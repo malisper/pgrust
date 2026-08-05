@@ -1,0 +1,37 @@
+[package]
+name = "sync"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sync"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+mcx = { path = "../../../../_support/mcx" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
+miscinit = { path = "../../../utils/init/miscinit" }
+smgr = { path = "../../smgr/smgr" }
+md = { path = "../../smgr/md" }
+clog = { path = "../../../access/transam/clog" }
+commit_ts = { path = "../../../access/transam/commit_ts" }
+multixact = { path = "../../../access/transam/multixact" }
+fd = { path = "../../file/fd" }
+latch = { path = "../../ipc/latch" }
+sync_seams = { path = "../sync_seams" }
+checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
+libc = "0.2"
+
+[dev-dependencies]
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+aio_seams = { path = "../../aio/aio_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+relpath_seams = { path = "../../../../common/relpath_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }

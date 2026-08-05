@@ -1,0 +1,26 @@
+[package]
+name = "adt_formatting"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+seam_core = { path = "../../../../_support/seam_core" }
+formatting_seams = { path = "../formatting_seams" }
+numeric = { path = "../numeric", package = "adt_numeric" }
+cash = { path = "../cash", package = "adt_cash" }
+oracle_compat = { path = "../oracle_compat", package = "adt_oracle_compat" }
+adt_datetime = { path = "../adt_datetime" }
+adt_timestamp = { path = "../adt_timestamp" }
+adt_date = { path = "../adt_date" }
+pg_locale = { path = "../pg_locale" }
+pg_locale_seams = { path = "../pg_locale_seams" }
+timestamp_seams = { path = "../timestamp_seams" }
+mbutils = { path = "../../mb/mbutils" }
+wchar = { path = "../../../../common/wchar" }
+init_small = { path = "../../init/init_small" }

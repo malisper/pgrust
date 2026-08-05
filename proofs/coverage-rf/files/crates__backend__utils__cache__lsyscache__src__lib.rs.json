@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/cache/lsyscache/src/lib.rs","sloc":[62,63,67,68,69,70,71,72],"kani":[],"fuzz":[],"regress":[67,68,69,70,71,72],"excluded":{"use-mod":[7,8,9,10,11,12,13,14,15,19],"attr":[1,2,3,4,5,43,52,60,61],"type-alias":[39],"const-static":[40],"typedef":[44,45,46,47,48,53,54,55,56,57]}}

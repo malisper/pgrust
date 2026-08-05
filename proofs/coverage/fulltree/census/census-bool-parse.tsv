@@ -1,0 +1,2 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+bool-parse	parse_bool_equiv	proofs::parse_bool_equiv	0	23	VERIFICATION:- SUCCESSFUL	RAN	1

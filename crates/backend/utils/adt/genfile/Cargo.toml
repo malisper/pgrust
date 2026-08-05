@@ -1,0 +1,26 @@
+[package]
+name = "genfile"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "0.2"
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+funcapi = { path = "../../fmgr/funcapi" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+varlena = { path = "../varlena" }
+mbutils = { path = "../../mb/mbutils" }
+acl_seams = { path = "../acl_seams" }
+adt_datetime = { path = "../adt_datetime" }
+miscinit = { path = "../../init/miscinit" }
+init_small = { path = "../../init/init_small" }
+elog = { path = "../../error/elog" }
+guc_tables = { path = "../../misc/guc_tables" }
+pg_path = { path = "../../../../port/pg_path" }
+cache_syscache = { path = "../../cache/cache_syscache" }
+fd = { path = "../../../storage/file/fd" }
+slot = { path = "../../../replication/slot" }

@@ -1,0 +1,1 @@
+{"path":"crates/backend/storage/lmgr/deadlock_seams/src/lib.rs","sloc":[3,4,10,12,15,17,20,23,24,25,26,27,31,33],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,7,8]}}

@@ -1,0 +1,1 @@
+{"path":"crates/backend/commands/opclasscmds/src/builtins.rs","sloc":[6,7,8,11],"kani":[],"fuzz":[],"regress":[6,7,8],"excluded":{"use-mod":[1,2,3],"const-table":[12,13,14,15,16,17]}}

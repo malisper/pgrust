@@ -1,0 +1,6 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+misc-ops	proofs::artifact_control_ultoa_dest_offset0	proofs::artifact_control_ultoa_dest_offset0	0	12	VERIFICATION:- SUCCESSFUL	RAN	1
+misc-ops	proofs::eq_booland_statefunc	proofs::eq_booland_statefunc	0	11	VERIFICATION:- SUCCESSFUL	RAN	1
+misc-ops	proofs::eq_boolor_statefunc	proofs::eq_boolor_statefunc	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+misc-ops	proofs::eq_date_mii	proofs::eq_date_mii	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+misc-ops	proofs::eq_date_pli	proofs::eq_date_pli	0	4	VERIFICATION:- SUCCESSFUL	RAN	1

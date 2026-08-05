@@ -1,0 +1,14 @@
+[package]
+name = "allpaths"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+types_pathnodes = { path = "../../../../_support/types/pathnodes" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+
+[dev-dependencies]
+mcx = { path = "../../../../_support/mcx" }

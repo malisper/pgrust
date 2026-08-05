@@ -1,0 +1,1 @@
+{"path":"crates/backend/snowball/dict_snowball/src/types.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[2],"attr":[4,7,8,9,21,22,23],"type-alias":[5],"typedef":[10,11,12,13,14,15,16,17,18,24,25,26,27,28,29]}}

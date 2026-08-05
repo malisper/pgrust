@@ -1,0 +1,8 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+enum-cmp	proofs::eq_enum_cmp	proofs::eq_enum_cmp	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+enum-cmp	proofs::eq_enum_ge	proofs::eq_enum_ge	0	12	VERIFICATION:- SUCCESSFUL	RAN	1
+enum-cmp	proofs::eq_enum_gt	proofs::eq_enum_gt	0	11	VERIFICATION:- SUCCESSFUL	RAN	1
+enum-cmp	proofs::eq_enum_larger	proofs::eq_enum_larger	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+enum-cmp	proofs::eq_enum_le	proofs::eq_enum_le	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+enum-cmp	proofs::eq_enum_lt	proofs::eq_enum_lt	0	17	VERIFICATION:- SUCCESSFUL	RAN	1
+enum-cmp	proofs::eq_enum_smaller	proofs::eq_enum_smaller	0	10	VERIFICATION:- SUCCESSFUL	RAN	1

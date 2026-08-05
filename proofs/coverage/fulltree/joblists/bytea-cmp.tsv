@@ -1,0 +1,26 @@
+bytea-cmp	eq_byteaeq	proofs::eq_byteaeq
+bytea-cmp	eq_byteane	proofs::eq_byteane
+bytea-cmp	eq_bytealt	
+bytea-cmp	eq_byteale	
+bytea-cmp	eq_byteagt	
+bytea-cmp	eq_byteage	
+bytea-cmp	eq_byteacmp	proofs::eq_byteacmp
+bytea-cmp	eq_bytea_larger	
+bytea-cmp	eq_bytea_smaller	
+bytea-cmp	proofs::eq_bytea_get_byte	
+bytea-cmp	proofs::eq_bytea_get_bit	
+bytea-cmp	proofs::eq_bytea_int4	
+bytea-cmp	proofs::eq_bytea_int8	
+bytea-cmp	proofs::eq_bytea_int2	
+bytea-cmp	proofs::eq_bytea_bit_count	
+bytea-cmp	eq_bytea_int2	
+bytea-cmp	eq_bytea_int4	
+bytea-cmp	eq_bytea_int8	
+bytea-cmp	eq_bytea_bit_count	proofs::eq_bytea_bit_count
+bytea-cmp	eq_to_hex32	
+bytea-cmp	eq_to_hex64	
+bytea-cmp	eq_to_oct32	
+bytea-cmp	eq_to_oct64	
+bytea-cmp	eq_to_bin32	
+bytea-cmp	eq_to_bin64	
+bytea-cmp	eq_byteain_escaped_count	proofs::eq_byteain_escaped_count

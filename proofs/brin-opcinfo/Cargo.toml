@@ -1,0 +1,13 @@
+[package]
+name = "proof_brin_opcinfo"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+brin_bloom = { path = "../../crates/backend/access/brin/brin_bloom" }
+brin_inclusion = { path = "../../crates/backend/access/brin/brin_inclusion" }
+brin_minmax_multi = { path = "../../crates/backend/access/brin/brin_minmax_multi" }
+types_brin = { path = "../../crates/_support/types/types_brin" }
+types_core = { path = "../../crates/_support/types/types_core" }

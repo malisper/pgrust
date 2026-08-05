@@ -1,0 +1,25 @@
+[package]
+name = "lanefold"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lanefold"
+path = "src/lib.rs"
+
+[dependencies]
+adt_numeric = { path = "../../utils/adt/numeric" }
+adt_float = { path = "../../utils/adt/float" }
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+varlena = { path = "../../utils/adt/varlena" }
+pg_locale = { path = "../../utils/adt/pg_locale" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+execexpr = { path = "../execexpr" }
+exectuples = { path = "../exectuples" }
+lanereg = { path = "../lanereg" }

@@ -1,0 +1,29 @@
+# proofs/coverage/p1-waveb-mm/summary.tsv — per-crate coverage equation for
+# lane p1-waveb unit p1-waveb-mm (crate backend/access/brin/brin_minmax_multi,
+# target brin_minmax_multi_diff).
+#
+# CAPTURE PROVENANCE (LOCAL — fleet floor pending, task #91 fuzz-workspace
+#   GNU-ld link breakage; the p1-waveb merge a285cf96fb carries the fix and
+#   the fleet 10M floor is submitted by the coordinator when rails reopen):
+#   full committed corpus replay (1101 inputs, merge-minimized) under
+#   fuzz/cov-export.sh brin_minmax_multi_diff (cargo fuzz coverage + sysroot
+#   llvm-cov, nightly-2026-07-17), macOS/aarch64, worktree HEAD a285cf96fb541a0035963962bf6cb522af73362e
+#   (= origin/proofs/p1-waveb a285cf96fb + this unit's follow-up commits).
+#   Banked as coverage.lcov.gz (251,772 DA lines tree-wide before crate
+#   filtering; per-line hit = max over the lcov's duplicate DA records).
+#
+# Functional smokes (local, zero divergences): 163,326 execs (181s, first
+#   unit) + 64,373 execs (241s, extended modes) + full-corpus replays in
+#   cargo test. One libFuzzer artifact during the extended smoke =
+#   HARNESS capacity ceiling (fixed-size oracle arena index; made growable),
+#   banked as corpus/regress-arena-880cb5d0 — NOT a product defect.
+# Injection sweep: 8/8 planes CAUGHT (first unit) + 2/2 new-plane plants
+#   CAUGHT (numeric strategy menu flip; shorten predicate).
+#
+# equation per file: DA_lines = fuzz_measured + exception_rows +
+#   measurement_notes, 0 unaccounted. Exception rows:
+#   proofs/coverage/exceptions.tsv author p1-waveb (33 rows, pending review).
+file	da_lines	fuzz_measured	exception_lines	measurement_note_lines	unaccounted	classes
+src/builtins.rs	258	244	11	3	0	defensive-c-parity 2 (?-OOM edges) + proof-covered-unmeasured 3 (summary_send, ledger 4641) + unreachable-arm 6 (fc_options, ledger excluded(state) 4620) + const-eval note 3 (const fn b)
+src/lib.rs	263	253	10	0	0	defensive-c-parity 7 (?-OOM edges 4, invalid-strategy panics 2, SK_ISNULL continue 1) + platform-other 1 (big-endian varatt arm) + unreachable-arm 2 (catalog-miss panics)
+src/ranges.rs	697	667	30	0	0	defensive-c-parity 21 (?-OOM edges 9, cstring typlen -2 arms 11, byval-width panic 1) + unreachable-arm 1 (width-1 fetch) + debug-only 8 (assert-gate release arms, invariant tails)

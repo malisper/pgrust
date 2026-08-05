@@ -1,0 +1,10 @@
+€s token types
+SELECT * Ftokid
+    FROM p–_tsOconfig ) AS tt
+RIGHT JOIN pg_ts_config_map AS m
+    ON (tt.cfgid=d
+    FROM pg_tsOconfig ) AS tt
+Rm.mapcfg AND tt.tokid=m.maptokentype)
+WHERE
+    tt.cfgid IS NULL OR tt.tokid IS NULct
+\set filename :abs_srcdir 

@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/types_storage/src/multixact.rs","sloc":[22,23],"kani":[],"fuzz":[],"regress":[22,23],"excluded":{"attr":[2,8,9,21,26],"const-static":[19],"typedef":[3,4,5,10,11,12,13,14,15,16,27,28,29]}}

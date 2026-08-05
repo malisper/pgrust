@@ -1,0 +1,53 @@
+[package]
+name = "commands_alter"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_alter"
+path = "src/lib.rs"
+
+[dependencies]
+launcher = { path = "../../replication/launcher" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+datum = { path = "../../../_support/types/datum" }
+mcx = { path = "../../../_support/mcx" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+genam = { path = "../../access/index/genam" }
+table = { path = "../../access/table/table" }
+heaptuple = { path = "../../access/common/heaptuple" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog = { path = "../../catalog/catalog" }
+catalog_objectaddress = { path = "../../catalog/objectaddress" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+miscinit = { path = "../../utils/init/miscinit" }
+superuser = { path = "../../utils/misc/superuser" }
+init_small = { path = "../../utils/init/init_small" }
+dbcommands = { path = "../dbcommands" }
+foreigncmds = { path = "../foreigncmds" }
+pg_publication = { path = "../../catalog/pg_publication" }
+pg_subscription = { path = "../../catalog/pg_subscription" }
+commands_publicationcmds = { path = "../publicationcmds" }
+subscriptioncmds = { path = "../subscriptioncmds" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+pg_proc = { path = "../../catalog/pg_proc" }
+collationcmds = { path = "../collationcmds" }
+opclasscmds = { path = "../opclasscmds" }
+schemacmds = { path = "../schemacmds" }
+alter_seams = { path = "../alter_seams" }
+tablecmds = { path = "../tablecmds" }
+typecmds = { path = "../typecmds" }
+relation_seams = { path = "../../access/common/relation_seams" }

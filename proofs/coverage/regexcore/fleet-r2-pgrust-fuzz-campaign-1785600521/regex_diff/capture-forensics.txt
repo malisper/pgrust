@@ -1,0 +1,134 @@
+== coverage capture forensics: regex_diff (cargo-fuzz coverage rc=1) ==
+-- corpus files on disk:  5017
+-- units replayed (log):  4619
+-- clean libFuzzer exits: 14
+-- raw profraw dir: /work/src/fuzz/coverage/regex_diff/raw
+total 9984
+drwxr-xr-x. 2 root root  16384 Aug  1 20:59 .
+drwxr-xr-x. 3 root root     17 Aug  1 20:59 ..
+-rw-r--r--. 1 root root 725720 Aug  1 21:01 batch-0.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 21:02 batch-1.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 20:59 batch-10.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 21:00 batch-11.profraw
+-rw-r--r--. 1 root root      0 Aug  1 20:59 batch-12.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 21:01 batch-13.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 21:04 batch-14.profraw
+-rw-r--r--. 1 root root      0 Aug  1 20:59 batch-15.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 20:59 batch-2.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 21:01 batch-3.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 21:00 batch-4.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 21:01 batch-5.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 21:00 batch-6.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 20:59 batch-7.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 21:00 batch-8.profraw
+-rw-r--r--. 1 root root 725720 Aug  1 21:02 batch-9.profraw
+-- llvm-profdata: /usr/local/rustup/toolchains/nightly-2026-07-17-aarch64-unknown-linux-gnu/lib/rustlib/aarch64-unknown-linux-gnu/bin/llvm-profdata
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-0.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 1233507391
+Maximum internal block count: 499641696
+Total number of blocks: 4587
+Total count: 3465352422
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-1.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 77224855
+Maximum internal block count: 19618290
+Total number of blocks: 4587
+Total count: 328304912
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-10.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 37915948
+Maximum internal block count: 3382707
+Total number of blocks: 4587
+Total count: 215498131
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-11.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 186363963
+Maximum internal block count: 57475741
+Total number of blocks: 4587
+Total count: 812068563
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-12.profraw (0 bytes)
+error: /work/src/fuzz/coverage/regex_diff/raw/batch-12.profraw: empty raw profile file
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-13.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 1465615250
+Maximum internal block count: 431720497
+Total number of blocks: 4587
+Total count: 6339463762
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-14.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 5263834100
+Maximum internal block count: 577063116
+Total number of blocks: 4587
+Total count: 25448659705
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-15.profraw (0 bytes)
+error: /work/src/fuzz/coverage/regex_diff/raw/batch-15.profraw: empty raw profile file
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-2.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 129555735
+Maximum internal block count: 43160712
+Total number of blocks: 4587
+Total count: 436566022
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-3.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 2264680862
+Maximum internal block count: 1513275088
+Total number of blocks: 4587
+Total count: 5948115740
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-4.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 116464345
+Maximum internal block count: 24493602
+Total number of blocks: 4587
+Total count: 463507044
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-5.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 1234924699
+Maximum internal block count: 452536201
+Total number of blocks: 4587
+Total count: 3498376138
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-6.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 838620132
+Maximum internal block count: 445619718
+Total number of blocks: 4587
+Total count: 2357168927
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-7.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 115908390
+Maximum internal block count: 49156716
+Total number of blocks: 4587
+Total count: 524284839
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-8.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 45486450
+Maximum internal block count: 4885577
+Total number of blocks: 4587
+Total count: 277256455
+---- /work/src/fuzz/coverage/regex_diff/raw/batch-9.profraw (725720 bytes)
+Instrumentation level: Front-end
+Total functions: 1244
+Maximum function count: 77280739
+Maximum internal block count: 14814029
+Total number of blocks: 4587
+Total count: 345460901
+-- merged profdata:
+error: /work/src/fuzz/coverage/regex_diff/coverage.profdata: No such file or directory
+-- covbin candidates (find target -path *coverage* -name regex_diff):
+     /work/src/fuzz/target/aarch64-unknown-linux-gnu/coverage/aarch64-unknown-linux-gnu/release/regex_diff  446318080e0929703e380362ad8ffd2fdefa0d6182593e1744c98592dc4bfbaf  126965424 bytes
+-- fuzz (non-coverage) binary for contrast:
+/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/regex_diff
+== end forensics: regex_diff ==

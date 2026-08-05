@@ -1,0 +1,5 @@
+€);
+
+-- Test inlining of immutable constant functions
+
+-- to_tsquery(text) is not immutable, so it won

@@ -1,0 +1,30 @@
+[package]
+name = "types_relscan"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[features]
+mock = []
+
+[dependencies]
+pgsync = { path = "../../../../_support/pgsync" }
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+snapmgr = { path = "../../../utils/time/snapmgr" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_brin = { path = "../../../../_support/types/types_brin" }
+types_spgist = { path = "../../../../_support/types/types_spgist" }
+types_gist = { path = "../../../../_support/types/gist" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+tableam = { path = "../../table/tableam" }
+types_hash = { path = "../../../../_support/types/hash" }
+types_bloom = { path = "../../../../_support/types/types_bloom" }
+types_hnsw = { path = "../../../../_support/types/types_hnsw" }
+gin_vocab = { path = "../../gin/gin_vocab" }

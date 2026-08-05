@@ -1,0 +1,16 @@
+# portfam_diff a0 EXHAUSTIVE-DIFF run log (p1-microbatch PORTFAM)
+# host: arm64 Apple M4 Pro, Darwin 24.5.0
+# sha: de776f5c8278486888e1e1abe6aae9ffb6858543
+# cmd: cargo test -p decoder_fuzz --release --lib portfam_diff::tests::exhaustive -- --ignored --nocapture --test-threads=1
+# date: 2026-08-01T05:56:47Z
+sweep	domain	count	wall_s	verdict
+exhaustive_bitutils32	full u32 word domain x 6 pg_bitutils word ops	4294967296	14.54	PASS (0 divergences)
+exhaustive_rotate32_shifts	full 1..=31 shift domain x 2^27 words	4160749568	4.53	PASS (0 divergences)
+exhaustive_two_byte_compare	all 2-byte x 2-byte pg_str(n)casecmp pairs	4228250625	385.25	PASS (0 divergences)
+exhaustive_casefold_and_onechar_compare	full u8 casefold + 255x255 one-char compare	65281	<0.1	PASS (0 divergences, runs in the normal suite)
+#
+# NEGATIVE CONTROL (calloc-fold-law discipline: prove the sweep really compares,
+# rather than compiling to a no-op). Planted a single-word mutant in the C
+# oracle — `out[1] = pg_ceil_log2_32(word) + (word == 0x5A5A5A5A)` in
+# fuzz/core/csrc/pg_portfam_io.c — and re-ran exhaustive_bitutils32:
+# result FAILED in 6.05s on the intended assert. Mutant reverted.

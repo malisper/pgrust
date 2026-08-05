@@ -1,0 +1,26 @@
+[package]
+name = "proof_scalar_misc"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+adt_char = { path = "../../crates/backend/utils/adt/char" }
+adt_scalar = { path = "../../crates/backend/utils/adt/scalar" }
+nbt_compare = { path = "../../crates/backend/access/nbtree/compare" }
+array = { package = "types_array", path = "../../crates/_support/types/array" }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+# --- wave 5 (wave5 + xid8snap modules) ---
+xid8funcs = { path = "../../crates/backend/utils/adt/xid8funcs" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+# seam-stub target paths (kani::stub needs direct deps)
+xact_seams = { path = "../../crates/backend/access/transam/xact_seams" }
+multixact = { path = "../../crates/backend/access/transam/multixact" }
+# recv/send harnesses: real StringInfo/Mcx under the mcx-stubs recipe
+mcx = { path = "../../crates/_support/mcx" }
+stringinfo = { path = "../../crates/_support/types/stringinfo" }
+pqformat = { path = "../../crates/backend/libpq/pqformat" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }

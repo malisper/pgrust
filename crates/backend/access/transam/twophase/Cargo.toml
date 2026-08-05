@@ -1,0 +1,76 @@
+[package]
+name = "twophase"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "twophase"
+path = "src/lib.rs"
+
+[dependencies]
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+libc = "0.2"
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
+miscinit = { path = "../../../utils/init/miscinit" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+superuser_seams = { path = "../../../utils/misc/superuser_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+predicate = { path = "../../../storage/lmgr/predicate" }
+procarray = { path = "../../../storage/ipc/procarray" }
+ipc = { path = "../../../storage/ipc/ipc" }
+sinval = { path = "../../../storage/ipc/sinval" }
+fd = { path = "../../../storage/file/fd" }
+crc32c = { path = "../../../../port/crc32c" }
+catalog_storage = { path = "../../../catalog/catalog_storage" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+pgstat = { path = "../../../utils/activity/pgstat" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+funcapi = { path = "../../../utils/fmgr/funcapi" }
+tupdesc = { path = "../../common/tupdesc" }
+heaptuple = { path = "../../common/heaptuple" }
+varlena = { path = "../../../utils/adt/varlena" }
+transam = { path = "../transam" }
+transam_xlog = { path = "../transam_xlog" }
+varsup = { path = "../varsup" }
+subtrans = { path = "../subtrans" }
+xact = { path = "../xact" }
+xlogreader = { path = "../xlogreader" }
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
+xlogutils = { path = "../xlogutils" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+xlog_seams = { path = "../transam_xlog_seams", package = "transam_xlog_seams" }
+origin_seams = { path = "../../../replication/origin_seams" }
+syncrep_seams = { path = "../../../replication/syncrep_seams" }
+commit_ts_seams = { path = "../commit_ts_seams" }
+twophase_seams = { path = "../twophase_seams" }
+twophase_config = { path = "../twophase_config" }
+twophase_rmgr = { path = "../twophase_rmgr" }
+
+[dev-dependencies]
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+deadlock_seams = { path = "../../../storage/lmgr/deadlock_seams" }
+pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
+autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
+xact_seams = { path = "../xact_seams" }
+transam_seams = { path = "../transam_seams" }
+subtrans_seams = { path = "../subtrans_seams" }

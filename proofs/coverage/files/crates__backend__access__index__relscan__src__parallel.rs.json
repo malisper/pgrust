@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/index/relscan/src/parallel.rs","sloc":[54,55,56,57,58,59,60,62,68,69],"kani":[],"fuzz":[],"regress":[54,55,56,57,58,59,60,62],"excluded":{"use-mod":[4,6,7,8],"attr":[10],"typedef":[11,12,13,14,15,16,19,20,21,24,25,27,30,31,32,33,34,48,49,50,73,74,78,79,80,81,82],"impl-header":[53,67]}}

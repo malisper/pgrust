@@ -1,0 +1,16 @@
+[package]
+name = "proof-mac8"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+adt_mac8 = { path = "../../crates/backend/utils/adt/mac8" }
+adt_mac = { path = "../../crates/backend/utils/adt/mac" }
+types_error = { path = "../../crates/_support/types/types_error" }
+# --- wave W3 (macaddr8_send wire row: wrapper-level LocalFcinfo harness) ---
+proof_support = { path = "../support", features = ["mcx-stubs"] }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+mcx = { path = "../../crates/_support/mcx" }
+
+[workspace]

@@ -1,0 +1,57 @@
+[package]
+name = "parse_utilcmd"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+parse_utilcmd_seams = { path = "../parse_utilcmd_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+datum = { path = "../../../_support/types/datum" }
+types_fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+elog = { path = "../../utils/error/elog" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_array = { path = "../../../_support/types/array" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+parser_small1 = { path = "../parser_small1" }
+mbutils = { path = "../../utils/mb/mbutils" }
+format_type = { path = "../../utils/adt/format_type" }
+gram_core = { path = "../gram_core" }
+parser_seams = { path = "../parser_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+keywords = { path = "../../../common/keywords" }
+table = { path = "../../access/table/table" }
+relation = { path = "../../access/common/relation" }
+genam = { path = "../../access/index/genam" }
+indexam = { path = "../../access/index/indexam" }
+tupdesc = { path = "../../access/common/tupdesc" }
+detoast = { path = "../../access/common/detoast" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+aclchk = { path = "../../catalog/aclchk" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+miscinit = { path = "../../utils/init/miscinit" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+pg_depend = { path = "../../catalog/pg_depend" }
+commands_comment = { path = "../../commands/comment" }
+readfuncs = { path = "../../nodes/readfuncs" }
+nodes_core = { path = "../../nodes/nodes_core" }
+outfuncs = { path = "../../nodes/outfuncs" }
+relcache = { path = "../../utils/cache/relcache" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
+regproc_seams = { path = "../../utils/adt/regproc_seams" }
+tablespace_seams = { path = "../../commands/tablespace_seams" }
+relcache_build_seams = { path = "../../utils/cache/relcache_build_seams" }

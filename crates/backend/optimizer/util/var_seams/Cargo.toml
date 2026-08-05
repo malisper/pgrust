@@ -1,0 +1,13 @@
+[package]
+name = "var_seams"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nodes = { path = "../../../../_support/types/nodes" }

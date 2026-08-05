@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/index/indexam_seams/src/lib.rs","sloc":[6,7,8,9,10,11,14,17,20,25,26,27,28,29,32,33,34,35,36,37,40,45,46,47,50,54,57,63,64,65,66],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2,3,4]}}

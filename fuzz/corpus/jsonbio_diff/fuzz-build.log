@@ -1,0 +1,2652 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded bitflags v2.13.0
+  Downloaded allocator-api2 v0.2.21
+  Downloaded foreign-types-shared v0.1.1
+  Downloaded shlex v2.0.1
+  Downloaded jobserver v0.1.35
+  Downloaded cfg-if v1.0.4
+  Downloaded openssl-macros v0.1.1
+  Downloaded version_check v0.9.5
+  Downloaded foreign-types v0.3.2
+  Downloaded ahash v0.8.12
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded rustc-hash v2.1.3
+  Downloaded arbitrary v1.4.2
+  Downloaded cc v1.2.66
+  Downloaded pkg-config v0.3.33
+  Downloaded snap v1.1.2
+  Downloaded zstd-safe v7.2.4
+  Downloaded once_cell v1.21.4
+  Downloaded zstd v0.13.3
+  Downloaded quote v1.0.46
+  Downloaded simdutf8 v0.1.5
+  Downloaded lz4_flex v0.11.6
+  Downloaded twox-hash v2.1.3
+  Downloaded unicode-ident v1.0.24
+  Downloaded proc-macro2 v1.0.106
+  Downloaded openssl-sys v0.9.117
+  Downloaded memchr v2.8.3
+  Downloaded libfuzzer-sys v0.4.13
+  Downloaded hashbrown v0.14.5
+  Downloaded vcpkg v0.2.15
+  Downloaded zerocopy v0.8.53
+  Downloaded syn v2.0.118
+  Downloaded openssl v0.10.81
+  Downloaded zstd-sys v2.0.16+zstd.1.5.7
+  Downloaded libc v0.2.186
+  Downloaded openssl-src v300.6.1+3.6.3
+   Compiling types_error v0.0.0 (/work/src/crates/_support/types/types_error)
+   Compiling seam_core v0.1.0 (/work/src/crates/_support/seam_core)
+   Compiling types_core v0.0.0 (/work/src/crates/_support/types/types_core)
+   Compiling zerocopy v0.8.53
+   Compiling version_check v0.9.5
+   Compiling cfg-if v1.0.4
+   Compiling once_cell v1.21.4
+   Compiling allocator-api2 v0.2.21
+   Compiling rustc-hash v2.1.3
+   Compiling libc v0.2.186
+   Compiling types_guc v0.0.0 (/work/src/crates/_support/types/types_guc)
+   Compiling types_dest v0.0.0 (/work/src/crates/_support/types/types_dest)
+   Compiling rel_vocab v0.1.0 (/work/src/crates/_support/types/rel_vocab)
+   Compiling wchar v0.1.0 (/work/src/crates/common/wchar)
+   Compiling hashfn v0.1.0 (/work/src/crates/common/hashfn)
+   Compiling keywords v0.1.0 (/work/src/crates/common/keywords)
+   Compiling init_small_seams v0.0.0 (/work/src/crates/backend/utils/init/init_small_seams)
+   Compiling waitevent_seams v0.0.0 (/work/src/crates/backend/utils/activity/waitevent_seams)
+   Compiling s_lock_seams v0.0.0 (/work/src/crates/backend/storage/lmgr/s_lock_seams)
+   Compiling pmsignal_seams v0.0.0 (/work/src/crates/backend/storage/ipc/pmsignal_seams)
+   Compiling xlogutils_seams v0.0.0 (/work/src/crates/backend/access/transam/xlogutils_seams)
+   Compiling string_seams v0.0.0 (/work/src/crates/common/string_seams)
+   Compiling hyperloglog v0.1.0 (/work/src/crates/backend/lib/hyperloglog)
+   Compiling pg_string v0.0.0 (/work/src/crates/common/string)
+   Compiling guc_seams v0.0.0 (/work/src/crates/backend/utils/misc/guc_seams)
+   Compiling error_small_seams v0.0.0 (/work/src/crates/backend/utils/error/error_small_seams)
+   Compiling elog_seams v0.0.0 (/work/src/crates/backend/utils/error/elog_seams)
+   Compiling file_seams v0.0.0 (/work/src/crates/backend/storage/file/file_seams)
+   Compiling shmem_seams v0.0.0 (/work/src/crates/backend/storage/ipc/shmem_seams)
+   Compiling acl_seams v0.0.0 (/work/src/crates/backend/utils/adt/acl_seams)
+   Compiling guc_tables v0.0.0 (/work/src/crates/backend/utils/misc/guc_tables)
+   Compiling pgstat_seams v0.0.0 (/work/src/crates/backend/utils/activity/pgstat_seams)
+   Compiling xact_seams v0.0.0 (/work/src/crates/backend/access/transam/xact_seams)
+   Compiling pg_prng_seams v0.0.0 (/work/src/crates/port/pg_prng_seams)
+   Compiling xloginsert_seams v0.0.0 (/work/src/crates/backend/access/transam/xloginsert_seams)
+   Compiling twophase_seams v0.0.0 (/work/src/crates/backend/access/transam/twophase_seams)
+   Compiling inval_seams v0.0.0 (/work/src/crates/backend/utils/cache/inval_seams)
+   Compiling numutils v0.1.0 (/work/src/crates/backend/utils/adt/numutils)
+   Compiling ahash v0.8.12
+   Compiling postgres_seams v0.0.0 (/work/src/crates/backend/tcop/postgres_seams)
+   Compiling pg_prng v0.1.0 (/work/src/crates/common/pg_prng)
+   Compiling types_array v0.1.0 (/work/src/crates/_support/types/array)
+   Compiling postmaster_seams v0.0.0 (/work/src/crates/backend/postmaster/postmaster_seams)
+   Compiling pg_class_seams v0.0.0 (/work/src/crates/backend/catalog/pg_class_seams)
+   Compiling transam_seams v0.0.0 (/work/src/crates/backend/access/transam/transam_seams)
+   Compiling varsup_seams v0.0.0 (/work/src/crates/backend/access/transam/varsup_seams)
+   Compiling lsyscache_seams v0.1.0 (/work/src/crates/backend/utils/cache/lsyscache_seams)
+   Compiling relmapper_seams v0.0.0 (/work/src/crates/backend/utils/cache/relmapper_seams)
+   Compiling arrayutils v0.1.0 (/work/src/crates/backend/utils/adt/arrayutils)
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling ryu v0.1.0 (/work/src/crates/common/ryu)
+   Compiling pkg-config v0.3.33
+   Compiling aio_seams v0.0.0 (/work/src/crates/backend/storage/aio/aio_seams)
+   Compiling startup_seams v0.0.0 (/work/src/crates/backend/postmaster/startup_seams)
+   Compiling unicode_category v0.1.0 (/work/src/crates/common/unicode_category)
+   Compiling pglz v0.1.0 (/work/src/crates/common/pglz)
+   Compiling memchr v2.8.3
+   Compiling pg_bitutils v0.1.0 (/work/src/crates/port/pg_bitutils)
+   Compiling timeout_seams v0.0.0 (/work/src/crates/backend/utils/misc/timeout_seams)
+   Compiling syncrep_seams v0.0.0 (/work/src/crates/backend/replication/syncrep_seams)
+   Compiling pg_sema_seams v0.0.0 (/work/src/crates/backend/port/pg_sema_seams)
+   Compiling condition_variable_seams v0.0.0 (/work/src/crates/backend/storage/lmgr/condition_variable_seams)
+   Compiling autovacuum_seams v0.0.0 (/work/src/crates/backend/postmaster/autovacuum_seams)
+   Compiling timestamp_seams v0.0.0 (/work/src/crates/backend/utils/adt/timestamp_seams)
+   Compiling parallel_seams v0.0.0 (/work/src/crates/backend/access/transam/parallel_seams)
+   Compiling guc_file_seams v0.0.0 (/work/src/crates/backend/utils/misc/guc_file_seams)
+   Compiling mcxt_seams v0.0.0 (/work/src/crates/backend/utils/mmgr/mcxt_seams)
+   Compiling pgtz_seams v0.0.0 (/work/src/crates/backend/timezone/pgtz_seams)
+   Compiling conffiles_seams v0.0.0 (/work/src/crates/backend/utils/misc/conffiles_seams)
+   Compiling ipc_portal_seams v0.0.0 (/work/src/crates/backend/storage/ipc/ipc_portal_seams)
+   Compiling scalar_seams v0.0.0 (/work/src/crates/backend/utils/adt/scalar_seams)
+   Compiling ps_status_seams v0.0.0 (/work/src/crates/backend/utils/misc/ps_status_seams)
+   Compiling backend_status_seams v0.0.0 (/work/src/crates/backend/utils/activity/backend_status_seams)
+   Compiling slot_seams v0.0.0 (/work/src/crates/backend/replication/slot_seams)
+   Compiling localtime v0.1.0 (/work/src/crates/backend/timezone/localtime)
+   Compiling superuser_seams v0.0.0 (/work/src/crates/backend/utils/misc/superuser_seams)
+   Compiling subtrans_seams v0.0.0 (/work/src/crates/backend/access/transam/subtrans_seams)
+   Compiling xlogrecovery_seams v0.0.0 (/work/src/crates/backend/access/transam/xlogrecovery_seams)
+   Compiling bgworker_seams v0.0.0 (/work/src/crates/backend/postmaster/bgworker_seams)
+   Compiling crc32c v0.1.0 (/work/src/crates/port/crc32c)
+   Compiling async_seams v0.0.0 (/work/src/crates/backend/commands/async_seams)
+   Compiling xact_portal_seams v0.0.0 (/work/src/crates/backend/access/transam/xact_portal_seams)
+   Compiling commit_ts_seams v0.0.0 (/work/src/crates/backend/access/transam/commit_ts_seams)
+   Compiling backend_progress_seams v0.0.0 (/work/src/crates/backend/utils/activity/backend_progress_seams)
+   Compiling snapbuild_seams v0.0.0 (/work/src/crates/backend/replication/snapbuild_seams)
+   Compiling launcher_seams v0.0.0 (/work/src/crates/backend/replication/launcher_seams)
+   Compiling logical_worker_seams v0.0.0 (/work/src/crates/backend/replication/logical_worker_seams)
+   Compiling logical_seams v0.0.0 (/work/src/crates/backend/replication/logical_seams)
+   Compiling trigger_seams v0.0.0 (/work/src/crates/backend/commands/trigger_seams)
+   Compiling be_fsstubs_seams v0.0.0 (/work/src/crates/backend/libpq/be_fsstubs_seams)
+   Compiling unicode_case v0.1.0 (/work/src/crates/common/unicode_case)
+   Compiling xlogarchive_seams v0.0.0 (/work/src/crates/backend/access/transam/xlogarchive_seams)
+   Compiling walreceiverfuncs_seams v0.0.0 (/work/src/crates/backend/replication/walreceiverfuncs_seams)
+   Compiling pg_clock v0.1.0 (/work/src/crates/port/pg_clock)
+   Compiling pg_strong_random v0.1.0 (/work/src/crates/port/pg_strong_random)
+   Compiling ip v0.0.0 (/work/src/crates/common/ip)
+   Compiling vfs v0.0.0 (/work/src/crates/backend/storage/file/vfs)
+   Compiling jobserver v0.1.35
+   Compiling pg_path v0.1.0 (/work/src/crates/port/pg_path)
+   Compiling libpq_pqsignal v0.0.0 (/work/src/crates/backend/libpq/libpq_pqsignal)
+   Compiling pgstrcasecmp v0.1.0 (/work/src/crates/port/pgstrcasecmp)
+   Compiling pgsync v0.1.0 (/work/src/crates/_support/pgsync)
+   Compiling walsummarizer_seams v0.0.0 (/work/src/crates/backend/postmaster/walsummarizer_seams)
+   Compiling strftime v0.1.0 (/work/src/crates/backend/timezone/strftime)
+   Compiling rewriteheap_seams v0.0.0 (/work/src/crates/backend/access/heap/rewriteheap_seams)
+   Compiling types_startup v0.0.0 (/work/src/crates/_support/types/types_startup)
+   Compiling reorderbuffer_seams v0.0.0 (/work/src/crates/backend/replication/logical/reorderbuffer_seams)
+   Compiling proc-macro2 v1.0.106
+   Compiling syslogger_seams v0.0.0 (/work/src/crates/backend/postmaster/syslogger_seams)
+   Compiling cc v1.2.66
+   Compiling waiter v0.0.0 (/work/src/crates/backend/storage/ipc/waiter)
+   Compiling be_secure_seams v0.0.0 (/work/src/crates/backend/libpq/be_secure_seams)
+   Compiling quote v1.0.46
+   Compiling unicode-ident v1.0.24
+   Compiling vcpkg v0.2.15
+   Compiling foreign-types-shared v0.1.1
+   Compiling openssl v0.10.81
+   Compiling foreign-types v0.3.2
+   Compiling walsender_config v0.0.0 (/work/src/crates/backend/replication/walsender_config)
+   Compiling bitflags v2.13.0
+   Compiling pg_sha2 v0.1.0 (/work/src/crates/common/sha2)
+   Compiling pg_md5 v0.1.0 (/work/src/crates/common/md5)
+   Compiling ifaddr v0.0.0 (/work/src/crates/backend/libpq/ifaddr)
+   Compiling hba_seams v0.0.0 (/work/src/crates/backend/libpq/hba_seams)
+   Compiling auth_seams v0.0.0 (/work/src/crates/backend/libpq/auth_seams)
+   Compiling relfilenumbermap_seams v0.0.0 (/work/src/crates/backend/utils/cache/relfilenumbermap_seams)
+   Compiling xlogprefetcher_seams v0.0.0 (/work/src/crates/backend/access/transam/xlogprefetcher_seams)
+   Compiling zstd-safe v7.2.4
+   Compiling twox-hash v2.1.3
+   Compiling pg_inherits_seams v0.0.0 (/work/src/crates/backend/catalog/pg_inherits_seams)
+   Compiling gin_int4_seams v0.1.0 (/work/src/crates/backend/access/gin/gin_int4_seams)
+   Compiling gin_hstore_seams v0.1.0 (/work/src/crates/backend/access/gin/gin_hstore_seams)
+   Compiling pairingheap v0.1.0 (/work/src/crates/backend/lib/pairingheap)
+   Compiling lz4_flex v0.11.6
+   Compiling rls_seams v0.0.0 (/work/src/crates/backend/utils/misc/rls_seams)
+   Compiling lanereg v0.0.0 (/work/src/crates/backend/executor/lanereg)
+   Compiling scan_fgram v0.1.0 (/work/src/crates/backend/parser/scan_fgram)
+   Compiling gram_core v0.1.0 (/work/src/crates/backend/parser/gram_core)
+   Compiling session_seams v0.0.0 (/work/src/crates/backend/access/session_seams)
+   Compiling pmchild_seams v0.0.0 (/work/src/crates/backend/postmaster/pmchild_seams)
+   Compiling ipci_seams v0.0.0 (/work/src/crates/backend/storage/ipc/ipci_seams)
+   Compiling stringhash v0.0.0 (/work/src/crates/common/stringhash)
+   Compiling pg_rusage v0.0.0 (/work/src/crates/backend/utils/misc/pg_rusage)
+warning: associated function `pending` is never used
+   --> /work/src/crates/backend/executor/lanereg/src/lib.rs:174:14
+    |
+170 | impl TierCov {
+    | ------------ associated function in this implementation
+...
+174 |     const fn pending(tier: Tier, branch: &'static str, guard: GuardTier, coll: CollGate) -> TierCov {
+    |              ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling pg_hmac v0.1.0 (/work/src/crates/common/hmac)
+   Compiling pg_b64 v0.1.0 (/work/src/crates/common/base64)
+   Compiling wait_error v0.0.0 (/work/src/crates/common/wait_error)
+   Compiling snap v1.1.2
+   Compiling simdutf8 v0.1.5
+   Compiling pg_sha1 v0.0.0 (/work/src/crates/common/sha1)
+   Compiling openssl-src v300.6.1+3.6.3
+   Compiling syn v2.0.118
+   Compiling arbitrary v1.4.2
+warning: `lanereg` (lib) generated 1 warning
+   Compiling regexp_alt v0.1.0 (/work/src/crates/backend/utils/adt/regexp_alt)
+   Compiling openssl-sys v0.9.117
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling decoder_fuzz v0.0.0 (/work/src/fuzz/core)
+   Compiling libfuzzer-sys v0.4.13
+   Compiling hashbrown v0.14.5
+   Compiling mcx v0.0.0 (/work/src/crates/_support/mcx)
+warning: variant `Malloc` is never constructed
+  --> /work/src/crates/_support/mcx/src/lib.rs:64:5
+   |
+61 | enum Backend {
+   |      ------- variant in this enum
+...
+64 |     Malloc,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `chunk_size` is never used
+   --> /work/src/crates/_support/mcx/src/aset.rs:284:4
+    |
+284 | fn chunk_size(idx: usize) -> usize {
+    |    ^^^^^^^^^^
+
+warning: method `mem_allocated` is never used
+   --> /work/src/crates/_support/mcx/src/aset.rs:340:19
+    |
+306 | impl AllocSet {
+    | ------------- method in this implementation
+...
+340 |     pub(crate) fn mem_allocated(&self) -> usize {
+    |                   ^^^^^^^^^^^^^
+
+   Compiling datum v0.0.0 (/work/src/crates/_support/types/datum)
+   Compiling types_storage v0.1.0 (/work/src/crates/_support/types/types_storage)
+   Compiling types_tuple v0.1.0 (/work/src/crates/_support/types/types_tuple)
+   Compiling stringinfo v0.1.0 (/work/src/crates/_support/types/stringinfo)
+   Compiling detoast_seams v0.1.0 (/work/src/crates/backend/access/common/detoast_seams)
+   Compiling types_fmgr v0.1.0 (/work/src/crates/_support/types/fmgr)
+   Compiling types_hash v0.1.0 (/work/src/crates/_support/types/hash)
+   Compiling types_trigger v0.1.0 (/work/src/crates/_support/types/types_trigger)
+   Compiling mbutils_seams v0.1.0 (/work/src/crates/backend/utils/mb/mbutils_seams)
+   Compiling types_scan v0.1.0 (/work/src/crates/_support/types/types_scan)
+   Compiling types_gist v0.1.0 (/work/src/crates/_support/types/gist)
+   Compiling types_nbtree v0.1.0 (/work/src/crates/_support/types/types_nbtree)
+   Compiling types_spgist v0.1.0 (/work/src/crates/_support/types/types_spgist)
+warning: type `spgChooseIn` should have an upper camel case name
+  --> /work/src/crates/_support/types/types_spgist/src/state.rs:92:12
+   |
+92 | pub struct spgChooseIn {
+   |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseIn`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `spgChooseOut` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/state.rs:104:10
+    |
+104 | pub enum spgChooseOut {
+    |          ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseOut`
+
+warning: type `spgPickSplitIn` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/state.rs:127:12
+    |
+127 | pub struct spgPickSplitIn {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitIn`
+
+warning: type `spgPickSplitOut` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/state.rs:134:12
+    |
+134 | pub struct spgPickSplitOut {
+    |            ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitOut`
+
+warning: type `spgInnerConsistentIn` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/state.rs:157:12
+    |
+157 | pub struct spgInnerConsistentIn<'a> {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentIn`
+
+warning: type `spgInnerConsistentOut` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/state.rs:175:12
+    |
+175 | pub struct spgInnerConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentOut`
+
+warning: type `spgLeafConsistentIn` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/state.rs:199:12
+    |
+199 | pub struct spgLeafConsistentIn {
+    |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentIn`
+
+warning: type `spgLeafConsistentOut` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/state.rs:212:12
+    |
+212 | pub struct spgLeafConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentOut`
+
+warning: type `spgxlogState` should have an upper camel case name
+  --> /work/src/crates/_support/types/types_spgist/src/xlog.rs:15:12
+   |
+15 | pub struct spgxlogState {
+   |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogState`
+
+warning: type `spgxlogAddLeaf` should have an upper camel case name
+  --> /work/src/crates/_support/types/types_spgist/src/xlog.rs:40:12
+   |
+40 | pub struct spgxlogAddLeaf {
+   |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddLeaf`
+
+warning: type `spgxlogMoveLeafs` should have an upper camel case name
+  --> /work/src/crates/_support/types/types_spgist/src/xlog.rs:76:12
+   |
+76 | pub struct spgxlogMoveLeafs {
+   |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogMoveLeafs`
+
+warning: type `spgxlogAddNode` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/xlog.rs:115:12
+    |
+115 | pub struct spgxlogAddNode {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddNode`
+
+warning: type `spgxlogSplitTuple` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/xlog.rs:154:12
+    |
+154 | pub struct spgxlogSplitTuple {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogSplitTuple`
+
+warning: type `spgxlogPickSplit` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/xlog.rs:184:12
+    |
+184 | pub struct spgxlogPickSplit {
+    |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogPickSplit`
+
+warning: type `spgxlogVacuumLeaf` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/xlog.rs:238:12
+    |
+238 | pub struct spgxlogVacuumLeaf {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumLeaf`
+
+warning: type `spgxlogVacuumRoot` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/xlog.rs:271:12
+    |
+271 | pub struct spgxlogVacuumRoot {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRoot`
+
+warning: type `spgxlogVacuumRedirect` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/xlog.rs:295:12
+    |
+295 | pub struct spgxlogVacuumRedirect {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRedirect`
+
+warning: type `spgConfigIn` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/lib.rs:237:12
+    |
+237 | pub struct spgConfigIn {
+    |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigIn`
+
+warning: type `spgConfigOut` should have an upper camel case name
+   --> /work/src/crates/_support/types/types_spgist/src/lib.rs:242:12
+    |
+242 | pub struct spgConfigOut {
+    |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigOut`
+
+   Compiling types_bloom v0.1.0 (/work/src/crates/_support/types/types_bloom)
+   Compiling pqcomm_seams v0.0.0 (/work/src/crates/backend/libpq/pqcomm_seams)
+   Compiling types_rel v0.1.0 (/work/src/crates/_support/types/rel)
+   Compiling miscinit_seams v0.0.0 (/work/src/crates/backend/utils/init/miscinit_seams)
+   Compiling ipc_seams v0.0.0 (/work/src/crates/backend/storage/ipc/ipc_seams)
+   Compiling init_small v0.0.0 (/work/src/crates/backend/utils/init/init_small)
+warning: `mcx` (lib) generated 3 warnings
+   Compiling types_snapshot v0.1.0 (/work/src/crates/_support/types/snapshot)
+   Compiling elog v0.0.0 (/work/src/crates/backend/utils/error/elog)
+warning: unused imports: `LOG_DESTINATION_CSVLOG` and `LOG_DESTINATION_JSONLOG`
+  --> /work/src/crates/backend/utils/error/elog/src/config.rs:10:61
+   |
+10 |     ErrorLevel, PGErrorVerbosity, PgError, PgResult, ERROR, LOG_DESTINATION_CSVLOG,
+   |                                                             ^^^^^^^^^^^^^^^^^^^^^^
+11 |     LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, NOTICE, WARNING,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `types_spgist` (lib) generated 19 warnings
+   Compiling types_nodes v0.1.0 (/work/src/crates/_support/types/nodes)
+   Compiling types_resowner v0.1.0 (/work/src/crates/_support/types/types_resowner)
+   Compiling xlogreader_seams v0.0.0 (/work/src/crates/backend/access/transam/xlogreader_seams)
+warning: variant `ROW_MARK_EXCLUSIVE` should have an upper camel case name
+   --> /work/src/crates/_support/types/nodes/src/plannodes.rs:897:5
+    |
+897 |     ROW_MARK_EXCLUSIVE = 0,
+    |     ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkExclusive`
+    |
+    = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variant `ROW_MARK_NOKEYEXCLUSIVE` should have an upper camel case name
+   --> /work/src/crates/_support/types/nodes/src/plannodes.rs:898:5
+    |
+898 |     ROW_MARK_NOKEYEXCLUSIVE = 1,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkNokeyexclusive`
+
+warning: variant `ROW_MARK_SHARE` should have an upper camel case name
+   --> /work/src/crates/_support/types/nodes/src/plannodes.rs:899:5
+    |
+899 |     ROW_MARK_SHARE = 2,
+    |     ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkShare`
+
+warning: variant `ROW_MARK_KEYSHARE` should have an upper camel case name
+   --> /work/src/crates/_support/types/nodes/src/plannodes.rs:900:5
+    |
+900 |     ROW_MARK_KEYSHARE = 3,
+    |     ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkKeyshare`
+
+warning: variant `ROW_MARK_REFERENCE` should have an upper camel case name
+   --> /work/src/crates/_support/types/nodes/src/plannodes.rs:901:5
+    |
+901 |     ROW_MARK_REFERENCE = 4,
+    |     ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkReference`
+
+warning: variant `ROW_MARK_COPY` should have an upper camel case name
+   --> /work/src/crates/_support/types/nodes/src/plannodes.rs:902:5
+    |
+902 |     ROW_MARK_COPY = 5,
+    |     ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkCopy`
+
+   Compiling lmgr_proc_seams v0.0.0 (/work/src/crates/backend/storage/lmgr/lmgr_proc_seams)
+   Compiling jit_deform v0.1.0 (/work/src/crates/_support/jit_deform)
+   Compiling waiteventset_seams v0.0.0 (/work/src/crates/backend/storage/ipc/waiteventset_seams)
+   Compiling bufmgr_seams v0.0.0 (/work/src/crates/backend/storage/buffer/bufmgr_seams)
+   Compiling types_slot v0.1.0 (/work/src/crates/_support/types/types_slot)
+   Compiling lwlock v0.0.0 (/work/src/crates/backend/storage/lmgr/lwlock)
+   Compiling namespace_seams v0.0.0 (/work/src/crates/backend/catalog/namespace_seams)
+   Compiling types_portal v0.1.0 (/work/src/crates/_support/types/portal)
+   Compiling transam_xlog_seams v0.0.0 (/work/src/crates/backend/access/transam/transam_xlog_seams)
+   Compiling fmgr_seams v0.1.0 (/work/src/crates/backend/utils/fmgr/fmgr_seams)
+   Compiling mbutils v0.1.0 (/work/src/crates/backend/utils/mb/mbutils)
+   Compiling procarray_seams v0.0.0 (/work/src/crates/backend/storage/ipc/procarray_seams)
+   Compiling syscache_seams v0.0.0 (/work/src/crates/backend/utils/cache/syscache_seams)
+   Compiling pqformat v0.1.0 (/work/src/crates/backend/libpq/pqformat)
+   Compiling snapmgr_seams v0.0.0 (/work/src/crates/backend/utils/time/snapmgr_seams)
+   Compiling syncscan_seams v0.0.0 (/work/src/crates/backend/access/common/syncscan_seams)
+   Compiling relpath_seams v0.0.0 (/work/src/crates/common/relpath_seams)
+   Compiling tableam_vocab v0.1.0 (/work/src/crates/backend/access/table/tableam_vocab)
+   Compiling relcache_seams v0.0.0 (/work/src/crates/backend/utils/cache/relcache_seams)
+   Compiling smgr_seams v0.0.0 (/work/src/crates/backend/storage/smgr/smgr_seams)
+   Compiling relation_seams v0.0.0 (/work/src/crates/backend/access/common/relation_seams)
+   Compiling catalog_seams v0.0.0 (/work/src/crates/backend/catalog/catalog_seams)
+   Compiling table_seams v0.0.0 (/work/src/crates/backend/access/table/table_seams)
+   Compiling sync_seams v0.0.0 (/work/src/crates/backend/storage/sync/sync_seams)
+   Compiling types_pathnodes v0.1.0 (/work/src/crates/_support/types/pathnodes)
+   Compiling slru v0.0.0 (/work/src/crates/backend/access/transam/slru)
+   Compiling table v0.1.0 (/work/src/crates/backend/access/table/table)
+   Compiling readfuncs v0.1.0 (/work/src/crates/backend/nodes/readfuncs)
+warning: unused import: `OptNodeList`
+  --> /work/src/crates/backend/nodes/readfuncs/src/lib.rs:12:53
+   |
+12 | use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
+   |                                                     ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `CoerceViaIO`
+  --> /work/src/crates/backend/nodes/readfuncs/src/lib.rs:22:19
+   |
+22 |     CoalesceExpr, CoerceViaIO, CoercionForm, Const, FieldSelect, FieldStore, FromExpr, FuncExpr,
+   |                   ^^^^^^^^^^^
+
+   Compiling pmsignal v0.0.0 (/work/src/crates/backend/storage/ipc/pmsignal)
+   Compiling dbcommands_seams v0.0.0 (/work/src/crates/backend/commands/dbcommands_seams)
+   Compiling multixact_seams v0.0.0 (/work/src/crates/backend/access/transam/multixact_seams)
+   Compiling tableam_seams v0.0.0 (/work/src/crates/backend/access/table/tableam_seams)
+   Compiling multixact v0.0.0 (/work/src/crates/backend/access/transam/multixact)
+   Compiling format_type v0.1.0 (/work/src/crates/backend/utils/adt/format_type)
+   Compiling nbt_compare v0.1.0 (/work/src/crates/backend/access/nbtree/compare)
+   Compiling aclchk_seams v0.0.0 (/work/src/crates/backend/catalog/aclchk_seams)
+warning: variable does not need to be mutable
+   --> /work/src/crates/_support/types/pathnodes/src/run.rs:381:13
+    |
+381 |         let mut add = |outer: &mut crate::Relids<'mcx>, id: i32| {
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> /work/src/crates/_support/types/pathnodes/src/run.rs:414:17
+    |
+414 |             let mut add = |outer: &mut crate::Relids<'mcx>, id: i32| {
+    |                 ----^^^
+    |                 |
+    |                 help: remove this `mut`
+
+   Compiling catcache_seams v0.0.0 (/work/src/crates/backend/utils/cache/catcache_seams)
+   Compiling sinval_seams v0.0.0 (/work/src/crates/backend/storage/ipc/sinval_seams)
+warning: `types_nodes` (lib) generated 6 warnings
+   Compiling typcache_seams v0.0.0 (/work/src/crates/backend/utils/cache/typcache_seams)
+   Compiling inval v0.1.0 (/work/src/crates/backend/utils/cache/inval)
+   Compiling outfuncs v0.1.0 (/work/src/crates/backend/nodes/outfuncs)
+   Compiling adt_scalar v0.1.0 (/work/src/crates/backend/utils/adt/scalar)
+warning: unreachable pattern
+   --> /work/src/crates/backend/nodes/outfuncs/src/lib.rs:522:9
+    |
+124 |         NodeTag::T_CaseExpr => {
+    |         ------------------- matches all the relevant values
+...
+522 |         NodeTag::T_CaseExpr => {
+    |         ^^^^^^^^^^^^^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> /work/src/crates/backend/nodes/outfuncs/src/lib.rs:532:9
+    |
+134 |         NodeTag::T_CaseWhen => {
+    |         ------------------- matches all the relevant values
+...
+532 |         NodeTag::T_CaseWhen => {
+    |         ^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /work/src/crates/backend/nodes/outfuncs/src/lib.rs:587:9
+    |
+150 |         NodeTag::T_WindowFunc => {
+    |         --------------------- matches all the relevant values
+...
+587 |         NodeTag::T_WindowFunc => {
+    |         ^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /work/src/crates/backend/nodes/outfuncs/src/lib.rs:606:9
+    |
+194 |         NodeTag::T_SetOperationStmt => {
+    |         --------------------------- matches all the relevant values
+...
+606 |         NodeTag::T_SetOperationStmt => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /work/src/crates/backend/nodes/outfuncs/src/lib.rs:727:9
+    |
+479 |         NodeTag::T_NotifyStmt => out_notify_stmt(
+    |         --------------------- matches all the relevant values
+...
+727 |         NodeTag::T_NotifyStmt => {
+    |         ^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+   Compiling tupdesc v0.1.0 (/work/src/crates/backend/access/common/tupdesc)
+   Compiling lsyscache v0.1.0 (/work/src/crates/backend/utils/cache/lsyscache)
+   Compiling indexcmds_seams v0.1.0 (/work/src/crates/backend/commands/indexcmds_seams)
+   Compiling clauses_seams v0.1.0 (/work/src/crates/backend/optimizer/util/clauses_seams)
+warning: `outfuncs` (lib) generated 5 warnings
+   Compiling pg_enum_seams v0.0.0 (/work/src/crates/backend/catalog/pg_enum_seams)
+   Compiling funcapi_srf v0.1.0 (/work/src/crates/backend/utils/fmgr/funcapi_srf)
+warning: unused import: `SetFunctionReturnMode`
+ --> /work/src/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:4:62
+  |
+4 | use fmgr::{ExprDoneCond, FmgrInfo, FunctionCallInfoBaseData, SetFunctionReturnMode};
+  |                                                              ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `init_MultiFuncCall` should have a snake case name
+  --> /work/src/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:44:8
+   |
+44 | pub fn init_MultiFuncCall<'a>(
+   |        ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `init_multi_func_call`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: function `per_MultiFuncCall` should have a snake case name
+  --> /work/src/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:64:8
+   |
+64 | pub fn per_MultiFuncCall(flinfo: &mut FmgrInfo) -> &mut FuncCallContext {
+   |        ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `per_multi_func_call`
+
+warning: function `end_MultiFuncCall` should have a snake case name
+  --> /work/src/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:70:8
+   |
+70 | pub fn end_MultiFuncCall(flinfo: &mut FmgrInfo) {
+   |        ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `end_multi_func_call`
+
+   Compiling adt_float v0.1.0 (/work/src/crates/backend/utils/adt/float)
+   Compiling queryenvironment v0.1.0 (/work/src/crates/backend/utils/misc/queryenvironment)
+warning: `funcapi_srf` (lib) generated 4 warnings (run `cargo fix --lib -p funcapi_srf` to apply 1 suggestion)
+   Compiling nodes_core v0.1.0 (/work/src/crates/backend/nodes/nodes_core)
+   Compiling resowner_seams v0.0.0 (/work/src/crates/backend/utils/resowner/resowner_seams)
+   Compiling tablespace_seams v0.0.0 (/work/src/crates/backend/commands/tablespace_seams)
+   Compiling regex v0.0.0 (/work/src/crates/_support/types/regex)
+warning: unreachable pattern
+  --> /work/src/crates/backend/nodes/nodes_core/src/node_funcs.rs:47:9
+   |
+30 |         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
+   |         ---------------------- matches all the relevant values
+...
+47 |         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
+   |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+   |
+   = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> /work/src/crates/backend/nodes/nodes_core/src/node_funcs.rs:194:9
+    |
+163 |         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
+    |         ---------------------- matches all the relevant values
+...
+194 |         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
+    |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /work/src/crates/backend/nodes/nodes_core/src/node_funcs.rs:296:9
+    |
+279 |         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
+    |         ---------------------- matches all the relevant values
+...
+296 |         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
+    |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /work/src/crates/backend/nodes/nodes_core/src/node_funcs.rs:476:9
+    |
+424 |         NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
+    |         ---------------------- matches all the relevant values
+...
+476 |         NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
+    |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: `elog` (lib) generated 1 warning (run `cargo fix --lib -p elog` to apply 1 suggestion)
+   Compiling fd v0.0.0 (/work/src/crates/backend/storage/file/fd)
+   Compiling toast_internals_seams v0.1.0 (/work/src/crates/backend/access/common/toast_internals_seams)
+   Compiling unicode_norm v0.1.0 (/work/src/crates/common/unicode_norm)
+   Compiling detoast v0.1.0 (/work/src/crates/backend/access/common/detoast)
+   Compiling regex_core_seams v0.0.0 (/work/src/crates/backend/regex/regex_core_seams)
+   Compiling regexp_seams v0.0.0 (/work/src/crates/backend/utils/adt/regexp_seams)
+   Compiling typcache v0.1.0 (/work/src/crates/backend/utils/cache/typcache)
+   Compiling pg_locale_seams v0.1.0 (/work/src/crates/backend/utils/adt/pg_locale_seams)
+warning: unused import: `MemoryContext`
+  --> /work/src/crates/backend/utils/cache/typcache/src/lib.rs:19:16
+   |
+19 | use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
+   |                ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling latch_seams v0.0.0 (/work/src/crates/backend/storage/ipc/latch_seams)
+   Compiling procsignal_seams v0.0.0 (/work/src/crates/backend/storage/ipc/procsignal_seams)
+   Compiling latch v0.0.0 (/work/src/crates/backend/storage/ipc/latch)
+   Compiling lock_seams v0.0.0 (/work/src/crates/backend/storage/lmgr/lock_seams)
+   Compiling arrayfuncs v0.1.0 (/work/src/crates/backend/utils/adt/arrayfuncs)
+warning: `types_pathnodes` (lib) generated 2 warnings (run `cargo fix --lib -p types_pathnodes` to apply 2 suggestions)
+   Compiling deadlock_seams v0.0.0 (/work/src/crates/backend/storage/lmgr/deadlock_seams)
+   Compiling lmgr_proc v0.0.0 (/work/src/crates/backend/storage/lmgr/lmgr_proc)
+   Compiling dfmgr v0.1.0 (/work/src/crates/backend/utils/fmgr/dfmgr)
+warning: value assigned to `addedafter` is never read
+   --> /work/src/crates/backend/utils/adt/arrayfuncs/src/element.rs:545:26
+    |
+545 |     let mut addedafter = 0i32;
+    |                          ^^^^ this value is reassigned later and never used
+...
+578 |             addedafter = aa;
+    |             --------------- `addedafter` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> /work/src/crates/backend/utils/adt/arrayfuncs/src/expanded.rs:144:55
+    |
+141 |     unsafe {
+    |     ------ because it's nested under this `unsafe` block
+...
+144 |         parentcontext.register_reset_callback(move || unsafe { drop(Box::from_raw(p)) });
+    |                                                       ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> /work/src/crates/backend/utils/adt/arrayfuncs/src/expanded.rs:252:15
+    |
+252 |         cur + unsafe { varsize_any(value.as_usize() as *const u8) }
+    |               ^^^^^^ unnecessary `unsafe` block
+
+   Compiling heaptuple v0.1.0 (/work/src/crates/backend/access/common/heaptuple)
+warning: unnecessary `unsafe` block
+   --> /work/src/crates/backend/utils/adt/arrayfuncs/src/io.rs:559:15
+    |
+559 |         -1 => unsafe { varsize_any(p) },
+    |               ^^^^^^ unnecessary `unsafe` block
+
+warning: constant `HASH_RECORD_OID` is never used
+   --> /work/src/crates/backend/utils/adt/arrayfuncs/src/builtins.rs:514:7
+    |
+514 | const HASH_RECORD_OID: Oid = 6192;
+    |       ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `HASH_RECORD_EXTENDED_OID` is never used
+   --> /work/src/crates/backend/utils/adt/arrayfuncs/src/builtins.rs:515:7
+    |
+515 | const HASH_RECORD_EXTENDED_OID: Oid = 6193;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling exectuples v0.1.0 (/work/src/crates/backend/executor/exectuples)
+warning: `readfuncs` (lib) generated 2 warnings (run `cargo fix --lib -p readfuncs` to apply 2 suggestions)
+   Compiling adt_numeric v0.1.0 (/work/src/crates/backend/utils/adt/numeric)
+   Compiling adt_varbit v0.1.0 (/work/src/crates/backend/utils/adt/varbit)
+   Compiling waiteventset v0.0.0 (/work/src/crates/backend/storage/ipc/waiteventset)
+   Compiling miscinit v0.0.0 (/work/src/crates/backend/utils/init/miscinit)
+warning: field `0` is never read
+  --> /work/src/crates/backend/utils/adt/numeric/src/sortsupport.rs:21:17
+   |
+21 | struct AlignBuf([u8; 128]);
+   |        -------- ^^^^^^^^^
+   |        |
+   |        field in this struct
+   |
+   = help: consider removing this field
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: decoder_fuzz@0.0.0: csrc/pg_float_io.c:14:42: warning: "/*" within comment [-Wcomment]
+warning: decoder_fuzz@0.0.0:    14 |  *     byte-for-byte copies of src/common/* at the same ref (compiled as
+warning: decoder_fuzz@0.0.0: csrc/pg_float_io.c: In function 'float4in_internal':
+warning: decoder_fuzz@0.0.0: csrc/pg_float_io.c:173:47: warning: unused parameter 'type_name' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   173 |                                   const char *type_name, const char *orig_string,
+warning: decoder_fuzz@0.0.0:       |                                   ~~~~~~~~~~~~^~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_float_io.c:173:70: warning: unused parameter 'orig_string' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   173 |                                   const char *type_name, const char *orig_string,
+warning: decoder_fuzz@0.0.0:       |                                                          ~~~~~~~~~~~~^~~~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_float_io.c:174:48: warning: unused parameter 'escontext' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   174 |                                   struct Node *escontext)
+warning: decoder_fuzz@0.0.0:       |                                   ~~~~~~~~~~~~~^~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_float_io.c: In function 'float8in_internal':
+warning: decoder_fuzz@0.0.0: csrc/pg_float_io.c:307:47: warning: unused parameter 'type_name' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   307 |                                   const char *type_name, const char *orig_string,
+warning: decoder_fuzz@0.0.0:       |                                   ~~~~~~~~~~~~^~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_float_io.c:307:70: warning: unused parameter 'orig_string' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   307 |                                   const char *type_name, const char *orig_string,
+warning: decoder_fuzz@0.0.0:       |                                                          ~~~~~~~~~~~~^~~~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_float_io.c:308:48: warning: unused parameter 'escontext' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   308 |                                   struct Node *escontext)
+warning: decoder_fuzz@0.0.0:       |                                   ~~~~~~~~~~~~~^~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_geo_io.c:662:9: warning: "palloc" redefined
+warning: decoder_fuzz@0.0.0:   662 | #define palloc(n) pg_geo_palloc_impl(n)
+warning: decoder_fuzz@0.0.0:       |         ^~~~~~
+warning: decoder_fuzz@0.0.0: In file included from csrc/pg_geo_io.c:30:
+warning: decoder_fuzz@0.0.0: csrc/shim/postgres.h:34:9: note: this is the location of the previous definition
+warning: decoder_fuzz@0.0.0:    34 | #define palloc(n) malloc(n)
+warning: decoder_fuzz@0.0.0:       |         ^~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_strfam.c: In function 'pg_clean_ascii':
+warning: decoder_fuzz@0.0.0: csrc/pg_strfam.c:221:37: warning: unused parameter 'alloc_flags' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   221 | pg_clean_ascii(const char *str, int alloc_flags)
+warning: decoder_fuzz@0.0.0:       |                                 ~~~~^~~~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_strfam.c: In function 'replace_percent_placeholders':
+warning: decoder_fuzz@0.0.0: csrc/pg_strfam.c:264:61: warning: unused parameter 'param_name' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   264 | replace_percent_placeholders(const char *instr, const char *param_name, const char *letters,...)
+warning: decoder_fuzz@0.0.0:       |                                                 ~~~~~~~~~~~~^~~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_strfam.c: In function 'make_native_path':
+warning: decoder_fuzz@0.0.0: csrc/pg_strfam.c:338:24: warning: unused parameter 'filename' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   338 | make_native_path(char *filename)
+warning: decoder_fuzz@0.0.0:       |                  ~~~~~~^~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_cash_io.c: In function 'pg_diff_cash_in':
+warning: decoder_fuzz@0.0.0: csrc/pg_cash_io.c:271:44: warning: array subscript 1 is outside array bounds of 'char[1]' [-Warray-bounds=]
+warning: decoder_fuzz@0.0.0:   271 |                 lconvert->mon_decimal_point[1] == '\0')
+warning: decoder_fuzz@0.0.0:       |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~
+warning: decoder_fuzz@0.0.0: csrc/pg_cash_io.c:179:13: note: at offset 1 into object 'pg_cash_empty' of size 1
+warning: decoder_fuzz@0.0.0:   179 | static char pg_cash_empty[1] = "";
+warning: decoder_fuzz@0.0.0:       |             ^~~~~~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_cash_io.c: In function 'pg_diff_cash_out':
+warning: decoder_fuzz@0.0.0: csrc/pg_cash_io.c:459:44: warning: array subscript 1 is outside array bounds of 'char[1]' [-Warray-bounds=]
+warning: decoder_fuzz@0.0.0:   459 |                 lconvert->mon_decimal_point[1] == '\0')
+warning: decoder_fuzz@0.0.0:       |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~
+warning: decoder_fuzz@0.0.0: csrc/pg_cash_io.c:179:13: note: at offset 1 into object 'pg_cash_empty' of size 1
+warning: decoder_fuzz@0.0.0:   179 | static char pg_cash_empty[1] = "";
+warning: decoder_fuzz@0.0.0:       |             ^~~~~~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c: In function 'set_var_from_str':
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c:997:30: warning: unused parameter 'str' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   997 | set_var_from_str(const char *str, const char *cp,
+warning: decoder_fuzz@0.0.0:       |                  ~~~~~~~~~~~~^~~
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c:999:40: warning: unused parameter 'escontext' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   999 |                                  Node *escontext)
+warning: decoder_fuzz@0.0.0:       |                                  ~~~~~~^~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c: In function 'apply_typmod':
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c:1351:101: warning: right-hand operand of comma expression has no effect [-Wunused-value]
+warning: decoder_fuzz@0.0.0:  1351 |                                                         (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+warning: decoder_fuzz@0.0.0:       |                                                                                                     ^
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c:125:53: note: in definition of macro 'ereturn'
+warning: decoder_fuzz@0.0.0:   125 | #define ereturn(escontext, ret, stuff) do { (void) (stuff); return (ret); } while (0)
+warning: decoder_fuzz@0.0.0:       |                                                     ^~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c:1302:51: warning: unused parameter 'escontext' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:  1302 | apply_typmod(NumericVar *var, int32 typmod, Node *escontext)
+warning: decoder_fuzz@0.0.0:       |                                             ~~~~~~^~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c: In function 'apply_typmod_special':
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c:1393:69: warning: right-hand operand of comma expression has no effect [-Wunused-value]
+warning: decoder_fuzz@0.0.0:  1393 |                         (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+warning: decoder_fuzz@0.0.0:       |                                                                     ^
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c:125:53: note: in definition of macro 'ereturn'
+warning: decoder_fuzz@0.0.0:   125 | #define ereturn(escontext, ret, stuff) do { (void) (stuff); return (ret); } while (0)
+warning: decoder_fuzz@0.0.0:       |                                                     ^~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c:1372:33: warning: variable 'scale' set but not used [-Wunused-but-set-variable]
+warning: decoder_fuzz@0.0.0:  1372 |         int                     scale;
+warning: decoder_fuzz@0.0.0:       |                                 ^~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c:1371:33: warning: variable 'precision' set but not used [-Wunused-but-set-variable]
+warning: decoder_fuzz@0.0.0:  1371 |         int                     precision;
+warning: decoder_fuzz@0.0.0:       |                                 ^~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_lsn_oracle.c:1369:55: warning: unused parameter 'escontext' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:  1369 | apply_typmod_special(Numeric num, int32 typmod, Node *escontext)
+warning: decoder_fuzz@0.0.0:       |                                                 ~~~~~~^~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_enc_tables.c: In function 'ScanKeywordLookup':
+warning: decoder_fuzz@0.0.0: csrc/pg_enc_tables.c:376:17: warning: comparison of integer expressions of different signedness: 'size_t' {aka 'long unsigned int'} and 'int' [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:   376 |         if (len > keywords->max_kw_len)
+warning: decoder_fuzz@0.0.0:       |                 ^
+warning: decoder_fuzz@0.0.0: csrc/hashenc/hmac.c: In function 'hashenc_impl_pg_hmac_init':
+warning: decoder_fuzz@0.0.0: csrc/hashenc/hmac.c:158:17: warning: comparison of integer expressions of different signedness: 'size_t' {aka 'long unsigned int'} and 'int' [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:   158 |         if (len > block_size)
+warning: decoder_fuzz@0.0.0:       |                 ^
+warning: decoder_fuzz@0.0.0: csrc/hashenc/hmac.c:195:23: warning: comparison of integer expressions of different signedness: 'int' and 'size_t' {aka 'long unsigned int'} [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:   195 |         for (i = 0; i < len; i++)
+warning: decoder_fuzz@0.0.0:       |                       ^
+warning: decoder_fuzz@0.0.0: In file included from csrc/hashenc/pg_hashenc_ascii.c:24:
+warning: decoder_fuzz@0.0.0: csrc/hashenc/shim/mb/pg_wchar.h: In function 'pg_encoding_to_char':
+warning: decoder_fuzz@0.0.0: csrc/hashenc/shim/mb/pg_wchar.h:67:25: warning: unused parameter 'enc' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:    67 | pg_encoding_to_char(int enc)
+warning: decoder_fuzz@0.0.0:       |                     ~~~~^~~
+warning: decoder_fuzz@0.0.0: In file included from csrc/hashenc/pg_hashenc_glue.c:18:
+warning: decoder_fuzz@0.0.0: csrc/hashenc/shim/mb/pg_wchar.h: In function 'pg_encoding_to_char':
+warning: decoder_fuzz@0.0.0: csrc/hashenc/shim/mb/pg_wchar.h:67:25: warning: unused parameter 'enc' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:    67 | pg_encoding_to_char(int enc)
+warning: decoder_fuzz@0.0.0:       |                     ~~~~^~~
+warning: decoder_fuzz@0.0.0: csrc/cryptofam/hmac.c: In function 'cryptofam_pg_hmac_init':
+warning: decoder_fuzz@0.0.0: csrc/cryptofam/hmac.c:158:17: warning: comparison of integer expressions of different signedness: 'size_t' {aka 'long unsigned int'} and 'int' [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:   158 |         if (len > block_size)
+warning: decoder_fuzz@0.0.0:       |                 ^
+warning: decoder_fuzz@0.0.0: csrc/cryptofam/hmac.c:195:23: warning: comparison of integer expressions of different signedness: 'int' and 'size_t' {aka 'long unsigned int'} [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:   195 |         for (i = 0; i < len; i++)
+warning: decoder_fuzz@0.0.0:       |                       ^
+warning: decoder_fuzz@0.0.0: csrc/tablesfam/kwlookup.c: In function 'tablesfam_ScanKeywordLookup':
+warning: decoder_fuzz@0.0.0: csrc/tablesfam/kwlookup.c:50:17: warning: comparison of integer expressions of different signedness: 'size_t' {aka 'long unsigned int'} and 'int' [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:    50 |         if (len > keywords->max_kw_len)
+warning: decoder_fuzz@0.0.0:       |                 ^
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c: In function 'gettoken_query_plain':
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:510:54: warning: unused parameter 'operator' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   510 | gettoken_query_plain(TSQueryParserState state, int8 *operator,
+warning: decoder_fuzz@0.0.0:       |                                                ~~~~~~^~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c: In function 'findoprnd_recurse':
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:731:18: warning: comparison of integer expressions of different signedness: 'uint32' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:   731 |         if (*pos >= nnodes)
+warning: decoder_fuzz@0.0.0:       |                  ^~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c: In function 'findoprnd':
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:792:17: warning: comparison of integer expressions of different signedness: 'uint32' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:   792 |         if (pos != size)
+warning: decoder_fuzz@0.0.0:       |                 ^~
+warning: decoder_fuzz@0.0.0: In file included from csrc/tsq/tsquery.c:21:
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c: In function 'parse_tsquery':
+warning: decoder_fuzz@0.0.0: csrc/tsqrw/include/tsearch/ts_type.h:236:17: warning: comparison of integer expressions of different signedness: 'int' and 'long unsigned int' [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:   236 |         ((size) > (MaxAllocSize - HDRSIZETQ - (lenofoperand)) / sizeof(QueryItem))
+warning: decoder_fuzz@0.0.0:       |                 ^
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:887:13: note: in expansion of macro 'TSQUERY_TOO_BIG'
+warning: decoder_fuzz@0.0.0:   887 |         if (TSQUERY_TOO_BIG(list_length(state.polstr), state.sumlen))
+warning: decoder_fuzz@0.0.0:       |             ^~~~~~~~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c: In function 'pushval_asis':
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:942:20: warning: unused parameter 'opaque' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   942 | pushval_asis(Datum opaque, TSQueryParserState state, char *strval, int lenval,
+warning: decoder_fuzz@0.0.0:       |              ~~~~~~^~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c: In function 'infix':
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1064:25: error: implicit declaration of function 'sprintf' [-Wimplicit-function-declaration]
+warning: decoder_fuzz@0.0.0:  1064 |                         sprintf(in->cur, "( ");
+warning: decoder_fuzz@0.0.0:       |                         ^~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:27:1: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+warning: decoder_fuzz@0.0.0:    26 | #include "varatt.h"
+warning: decoder_fuzz@0.0.0:   +++ |+#include <stdio.h>
+warning: decoder_fuzz@0.0.0:    27 | 
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1064:25: warning: incompatible implicit declaration of built-in function 'sprintf' [-Wbuiltin-declaration-mismatch]
+warning: decoder_fuzz@0.0.0:  1064 |                         sprintf(in->cur, "( ");
+warning: decoder_fuzz@0.0.0:       |                         ^~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1064:25: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1077:25: warning: incompatible implicit declaration of built-in function 'sprintf' [-Wbuiltin-declaration-mismatch]
+warning: decoder_fuzz@0.0.0:  1077 |                         sprintf(in->cur, " )");
+warning: decoder_fuzz@0.0.0:       |                         ^~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1077:25: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1096:25: warning: incompatible implicit declaration of built-in function 'sprintf' [-Wbuiltin-declaration-mismatch]
+warning: decoder_fuzz@0.0.0:  1096 |                         sprintf(in->cur, "( ");
+warning: decoder_fuzz@0.0.0:       |                         ^~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1096:25: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1117:33: warning: incompatible implicit declaration of built-in function 'sprintf' [-Wbuiltin-declaration-mismatch]
+warning: decoder_fuzz@0.0.0:  1117 |                                 sprintf(in->cur, " | %s", nrm.buf);
+warning: decoder_fuzz@0.0.0:       |                                 ^~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1117:33: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1138:25: warning: incompatible implicit declaration of built-in function 'sprintf' [-Wbuiltin-declaration-mismatch]
+warning: decoder_fuzz@0.0.0:  1138 |                         sprintf(in->cur, " )");
+warning: decoder_fuzz@0.0.0:       |                         ^~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1138:25: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c: In function 'tsqueryrecv':
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1253:23: warning: comparison of integer expressions of different signedness: 'int' and 'uint32' {aka 'unsigned int'} [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:  1253 |         for (i = 0; i < size; i++)
+warning: decoder_fuzz@0.0.0:       |                       ^
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1310:31: warning: comparison of integer expressions of different signedness: 'int' and 'uint32' {aka 'unsigned int'} [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:  1310 |                         if (i == size - 1)
+warning: decoder_fuzz@0.0.0:       |                               ^~
+warning: decoder_fuzz@0.0.0: csrc/tsq/tsquery.c:1338:23: warning: comparison of integer expressions of different signedness: 'int' and 'uint32' {aka 'unsigned int'} [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:  1338 |         for (i = 0; i < size; i++)
+warning: decoder_fuzz@0.0.0:       |                       ^
+warning: decoder_fuzz@0.0.0: ToolExecError: command did not execute successfully (status code exit status: 1): LC_ALL="C" "cc" "-O3" "-ffunction-sections" "-fdata-sections" "-fPIC" "-g" "-gdwarf-4" "-fno-omit-frame-pointer" "-I" "csrc/tsq/shim" "-I" "csrc/tsq/include" "-I" "csrc/tsqrw/include" "-Wall" "-Wextra" "-fno-strict-aliasing" "-fwrapv" "-o" "/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/build/decoder_fuzz-3e9bd349d077e8ca/out/771950c5685a9b69-tsquery.o" "-c" "csrc/tsq/tsquery.c"cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_prepare':
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:576:25: warning: unused parameter 'src' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   576 | SPI_prepare(const char *src, int nargs, Oid *argtypes)
+warning: decoder_fuzz@0.0.0:       |             ~~~~~~~~~~~~^~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:576:34: warning: unused parameter 'nargs' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   576 | SPI_prepare(const char *src, int nargs, Oid *argtypes)
+warning: decoder_fuzz@0.0.0:       |                              ~~~~^~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:576:46: warning: unused parameter 'argtypes' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   576 | SPI_prepare(const char *src, int nargs, Oid *argtypes)
+warning: decoder_fuzz@0.0.0:       |                                         ~~~~~^~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_cursor_open':
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:582:29: warning: unused parameter 'name' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   582 | SPI_cursor_open(const char *name, SPIPlanPtr plan,
+warning: decoder_fuzz@0.0.0:       |                 ~~~~~~~~~~~~^~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:582:46: warning: unused parameter 'plan' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   582 | SPI_cursor_open(const char *name, SPIPlanPtr plan,
+warning: decoder_fuzz@0.0.0:       |                                   ~~~~~~~~~~~^~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:583:40: warning: unused parameter 'Values' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   583 |                                 Datum *Values, const char *Nulls, bool read_only)
+warning: decoder_fuzz@0.0.0:       |                                 ~~~~~~~^~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:583:60: warning: unused parameter 'Nulls' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   583 |                                 Datum *Values, const char *Nulls, bool read_only)
+warning: decoder_fuzz@0.0.0:       |                                                ~~~~~~~~~~~~^~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:583:72: warning: unused parameter 'read_only' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   583 |                                 Datum *Values, const char *Nulls, bool read_only)
+warning: decoder_fuzz@0.0.0:       |                                                                        ^
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_cursor_fetch':
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:589:25: warning: unused parameter 'portal' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   589 | SPI_cursor_fetch(Portal portal, bool forward, long count)
+warning: decoder_fuzz@0.0.0:       |                  ~~~~~~~^~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:589:38: warning: unused parameter 'forward' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   589 | SPI_cursor_fetch(Portal portal, bool forward, long count)
+warning: decoder_fuzz@0.0.0:       |                                      ^
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:589:52: warning: unused parameter 'count' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   589 | SPI_cursor_fetch(Portal portal, bool forward, long count)
+warning: decoder_fuzz@0.0.0:       |                                               ~~~~~^~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_cursor_close':
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:595:25: warning: unused parameter 'portal' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   595 | SPI_cursor_close(Portal portal)
+warning: decoder_fuzz@0.0.0:       |                  ~~~~~~~^~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_freeplan':
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:601:25: warning: unused parameter 'plan' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   601 | SPI_freeplan(SPIPlanPtr plan)
+warning: decoder_fuzz@0.0.0:       |              ~~~~~~~~~~~^~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_freetuptable':
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:607:33: warning: unused parameter 'tuptable' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   607 | SPI_freetuptable(SPITupleTable *tuptable)
+warning: decoder_fuzz@0.0.0:       |                  ~~~~~~~~~~~~~~~^~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_getbinval':
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:613:25: warning: unused parameter 'row' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   613 | SPI_getbinval(HeapTuple row, TupleDesc rowdesc, int colnumber, bool *isnull)
+warning: decoder_fuzz@0.0.0:       |               ~~~~~~~~~~^~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:613:40: warning: unused parameter 'rowdesc' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   613 | SPI_getbinval(HeapTuple row, TupleDesc rowdesc, int colnumber, bool *isnull)
+warning: decoder_fuzz@0.0.0:       |                              ~~~~~~~~~~^~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:613:53: warning: unused parameter 'colnumber' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   613 | SPI_getbinval(HeapTuple row, TupleDesc rowdesc, int colnumber, bool *isnull)
+warning: decoder_fuzz@0.0.0:       |                                                 ~~~~^~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:613:70: warning: unused parameter 'isnull' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   613 | SPI_getbinval(HeapTuple row, TupleDesc rowdesc, int colnumber, bool *isnull)
+warning: decoder_fuzz@0.0.0:       |                                                                      ^
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_gettypeid':
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:619:25: warning: unused parameter 'rowdesc' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   619 | SPI_gettypeid(TupleDesc rowdesc, int colnumber)
+warning: decoder_fuzz@0.0.0:       |               ~~~~~~~~~~^~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/pg_tsq_shim.c:619:38: warning: unused parameter 'colnumber' [-Wunused-parameter]
+warning: decoder_fuzz@0.0.0:   619 | SPI_gettypeid(TupleDesc rowdesc, int colnumber)
+warning: decoder_fuzz@0.0.0:       |                                  ~~~~^~~~~~~~~
+warning: decoder_fuzz@0.0.0: In file included from csrc/tsq/include/tsearch/ts_public.h:16,
+warning: decoder_fuzz@0.0.0:                  from csrc/tsqrw/include/tsearch/ts_utils.h:16,
+warning: decoder_fuzz@0.0.0:                  from csrc/tsqrw/tsquery_util.c:18:
+warning: decoder_fuzz@0.0.0: csrc/tsqrw/tsquery_util.c: In function 'QTN2QT':
+warning: decoder_fuzz@0.0.0: csrc/tsqrw/include/tsearch/ts_type.h:236:17: warning: comparison of integer expressions of different signedness: 'int' and 'long unsigned int' [-Wsign-compare]
+warning: decoder_fuzz@0.0.0:   236 |         ((size) > (MaxAllocSize - HDRSIZETQ - (lenofoperand)) / sizeof(QueryItem))
+warning: decoder_fuzz@0.0.0:       |                 ^
+warning: decoder_fuzz@0.0.0: csrc/tsqrw/tsquery_util.c:373:13: note: in expansion of macro 'TSQUERY_TOO_BIG'
+warning: decoder_fuzz@0.0.0:   373 |         if (TSQUERY_TOO_BIG(nnode, sumlen))
+warning: decoder_fuzz@0.0.0:       |             ^~~~~~~~~~~~~~~
+warning: decoder_fuzz@0.0.0: csrc/pg_tsquery_core_io.c: In function 'pg_diff_tsquery_in':
+warning: decoder_fuzz@0.0.0: csrc/pg_tsquery_core_io.c:115:9: warning: missing initializer for field 'error_occurred' of 'ErrorSaveContext' [-Wmissing-field-initializers]
+warning: decoder_fuzz@0.0.0:   115 |         ErrorSaveContext escontext = {T_ErrorSaveContext};
+warning: decoder_fuzz@0.0.0:       |         ^~~~~~~~~~~~~~~~
+warning: decoder_fuzz@0.0.0: In file included from csrc/pg_tsquery_core_io.c:48:
+warning: decoder_fuzz@0.0.0: csrc/tsq/shim/nodes/miscnodes.h:47:25: note: 'error_occurred' declared here
+warning: decoder_fuzz@0.0.0:    47 |         bool            error_occurred; /* set to true if we detect a soft error */
+warning: decoder_fuzz@0.0.0:       |                         ^~~~~~~~~~~~~~
+error: failed to run custom build command for `decoder_fuzz v0.0.0 (/work/src/fuzz/core)`
+
+Caused by:
+  process didn't exit successfully: `/work/src/fuzz/target/release/build/decoder_fuzz-7725cd946fcd48c4/build-script-build` (exit status: 1)
+  --- stdout
+  cargo:rerun-if-env-changed=CC_FORCE_DISABLE
+  CC_FORCE_DISABLE = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/pg_float_io.c:14:42: warning: "/*" within comment [-Wcomment]
+  cargo:warning=   14 |  *     byte-for-byte copies of src/common/* at the same ref (compiled as
+  cargo:warning=csrc/pg_float_io.c: In function 'float4in_internal':
+  cargo:warning=csrc/pg_float_io.c:173:47: warning: unused parameter 'type_name' [-Wunused-parameter]
+  cargo:warning=  173 |                                   const char *type_name, const char *orig_string,
+  cargo:warning=      |                                   ~~~~~~~~~~~~^~~~~~~~~
+  cargo:warning=csrc/pg_float_io.c:173:70: warning: unused parameter 'orig_string' [-Wunused-parameter]
+  cargo:warning=  173 |                                   const char *type_name, const char *orig_string,
+  cargo:warning=      |                                                          ~~~~~~~~~~~~^~~~~~~~~~~
+  cargo:warning=csrc/pg_float_io.c:174:48: warning: unused parameter 'escontext' [-Wunused-parameter]
+  cargo:warning=  174 |                                   struct Node *escontext)
+  cargo:warning=      |                                   ~~~~~~~~~~~~~^~~~~~~~~
+  cargo:warning=csrc/pg_float_io.c: In function 'float8in_internal':
+  cargo:warning=csrc/pg_float_io.c:307:47: warning: unused parameter 'type_name' [-Wunused-parameter]
+  cargo:warning=  307 |                                   const char *type_name, const char *orig_string,
+  cargo:warning=      |                                   ~~~~~~~~~~~~^~~~~~~~~
+  cargo:warning=csrc/pg_float_io.c:307:70: warning: unused parameter 'orig_string' [-Wunused-parameter]
+  cargo:warning=  307 |                                   const char *type_name, const char *orig_string,
+  cargo:warning=      |                                                          ~~~~~~~~~~~~^~~~~~~~~~~
+  cargo:warning=csrc/pg_float_io.c:308:48: warning: unused parameter 'escontext' [-Wunused-parameter]
+  cargo:warning=  308 |                                   struct Node *escontext)
+  cargo:warning=      |                                   ~~~~~~~~~~~~~^~~~~~~~~
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/pg_geo_io.c:662:9: warning: "palloc" redefined
+  cargo:warning=  662 | #define palloc(n) pg_geo_palloc_impl(n)
+  cargo:warning=      |         ^~~~~~
+  cargo:warning=In file included from csrc/pg_geo_io.c:30:
+  cargo:warning=csrc/shim/postgres.h:34:9: note: this is the location of the previous definition
+  cargo:warning=   34 | #define palloc(n) malloc(n)
+  cargo:warning=      |         ^~~~~~
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/pg_strfam.c: In function 'pg_clean_ascii':
+  cargo:warning=csrc/pg_strfam.c:221:37: warning: unused parameter 'alloc_flags' [-Wunused-parameter]
+  cargo:warning=  221 | pg_clean_ascii(const char *str, int alloc_flags)
+  cargo:warning=      |                                 ~~~~^~~~~~~~~~~
+  cargo:warning=csrc/pg_strfam.c: In function 'replace_percent_placeholders':
+  cargo:warning=csrc/pg_strfam.c:264:61: warning: unused parameter 'param_name' [-Wunused-parameter]
+  cargo:warning=  264 | replace_percent_placeholders(const char *instr, const char *param_name, const char *letters,...)
+  cargo:warning=      |                                                 ~~~~~~~~~~~~^~~~~~~~~~
+  cargo:warning=csrc/pg_strfam.c: In function 'make_native_path':
+  cargo:warning=csrc/pg_strfam.c:338:24: warning: unused parameter 'filename' [-Wunused-parameter]
+  cargo:warning=  338 | make_native_path(char *filename)
+  cargo:warning=      |                  ~~~~~~^~~~~~~~
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/pg_cash_io.c: In function 'pg_diff_cash_in':
+  cargo:warning=csrc/pg_cash_io.c:271:44: warning: array subscript 1 is outside array bounds of 'char[1]' [-Warray-bounds=]
+  cargo:warning=  271 |                 lconvert->mon_decimal_point[1] == '\0')
+  cargo:warning=      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~
+  cargo:warning=csrc/pg_cash_io.c:179:13: note: at offset 1 into object 'pg_cash_empty' of size 1
+  cargo:warning=  179 | static char pg_cash_empty[1] = "";
+  cargo:warning=      |             ^~~~~~~~~~~~~
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/pg_cash_io.c: In function 'pg_diff_cash_out':
+  cargo:warning=csrc/pg_cash_io.c:459:44: warning: array subscript 1 is outside array bounds of 'char[1]' [-Warray-bounds=]
+  cargo:warning=  459 |                 lconvert->mon_decimal_point[1] == '\0')
+  cargo:warning=      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~
+  cargo:warning=csrc/pg_cash_io.c:179:13: note: at offset 1 into object 'pg_cash_empty' of size 1
+  cargo:warning=  179 | static char pg_cash_empty[1] = "";
+  cargo:warning=      |             ^~~~~~~~~~~~~
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/pg_lsn_oracle.c: In function 'set_var_from_str':
+  cargo:warning=csrc/pg_lsn_oracle.c:997:30: warning: unused parameter 'str' [-Wunused-parameter]
+  cargo:warning=  997 | set_var_from_str(const char *str, const char *cp,
+  cargo:warning=      |                  ~~~~~~~~~~~~^~~
+  cargo:warning=csrc/pg_lsn_oracle.c:999:40: warning: unused parameter 'escontext' [-Wunused-parameter]
+  cargo:warning=  999 |                                  Node *escontext)
+  cargo:warning=      |                                  ~~~~~~^~~~~~~~~
+  cargo:warning=csrc/pg_lsn_oracle.c: In function 'apply_typmod':
+  cargo:warning=csrc/pg_lsn_oracle.c:1351:101: warning: right-hand operand of comma expression has no effect [-Wunused-value]
+  cargo:warning= 1351 |                                                         (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+  cargo:warning=      |                                                                                                     ^
+  cargo:warning=csrc/pg_lsn_oracle.c:125:53: note: in definition of macro 'ereturn'
+  cargo:warning=  125 | #define ereturn(escontext, ret, stuff) do { (void) (stuff); return (ret); } while (0)
+  cargo:warning=      |                                                     ^~~~~
+  cargo:warning=csrc/pg_lsn_oracle.c:1302:51: warning: unused parameter 'escontext' [-Wunused-parameter]
+  cargo:warning= 1302 | apply_typmod(NumericVar *var, int32 typmod, Node *escontext)
+  cargo:warning=      |                                             ~~~~~~^~~~~~~~~
+  cargo:warning=csrc/pg_lsn_oracle.c: In function 'apply_typmod_special':
+  cargo:warning=csrc/pg_lsn_oracle.c:1393:69: warning: right-hand operand of comma expression has no effect [-Wunused-value]
+  cargo:warning= 1393 |                         (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+  cargo:warning=      |                                                                     ^
+  cargo:warning=csrc/pg_lsn_oracle.c:125:53: note: in definition of macro 'ereturn'
+  cargo:warning=  125 | #define ereturn(escontext, ret, stuff) do { (void) (stuff); return (ret); } while (0)
+  cargo:warning=      |                                                     ^~~~~
+  cargo:warning=csrc/pg_lsn_oracle.c:1372:33: warning: variable 'scale' set but not used [-Wunused-but-set-variable]
+  cargo:warning= 1372 |         int                     scale;
+  cargo:warning=      |                                 ^~~~~
+  cargo:warning=csrc/pg_lsn_oracle.c:1371:33: warning: variable 'precision' set but not used [-Wunused-but-set-variable]
+  cargo:warning= 1371 |         int                     precision;
+  cargo:warning=      |                                 ^~~~~~~~~
+  cargo:warning=csrc/pg_lsn_oracle.c:1369:55: warning: unused parameter 'escontext' [-Wunused-parameter]
+  cargo:warning= 1369 | apply_typmod_special(Numeric num, int32 typmod, Node *escontext)
+  cargo:warning=      |                                                 ~~~~~~^~~~~~~~~
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/pg_enc_tables.c: In function 'ScanKeywordLookup':
+  cargo:warning=csrc/pg_enc_tables.c:376:17: warning: comparison of integer expressions of different signedness: 'size_t' {aka 'long unsigned int'} and 'int' [-Wsign-compare]
+  cargo:warning=  376 |         if (len > keywords->max_kw_len)
+  cargo:warning=      |                 ^
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  cargo:rerun-if-env-changed=AR_aarch64-unknown-linux-gnu
+  AR_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64_unknown_linux_gnu
+  AR_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64_unknown_linux_gnu
+  ARFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64-unknown-linux-gnu
+  ARFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64-unknown-linux-gnu
+  AR_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64_unknown_linux_gnu
+  AR_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64_unknown_linux_gnu
+  ARFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64-unknown-linux-gnu
+  ARFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rustc-link-lib=static=pg_difffuzz_oracle
+  cargo:rustc-link-search=native=/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/build/decoder_fuzz-3e9bd349d077e8ca/out
+  cargo:rerun-if-env-changed=CC_FORCE_DISABLE
+  CC_FORCE_DISABLE = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/hashenc/hmac.c: In function 'hashenc_impl_pg_hmac_init':
+  cargo:warning=csrc/hashenc/hmac.c:158:17: warning: comparison of integer expressions of different signedness: 'size_t' {aka 'long unsigned int'} and 'int' [-Wsign-compare]
+  cargo:warning=  158 |         if (len > block_size)
+  cargo:warning=      |                 ^
+  cargo:warning=csrc/hashenc/hmac.c:195:23: warning: comparison of integer expressions of different signedness: 'int' and 'size_t' {aka 'long unsigned int'} [-Wsign-compare]
+  cargo:warning=  195 |         for (i = 0; i < len; i++)
+  cargo:warning=      |                       ^
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  cargo:rerun-if-env-changed=AR_aarch64-unknown-linux-gnu
+  AR_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64_unknown_linux_gnu
+  AR_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64_unknown_linux_gnu
+  ARFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64-unknown-linux-gnu
+  ARFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64-unknown-linux-gnu
+  AR_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64_unknown_linux_gnu
+  AR_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64_unknown_linux_gnu
+  ARFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64-unknown-linux-gnu
+  ARFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rustc-link-lib=static=pg_difffuzz_hashenc_fe
+  cargo:rustc-link-search=native=/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/build/decoder_fuzz-3e9bd349d077e8ca/out
+  cargo:rerun-if-env-changed=CC_FORCE_DISABLE
+  CC_FORCE_DISABLE = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=In file included from csrc/hashenc/pg_hashenc_ascii.c:24:
+  cargo:warning=csrc/hashenc/shim/mb/pg_wchar.h: In function 'pg_encoding_to_char':
+  cargo:warning=csrc/hashenc/shim/mb/pg_wchar.h:67:25: warning: unused parameter 'enc' [-Wunused-parameter]
+  cargo:warning=   67 | pg_encoding_to_char(int enc)
+  cargo:warning=      |                     ~~~~^~~
+  cargo:warning=In file included from csrc/hashenc/pg_hashenc_glue.c:18:
+  cargo:warning=csrc/hashenc/shim/mb/pg_wchar.h: In function 'pg_encoding_to_char':
+  cargo:warning=csrc/hashenc/shim/mb/pg_wchar.h:67:25: warning: unused parameter 'enc' [-Wunused-parameter]
+  cargo:warning=   67 | pg_encoding_to_char(int enc)
+  cargo:warning=      |                     ~~~~^~~
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  cargo:rerun-if-env-changed=AR_aarch64-unknown-linux-gnu
+  AR_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64_unknown_linux_gnu
+  AR_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64_unknown_linux_gnu
+  ARFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64-unknown-linux-gnu
+  ARFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64-unknown-linux-gnu
+  AR_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64_unknown_linux_gnu
+  AR_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64_unknown_linux_gnu
+  ARFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64-unknown-linux-gnu
+  ARFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rustc-link-lib=static=pg_difffuzz_hashenc
+  cargo:rustc-link-search=native=/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/build/decoder_fuzz-3e9bd349d077e8ca/out
+  cargo:rerun-if-env-changed=CC_FORCE_DISABLE
+  CC_FORCE_DISABLE = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/cryptofam/hmac.c: In function 'cryptofam_pg_hmac_init':
+  cargo:warning=csrc/cryptofam/hmac.c:158:17: warning: comparison of integer expressions of different signedness: 'size_t' {aka 'long unsigned int'} and 'int' [-Wsign-compare]
+  cargo:warning=  158 |         if (len > block_size)
+  cargo:warning=      |                 ^
+  cargo:warning=csrc/cryptofam/hmac.c:195:23: warning: comparison of integer expressions of different signedness: 'int' and 'size_t' {aka 'long unsigned int'} [-Wsign-compare]
+  cargo:warning=  195 |         for (i = 0; i < len; i++)
+  cargo:warning=      |                       ^
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  cargo:rerun-if-env-changed=AR_aarch64-unknown-linux-gnu
+  AR_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64_unknown_linux_gnu
+  AR_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64_unknown_linux_gnu
+  ARFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64-unknown-linux-gnu
+  ARFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64-unknown-linux-gnu
+  AR_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64_unknown_linux_gnu
+  AR_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64_unknown_linux_gnu
+  ARFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64-unknown-linux-gnu
+  ARFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rustc-link-lib=static=pg_difffuzz_cryptofam
+  cargo:rustc-link-search=native=/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/build/decoder_fuzz-3e9bd349d077e8ca/out
+  cargo:rerun-if-env-changed=CC_FORCE_DISABLE
+  CC_FORCE_DISABLE = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/tablesfam/kwlookup.c: In function 'tablesfam_ScanKeywordLookup':
+  cargo:warning=csrc/tablesfam/kwlookup.c:50:17: warning: comparison of integer expressions of different signedness: 'size_t' {aka 'long unsigned int'} and 'int' [-Wsign-compare]
+  cargo:warning=   50 |         if (len > keywords->max_kw_len)
+  cargo:warning=      |                 ^
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  cargo:rerun-if-env-changed=AR_aarch64-unknown-linux-gnu
+  AR_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64_unknown_linux_gnu
+  AR_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64_unknown_linux_gnu
+  ARFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64-unknown-linux-gnu
+  ARFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64-unknown-linux-gnu
+  AR_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_aarch64_unknown_linux_gnu
+  AR_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64_unknown_linux_gnu
+  ARFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_aarch64-unknown-linux-gnu
+  ARFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rustc-link-lib=static=pg_difffuzz_tablesfam
+  cargo:rustc-link-search=native=/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/build/decoder_fuzz-3e9bd349d077e8ca/out
+  cargo:rerun-if-env-changed=CC_FORCE_DISABLE
+  CC_FORCE_DISABLE = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/tsq/tsquery.c: In function 'gettoken_query_plain':
+  cargo:warning=csrc/tsq/tsquery.c:510:54: warning: unused parameter 'operator' [-Wunused-parameter]
+  cargo:warning=  510 | gettoken_query_plain(TSQueryParserState state, int8 *operator,
+  cargo:warning=      |                                                ~~~~~~^~~~~~~~
+  cargo:warning=csrc/tsq/tsquery.c: In function 'findoprnd_recurse':
+  cargo:warning=csrc/tsq/tsquery.c:731:18: warning: comparison of integer expressions of different signedness: 'uint32' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+  cargo:warning=  731 |         if (*pos >= nnodes)
+  cargo:warning=      |                  ^~
+  cargo:warning=csrc/tsq/tsquery.c: In function 'findoprnd':
+  cargo:warning=csrc/tsq/tsquery.c:792:17: warning: comparison of integer expressions of different signedness: 'uint32' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+  cargo:warning=  792 |         if (pos != size)
+  cargo:warning=      |                 ^~
+  cargo:warning=In file included from csrc/tsq/tsquery.c:21:
+  cargo:warning=csrc/tsq/tsquery.c: In function 'parse_tsquery':
+  cargo:warning=csrc/tsqrw/include/tsearch/ts_type.h:236:17: warning: comparison of integer expressions of different signedness: 'int' and 'long unsigned int' [-Wsign-compare]
+  cargo:warning=  236 |         ((size) > (MaxAllocSize - HDRSIZETQ - (lenofoperand)) / sizeof(QueryItem))
+  cargo:warning=      |                 ^
+  cargo:warning=csrc/tsq/tsquery.c:887:13: note: in expansion of macro 'TSQUERY_TOO_BIG'
+  cargo:warning=  887 |         if (TSQUERY_TOO_BIG(list_length(state.polstr), state.sumlen))
+  cargo:warning=      |             ^~~~~~~~~~~~~~~
+  cargo:warning=csrc/tsq/tsquery.c: In function 'pushval_asis':
+  cargo:warning=csrc/tsq/tsquery.c:942:20: warning: unused parameter 'opaque' [-Wunused-parameter]
+  cargo:warning=  942 | pushval_asis(Datum opaque, TSQueryParserState state, char *strval, int lenval,
+  cargo:warning=      |              ~~~~~~^~~~~~
+  cargo:warning=csrc/tsq/tsquery.c: In function 'infix':
+  cargo:warning=csrc/tsq/tsquery.c:1064:25: error: implicit declaration of function 'sprintf' [-Wimplicit-function-declaration]
+  cargo:warning= 1064 |                         sprintf(in->cur, "( ");
+  cargo:warning=      |                         ^~~~~~~
+  cargo:warning=csrc/tsq/tsquery.c:27:1: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+  cargo:warning=   26 | #include "varatt.h"
+  cargo:warning=  +++ |+#include <stdio.h>
+  cargo:warning=   27 | 
+  cargo:warning=csrc/tsq/tsquery.c:1064:25: warning: incompatible implicit declaration of built-in function 'sprintf' [-Wbuiltin-declaration-mismatch]
+  cargo:warning= 1064 |                         sprintf(in->cur, "( ");
+  cargo:warning=      |                         ^~~~~~~
+  cargo:warning=csrc/tsq/tsquery.c:1064:25: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+  cargo:warning=csrc/tsq/tsquery.c:1077:25: warning: incompatible implicit declaration of built-in function 'sprintf' [-Wbuiltin-declaration-mismatch]
+  cargo:warning= 1077 |                         sprintf(in->cur, " )");
+  cargo:warning=      |                         ^~~~~~~
+  cargo:warning=csrc/tsq/tsquery.c:1077:25: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+  cargo:warning=csrc/tsq/tsquery.c:1096:25: warning: incompatible implicit declaration of built-in function 'sprintf' [-Wbuiltin-declaration-mismatch]
+  cargo:warning= 1096 |                         sprintf(in->cur, "( ");
+  cargo:warning=      |                         ^~~~~~~
+  cargo:warning=csrc/tsq/tsquery.c:1096:25: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+  cargo:warning=csrc/tsq/tsquery.c:1117:33: warning: incompatible implicit declaration of built-in function 'sprintf' [-Wbuiltin-declaration-mismatch]
+  cargo:warning= 1117 |                                 sprintf(in->cur, " | %s", nrm.buf);
+  cargo:warning=      |                                 ^~~~~~~
+  cargo:warning=csrc/tsq/tsquery.c:1117:33: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+  cargo:warning=csrc/tsq/tsquery.c:1138:25: warning: incompatible implicit declaration of built-in function 'sprintf' [-Wbuiltin-declaration-mismatch]
+  cargo:warning= 1138 |                         sprintf(in->cur, " )");
+  cargo:warning=      |                         ^~~~~~~
+  cargo:warning=csrc/tsq/tsquery.c:1138:25: note: include '<stdio.h>' or provide a declaration of 'sprintf'
+  cargo:warning=csrc/tsq/tsquery.c: In function 'tsqueryrecv':
+  cargo:warning=csrc/tsq/tsquery.c:1253:23: warning: comparison of integer expressions of different signedness: 'int' and 'uint32' {aka 'unsigned int'} [-Wsign-compare]
+  cargo:warning= 1253 |         for (i = 0; i < size; i++)
+  cargo:warning=      |                       ^
+  cargo:warning=csrc/tsq/tsquery.c:1310:31: warning: comparison of integer expressions of different signedness: 'int' and 'uint32' {aka 'unsigned int'} [-Wsign-compare]
+  cargo:warning= 1310 |                         if (i == size - 1)
+  cargo:warning=      |                               ^~
+  cargo:warning=csrc/tsq/tsquery.c:1338:23: warning: comparison of integer expressions of different signedness: 'int' and 'uint32' {aka 'unsigned int'} [-Wsign-compare]
+  cargo:warning= 1338 |         for (i = 0; i < size; i++)
+  cargo:warning=      |                       ^
+  exit status: 1
+  cargo:warning=ToolExecError: command did not execute successfully (status code exit status: 1): LC_ALL="C" "cc" "-O3" "-ffunction-sections" "-fdata-sections" "-fPIC" "-g" "-gdwarf-4" "-fno-omit-frame-pointer" "-I" "csrc/tsq/shim" "-I" "csrc/tsq/include" "-I" "csrc/tsqrw/include" "-Wall" "-Wextra" "-fno-strict-aliasing" "-fwrapv" "-o" "/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/build/decoder_fuzz-3e9bd349d077e8ca/out/771950c5685a9b69-tsquery.o" "-c" "csrc/tsq/tsquery.c"cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_prepare':
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:576:25: warning: unused parameter 'src' [-Wunused-parameter]
+  cargo:warning=  576 | SPI_prepare(const char *src, int nargs, Oid *argtypes)
+  cargo:warning=      |             ~~~~~~~~~~~~^~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:576:34: warning: unused parameter 'nargs' [-Wunused-parameter]
+  cargo:warning=  576 | SPI_prepare(const char *src, int nargs, Oid *argtypes)
+  cargo:warning=      |                              ~~~~^~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:576:46: warning: unused parameter 'argtypes' [-Wunused-parameter]
+  cargo:warning=  576 | SPI_prepare(const char *src, int nargs, Oid *argtypes)
+  cargo:warning=      |                                         ~~~~~^~~~~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_cursor_open':
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:582:29: warning: unused parameter 'name' [-Wunused-parameter]
+  cargo:warning=  582 | SPI_cursor_open(const char *name, SPIPlanPtr plan,
+  cargo:warning=      |                 ~~~~~~~~~~~~^~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:582:46: warning: unused parameter 'plan' [-Wunused-parameter]
+  cargo:warning=  582 | SPI_cursor_open(const char *name, SPIPlanPtr plan,
+  cargo:warning=      |                                   ~~~~~~~~~~~^~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:583:40: warning: unused parameter 'Values' [-Wunused-parameter]
+  cargo:warning=  583 |                                 Datum *Values, const char *Nulls, bool read_only)
+  cargo:warning=      |                                 ~~~~~~~^~~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:583:60: warning: unused parameter 'Nulls' [-Wunused-parameter]
+  cargo:warning=  583 |                                 Datum *Values, const char *Nulls, bool read_only)
+  cargo:warning=      |                                                ~~~~~~~~~~~~^~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:583:72: warning: unused parameter 'read_only' [-Wunused-parameter]
+  cargo:warning=  583 |                                 Datum *Values, const char *Nulls, bool read_only)
+  cargo:warning=      |                                                                        ^
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_cursor_fetch':
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:589:25: warning: unused parameter 'portal' [-Wunused-parameter]
+  cargo:warning=  589 | SPI_cursor_fetch(Portal portal, bool forward, long count)
+  cargo:warning=      |                  ~~~~~~~^~~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:589:38: warning: unused parameter 'forward' [-Wunused-parameter]
+  cargo:warning=  589 | SPI_cursor_fetch(Portal portal, bool forward, long count)
+  cargo:warning=      |                                      ^
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:589:52: warning: unused parameter 'count' [-Wunused-parameter]
+  cargo:warning=  589 | SPI_cursor_fetch(Portal portal, bool forward, long count)
+  cargo:warning=      |                                               ~~~~~^~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_cursor_close':
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:595:25: warning: unused parameter 'portal' [-Wunused-parameter]
+  cargo:warning=  595 | SPI_cursor_close(Portal portal)
+  cargo:warning=      |                  ~~~~~~~^~~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_freeplan':
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:601:25: warning: unused parameter 'plan' [-Wunused-parameter]
+  cargo:warning=  601 | SPI_freeplan(SPIPlanPtr plan)
+  cargo:warning=      |              ~~~~~~~~~~~^~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_freetuptable':
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:607:33: warning: unused parameter 'tuptable' [-Wunused-parameter]
+  cargo:warning=  607 | SPI_freetuptable(SPITupleTable *tuptable)
+  cargo:warning=      |                  ~~~~~~~~~~~~~~~^~~~~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_getbinval':
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:613:25: warning: unused parameter 'row' [-Wunused-parameter]
+  cargo:warning=  613 | SPI_getbinval(HeapTuple row, TupleDesc rowdesc, int colnumber, bool *isnull)
+  cargo:warning=      |               ~~~~~~~~~~^~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:613:40: warning: unused parameter 'rowdesc' [-Wunused-parameter]
+  cargo:warning=  613 | SPI_getbinval(HeapTuple row, TupleDesc rowdesc, int colnumber, bool *isnull)
+  cargo:warning=      |                              ~~~~~~~~~~^~~~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:613:53: warning: unused parameter 'colnumber' [-Wunused-parameter]
+  cargo:warning=  613 | SPI_getbinval(HeapTuple row, TupleDesc rowdesc, int colnumber, bool *isnull)
+  cargo:warning=      |                                                 ~~~~^~~~~~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:613:70: warning: unused parameter 'isnull' [-Wunused-parameter]
+  cargo:warning=  613 | SPI_getbinval(HeapTuple row, TupleDesc rowdesc, int colnumber, bool *isnull)
+  cargo:warning=      |                                                                      ^
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c: In function 'SPI_gettypeid':
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:619:25: warning: unused parameter 'rowdesc' [-Wunused-parameter]
+  cargo:warning=  619 | SPI_gettypeid(TupleDesc rowdesc, int colnumber)
+  cargo:warning=      |               ~~~~~~~~~~^~~~~~~
+  cargo:warning=csrc/tsq/shim/pg_tsq_shim.c:619:38: warning: unused parameter 'colnumber' [-Wunused-parameter]
+  cargo:warning=  619 | SPI_gettypeid(TupleDesc rowdesc, int colnumber)
+  cargo:warning=      |                                  ~~~~^~~~~~~~~
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=In file included from csrc/tsq/include/tsearch/ts_public.h:16,
+  cargo:warning=                 from csrc/tsqrw/include/tsearch/ts_utils.h:16,
+  cargo:warning=                 from csrc/tsqrw/tsquery_util.c:18:
+  cargo:warning=csrc/tsqrw/tsquery_util.c: In function 'QTN2QT':
+  cargo:warning=csrc/tsqrw/include/tsearch/ts_type.h:236:17: warning: comparison of integer expressions of different signedness: 'int' and 'long unsigned int' [-Wsign-compare]
+  cargo:warning=  236 |         ((size) > (MaxAllocSize - HDRSIZETQ - (lenofoperand)) / sizeof(QueryItem))
+  cargo:warning=      |                 ^
+  cargo:warning=csrc/tsqrw/tsquery_util.c:373:13: note: in expansion of macro 'TSQUERY_TOO_BIG'
+  cargo:warning=  373 |         if (TSQUERY_TOO_BIG(nnode, sumlen))
+  cargo:warning=      |             ^~~~~~~~~~~~~~~
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  cargo:warning=csrc/pg_tsquery_core_io.c: In function 'pg_diff_tsquery_in':
+  cargo:warning=csrc/pg_tsquery_core_io.c:115:9: warning: missing initializer for field 'error_occurred' of 'ErrorSaveContext' [-Wmissing-field-initializers]
+  cargo:warning=  115 |         ErrorSaveContext escontext = {T_ErrorSaveContext};
+  cargo:warning=      |         ^~~~~~~~~~~~~~~~
+  cargo:warning=In file included from csrc/pg_tsquery_core_io.c:48:
+  cargo:warning=csrc/tsq/shim/nodes/miscnodes.h:47:25: note: 'error_occurred' declared here
+  cargo:warning=   47 |         bool            error_occurred; /* set to true if we detect a soft error */
+  cargo:warning=      |                         ^~~~~~~~~~~~~~
+
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+  CC_aarch64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+  CC_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+  CFLAGS_aarch64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+  CFLAGS_aarch64-unknown-linux-gnu = None
+  exit status: 0
+  exit status: 0
+  exit status: 0
+
+  --- stderr
+
+
+  error occurred in cc-rs: command did not execute successfully (status code exit status: 1): LC_ALL="C" "cc" "-O3" "-ffunction-sections" "-fdata-sections" "-fPIC" "-g" "-gdwarf-4" "-fno-omit-frame-pointer" "-I" "csrc/tsq/shim" "-I" "csrc/tsq/include" "-I" "csrc/tsqrw/include" "-Wall" "-Wextra" "-fno-strict-aliasing" "-fwrapv" "-o" "/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/build/decoder_fuzz-3e9bd349d077e8ca/out/771950c5685a9b69-tsquery.o" "-c" "csrc/tsq/tsquery.c"
+
+
+warning: build failed, waiting for other jobs to finish...
+warning: `nodes_core` (lib) generated 4 warnings
+warning: `typcache` (lib) generated 1 warning (run `cargo fix --lib -p typcache` to apply 1 suggestion)
+warning: `arrayfuncs` (lib) generated 6 warnings
+warning: `adt_numeric` (lib) generated 1 warning
+Error: failed to build fuzz script: ASAN_OPTIONS="detect_odr_violation=0" RUSTFLAGS=" -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=4 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Cllvm-args=-sanitizer-coverage-pc-table -Cllvm-args=-sanitizer-coverage-trace-compares --cfg fuzzing -Cllvm-args=-simplifycfg-branch-fold-threshold=0 -Zsanitizer=address -Cllvm-args=-sanitizer-coverage-stack-depth -Cdebug-assertions -Ccodegen-units=1" "cargo" "build" "--manifest-path" "/work/src/fuzz/Cargo.toml" "--target" "aarch64-unknown-linux-gnu" "--release" "--config" "profile.release.debug=\"line-tables-only\"" "--bins"

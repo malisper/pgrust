@@ -1,0 +1,124 @@
+{
+ "generated": "2026-07-30T21:50:11+00:00",
+ "head_sha": "2cacd3e273b50d9edb1dc02b3fa895e5a5bcae92",
+ "sloc_rule": "non-blank, non-comment-only lines containing at least one character besides whitespace and {}()[];, \u2014 see proofs/COVERAGE.md",
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 177,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/float"
+ ],
+ "totals": {
+  "sloc": 2215,
+  "kani": 284,
+  "fuzz": 0,
+  "regress": 0,
+  "any": 284,
+  "pct": {
+   "kani": 12.82,
+   "fuzz": 0.0,
+   "regress": 0.0,
+   "any": 12.82
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "float",
+   "path": "crates/backend/utils/adt/float",
+   "sloc": 2215,
+   "kani": 284,
+   "fuzz": 0,
+   "regress": 0,
+   "any": 284,
+   "pct": {
+    "kani": 12.82,
+    "fuzz": 0.0,
+    "regress": 0.0,
+    "any": 12.82
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/float/src/aggregates.rs",
+     "sloc": 225,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__float__src__aggregates.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/float/src/builtins.rs",
+     "sloc": 490,
+     "kani": 49,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 49,
+     "detail": "files/crates__backend__utils__adt__float__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/float/src/funcs.rs",
+     "sloc": 663,
+     "kani": 71,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 71,
+     "detail": "files/crates__backend__utils__adt__float__src__funcs.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/float/src/io.rs",
+     "sloc": 496,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__float__src__io.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/float/src/lib.rs",
+     "sloc": 341,
+     "kani": 164,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 164,
+     "detail": "files/crates__backend__utils__adt__float__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/float/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__float__src__tests.rs.json"
+    }
+   ]
+  }
+ ]
+}

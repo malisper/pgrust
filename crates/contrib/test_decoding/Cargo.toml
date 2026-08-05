@@ -1,0 +1,29 @@
+[package]
+name = "test_decoding"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "test_decoding"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_rel = { path = "../../_support/types/rel" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+elog = { path = "../../backend/utils/error/elog" }
+adt_bool = { path = "../../backend/utils/adt/bool" }
+adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
+format_type = { path = "../../backend/utils/adt/format_type" }
+ruleutils = { path = "../../backend/utils/adt/ruleutils" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+detoast = { path = "../../backend/access/common/detoast" }
+fmgr_seams = { path = "../../backend/utils/fmgr/fmgr_seams" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+logical = { path = "../../backend/replication/logical/logical" }
+reorderbuffer = { path = "../../backend/replication/logical/reorderbuffer" }

@@ -1,0 +1,33 @@
+[package]
+name = "execgrouping"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pgsync = { path = "../../../_support/pgsync" }
+datum = { path = "../../../_support/types/datum" }
+execexpr = { path = "../execexpr" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+heaptuple = { path = "../../access/common/heaptuple" }
+hashbrown = { version = "0.14", default-features = false, features = ["allocator-api2", "ahash", "inline-more"] }
+hashfn = { path = "../../../common/hashfn" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+mcx = { path = "../../../_support/mcx" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+varlena = { path = "../../utils/adt/varlena" }
+
+[dev-dependencies]
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+init_small = { path = "../../utils/init/init_small" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }

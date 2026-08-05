@@ -1,0 +1,91 @@
+# proofs/wall-retry runqueue — FLEET WALL-RETRY lane (2026-07-29).
+# Re-attempts the memory-walled harness set at a BIG per-solve budget
+# (KANI_SOLVE_RSS_GB=40 on a 128GB c8g.16xlarge, conc 3) — every row that
+# walled on the 6-8GiB laptop/pod caps gets a 40GiB ceiling here.
+#
+# EVERYTHING IS A PROBE: expected=info on every row — nothing gates.
+# A row that now SOLVES is a headline (record verdict + time + peak RSS
+# from telemetry/governor logs); a row that still walls at 40GiB is a
+# durable "memory, not budget" classification for TRIAGE.md.
+#
+# Format: harness|expected|tier|command  (pipe table WITH command; the
+# fleet runner run-kani-suite.sh normalizes each line and executes the
+# command verbatim from this file's directory — hence each command cd's
+# into its family crate at ../<family>). Full proofs:: names everywhere
+# (bare names + --exact never match nested modules); json-escape harnesses
+# are crate-top-level, so their exact names are bare by construction.
+#
+# Named set + provenance (SUITE.tsv / TRIAGE.md / USER_FACING_FUNCTIONS.tsv
+# @ pgrust-correct 994f9977c84cf4c186c6fbb1be04b024ef47576d):
+#   1. typcache-inst uuid[] array family (7): "memory >6GiB byref-16B;
+#      solvable ~306s off-cap — fleet re-open" (SUITE 1760-1766).
+#   2. json-escape escape_json census cells (6): prop-reduction >6GiB both
+#      solvers; symex wall already BROKEN by mcx-stubs+grow (SUITE 630-635).
+#   3. mbconv big5/euc_tw conversions (4): wall(memory >6GiB in SSA/equation
+#      conversion, 37k VCCs; solver-independent) — ledger rows 4332-4337
+#      (euc_tw_to_mic + mic_to_euc_tw already proved, not re-queued).
+#      DEFAULT solver (kissat inverts on this mixed-arm family).
+#   4. text-slice textpos_utf8 + result-image canaries (4): textpos_utf8
+#      unwind(11/13) >6GiB; substr/textcat/byteacat = SAT residue >490-560s
+#      measured UNDER LOAD — idle-box rerun owed (SUITE 1502-1505).
+#   5. jsonb-probe equal-shape cmp cells (7): run-cmp.sh recipe of record
+#      inlined below (kissat, no-assertion-reach/no-unwinding checks,
+#      --slice-formula, per-loop EXACT unwindsets); wall = dual-iterator
+#      element-compare cross-product >6GiB (SUITE 1780; lib.rs ROUND 2).
+#      CAVEAT: the two _R* Rust loop labels embed macOS-harvested crate
+#      hashes (slPHXV9xPVYO / Cs6piKExmlbnT / Cs5hWUnuVq0gd); if the fleet
+#      toolchain mangles differently the unwindsets silently no-op and the
+#      cell burns its timeout — on that outcome re-harvest labels from the
+#      log ("Unwinding loop ...") per the run-cmp.sh header, don't conclude
+#      still-walled.
+#   6. bytea-cmp set pair (2): result-image law third instance; spot-proved
+#      105s once grow/dealloc mcx stubs were added (TRIAGE RVR lane) —
+#      full-plane retry at the big cap.
+#   7. int-arith recv trio (3): datum->StringInfo pointer round-trip SYMEX
+#      wall (SUITE 1633-1635) — included as probes; symex walls are
+#      time-bound, not RSS-bound, so expected outcome is timeout evidence,
+#      not a solve.
+#
+# Per-row leading timeouts are sized so the worst case (every row burning
+# its full budget) stays inside a 10800s job deadline at conc 3.
+#
+# --- 1. typcache-inst: uuid[] element-walk family (~306s off-cap) ---------
+proofs::eq_array_eq_uuid|info|wall-retry|timeout 720 bash -c "cd ../typcache-inst && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_array_eq_uuid --exact"
+proofs::eq_array_ne_uuid|info|wall-retry|timeout 720 bash -c "cd ../typcache-inst && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_array_ne_uuid --exact"
+proofs::eq_array_cmp_uuid|info|wall-retry|timeout 720 bash -c "cd ../typcache-inst && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_array_cmp_uuid --exact"
+proofs::eq_array_lt_uuid|info|wall-retry|timeout 720 bash -c "cd ../typcache-inst && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_array_lt_uuid --exact"
+proofs::eq_array_gt_uuid|info|wall-retry|timeout 720 bash -c "cd ../typcache-inst && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_array_gt_uuid --exact"
+proofs::eq_array_le_uuid|info|wall-retry|timeout 720 bash -c "cd ../typcache-inst && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_array_le_uuid --exact"
+proofs::eq_array_ge_uuid|info|wall-retry|timeout 720 bash -c "cd ../typcache-inst && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_array_ge_uuid --exact"
+# --- 2. json-escape: escape_json census cells (prop-reduction >6GiB) ------
+census_len1_with_len|info|wall-retry|timeout 900 bash -c "cd ../json-escape && cargo kani -Z c-ffi --c-lib c/pg_escape.c --solver kissat --harness census_len1_with_len --exact"
+census_len2_with_len|info|wall-retry|timeout 900 bash -c "cd ../json-escape && cargo kani -Z c-ffi --c-lib c/pg_escape.c --solver kissat --harness census_len2_with_len --exact"
+census_len3_with_len|info|wall-retry|timeout 900 bash -c "cd ../json-escape && cargo kani -Z c-ffi --c-lib c/pg_escape.c --solver kissat --harness census_len3_with_len --exact"
+census_len4_with_len|info|wall-retry|timeout 900 bash -c "cd ../json-escape && cargo kani -Z c-ffi --c-lib c/pg_escape.c --solver kissat --harness census_len4_with_len --exact"
+census_len1_cstr|info|wall-retry|timeout 900 bash -c "cd ../json-escape && cargo kani -Z c-ffi --c-lib c/pg_escape.c --solver kissat --harness census_len1_cstr --exact"
+census_len1_cstr_r2|info|wall-retry|timeout 900 bash -c "cd ../json-escape && cargo kani -Z c-ffi --c-lib c/pg_escape.c --solver kissat --harness census_len1_cstr_r2 --exact"
+# --- 3. mbconv: big5/euc_tw class (SSA/equation-conversion memory wall) ---
+proofs::eq_euc_tw_to_big5|info|wall-retry|timeout 900 bash -c "cd ../mbconv && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_tw_big5.c --harness proofs::eq_euc_tw_to_big5 --exact"
+proofs::eq_big5_to_euc_tw|info|wall-retry|timeout 900 bash -c "cd ../mbconv && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_tw_big5.c --harness proofs::eq_big5_to_euc_tw --exact"
+proofs::eq_big5_to_mic|info|wall-retry|timeout 900 bash -c "cd ../mbconv && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_tw_big5.c --harness proofs::eq_big5_to_mic --exact"
+proofs::eq_mic_to_big5|info|wall-retry|timeout 900 bash -c "cd ../mbconv && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_tw_big5.c --harness proofs::eq_mic_to_big5 --exact"
+# --- 4. text-slice: textpos_utf8 + result-image canaries (idle-box owed) --
+proofs::eq_textpos_utf8|info|wall-retry|timeout 1200 bash -c "cd ../text-slice && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --solver kissat --harness proofs::eq_textpos_utf8 --exact"
+proofs::eq_text_substr_latin1|info|wall-retry|timeout 1200 bash -c "cd ../text-slice && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --solver kissat --harness proofs::eq_text_substr_latin1 --exact"
+proofs::eq_textcat|info|wall-retry|timeout 1200 bash -c "cd ../text-slice && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --solver kissat --harness proofs::eq_textcat --exact"
+proofs::eq_byteacat|info|wall-retry|timeout 1200 bash -c "cd ../text-slice && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --solver kissat --harness proofs::eq_byteacat --exact"
+# --- 5. jsonb-probe: equal-shape cmp cells (run-cmp.sh recipe inlined) ----
+proofs::eq_cmp_bool_1_1|info|wall-retry|timeout 600 bash -c "cd ../jsonb-probe && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb.c --harness proofs::eq_cmp_bool_1_1 --exact --solver kissat --no-assertion-reach-checks --no-unwinding-checks -Z unstable-options --cbmc-args --slice-formula --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj1_ECslPHXV9xPVYO_17proof_jsonb_probe.0:3 --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj2_ECslPHXV9xPVYO_17proof_jsonb_probe.0:3 --unwindset pg_compareJsonbContainers.0:3 --unwindset pg_compareJsonbContainers.1:3 --unwindset pg_compareJsonbContainers.2:3 --unwindset pg_JsonbIteratorNext.3:2 --unwindset pg_getJsonbOffset.0:5 --unwindset _RNvNtCs6piKExmlbnT_9adt_jsonb9container16get_jsonb_offset.0:5 --unwindset _RNvCs5hWUnuVq0gd_7varlena10varstr_cmp.0:4 --unwindset memcmp.0:4 --unwindset pgp_cmp_staged.0:25 --unwindset pgp_cmp_staged.1:25"
+proofs::eq_cmp_bool_2_2|info|wall-retry|timeout 600 bash -c "cd ../jsonb-probe && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb.c --harness proofs::eq_cmp_bool_2_2 --exact --solver kissat --no-assertion-reach-checks --no-unwinding-checks -Z unstable-options --cbmc-args --slice-formula --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj1_ECslPHXV9xPVYO_17proof_jsonb_probe.0:4 --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj2_ECslPHXV9xPVYO_17proof_jsonb_probe.0:4 --unwindset pg_compareJsonbContainers.0:4 --unwindset pg_compareJsonbContainers.1:3 --unwindset pg_compareJsonbContainers.2:3 --unwindset pg_JsonbIteratorNext.3:2 --unwindset pg_getJsonbOffset.0:5 --unwindset _RNvNtCs6piKExmlbnT_9adt_jsonb9container16get_jsonb_offset.0:5 --unwindset _RNvCs5hWUnuVq0gd_7varlena10varstr_cmp.0:4 --unwindset memcmp.0:4 --unwindset pgp_cmp_staged.0:25 --unwindset pgp_cmp_staged.1:25"
+proofs::eq_cmp_bool_raw_raw|info|wall-retry|timeout 600 bash -c "cd ../jsonb-probe && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb.c --harness proofs::eq_cmp_bool_raw_raw --exact --solver kissat --no-assertion-reach-checks --no-unwinding-checks -Z unstable-options --cbmc-args --slice-formula --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj1_ECslPHXV9xPVYO_17proof_jsonb_probe.0:2 --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj2_ECslPHXV9xPVYO_17proof_jsonb_probe.0:2 --unwindset pg_compareJsonbContainers.0:2 --unwindset pg_compareJsonbContainers.1:3 --unwindset pg_compareJsonbContainers.2:3 --unwindset pg_JsonbIteratorNext.3:2 --unwindset pg_getJsonbOffset.0:5 --unwindset _RNvNtCs6piKExmlbnT_9adt_jsonb9container16get_jsonb_offset.0:5 --unwindset _RNvCs5hWUnuVq0gd_7varlena10varstr_cmp.0:4 --unwindset memcmp.0:4 --unwindset pgp_cmp_staged.0:25 --unwindset pgp_cmp_staged.1:25"
+proofs::eq_cmp_string_1_1|info|wall-retry|timeout 600 bash -c "cd ../jsonb-probe && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb.c --harness proofs::eq_cmp_string_1_1 --exact --solver kissat --no-assertion-reach-checks --no-unwinding-checks -Z unstable-options --cbmc-args --slice-formula --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj1_ECslPHXV9xPVYO_17proof_jsonb_probe.0:3 --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj2_ECslPHXV9xPVYO_17proof_jsonb_probe.0:3 --unwindset pg_compareJsonbContainers.0:3 --unwindset pg_compareJsonbContainers.1:3 --unwindset pg_compareJsonbContainers.2:3 --unwindset pg_JsonbIteratorNext.3:2 --unwindset pg_getJsonbOffset.0:5 --unwindset _RNvNtCs6piKExmlbnT_9adt_jsonb9container16get_jsonb_offset.0:5 --unwindset _RNvCs5hWUnuVq0gd_7varlena10varstr_cmp.0:4 --unwindset memcmp.0:4 --unwindset pgp_cmp_staged.0:25 --unwindset pgp_cmp_staged.1:25"
+proofs::eq_cmp_obj_obj_1_1|info|wall-retry|timeout 600 bash -c "cd ../jsonb-probe && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb.c --harness proofs::eq_cmp_obj_obj_1_1 --exact --solver kissat --no-assertion-reach-checks --no-unwinding-checks -Z unstable-options --cbmc-args --slice-formula --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj1_ECslPHXV9xPVYO_17proof_jsonb_probe.0:3 --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj2_ECslPHXV9xPVYO_17proof_jsonb_probe.0:3 --unwindset pg_compareJsonbContainers.0:3 --unwindset pg_compareJsonbContainers.1:3 --unwindset pg_compareJsonbContainers.2:3 --unwindset pg_JsonbIteratorNext.3:2 --unwindset pg_getJsonbOffset.0:5 --unwindset _RNvNtCs6piKExmlbnT_9adt_jsonb9container16get_jsonb_offset.0:5 --unwindset _RNvCs5hWUnuVq0gd_7varlena10varstr_cmp.0:4 --unwindset memcmp.0:4 --unwindset pgp_cmp_staged.0:25 --unwindset pgp_cmp_staged.1:25"
+proofs::eq_cmp_nested_1i1_1i1|info|wall-retry|timeout 600 bash -c "cd ../jsonb-probe && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb.c --harness proofs::eq_cmp_nested_1i1_1i1 --exact --solver kissat --no-assertion-reach-checks --no-unwinding-checks -Z unstable-options --cbmc-args --slice-formula --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj1_ECslPHXV9xPVYO_17proof_jsonb_probe.0:3 --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj2_ECslPHXV9xPVYO_17proof_jsonb_probe.0:3 --unwindset pg_compareJsonbContainers.0:3 --unwindset pg_compareJsonbContainers.1:3 --unwindset pg_compareJsonbContainers.2:3 --unwindset pg_JsonbIteratorNext.3:3 --unwindset pg_getJsonbOffset.0:5 --unwindset _RNvNtCs6piKExmlbnT_9adt_jsonb9container16get_jsonb_offset.0:5 --unwindset _RNvCs5hWUnuVq0gd_7varlena10varstr_cmp.0:4 --unwindset memcmp.0:4 --unwindset pgp_cmp_staged.0:25 --unwindset pgp_cmp_staged.1:25"
+proofs::eq_cmp_raw_scalar_crosstype|info|wall-retry|timeout 600 bash -c "cd ../jsonb-probe && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb.c --harness proofs::eq_cmp_raw_scalar_crosstype --exact --solver kissat --no-assertion-reach-checks --no-unwinding-checks -Z unstable-options --cbmc-args --slice-formula --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj1_ECslPHXV9xPVYO_17proof_jsonb_probe.0:2 --unwindset _RINvNtCs6piKExmlbnT_9adt_jsonb3ops24compare_containers_fixedKj2_ECslPHXV9xPVYO_17proof_jsonb_probe.0:2 --unwindset pg_compareJsonbContainers.0:2 --unwindset pg_compareJsonbContainers.1:3 --unwindset pg_compareJsonbContainers.2:3 --unwindset pg_JsonbIteratorNext.3:2 --unwindset pg_getJsonbOffset.0:5 --unwindset _RNvNtCs6piKExmlbnT_9adt_jsonb9container16get_jsonb_offset.0:5 --unwindset _RNvCs5hWUnuVq0gd_7varlena10varstr_cmp.0:4 --unwindset memcmp.0:4 --unwindset pgp_cmp_staged.0:25 --unwindset pgp_cmp_staged.1:25"
+# --- 6. bytea-cmp: set pair (result-image law; spot-proved 105s) ----------
+proofs::eq_bytea_set_byte|info|wall-retry|timeout 900 bash -c "cd ../bytea-cmp && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --harness proofs::eq_bytea_set_byte --exact"
+proofs::eq_bytea_set_bit|info|wall-retry|timeout 900 bash -c "cd ../bytea-cmp && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --harness proofs::eq_bytea_set_bit --exact"
+# --- 7. int-arith: recv trio (symex wall probes — timeout evidence) -------
+proofs::eq_int2recv|info|wall-retry|timeout 600 bash -c "cd ../int-arith && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_int_arith.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_int2recv --exact"
+proofs::eq_int4recv|info|wall-retry|timeout 600 bash -c "cd ../int-arith && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_int_arith.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_int4recv --exact"
+proofs::eq_int8recv|info|wall-retry|timeout 600 bash -c "cd ../int-arith && cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_int_arith.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_int8recv --exact"

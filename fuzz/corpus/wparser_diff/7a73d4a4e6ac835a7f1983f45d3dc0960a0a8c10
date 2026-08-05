@@ -1,0 +1,4 @@
+€));
+create index phrase_index_ GIN_SEARCH_MODE_ALL queries
+EXPLAIN (COSTS OFF)
+SEL</scriptECT count(*) FROM test_tsvectorom phrase_index_test whe2e fts @@ phraseto_tsquery(

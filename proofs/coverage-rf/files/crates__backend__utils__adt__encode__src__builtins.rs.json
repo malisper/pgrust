@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/adt/encode/src/builtins.rs","sloc":[12,14,15,16,17,18,19,20,23,25,26,27,28,29,30,31,34,35,36,37,38,39,40,41,45],"kani":[],"fuzz":[],"regress":[12,14,15,16,17,18,19,23,25,26,27,28,29,30],"excluded":{"use-mod":[5,6,7,8,9],"const-table":[46,47]}}

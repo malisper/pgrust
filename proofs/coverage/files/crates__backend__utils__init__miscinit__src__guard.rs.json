@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/init/miscinit/src/guard.rs","sloc":[16,17,18,19,20,21,26,27,28,29,30,31,35,36,39,40,41,46,47],"kani":[],"fuzz":[],"regress":[16,17,18,19,20,21,26,27,28,29,30,31,35,36,39,40,41,46,47],"excluded":{"use-mod":[5,7],"attr":[9],"typedef":[10,11,12],"impl-header":[15,45]}}

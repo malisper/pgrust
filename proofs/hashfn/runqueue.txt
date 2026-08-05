@@ -1,0 +1,19 @@
+# proofs/hashfn — p1-laneh runqueue (2026-07-31). Execute from proofs/hashfn/.
+# Format: <harness> | <expected> | <tier> | <command>
+# murmur64 / inverse_roundtrip / string_hash / hash_bytes(+ext) len16 walled
+# locally at 120-560s UNDER MULTI-LANE LOAD; fleet = verdict of record.
+harnesses::eq_hash_bytes_len16 | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_hash_bytes_len16 --exact --solver kissat
+harnesses::eq_hash_bytes_extended_len16 | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_hash_bytes_extended_len16 --exact --solver kissat
+harnesses::eq_hash_bytes_uint32 | green | per-commit | cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_hash_bytes_uint32 --exact --solver kissat
+harnesses::eq_hash_bytes_uint32_extended | green | per-commit | cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_hash_bytes_uint32_extended --exact --solver kissat
+harnesses::eq_string_hash_len8 | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_string_hash_len8 --exact --solver kissat
+harnesses::eq_string_hash_len8_huge_keysize | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_string_hash_len8_huge_keysize --exact --solver kissat
+harnesses::eq_tag_hash_len12 | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_tag_hash_len12 --exact --solver kissat
+harnesses::eq_uint32_hash | green | per-commit | cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_uint32_hash --exact --solver kissat
+harnesses::eq_hash_combine | green | per-commit | cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_hash_combine --exact --solver kissat
+harnesses::eq_hash_combine64 | green | per-commit | cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_hash_combine64 --exact --solver kissat
+harnesses::eq_murmurhash32 | green | per-commit | cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_murmurhash32 --exact --solver kissat
+harnesses::eq_murmurhash64 | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_murmurhash64 --exact --solver kissat
+harnesses::eq_rotate_high_and_low_32bits | green | per-commit | cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_rotate_high_and_low_32bits --exact --solver kissat
+harnesses::murmur32_inverse_roundtrip | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::murmur32_inverse_roundtrip --exact --solver kissat
+harnesses::control_murmur32_wrong_value | must-fail | per-commit | cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::control_murmur32_wrong_value --exact

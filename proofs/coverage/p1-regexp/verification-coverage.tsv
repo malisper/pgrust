@@ -1,0 +1,7 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/utils/adt/regexp/src/builtins.rs	448	0	252	0	252
+crates/backend/utils/adt/regexp/src/lib.rs	362	0	339	0	339
+crates/backend/utils/adt/regexp/src/matches.rs	356	0	270	0	270
+crates/backend/utils/adt/regexp/src/tests.rs	0	0	0	0	0
+CRATE:crates/backend/utils/adt/regexp	1166	0	861	0	861
+TOTAL	1166	0	861	0	861

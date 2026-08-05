@@ -1,0 +1,157 @@
+# libFuzzer/AFL dictionary for the jsonpath_diff target (lane p1-laneaa).
+# Parser-shaped target => dictionary + CmpLog day-one (fuzzuproof-crate
+# skill, LIT-REVIEW §3). Tokens taken from the vendored 18.3
+# jsonpath_scan.l / jsonpath_gram.y and the regress SQL literals.
+#
+# Input layout reminder (driver: fuzz/core/src/jsonpath_diff.rs):
+#   byte 0  selector % 3: 0 = IN+OUT, 1 = RECV/SEND, 2 = MUTABILITY
+#   byte 1  arm 0/2: mode/varsel byte (arm 0: bit0 = soft-error mode;
+#           arm 2: bits0-1 = var count, bits2+ = var-table offset)
+#           arm 1: byte 1 onward IS the wire buffer (version byte first)
+#   rest    arm 0/2: jsonpath source text; arm 1: wire payload
+
+# --- selector/mode prefixes (so the fuzzer can pivot arms cheaply) ---
+sel_in="\x00\x00"
+sel_in_soft="\x00\x01"
+sel_wire_v1="\x01\x01"
+sel_wire_v0="\x01\x00"
+sel_wire_v2="\x01\x02"
+sel_mut="\x02\x00"
+
+# --- path anchors / accessors ---
+root="$"
+current="@"
+key_dot="."
+anyarray="[*]"
+anykey=".*"
+any="**"
+any_bounded=".**{"
+any_last=".**{last}"
+any_range=".**{1 to last}"
+subscript_open="["
+subscript_close="]"
+comma=","
+filter="?("
+filter_sp=" ? ("
+lparen="("
+rparen=")"
+
+# --- mode keywords ---
+strict="strict "
+lax="lax "
+
+# --- literals ---
+kw_true="true"
+kw_false="false"
+kw_null="null"
+kw_last="last"
+kw_to=" to "
+kw_is=" is "
+kw_unknown="unknown"
+kw_exists="exists "
+kw_starts="starts with "
+kw_with="with"
+kw_like_regex=" like_regex "
+kw_flag=" flag "
+
+# --- operators ---
+op_and="&&"
+op_or="||"
+op_not="!"
+op_eq="=="
+op_ne="!="
+op_lt="<"
+op_gt=">"
+op_le="<="
+op_ge=">="
+op_add="+"
+op_sub="-"
+op_mul="*"
+op_div="/"
+op_mod="%"
+
+# --- item methods ---
+m_type=".type()"
+m_size=".size()"
+m_double=".double()"
+m_ceiling=".ceiling()"
+m_floor=".floor()"
+m_abs=".abs()"
+m_keyvalue=".keyvalue()"
+m_datetime=".datetime("
+m_date=".date()"
+m_time=".time("
+m_time_tz=".time_tz("
+m_timestamp=".timestamp("
+m_timestamp_tz=".timestamp_tz("
+m_bigint=".bigint()"
+m_boolean=".boolean()"
+m_decimal=".decimal("
+m_integer=".integer()"
+m_number=".number()"
+m_string=".string()"
+
+# --- regex flags (XQuery) ---
+flag_i="\"i\""
+flag_s="\"s\""
+flag_m="\"m\""
+flag_x="\"x\""
+flag_q="\"q\""
+flag_all="\"ismxq\""
+
+# --- string/escape surface (jsonpath_scan.l) ---
+dquote="\""
+squote="'"
+esc_b="\\b"
+esc_f="\\f"
+esc_n="\\n"
+esc_r="\\r"
+esc_t="\\t"
+esc_v="\\v"
+esc_quote="\\\""
+esc_bs="\\\\"
+esc_hex="\\x50"
+esc_u4="\\u0067"
+esc_ubrace="\\u{1F600}"
+esc_surr_hi="\\ud83d"
+esc_surr_lo="\\ude00"
+
+# --- numeric surface (scan.l numeric rules) ---
+num_zero="0"
+num_dot=".1"
+num_trail="1."
+num_exp="1e1"
+num_exp_neg="1e-1"
+num_exp_plus="1e+1"
+num_big="1e300"
+num_huge="1e1000000"
+num_hex="0x42F"
+num_oct="0o273"
+num_bin="0b100101"
+num_under="1_000_000"
+num_hex_under="0x1EEE_FFFF"
+num_int64max="9223372036854775807"
+
+# --- variables (arm-2 var-table names, for prefix-match witnesses) ---
+var="$var"
+var_a="$a"
+var_ab="$ab"
+var_zip="$zip"
+var_d="$d"
+var_dz="$dz"
+var_ts="$ts"
+var_tsz="$tsz"
+
+# --- datetime templates (drive datetime_format_has_tz / DCH parse) ---
+tmpl_tzh="\"HH24:MI TZH\""
+tmpl_date="\"YYYY-MM-DD\""
+tmpl_tzm="\"TZM\""
+tmpl_of="\"OF\""
+
+# --- regex bracket/class surface (drives pg_regcomp) ---
+re_class="[[:alpha:]]"
+re_alt="(a|b)+"
+re_anchor="^a$"
+re_bound="a{2,4}"
+re_backref="(a)\\1"
+re_unbalanced="(bad"

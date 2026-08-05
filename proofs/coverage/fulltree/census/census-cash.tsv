@@ -1,0 +1,12 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+cash	eq_cash_cmp	proofs::eq_cash_cmp	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	eq_cash_eq	proofs::eq_cash_eq	0	13	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	eq_cash_ge	proofs::eq_cash_ge	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	eq_cash_gt	proofs::eq_cash_gt	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	eq_cash_le	proofs::eq_cash_le	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	eq_cash_lt	proofs::eq_cash_lt	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	eq_cash_mi	proofs::eq_cash_mi	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	eq_cash_ne	proofs::eq_cash_ne	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	eq_cash_pl	proofs::eq_cash_pl	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	eq_cashlarger	proofs::eq_cashlarger	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	eq_cashsmaller	proofs::eq_cashsmaller	0	2	VERIFICATION:- SUCCESSFUL	RAN	1

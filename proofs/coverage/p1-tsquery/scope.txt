@@ -1,0 +1,2 @@
+crates/backend/utils/adt/tsquery_core
+crates/backend/utils/adt/tsquery_rewrite

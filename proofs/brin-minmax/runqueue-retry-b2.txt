@@ -1,0 +1,20 @@
+# proofs/brin-minmax RETRY runqueue — batchB (fleet 994f9977/1785310905) follow-up
+# 2026-07-29 runner-harvester lane 2.
+# Canonical 4-col pipe rows: <harness> | <expected> | <tier> | <command>
+#
+#  1. Byte-chain distance timeouts at 4x: macaddr/macaddr8 75s -> 300s
+#     (kissat), uuid 120s -> 480s (kissat), inet_v6 120s -> 480s (DEFAULT
+#     solver per the runqueue's own solver-inversion note on byref arms).
+#  2. eq_dist_time: batchB ran at the pre-normalization tip where the
+#     unqualified name + dropped --exact produced AMBIGUOUS-HARNESS-MATCH(3)
+#     (time/timetz/timestamp) — clean --exact re-adjudication.
+#  3. eq_dist_timetz: batchB VERIFICATION FAILED in 20s (green-expected,
+#     |zone|<=86400 fenced plane). DEFAULT solver + concrete-playback for a
+#     decodable counterexample -> decode lane; adjudication owed, do not
+#     record divergence without native + docker ground truth.
+dist_proofs::eq_dist_macaddr | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_macaddr --exact
+dist_proofs::eq_dist_macaddr8 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_macaddr8 --exact
+dist_proofs::eq_dist_uuid | info | wall-retry | timeout 480 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_uuid --exact
+dist_proofs::eq_dist_inet_v6 | info | wall-retry | timeout 480 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --harness dist_proofs::eq_dist_inet_v6 --exact
+dist_proofs::eq_dist_time | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_time --exact
+dist_proofs::eq_dist_timetz | info | probe | timeout 300 cargo kani -Z c-ffi -Z stubbing -Z concrete-playback --concrete-playback=print --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --harness dist_proofs::eq_dist_timetz --exact

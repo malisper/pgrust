@@ -1,0 +1,3 @@
+thread '<unnamed>' (19127) panicked at /work/src/crates/backend/regex/regex_core/src/regex_compile.rs:2821:5:
+assertion failed: v.SEE(EOS)
+==19127== ERROR: libFuzzer: deadly signal

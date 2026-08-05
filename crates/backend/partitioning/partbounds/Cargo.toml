@@ -1,0 +1,43 @@
+[package]
+name = "partbounds"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_pathnodes = { path = "../../../_support/types/pathnodes" }
+partcache = { path = "../../utils/cache/partcache" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+readfuncs = { path = "../../nodes/readfuncs" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+execexpr = { path = "../../executor/execexpr" }
+table = { path = "../../access/table/table" }
+tableam = { path = "../../access/table/tableam" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+parser_small1 = { path = "../../parser/parser_small1" }
+mbutils = { path = "../../utils/mb/mbutils" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
+tupdesc = { path = "../../access/common/tupdesc" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+coerce = { path = "../../parser/coerce" }
+format_type = { path = "../../utils/adt/format_type" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+adt_scalar = { path = "../../utils/adt/scalar" }

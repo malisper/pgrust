@@ -1,0 +1,48 @@
+[package]
+name = "nodeindexscan"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+postgres_seams = { path = "../../tcop/postgres_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
+types_scan = { path = "../../../_support/types/types_scan" }
+indexam = { path = "../../access/index/indexam" }
+tableam = { path = "../../access/table/tableam" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+detoast = { path = "../../access/common/detoast" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+pairingheap = { path = "../../lib/pairingheap" }
+tuplesort = { path = "../../utils/sort/tuplesort" }
+nodes_core = { path = "../../nodes/nodes_core" }
+heaptuple = { path = "../../access/common/heaptuple" }
+adt_scalar = { path = "../../utils/adt/scalar" }
+execscan = { path = "../execscan" }
+execexpr = { path = "../execexpr" }
+executils = { path = "../executils" }
+exectuples = { path = "../exectuples" }
+init_small = { path = "../../utils/init/init_small" }
+types_slot = { path = "../../../_support/types/types_slot" }
+
+[dev-dependencies]
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_nbtree = { path = "../../../_support/types/types_nbtree" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }

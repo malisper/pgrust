@@ -1,0 +1,37 @@
+[package]
+name = "vacuumparallel"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "vacuumparallel"
+path = "src/lib.rs"
+
+[dependencies]
+amapi = { path = "../../access/index/amapi" }
+commands_vacuum = { path = "../vacuum" }
+indexam = { path = "../../access/index/indexam" }
+nbtree = { path = "../../access/nbtree/nbtree" }
+parallel = { path = "../../access/transam/parallel" }
+xact = { path = "../../access/transam/xact" }
+table = { path = "../../access/table/table" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nbtree = { path = "../../../_support/types/types_nbtree" }
+types_rel = { path = "../../../_support/types/rel" }
+types_relscan = { path = "../../access/index/relscan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+backend_progress = { path = "../../utils/activity/backend_progress" }
+init_small = { path = "../../utils/init/init_small" }
+elog = { path = "../../utils/error/elog" }
+runtime = { path = "../../executor/runtime" }
+pg_clock = { path = "../../../port/pg_clock" }
+latch = { path = "../../storage/ipc/latch" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+miscinit = { path = "../../utils/init/miscinit" }

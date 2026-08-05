@@ -1,0 +1,15 @@
+[package]
+name = "s_lock"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "s_lock"
+path = "src/lib.rs"
+
+[dependencies]
+waiter = { path = "../../ipc/waiter" }
+pg_prng = { path = "../../../../common/pg_prng" }
+s_lock_seams = { path = "../s_lock_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }

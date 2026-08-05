@@ -1,0 +1,24 @@
+[package]
+name = "manifest"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "manifest"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+pg_sha2 = { path = "../../../common/sha2" }
+crc32c = { path = "../../../port/crc32c" }
+varlena = { path = "../../utils/adt/varlena" }
+localtime = { path = "../../timezone/localtime" }
+strftime = { path = "../../timezone/strftime" }
+timeline = { path = "../../access/transam/timeline" }
+
+[dev-dependencies]
+pgtz_seams = { path = "../../timezone/pgtz_seams" }

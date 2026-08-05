@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/locale/src/lib.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[26],"attr":[24,30,31,46],"type-alias":[67],"typedef":[32,34,36,38,40,47,49,52,54,56,58]}}

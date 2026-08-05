@@ -1,0 +1,32 @@
+=== residual lines vs 29-probe coverage ===
+  (none) — no probe covered any of the 248 residual lines
+
+=== guard witnesses (probe DA on the lines AROUND each probed residual line; residual line itself shown as [x]) ===
+  src/crypt.rs:76 [noDA]  guards 73:1 77:1 78:1
+  src/crypt.rs:92 [0]  guards 88:1 91:1 94:1
+  src/crypt.rs:120 [0]  guards 119:2 122:2
+  src/crypt.rs:123 [0]  guards 122:2 125:2
+  src/crypt.rs:138 [0]  guards 137:1 140:1
+  src/crypt.rs:208 [0]  guards 206:6 207:6 212:6
+  src/crypt/bcrypt.rs:40 [0]  guards 38:5 39:5 42:5
+  src/crypt/cryptdes.rs:206 [0]  guards 204:3584 205:3584 208:3584
+  src/crypt/cryptdes.rs:388 [0]  guards 385:5 386:5
+  src/crypt/cryptdes.rs:579 [0]  guards 577:18 578:18 581:18
+  src/crypt/cryptdes.rs:593 [0]  guards 588:3 590:3 591:3
+  src/crypt/shacrypt.rs:116 [0]  guards 111:2 112:2 118:2
+  src/crypt/shacrypt.rs:138 [0]  guards 136:3 137:3 144:3
+  src/crypt/shacrypt.rs:183 [0]  guards 175:1 181:1 185:1
+  src/crypt/shacrypt.rs:361 [0]  guards 357:61 360:3 362:3
+  src/crypt/shacrypt.rs:462 [0]  guards 459:1 460:1
+  src/lib.rs:325 [0]  guards 318:3 323:3 327:3
+  src/lib.rs:410 [0]  guards 408:3 409:3 415:3
+  src/lib.rs:425 [0]  guards 424:2 431:2
+  src/lib.rs:437 [0]  guards 436:4 442:4
+  src/lib.rs:465 [0]  guards 464:4 470:4
+  src/pgp/armor.rs:159 [0]  guards 144:17 145:116 152:13
+  src/pgp/armor.rs:209 [0]  guards 207:11 208:8 211:8
+  src/pgp/armor.rs:215 [0]  guards 213:8 214:4 217:4
+  src/pgp/armor.rs:221 [0]  guards 219:5 220:10 222:1
+  src/pgp/armor.rs:243 [0]  guards 242:3 245:3
+
+REFUTED lines: 0

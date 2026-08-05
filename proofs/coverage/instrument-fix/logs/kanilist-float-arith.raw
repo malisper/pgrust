@@ -1,0 +1,316 @@
+Kani Rust Verifier 0.67.0 (cargo plugin)
+warning: variant `Malloc` is never constructed
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/lib.rs:64:5
+   |
+61 | enum Backend {
+   |      ------- variant in this enum
+...
+64 |     Malloc,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `chunk_size` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/aset.rs:284:4
+    |
+284 | fn chunk_size(idx: usize) -> usize {
+    |    ^^^^^^^^^^
+
+warning: method `mem_allocated` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/aset.rs:340:19
+    |
+306 | impl AllocSet {
+    | ------------- method in this implementation
+...
+340 |     pub(crate) fn mem_allocated(&self) -> usize {
+    |                   ^^^^^^^^^^^^^
+
+warning: type `spgChooseIn` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:92:12
+   |
+92 | pub struct spgChooseIn {
+   |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseIn`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `spgChooseOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:104:10
+    |
+104 | pub enum spgChooseOut {
+    |          ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseOut`
+
+warning: type `spgPickSplitIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:127:12
+    |
+127 | pub struct spgPickSplitIn {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitIn`
+
+warning: type `spgPickSplitOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:134:12
+    |
+134 | pub struct spgPickSplitOut {
+    |            ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitOut`
+
+warning: type `spgInnerConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:157:12
+    |
+157 | pub struct spgInnerConsistentIn<'a> {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentIn`
+
+warning: type `spgInnerConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:175:12
+    |
+175 | pub struct spgInnerConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentOut`
+
+warning: type `spgLeafConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:199:12
+    |
+199 | pub struct spgLeafConsistentIn {
+    |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentIn`
+
+warning: type `spgLeafConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:212:12
+    |
+212 | pub struct spgLeafConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentOut`
+
+warning: type `spgxlogState` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:15:12
+   |
+15 | pub struct spgxlogState {
+   |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogState`
+
+warning: type `spgxlogAddLeaf` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:40:12
+   |
+40 | pub struct spgxlogAddLeaf {
+   |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddLeaf`
+
+warning: type `spgxlogMoveLeafs` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:76:12
+   |
+76 | pub struct spgxlogMoveLeafs {
+   |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogMoveLeafs`
+
+warning: type `spgxlogAddNode` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:115:12
+    |
+115 | pub struct spgxlogAddNode {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddNode`
+
+warning: type `spgxlogSplitTuple` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:154:12
+    |
+154 | pub struct spgxlogSplitTuple {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogSplitTuple`
+
+warning: type `spgxlogPickSplit` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:184:12
+    |
+184 | pub struct spgxlogPickSplit {
+    |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogPickSplit`
+
+warning: type `spgxlogVacuumLeaf` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:238:12
+    |
+238 | pub struct spgxlogVacuumLeaf {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumLeaf`
+
+warning: type `spgxlogVacuumRoot` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:271:12
+    |
+271 | pub struct spgxlogVacuumRoot {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRoot`
+
+warning: type `spgxlogVacuumRedirect` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:295:12
+    |
+295 | pub struct spgxlogVacuumRedirect {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRedirect`
+
+warning: type `spgConfigIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/lib.rs:237:12
+    |
+237 | pub struct spgConfigIn {
+    |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigIn`
+
+warning: type `spgConfigOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/lib.rs:242:12
+    |
+242 | pub struct spgConfigOut {
+    |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigOut`
+
+warning: unused doc comment
+   --> src/lib.rs:855:5
+    |
+855 | /     /// Half-symbolic mul: one fully-symbolic operand × special grid.
+856 | |     /// Probes whether symbolic×constant multiply is affordable (the
+857 | |     /// degrees/radians shape) even where symbolic×symbolic walls.
+    | |_____-------------------------------------------------------------^
+    |       |
+    |       rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `mcx_stubs` and `stubs`
+   --> src/lib.rs:702:25
+    |
+702 |     use proof_support::{mcx_stubs, stubs};
+    |                         ^^^^^^^^^  ^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `stub_pg_error_error` is never used
+   --> src/lib.rs:259:8
+    |
+259 |     fn stub_pg_error_error(_message: impl Into<String>) -> PgError {
+    |        ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: Found the following unsupported constructs:
+             - caller_location (1)
+             - foreign function (2)
+         
+         Verification will fail if one or more of these constructs is reachable.
+         See https://model-checking.github.io/kani/rust-feature-support.html for more details.
+
+warning: Kani currently does not support concurrency. The following constructs will be treated as sequential operations:
+             - atomic_cxchg (30)
+             - atomic_load (12)
+             - atomic_xadd (10)
+             - atomic_xsub (10)
+             - atomic_store (6)
+         
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
+
+Contracts:
+No contracts or contract harnesses found.
+
+Standard Harnesses (#[kani::proof]):
++-------+-------------------+--------------------------------------------+
+|       | Crate             | Harness                                    |
++========================================================================+
+|       | proof_float_arith | proofs::control_dtrunc_vs_c_round          |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::control_float4pl_vs_ieee           |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::control_float4um_vs_c_abs          |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::control_float8send_vs_c_float4send |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::control_in_range_f8_vs_noreject    |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::dsqrt_bisect_grid                  |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_dceil                           |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_degrees                         |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_dfloor                          |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_dpi                             |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_dround                          |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_dsign                           |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_dsqrt                           |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_dtrunc                          |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float48div                      |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float48div_zero                 |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float48mi                       |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float48mul                      |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float48pl                       |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float4abs                       |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float4div                       |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float4div_zero                  |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float4mi                        |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float4mul                       |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float4pl                        |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float4send                      |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float4um                        |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float4up                        |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float84div                      |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float84div_zero                 |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float84mi                       |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float84mul                      |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float84pl                       |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float8abs                       |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float8div                       |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float8div_zero                  |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float8mi                        |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float8mul                       |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float8pl                        |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float8send                      |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float8um                        |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_float8up                        |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_in_range_float4_float8          |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_in_range_float8_float8          |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_radians                         |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::eq_width_bucket_reject             |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::grid_width_bucket_float8           |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::half_float4div                     |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::half_float4mul                     |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::half_float8div                     |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::half_float8mul                     |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::kani_defect_control_f32            |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::kani_defect_witness_f64            |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::spots_dsqrt                        |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::spots_float48mul                   |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::spots_float4div                    |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::spots_float4mul                    |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::spots_float84mul                   |
+|-------+-------------------+--------------------------------------------|
+|       | proof_float_arith | proofs::spots_float8mul                    |
+|-------+-------------------+--------------------------------------------|
+| Total |                   | 59                                         |
++-------+-------------------+--------------------------------------------+

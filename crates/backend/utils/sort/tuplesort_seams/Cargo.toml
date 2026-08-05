@@ -1,0 +1,13 @@
+[package]
+name = "tuplesort_seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_tuple = { version = "0.1.0", path = "../../../../_support/types/types_tuple" }

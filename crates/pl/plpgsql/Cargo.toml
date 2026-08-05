@@ -1,0 +1,73 @@
+[package]
+name = "plpgsql"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "plpgsql"
+path = "src/lib.rs"
+
+[dependencies]
+pg_string = { path = "../../common/string" }
+pgsync = { path = "../../_support/pgsync" }
+array = { package = "types_array", path = "../../_support/types/array" }
+cache_syscache = { path = "../../backend/utils/cache/cache_syscache" }
+catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
+clauses = { path = "../../backend/optimizer/util/clauses" }
+rel_vocab = { path = "../../_support/types/rel_vocab" }
+syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
+types_rel = { path = "../../_support/types/rel" }
+cmdtag = { path = "../../backend/tcop/cmdtag" }
+coerce = { path = "../../backend/parser/coerce" }
+event_trigger = { path = "../../backend/commands/event_trigger" }
+datum = { path = "../../_support/types/datum" }
+detoast = { path = "../../backend/access/common/detoast" }
+elog = { path = "../../backend/utils/error/elog" }
+execexpr = { path = "../../backend/executor/execexpr" }
+fmgr = { package = "types_fmgr", path = "../../_support/types/fmgr" }
+fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
+format_type = { path = "../../backend/utils/adt/format_type" }
+adt_regproc = { path = "../../backend/utils/adt/regproc" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+lmgr_proc = { path = "../../backend/storage/lmgr/lmgr_proc" }
+guc = { path = "../../backend/utils/misc/guc" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
+ipc_seams = { path = "../../backend/storage/ipc/ipc_seams" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+mcx = { path = "../../_support/mcx" }
+rustc-hash = { version = "2", default-features = false }
+nodes_core = { path = "../../backend/nodes/nodes_core" }
+parse_utilcmd = { path = "../../backend/parser/parse_utilcmd" }
+parser_seams = { path = "../../backend/parser/parser_seams" }
+parser_small1 = { path = "../../backend/parser/parser_small1" }
+analyze_seams = { path = "../../backend/parser/analyze_seams" }
+rewrite_handler_seams = { path = "../../backend/rewrite/rewrite_handler_seams" }
+pg_proc = { path = "../../backend/catalog/pg_proc" }
+plancache = { path = "../../backend/utils/cache/plancache" }
+portalmem = { path = "../../backend/utils/mmgr/portalmem" }
+resowner = { path = "../../backend/utils/resowner/resowner" }
+scan_fgram = { path = "../../backend/parser/scan_fgram" }
+snapmgr = { path = "../../backend/utils/time/snapmgr" }
+spi = { path = "../../backend/executor/spi" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_nodes = { path = "../../_support/types/nodes" }
+types_portal = { path = "../../_support/types/portal" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+wchar = { path = "../../common/wchar" }
+xact = { path = "../../backend/access/transam/xact" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+init_small = { path = "../../backend/utils/init/init_small" }
+tupdesc = { path = "../../backend/access/common/tupdesc" }
+tuplestore = { path = "../../backend/utils/sort/tuplestore" }
+typcache = { path = "../../backend/utils/cache/typcache" }
+adt_domains = { path = "../../backend/utils/adt/domains" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+types_trigger = { path = "../../_support/types/types_trigger" }
+types_trigger_call = { path = "../../_support/types/types_trigger_call" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+
+[dev-dependencies]
+typcache_seams = { path = "../../backend/utils/cache/typcache_seams" }

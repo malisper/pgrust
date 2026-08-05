@@ -1,0 +1,22 @@
+# libfam_diff dictionary — op bytes are single-byte and need no dictionary;
+# these are the multi-byte magic values the arms compare/decode against
+# (LE encodings): simple8b band edges, u64 extremes, register-index strides.
+# u64 extremes (intset absolute adds, heap values)
+"\xff\xff\xff\xff\xff\xff\xff\xff"
+"\xfe\xff\xff\xff\xff\xff\xff\xff"
+"\x00\x00\x00\x00\x00\x00\x00\x80"
+"\xff\xff\xff\xff\xff\xff\xff\x7f"
+"\x00\x00\x00\x00\x01\x00\x00\x00"
+# u32 hash extremes (hll adds)
+"\x00\x00\x00\x80"
+"\xff\xff\xff\xff"
+"\x01\x00\x00\x00"
+# simple8b delta band edges (2^60 empty-codeword threshold region)
+"\x00\x00\x00\x00\x00\x00\x00\x10"
+"\xff\xff\xff\xff\xff\xff\xff\x0f"
+# consecutive-run lengths that fill mode-0/1 codewords (239/240/241)
+"\xef"
+"\xf0"
+"\xf1"
+# bloom element the witness seeds use
+"witness-elem"

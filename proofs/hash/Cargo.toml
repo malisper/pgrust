@@ -1,0 +1,12 @@
+[package]
+name = "poc-hash"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+hashfn = { path = "../../crates/common/hashfn" }
+
+[package.metadata.kani.flags]
+# defaults; per-run flags passed on CLI

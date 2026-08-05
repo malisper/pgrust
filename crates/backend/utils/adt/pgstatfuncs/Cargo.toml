@@ -1,0 +1,41 @@
+[package]
+name = "pgstatfuncs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
+walsender_seams = { path = "../../../replication/walsender_seams" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+funcapi = { path = "../../fmgr/funcapi" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+adt_network = { path = "../network" }
+adt_numeric = { path = "../numeric" }
+ip = { path = "../../../../common/ip" }
+varlena = { path = "../varlena" }
+acl_seams = { path = "../acl_seams" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+
+init_small = { path = "../../init/init_small" }
+miscinit = { path = "../../init/miscinit" }
+backend_status = { path = "../../activity/backend_status" }
+backend_progress = { path = "../../activity/backend_progress" }
+pgstat = { path = "../../activity/pgstat" }
+waitevent = { path = "../../activity/waitevent" }
+procarray = { path = "../../../storage/ipc/procarray" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+xlogprefetcher_seams = { path = "../../../access/transam/xlogprefetcher_seams" }
+backend_status_seams = { path = "../../activity/backend_status_seams" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+slot = { path = "../../../replication/slot" }
+bgworker_seams = { path = "../../../postmaster/bgworker_seams" }
+launcher_seams = { path = "../../../replication/launcher_seams" }
+libc = "0.2"

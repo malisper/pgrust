@@ -1,0 +1,1 @@
+{"path":"crates/contrib/ltree/src/crc.rs","sloc":[8,9,10,13,14,16,18,19,20,21,24,26],"kani":[],"fuzz":[],"regress":[],"excluded":{"else-only":[17],"use-mod":[5],"const-static":[6]}}

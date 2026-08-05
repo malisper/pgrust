@@ -1,0 +1,16 @@
+[package]
+name = "proof_cash"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_cash = { path = "../../crates/backend/utils/adt/cash" }
+types_error = { path = "../../crates/_support/types/types_error" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }
+# direct deps needed as stub-target / scaffolding paths (wave-4 extension):
+pg_locale = { path = "../../crates/backend/utils/adt/pg_locale" }
+mcx = { path = "../../crates/_support/mcx" }
+stringinfo = { path = "../../crates/_support/types/stringinfo" }
+datum = { path = "../../crates/_support/types/datum" }

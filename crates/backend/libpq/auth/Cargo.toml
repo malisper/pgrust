@@ -1,0 +1,53 @@
+[package]
+name = "auth"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "auth"
+path = "src/lib.rs"
+
+[dependencies]
+auth_sasl = { path = "../auth_sasl" }
+auth_scram = { path = "../auth_scram" }
+auth_seams = { path = "../auth_seams" }
+be_secure = { path = "../be_secure" }
+crypt = { path = "../crypt" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+pg_strong_random = { path = "../../../port/pg_strong_random" }
+backend_startup = { path = "../../tcop/backend_startup" }
+elog = { path = "../../utils/error/elog" }
+hba = { path = "../hba" }
+init_small = { path = "../../utils/init/init_small" }
+ip = { path = "../../../common/ip" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+libc = "0.2"
+mcx = { path = "../../../_support/mcx" }
+miscinit = { path = "../../utils/init/miscinit" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+pqcomm = { path = "../pqcomm" }
+pqformat = { path = "../pqformat" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+walsender_seams = { path = "../../replication/walsender_seams" }
+
+[dev-dependencies]
+acl_seams = { path = "../../utils/adt/acl_seams" }
+fd = { path = "../../storage/file/fd" }
+hba_seams = { path = "../hba_seams" }
+latch = { path = "../../storage/ipc/latch" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+pqcomm_seams = { path = "../pqcomm_seams" }
+types_dest = { path = "../../../_support/types/types_dest" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }
+pg_b64 = { path = "../../../common/base64" }
+pg_hmac = { path = "../../../common/hmac" }
+pg_md5 = { path = "../../../common/md5" }
+scram_common = { path = "../../../common/scram_common" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }

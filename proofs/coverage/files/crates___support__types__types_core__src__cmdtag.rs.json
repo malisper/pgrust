@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/types_core/src/cmdtag.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"attr":[3,4],"const-static":[8,9,10,11,12],"typedef":[5],"impl-header":[7]}}

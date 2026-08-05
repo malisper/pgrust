@@ -1,0 +1,1 @@
+{"path":"crates/backend/storage/aio/aio_funcs/src/lib.rs","sloc":[10,11,12,13,14,16,17,18,19,22],"kani":[],"fuzz":[],"regress":[10,11,12,13,14,16,17,18,19],"excluded":{"use-mod":[6],"const-static":[8],"const-table":[23,24,25,26,27,28]}}

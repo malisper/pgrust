@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/error/error_small_seams/src/lib.rs","sloc":[3,4,7,8],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1]}}

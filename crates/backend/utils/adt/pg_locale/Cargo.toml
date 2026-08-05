@@ -1,0 +1,33 @@
+[package]
+name = "pg_locale"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_locale"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+elog = { path = "../../error/elog" }
+guc_tables = { path = "../../misc/guc_tables" }
+init_small = { path = "../../init/init_small" }
+mbutils = { path = "../../mb/mbutils" }
+hashfn = { path = "../../../../common/hashfn" }
+unicode_case = { path = "../../../../common/unicode_case" }
+unicode_category = { path = "../../../../common/unicode_category" }
+wchar = { path = "../../../../common/wchar" }
+lsyscache = { path = "../../cache/lsyscache" }
+varlena = { path = "../varlena" }
+pg_locale_seams = { path = "../pg_locale_seams" }
+pg_database_seams = { path = "../../../catalog/pg_database_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+libc = "0.2"
+pgsync = { path = "../../../../_support/pgsync" }
+
+[dev-dependencies]
+types_tuple = { path = "../../../../_support/types/types_tuple" }

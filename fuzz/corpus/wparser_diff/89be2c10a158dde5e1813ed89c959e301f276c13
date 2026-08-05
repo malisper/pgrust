@@ -1,0 +1,5 @@
+Å;
+
+RESET enable_seqscan;
+
+SELECT ts_rewrite(

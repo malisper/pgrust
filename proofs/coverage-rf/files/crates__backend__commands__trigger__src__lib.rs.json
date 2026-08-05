@@ -1,0 +1,1 @@
+{"path":"crates/backend/commands/trigger/src/lib.rs","sloc":[26,27,28,29,30,31,32,33],"kani":[],"fuzz":[],"regress":[26,27,28,29,30,31,32,33],"excluded":{"use-mod":[3,4,5,6,7,9,10,11,12,13,14,16,17,18,19,20,21,22,24],"attr":[1]}}

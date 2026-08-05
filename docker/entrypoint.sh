@@ -1,0 +1,424 @@
+#!/usr/bin/env bash
+# Drop-in replacement for the official postgres image's docker-entrypoint.sh
+# (https://github.com/docker-library/postgres). This is a faithful port of the
+# upstream script — same env vars, same /docker-entrypoint-initdb.d semantics,
+# same gosu step-down, same first-boot-on-localhost-then-restart pattern, same
+# pg_hba setup.
+#
+# The ONE substitution for pgrust: the user-facing SERVER is the pgrust
+# `postgres` binary (a Rust port of PostgreSQL 18.3), not C postgres. But:
+#   * the catalog bootstrap (`initdb`) is still done by the bundled C initdb,
+#     because pgrust ships no initdb of its own; and
+#   * `psql` (the client used for init scripts / db setup) is the bundled C psql.
+# So the only places that diverge from upstream are:
+#   * docker_temp_server_start / docker_temp_server_stop — these launch the
+#     pgrust binary directly (upstream uses `pg_ctl`, which would launch C
+#     postgres). pgrust is started backgrounded and we poll for readiness, then
+#     SIGINT it to stop (matching STOPSIGNAL SIGINT / fast-shutdown semantics).
+#   * pg_setup_hba_conf — upstream runs `postgres -C password_encryption` to
+#     discover the auth method; we read it from the freshly-initdb'd
+#     postgresql.conf instead (defaulting to scram-sha-256, PG14+ default), so
+#     we never depend on the pgrust binary supporting `-C`.
+#   * the final `exec` of the server appends pgrust-specific GUCs
+#     (io_method=sync, max_stack_depth) and a larger stack ulimit, without
+#     changing the `postgres ...`/flags CMD contract a user passes.
+set -Eeo pipefail
+# TODO swap to -Eeuo pipefail above (after handling all potentially-unset variables)
+
+# The pgrust server binary (the user-facing server). The C `postgres` backend
+# that ships alongside initdb (used ONLY by initdb's bootstrap) is also on PATH,
+# so we always resolve the real server by this absolute path, never by name.
+PGRUST_BIN="${PGRUST_BIN:-/usr/local/bin/pgrust-postgres}"
+
+# pgrust's per-statement frames are large; the C stack default refuses to boot.
+ulimit -s 65520 2>/dev/null || true
+export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+
+# pgrust-specific server GUCs applied to BOTH the temp init server and the final
+# server (without disturbing the user's CMD/flags).
+#
+# unix_socket_directories=/var/run/postgresql aligns the pgrust server's socket
+# with the location the bundled Debian C psql/libpq use by default, so the
+# init-script client and healthchecks connect.
+PGRUST_SERVER_OPTS=(
+	-c io_method=sync
+	-c max_stack_depth=60000
+	-c unix_socket_directories=/var/run/postgresql
+)
+
+# usage: file_env VAR [DEFAULT]
+#    ie: file_env 'XYZ_DB_PASSWORD' 'example'
+# (will allow for "$XYZ_DB_PASSWORD_FILE" to fill in the value of
+#  "$XYZ_DB_PASSWORD" from a file, especially for Docker's secrets feature)
+file_env() {
+	local var="$1"
+	local fileVar="${var}_FILE"
+	local def="${2:-}"
+	if [ "${!var:-}" ] && [ "${!fileVar:-}" ]; then
+		printf >&2 'error: both %s and %s are set (but are exclusive)\n' "$var" "$fileVar"
+		exit 1
+	fi
+	local val="$def"
+	if [ "${!var:-}" ]; then
+		val="${!var}"
+	elif [ "${!fileVar:-}" ]; then
+		val="$(< "${!fileVar}")"
+	fi
+	export "$var"="$val"
+	unset "$fileVar"
+}
+
+# check to see if this file is being run or sourced from another script
+_is_sourced() {
+	# https://unix.stackexchange.com/a/215279
+	[ "${#FUNCNAME[@]}" -ge 2 ] \
+		&& [ "${FUNCNAME[0]}" = '_is_sourced' ] \
+		&& [ "${FUNCNAME[1]}" = 'source' ]
+}
+
+# used to create initial postgres directories and if run as root, ensure ownership to the "postgres" user
+docker_create_db_directories() {
+	local user; user="$(id -u)"
+
+	mkdir -p "$PGDATA"
+	# ignore failure since there are cases where we can't chmod (and PostgreSQL might fail later anyhow - it's picky about permissions of this directory)
+	chmod 00700 "$PGDATA" || :
+
+	# ignore failure since it will be fine when using the image provided directory; see also https://github.com/docker-library/postgres/pull/289
+	mkdir -p /var/run/postgresql || :
+	chmod 03775 /var/run/postgresql || :
+
+	# Create the transaction log directory before initdb is run so the directory is owned by the correct user
+	if [ -n "${POSTGRES_INITDB_WALDIR:-}" ]; then
+		mkdir -p "$POSTGRES_INITDB_WALDIR"
+		if [ "$user" = '0' ]; then
+			find "$POSTGRES_INITDB_WALDIR" \! -user postgres -exec chown postgres '{}' +
+		fi
+		chmod 700 "$POSTGRES_INITDB_WALDIR"
+	fi
+
+	# allow the container to be started with `--user`
+	if [ "$user" = '0' ]; then
+		find "$PGDATA" \! -user postgres -exec chown postgres '{}' +
+		find /var/run/postgresql \! -user postgres -exec chown postgres '{}' +
+	fi
+}
+
+# initialize empty PGDATA directory with new database via 'initdb'
+# arguments to `initdb` can be passed via POSTGRES_INITDB_ARGS or as arguments to this function
+# `initdb` automatically creates the "postgres", "template0", and "template1" dbnames
+# this is also where the database user is created, specified by `POSTGRES_USER` env
+docker_init_database_dir() {
+	# "initdb" is particular about the current user existing in "/etc/passwd", so we use "nss_wrapper" to fake that if necessary
+	# see https://github.com/docker-library/postgres/pull/253, https://github.com/docker-library/postgres/issues/359, https://cwrap.org/nss_wrapper.html
+	local uid; uid="$(id -u)"
+	if ! getent passwd "$uid" &> /dev/null; then
+		# see if we can find a suitable "libnss_wrapper.so" (https://salsa.debian.org/sssd-team/nss-wrapper/-/commit/b9925a653a54e24d09d9b498a2d913729f7abb15)
+		local wrapper
+		for wrapper in {/usr,}/lib{/*,}/libnss_wrapper.so; do
+			if [ -s "$wrapper" ]; then
+				NSS_WRAPPER_PASSWD="$(mktemp)"
+				NSS_WRAPPER_GROUP="$(mktemp)"
+				export LD_PRELOAD="$wrapper" NSS_WRAPPER_PASSWD NSS_WRAPPER_GROUP
+				local gid; gid="$(id -g)"
+				printf 'postgres:x:%s:%s:PostgreSQL:%s:/bin/false\n' "$uid" "$gid" "$PGDATA" > "$NSS_WRAPPER_PASSWD"
+				printf 'postgres:x:%s:\n' "$gid" > "$NSS_WRAPPER_GROUP"
+				break
+			fi
+		done
+	fi
+
+	if [ -n "${POSTGRES_INITDB_WALDIR:-}" ]; then
+		set -- --waldir "$POSTGRES_INITDB_WALDIR" "$@"
+	fi
+
+	# --pwfile refuses to handle a properly-empty file (hence the "\n"): https://github.com/docker-library/postgres/issues/1025
+	eval 'initdb --username="$POSTGRES_USER" --pwfile=<(printf "%s\n" "$POSTGRES_PASSWORD") '"$POSTGRES_INITDB_ARGS"' "$@"'
+
+	# unset/cleanup "nss_wrapper" bits
+	if [[ "${LD_PRELOAD:-}" == */libnss_wrapper.so ]]; then
+		rm -f "$NSS_WRAPPER_PASSWD" "$NSS_WRAPPER_GROUP"
+		unset LD_PRELOAD NSS_WRAPPER_PASSWD NSS_WRAPPER_GROUP
+	fi
+}
+
+# print large warning if POSTGRES_PASSWORD is long
+# error if both POSTGRES_PASSWORD is empty and POSTGRES_HOST_AUTH_METHOD is not 'trust'
+# print large warning if POSTGRES_HOST_AUTH_METHOD is set to 'trust'
+# assumes database is not set up, ie: [ -z "$DATABASE_ALREADY_EXISTS" ]
+docker_verify_minimum_env() {
+	if [ -z "$POSTGRES_PASSWORD" ] && [ 'trust' != "$POSTGRES_HOST_AUTH_METHOD" ]; then
+		# The - option suppresses leading tabs but *not* spaces. :)
+		cat >&2 <<-'EOE'
+			Error: Database is uninitialized and superuser password is not specified.
+			       You must specify POSTGRES_PASSWORD to a non-empty value for the
+			       superuser. For example, "-e POSTGRES_PASSWORD=password" on "docker run".
+
+			       You may also use "POSTGRES_HOST_AUTH_METHOD=trust" to allow all
+			       connections without a password. This is *not* recommended.
+
+			       See PostgreSQL documentation about "trust":
+			       https://www.postgresql.org/docs/current/auth-trust.html
+		EOE
+		exit 1
+	fi
+	if [ 'trust' = "$POSTGRES_HOST_AUTH_METHOD" ]; then
+		cat >&2 <<-'EOWARN'
+			********************************************************************************
+			WARNING: POSTGRES_HOST_AUTH_METHOD has been set to "trust". This will allow
+			         anyone with access to the Postgres port to access your database without
+			         a password, even if POSTGRES_PASSWORD is set. See PostgreSQL
+			         documentation about "trust":
+			         https://www.postgresql.org/docs/current/auth-trust.html
+			         In Docker's default configuration, this is effectively any other
+			         container on the same system.
+
+			         It is not recommended to use POSTGRES_HOST_AUTH_METHOD=trust. Replace
+			         it with "-e POSTGRES_PASSWORD=password" instead to set a password in
+			         "docker run".
+			********************************************************************************
+		EOWARN
+	fi
+}
+
+# usage: docker_process_init_files [file [file [...]]]
+#    ie: docker_process_init_files /always-initdb.d/*
+# process initializer files, based on file extensions and permissions
+docker_process_init_files() {
+	# psql here for backwards compatibility "${psql[@]}"
+	psql=( docker_process_sql )
+
+	printf '\n'
+	local f
+	for f; do
+		case "$f" in
+			*.sh)
+				# https://github.com/docker-library/postgres/issues/450#issuecomment-393167936
+				# https://github.com/docker-library/postgres/pull/452
+				if [ -x "$f" ]; then
+					printf '%s: running %s\n' "$0" "$f"
+					"$f"
+				else
+					printf '%s: sourcing %s\n' "$0" "$f"
+					. "$f"
+				fi
+				;;
+			*.sql)     printf '%s: running %s\n' "$0" "$f"; docker_process_sql -f "$f"; printf '\n' ;;
+			*.sql.gz)  printf '%s: running %s\n' "$0" "$f"; gunzip -c "$f" | docker_process_sql; printf '\n' ;;
+			*.sql.xz)  printf '%s: running %s\n' "$0" "$f"; xzcat "$f" | docker_process_sql; printf '\n' ;;
+			*.sql.zst) printf '%s: running %s\n' "$0" "$f"; zstd -dc "$f" | docker_process_sql; printf '\n' ;;
+			*)         printf '%s: ignoring %s\n' "$0" "$f" ;;
+		esac
+		printf '\n'
+	done
+}
+
+# Execute sql script, passed via stdin (or -f flag of pqsl)
+# usage: docker_process_sql [psql-cli-args]
+#    ie: docker_process_sql --dbname=mydb <<<'INSERT ...'
+#    ie: docker_process_sql -f my-file.sql
+#    ie: docker_process_sql <my-file.sql
+docker_process_sql() {
+	local query_runner=( psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --no-password --no-psqlrc )
+	if [ -n "$POSTGRES_DB" ]; then
+		query_runner+=( --dbname "$POSTGRES_DB" )
+	fi
+
+	PGHOST= PGHOSTADDR= "${query_runner[@]}" "$@"
+}
+
+# create initial database
+# uses environment variables for input: POSTGRES_DB
+docker_setup_db() {
+	local dbAlreadyExists
+	dbAlreadyExists="$(
+		POSTGRES_DB= docker_process_sql --dbname postgres --set db="$POSTGRES_DB" --tuples-only <<-'EOSQL'
+			SELECT 1 FROM pg_database WHERE datname = :'db' ;
+		EOSQL
+	)"
+	if [ -z "$dbAlreadyExists" ]; then
+		POSTGRES_DB= docker_process_sql --dbname postgres --set db="$POSTGRES_DB" <<-'EOSQL'
+			CREATE DATABASE :"db" ;
+		EOSQL
+		printf '\n'
+	fi
+}
+
+# Loads various settings that are used elsewhere in the script
+# This should be called before any other functions
+docker_setup_env() {
+	file_env 'POSTGRES_PASSWORD'
+
+	file_env 'POSTGRES_USER' 'postgres'
+	file_env 'POSTGRES_DB' "$POSTGRES_USER"
+	file_env 'POSTGRES_INITDB_ARGS'
+	: "${POSTGRES_HOST_AUTH_METHOD:=}"
+
+	declare -g DATABASE_ALREADY_EXISTS
+	: "${DATABASE_ALREADY_EXISTS:=}"
+	# look specifically for PG_VERSION, as it is expected in the DB dir
+	if [ -s "$PGDATA/PG_VERSION" ]; then
+		DATABASE_ALREADY_EXISTS='true'
+	fi
+}
+
+# append POSTGRES_HOST_AUTH_METHOD to pg_hba.conf for "host" connections
+#
+# pgrust note: upstream discovers the default auth method via `postgres -C
+# password_encryption`; we read it from the freshly-initdb'd postgresql.conf
+# instead (defaulting to scram-sha-256, the PG14+ default), so we never depend
+# on the pgrust binary supporting `-C`. An explicit POSTGRES_HOST_AUTH_METHOD
+# always wins.
+pg_setup_hba_conf() {
+	if [ "$1" = 'postgres' ]; then
+		shift
+	fi
+	local auth=
+	auth="$(sed -n \
+		's/^[[:space:]]*password_encryption[[:space:]]*=[[:space:]]*\([a-z0-9-]*\).*/\1/p' \
+		"$PGDATA/postgresql.conf" | tail -n 1)"
+	: "${auth:=scram-sha-256}"
+	: "${POSTGRES_HOST_AUTH_METHOD:=$auth}"
+	{
+		printf '\n'
+		if [ 'trust' = "$POSTGRES_HOST_AUTH_METHOD" ]; then
+			printf '# warning trust is enabled for all connections\n'
+			printf '# see https://www.postgresql.org/docs/current/auth-trust.html\n'
+		fi
+		printf 'host all all all %s\n' "$POSTGRES_HOST_AUTH_METHOD"
+	} >> "$PGDATA/pg_hba.conf"
+}
+
+# start socket-only pgrust server for setting up or running scripts
+# all arguments will be passed along as arguments to the pgrust `postgres`
+#
+# pgrust note: upstream uses `pg_ctl ... start`, which would launch the C
+# postgres. We launch the pgrust binary directly (backgrounded, socket-only) and
+# poll for readiness.
+PGRUST_TEMP_PID=""
+docker_temp_server_start() {
+	if [ "$1" = 'postgres' ]; then
+		shift
+	fi
+
+	# socket-only: no external TCP/IP, same as upstream's `-c listen_addresses=''`.
+	"$PGRUST_BIN" -D "$PGDATA" \
+		"${PGRUST_SERVER_OPTS[@]}" \
+		-c listen_addresses='' \
+		-p "${PGPORT:-5432}" \
+		"$@" &
+	PGRUST_TEMP_PID=$!
+
+	# Wait until it accepts connections on the unix socket (default /var/run/postgresql).
+	local i
+	for i in $(seq 1 120); do
+		if PGHOST=/var/run/postgresql PGHOSTADDR= \
+			psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --no-password --no-psqlrc \
+				--dbname postgres -tAc 'SELECT 1' >/dev/null 2>&1; then
+			return 0
+		fi
+		if ! kill -0 "$PGRUST_TEMP_PID" 2>/dev/null; then
+			echo >&2 "pgrust: temporary server exited during startup"
+			wait "$PGRUST_TEMP_PID" || true
+			exit 1
+		fi
+		sleep 0.5
+	done
+	echo >&2 "pgrust: timed out waiting for temporary server to accept connections"
+	exit 1
+}
+
+# stop the temporary pgrust server after setup (SIGINT = fast shutdown).
+docker_temp_server_stop() {
+	if [ -n "$PGRUST_TEMP_PID" ] && kill -0 "$PGRUST_TEMP_PID" 2>/dev/null; then
+		kill -INT "$PGRUST_TEMP_PID" 2>/dev/null || true
+		wait "$PGRUST_TEMP_PID" 2>/dev/null || true
+	fi
+	PGRUST_TEMP_PID=""
+}
+
+# check arguments for an option that would cause postgres to stop
+# return true if there is one
+_pg_want_help() {
+	local arg
+	for arg; do
+		case "$arg" in
+			# postgres --help | grep 'then exit'
+			# leaving out -C on purpose since it always fails and is unhelpful:
+			# postgres: could not access the server configuration file "/var/lib/postgresql/data/postgresql.conf": No such file or directory
+			-'?'|--help|--describe-config|-V|--version)
+				return 0
+				;;
+		esac
+	done
+	return 1
+}
+
+_main() {
+	# if first arg looks like a flag, assume we want to run postgres server
+	if [ "${1:0:1}" = '-' ]; then
+		set -- postgres "$@"
+	fi
+
+	if [ "$1" = 'postgres' ] && ! _pg_want_help "$@"; then
+		docker_setup_env
+		# setup data directories and permissions (when run as root)
+		docker_create_db_directories
+		if [ "$(id -u)" = '0' ]; then
+			# then restart script as postgres user
+			exec gosu postgres "$BASH_SOURCE" "$@"
+		fi
+
+		# only run initialization on an empty data directory
+		if [ -z "$DATABASE_ALREADY_EXISTS" ]; then
+			docker_verify_minimum_env
+
+			# check dir permissions to reduce likelihood of half-initialized database
+			ls /docker-entrypoint-initdb.d/ > /dev/null
+
+			docker_init_database_dir
+			pg_setup_hba_conf "$@"
+
+			# PGPASSWORD is required for psql when authentication is required for 'local' connections via pg_hba.conf and is otherwise harmless
+			# e.g. when '--auth=md5' or '--auth-local=md5' is used in POSTGRES_INITDB_ARGS
+			export PGPASSWORD="${PGPASSWORD:-$POSTGRES_PASSWORD}"
+			docker_temp_server_start "$@"
+
+			docker_setup_db
+			docker_process_init_files /docker-entrypoint-initdb.d/*
+
+			docker_temp_server_stop
+			unset PGPASSWORD
+
+			cat <<-'EOM'
+
+				PostgreSQL init process complete; ready for start up.
+
+			EOM
+		else
+			cat <<-'EOM'
+
+				PostgreSQL Database directory appears to contain a database; Skipping initialization
+
+			EOM
+		fi
+	fi
+
+	# pgrust substitution: `exec "$@"` would run the C `postgres` on PATH (used
+	# only by initdb). When the command IS the server (`postgres [flags...]`),
+	# rewrite argv[0] to the pgrust binary and append pgrust GUCs + listen_addresses='*'.
+	# Anything else (psql, a help flag, an arbitrary command) is exec'd verbatim.
+	if [ "$1" = 'postgres' ] && ! _pg_want_help "$@"; then
+		shift # drop the literal "postgres"
+		exec "$PGRUST_BIN" -D "$PGDATA" \
+			"${PGRUST_SERVER_OPTS[@]}" \
+			-c listen_addresses='*' \
+			"$@"
+	fi
+
+	exec "$@"
+}
+
+if ! _is_sourced; then
+	_main "$@"
+fi

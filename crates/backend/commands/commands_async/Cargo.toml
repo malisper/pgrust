@@ -1,0 +1,39 @@
+[package]
+name = "commands_async"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+async_seams = { path = "../async_seams" }
+datum = { path = "../../../_support/types/datum" }
+elog = { path = "../../utils/error/elog" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+ipc = { path = "../../storage/ipc/ipc" }
+latch = { path = "../../storage/ipc/latch" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+mcx = { path = "../../../_support/mcx" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+pqformat = { path = "../../libpq/pqformat" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+rustc-hash = { version = "2", default-features = false, features = ["std"] }
+shmem = { path = "../../storage/ipc/shmem" }
+slru = { path = "../../access/transam/slru" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+transam = { path = "../../access/transam/transam" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_error = { path = "../../../_support/types/types_error" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_storage = { path = "../../../_support/types/types_storage" }
+varlena = { path = "../../utils/adt/varlena" }
+xact = { path = "../../access/transam/xact" }

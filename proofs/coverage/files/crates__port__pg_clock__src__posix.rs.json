@@ -1,0 +1,1 @@
+{"path":"crates/port/pg_clock/src/posix.rs","sloc":[18,19,24,27,29,30,35,36,40,41],"kani":[],"fuzz":[],"regress":[24,27,29,30,35,36,40,41],"excluded":{"use-mod":[10],"attr":[13,17,23,34,39],"typedef":[14],"impl-header":[16,33]}}

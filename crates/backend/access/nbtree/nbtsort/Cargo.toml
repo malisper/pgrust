@@ -1,0 +1,39 @@
+[package]
+name = "nbtsort"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bufmgr = { path = "../../../storage/buffer/bufmgr" }
+bulkwrite = { path = "../../../storage/smgr/bulkwrite" }
+datum = { path = "../../../../_support/types/datum" }
+elog_seams = { path = "../../../utils/error/elog_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+nbtree = { path = "../nbtree" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+mcx = { path = "../../../../_support/mcx" }
+execindexing = { path = "../../../executor/execindexing" }
+tuplesort = { path = "../../../utils/sort/tuplesort" }
+init_small = { path = "../../../utils/init/init_small" }
+# M4.2 pool arm (pool.rs)
+parallel = { path = "../../transam/parallel" }
+xact = { path = "../../transam/xact" }
+table = { path = "../../table/table" }
+indexam = { path = "../../index/indexam" }
+runtime = { path = "../../../executor/runtime" }
+latch = { path = "../../../storage/ipc/latch" }
+pg_clock = { path = "../../../../port/pg_clock" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+miscinit = { path = "../../../utils/init/miscinit" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+catalog = { path = "../../../catalog/catalog" }
+procarray = { path = "../../../storage/ipc/procarray" }
+clauses = { path = "../../../optimizer/util/clauses" }

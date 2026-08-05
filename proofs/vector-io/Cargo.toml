@@ -1,0 +1,23 @@
+[package]
+name = "proof_vector_io"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+adt_scalar = { path = "../../crates/backend/utils/adt/scalar" }
+adt_int = { path = "../../crates/backend/utils/adt/int" }
+array = { package = "types_array", path = "../../crates/_support/types/array" }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_error = { path = "../../crates/_support/types/types_error" }
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+debug = false

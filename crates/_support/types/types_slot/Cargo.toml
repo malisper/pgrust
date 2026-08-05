@@ -1,0 +1,12 @@
+[package]
+name = "types_slot"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../mcx" }
+types_core = { path = "../types_core" }
+datum = { path = "../datum" }
+types_tuple = { path = "../types_tuple" }
+jit_deform = { path = "../../jit_deform" }

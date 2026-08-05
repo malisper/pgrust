@@ -1,0 +1,1 @@
+{"path":"crates/backend/parser/parser_driver/src/lib.rs","sloc":[12,13,14,15,16,17,18,19,20,21,22,24,27,28,29,30,34,35],"kani":[],"fuzz":[],"regress":[12,13,14,15,16,17,18,19,20,21,22,24,34,35],"excluded":{"use-mod":[3,5,6,7,8,10,39],"attr":[1,38]}}

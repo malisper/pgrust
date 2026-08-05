@@ -1,0 +1,12 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+jsonb-probe	proofs::eq_gin_compare_jsonb	proofs::eq_gin_compare_jsonb	0	16	VERIFICATION:- SUCCESSFUL	RAN	1
+jsonb-probe	proofs::eq_jsonb_cast_err_array_n2	proofs::eq_jsonb_cast_err_array_n2	0	26	VERIFICATION:- SUCCESSFUL	RAN	1
+jsonb-probe	proofs::eq_jsonb_cast_err_object_n1	proofs::eq_jsonb_cast_err_object_n1	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+jsonb-probe	proofs::eq_jsonb_cast_scalar_kinds	proofs::eq_jsonb_cast_scalar_kinds	0	11	VERIFICATION:- SUCCESSFUL	RAN	1
+jsonb-probe	proofs::eq_jsonb_numeric_window_n0	proofs::eq_jsonb_numeric_window_n0	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+jsonb-probe	proofs::eq_jsonb_numeric_window_n1	proofs::eq_jsonb_numeric_window_n1	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+jsonb-probe	proofs::eq_jsonb_numeric_window_n2	proofs::eq_jsonb_numeric_window_n2	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+jsonb-probe	proofs::eq_path_empty_arr	proofs::eq_path_empty_arr	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+jsonb-probe	proofs::eq_path_empty_scalar	proofs::eq_path_empty_scalar	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+jsonb-probe	proofs::eq_path_scalar_root_len1	proofs::eq_path_scalar_root_len1	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+jsonb-probe	proofs::witness_path_vt_subscript	proofs::witness_path_vt_subscript	0	6	VERIFICATION:- SUCCESSFUL	RAN	1

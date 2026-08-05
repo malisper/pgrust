@@ -1,0 +1,18 @@
+[package]
+name = "parser_driver"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parser_driver"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+parser_seams = { path = "../parser_seams" }
+parser_small1 = { path = "../parser_small1" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+gram_core = { path = "../gram_core" }
+wchar = { path = "../../../common/wchar" }

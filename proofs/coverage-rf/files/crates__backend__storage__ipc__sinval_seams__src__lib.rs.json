@@ -1,0 +1,1 @@
+{"path":"crates/backend/storage/ipc/sinval_seams/src/lib.rs","sloc":[4,7,8,9,10,13,16,20,23],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2]}}

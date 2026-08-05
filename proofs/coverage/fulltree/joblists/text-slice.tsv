@@ -1,0 +1,19 @@
+text-slice	proofs::eq_textoctetlen	
+text-slice	proofs::eq_byteaoctetlen	
+text-slice	proofs::eq_textlen_latin1	
+text-slice	proofs::eq_byteapos	
+text-slice	proofs::eq_byteacat	
+text-slice	proofs::eq_textcat	
+text-slice	proofs::eq_bytea_substr	
+text-slice	proofs::eq_bytea_substr_no_len	
+text-slice	proofs::eq_textpos_latin1	
+text-slice	proofs::eq_text_substr_latin1	
+text-slice	proofs::eq_text_substr_no_len_latin1	
+text-slice	proofs::eq_text_starts_with_latin1	
+text-slice	proofs::eq_text_left_latin1	
+text-slice	proofs::eq_text_right_latin1	
+text-slice	eq_textoctetlen	proofs::eq_textoctetlen
+text-slice	eq_byteaoctetlen	proofs::eq_byteaoctetlen
+text-slice	eq_textlen_latin1	proofs::eq_textlen_latin1
+text-slice	eq_byteapos	proofs::eq_byteapos
+text-slice	eq_text_starts_with_latin1	proofs::eq_text_starts_with_latin1

@@ -1,0 +1,1 @@
+$ ? (@ like_regex "patt@rHHHHHHHHHHHHHHHHHHHHHHHHMHHHHHHHHHHHHHHHHHHHHHHHAHHHHHHHHHHLHHHHHHHLHHHHHHHHH\\\\\\\\@\\\W\\\\^^^^^^^^^^^^^^^.string()s ^^^^^^^^^^^^^^^^^^^^^^^^^^g^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^" flag "isim")

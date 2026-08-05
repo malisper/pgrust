@@ -1,0 +1,109 @@
+{
+ "generated": "2026-08-01T20:14:33+00:00",
+ "head_sha": "c7d5565ff527d318caeebe76e708fa3473c6be35",
+ "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
+ "sloc_rule_id": "v2+no-const-tables",
+ "sloc_exclusions": {
+  "else-only": 2,
+  "arm-head": 3,
+  "use-mod": 6,
+  "attr": 1
+ },
+ "line_table_inputs": [],
+ "census": {
+  "expected": null,
+  "census_closed": false,
+  "kaniraw_files": 0,
+  "note": "run with --no-census-required: harnesses that failed to run are indistinguishable from covered-nothing; DO NOT PUBLISH"
+ },
+ "macro_attribution": {
+  "enabled": true,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": {
+   "files": 153,
+   "macro_defs": 321,
+   "generator_macros": 221,
+   "call_blocks": 468,
+   "decl_lines": 2293
+  }
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 0,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [
+    "fleet-fuzz-results/pgrust-fuzz-campaign-1785614337-78c8-38739/define_diff/coverage.lcov"
+   ],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/commands/define"
+ ],
+ "totals": {
+  "sloc": 61,
+  "kani": 0,
+  "fuzz": 56,
+  "regress": 0,
+  "any": 56,
+  "pct": {
+   "kani": 0.0,
+   "fuzz": 91.8,
+   "regress": 0.0,
+   "any": 91.8
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 9,
+   "covered_sloc_in_touched_files": 521,
+   "sloc_of_touched_files": 2184
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "define",
+   "path": "crates/backend/commands/define",
+   "sloc": 61,
+   "kani": 0,
+   "fuzz": 56,
+   "regress": 0,
+   "any": 56,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 91.8,
+    "regress": 0.0,
+    "any": 91.8
+   },
+   "files": [
+    {
+     "path": "crates/backend/commands/define/src/lib.rs",
+     "sloc": 61,
+     "kani": 0,
+     "fuzz": 56,
+     "regress": 0,
+     "any": 56,
+     "detail": "files/crates__backend__commands__define__src__lib.rs.json"
+    }
+   ]
+  }
+ ]
+}

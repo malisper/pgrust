@@ -1,0 +1,58 @@
+[package]
+name = "subscriptioncmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "subscriptioncmds"
+path = "src/lib.rs"
+
+[dependencies]
+twophase = { path = "../../access/transam/twophase" }
+launcher = { path = "../../replication/launcher" }
+pgstat = { path = "../../utils/activity/pgstat" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+walreceiver = { path = "../../replication/walreceiver" }
+origin = { path = "../../replication/origin" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+datum = { path = "../../../_support/types/datum" }
+pg_string = { path = "../../../common/string" }
+mcx = { path = "../../../_support/mcx" }
+elog = { path = "../../utils/error/elog" }
+xact = { path = "../../access/transam/xact" }
+table = { path = "../../access/table/table" }
+heaptuple = { path = "../../access/common/heaptuple" }
+genam = { path = "../../access/index/genam" }
+catalog = { path = "../../catalog/catalog" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+pg_depend = { path = "../../catalog/pg_depend" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+pg_subscription = { path = "../../catalog/pg_subscription" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+superuser = { path = "../../utils/misc/superuser" }
+miscinit = { path = "../../utils/init/miscinit" }
+init_small = { path = "../../utils/init/init_small" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+guc = { path = "../../utils/misc/guc" }
+commands_define = { path = "../commands_define" }
+varlena = { path = "../../utils/adt/varlena" }
+adt_pg_lsn = { path = "../../utils/adt/pg_lsn" }
+dbcommands = { path = "../dbcommands" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+origin_seams = { path = "../../replication/origin_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+types_fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }

@@ -1,0 +1,4 @@
+#!/bin/bash
+set -eu
+. "$(dirname "$0")/env.sh"
+du -bcs "$CB_DD" | grep total | awk '{print $1}'

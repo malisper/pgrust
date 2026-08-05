@@ -1,0 +1,20 @@
+[package]
+name = "execmain_seams"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_error = { path = "../../../_support/types/types_error" }
+types_portal = { path = "../../../_support/types/portal" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_dest = { path = "../../../_support/types/types_dest" }
+tcop_dest = { path = "../../tcop/dest" }

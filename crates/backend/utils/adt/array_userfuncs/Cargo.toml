@@ -1,0 +1,24 @@
+[package]
+name = "array_userfuncs"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+lsyscache = { path = "../../cache/lsyscache" }
+typcache = { path = "../../cache/typcache" }
+tuplesort_seams = { path = "../../sort/tuplesort_seams" }
+arrayfuncs = { path = "../arrayfuncs" }
+arrayutils = { path = "../arrayutils" }
+format_type = { path = "../format_type" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+pg_prng = { path = "../../../../common/pg_prng" }
+init_small = { path = "../../init/init_small" }

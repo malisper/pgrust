@@ -1,0 +1,59 @@
+[package]
+name = "bufmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bufmgr"
+path = "src/lib.rs"
+
+[dependencies]
+aio_core = { path = "../../aio/aio_core" }
+bufmgr_seams = { path = "../bufmgr_seams" }
+datum = { path = "../../../../_support/types/datum" }
+dynahash = { path = "../../../utils/hash/dynahash" }
+resowner = { path = "../../../utils/resowner/resowner" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
+elog = { path = "../../../utils/error/elog" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+init_small = { path = "../../../utils/init/init_small" }
+condition_variable = { path = "../../lmgr/condition_variable" }
+lmgr = { path = "../../lmgr/lmgr" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
+lwlock = { path = "../../lmgr/lwlock" }
+mcx = { path = "../../../../_support/mcx" }
+pgstat = { path = "../../../utils/activity/pgstat" }
+xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
+parallel_seams = { path = "../../../access/transam/parallel_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+relmapper_seams = { path = "../../../utils/cache/relmapper_seams" }
+relpath_seams = { path = "../../../../common/relpath_seams" }
+seam_core = { path = "../../../../_support/seam_core" }
+aio_seams = { path = "../../aio/aio_seams" }
+smgr_seams = { path = "../../smgr/smgr_seams" }
+fd = { path = "../../file/fd" }
+procsignal_seams = { path = "../../ipc/procsignal_seams" }
+standby_seams = { path = "../../ipc/standby_seams" }
+xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+catalog_storage_seams = { path = "../../../catalog/storage_seams" }
+checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_hash = { path = "../../../../_support/types/hash" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+latch = { path = "../../ipc/latch" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+
+[dev-dependencies]
+shmem_seams = { path = "../../ipc/shmem_seams" }
+ipc_seams = { path = "../../ipc/ipc_seams" }
+pg_sema = { path = "../../../port/pg_sema" }
+s_lock_seams = { path = "../../lmgr/s_lock_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+waiteventset = { path = "../../ipc/waiteventset" }
+xact_seams = { path = "../../../access/transam/xact_seams" }

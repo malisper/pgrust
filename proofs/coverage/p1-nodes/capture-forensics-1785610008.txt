@@ -1,0 +1,149 @@
+== coverage capture forensics: nodesfam_diff (cargo-fuzz coverage rc=0) ==
+-- corpus files on disk:  11016
+-- units replayed (log):  11016
+-- clean libFuzzer exits: 16
+-- raw profraw dir: /work/src/fuzz/coverage/nodesfam_diff/raw
+total 14352
+drwxr-xr-x. 2 root root  16384 Aug  1 18:59 .
+drwxr-xr-x. 3 root root     42 Aug  1 18:59 ..
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-0.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-1.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-10.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-11.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-12.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-13.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-14.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-15.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-2.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-3.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-4.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-5.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-6.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-7.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-8.profraw
+-rw-r--r--. 1 root root 917120 Aug  1 18:59 batch-9.profraw
+-- llvm-profdata: /usr/local/rustup/toolchains/nightly-2026-07-17-aarch64-unknown-linux-gnu/lib/rustlib/aarch64-unknown-linux-gnu/bin/llvm-profdata
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-0.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 1818064
+Maximum internal block count: 1291127
+Total number of blocks: 8832
+Total count: 43250524
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-1.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 2058752
+Maximum internal block count: 1454051
+Total number of blocks: 8832
+Total count: 48702650
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-10.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 228202
+Maximum internal block count: 678751
+Total number of blocks: 8832
+Total count: 8253275
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-11.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 341268
+Maximum internal block count: 882567
+Total number of blocks: 8832
+Total count: 11830005
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-12.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 301100
+Maximum internal block count: 840507
+Total number of blocks: 8832
+Total count: 10712930
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-13.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 275865
+Maximum internal block count: 1022339
+Total number of blocks: 8832
+Total count: 10366241
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-14.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 396098
+Maximum internal block count: 1229274
+Total number of blocks: 8832
+Total count: 15024975
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-15.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 439152
+Maximum internal block count: 1459758
+Total number of blocks: 8832
+Total count: 16404165
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-2.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 1007400
+Maximum internal block count: 1108801
+Total number of blocks: 8832
+Total count: 26054560
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-3.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 240108
+Maximum internal block count: 608510
+Total number of blocks: 8832
+Total count: 8639067
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-4.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 137830
+Maximum internal block count: 501083
+Total number of blocks: 8832
+Total count: 5485915
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-5.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 197838
+Maximum internal block count: 696089
+Total number of blocks: 8832
+Total count: 8532637
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-6.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 244968
+Maximum internal block count: 721955
+Total number of blocks: 8832
+Total count: 8600096
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-7.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 216300
+Maximum internal block count: 589135
+Total number of blocks: 8832
+Total count: 7655079
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-8.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 235408
+Maximum internal block count: 709172
+Total number of blocks: 8832
+Total count: 8797458
+---- /work/src/fuzz/coverage/nodesfam_diff/raw/batch-9.profraw (917120 bytes)
+Instrumentation level: Front-end
+Total functions: 3447
+Maximum function count: 215872
+Maximum internal block count: 561704
+Total number of blocks: 8832
+Total count: 7126338
+-- merged profdata:
+Instrumentation level: Front-end
+Total functions: 1329
+Maximum function count: 8303592
+Maximum internal block count: 14354823
+Total number of blocks: 4540
+Total count: 245435915
+-- covbin candidates (find target -path *coverage* -name nodesfam_diff):
+     /work/src/fuzz/target/aarch64-unknown-linux-gnu/coverage/aarch64-unknown-linux-gnu/release/nodesfam_diff  15368321263c7a9a9bbbc31f62f13ef3369adea24f52fcab82a9d19ecc5a4772  133280008 bytes
+-- fuzz (non-coverage) binary for contrast:
+/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/nodesfam_diff
+== end forensics: nodesfam_diff ==

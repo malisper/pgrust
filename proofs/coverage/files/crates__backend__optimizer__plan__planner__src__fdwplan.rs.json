@@ -1,0 +1,1 @@
+{"path":"crates/backend/optimizer/plan/planner/src/fdwplan.rs","sloc":[40,41,43,44,45,49,50,51,52],"kani":[],"fuzz":[],"regress":[43,44],"excluded":{"use-mod":[11,13,14,15,16,17,18,20],"type-alias":[24,25,26,27,28,29,30,31,32],"typedef":[34,35,36,37]}}

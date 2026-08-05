@@ -1,0 +1,1 @@
+{"path":"crates/backend/storage/ipc/waiteventset/src/wasm_stub.rs","sloc":[22,23,26,28,32,33,34,37,41,42,43,44,45,46,47,48,50,51,52,56,57,58],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[16,17],"typedef":[19],"impl-header":[21]}}

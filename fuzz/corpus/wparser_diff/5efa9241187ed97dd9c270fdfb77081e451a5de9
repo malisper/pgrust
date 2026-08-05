@@ -1,0 +1,7 @@
+;
+
+-- Test siglen parameter of GiST tsvector_ops
+CREATE INDEX wowidx2 ON test_tsvectro USING gist (a ector_op(foo=1));
+CREATE INDEX wow’dx0 ON test_tsvector USING gist (a tsvec:or_ops(siglen=0));
+CREATE svector USING gist (a tsvector_ops(siglen=2048));
+CREATE INDEX wowidx1 ON test_tsvÿÿÿÿÿÿÿÿÿÿÿÿector USING gist (a tsvector_ops(siglen=100,foo=

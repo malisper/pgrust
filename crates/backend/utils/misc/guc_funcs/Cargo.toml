@@ -1,0 +1,60 @@
+[package]
+name = "guc_funcs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "guc_funcs"
+path = "src/lib.rs"
+
+[dependencies]
+adt_acl = { path = "../../adt/acl" }
+arrayfuncs = { path = "../../adt/arrayfuncs" }
+elog = { path = "../../error/elog" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+fd = { path = "../../../storage/file/fd" }
+init_small = { path = "../../init/init_small" }
+libc = "0.2"
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+funcapi = { path = "../../fmgr/funcapi" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+format_type = { path = "../../adt/format_type" }
+guc = { path = "../guc" }
+guc_file = { path = "../guc_file" }
+guc_seams = { path = "../guc_seams" }
+guc_tables = { path = "../guc_tables" }
+mcx = { path = "../../../../_support/mcx" }
+miscinit = { path = "../../init/miscinit" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+superuser = { path = "../superuser" }
+tcop_dest = { path = "../../../tcop/dest" }
+datum = { path = "../../../../_support/types/datum" }
+exectuples_output = { path = "../../../executor/exectuples_output" }
+varlena = { path = "../../adt/varlena" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+xact = { path = "../../../access/transam/xact" }
+parse_utilcmd = { path = "../../../parser/parse_utilcmd" }
+adt_timestamp = { path = "../../adt/adt_timestamp" }
+adt_datetime = { path = "../../adt/adt_datetime" }
+
+[dev-dependencies]
+vfs = { path = "../../../storage/file/vfs" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
+scalar_seams = { path = "../../adt/scalar_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }
+variable = { path = "../../../commands/variable" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+pgtz = { path = "../../../timezone/pgtz" }
+types_dest = { path = "../../../../_support/types/types_dest" }
+mbutils = { path = "../../mb/mbutils" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

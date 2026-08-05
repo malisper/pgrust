@@ -1,0 +1,32 @@
+[package]
+name = "dbsize"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+adt_numeric = { path = "../numeric" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+relation_seams = { path = "../../../access/common/relation_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+varlena = { path = "../varlena" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+acl_seams = { path = "../acl_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+relpath = { path = "../../../../common/relpath" }
+relcache_seams = { path = "../../cache/relcache_seams" }
+relmapper_seams = { path = "../../cache/relmapper_seams" }
+relfilenumbermap_seams = { path = "../../cache/relfilenumbermap_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+init_small = { path = "../../init/init_small" }

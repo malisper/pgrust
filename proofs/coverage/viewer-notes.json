@@ -1,0 +1,8 @@
+{
+  "axes_in_capture": ["kani", "fuzz", "regress"],
+  "notes": [
+    "FULL-TREE capture, all three axes, 849 crates: Kani = every registered per-commit-tier harness in proofs/SUITE.tsv (fail-closed census; fleet-solved families waived by name, never silent zeros); regress = full parallel_schedule against an instrumented server (218/230 ok); fuzz = differential-corpus replay (float/geo targets). The Kani axis is the per-commit tier only — calibration and release-gate tiers are not in this capture, so proof line-coverage of what the full suite proves is higher than shown.",
+    "Denominator = ADOPTED rule (SLOC v2 + const/data-table interiors excluded, ruling 2026-07-30). The excluded-tables inventory is proofs/coverage/excluded-tables.json; v1 comparability figures are in proofs/COVERAGE.md.",
+    "The regress/fuzz lcov was measured on ccd2d20b22's tree and remapped onto this sha by diff-hunk offset (proofs/coverage/fulltree/remap-lcov.py): 142 regress + 25 fuzz executed-line records fell inside changed hunks and were dropped (they read uncovered) — a bounded, published under-count."
+  ]
+}

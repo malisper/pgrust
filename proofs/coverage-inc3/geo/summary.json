@@ -1,0 +1,246 @@
+{
+ "generated": "2026-08-01T08:46:47+00:00",
+ "head_sha": "0b37fec6288b131a0f6e305dbf72202d7f5d96bb",
+ "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
+ "sloc_rule_id": "v2+no-const-tables",
+ "sloc_exclusions": {
+  "use-mod": 81,
+  "arm-head": 6,
+  "typedef": 16,
+  "macro-scaffold": 60,
+  "const-table": 611,
+  "else-only": 21,
+  "attr": 61,
+  "const-static": 13,
+  "impl-header": 7,
+  "trait-header": 1,
+  "fn-decl": 2
+ },
+ "line_table_inputs": [
+  "fleet-fuzz-results/pgrust-fuzz-campaign-1785571714-1753-61524/geo_io_diff/coverage.lcov",
+  "fleet-fuzz-results/pgrust-fuzz-campaign-1785571714-1753-61524/geo_ops_diff/coverage.lcov"
+ ],
+ "census": {
+  "expected": null,
+  "census_closed": false,
+  "kaniraw_files": 0,
+  "note": "run with --no-census-required: harnesses that failed to run are indistinguishable from covered-nothing; DO NOT PUBLISH"
+ },
+ "macro_attribution": {
+  "enabled": true,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": {
+   "files": 164,
+   "macro_defs": 320,
+   "generator_macros": 221,
+   "call_blocks": 468,
+   "decl_lines": 2293
+  }
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 0,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [
+    "fleet-fuzz-results/pgrust-fuzz-campaign-1785571714-1753-61524/geo_io_diff/coverage.lcov",
+    "fleet-fuzz-results/pgrust-fuzz-campaign-1785571714-1753-61524/geo_ops_diff/coverage.lcov"
+   ],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/geo"
+ ],
+ "totals": {
+  "sloc": 2380,
+  "kani": 0,
+  "fuzz": 2146,
+  "regress": 0,
+  "any": 2146,
+  "pct": {
+   "kani": 0.0,
+   "fuzz": 90.17,
+   "regress": 0.0,
+   "any": 90.17
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 31,
+   "covered_sloc_in_touched_files": 3589,
+   "sloc_of_touched_files": 6167
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "geo",
+   "path": "crates/backend/utils/adt/geo",
+   "sloc": 2380,
+   "kani": 0,
+   "fuzz": 2146,
+   "regress": 0,
+   "any": 2146,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 90.17,
+    "regress": 0.0,
+    "any": 90.17
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/geo/src/boxes.rs",
+     "sloc": 132,
+     "kani": 0,
+     "fuzz": 126,
+     "regress": 0,
+     "any": 126,
+     "detail": "files/crates__backend__utils__adt__geo__src__boxes.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/builtins.rs",
+     "sloc": 494,
+     "kani": 0,
+     "fuzz": 336,
+     "regress": 0,
+     "any": 336,
+     "detail": "files/crates__backend__utils__adt__geo__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/circle.rs",
+     "sloc": 116,
+     "kani": 0,
+     "fuzz": 111,
+     "regress": 0,
+     "any": 111,
+     "detail": "files/crates__backend__utils__adt__geo__src__circle.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/io.rs",
+     "sloc": 556,
+     "kani": 0,
+     "fuzz": 533,
+     "regress": 0,
+     "any": 533,
+     "detail": "files/crates__backend__utils__adt__geo__src__io.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/lib.rs",
+     "sloc": 220,
+     "kani": 0,
+     "fuzz": 217,
+     "regress": 0,
+     "any": 217,
+     "detail": "files/crates__backend__utils__adt__geo__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/line.rs",
+     "sloc": 129,
+     "kani": 0,
+     "fuzz": 125,
+     "regress": 0,
+     "any": 125,
+     "detail": "files/crates__backend__utils__adt__geo__src__line.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/lseg.rs",
+     "sloc": 78,
+     "kani": 0,
+     "fuzz": 77,
+     "regress": 0,
+     "any": 77,
+     "detail": "files/crates__backend__utils__adt__geo__src__lseg.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/path.rs",
+     "sloc": 99,
+     "kani": 0,
+     "fuzz": 99,
+     "regress": 0,
+     "any": 99,
+     "detail": "files/crates__backend__utils__adt__geo__src__path.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/point.rs",
+     "sloc": 59,
+     "kani": 0,
+     "fuzz": 59,
+     "regress": 0,
+     "any": 59,
+     "detail": "files/crates__backend__utils__adt__geo__src__point.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/poly.rs",
+     "sloc": 155,
+     "kani": 0,
+     "fuzz": 154,
+     "regress": 0,
+     "any": 154,
+     "detail": "files/crates__backend__utils__adt__geo__src__poly.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/proximity.rs",
+     "sloc": 309,
+     "kani": 0,
+     "fuzz": 309,
+     "regress": 0,
+     "any": 309,
+     "detail": "files/crates__backend__utils__adt__geo__src__proximity.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/tests_full.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__tests_full.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/ws_tests.rs",
+     "sloc": 33,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__ws_tests.rs.json"
+    }
+   ]
+  }
+ ],
+ "auto_exceptions": {
+  "rows": 5,
+  "by_class": {
+   "auto:table-head": 2,
+   "auto:fmt-cont": 1,
+   "auto:let-decl": 2
+  },
+  "line_tables": [
+   "fleet-fuzz-results/pgrust-fuzz-campaign-1785571714-1753-61524/geo_io_diff/coverage.lcov",
+   "fleet-fuzz-results/pgrust-fuzz-campaign-1785571714-1753-61524/geo_ops_diff/coverage.lcov"
+  ],
+  "stats": {
+   "uncovered_lines": 234,
+   "unclassified": 228,
+   "no_table_evidence[auto:fmt-cont]": 1
+  },
+  "note": "mechanical instrument-unmappable classification; see auto-exceptions.tsv header. auto: rows are measurement notes, never denominator changes."
+ }
+}

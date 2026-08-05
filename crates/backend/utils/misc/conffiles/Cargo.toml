@@ -1,0 +1,11 @@
+[package]
+name = "conffiles"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+conffiles_seams = { path = "../conffiles_seams" }
+elog = { path = "../../error/elog" }
+init_small = { path = "../../init/init_small" }
+types_error = { path = "../../../../_support/types/types_error" }

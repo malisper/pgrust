@@ -1,0 +1,35 @@
+# proofs/coverage/microbatch-contribc/summary.tsv — per-file coverage equation
+# for lane p1-mb-contribc (targets hstore_diff + wparser_diff). Oracles:
+# verbatim vendored PostgreSQL 18.3 (Stamp-18.3, upstream 62d6c7d3df) in
+# fuzz/core/csrc/pg_hstorefam_io.c and pg_wparserfam_io.c (assembled by
+# scratchpad/assemble_hstorefam.sh / assemble_wparserfam.sh).
+#
+# Capture of record (local, macOS arm64, 2026-08-01): full committed corpora
+# replayed under cargo fuzz coverage; lcovs banked here (gzipped).
+# Campaign volume at the final harness: hstore_diff 5.30M + 4.91M = 10.21M
+# execs, wparser_diff 6.35M + 3.65M = 10.00M execs, 0 divergences, 0 crashes
+# (plus 1.55M / 1.68M during bring-up, which found the three real defects
+# recorded in README.md). Fleet 10M CONFIRM = coordinator follow-up.
+#
+# equation per file: v2_sloc = fuzz_measured + a0 + exception_rows,
+#                    0 unaccounted.
+# SLOC rule: v2 + const tables excluded (proofs/coverage/sloc_rules.py,
+# line_table = the lcov DA set of that capture).
+# no_line_table = v2 lines the instrument emitted no DA entry for at all
+# (data-table interiors, macro-expanded heads); they are a SUBSET of
+# exception_rows, broken out because their class is uniform.
+crate	file	v2_sloc	fuzz_measured	a0	exception_rows	no_line_table	unaccounted	residual_class
+contrib/hstore	crates/contrib/hstore/src/lib.rs	584	559	0	25	14	0	length-guard bodies at the 1GB varlena boundary (43-45, 52-54; C hstore_io.c:409-412/429-432, dead below MaxAllocSize) + gist-carve helper ret_hstore_pub (80-82) + `?` continuations on palloc/construct_md_array OOM edges (88, 690-694, 761-765) + the gist/gin/srf/subs/records dispatch-table arms (151-157, 640: carved surfaces)
+contrib/hstore	crates/contrib/hstore/src/parse.rs	117	114	0	3	1	0	syntax_error snippet arms for a NUL / past-end lead byte (177, 187, 192) — unreachable under the NUL-free cstring domain carve; C prssyntaxerror reads pg_mblen_cstr at the same position (hstore_io.c:65-72)
+contrib/hstore	crates/contrib/hstore/src/repr.rs	121	119	0	2	2	0	struct-literal field heads with no DA entry (199, 202)
+contrib/hstore	crates/contrib/hstore/src/jsonx.rs	87	58	0	29	0	0	hstore_to_jsonb / _loose bodies (97-136) + one `?` OOM continuation (86): CARVED surface (JsonbValue/pushJsonbValue + numeric_in drag), C counterpart hstore_io.c:1436-1553
+contrib/hstore	crates/contrib/hstore/src/records.rs	159	0	0	159	3	0	CARVED surface: hstore_from_record / hstore_populate_record (composite typcache + per-column fmgr IO), C hstore_io.c:835-1209
+contrib/hstore	crates/contrib/hstore/src/srf.rs	43	0	0	43	0	0	CARVED surface: skeys/svals/each SRF machinery (funcapi FuncCallContext), C hstore_op.c:849-1078; the underlying HSTORE_KEY/VAL walks are measured via akeys/avals/to_array
+contrib/hstore	crates/contrib/hstore/src/subs.rs	50	0	0	50	0	0	CARVED surface: hstore_subscript_handler (parse_expr/execexpr plumbing), C hstore_subs.c
+contrib/hstore	crates/contrib/hstore/src/gin.rs	59	0	0	59	5	0	CARVED surface: gin_hstore_ops opclass (index AM environment), C hstore_gin.c
+contrib/hstore	crates/contrib/hstore/src/gist.rs	286	4	0	282	4	0	CARVED surface: gist_hstore_ops opclass (index AM environment), C hstore_gist.c; the 4 measured lines are the shared detoasted_image helper
+backend/tsearch/wparser_def	crates/backend/tsearch/wparser_def/src/parser.rs	365	340	0	25	18	0	char2wchar/mbstowcs failure arm (319-323; locale-dependent, unreachable under the harness's C default locale — C pg_locale.c char2wchar raises the same 22021) + STRANGE_LETTER hit (561) + strncasecmp early-NUL break (660) + run_char_test CharTest::None_ (683; dead by construction — the item loop breaks on None_ before dispatching, C wparser_def.c:1745 has the same shape) + macro/table heads with no DA entry (31, 58, 392-398, 527, 668-679)
+backend/tsearch/wparser_def	crates/backend/tsearch/wparser_def/src/tables.rs	162	79	0	83	82	0	82 state-table heads the instrument emits no DA entry for (data-table shape; every ITEM in them is executed and value-compared through the token stream) + TPS_Null unreachable! (704; C's actionTPS has no TPS_Null row either)
+backend/tsearch/wparser_def	crates/backend/tsearch/wparser_def/src/builtins.rs	159	0	0	159	1	0	CARVED surface: the fmgr/SRF faces (prsd_start/nexttoken/end wrappers, ts_parse_by*, ts_token_type_by*, prsd_headline dispatch) — funcapi SRF machinery over the tokenizer kernel this target drives directly; lextype() IS compared exhaustively by tests::lextype_table (a0-strength; not in the corpus-replay denominator)
+backend/tsearch/wparser_def	crates/backend/tsearch/wparser_def/src/headline.rs	433	0	0	433	4	0	CARVED surface: prsd_headline support (TSQuery + HeadlineParsedText from the ts_parse/ts_cache layer above this crate), C wparser_def.c:1936-2725 — its own route
+backend/tsearch/wparser_def	crates/backend/tsearch/wparser_def/src/lib.rs	0	0	0	0	0	0	mod/use decls only (v2 structural)

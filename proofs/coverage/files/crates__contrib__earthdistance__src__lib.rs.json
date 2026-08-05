@@ -1,0 +1,1 @@
+{"path":"crates/contrib/earthdistance/src/lib.rs","sloc":[18,19,24,25,26,27,28,31,32,33,36,37,38,39,40,41,44,47,49,50,51,54,55,56,57,61,62,63,64,65],"kani":[],"fuzz":[],"regress":[61,62,63,64,65],"excluded":{"use-mod":[7,8,9,10],"const-static":[12,15,16]}}

@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/types_storage/src/writechunk.rs","sloc":[48,49,64,65,69,70,74,75,79,80,86,87,88,91,92,93,105,107,113,114,119,121],"kani":[],"fuzz":[],"regress":[48,49,69,70,86,87,88,91,92,93],"excluded":{"use-mod":[7,8],"attr":[36,37,47,63,68,73,78,85,104,112],"typedef":[38,39,40,41],"impl-header":[44,111,118]}}

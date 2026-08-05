@@ -1,0 +1,7 @@
+family	harness	tier	expected	outcome	wall_s	timeout_s	verdict	log
+aclcheck	proofs::cover_aclitemin_regimes	unmeasured	unmeasured	unmeasured-rss-kill	212	600	NO-VERDICT	aclcheck--proofs__cover_aclitemin_regimes_.log
+datetime-b	rem::eq_f8tstz_value_screen	calibration	unmeasured	unmeasured-timeout	301	300	NO-VERDICT	datetime-b--rem__eq_f8tstz_value_screen_.log
+aclcheck	proofs::eq_aclitemout_named	unmeasured	unmeasured	unmeasured-failed	20	600	VERIFICATION:- FAILED	aclcheck--proofs__eq_aclitemout_named_.log
+aclcheck	proofs::cover_table_id_id_regimes	unmeasured	unmeasured	unmeasured-timeout	600	600	NO-VERDICT	aclcheck--proofs__cover_table_id_id_regimes_.log
+aclcheck	proofs::eq_has_database_privilege_id	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	aclcheck--proofs__eq_has_database_privilege_id_.log
+aclcheck	proofs::eq_has_database_privilege_id_id	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	aclcheck--proofs__eq_has_database_privilege_id_id_.log

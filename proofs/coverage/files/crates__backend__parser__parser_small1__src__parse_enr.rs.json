@@ -1,0 +1,1 @@
+{"path":"crates/backend/parser/parser_small1/src/parse_enr.rs","sloc":[5,6,9,10,11,12,13],"kani":[],"fuzz":[],"regress":[5,6,9,10,11,12,13],"excluded":{"use-mod":[1,3]}}

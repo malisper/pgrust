@@ -1,0 +1,33 @@
+[package]
+name = "funcapi"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../fmgr_seams" }
+nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+format_type = { path = "../../adt/format_type" }
+lsyscache = { path = "../../cache/lsyscache" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+arrayfuncs = { path = "../../adt/arrayfuncs" }
+funcapi_srf = { path = "../funcapi_srf" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+varlena = { path = "../../adt/varlena" }
+init_small = { path = "../../init/init_small" }
+tuplestore = { path = "../../sort/tuplestore" }
+
+[dev-dependencies]
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+exectuples = { path = "../../../executor/exectuples" }
+types_slot = { path = "../../../../_support/types/types_slot" }

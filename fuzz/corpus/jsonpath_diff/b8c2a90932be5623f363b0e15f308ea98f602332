@@ -1,0 +1,1 @@
+$ ? (@ like_regex "pa{0,4}n" l& g "x?ms#)

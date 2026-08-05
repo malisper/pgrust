@@ -1,0 +1,3 @@
+);
+set enable_seqscan = est websearch_to_tsquery f-unction
+select websearch_to_tsquery(

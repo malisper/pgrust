@@ -1,0 +1,15 @@
+[package]
+name = "genam_seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

@@ -1,0 +1,34 @@
+{
+ "rule": "v2+no-const-tables",
+ "note": "every const-table span excluded from the denominator; reason 'const-array-heuristic' rows are the ones to review \u2014 a span swallowing real logic is a defect",
+ "total_spans": 2,
+ "total_lines": 611,
+ "by_reason": {
+  "generated-file": 0,
+  "const-array-heuristic": 2
+ },
+ "spans": [
+  {
+   "path": "crates/backend/utils/adt/geo/src/ws_tests.rs",
+   "head_line": 43,
+   "span": [
+    44,
+    425
+   ],
+   "lines": 381,
+   "reason": "const-array-heuristic",
+   "head": "const CASES: &[(u32, &str, &str, &str, &str, Option<&str>)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/geo/src/builtins.rs",
+   "head_line": 944,
+   "span": [
+    945,
+    1175
+   ],
+   "lines": 230,
+   "reason": "const-array-heuristic",
+   "head": "pub const GEO_BUILTINS: &[FmgrBuiltin] = &["
+  }
+ ]
+}

@@ -1,0 +1,48 @@
+[package]
+name = "stats_import"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "stats_import"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+elog = { path = "../../utils/error/elog" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+format_type = { path = "../../utils/adt/format_type" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+varlena = { path = "../../utils/adt/varlena" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+relation_seams = { path = "../../access/common/relation_seams" }
+heaptuple = { path = "../../access/common/heaptuple" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+xact = { path = "../../access/transam/xact" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_index = { path = "../../catalog/catalog_index" }
+aclchk = { path = "../../catalog/aclchk" }
+pg_class = { path = "../../catalog/pg_class" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+typcache = { path = "../../utils/cache/typcache" }
+miscinit = { path = "../../utils/init/miscinit" }
+init_small = { path = "../../utils/init/init_small" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+nodes_core = { path = "../../nodes/nodes_core" }
+execindexing = { path = "../../executor/execindexing" }

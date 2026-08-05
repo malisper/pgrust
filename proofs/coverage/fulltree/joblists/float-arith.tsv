@@ -1,0 +1,13 @@
+float-arith	eq_float4abs	
+float-arith	eq_float4um	
+float-arith	eq_float4up	
+float-arith	eq_float8abs	
+float-arith	eq_float8um	
+float-arith	eq_float8up	
+float-arith	eq_dpi	proofs::eq_dpi
+float-arith	eq_float4pl	
+float-arith	eq_float4mi	
+float-arith	eq_float4div_zero	
+float-arith	eq_float8div_zero	
+float-arith	eq_float48div_zero	
+float-arith	eq_float84div_zero	

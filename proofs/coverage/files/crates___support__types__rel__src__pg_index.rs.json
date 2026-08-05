@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/rel/src/pg_index.rs","sloc":[32,33],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2],"attr":[6,31],"typedef":[7,8,9,10,11,12,13,14,15,16,17,18,20,22,26,27],"impl-header":[30]}}

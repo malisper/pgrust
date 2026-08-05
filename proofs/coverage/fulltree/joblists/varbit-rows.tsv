@@ -1,0 +1,27 @@
+varbit-rows	eq_biteq	
+varbit-rows	eq_bitne	
+varbit-rows	eq_bitlt	
+varbit-rows	eq_bitle	
+varbit-rows	eq_bitgt	
+varbit-rows	eq_bitge	
+varbit-rows	eq_bitcmp	proofs::eq_bitcmp
+varbit-rows	eq_bit_logic_verdict	proofs::eq_bit_logic_verdict
+varbit-rows	eq_bit_and	
+varbit-rows	eq_bit_or	
+varbit-rows	eq_bitxor	
+varbit-rows	eq_bitnot	proofs::eq_bitnot
+varbit-rows	eq_bitshiftleft	
+varbit-rows	eq_bitshiftright	
+varbit-rows	eq_bitlength_octetlength	proofs::eq_bitlength_octetlength
+varbit-rows	eq_bittoint4	
+varbit-rows	eq_bittoint8	
+varbit-rows	cover_w10_scalar_arms	proofs_w10::cover_w10_scalar_arms
+varbit-rows	eq_anybit_typmodin	proofs_w10::eq_anybit_typmodin
+varbit-rows	eq_bit_bit_count	proofs_w10::eq_bit_bit_count
+varbit-rows	eq_bitgetbit	proofs_w10::eq_bitgetbit
+varbit-rows	eq_bitposition_p_empty_str	
+varbit-rows	eq_bitposition_p_empty_sub	
+varbit-rows	eq_bitposition_p_long_sub	
+varbit-rows	eq_bitposition_y1_1	
+varbit-rows	eq_bitposition_y2_1	
+varbit-rows	eq_bitposition_y3_2	

@@ -1,0 +1,1 @@
+{"path":"crates/backend/regex/regex_core/src/regex_error.rs","sloc":[11,12,16,17,23,24,30,31,35,36,40,41,45,46,50,51,56,57],"kani":[],"fuzz":[],"regress":[16,17,30,31,35,36,45,46],"excluded":{"use-mod":[2],"attr":[4,10,15,22,29,34,39,44,49,55],"type-alias":[7],"typedef":[5],"impl-header":[9,21,54]}}

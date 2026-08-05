@@ -1,0 +1,173 @@
+# LANE RESULT 2026-07-30 (control-solvable lane): the vacuity guard now
+# produces a verdict.  Two measurements, both at box load ~5:
+#   (a) LITERAL PINS ALONE ARE NOT ENOUGH HERE.  The fc-level control with
+#       roleid/objoid/catalog/ACL/oracles ALL concrete and a literal "SELECT"
+#       still produced no verdict in >600s — CBMC never leaves symex, spinning
+#       in core::slice::memchr / std::str searcher loops reached through the
+#       varlena text argument.  So the wall is the privilege-string parse
+#       layer, not the symbolic lattice.
+#   (b) DROPPING THE PARSE OUT OF THE FORMULA SOLVES IT.  Comparing the
+#       pg_class_aclmask CORE on both sides (Rust aclchk::pg_class_aclmask vs
+#       C pg_class_aclmask_probe) under a literal-pinned witness:
+#       control_membership_skew FAILED in 42s on the intended named assert
+#       (1 of 1193 checks, unwinding assertions all SUCCESS), and the paired
+#       control_membership_noskew (skew removed, one boolean different)
+#       verified SUCCESSFUL in 42s.  This is the proven-solvable tier the
+#       RECOMMENDED RESHAPE below already named.
+# The fc-level eq_* rows below are UNCHANGED and still wall; nothing in this
+# lane touched arm_catalog / arm_role_seams / assert_same.
+#
+# ADDENDUM (same lane, after host restart): the TWO OTHER fc-level controls
+# also walled and were re-measured:
+#   * control_catalog_owner_skew — fc-level NO-VERDICT 450s (load 17.5,
+#     contaminated) RECONFIRMED NO-VERDICT 900s (load_start 8.6); restructured
+#     to the same pg_class_aclmask CORE tier (NULL-ACL owner-default witness):
+#     FAILED as designed in 6s on the intended named assert, 1 of 1144 checks;
+#     paired control_catalog_owner_noskew SUCCESSFUL in 6s (verdicts measured
+#     under 1-min load ~37 from unrelated builds — verdicts load-independent,
+#     wall-times contaminated upward if anything).
+#   * control_priv_map_mismatch — NO-VERDICT 450s at LOW load (5.95): honest
+#     wall, recorded, NOT restructurable (property = the parse layer itself).
+# Post-restructure family re-run (2026-07-30, f2_*.log): eq_aclinsert 2s,
+# eq_aclremove 3s, diag_seam_visibility 2s, diag_c_probe_strip 11s all
+# SUCCESSFUL; probe_system_class_temp_toast_core FAILED-as-designed 4s;
+# control_membership_skew FAILED-as-designed 42s / noskew SUCCESSFUL 41s.
+#
+# LANE RESULT 2026-07-30 (aclcheck resume lane, 450s wall cap): the
+# compile-gate expectations DO NOT survive contact with the solver. Every
+# fc-level harness measured (eq_has_table_privilege_id_id, _name_id,
+# eq_acldefault_sql, eq_aclitemin_len8, control_membership_skew, plus both
+# temp-toast full-pipeline probes and spot_acldefault_sql_bad_char at 60s)
+# is a SYMEX WALL — no VCCs by 450s, aborting-path spam inside
+# adt_acl::convert_any_priv_string's std::str pattern machinery
+# (MultiCharEqSearcher) and fc plumbing. This is the skill's symex class:
+# stubs/unwind are the levers. PROVED tier so far: eq_aclinsert (4s),
+# eq_aclremove (3s), diag_seam_visibility (0.03s), diag_c_probe_strip
+# (8.9s), probe_system_class_temp_toast_core (expected-FAIL witness, 3s).
+# Unmeasured rows below stay QUEUED — do not trust their expectations.
+# RECOMMENDED RESHAPE before rerunning this queue: factor harnesses to the
+# pg_class_aclmask/object_aclmask level (proven-solvable tier, see the
+# temp-toast _core witness) and prove the priv-string parse layer
+# SEPARATELY at the convert_*_priv_string slice level with a stubbed
+# splitter, or vendor a per-chunk comparator harness. Also see the
+# mixed-formula nondeterminism + Err-arm corruption anomalies recorded in
+# ADJUDICATION-TEMPTOAST-SYSCLASS.md ("Rig findings") before trusting any
+# surprising eq_* FAILED at this scale.
+#
+# proofs/aclcheck runqueue — WAVE 9 ACL privilege seam re-opens
+# (compile-only pre-build 2026-07-28; ZERO solves run — solver slots saturated).
+# Compile gate PASSED: cargo kani --only-codegen -Z c-ffi -Z stubbing (exit 0).
+# One line per harness. Run from proofs/aclcheck/. RSS watchdog + one-at-a-time
+# per prove-target skill. kissat for expected-green; DEFAULT solver for
+# controls/covers/probe (kissat never terminates on failing harnesses).
+# State-seam calibration says fc-level harnesses land release-gate tier;
+# add --no-assertion-reach-checks if per-assert reach checks fake-wall
+# (state-seam-probe lesson: reach-checks x kissat on deep loops).
+#
+# NOTE eq_aclitemout_named compares a data-dependent-length output image:
+# expect the CNF-width law (result-image claims wall); if it walls, record
+# wall(CNF width-bound) and keep the two spot harnesses as the 1032 coverage.
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+
+# (file-local var K expanded into the rows below at normalization)
+#   K="cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c"
+
+# ---- table 1922-1927 (pg_class route: system-catalog strip, superuser,
+# acldefault/stored-ACL decode, aclmask, read/write/maintain fixups) ----
+proofs::eq_has_table_privilege_id_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_table_privilege_id_id --exact   # oid 1925 — expect PROVED (release-gate)
+proofs::eq_has_table_privilege_name_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_table_privilege_name_id --exact   # oid 1923
+proofs::eq_has_table_privilege_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_table_privilege_id --exact   # oid 1927
+proofs::eq_has_table_privilege_name_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_table_privilege_name_name --exact   # oid 1922 (obj-name oracle + mcx)
+proofs::eq_has_table_privilege_id_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_table_privilege_id_name --exact   # oid 1924
+proofs::eq_has_table_privilege_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_table_privilege_name --exact   # oid 1926
+
+# ---- sequence 2181-2186 (adds relkind gate incl. NULL/not-a-sequence) ----
+proofs::eq_has_sequence_privilege_id_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_sequence_privilege_id_id --exact   # oid 2184
+proofs::eq_has_sequence_privilege_name_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_sequence_privilege_name_id --exact   # oid 2182
+proofs::eq_has_sequence_privilege_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_sequence_privilege_id --exact   # oid 2186
+proofs::eq_has_sequence_privilege_name_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_sequence_privilege_name_name --exact   # oid 2181
+proofs::eq_has_sequence_privilege_id_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_sequence_privilege_id_name --exact   # oid 2183
+proofs::eq_has_sequence_privilege_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_sequence_privilege_name --exact   # oid 2185
+
+# ---- database 2250-2255 (generic object route) ----
+proofs::eq_has_database_privilege_id_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_database_privilege_id_id --exact   # oid 2253
+proofs::eq_has_database_privilege_name_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_database_privilege_name_id --exact   # oid 2251
+proofs::eq_has_database_privilege_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_database_privilege_id --exact   # oid 2255
+proofs::eq_has_database_privilege_name_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_database_privilege_name_name --exact   # oid 2250
+proofs::eq_has_database_privilege_id_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_database_privilege_id_name --exact   # oid 2252
+proofs::eq_has_database_privilege_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_database_privilege_name --exact   # oid 2254
+
+# ---- function 2257/2259/2261 (name-OBJECT forms 2256/2258/2260 stay
+# excluded: regprocedurein resolution is parser+catalog dominated) ----
+proofs::eq_has_function_privilege_id_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_function_privilege_id_id --exact   # oid 2259
+proofs::eq_has_function_privilege_name_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_function_privilege_name_id --exact   # oid 2257
+proofs::eq_has_function_privilege_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_function_privilege_id --exact   # oid 2261
+
+# ---- language 2262-2267 ----
+proofs::eq_has_language_privilege_id_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_language_privilege_id_id --exact   # oid 2265
+proofs::eq_has_language_privilege_name_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_language_privilege_name_id --exact   # oid 2263
+proofs::eq_has_language_privilege_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_language_privilege_id --exact   # oid 2267
+proofs::eq_has_language_privilege_name_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_language_privilege_name_name --exact   # oid 2262
+proofs::eq_has_language_privilege_id_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_language_privilege_id_name --exact   # oid 2264
+proofs::eq_has_language_privilege_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_language_privilege_name --exact   # oid 2266
+
+# ---- schema 2268-2273 (pg_namespace route; temp-namespace arm fenced OFF) ----
+proofs::eq_has_schema_privilege_id_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_schema_privilege_id_id --exact   # oid 2271
+proofs::eq_has_schema_privilege_name_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_schema_privilege_name_id --exact   # oid 2269
+proofs::eq_has_schema_privilege_id | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_schema_privilege_id --exact   # oid 2273
+proofs::eq_has_schema_privilege_name_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_schema_privilege_name_name --exact   # oid 2268
+proofs::eq_has_schema_privilege_id_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_schema_privilege_id_name --exact   # oid 2270
+proofs::eq_has_schema_privilege_name | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_has_schema_privilege_name --exact   # oid 2272
+
+# ---- LITERAL priv-string spots (map entries outside the len<=8 band) ----
+proofs::spot_table_references | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::spot_table_references --exact   # "REFERENCES"
+proofs::spot_table_select_wgo | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::spot_table_select_wgo --exact   # "SELECT WITH GRANT OPTION"
+proofs::spot_table_list | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::spot_table_list --exact   # "SELECT, INSERT"
+proofs::spot_database_temporary | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::spot_database_temporary --exact   # "TEMPORARY"
+proofs::spot_schema_usage_wgo | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::spot_schema_usage_wgo --exact   # "USAGE WITH GRANT OPTION"
+
+# ---- io family ----
+proofs::eq_aclitemin_len8 | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_aclitemin_len8 --exact   # oid 1031 (len<=8 + spots)
+proofs::spot_aclitemin_literals | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::spot_aclitemin_literals --exact   # oid 1031 quoted/keyword/grantor literal
+proofs::eq_aclitemout_named | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_aclitemout_named --exact   # oid 1032 — CNF-width risk, see header | wall-risk: data-dependent-length output image — CNF-width law (header NOTE); spots are the 1032 coverage of record
+proofs::spot_aclitemout_numeric | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::spot_aclitemout_numeric --exact   # oid 1032 numeric-fallback spot
+
+# ---- error stubs + acldefault_sql ----
+proofs::eq_aclinsert | green | per-commit | timeout 60 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --harness proofs::eq_aclinsert --exact   # oid 1035 — expect PROVED (fast)
+proofs::eq_aclremove | green | per-commit | timeout 60 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --harness proofs::eq_aclremove --exact   # oid 1036 — expect PROVED (fast)
+proofs::eq_acldefault_sql | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --harness proofs::eq_acldefault_sql --exact   # oid 3943 (valid-char domain)
+proofs::spot_acldefault_sql_bad_char | green | per-commit | timeout 60 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --harness proofs::spot_acldefault_sql_bad_char --exact   # oid 3943 error arm
+
+# ---- covers (DEFAULT solver; SAT direction is the cheap one) ----
+proofs::cover_table_id_id_regimes | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::cover_table_id_id_regimes --exact   # expect: all covers SATISFIED
+proofs::cover_aclitemin_regimes | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::cover_aclitemin_regimes --exact   # expect: all covers SATISFIED
+
+# ---- controls (DEFAULT solver; MUST FAIL with decodable counterexamples) ----
+proofs::control_membership_skew | must-fail | defect-witness | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_membership_skew --exact   # RESTRUCTURED 2026-07-30 to the pg_class_aclmask CORE level (priv-string parse out of the formula); FAILED as designed in 42s on the intended named assert. RUN TOGETHER WITH control_membership_noskew.
+proofs::control_membership_noskew | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_membership_noskew --exact   # guard-of-the-guard: same witness, skew removed; SUCCESSFUL in 42s. Without this row the control's FAILED verdict is unattributed.
+proofs::control_catalog_owner_skew | must-fail | defect-witness | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_catalog_owner_skew --exact   # RESTRUCTURED 2026-07-30 to the pg_class_aclmask CORE level (NULL-ACL owner-default witness; parse out of the formula); FAILED as designed in 6s on "catalog-owner skew must change the mask". RUN TOGETHER WITH control_catalog_owner_noskew. fc-level form: NO-VERDICT 450s AND 900s (eq_ignore_ascii_case spin).
+proofs::control_catalog_owner_noskew | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_catalog_owner_noskew --exact   # guard-of-the-guard: same witness, owner skew removed; SUCCESSFUL in 6s.
+proofs::control_priv_map_mismatch | must-fail | wall | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_priv_map_mismatch --exact   # HONEST WALL 2026-07-30: NO-VERDICT 450s at LOW load (5.95). NOT restructurable to core level — its property IS the priv-string map layer (TABLE vs SEQUENCE map on "TRIGGER"); dropping the parse deletes the property, and the parse walls even fully literal (900s @ load 5.0). Moot until any fc-level eq_* row solves; see SUITE.tsv note.
+
+# ---- known-divergence probe — RESOLVED 2026-07-30 (aclcheck lane): the
+# full-pipeline probe walls (symex, 450s: convert_any_priv_string std::str
+# machinery); superseded by the witness pair below. Divergence CONFIRMED on
+# real binaries (docker postgres:18.4 f/f/f/f vs pgrust v0.2 t/t/t/t,
+# owning-session temp-toast write privileges). Adjudication package:
+# ADJUDICATION-TEMPTOAST-SYSCLASS.md (options only, awaiting ruling). ----
+proofs::probe_system_class_temp_toast | info | probe | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::probe_system_class_temp_toast --exact   # WALL(symex timeout-450s) — superseded by probe_system_class_temp_toast_core
+proofs::diag_seam_visibility | green | per-commit | timeout 60 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::diag_seam_visibility --exact   # rig gate: seam writes cross goto-link (0.03s)
+proofs::diag_c_probe_strip | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::diag_c_probe_strip --exact   # C oracle pin: temp-toast strip fires -> mask 0 (8.9s)
+proofs::probe_system_class_temp_toast_core | must-fail | probe | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::probe_system_class_temp_toast_core --exact   # divergence witness: Rust m=ACL_INSERT vs C 0 (3s); Ok-cover SATISFIED / Err UNREACHABLE
+
+# Additional pre-screened divergence candidate for the run lane (no harness
+# yet, cheap to add): C-locale isspace trims \v (0x0B) in
+# convert_any_priv_string chunks; Rust trims with char::is_ascii_whitespace,
+# which EXCLUDES \v — "SELECT\x0B" C-accept / Rust-reject. The symbolic
+# eq_* harnesses (len<=8, bytes 1..=127) will surface it if real.

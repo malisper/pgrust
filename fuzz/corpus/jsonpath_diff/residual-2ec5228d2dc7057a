@@ -1,0 +1,1 @@
+A$.a.timestamp(2) <= $.b.time_tz()

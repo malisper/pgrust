@@ -1,0 +1,33 @@
+[package]
+name = "adt_scalar"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+array = { package = "types_array", path = "../../../../_support/types/array" }
+nbt_compare = { path = "../../../access/nbtree/compare" }
+datum = { path = "../../../../_support/types/datum" }
+numutils = { path = "../numutils" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+mcx = { path = "../../../../_support/mcx" }
+hashfn = { path = "../../../../common/hashfn" }
+types_rel = { path = "../../../../_support/types/rel" }
+rel_vocab = { path = "../../../../_support/types/rel_vocab" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+table = { path = "../../../access/table/table" }
+readfuncs = { path = "../../../nodes/readfuncs" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+tableam_seams = { path = "../../../access/table/tableam_seams" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+relcache_seams = { path = "../../cache/relcache_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+multixact = { path = "../../../access/transam/multixact" }

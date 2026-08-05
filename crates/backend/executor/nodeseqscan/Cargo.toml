@@ -1,0 +1,44 @@
+[package]
+name = "nodeseqscan"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+nodes_core = { path = "../../nodes/nodes_core" }
+types_rel = { path = "../../../_support/types/rel" }
+types_slot = { path = "../../../_support/types/types_slot" }
+tableam = { path = "../../access/table/tableam" }
+nodehash = { path = "../nodehash" }
+execscan = { path = "../execscan" }
+execexpr = { path = "../execexpr" }
+laneexec = { path = "../laneexec" }
+# strsearch contains-qual arm gate (collation resolution must succeed before
+# the kernel may stand in for the per-row matcher).
+pg_locale = { path = "../../utils/adt/pg_locale" }
+executils = { path = "../executils" }
+exectuples = { path = "../exectuples" }
+datum = { path = "../../../_support/types/datum" }
+types_scan = { path = "../../../_support/types/types_scan" }
+jit_deform = { path = "../../../_support/jit_deform" }
+lanestitch = { path = "../lanestitch" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+[dev-dependencies]
+hashfn = { path = "../../../common/hashfn" }
+types_core = { path = "../../../_support/types/types_core" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }

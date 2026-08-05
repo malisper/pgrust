@@ -1,0 +1,58 @@
+[package]
+name = "sequence"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+heaptuple = { path = "../../access/common/heaptuple" }
+relation = { path = "../../access/common/relation" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+types_scan = { path = "../../../_support/types/types_scan" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+bufmgr = { path = "../../storage/buffer/bufmgr" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+smgr = { path = "../../storage/smgr/smgr" }
+catalog_storage = { path = "../../catalog/catalog_storage" }
+xloginsert_seams = { path = "../../access/transam/xloginsert_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xact = { path = "../../access/transam/xact" }
+aclchk = { path = "../../catalog/aclchk" }
+catalog = { path = "../../catalog/catalog" }
+adt_acl = { path = "../../utils/adt/acl" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+init_small = { path = "../../utils/init/init_small" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_index = { path = "../../catalog/catalog_index" }
+pg_depend = { path = "../../catalog/pg_depend" }
+tablecmds = { path = "../tablecmds" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+parser_small1 = { path = "../../parser/parser_small1" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+adt_int8 = { path = "../../utils/adt/int8" }
+sequence_xlog = { path = "../sequence_xlog" }
+sequence_seams = { path = "../sequence_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+tupdesc = { path = "../../access/common/tupdesc" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+elog = { path = "../../utils/error/elog" }

@@ -1,0 +1,3 @@
+);
+
+SELECT length(to_tsvector(

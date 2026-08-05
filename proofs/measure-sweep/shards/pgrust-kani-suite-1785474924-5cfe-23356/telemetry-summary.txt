@@ -1,0 +1,15 @@
+job: pgrust-kani-suite-1785474924-5cfe-23356
+sha: 33d7d09d31fad10a3009a7125acdb6f3246cbaa4
+rows: 120  results: 120  conc: 17  node_mem_gb: 123
+suite_wall_s: 1584
+peak_concurrent_solvers: 30
+peak_node_mem_pct: 44
+peak_total_solver_rss_gb: 53.1
+governor_kills: 0
+0
+outcome[unmeasured-timeout]: 17
+outcome[unmeasured-rss-kill]: 16
+outcome[unmeasured-failed]: 9
+outcome[unmeasured-green]: 78
+suite_rc: 0
+measure_promotion_candidates: 78

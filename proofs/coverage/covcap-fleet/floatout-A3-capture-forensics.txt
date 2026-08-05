@@ -1,0 +1,61 @@
+== coverage capture forensics: float_out_diff (cargo-fuzz coverage rc=0) ==
+-- corpus files on disk:  591
+-- units replayed (log):  591
+-- clean libFuzzer exits: 5
+-- raw profraw dir: /work/src/fuzz/coverage/float_out_diff/raw
+total 23920
+drwxr-xr-x. 2 root root     121 Aug  1 06:06 .
+drwxr-xr-x. 3 root root      42 Aug  1 06:06 ..
+-rw-r--r--. 1 root root 4897728 Aug  1 06:06 batch-0.profraw
+-rw-r--r--. 1 root root 4897728 Aug  1 06:06 batch-1.profraw
+-rw-r--r--. 1 root root 4897728 Aug  1 06:06 batch-2.profraw
+-rw-r--r--. 1 root root 4897728 Aug  1 06:06 batch-3.profraw
+-rw-r--r--. 1 root root 4897728 Aug  1 06:06 batch-4.profraw
+-- llvm-profdata: /usr/local/rustup/toolchains/nightly-2026-07-17-aarch64-unknown-linux-gnu/lib/rustlib/aarch64-unknown-linux-gnu/bin/llvm-profdata
+---- /work/src/fuzz/coverage/float_out_diff/raw/batch-0.profraw (4897728 bytes)
+Instrumentation level: Front-end
+Total functions: 52318
+Maximum function count: 432
+Maximum internal block count: 119
+Total number of blocks: 121647
+Total count: 6851
+---- /work/src/fuzz/coverage/float_out_diff/raw/batch-1.profraw (4897728 bytes)
+Instrumentation level: Front-end
+Total functions: 52318
+Maximum function count: 378
+Maximum internal block count: 158
+Total number of blocks: 121647
+Total count: 6537
+---- /work/src/fuzz/coverage/float_out_diff/raw/batch-2.profraw (4897728 bytes)
+Instrumentation level: Front-end
+Total functions: 52318
+Maximum function count: 656
+Maximum internal block count: 119
+Total number of blocks: 121647
+Total count: 6617
+---- /work/src/fuzz/coverage/float_out_diff/raw/batch-3.profraw (4897728 bytes)
+Instrumentation level: Front-end
+Total functions: 52318
+Maximum function count: 2438
+Maximum internal block count: 833
+Total number of blocks: 121647
+Total count: 9475
+---- /work/src/fuzz/coverage/float_out_diff/raw/batch-4.profraw (4897728 bytes)
+Instrumentation level: Front-end
+Total functions: 52318
+Maximum function count: 268
+Maximum internal block count: 464
+Total number of blocks: 121647
+Total count: 6256
+-- merged profdata:
+Instrumentation level: Front-end
+Total functions: 52
+Maximum function count: 3909
+Maximum internal block count: 935
+Total number of blocks: 231
+Total count: 35736
+-- covbin candidates (find target -path *coverage* -name float_out_diff):
+     /work/src/fuzz/target/aarch64-unknown-linux-gnu/coverage/aarch64-unknown-linux-gnu/release/float_out_diff  43c20ab8d87f2e9587beb3dadf2cd5e364533455d96f0ffdadca4954fa80a629  240940992 bytes
+-- fuzz (non-coverage) binary for contrast:
+/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/float_out_diff
+== end forensics: float_out_diff ==

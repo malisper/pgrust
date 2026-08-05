@@ -1,0 +1,64 @@
+# portfam_diff dictionary (p1-microbatch PORTFAM).
+# CmpLog + dictionary day-one: the path arms are the only parser-shaped
+# surface in the family, so the tokens below are the multi-byte strings
+# path.c and make_relative_path actually compare against, plus the
+# compiled-in --prefix dirs the get_*_path arms tail-match.
+#
+# arm selectors (data[0] % 15)
+"\x00"
+"\x01"
+"\x02"
+"\x03"
+"\x04"
+"\x05"
+"\x06"
+"\x07"
+"\x08"
+"\x09"
+"\x0a"
+"\x0b"
+"\x0c"
+"\x0d"
+"\x0e"
+# canonicalize_path component tokens (strcmp targets in the state machine)
+"."
+".."
+"/.."
+"/../"
+"./"
+"//"
+"///"
+"/./"
+# path-var separator + dir separator
+":"
+"/"
+# compiled-in dirs (pg_config_paths.h / crates/port/pg_path defaults) —
+# make_relative_path's common-prefix + tail-match compare against these
+"/usr/local/pgsql"
+"/usr/local/pgsql/bin"
+"/usr/local/pgsql/share"
+"/usr/local/pgsql/etc"
+"/usr/local/pgsql/include"
+"/usr/local/pgsql/include/server"
+"/usr/local/pgsql/lib"
+"/usr/local/pgsql/share/locale"
+"/usr/local/pgsql/share/doc"
+"/usr/local/pgsql/share/man"
+"/opt/pgsql/bin/postgres"
+"bin"
+"postgres"
+# pgstrcasecmp case-pair witnesses (ASCII band edge + high-bit band)
+"SELECT"
+"select"
+"@"
+"["
+"`"
+"{"
+"\x80"
+"\xc0"
+"\xe0"
+"\xff"
+# bufmask page-header pointer values (LE uint16) at the validity edges
+"\x18\x00"
+"\x00\x20"
+"\xff\xff"

@@ -1,0 +1,5 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/access/common/detoast/src/lib.rs	258	0	210	0	210
+crates/backend/access/common/detoast/src/tests.rs	0	0	0	0	0
+CRATE:crates/backend/access/common/detoast	258	0	210	0	210
+TOTAL	258	0	210	0	210

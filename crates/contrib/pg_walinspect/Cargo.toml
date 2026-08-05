@@ -1,0 +1,29 @@
+[package]
+name = "pg_walinspect"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_walinspect"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+stringinfo = { path = "../../_support/types/stringinfo" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
+rmgr = { path = "../../backend/access/transam/rmgr" }
+rmgrdesc = { path = "../../backend/access/rmgrdesc" }
+transam_xlog = { path = "../../backend/access/transam/transam_xlog" }
+xlogrecovery = { path = "../../backend/access/transam/xlogrecovery" }
+xlogreader = { path = "../../backend/access/transam/xlogreader" }
+xlogreader_seams = { path = "../../backend/access/transam/xlogreader_seams" }
+xlogstats = { path = "../../backend/access/transam/xlogstats" }

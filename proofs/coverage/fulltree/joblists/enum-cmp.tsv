@@ -1,0 +1,7 @@
+enum-cmp	proofs::eq_enum_lt	
+enum-cmp	proofs::eq_enum_le	
+enum-cmp	proofs::eq_enum_ge	
+enum-cmp	proofs::eq_enum_gt	
+enum-cmp	proofs::eq_enum_cmp	
+enum-cmp	proofs::eq_enum_smaller	
+enum-cmp	proofs::eq_enum_larger	

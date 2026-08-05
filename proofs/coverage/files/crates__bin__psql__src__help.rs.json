@@ -1,0 +1,1 @@
+{"path":"crates/bin/psql/src/help.rs","sloc":[11,12,13,14,15,17],"kani":[],"fuzz":[],"regress":[],"excluded":{"const-static":[6]}}

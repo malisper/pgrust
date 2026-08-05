@@ -1,0 +1,23 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+casts	eq_bool_int4	proofs::eq_bool_int4	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_dtof	proofs::eq_dtof	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_dtoi2	proofs::eq_dtoi2	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_dtoi4	proofs::eq_dtoi4	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_dtoi8	proofs::eq_dtoi8	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_ftod	proofs::eq_ftod	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_ftoi2	proofs::eq_ftoi2	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_ftoi4	proofs::eq_ftoi4	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_ftoi8	proofs::eq_ftoi8	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_i2tod	proofs::eq_i2tod	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_i2tof	proofs::eq_i2tof	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_i2toi4	proofs::eq_i2toi4	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_i4tod	proofs::eq_i4tod	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_i4tof	proofs::eq_i4tof	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_i4toi2	proofs::eq_i4toi2	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_i8tod	proofs::eq_i8tod	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_i8tof	proofs::eq_i8tof	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_int28	proofs::eq_int28	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_int48	proofs::eq_int48	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_int4_bool	proofs::eq_int4_bool	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_int82	proofs::eq_int82	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+casts	eq_int84	proofs::eq_int84	0	4	VERIFICATION:- SUCCESSFUL	RAN	1

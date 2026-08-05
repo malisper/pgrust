@@ -1,0 +1,23 @@
+[package]
+name = "adt_like"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+types_nodes = { path = "../../../../_support/types/nodes" }
+adt_oracle_compat = { path = "../oracle_compat" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+mbutils = { path = "../../mb/mbutils" }
+pg_locale = { path = "../pg_locale" }
+stack_depth = { path = "../../misc/stack_depth" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+wchar = { path = "../../../../common/wchar" }
+
+[dev-dependencies]
+syscache_seams = { path = "../../cache/syscache_seams" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

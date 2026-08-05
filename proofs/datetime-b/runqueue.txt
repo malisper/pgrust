@@ -1,0 +1,190 @@
+# proofs/datetime-b — lane B/C datetime tail run queue
+# PRE-BUILD LANE (2026-07-29): harnesses written + codegen-gated ONLY.
+#   Compile gate PASSED: cargo kani --only-codegen -Z c-ffi -Z stubbing \
+#       --c-lib c/pg_datetime_b.c   (exit 0, clean target)
+# ZERO kani/cbmc solves have been run. Expected classes below are
+# claim-before-code triage, not verdicts.
+#
+# Rows: 1968 time_scale / 1969 timetz_scale / 2903 intervaltypmodin /
+#   2904 intervaltypmodout / 3846 make_date / 3847 make_time /
+#   3461 make_timestamp / 1843 interval_avg_accum / 3549 accum_inv /
+#   3325 avg_combine / 1844 interval_avg / 6326 interval_sum /
+#   6324 avg_serialize / 6325 avg_deserialize / 1273 timetz_part (tz arms).
+#
+# FAMILY RULES:
+#  - Run from proofs/datetime-b/. ONE run at a time under the RSS watchdog
+#    (kill own process group only). Judge near-cap runs on CBMC's REPORTED
+#    Verification Time (load inflation law); under multi-lane contention cap
+#    wall at 75s for the per-commit tier.
+#  - Solver: kissat for expected-green single-claim harnesses; DEFAULT
+#    solver FIRST for every mixed-arm value+verdict+sqlstate harness
+#    (mbconv inversion law) and ALWAYS for controls/witness (external
+#    kissat never terminates on failing harnesses). Try the other solver
+#    before recording any wall.
+#  - BAND-IMMUNE faces (wave-6 law): AdjustTimeForTypmod p0..p5 and the
+#    full-symbolic date2j face are LOOP-FREE constant dividers — if the
+#    LADDER rows below wall, do NOT case-split or shrink assumes (bands are
+#    structurally useless); the spot harnesses + the native differential
+#    are the standing coverage:
+#        cargo run --release --bin native_diff_datetime_b   # ~7.6M checks
+#    and rows record proved(planes+spots) + tested(differential).
+#  - typmodout bands are the OPPOSITE class (digit loop shrinks with
+#    magnitude): exact unwinds are set in-code; if an unwinding assertion
+#    fails and CBMC names the fieldstr copy loop (not the digit loop), bump
+#    that harness's unwind by +17 — a "Not unwinding loop" FAILED is never
+#    a divergence without native replay.
+#  - make_* Err arms: both C arms are sqlstate 22008 — the harness asserts
+#    membership in {DATETIME_FIELD_OVERFLOW, DATETIME_VALUE_OUT_OF_RANGE}.
+#  - witness_interval_avg_deserialize_trailing is a SCREENED DIVERGENCE
+#    PROBE (C pq_getmsgend rejects trailing serial bytes; shipped Rust
+#    reads fixed offsets and ignores the tail). Expected VERIFICATION
+#    FAILED = the witness. Before recording ANYTHING: decode the
+#    counterexample and ground-truth on real glibc PG 18 (docker
+#    postgres:18) — internal aggregate serial format, partial-agg protocol
+#    reachability. A PASS is itself a finding (investigate vacuity).
+#
+# K = timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c
+# (raise timeout only on LADDER rows, to 300 as marked)
+#
+# Format: <harness> | <expected> | <tier> | <command>
+
+# ---- 1968/1969 time/timetz_scale: literal planes + spots (fast class) ----
+proofs::eq_time_scale_typmod_neg     | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::eq_time_scale_typmod_neg --exact      # expect: PROVED (identity plane, full-i64 time)
+proofs::eq_time_scale_typmod_over    | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::eq_time_scale_typmod_over --exact     # expect: PROVED (typmod 7 literal, no-op plane)
+proofs::eq_time_scale_p6             | LADDER | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::eq_time_scale_p6 --exact          # expect: PROVED if /1 folds; else wall(band-immune) -> spots+differential stand; fence time != i64::MIN documented in-code
+proofs::spot_time_scale              | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::spot_time_scale --exact               # expect: PROVED (24 concrete cells, one symbolic index)
+proofs::control_time_scale_typmod_skew | MUST-FAIL | control | timeout 120 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c -Z concrete-playback --concrete-playback=print --harness proofs::control_time_scale_typmod_skew --exact  # expect: VERIFICATION FAILED w/ decodable counterexample (DEFAULT solver)
+proofs::eq_timetz_scale_typmod_neg   | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::eq_timetz_scale_typmod_neg --exact    # expect: PROVED (identity plane + 12B by-ref image, mcx-stub model)
+proofs::spot_timetz_scale            | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::spot_timetz_scale --exact             # expect: PROVED (concrete time cells, FULL-symbolic zone passthrough)
+
+# ---- 2904 intervaltypmodout (core): fieldstr theorem + digit bands ----
+proofs::eq_intervaltypmodout_fieldstr_fullprec | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodout_fieldstr_fullprec --exact  # expect: PROVED (mixed-arm: DEFAULT first; 14-way fieldstr + neg plane + XX000 err arm; digit loop pruned by literal FULL precision)
+proofs::eq_intervaltypmodout_prec_d1 | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodout_prec_d1 --exact  # expect: PROVED (band [0,9], unwind 2, " minute" literal cell)  # REPAIRED 2026-07-29: unwind 66 (64B image memcmp + emit_str loops) + DEFAULT solver (kissat false-fails the unwinding assertions here — solver inversion); locally PROVED 3-7.6s
+proofs::eq_intervaltypmodout_prec_d2 | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodout_prec_d2 --exact  # expect: PROVED (band [10,99], unwind 3)  # REPAIRED 2026-07-29: unwind 66 (64B image memcmp + emit_str loops) + DEFAULT solver (kissat false-fails the unwinding assertions here — solver inversion); locally PROVED 3-7.6s
+proofs::eq_intervaltypmodout_prec_d3 | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodout_prec_d3 --exact  # expect: PROVED (band [100,999], unwind 4)  # REPAIRED 2026-07-29: unwind 66 (64B image memcmp + emit_str loops) + DEFAULT solver (kissat false-fails the unwinding assertions here — solver inversion); locally PROVED 3-7.6s
+proofs::eq_intervaltypmodout_prec_d4 | LADDER | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodout_prec_d4 --exact  # expect: PROVED (band [1000,9999], unwind 5; intout slope ~2x/digit)  # REPAIRED 2026-07-29: unwind 66 (64B image memcmp + emit_str loops) + DEFAULT solver (kissat false-fails the unwinding assertions here — solver inversion); locally PROVED 3-7.6s
+proofs::eq_intervaltypmodout_prec_d5 | LADDER | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodout_prec_d5 --exact  # expect: PROVED (band [10000,65534], unwind 6)  # REPAIRED 2026-07-29: unwind 66 (64B image memcmp + emit_str loops) + DEFAULT solver (kissat false-fails the unwinding assertions here — solver inversion); locally PROVED 3-7.6s
+proofs::eq_intervaltypmodout_fullrange_prec_d2 | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodout_fullrange_prec_d2 --exact  # expect: PROVED (second representative range cell, paren at offset 0)  # REPAIRED 2026-07-29: unwind 66 (64B image memcmp + emit_str loops) + DEFAULT solver (kissat false-fails the unwinding assertions here — solver inversion); locally PROVED 3-7.6s
+proofs::cover_intervaltypmodout_prec_bands | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::cover_intervaltypmodout_prec_bands --exact  # expect: PROVED (MANDATORY union coverage — gate is weak without it)
+
+# ---- 2903 intervaltypmodin (core): per-length cells (mixed-arm) ----
+proofs::eq_intervaltypmodin_n0       | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodin_n0 --exact  # expect: PROVED (DEFAULT first: value+verdict+22023)
+proofs::eq_intervaltypmodin_n1       | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodin_n1 --exact  # expect: PROVED (full-symbolic range word)
+proofs::eq_intervaltypmodin_n2       | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodin_n2 --exact  # expect: PROVED (incl neg-precision err + >6 clamp; WARNING suppressed both sides — see module doc)
+proofs::eq_intervaltypmodin_n3       | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_intervaltypmodin_n3 --exact  # expect: PROVED (invalid-arity arm)
+
+# ---- 3846 make_date: bands (literal-masked years) + honest full screen ----
+proofs::eq_make_date_ad_band         | GREEN | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_make_date_ad_band --exact  # expect: PROVED (23-bit literal-masked AD years x full m/d; /100 & /4 on narrowed dividend; DEFAULT first, mixed-arm)
+proofs::eq_make_date_bc_band         | GREEN | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_make_date_bc_band --exact  # expect: PROVED (BC fold + year-zero arm)
+proofs::eq_make_date_full            | LADDER | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_make_date_full --exact    # expect: honest screen of the loop-free date2j face — PROVED or wall(band-immune); on wall record proved(bands+spots) + tested(differential), do NOT ladder further
+proofs::cover_make_date_year_bands   | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::cover_make_date_year_bands --exact  # expect: PROVED (MANDATORY band union coverage: outside bands both sides reject pre-divider)
+proofs::spot_make_date               | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::spot_make_date --exact           # expect: PROVED (18 boundary cells incl leap grid, julian edges, i32 extremes)
+proofs::control_make_date_day_skew   | MUST-FAIL | control | timeout 120 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c -Z concrete-playback --concrete-playback=print --harness proofs::control_make_date_day_skew --exact  # expect: VERIFICATION FAILED w/ decodable counterexample (DEFAULT solver)
+
+# ---- 3847 make_time / 3461 make_timestamp (seconds = literal grid) ----
+proofs::eq_make_time_secgrid         | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_make_time_secgrid --exact     # expect: PROVED (full h/min x 16 literal secs incl NaN/Inf/60.0 edges; rint==round_ties_even precedent)
+proofs::eq_make_timestamp_ad_band    | LADDER | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_make_timestamp_ad_band --exact  # expect: PROVED (date2j band + checked i64 ops + IS_VALID_TIMESTAMP; DEFAULT first)
+proofs::eq_make_timestamp_bc_band    | LADDER | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_make_timestamp_bc_band --exact  # expect: PROVED (sibling)
+proofs::spot_make_timestamp          | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::spot_make_timestamp --exact       # expect: PROVED (END_TIMESTAMP edges, 24:00 fold, BC julian min)
+
+# ---- 1843/3549/3325 aggregate transition cores (fully symbolic) ----
+proofs::eq_interval_avg_accum_core   | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_interval_avg_accum_core --exact      # expect: PROVED (full state x newval; checked adds; DEFAULT first, mixed-arm)
+proofs::eq_interval_avg_accum_inv_core | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_interval_avg_accum_inv_core --exact  # expect: PROVED (discard + N==0 reset arm)
+proofs::eq_interval_avg_combine_core | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_interval_avg_combine_core --exact    # expect: PROVED (dual symbolic states, non-null path)
+
+# ---- 6326 interval_sum / 1844 interval_avg (fc wrapper level) ----
+proofs::eq_interval_sum_fc           | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_interval_sum_fc --exact        # expect: PROVED (pure lattice, null verdict + 16B image + 22008 parity)
+proofs::eq_interval_avg_fc_empty     | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_interval_avg_fc_empty --exact  # expect: PROVED (literal-plane; interval_div structurally pruned)
+proofs::eq_interval_avg_fc_pinf      | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_interval_avg_fc_pinf --exact   # expect: PROVED (NOEND plane, N symbolic)
+proofs::eq_interval_avg_fc_ninf      | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_interval_avg_fc_ninf --exact   # expect: PROVED (NOBEGIN plane)
+proofs::eq_interval_avg_fc_conflict  | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_interval_avg_fc_conflict --exact  # expect: PROVED (Err 22008 plane)
+proofs::spot_interval_avg_fc_mean    | LADDER | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::spot_interval_avg_fc_mean --exact  # expect: PROVED (fully concrete mean cell; interval_div folds) — if the concrete float div still walls, the mean arm is native-differential-only
+
+# ---- 6324/6325 serialize / deserialize (fc, fixed 40B BE image) ----
+proofs::eq_interval_avg_serialize_fc | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::eq_interval_avg_serialize_fc --exact  # expect: PROVED (literal offsets; header + 40B payload; mcx-stub model incl grow/dealloc)
+proofs::control_interval_avg_serialize_swap | MUST-FAIL | control | timeout 120 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c -Z concrete-playback --concrete-playback=print --harness proofs::control_interval_avg_serialize_swap --exact  # expect: VERIFICATION FAILED (day/month swap skew; DEFAULT solver)
+proofs::eq_interval_avg_deserialize_fc | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_interval_avg_deserialize_fc --exact  # expect: PROVED (symbolic 40B payload; agg_context stubbed; state-field parity)
+proofs::witness_interval_avg_deserialize_trailing | MUST-FAIL(witness) | probe | timeout 120 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c -Z concrete-playback --concrete-playback=print --harness proofs::witness_interval_avg_deserialize_trailing --exact  # expect: VERIFICATION FAILED = SCREENED DIVERGENCE (see header rule: ground-truth on docker postgres:18 BEFORE recording; a PASS is a vacuity finding)
+
+# ---- 1273 timetz_part tz arms (per-cell literal selectors) ----
+proofs::eq_timetz_part_tz            | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --harness proofs::eq_timetz_part_tz --exact          # expect: PROVED (zone full-symbolic, no divider in DTK_TZ arm; Rust literal-token decode in-theorem)  # REPAIRED 2026-07-29: TLS stub pair (env_var_zero+once_lock) for Linux pthread_key_create status-6; zone contract fence |zone|<57600; DEFAULT solver (kissat false-fails here); locally PROVED 4.8s
+proofs::eq_timetz_part_tz_hour       | LADDER | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::eq_timetz_part_tz_hour --exact  # expect: PROVED if i32/3600 is cheap; else wall(band-immune, loop-free) -> native differential stands
+proofs::eq_timetz_part_tz_minute     | LADDER | release-gate | timeout 300 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::eq_timetz_part_tz_minute --exact  # expect: PROVED or wall as tz_hour (/60 then %60)
+proofs::spot_timetz_part_tz_time_nonzero | GREEN | per-commit | timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --harness proofs::spot_timetz_part_tz_time_nonzero --exact  # expect: PROVED (concrete time folds timetz2tm; zone symbolic)  # REPAIRED 2026-07-29: TLS stub pair + zone fence; locally PROVED 4.7s (kissat)
+
+# ---- native differential tier (band-immune + 53-bit faces; NOT a solve) ----
+# cargo run --release --bin native_diff_datetime_b
+#   -> rows 1968/1969 (p0..p5 face), 3846/3847/3461 (symbolic-year +
+#      random-seconds faces), 1844 mean arm, 6324/6325 round-trip,
+#      1273 tz arms: record tested(differential) alongside the planes/spots.
+# SMOKE RESULT (2026-07-29, rig validation — allowed pre-build, not a solve):
+#   10,725,656 checks, 0 mismatches with -ffp-contract=off (build.rs).
+# FP-CONTRACTION FINDING (adjudication owed to the runner lane): under
+#   clang's DEFAULT contraction the same sweep shows 1779 interval_avg
+#   mean-arm mismatches — interval_div's tail
+#   (span->time/factor + sec_remainder*USECS_PER_SEC) fuses into fma and
+#   the rint'ed time drifts 2-8 usec at ~2e16 magnitude
+#   (tests/probe_interval_div_contract.rs decodes three cases). Shipped
+#   Rust does NOT fuse. Real PG builds gcc -O2 (-ffp-contract=fast on
+#   aarch64): whether REAL PG contracts there decides if this is a genuine
+#   platform-divergence candidate (money/pg_hypot class) — ground-truth on
+#   docker postgres:18 + macOS PG before recording anything for row 1844.
+
+# ==== lane D (adt_date remainder, 2026-07-29): SOLVED LOCALLY, verdicts recorded ====
+# All rem::* harnesses below were run serially under the 6GiB watchdog on
+# 2026-07-29 (this queue is a REPLAY recipe; times = CBMC-reported).
+# Solver choice measured per-harness (kissat/default inversions live in this
+# family too). K75 = timeout 75 ~/.cargo/bin/cargo-kani kani -Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c
+rem::eq_date_finite               | GREEN 0.21s | per-commit  | kissat
+rem::eq_timetz_time               | GREEN 0.35s | per-commit  | kissat
+rem::eq_hashdate                  | GREEN 0.75s | per-commit  | kissat
+rem::eq_hashdate_extended         | GREEN 4.2s  | per-commit  | kissat
+rem::eq_time_hash                 | GREEN 9.2s  | per-commit  | kissat
+rem::eq_time_hash_extended        | GREEN 3.9s  | per-commit  | kissat
+rem::eq_timetz_hash               | GREEN 1.9s  | per-commit  | kissat
+rem::eq_timetz_hash_extended      | GREEN 31.2s | release-gate| kissat
+rem::eq_interval_finite           | GREEN 0.40s | per-commit  | kissat
+rem::eq_interval_hash_m0d0        | GREEN 1.1s  | per-commit  | kissat
+rem::eq_interval_hash_ext_m0d0    | GREEN 4.8s  | per-commit  | kissat
+rem::eq_interval_hash_band        | GREEN 20.9s | release-gate| kissat
+rem::eq_time_interval             | GREEN 1.1s  | per-commit  | kissat
+rem::eq_time_mi_time              | GREEN 1.3s  | per-commit  | kissat
+rem::eq_interval_time_err_plane   | GREEN 0.74s | per-commit  | kissat
+rem::spot_interval_time           | GREEN 0.67s | per-commit  | default
+rem::eq_interval_time_screen      | WALL(band-immune %USECS_PER_DAY; 300s BOTH solvers; do not ladder) — spots+err-plane+differential stand
+rem::eq_date_mi                   | GREEN 0.86s | per-commit  | default
+rem::eq_date_timestamp            | GREEN 3.8s  | per-commit  | kissat (default WALLS >75s — inversion)
+rem::eq_datetime_timestamp        | GREEN 7.2s  | per-commit  | kissat (default WALLS)
+rem::eq_datetimetz_timestamptz    | GREEN 4.1s  | per-commit  | kissat (default WALLS)
+rem::eq_timetypmodin_check        | GREEN 1.3s  | per-commit  | default
+rem::eq_timetztypmodin_check      | GREEN 1.4s  | per-commit  | default
+rem::eq_timetypmodout_neg         | GREEN 2.2s  | per-commit  | kissat (unwind 34: 32B compare loop)
+rem::eq_timetztypmodout_neg       | GREEN 2.1s  | per-commit  | kissat
+rem::eq_timetypmodout_d1          | GREEN 15.5s | release-gate| kissat
+rem::eq_timetypmodout_d2          | GREEN 14.6s | release-gate| kissat
+rem::eq_timetypmodout_d3          | GREEN 13.5s | release-gate| kissat
+rem::eq_timetztypmodout_d1        | GREEN 11.1s | release-gate| kissat
+rem::spot_typmodout               | GREEN 11.6s | release-gate| kissat
+rem::eq_overlaps_time             | GREEN 1.1s  | per-commit  | default
+rem::eq_overlaps_timetz           | GREEN 235.9s| release-gate| kissat (default WALLS >150s)
+rem::eq_in_range_time_interval    | GREEN 1.9s  | per-commit  | default
+rem::eq_in_range_timetz_interval  | GREEN 31.4s | release-gate| default (offset fence i64::MAX-1.5e11: wrap sliver -> differential)
+rem::eq_in_range_date_interval_m0d0  | GREEN 14.3s | per-commit | kissat (default WALLS)
+rem::eq_in_range_date_interval_noend | GREEN 2.8s  | per-commit | default
+rem::eq_timetz_izone_err_planes   | GREEN 3.0s  | per-commit  | kissat (unwind 5: rotate while-loop is a symex hang without it)
+rem::eq_timetz_izone_cells        | GREEN 6.3s  | per-commit  | kissat (unwind 5)
+rem::eq_interval_scale_typmod_neg | GREEN 4.6s  | per-commit  | kissat
+rem::spot_interval_scale          | GREEN 6.5s  | per-commit  | default
+rem::eq_date_recv                 | GREEN 77.8s | release-gate| default
+rem::eq_time_recv_typmod_neg      | GREEN 77.5s | release-gate| default
+rem::eq_timetz_recv_typmod_neg    | GREEN 126.8s| release-gate| default
+rem::eq_interval_recv_typmod_neg  | WALL(memory >6GiB local cap, BOTH solvers; fleet 40GB retry tier candidate) — differential stands (random typmods too)
+rem::eq_date_send                 | GREEN 63.7s | release-gate| kissat (unwind exact = len+2; slack unwind was an RSS kill)
+rem::eq_time_send                 | GREEN 104.4s| release-gate| kissat
+rem::eq_timetz_send               | GREEN 163.2s| release-gate| kissat
+rem::eq_interval_send             | WALL(memory >6GiB local cap, BOTH solvers; fleet retry candidate) — differential stands
+rem::control_overlaps_time_swap_skew | MUST-FAIL: FAILED 0.41s w/ decodable playback (default + -Z concrete-playback)
+rem::control_date_send_skew       | MUST-FAIL: FAILED 46.2s default (playback run RSS-walls before emitting — verdict-only control; RVR law noted)
+# native differential (MUST be --release; wrap parity is release-semantics):
+#   cargo run --release --bin native_diff_adt_date_rem
+#   2026-07-29: 19,420,000 checks, 0 mismatches

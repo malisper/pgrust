@@ -1,0 +1,306 @@
+Kani Rust Verifier 0.67.0 (cargo plugin)
+   Compiling poc-strtoint v0.1.0 (/private/tmp/claude-501/-Users-malisper-dev-pgrust-fast/ef403f10-7325-4e59-90ca-41f6ae52fcf7/scratchpad/poc-strtoint)
+warning: function `stub_format` is never used
+  --> src/lib.rs:89:4
+   |
+89 | fn stub_format(_args: core::fmt::Arguments<'_>) -> String {
+   |    ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `stub_pg_error_new` is never used
+   --> src/lib.rs:103:4
+    |
+103 | fn stub_pg_error_new(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: Found the following unsupported constructs:
+             - caller_location (1)
+             - foreign function (2)
+         
+         Verification will fail if one or more of these constructs is reachable.
+         See https://model-checking.github.io/kani/rust-feature-support.html for more details.
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s
+Checking harness harnesses::equiv_len4...
+CBMC 6.8.0 (cbmc-6.8.0)
+CBMC version 6.8.0 (cbmc-6.8.0) 64-bit arm64 macos
+Reading GOTO program from file /private/tmp/claude-501/-Users-malisper-dev-pgrust-fast/ef403f10-7325-4e59-90ca-41f6ae52fcf7/scratchpad/poc-strtoint/target/kani/aarch64-apple-darwin/debug/deps/poc_strtoint-11577b7f7b5ae8db__RNvNtCsafIYecwGieI_12poc_strtoint9harnesses10equiv_len4.out
+Generating GOTO Program
+Adding CPROVER library (arm64)
+Removal of function pointers and virtual functions
+Generic Property Instrumentation
+Running with 16 object bits, 48 offset bits (user-specified)
+Starting Bounded Model Checking
+Unwinding loop _RINvCsafIYecwGieI_12poc_strtoint5checkKj4_EB2_.0 iteration 1 file src/lib.rs line 65 column 5 function check::<4> thread 0
+Unwinding loop _RINvCsafIYecwGieI_12poc_strtoint5checkKj4_EB2_.0 iteration 2 file src/lib.rs line 65 column 5 function check::<4> thread 0
+Unwinding loop _RINvCsafIYecwGieI_12poc_strtoint5checkKj4_EB2_.0 iteration 3 file src/lib.rs line 65 column 5 function check::<4> thread 0
+Unwinding loop _RINvCsafIYecwGieI_12poc_strtoint5checkKj4_EB2_.0 iteration 4 file src/lib.rs line 65 column 5 function check::<4> thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 49 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 68 column 5 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 443 column 13 function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index thread 0
+Unwinding loop pgc_strtoint32_safe.0 iteration 1 file c/pg_numutils_vendored.c line 115 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.0 iteration 2 file c/pg_numutils_vendored.c line 115 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.0 iteration 3 file c/pg_numutils_vendored.c line 115 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.0 iteration 4 file c/pg_numutils_vendored.c line 115 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.0 iteration 5 file c/pg_numutils_vendored.c line 115 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.0 iteration 6 file c/pg_numutils_vendored.c line 115 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.0 iteration 7 file c/pg_numutils_vendored.c line 115 function pgc_strtoint32_safe thread 0
+Not unwinding loop pgc_strtoint32_safe.0 iteration 8 file c/pg_numutils_vendored.c line 115 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.1 iteration 1 file c/pg_numutils_vendored.c line 152 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.1 iteration 2 file c/pg_numutils_vendored.c line 152 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.1 iteration 3 file c/pg_numutils_vendored.c line 152 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.1 iteration 4 file c/pg_numutils_vendored.c line 152 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.2 iteration 1 file c/pg_numutils_vendored.c line 169 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.2 iteration 2 file c/pg_numutils_vendored.c line 169 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.2 iteration 3 file c/pg_numutils_vendored.c line 169 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.2 iteration 4 file c/pg_numutils_vendored.c line 169 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.2 iteration 5 file c/pg_numutils_vendored.c line 169 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.2 iteration 6 file c/pg_numutils_vendored.c line 169 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.2 iteration 7 file c/pg_numutils_vendored.c line 169 function pgc_strtoint32_safe thread 0
+Not unwinding loop pgc_strtoint32_safe.2 iteration 8 file c/pg_numutils_vendored.c line 169 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.3 iteration 1 file c/pg_numutils_vendored.c line 193 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.3 iteration 2 file c/pg_numutils_vendored.c line 193 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.3 iteration 3 file c/pg_numutils_vendored.c line 193 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.3 iteration 4 file c/pg_numutils_vendored.c line 193 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.3 iteration 5 file c/pg_numutils_vendored.c line 193 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.3 iteration 6 file c/pg_numutils_vendored.c line 193 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.3 iteration 7 file c/pg_numutils_vendored.c line 193 function pgc_strtoint32_safe thread 0
+Not unwinding loop pgc_strtoint32_safe.3 iteration 8 file c/pg_numutils_vendored.c line 193 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.4 iteration 1 file c/pg_numutils_vendored.c line 217 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.4 iteration 2 file c/pg_numutils_vendored.c line 217 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.4 iteration 3 file c/pg_numutils_vendored.c line 217 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.4 iteration 4 file c/pg_numutils_vendored.c line 217 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.4 iteration 5 file c/pg_numutils_vendored.c line 217 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.4 iteration 6 file c/pg_numutils_vendored.c line 217 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.4 iteration 7 file c/pg_numutils_vendored.c line 217 function pgc_strtoint32_safe thread 0
+Not unwinding loop pgc_strtoint32_safe.4 iteration 8 file c/pg_numutils_vendored.c line 217 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.5 iteration 1 file c/pg_numutils_vendored.c line 241 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.5 iteration 2 file c/pg_numutils_vendored.c line 241 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.5 iteration 3 file c/pg_numutils_vendored.c line 241 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.5 iteration 4 file c/pg_numutils_vendored.c line 241 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.5 iteration 5 file c/pg_numutils_vendored.c line 241 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.5 iteration 6 file c/pg_numutils_vendored.c line 241 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.5 iteration 7 file c/pg_numutils_vendored.c line 241 function pgc_strtoint32_safe thread 0
+Not unwinding loop pgc_strtoint32_safe.5 iteration 8 file c/pg_numutils_vendored.c line 241 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.6 iteration 1 file c/pg_numutils_vendored.c line 270 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.6 iteration 2 file c/pg_numutils_vendored.c line 270 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.6 iteration 3 file c/pg_numutils_vendored.c line 270 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.6 iteration 4 file c/pg_numutils_vendored.c line 270 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.6 iteration 5 file c/pg_numutils_vendored.c line 270 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.6 iteration 6 file c/pg_numutils_vendored.c line 270 function pgc_strtoint32_safe thread 0
+Unwinding loop pgc_strtoint32_safe.6 iteration 7 file c/pg_numutils_vendored.c line 270 function pgc_strtoint32_safe thread 0
+Not unwinding loop pgc_strtoint32_safe.6 iteration 8 file c/pg_numutils_vendored.c line 270 function pgc_strtoint32_safe thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.0 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 69 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.0 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 69 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.0 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 69 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.0 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 69 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.0 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 69 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.0 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 69 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.0 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 69 column 5 function numutils::strtoint_slow_inner thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.0 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 69 column 5 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.1 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 163 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.1 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 163 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.1 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 163 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.1 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 163 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.1 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 163 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.1 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 163 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.1 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 163 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.1 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 163 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.2 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 138 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.2 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 138 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.2 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 138 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.2 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 138 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.2 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 138 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.2 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 138 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.2 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 138 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.2 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 138 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.3 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 112 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.3 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 112 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.3 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 112 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.3 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 112 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.3 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 112 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.3 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 112 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.3 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 112 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.3 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 112 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1014 column 15 function std::option::Option::<u64>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2175 column 5 function std::option::unwrap_failed thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1016 column 21 function std::option::Option::<u64>::unwrap thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 66 column 1 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.5 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 86 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1014 column 15 function std::option::Option::<u64>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2175 column 5 function std::option::unwrap_failed thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1016 column 21 function std::option::Option::<u64>::unwrap thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 66 column 1 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.5 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 86 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1014 column 15 function std::option::Option::<u64>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2175 column 5 function std::option::unwrap_failed thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1016 column 21 function std::option::Option::<u64>::unwrap thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 66 column 1 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.5 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 86 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1014 column 15 function std::option::Option::<u64>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2175 column 5 function std::option::unwrap_failed thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1016 column 21 function std::option::Option::<u64>::unwrap thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 66 column 1 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.5 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 86 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1014 column 15 function std::option::Option::<u64>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2175 column 5 function std::option::unwrap_failed thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1016 column 21 function std::option::Option::<u64>::unwrap thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 66 column 1 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.5 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 86 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1014 column 15 function std::option::Option::<u64>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2175 column 5 function std::option::unwrap_failed thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1016 column 21 function std::option::Option::<u64>::unwrap thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 66 column 1 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.5 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 86 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1014 column 15 function std::option::Option::<u64>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2175 column 5 function std::option::unwrap_failed thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1016 column 21 function std::option::Option::<u64>::unwrap thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 66 column 1 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.5 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 86 column 13 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1014 column 15 function std::option::Option::<u64>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2175 column 5 function std::option::unwrap_failed thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1016 column 21 function std::option::Option::<u64>::unwrap thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 7 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+Not unwinding loop _RNvCsjJNkvgaIStN_8numutils19strtoint_slow_inner.4 iteration 8 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 192 column 5 function numutils::strtoint_slow_inner thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 2058 column 15 function std::option::Option::<&u8>::copied thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/numutils/src/lib.rs line 66 column 1 function numutils::strtoint_slow_inner thread 0
+
+CBMC failed with status 15
+VERIFICATION:- FAILED
+
+Manual Harness Summary:
+Verification failed for - harnesses::equiv_len4
+Complete - 0 successfully verified harnesses, 1 failures, 1 total.
+DONE_EXIT=1

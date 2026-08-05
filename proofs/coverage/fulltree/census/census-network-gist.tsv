@@ -1,0 +1,10 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+network-gist	cover_consistent_regimes	proofs::cover_consistent_regimes	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+network-gist	cover_penalty_regimes	proofs::cover_penalty_regimes	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+network-gist	cover_strategy_partition	proofs::cover_strategy_partition	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+network-gist	cover_union_regimes	proofs::cover_union_regimes	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+network-gist	eq_penalty	proofs::eq_penalty	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+network-gist	eq_same	proofs::eq_same	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+network-gist	probe_bitncommon16	proofs::probe_bitncommon16	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+network-gist	probe_union_c_vs_c	proofs::probe_union_c_vs_c	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+network-gist	spec_compress_nonleaf_identity	proofs::spec_compress_nonleaf_identity	0	6	VERIFICATION:- SUCCESSFUL	RAN	1

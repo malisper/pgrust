@@ -1,0 +1,6 @@
+{
+ "expected": null,
+ "census_closed": false,
+ "kaniraw_files": 0,
+ "note": "run with --no-census-required: harnesses that failed to run are indistinguishable from covered-nothing; DO NOT PUBLISH"
+}

@@ -1,0 +1,49 @@
+[package]
+name = "event_trigger"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }
+cache_evtcache = { path = "../../utils/cache/cache_evtcache" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+cmdtag = { path = "../../tcop/cmdtag" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+pgstat = { path = "../../utils/activity/pgstat" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+varlena = { path = "../../utils/adt/varlena" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+table = { path = "../../access/table/table" }
+heaptuple = { path = "../../access/common/heaptuple" }
+catalog = { path = "../../catalog/catalog" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_objectaddress = { path = "../../catalog/objectaddress" }
+pg_depend = { path = "../../catalog/pg_depend" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+plancache = { path = "../../utils/cache/plancache" }
+superuser = { path = "../../utils/misc/superuser" }
+miscinit = { path = "../../utils/init/miscinit" }
+init_small = { path = "../../utils/init/init_small" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+xact = { path = "../../access/transam/xact" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+pg_database = { path = "../../catalog/pg_database" }
+types_scan = { path = "../../../_support/types/types_scan" }
+genam = { path = "../../access/index/genam" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+pg_attrdef = { path = "../../catalog/pg_attrdef" }
+elog = { path = "../../utils/error/elog" }
+event_trigger_seams = { path = "../event_trigger_seams" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }

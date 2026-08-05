@@ -1,0 +1,4 @@
+::tsquery @@ ts;
+
+--check $OP_PHRASE on index
+createndex_test values (

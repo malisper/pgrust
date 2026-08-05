@@ -1,0 +1,27 @@
+[package]
+name = "tcop_dest"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+tqueue = { path = "../../executor/tqueue" }
+cmdtag = { path = "../cmdtag" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_error = { path = "../../../_support/types/types_error" }
+types_portal = { path = "../../../_support/types/portal" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+printtup = { path = "../../access/common/printtup" }
+tstore_receiver = { path = "../../executor/tstore_receiver" }
+pqformat = { path = "../../libpq/pqformat" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+spi_seams = { path = "../../executor/spi_seams" }
+createas_seams = { path = "../../commands/createas_seams" }
+copy_seams = { path = "../../commands/copy_seams" }
+matview_seams = { path = "../../commands/matview_seams" }
+sql_functions_seams = { path = "../../executor/sql_functions_seams" }
+explain_dr = { path = "../../commands/explain_dr" }

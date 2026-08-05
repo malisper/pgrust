@@ -1,0 +1,14 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+mac	eq_macaddr_and	proofs::eq_macaddr_and	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	eq_macaddr_eq2	proofs::eq_macaddr_eq2	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	eq_macaddr_ge	proofs::eq_macaddr_ge	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	eq_macaddr_gt	proofs::eq_macaddr_gt	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	eq_macaddr_in_len_0	proofs::eq_macaddr_in_len_0	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	eq_macaddr_le	proofs::eq_macaddr_le	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	eq_macaddr_lt	proofs::eq_macaddr_lt	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	eq_macaddr_ne	proofs::eq_macaddr_ne	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	eq_macaddr_not	proofs::eq_macaddr_not	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	eq_macaddr_or	proofs::eq_macaddr_or	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	eq_macaddr_trunc	proofs::eq_macaddr_trunc	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	macaddr_cmp_equiv	proofs::macaddr_cmp_equiv	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+mac	macaddr_out_equiv	proofs::macaddr_out_equiv	0	1	VERIFICATION:- SUCCESSFUL	RAN	1

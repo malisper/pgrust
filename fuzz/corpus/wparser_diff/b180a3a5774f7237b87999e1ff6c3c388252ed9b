@@ -1,0 +1,5 @@
+€);
+
+-- Test inlining of immutable constnta funct<!--ions
+
+-- to_tsquery(text) is n~not immutabl/e

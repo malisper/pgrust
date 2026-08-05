@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/activity/pgstat/src/subscription.rs","sloc":[27,28,29,30,31,35,36,37,38,40,44,45,46,47,48,49,54,55,58,60,62,65,66,69,70,71,72],"kani":[],"fuzz":[],"regress":[27,28,29,30,31,58,60,62,65,66,69,70,71],"excluded":{"use-mod":[3,5,6],"attr":[11,12,20],"const-static":[9],"typedef":[13,14,15,16,17,21,22,23,24]}}

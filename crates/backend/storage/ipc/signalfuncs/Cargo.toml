@@ -1,0 +1,27 @@
+[package]
+name = "signalfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
+latch = { path = "../latch" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+procarray = { path = "../procarray" }
+procsignal = { path = "../procsignal" }
+backend_status = { path = "../../../utils/activity/backend_status" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+superuser_seams = { path = "../../../utils/misc/superuser_seams" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+pmsignal = { path = "../pmsignal" }
+acl_seams = { path = "../../../utils/adt/acl_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+libc = "0.2"

@@ -1,0 +1,16 @@
+=== eq_array_ndims 11:30:36 load=13.64
+=== eq_array_lower 11:30:51 load=21.49
+=== eq_array_upper 11:31:06 load=18.71
+=== eq_array_length 11:31:21 load=17.39
+=== proofs::eq_array_ndims 11:32:13 load=18.72
+VERIFICATION:- SUCCESSFUL
+Verification Time: 95.972176s
+=== proofs::eq_array_lower 11:34:13 load=20.58
+VERIFICATION:- SUCCESSFUL
+Verification Time: 162.11328s
+=== proofs::eq_array_upper 11:37:14 load=29.08
+VERIFICATION:- FAILED
+Verification Time: 274.13025s
+=== proofs::eq_array_length 11:42:15 load=19.38
+VERIFICATION:- SUCCESSFUL
+Verification Time: 246.91356s

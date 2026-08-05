@@ -1,0 +1,56 @@
+{
+ "rule": "v2+no-const-tables",
+ "note": "every const-table span excluded from the denominator; reason 'const-array-heuristic' rows are the ones to review \u2014 a span swallowing real logic is a defect",
+ "total_spans": 4,
+ "total_lines": 274,
+ "by_reason": {
+  "generated-file": 0,
+  "const-array-heuristic": 4
+ },
+ "spans": [
+  {
+   "path": "crates/common/wchar/src/lib.rs",
+   "head_line": 1466,
+   "span": [
+    1468,
+    1645
+   ],
+   "lines": 147,
+   "reason": "const-array-heuristic",
+   "head": "pub static pg_wchar_table: [pg_wchar_tbl; _PG_LAST_ENCODING_ as usize] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/mbutils/src/lib.rs",
+   "head_line": 87,
+   "span": [
+    88,
+    169
+   ],
+   "lines": 81,
+   "reason": "const-array-heuristic",
+   "head": "static PG_ENCNAME: [(&str, pg_enc); 81] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/mbutils/src/lib.rs",
+   "head_line": 37,
+   "span": [
+    38,
+    80
+   ],
+   "lines": 42,
+   "reason": "const-array-heuristic",
+   "head": "static PG_ENC2NAME: [&str; wchar::_PG_LAST_ENCODING_ as usize] = ["
+  },
+  {
+   "path": "crates/contrib/ltree/src/lib.rs",
+   "head_line": 84,
+   "span": [
+    85,
+    89
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "const SOFT_ABLE: [types_error::SqlState; 4] = ["
+  }
+ ]
+}

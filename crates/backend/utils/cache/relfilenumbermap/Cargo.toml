@@ -1,0 +1,28 @@
+[package]
+name = "relfilenumbermap"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "relfilenumbermap"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+genam = { path = "../../../access/index/genam" }
+table = { path = "../../../access/table/table" }
+inval = { path = "../inval" }
+relmapper = { path = "../relmapper" }
+init_small = { path = "../../init/init_small" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+relfilenumbermap_seams = { path = "../relfilenumbermap_seams" }
+
+[dev-dependencies]
+types_fmgr = { path = "../../../../_support/types/fmgr" }

@@ -1,0 +1,5 @@
+char	proofs::charout_equiv_and_roundtrip	
+char	proofs::charin_equiv	
+char	eq_chartoi4	
+char	proofs::eq_i4tochar	
+char	proofs::eq_text_char	

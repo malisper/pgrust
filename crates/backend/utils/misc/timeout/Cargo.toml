@@ -1,0 +1,23 @@
+[package]
+name = "timeout"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# DST P2 (contract s1.3): timer deadlines in pg_clock's mono domain; the
+# timer thread parks on the Waiter (rg.rs conversion precedent).
+pg_clock = { path = "../../../../port/pg_clock" }
+# PERMIT-S5 (P3 census row 16): the timer thread enters the spawn door via
+# the pgsync::thread child-registering wrapper, and the slots registry is a
+# pgsync Mutex (a raw lock shared with the REGISTERED timer thread would be
+# the permit-holder-blocks-raw watchdog wedge shape).
+pgsync = { path = "../../../../_support/pgsync" }
+waiter = { path = "../../../storage/ipc/waiter" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+init_small = { path = "../../init/init_small" }
+latch = { path = "../../../storage/ipc/latch" }
+timeout_seams = { path = "../timeout_seams" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }

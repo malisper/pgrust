@@ -1,0 +1,6 @@
+crates/backend/utils/adt/float/src/aggregates.rs: IDENTICAL hit set (43 lines)
+crates/backend/utils/adt/float/src/builtins.rs: IDENTICAL hit set (0 lines)
+crates/backend/utils/adt/float/src/funcs.rs: IDENTICAL hit set (528 lines)
+crates/backend/utils/adt/float/src/io.rs: IDENTICAL hit set (531 lines)
+crates/backend/utils/adt/float/src/lib.rs: IDENTICAL hit set (87 lines)
+TOTAL A-only=0 B-only=0

@@ -1,0 +1,62 @@
+{
+  "name": "metamorphic",
+  "connections": 1,
+  "iso_mix": {
+    "read-committed": 70,
+    "repeatable-read": 20,
+    "serializable": 10
+  },
+  "statement_weights": {
+    "ddl": 8,
+    "dml": 14,
+    "query": 32,
+    "tx": 10,
+    "arm": 6,
+    "fault": 0,
+    "property": 30
+  },
+  "table_shape": {
+    "tables_min": 1,
+    "tables_max": 4,
+    "cols_min": 3,
+    "cols_max": 3,
+    "rows_max": 200
+  },
+  "arm_sets": [
+    [],
+    [
+      "work_mem=64kB"
+    ],
+    [
+      "enable_seqscan=off"
+    ],
+    [
+      "enable_indexscan=off",
+      "enable_bitmapscan=off"
+    ]
+  ],
+  "property_weights": {
+    "F1-InsertSelect": 1,
+    "F2-UpdateVisibility": 1,
+    "F3-DeleteAbsence": 1,
+    "F4-ConstraintError": 1,
+    "F5-DdlEffects": 1,
+    "F6-AggConsistency": 2,
+    "F7-MemoryBaseline": 0,
+    "F8-ResourceBaseline": 0,
+    "L1-Tlp": 10,
+    "L2-NoRec": 10,
+    "X1-ArmEquivalence": 1,
+    "X2-IndexInvariance": 2,
+    "X4-StatementForm": 1,
+    "M1-ReadYourWrites": 1
+  },
+  "kill_switches": [],
+  "float_lenient": false,
+  "engagement_floors": {},
+  "background_policy": {
+    "autovacuum": "off"
+  },
+  "steps_min": 24,
+  "steps_max": 64
+}

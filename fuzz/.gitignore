@@ -1,0 +1,6 @@
+/target
+/artifacts
+/coverage
+core/target
+# /corpus is COMMITTED (fuzzuproof-crate durable bank; S3 has a 7-day
+# lifecycle) — do not re-ignore it.

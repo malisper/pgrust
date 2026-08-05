@@ -1,0 +1,1 @@
+{"path":"crates/backend/tsearch/to_tsany/src/lib.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2,3,4,5,6,7,13]}}

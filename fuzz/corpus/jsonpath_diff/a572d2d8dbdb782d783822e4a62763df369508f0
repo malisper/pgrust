@@ -1,0 +1,1 @@
+$ ? (@ like_regex "pa^^^\\\\\\\\\\\\n" flag "isim")

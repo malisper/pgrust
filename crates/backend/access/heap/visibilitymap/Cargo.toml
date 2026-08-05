@@ -1,0 +1,25 @@
+[package]
+name = "visibilitymap"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+inval = { path = "../../../utils/cache/inval" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+xlogutils_seams = { path = "../../transam/xlogutils_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+init_small = { path = "../../../utils/init/init_small" }
+pg_bitutils = { path = "../../../../port/pg_bitutils" }
+
+[dev-dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

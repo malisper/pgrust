@@ -1,0 +1,19 @@
+[package]
+name = "tzparser"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+adt_datetime = { path = "../../adt/adt_datetime" }
+guc = { path = "../guc" }
+mcx = { path = "../../../../_support/mcx" }
+pg_path = { path = "../../../../port/pg_path" }
+init_small = { path = "../../init/init_small" }
+
+[dev-dependencies]
+pgtz = { path = "../../../timezone/pgtz" }
+guc_tables = { path = "../guc_tables" }
+elog = { path = "../../error/elog" }
+fd = { path = "../../../storage/file/fd" }
+xact_seams = { path = "../../../access/transam/xact_seams" }

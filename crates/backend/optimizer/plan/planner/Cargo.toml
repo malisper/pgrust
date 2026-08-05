@@ -1,0 +1,126 @@
+[package]
+name = "planner"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+foreigncmds_seams = { path = "../../../commands/foreigncmds_seams" }
+execmain = { path = "../../../executor/execmain" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+parse_agg = { path = "../../../parser/parse_agg" }
+parse_relation = { path = "../../../parser/parse_relation" }
+parser_analyze = { path = "../../../parser/parser_analyze" }
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+adt_numeric = { path = "../../../utils/adt/numeric" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_portal = { path = "../../../../_support/types/portal" }
+planner_seams = { path = "../planner_seams" }
+seam_core = { path = "../../../../_support/seam_core" }
+parallel_seams = { path = "../../../access/transam/parallel_seams" }
+costsize = { path = "../../path/costsize" }
+allpaths = { path = "../../path/allpaths" }
+pathnode = { path = "../../util/pathnode" }
+equivclass = { path = "../../path/equivclass" }
+indxpath = { path = "../../path/indxpath" }
+tablesample = { path = "../../../access/tablesample/tablesample" }
+backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
+adt_int8 = { path = "../../../utils/adt/int8" }
+adt_multirangetypes = { path = "../../../utils/adt/multirangetypes" }
+adt_network = { path = "../../../utils/adt/network" }
+adt_acl = { path = "../../../utils/adt/acl" }
+aclchk = { path = "../../../catalog/aclchk" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+adt_rangetypes = { path = "../../../utils/adt/rangetypes" }
+adt_tsvector_core = { path = "../../../utils/adt/tsvector_core" }
+stack_depth = { path = "../../../utils/misc/stack_depth" }
+typcache = { path = "../../../utils/cache/typcache" }
+clauses = { path = "../../util/clauses" }
+execexpr = { path = "../../../executor/execexpr" }
+inval = { path = "../../../utils/cache/inval" }
+cache_syscache = { path = "../../../utils/cache/cache_syscache" }
+arrayutils = { path = "../../../utils/adt/arrayutils" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+readfuncs = { path = "../../../nodes/readfuncs" }
+outfuncs = { path = "../../../nodes/outfuncs" }
+rewrite_manip = { path = "../../../rewrite/rewrite_manip" }
+copyfuncs = { path = "../../../nodes/copyfuncs" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+pg_depend = { path = "../../../catalog/pg_depend" }
+nodememoize = { path = "../../../executor/nodememoize" }
+arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
+format_type = { path = "../../../utils/adt/format_type" }
+mbutils = { path = "../../../utils/mb/mbutils" }
+pg_locale = { path = "../../../utils/adt/pg_locale" }
+regexp_seams = { path = "../../../utils/adt/regexp_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+pgvector_hnsw = { path = "../../../../contrib/pgvector_hnsw" }
+init_small = { path = "../../../utils/init/init_small" }
+tidbitmap = { path = "../../../nodes/tidbitmap" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_relscan = { path = "../../../access/index/relscan" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+statistics = { path = "../../../statistics/statistics" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+table = { path = "../../../access/table/table" }
+pg_inherits = { path = "../../../catalog/pg_inherits" }
+partdesc = { path = "../../../partitioning/partdesc" }
+partcache = { path = "../../../utils/cache/partcache" }
+partbounds = { path = "../../../partitioning/partbounds" }
+partprune = { path = "../../../partitioning/partprune" }
+tableam = { path = "../../../access/table/tableam" }
+tableam_vocab = { path = "../../../access/table/tableam_vocab" }
+indexam = { path = "../../../access/index/indexam" }
+indexam_seams = { path = "../../../access/index/indexam_seams" }
+brin = { path = "../../../access/brin/brin" }
+spgist = { path = "../../../access/spgist/spgist" }
+gist = { path = "../../../access/gist/gist" }
+nbtree = { path = "../../../access/nbtree/nbtree" }
+nodeagg = { path = "../../../executor/nodeagg" }
+nodehash = { path = "../../../executor/nodehash" }
+lanefold = { path = "../../../executor/lanefold" }
+vars = { path = "../../util/vars" }
+coerce = { path = "../../../parser/coerce" }
+parser_small1 = { path = "../../../parser/parser_small1" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+visibilitymap = { path = "../../../access/heap/visibilitymap" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+exectuples = { path = "../../../executor/exectuples" }
+adt_regexp = { path = "../../../utils/adt/regexp" }
+varlena = { path = "../../../utils/adt/varlena" }
+
+gin = { path = "../../../access/gin/gin" }
+clauses_seams = { path = "../../util/clauses_seams" }
+pg_prng = { path = "../../../../common/pg_prng" }
+
+[features]
+# The non-default GEQO recombination operators (PMX/CX/PX/OX1/OX2 + mutation +
+# the City table) are `#if defined(...)` in C, compiled out of the default
+# build (C ships `#define ERX`). This feature renders that ifdef discipline:
+# the faithful ports compile only when it is set; the default build carries ERX
+# alone, exactly as C does.
+geqo_nondefault_operators = []
+
+[dev-dependencies]
+indexcmds_seams = { path = "../../../commands/indexcmds_seams" }
+regex_core = { path = "../../../regex/regex_core" }
+wchar = { path = "../../../../common/wchar" }
+relcache = { path = "../../../utils/cache/relcache" }
+relcache_build_seams = { path = "../../../utils/cache/relcache_build_seams" }
+relation_seams = { path = "../../../access/common/relation_seams" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }

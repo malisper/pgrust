@@ -1,0 +1,39 @@
+[package]
+name = "rmgrdesc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rmgrdesc"
+path = "src/lib.rs"
+
+[dependencies]
+types_spgist = { path = "../../../_support/types/types_spgist" }
+types_brin = { path = "../../../_support/types/types_brin" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_nbtree = { path = "../../../_support/types/types_nbtree" }
+types_gist = { path = "../../../_support/types/gist" }
+types_hash = { path = "../../../_support/types/hash" }
+gin_vocab = { path = "../gin/gin_vocab" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+xlogreader_seams = { path = "../transam/xlogreader_seams" }
+controldata_utils = { path = "../../../common/controldata_utils" }
+relpath_seams = { path = "../../../common/relpath_seams" }
+xact = { path = "../transam/xact" }
+clog = { path = "../transam/clog" }
+commit_ts = { path = "../transam/commit_ts" }
+multixact = { path = "../transam/multixact" }
+relmapper = { path = "../../utils/cache/relmapper" }
+storage_xlog = { path = "../../catalog/storage_xlog" }
+standby = { path = "../../storage/ipc/standby" }
+heapam_xlog = { path = "../heap/heapam_xlog" }
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+adt_datetime = { path = "../../utils/adt/adt_datetime" }
+
+[dev-dependencies]
+mcx = { path = "../../../_support/mcx" }
+rmgr = { path = "../transam/rmgr" }

@@ -1,0 +1,28 @@
+[package]
+name = "waiter"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "waiter"
+path = "src/lib.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"] }
+
+[dependencies]
+# THE single lock library (permit-s1): mod sync is a facade over it.
+pgsync = { path = "../../../../_support/pgsync" }
+libc = "0.2"
+# DST P2 (contract s1.1): the one monotonic authority. RealClock::now_ms
+# delegates here; pg_clock is a leaf crate (libc only), no cycle.
+pg_clock = { path = "../../../../port/pg_clock" }
+
+# Survives solely for the tests/loom.rs + loom_litmus.rs model Builders
+# (src/ no longer touches loom — pgsync is the only cfg site).
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[dev-dependencies]
+loom = "0.7"

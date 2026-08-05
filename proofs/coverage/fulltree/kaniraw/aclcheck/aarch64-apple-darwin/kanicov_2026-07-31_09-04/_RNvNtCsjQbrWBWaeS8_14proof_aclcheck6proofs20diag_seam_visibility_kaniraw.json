@@ -1,0 +1,1 @@
+{"data":{"src/lib.rs":[{"function":"proofs::diag_seam_visibility","term":{"Counter":0},"region":{"file":"src/lib.rs","start":[1595,34],"end":[1606,14]},"status":"COVERED"}]}}

@@ -1,0 +1,6 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+char	eq_chartoi4	proofs::eq_chartoi4	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+char	proofs::charin_equiv	proofs::charin_equiv	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+char	proofs::charout_equiv_and_roundtrip	proofs::charout_equiv_and_roundtrip	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+char	proofs::eq_i4tochar	proofs::eq_i4tochar	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+char	proofs::eq_text_char	proofs::eq_text_char	0	2	VERIFICATION:- SUCCESSFUL	RAN	1

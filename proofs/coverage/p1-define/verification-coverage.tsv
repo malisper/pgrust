@@ -1,0 +1,4 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/commands/define/src/lib.rs	61	0	56	0	56
+CRATE:crates/backend/commands/define	61	0	56	0	56
+TOTAL	61	0	56	0	56

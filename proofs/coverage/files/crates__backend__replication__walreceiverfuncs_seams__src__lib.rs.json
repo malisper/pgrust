@@ -1,0 +1,1 @@
+{"path":"crates/backend/replication/walreceiverfuncs_seams/src/lib.rs","sloc":[9,11,14,16,19,21,24,27,28,29,30,31,32,33,36,39,42,44,66,68],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[6,7],"typedef":[48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63]}}

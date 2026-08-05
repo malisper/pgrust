@@ -1,0 +1,65 @@
+[package]
+name = "parser_analyze"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parser_analyze"
+path = "src/lib.rs"
+
+[dependencies]
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+table = { path = "../../access/table/table" }
+datum = { path = "../../../_support/types/datum" }
+define = { path = "../../commands/define" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mbutils = { path = "../../utils/mb/mbutils" }
+coerce = { path = "../coerce" }
+elog = { path = "../../utils/error/elog" }
+parse_relation = { path = "../parse_relation" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+parse_expr = { path = "../parse_expr" }
+parse_func = { path = "../parse_func" }
+clauses = { path = "../../optimizer/util/clauses" }
+vars = { path = "../../optimizer/util/vars" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+analyze_seams = { path = "../analyze_seams" }
+backend_status = { path = "../../utils/activity/backend_status" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+queryjumble = { path = "../../nodes/queryjumble" }
+seam_core = { path = "../../../_support/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+nodes_core = { path = "../../nodes/nodes_core" }
+parse_agg = { path = "../parse_agg" }
+parse_clause = { path = "../parse_clause" }
+parse_oper = { path = "../parse_oper" }
+typcache = { path = "../../utils/cache/typcache" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+parse_collate = { path = "../parse_collate" }
+parse_target = { path = "../parse_target" }
+parser_small1 = { path = "../parser_small1" }
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_portal = { path = "../../../_support/types/portal" }
+format_type = { path = "../../utils/adt/format_type" }
+
+[dev-dependencies]
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+gram_core = { path = "../gram_core" }
+parser_seams = { path = "../parser_seams" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+relation_seams = { path = "../../access/common/relation_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+table = { path = "../../access/table/table" }
+tupdesc = { path = "../../access/common/tupdesc" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

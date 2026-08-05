@@ -1,0 +1,44 @@
+[package]
+name = "statscmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "statscmds"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small = { path = "../../utils/init/init_small" }
+aclchk = { path = "../../catalog/aclchk" }
+table = { path = "../../access/table/table" }
+relation_seams = { path = "../../access/common/relation_seams" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+genam = { path = "../../access/index/genam" }
+heaptuple = { path = "../../access/common/heaptuple" }
+catalog = { path = "../../catalog/catalog" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+format_type = { path = "../../utils/adt/format_type" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
+inval = { path = "../../utils/cache/inval" }
+typcache = { path = "../../utils/cache/typcache" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+elog = { path = "../../utils/error/elog" }
+vars = { path = "../../optimizer/util/vars" }
+outfuncs = { path = "../../nodes/outfuncs" }
+nodes_core = { path = "../../nodes/nodes_core" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+commands_comment = { path = "../comment" }

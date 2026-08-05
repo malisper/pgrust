@@ -1,0 +1,1 @@
+{"path":"crates/backend/optimizer/path/allpaths/src/gucs.rs","sloc":[10,11,13,15,16,17,19,20,21],"kani":[],"fuzz":[],"regress":[13,15,16,17,19,20,21],"excluded":{"use-mod":[3,14]}}

@@ -1,0 +1,162 @@
+General
+  \copyright             show PostgreSQL usage and distribution terms
+  \crosstabview [COLUMNS] execute query and display result in crosstab
+  \errverbose            show most recent error message at maximum verbosity
+  \g [(OPTIONS)] [FILE]  execute query (and send result to file or |pipe);
+                         \g with no arguments is equivalent to a semicolon
+  \gdesc                 describe result of query, without executing it
+  \gexec                 execute query, then execute each value in its result
+  \gset [PREFIX]         execute query and store result in psql variables
+  \gx [(OPTIONS)] [FILE] as \g, but forces expanded output mode
+  \q                     quit psql
+  \restrict RESTRICT_KEY
+                         enter restricted mode with provided key
+  \unrestrict RESTRICT_KEY
+                         exit restricted mode if key matches
+  \watch [[i=]SEC] [c=N] [m=MIN]
+                         execute query every SEC seconds, up to N times,
+                         stop if less than MIN rows are returned
+
+Help
+  \? [commands]          show help on backslash commands
+  \? options             show help on psql command-line options
+  \? variables           show help on special variables
+  \h [NAME]              help on syntax of SQL commands, * for all commands
+
+Query Buffer
+  \e [FILE] [LINE]       edit the query buffer (or file) with external editor
+  \ef [FUNCNAME [LINE]]  edit function definition with external editor
+  \ev [VIEWNAME [LINE]]  edit view definition with external editor
+  \p                     show the contents of the query buffer
+  \r                     reset (clear) the query buffer
+  \s [FILE]              display history or save it to file
+  \w FILE                write query buffer to file
+
+Input/Output
+  \copy ...              perform SQL COPY with data stream to the client host
+  \echo [-n] [STRING]    write string to standard output (-n for no newline)
+  \i FILE                execute commands from file
+  \ir FILE               as \i, but relative to location of current script
+  \o [FILE]              send all query results to file or |pipe
+  \qecho [-n] [STRING]   write string to \o output stream (-n for no newline)
+  \warn [-n] [STRING]    write string to standard error (-n for no newline)
+
+Conditional
+  \if EXPR               begin conditional block
+  \elif EXPR             alternative within current conditional block
+  \else                  final alternative within current conditional block
+  \endif                 end conditional block
+
+Informational
+  (options: S = show system objects, x = expanded mode, + = additional detail)
+  \d[Sx+]                list tables, views, and sequences
+  \d[S+]   NAME          describe table, view, sequence, or index
+  \da[Sx]  [PATTERN]     list aggregates
+  \dA[x+]  [PATTERN]     list access methods
+  \dAc[x+] [AMPTRN [TYPEPTRN]]  list operator classes
+  \dAf[x+] [AMPTRN [TYPEPTRN]]  list operator families
+  \dAo[x+] [AMPTRN [OPFPTRN]]   list operators of operator families
+  \dAp[x+] [AMPTRN [OPFPTRN]]   list support functions of operator families
+  \db[x+]  [PATTERN]     list tablespaces
+  \dc[Sx+] [PATTERN]     list conversions
+  \dconfig[x+] [PATTERN] list configuration parameters
+  \dC[x+]  [PATTERN]     list casts
+  \dd[Sx]  [PATTERN]     show object descriptions not displayed elsewhere
+  \dD[Sx+] [PATTERN]     list domains
+  \ddp[x]  [PATTERN]     list default privileges
+  \dE[Sx+] [PATTERN]     list foreign tables
+  \des[x+] [PATTERN]     list foreign servers
+  \det[x+] [PATTERN]     list foreign tables
+  \deu[x+] [PATTERN]     list user mappings
+  \dew[x+] [PATTERN]     list foreign-data wrappers
+  \df[anptw][Sx+] [FUNCPTRN [TYPEPTRN ...]]
+                         list [only agg/normal/procedure/trigger/window] functions
+  \dF[x+]  [PATTERN]     list text search configurations
+  \dFd[x+] [PATTERN]     list text search dictionaries
+  \dFp[x+] [PATTERN]     list text search parsers
+  \dFt[x+] [PATTERN]     list text search templates
+  \dg[Sx+] [PATTERN]     list roles
+  \di[Sx+] [PATTERN]     list indexes
+  \dl[x+]                list large objects, same as \lo_list
+  \dL[Sx+] [PATTERN]     list procedural languages
+  \dm[Sx+] [PATTERN]     list materialized views
+  \dn[Sx+] [PATTERN]     list schemas
+  \do[Sx+] [OPPTRN [TYPEPTRN [TYPEPTRN]]]
+                         list operators
+  \dO[Sx+] [PATTERN]     list collations
+  \dp[Sx]  [PATTERN]     list table, view, and sequence access privileges
+  \dP[itnx+] [PATTERN]   list [only index/table] partitioned relations [n=nested]
+  \drds[x] [ROLEPTRN [DBPTRN]]
+                         list per-database role settings
+  \drg[Sx] [PATTERN]     list role grants
+  \dRp[x+] [PATTERN]     list replication publications
+  \dRs[x+] [PATTERN]     list replication subscriptions
+  \ds[Sx+] [PATTERN]     list sequences
+  \dt[Sx+] [PATTERN]     list tables
+  \dT[Sx+] [PATTERN]     list data types
+  \du[Sx+] [PATTERN]     list roles
+  \dv[Sx+] [PATTERN]     list views
+  \dx[x+]  [PATTERN]     list extensions
+  \dX[x]   [PATTERN]     list extended statistics
+  \dy[x+]  [PATTERN]     list event triggers
+  \l[x+]   [PATTERN]     list databases
+  \sf[+]   FUNCNAME      show a function's definition
+  \sv[+]   VIEWNAME      show a view's definition
+  \z[Sx]   [PATTERN]     same as \dp
+
+Large Objects
+  \lo_export LOBOID FILE write large object to file
+  \lo_import FILE [COMMENT]
+                         read large object from file
+  \lo_list[x+]           list large objects
+  \lo_unlink LOBOID      delete a large object
+
+Formatting
+  \a                     toggle between unaligned and aligned output mode
+  \C [STRING]            set table title, or unset if none
+  \f [STRING]            show or set field separator for unaligned query output
+  \H                     toggle HTML output mode (currently off)
+  \pset [NAME [VALUE]]   set table output option
+                         (border|columns|csv_fieldsep|expanded|fieldsep|
+                         fieldsep_zero|footer|format|linestyle|null|
+                         numericlocale|pager|pager_min_lines|recordsep|
+                         recordsep_zero|tableattr|title|tuples_only|
+                         unicode_border_linestyle|unicode_column_linestyle|
+                         unicode_header_linestyle|xheader_width)
+  \t [on|off]            show only rows (currently off)
+  \T [STRING]            set HTML <table> tag attributes, or unset if none
+  \x [on|off|auto]       toggle expanded output (currently off)
+
+Connection
+  \c[onnect] {[DBNAME|- USER|- HOST|- PORT|-] | conninfo}
+                         connect to new database (currently "postgres")
+  \conninfo              display information about current connection
+  \encoding [ENCODING]   show or set client encoding
+  \password [USERNAME]   securely change the password for a user
+
+Operating System
+  \cd [DIR]              change the current working directory
+  \getenv PSQLVAR ENVVAR fetch environment variable
+  \setenv NAME [VALUE]   set or unset environment variable
+  \timing [on|off]       toggle timing of commands (currently off)
+  \! [COMMAND]           execute command in shell or start interactive shell
+
+Variables
+  \prompt [TEXT] NAME    prompt user to set internal variable
+  \set [NAME [VALUE]]    set internal variable, or list all if no parameters
+  \unset NAME            unset (delete) internal variable
+
+Extended Query Protocol
+  \bind [PARAM]...       set query parameters
+  \bind_named STMT_NAME [PARAM]...
+                         set query parameters for an existing prepared statement
+  \close_prepared STMT_NAME
+                         close an existing prepared statement
+  \endpipeline           exit pipeline mode
+  \flush                 flush output data to the server
+  \flushrequest          send request to the server to flush its output buffer
+  \getresults [NUM_RES]  read NUM_RES pending results, or all if no argument
+  \parse STMT_NAME       create a prepared statement
+  \sendpipeline          send an extended query to an ongoing pipeline
+  \startpipeline         enter pipeline mode
+  \syncpipeline          add a synchronisation point to an ongoing pipeline

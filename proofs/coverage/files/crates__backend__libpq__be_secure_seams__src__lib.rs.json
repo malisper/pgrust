@@ -1,0 +1,1 @@
+{"path":"crates/backend/libpq/be_secure_seams/src/lib.rs","sloc":[3,4,7,8,11,12,15,16,19,23],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1]}}

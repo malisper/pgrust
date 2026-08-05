@@ -1,0 +1,1 @@
+{"path":"crates/backend/postmaster/checkpointer_seams/src/lib.rs","sloc":[1,3,8,11,14,16],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[6]}}

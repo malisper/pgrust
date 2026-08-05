@@ -1,0 +1,27 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+bytea-cmp	eq_bytea_bit_count	proofs::eq_bytea_bit_count	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_bytea_int2	proofs::eq_bytea_int2	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_bytea_int4	proofs::eq_bytea_int4	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_bytea_int8	proofs::eq_bytea_int8	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_bytea_larger	proofs::eq_bytea_larger	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_bytea_smaller	proofs::eq_bytea_smaller	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_byteacmp	proofs::eq_byteacmp	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_byteaeq	proofs::eq_byteaeq	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_byteage	proofs::eq_byteage	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_byteagt	proofs::eq_byteagt	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_byteain_escaped_count	proofs::eq_byteain_escaped_count	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_byteale	proofs::eq_byteale	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_bytealt	proofs::eq_bytealt	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_byteane	proofs::eq_byteane	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_to_bin32	proofs::eq_to_bin32	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_to_bin64	proofs::eq_to_bin64	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_to_hex32	proofs::eq_to_hex32	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_to_hex64	proofs::eq_to_hex64	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_to_oct32	proofs::eq_to_oct32	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	eq_to_oct64	proofs::eq_to_oct64	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	proofs::eq_bytea_bit_count	proofs::eq_bytea_bit_count	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	proofs::eq_bytea_get_bit	proofs::eq_bytea_get_bit	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	proofs::eq_bytea_get_byte	proofs::eq_bytea_get_byte	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	proofs::eq_bytea_int2	proofs::eq_bytea_int2	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	proofs::eq_bytea_int4	proofs::eq_bytea_int4	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-cmp	proofs::eq_bytea_int8	proofs::eq_bytea_int8	0	3	VERIFICATION:- SUCCESSFUL	RAN	1

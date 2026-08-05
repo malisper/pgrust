@@ -1,0 +1,218 @@
+{
+ "generated": "2026-07-31T23:08:49+00:00",
+ "head_sha": "7e9409548132593f58e32c2f5f6f3d9c8a868664",
+ "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
+ "sloc_rule_id": "v2+no-const-tables",
+ "sloc_exclusions": {
+  "use-mod": 15,
+  "const-table": 36,
+  "else-only": 11,
+  "unsafe-only": 7,
+  "attr": 25,
+  "const-static": 17,
+  "typedef": 27,
+  "impl-header": 4,
+  "arrow-only": 1,
+  "thread-local": 5,
+  "macro-scaffold": 1,
+  "type-alias": 2
+ },
+ "line_table_inputs": [
+  "/Users/malisper/dev/pgrust-fast/.wt-p1-laneo/fuzz/coverage/sha2_diff.lcov",
+  "/Users/malisper/dev/pgrust-fast/.wt-p1-laneo/fuzz/coverage/pglz_diff.lcov",
+  "/Users/malisper/dev/pgrust-fast/.wt-p1-laneo/fuzz/coverage/encode_diff.lcov"
+ ],
+ "census": {
+  "expected": 0,
+  "ran": 0,
+  "walled": 0,
+  "failed_to_run": 0,
+  "waived": 0,
+  "kaniraw_files": 0,
+  "kaniraw_without_census_row": 0,
+  "census_closed": true,
+  "unmeasured": []
+ },
+ "macro_attribution": {
+  "enabled": true,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": {
+   "files": 160,
+   "macro_defs": 320,
+   "generator_macros": 221,
+   "call_blocks": 468,
+   "decl_lines": 2293
+  }
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 0,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [
+    "/Users/malisper/dev/pgrust-fast/.wt-p1-laneo/fuzz/coverage/sha2_diff.lcov",
+    "/Users/malisper/dev/pgrust-fast/.wt-p1-laneo/fuzz/coverage/pglz_diff.lcov",
+    "/Users/malisper/dev/pgrust-fast/.wt-p1-laneo/fuzz/coverage/encode_diff.lcov"
+   ],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/encode",
+  "crates/common/pglz",
+  "crates/common/sha2"
+ ],
+ "totals": {
+  "sloc": 766,
+  "kani": 0,
+  "fuzz": 708,
+  "regress": 0,
+  "any": 708,
+  "pct": {
+   "kani": 0.0,
+   "fuzz": 92.43,
+   "regress": 0.0,
+   "any": 92.43
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 16,
+   "covered_sloc_in_touched_files": 1216,
+   "sloc_of_touched_files": 3843
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "encode",
+   "path": "crates/backend/utils/adt/encode",
+   "sloc": 315,
+   "kani": 0,
+   "fuzz": 287,
+   "regress": 0,
+   "any": 287,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 91.11,
+    "regress": 0.0,
+    "any": 91.11
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/encode/src/builtins.rs",
+     "sloc": 25,
+     "kani": 0,
+     "fuzz": 16,
+     "regress": 0,
+     "any": 16,
+     "detail": "files/crates__backend__utils__adt__encode__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/encode/src/lib.rs",
+     "sloc": 290,
+     "kani": 0,
+     "fuzz": 271,
+     "regress": 0,
+     "any": 271,
+     "detail": "files/crates__backend__utils__adt__encode__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/encode/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__encode__src__tests.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "pglz",
+   "path": "crates/common/pglz",
+   "sloc": 231,
+   "kani": 0,
+   "fuzz": 208,
+   "regress": 0,
+   "any": 208,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 90.04,
+    "regress": 0.0,
+    "any": 90.04
+   },
+   "files": [
+    {
+     "path": "crates/common/pglz/src/lib.rs",
+     "sloc": 231,
+     "kani": 0,
+     "fuzz": 208,
+     "regress": 0,
+     "any": 208,
+     "detail": "files/crates__common__pglz__src__lib.rs.json"
+    },
+    {
+     "path": "crates/common/pglz/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__common__pglz__src__tests.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "sha2",
+   "path": "crates/common/sha2",
+   "sloc": 220,
+   "kani": 0,
+   "fuzz": 213,
+   "regress": 0,
+   "any": 213,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 96.82,
+    "regress": 0.0,
+    "any": 96.82
+   },
+   "files": [
+    {
+     "path": "crates/common/sha2/src/lib.rs",
+     "sloc": 220,
+     "kani": 0,
+     "fuzz": 213,
+     "regress": 0,
+     "any": 213,
+     "detail": "files/crates__common__sha2__src__lib.rs.json"
+    },
+    {
+     "path": "crates/common/sha2/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__common__sha2__src__tests.rs.json"
+    }
+   ]
+  }
+ ]
+}

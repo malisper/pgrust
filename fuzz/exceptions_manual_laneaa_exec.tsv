@@ -1,0 +1,66 @@
+# Reviewed per-line exception rows for adt/jsonpath_exec (p1-laneaa-exec
+# coverage close-out). Consumed by emit_exceptions_laneaa.py --manual-file.
+# columns: basename<TAB>line<TAB>class<TAB>c_counterpart<TAB>justification
+#
+# DATETIME-CARVE RESIDUALS (class excluded-state): the claim rules the
+# session-TZ datetime family out of phase-1 scope; the driver carves it at
+# the parsed-item level (path_has_datetime_item), so jbvDatetime VALUES can
+# never exist in-harness. Each row below is a line whose only route is a
+# datetime value or a datetime-family item type.
+lib.rs	110	excluded-state	claim carve: datetime family (jsonpath_exec.c JsonbType jbvDatetime)	jsonb_kind() jbvDatetime arm: JbV::Datetime values are produced only by the carved execute_datetime_method family (driver carve path_has_datetime_item)
+lib.rs	256	excluded-state	claim carve: datetime family (jsonpath_exec.c jspOperationName jpiDatetime)	operation_name(Datetime): the only call sites passing datetime item types are the carved execute_datetime_method family
+lib.rs	262	excluded-state	claim carve: datetime family (jspOperationName jpiDate)	operation_name(Date): only reachable from the carved datetime-method family
+lib.rs	267	excluded-state	claim carve: datetime family (jspOperationName jpiTime)	operation_name(Time): only reachable from the carved datetime-method family
+lib.rs	268	excluded-state	claim carve: datetime family (jspOperationName jpiTimeTz)	operation_name(TimeTz): only reachable from the carved datetime-method family
+lib.rs	269	excluded-state	claim carve: datetime family (jspOperationName jpiTimestamp)	operation_name(Timestamp): only reachable from the carved datetime-method family
+lib.rs	270	excluded-state	claim carve: datetime family (jspOperationName jpiTimestampTz)	operation_name(TimestampTz): only reachable from the carved datetime-method family
+lib.rs	735	excluded-state	claim carve: datetime family (jsonpath_exec.c jpiType jbvDatetime)	.type() on a jbvDatetime value: datetime values exist only downstream of the carved datetime methods
+lib.rs	736	excluded-state	claim carve: datetime family (jpiType jbvDatetime)	.type() datetime carrier match: carved-value-only route
+lib.rs	737	excluded-state	claim carve: datetime family (jpiType DATEOID name)	.type() date name: carved-value-only route
+lib.rs	738	excluded-state	claim carve: datetime family (jpiType TIMEOID name)	.type() time name: carved-value-only route
+lib.rs	739	excluded-state	claim carve: datetime family (jpiType TIMETZOID name)	.type() timetz name: carved-value-only route
+lib.rs	740	excluded-state	claim carve: datetime family (jpiType TIMESTAMPOID name)	.type() timestamp name: carved-value-only route
+lib.rs	741	excluded-state	claim carve: datetime family (jpiType TIMESTAMPTZOID name)	.type() timestamptz name: carved-value-only route
+lib.rs	847	excluded-state	claim carve: datetime family (jsonpath_exec.c jpiDatetime dispatch)	lax array-unwrap guard inside the datetime-method dispatch arm: the arm head (841-846) is datetime-family item types, carved at the driver
+lib.rs	848	excluded-state	claim carve: datetime family (jpiDatetime dispatch)	array-unwrap call inside the carved datetime-method dispatch arm
+lib.rs	850	excluded-state	claim carve: datetime family (jpiDatetime dispatch)	execute_datetime_method call: the callee is a named claim carve; this dispatch line is inside the carved arm
+lib.rs	1107	excluded-state	claim carve: datetime family (jsonpath_exec.c jpiString jbvDatetime)	.string() on a jbvDatetime value (encode_datetime is a named carve); datetime values are carved-route-only
+lib.rs	2377	excluded-state	claim carve: datetime family (JsonbValueToJsonb jbvDatetime)	serializing a jbvDatetime executor value (encode_datetime named carve); carved-value-only route
+lib.rs	2488	excluded-state	claim carve: datetime family (jsonpath_exec.c compareItems jbvDatetime)	datetime x datetime comparison pattern: both operands are carved-route-only values
+lib.rs	2489	excluded-state	claim carve: datetime family (compareItems jbvDatetime)	datetime x datetime comparison pattern (second operand)
+lib.rs	2490	excluded-state	claim carve: datetime family (compareItems -> compareDatetime)	compare_datetime is a named claim carve (session-TZ state)
+lib.rs	2491	excluded-state	claim carve: datetime family (compareDatetime cross-type NULL)	inside the carved datetime comparison arm
+lib.rs	2492	excluded-state	claim carve: datetime family (compareDatetime result)	inside the carved datetime comparison arm
+lib.rs	379	excluded-state	claim carve: json_item_from_datum (jsonpath_exec.c GetJsonPathVar -> JsonItemFromDatum)	the non-null SQL/JSON PASSING variable route calls the named fmgr-datum carve json_item_from_datum; the null-variable and jsonb-variable lanes of get_json_path_variable ARE fuzz-covered (JSON_EXISTS List-vars plane)
+#
+# DEFENSIVE C-PARITY (class defensive-c-parity): arms whose refutation is a
+# call-site/domain audit recorded here; each mirrors a C line that is equally
+# dead in the C domain, kept for totality/panic-freedom.
+lib.rs	237	defensive-c-parity	jsonpath_exec.c jspOperationName jpiAnd	call-site audit 2026-07-31: operation_name is called only from method/arithmetic error sites (types Size/Double/Bigint/Boolean/Decimal/Number/Integer/StringFunc/Add..Mod/Plus/Minus/Abs/Floor/Ceiling/KeyValue/datetime); And is never passed; C jspOperationName is likewise total with the same dead arms
+lib.rs	238	defensive-c-parity	jspOperationName jpiOr	same call-site audit: Or never passed to operation_name
+lib.rs	239	defensive-c-parity	jspOperationName jpiEqual	same call-site audit: Equal never passed (comparison errors carry no operator name)
+lib.rs	240	defensive-c-parity	jspOperationName jpiNotEqual	same call-site audit: NotEqual never passed
+lib.rs	241	defensive-c-parity	jspOperationName jpiLess	same call-site audit: Less never passed
+lib.rs	242	defensive-c-parity	jspOperationName jpiGreater	same call-site audit: Greater never passed
+lib.rs	243	defensive-c-parity	jspOperationName jpiLessOrEqual	same call-site audit: LessOrEqual never passed
+lib.rs	244	defensive-c-parity	jspOperationName jpiGreaterOrEqual	same call-site audit: GreaterOrEqual never passed
+lib.rs	250	defensive-c-parity	jspOperationName jpiType	same call-site audit: .type() has no error path naming the operator
+lib.rs	258	defensive-c-parity	jspOperationName jpiStartsWith	same call-site audit: starts-with mismatches yield Unknown, never a named-operator error
+lib.rs	259	defensive-c-parity	jspOperationName jpiLikeRegex	same call-site audit: like_regex mismatches yield Unknown, never a named-operator error
+lib.rs	597	defensive-c-parity	jsonpath_exec.c executeItemOptUnwrapTarget jpiIndexArray `if (v == NULL) continue;`	index range is clamped to 0..=size-1 with size = container_size, so get_ith_value is always Some; mirrors C's defensive NULL continue
+lib.rs	799	defensive-c-parity	jsonpath_exec.c jpiDouble numeric arm (float8in_internal elog path)	Err edge of float8in_internal under a soft-error context: every in-domain failure is soft-routed (invalid-argument arm at 801 is fuzz-covered); the hard edge is allocation/internal-error propagation, C parity = ereport(ERROR) escape
+lib.rs	804	defensive-c-parity	jsonpath_exec.c jpiDouble numeric arm isinf/isnan gate	jsonb numerics and jsonpath numeric literals are finite (jsonb_in and the path grammar reject NaN/Inf spellings; numeric_out of any finite numeric never prints Infinity) and float8 overflow is soft-routed to the covered 801 arm; C has the same post-conversion gate, equally dead from jsonb inputs
+lib.rs	817	defensive-c-parity	jsonpath_exec.c jpiDouble string arm (float8in_internal elog path)	same as line 799: soft-error context covers all in-domain failures (819-822 fuzz-covered); hard Err edge is alloc/internal propagation
+lib.rs	962	defensive-c-parity	jsonpath_exec.c jpiDecimal/jpiNumber numeric arm isnan/isinf gate	same finite-carrier audit as line 804: no in-domain jbvNumeric can be NaN/Inf (the string arm's gate at 976 IS fuzz-covered via '"NaN"' docs)
+lib.rs	1155	defensive-c-parity	jsonpath_exec.c executeNextItem cur==NULL tolerance	call-site audit 2026-07-31: all 24 execute_next_item call sites pass Some(cur); the None arm mirrors C's cur==NULL branch, equally dead
+lib.rs	1567	defensive-c-parity	jsonpath_exec.c executeLikeRegex -> RE_compile_and_execute elog path	the like_regex pattern already compiled once during jsonpath parsing (gram makeItemLikeRegex parity), so exec-time recompilation of the identical pattern cannot fail in-domain; Err edge is alloc/internal propagation
+lib.rs	2115	defensive-c-parity	jsonpath_exec.c executeKeyValueMethod direct union read jb->val.binary	impossible let-else refutation: jsonb_kind(jb)==Object implies JbV::Binary (jsonb_kind's Object arm is only reached for Binary carriers); Rust keeps the panic-free error arm where C reads the union directly
+lib.rs	2117	defensive-c-parity	executeKeyValueMethod direct union read	inside the impossible let-else arm (see line 2115)
+lib.rs	2119	defensive-c-parity	executeKeyValueMethod direct union read	inside the impossible let-else arm (see line 2115)
+lib.rs	2120	defensive-c-parity	executeKeyValueMethod direct union read	inside the impossible let-else arm (see line 2115)
+lib.rs	2302	defensive-c-parity	jsonb_util.c pushJsonbValue / VARSIZE_ANY short-numeric tolerance	short-header EMBEDDED numeric: every jsonb image this crate receives in-harness is jsonb_in/build output whose embedded numerics carry 4B headers; short embedded numerics arise only from jsonb_build_* over short heap datums (out-of-crate producers); branch kept for C VARSIZE_ANY parity
+lib.rs	2303	defensive-c-parity	pushJsonbValue short-numeric tolerance	inside the short-header numeric branch (see line 2302)
+lib.rs	2304	defensive-c-parity	pushJsonbValue short-numeric tolerance	inside the short-header numeric branch (see line 2302)
+lib.rs	2305	defensive-c-parity	pushJsonbValue short-numeric tolerance	inside the short-header numeric branch (see line 2302)
+lib.rs	2306	defensive-c-parity	pushJsonbValue short-numeric tolerance	inside the short-header numeric branch (see line 2302)
+lib.rs	2339	defensive-c-parity	jsonb_util.c pushJsonbValue palloc ERROR path	Err edge of arena push (allocation-failure propagation only); the success path through the same call is fuzz-covered

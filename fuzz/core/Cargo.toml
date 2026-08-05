@@ -1,0 +1,246 @@
+# Decoder-fuzz core: the actual byte->decoder driving logic, as a plain library
+# buildable on the pinned stable toolchain (no libfuzzer). The cargo-fuzz crate
+# in ../ wraps these functions in libfuzzer targets (nightly). Keeping the logic
+# here lets `cargo test` smoke it on stable without cargo-fuzz installed.
+[package]
+name = "decoder_fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "decoder_fuzz"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../crates/_support/mcx" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+crc32c = { path = "../../crates/port/crc32c" }
+xlogreader = { path = "../../crates/backend/access/transam/xlogreader" }
+xlogreader_seams = { path = "../../crates/backend/access/transam/xlogreader_seams" }
+pqformat = { path = "../../crates/backend/libpq/pqformat" }
+stringinfo = { path = "../../crates/_support/types/stringinfo" }
+mbutils = { path = "../../crates/backend/utils/mb/mbutils" }
+detoast = { path = "../../crates/backend/access/common/detoast" }
+wchar = { path = "../../crates/common/wchar" }
+stack_depth = { path = "../../crates/backend/utils/misc/stack_depth" }
+stack_depth_core = { path = "../../crates/backend/utils/misc/stack_depth_core" }
+readfuncs = { path = "../../crates/backend/nodes/readfuncs" }
+outfuncs = { path = "../../crates/backend/nodes/outfuncs" }
+copyfuncs = { path = "../../crates/backend/nodes/copyfuncs" }
+# Differential targets (shipped Rust vs vendored C oracle in csrc/):
+adt_float = { path = "../../crates/backend/utils/adt/float" }
+adt_geo = { path = "../../crates/backend/utils/adt/geo" }
+adt_char = { path = "../../crates/backend/utils/adt/char" }
+adt_bool = { path = "../../crates/backend/utils/adt/bool" }
+hashfn = { path = "../../crates/common/hashfn" }
+scalar_seams = { path = "../../crates/backend/utils/adt/scalar_seams" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+# vlbytea_diff: shipped bytea_substring/bytea_overlay slice through the
+# detoast_attr_slice seam; installing the production seam makes those value
+# planes live (driver probes and carves them when absent).
+# (detoast dep already declared above)
+adt_pseudotypes = { path = "../../crates/backend/utils/adt/pseudotypes" }
+mbutils_seams = { path = "../../crates/backend/utils/mb/mbutils_seams" }
+adt_pg_lsn = { path = "../../crates/backend/utils/adt/pg_lsn" }
+adt_numeric = { path = "../../crates/backend/utils/adt/numeric" }
+# hashenc_diff (p1-lanee batch):
+pg_b64 = { path = "../../crates/common/base64" }
+pg_md5 = { path = "../../crates/common/md5" }
+pg_sha1 = { path = "../../crates/common/sha1" }
+pg_sha2 = { path = "../../crates/common/sha2" }
+pg_hmac = { path = "../../crates/common/hmac" }
+scram_common = { path = "../../crates/common/scram_common" }
+adt_ascii = { path = "../../crates/backend/utils/adt/adt_ascii" }
+cryptohashfuncs = { path = "../../crates/backend/utils/adt/cryptohashfuncs" }
+postgres_seams = { path = "../../crates/backend/tcop/postgres_seams" }
+adt_encode = { path = "../../crates/backend/utils/adt/encode" }  # encode_diff (scaffold.py)
+# strfam_diff (p1-lanec string-family batch):
+pg_string = { path = "../../crates/common/string" }
+archive = { path = "../../crates/common/archive" }
+percentrepl = { path = "../../crates/common/percentrepl" }
+relpath = { path = "../../crates/common/relpath" }
+relpath_seams = { path = "../../crates/common/relpath_seams" }
+wait_error = { path = "../../crates/common/wait_error" }
+types_storage = { path = "../../crates/_support/types/types_storage" }
+libc = "0.2"
+# Lane-0B differential targets (100%-coverage campaign):
+adt_uuid = { path = "../../crates/backend/utils/adt/uuid" }
+adt_mac = { path = "../../crates/backend/utils/adt/mac" }
+adt_mac8 = { path = "../../crates/backend/utils/adt/mac8" }
+name = { path = "../../crates/backend/utils/adt/name" }
+adt_cash = { path = "../../crates/backend/utils/adt/cash" }
+# example-only (cash_numeric_sample) also uses adt_numeric (declared above)
+ryu = { path = "../../crates/common/ryu" }
+# fc-wrapper plane (builtins.rs coverage through LocalFcinfo, the proofs
+# wrapper-level pattern run natively):
+# cryptofam_diff (p1-lanef crypto/hash family batch):
+# tablesfam_diff (p1-lanef tables batch):
+keywords = { path = "../../crates/common/keywords" }
+unicode_category = { path = "../../crates/common/unicode_category" }
+# enc_tables_diff (p1-laneg encoding+tables batch):
+adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (scaffold.py)
+# mbconv_diff (p1-lanez encoding-conversion family):
+conv = { path = "../../crates/backend/utils/mb/conv" }
+guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
+adt_tsquery_core = { path = "../../crates/backend/utils/adt/tsquery_core" }  # tsquery_core_diff (scaffold.py)
+adt_tsquery_rewrite = { path = "../../crates/backend/utils/adt/tsquery_rewrite" }  # tsqrw_diff (scaffold.py, p1-lanef handoff)
+# adt_tsvector_core (tsquery image types TsQueryRef/Item for tsquery_core_diff
+# + tsqrw_diff) — already declared below for tsvector_core_diff
+scan_fgram = { path = "../../crates/backend/parser/scan_fgram" }  # stubs: standard_conforming_strings session cell
+adt_formatting = { path = "../../crates/backend/utils/adt/formatting" }  # fmt_dch_diff + fmt_num_diff (p1-lanek)
+adt_json = { path = "../../crates/backend/utils/adt/json" }  # json_diff (scaffold.py)
+arrayfuncs = { path = "../../crates/backend/utils/adt/arrayfuncs" }  # arrayfuncs_diff (scaffold.py)
+adt_int = { path = "../../crates/backend/utils/adt/int" }    # arrayfuncs_diff element io
+fmgr_core = { path = "../../crates/backend/utils/fmgr/fmgr_core" }        # arrayfuncs_diff width_bucket cmp finfo
+syscache_seams = { path = "../../crates/backend/utils/cache/syscache_seams" }  # arrayfuncs_diff pinned typcache fixture
+indexcmds_seams = { path = "../../crates/backend/commands/indexcmds_seams" }   # arrayfuncs_diff pinned opclass fixture
+types_snapshot = { path = "../../crates/_support/types/snapshot" }  # stub:snapshot builder
+types_tuple = { path = "../../crates/_support/types/types_tuple" }        # NameData for the fixture
+# numutils_diff (p1-laneaj adt/numutils batch):
+numutils = { path = "../../crates/backend/utils/adt/numutils" }
+adt_oracle_compat = { path = "../../crates/backend/utils/adt/oracle_compat" }  # oraclefam_diff (scaffold.py)
+adt_rowtypes = { path = "../../crates/backend/utils/adt/rowtypes" }  # rowtypes_diff (scaffold.py)
+array_userfuncs = { path = "../../crates/backend/utils/adt/array_userfuncs" }  # array_userfuncs_diff (scaffold.py)
+# array_userfuncs_diff seam pins + shipped comparators/foundation:
+fmgr_seams = { path = "../../crates/backend/utils/fmgr/fmgr_seams" }
+detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
+pg_prng = { path = "../../crates/common/pg_prng" }
+# rowtypes_diff seam pins + record registry + tuple building:
+typcache = { path = "../../crates/backend/utils/cache/typcache" }
+tupdesc = { path = "../../crates/backend/access/common/tupdesc" }
+heaptuple = { path = "../../crates/backend/access/common/heaptuple" }
+catalog_seams = { path = "../../crates/backend/catalog/catalog_seams" }  # tupaccess_diff populate_compact_attribute pin
+namespace_seams = { path = "../../crates/backend/catalog/namespace_seams" }
+adt_jsonb = { path = "../../crates/backend/utils/adt/jsonb" }  # jsonbio_diff (scaffold.py)
+# jsonbops_diff (p1-lanev): text[]-arg detoast + C-collation string cmp seam
+pg_locale_seams = { path = "../../crates/backend/utils/adt/pg_locale_seams" }
+arrayutils = { path = "../../crates/backend/utils/adt/arrayutils" }  # arrayutils_diff (scaffold.py)
+adt_timestamp = { path = "../../crates/backend/utils/adt/adt_timestamp" }  # timestamp_diff (scaffold.py)
+
+adt_datetime = { path = "../../crates/backend/utils/adt/adt_datetime" }  # timestamp_diff
+adt_date = { path = "../../crates/backend/utils/adt/adt_date" }  # timestamp_diff fc plane (owed fc_timestamp_mi)
+pgtz = { path = "../../crates/backend/timezone/pgtz" }  # timestamp_diff env pin
+elog = { path = "../../crates/backend/utils/error/elog" }  # timestamp_diff env pin
+elog_seams = { path = "../../crates/backend/utils/error/elog_seams" }  # is_installed() sentinel for the shared ereport seam
+fd = { path = "../../crates/backend/storage/file/fd" }  # timestamp_diff env pin
+xact_seams = { path = "../../crates/backend/access/transam/xact_seams" }  # timestamp_diff env pin
+timestamp_seams = { path = "../../crates/backend/utils/adt/timestamp_seams" }  # timestamp_diff env pin
+adt_jsonpath = { path = "../../crates/backend/utils/adt/jsonpath" }  # jsonpath_diff (p1-laneaa)
+adt_jsonpath_exec = { path = "../../crates/backend/utils/adt/jsonpath_exec" }  # jsonpathexec_diff (p1-laneaa)
+pg_locale = { path = "../../crates/backend/utils/adt/pg_locale" }  # jsonpath_diff: pinned C-ctype default collation (both sides)
+adt_rangetypes = { path = "../../crates/backend/utils/adt/rangetypes" }  # rangetypes_diff (scaffold.py)
+# rangetypes_diff pinned-instantiation element crates + seams
+adt_int8 = { path = "../../crates/backend/utils/adt/int8" }
+nbt_compare = { path = "../../crates/backend/access/nbtree/compare" }
+lsyscache = { path = "../../crates/backend/utils/cache/lsyscache" }
+adt_multirangetypes = { path = "../../crates/backend/utils/adt/multirangetypes" }  # multirangetypes_diff (scaffold.py)
+# multirange_constructor2 detoasts its variadic array through the detoast
+# seam; multirangetypes_diff installs the SHIPPED impl (never a mock: the
+# seam is environment, the detoast logic is computation).
+# rangetypes_diff mints inline-compressed (4B_C) bound images with the SHIPPED
+# compressor; both sides then decompress the identical bytes (C: verbatim
+# vendored pglz_decompress; Rust: the shipped detoast path).
+pglz = { path = "../../crates/common/pglz" }
+adt_like = { path = "../../crates/backend/utils/adt/like" }  # like_diff (scaffold.py)
+adt_regexp = { path = "../../crates/backend/utils/adt/regexp" }  # regexp_diff (scaffold.py)
+regexp_alt = { path = "../../crates/backend/utils/adt/regexp_alt" }  # regexp_diff: pin regex_engine=spencer (RE2 dispatch carve)
+regex_core = { path = "../../crates/backend/regex/regex_core" }  # regexp_diff: install the Spencer engine seams
+regex_core_seams = { path = "../../crates/backend/regex/regex_core_seams" }  # task #155 must-fail control: conflicting seam install must still panic
+# regex_diff (p1-regexcore Spencer engine differential): regex_core,
+# stack_depth, syscache_seams, types_tuple and pg_locale are already
+# dependencies above; regex_diff reuses those single registrations. Its
+# only otherwise-unused dep:
+regex = { path = "../../crates/_support/types/regex" }  # regex_diff: RegcompResult/RegexecResult/RegprefixResult carrier types
+# pg_locale (like_diff C_LOCALE direct-kernel arms) — already declared above for jsonpath_diff
+types_nodes = { path = "../../crates/_support/types/nodes" }  # like_diff: NodeTag for the prosupport unhandled-tag plane
+integerset = { path = "../../crates/backend/lib/integerset" }  # libfam_diff (scaffold.py)
+hyperloglog = { path = "../../crates/backend/lib/hyperloglog" }  # libfam_diff
+binaryheap = { path = "../../crates/backend/lib/binaryheap" }  # libfam_diff
+radixtree = { path = "../../crates/backend/lib/radixtree" }  # radixtree_diff (p1-mb-lib)
+pairingheap = { path = "../../crates/backend/lib/pairingheap" }  # libfam_diff
+bloomfilter = { path = "../../crates/backend/lib/bloomfilter" }  # libfam_diff
+# miscfam_diff (p1-mb-miscfam); stringinfo/mcx/types_* already above
+cmdtag = { path = "../../crates/backend/tcop/cmdtag" }
+pg_class = { path = "../../crates/backend/catalog/pg_class" }
+contrib_earthdistance = { path = "../../crates/contrib/earthdistance" }
+pg_rusage = { path = "../../crates/backend/utils/misc/pg_rusage" }
+xlogstats = { path = "../../crates/backend/access/transam/xlogstats" }
+types_portal = { path = "../../crates/_support/types/portal" }
+dfmgr = { path = "../../crates/backend/utils/fmgr/dfmgr" }
+pg_bitutils = { path = "../../crates/port/pg_bitutils" }  # portfam_diff (scaffold.py)
+# crc32c (portfam_diff) — already declared above
+pgstrcasecmp = { path = "../../crates/port/pgstrcasecmp" }  # portfam_diff
+pg_path = { path = "../../crates/port/pg_path" }  # portfam_diff
+bufmask = { path = "../../crates/backend/access/common/bufmask" }  # portfam_diff
+
+# tzfam_diff (p1-mb-tzfam); adt_datetime/pg_locale/mbutils/wchar/mcx/types_error already above
+strftime = { path = "../../crates/backend/timezone/strftime" }
+localtime = { path = "../../crates/backend/timezone/localtime" }
+tzparser = { path = "../../crates/backend/utils/misc/tzparser" }
+ts_locale = { path = "../../crates/backend/tsearch/ts_locale" }
+# spellfam_diff (p1-spell): tsearch/spell loader+normalizer; pg_locale/mbutils/
+# wchar/mcx/types_error/ts_locale already declared above.
+tsearch_spell = { path = "../../crates/backend/tsearch/spell" }
+guc = { path = "../../crates/backend/utils/misc/guc" }
+
+# netfam_diff (p1-mb-netfam); pqformat/mcx/stringinfo/types_error/mbutils/mbutils_seams/datum already above
+ifaddr = { path = "../../crates/backend/libpq/ifaddr" }
+pqcomm_seams = { path = "../../crates/backend/libpq/pqcomm_seams" }
+
+# contribb_diff (p1-mb-contribb); mcx/datum/types_*/stringinfo/dfmgr already above
+contrib_seg = { path = "../../crates/contrib/seg" }
+contrib_cube = { path = "../../crates/contrib/cube" }
+# hstore_diff (p1-mb-contribc); arrayfuncs/mcx/datum/types_fmgr/dfmgr/varlena/
+# stringinfo/pqformat/mbutils/hashfn/types_tuple already above
+hstore = { path = "../../crates/contrib/hstore" }
+wparser_def = { path = "../../crates/backend/tsearch/wparser_def" }
+# contriba_diff (p1-mb-contriba); varlena/mbutils/wchar/dfmgr/guc/mcx/types_* already above
+fuzzystrmatch = { path = "../../crates/contrib/fuzzystrmatch" }
+isn = { path = "../../crates/contrib/isn" }
+# contriba_diff GUC environment (isn.weak fc plane): store init + identity
+aclchk_seams = { path = "../../crates/backend/catalog/aclchk_seams" }
+superuser_seams = { path = "../../crates/backend/utils/misc/superuser_seams" }
+miscinit = { path = "../../crates/backend/utils/init/miscinit" }
+define = { path = "../../crates/backend/commands/define" }  # define_diff (scaffold.py)
+
+adt_tsvector_core = { path = "../../crates/backend/utils/adt/tsvector_core" }  # tsvector_core_diff (scaffold.py)
+adt_tsrank = { path = "../../crates/backend/utils/adt/tsrank" }  # tsrank_diff (scaffold.py)
+
+adt_network = { path = "../../crates/backend/utils/adt/network" }  # network_diff (scaffold.py)
+guc_file = { path = "../../crates/backend/utils/misc/guc_file" }  # guc_file_diff (scaffold.py)
+timeline = { path = "../../crates/backend/access/transam/timeline" }  # timeline_diff (scaffold.py)
+tsm_system_rows = { path = "../../crates/contrib/tsm_system_rows" }  # tsm_system_rows_diff (scaffold.py)
+tsm_system_time = { path = "../../crates/contrib/tsm_system_time" }  # tsm_system_time_diff (scaffold.py)
+tablesample = { path = "../../crates/backend/access/tablesample/tablesample" }  # tablesample_diff (p1-wavea)
+tableam_vocab = { path = "../../crates/backend/access/table/tableam_vocab" }    # tablesample_diff SampleScanDriver
+# stub:clock monotonic half (tsm_system_time_diff): the default-off pin
+# feature exists FOR this detached fuzz workspace; product builds never
+# enable it (see pg_clock/Cargo.toml).
+pg_clock = { path = "../../crates/port/pg_clock", features = ["fuzz_mono_pin"] }
+crypt = { path = "../../crates/backend/libpq/crypt" }  # crypt_be_diff (p1-wavea)
+# instrument_diff (p1-wavea): crate under test + the wal_usage seam the
+# driver installs to pin the pgWalUsage analog from fuzz input.
+instrument = { path = "../../crates/backend/executor/instrument" }
+transam_xlog_seams = { path = "../../crates/backend/access/transam/transam_xlog_seams" }
+auth_scram = { path = "../../crates/backend/libpq/auth_scram" }  # crypt_be_diff (p1-wavea)
+
+# pgcryptofam_diff (p1-pgcryptofam): contrib/pgcrypto crypt()/gen_salt()/armor
+# family vs the verbatim 18.3 C oracle in csrc/pgcryptofam/.
+pgcrypto = { path = "../../crates/contrib/pgcrypto" }
+spgist_quadtree = { path = "../../crates/backend/access/spgist/spgist_quadtree" }  # spgquad_diff (scaffold.py)
+types_scan = { path = "../../crates/_support/types/types_scan" }  # spgquad_diff
+types_spgist = { path = "../../crates/_support/types/types_spgist" }  # spgquad_diff
+spgist_box = { path = "../../crates/backend/access/spgist/spgist_box" }  # spgbox_diff (scaffold.py)
+ltree = { path = "../../crates/contrib/ltree" }  # ltree_diff (p1-ltree-t74)
+pg_trgm = { path = "../../crates/contrib/pg_trgm" }  # trgm_diff (scaffold.py)
+
+adt_scalar = { path = "../../crates/backend/utils/adt/scalar" }  # scalarxid_diff (scaffold.py)
+xid8funcs = { path = "../../crates/backend/utils/adt/xid8funcs" }  # snapio_diff (scaffold.py)
+# numutils (scalarxid_diff uint32in_subr plane) already declared above (numutils_diff, p1-laneaj)
+
+[build-dependencies]
+cc = "1"

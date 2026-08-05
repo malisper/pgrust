@@ -1,0 +1,44 @@
+[package]
+name = "commands_createas"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+parser_analyze = { path = "../../parser/parser_analyze" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_portal = { path = "../../../_support/types/portal" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+createas_seams = { path = "../createas_seams" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+matview_seams = { path = "../matview_seams" }
+commands_view = { path = "../view" }
+catalog_toasting = { path = "../../catalog/catalog_toasting" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
+elog = { path = "../../utils/error/elog" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+execmain_seams = { path = "../../executor/execmain_seams" }
+format_type = { path = "../../utils/adt/format_type" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+queryjumble = { path = "../../nodes/queryjumble" }
+heapam = { path = "../../access/heap/heapam" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+parse_expr = { path = "../../parser/parse_expr" }
+postgres = { path = "../../tcop/postgres" }
+prepare = { path = "../prepare" }
+rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+table = { path = "../../access/table/table" }
+tableam = { path = "../../access/table/tableam" }
+tablecmds = { path = "../tablecmds" }
+tcop_dest = { path = "../../tcop/dest" }
+xact = { path = "../../access/transam/xact" }

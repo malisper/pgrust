@@ -1,0 +1,37 @@
+#!/bin/bash
+# (2) install: no apt/systemd - initdb + the UPSTREAM ClickBench install conf
+# formulas verbatim, + io_method=sync, + the TUNED-mode global conf lines.
+set -eu
+. "$(dirname "$0")/env.sh"
+rm -rf "$CB_DD"; mkdir -p "$CB_DD" "$CB_SOCK"
+"$PG_BINDIR/initdb" -D "$CB_DD" -U postgres --no-locale --encoding=UTF8 -A trust >/dev/null
+sed -i "s/^log_timezone = .*/log_timezone = 'GMT'/; s/^timezone = .*/timezone = 'GMT'/" "$CB_DD/postgresql.conf"
+
+# ---- UPSTREAM postgresql/install conf block, formulas verbatim ----
+memory=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+threads=$(nproc)
+cpus=$(($threads / 2))
+shared_buffers=$(($memory / 4))
+effective_cache_size=$(($memory - ($memory / 4)))
+max_worker_processes=$(($threads + 15))
+
+tee -a "$CB_DD/postgresql.conf" <<CONF
+shared_buffers=${shared_buffers}kB
+max_worker_processes=${max_worker_processes}
+max_parallel_workers=${threads}
+max_parallel_maintenance_workers=${cpus}
+max_parallel_workers_per_gather=${cpus}
+max_wal_size=32GB
+work_mem=64MB
+effective_cache_size = ${effective_cache_size}kB
+CONF
+
+# PG18 defaults io_method=worker (AIO io_worker child is unported in pgrust);
+# upstream ClickBench postgresql pins PGVERSION=17, which has no AIO at all.
+echo "io_method=sync" | tee -a "$CB_DD/postgresql.conf"
+
+# TUNED-ROW global conf (leaderboard tuned row)
+tee -a "$CB_DD/postgresql.conf" <<CONF
+work_mem=1GB
+pgrust.condition_cache=on
+CONF

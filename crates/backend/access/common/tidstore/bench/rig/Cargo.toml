@@ -1,0 +1,23 @@
+[package]
+name = "tidstore-rig"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "tidstore-rig"
+path = "src/main.rs"
+
+[dependencies]
+tidstore = { path = "../.." }
+mcx = { path = "../../../../../../_support/mcx" }
+types_core = { path = "../../../../../../_support/types/types_core" }
+types_tuple = { path = "../../../../../../_support/types/types_tuple" }
+
+[profile.release]
+lto = "fat"
+opt-level = 3
+codegen-units = 1
+debug = 0

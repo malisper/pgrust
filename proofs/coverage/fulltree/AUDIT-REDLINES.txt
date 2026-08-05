@@ -1,0 +1,82 @@
+total red line population: 261176
+crates/_support/types/pathnodes/src/lib.rs:1087:         match $self {
+crates/backend/access/brin/brin_build/src/lib.rs:254:         0
+crates/backend/access/brin/brin_minmax_multi/src/lib.rs:306:             &cmp,
+crates/backend/access/hash/hash/src/page.rs:899: pub(crate) fn _hash_finish_split(
+crates/backend/access/heap/rewriteheap/src/lib.rs:159:     let (_slot_xmin, logical_xmin) = procarray::ProcArrayGetReplicationSlotXmin()?;
+crates/backend/access/pgrcolumnar/src/reader.rs:994: fn advise_extent(bytes: &[u8], start: u64, end: u64) -> bool {
+crates/backend/access/spgist/spgist_validate/src/lib.rs:192:                     "operator family \"{}\" of access method {} contains invalid ORDER BY specification for operator {}",
+crates/backend/access/table/tableam/src/lib.rs:1050:     rg: u32,
+crates/backend/access/transam/transam_xlog/src/write.rs:661:         if !force && new_mrp < lsn {
+crates/backend/access/transam/xlogarchive_seams/src/lib.rs:31: seam_core::seam!(
+crates/backend/access/transam/xlogrecovery/src/lib.rs:1320:                 format!(
+crates/backend/catalog/catalog_namespace/src/temp.rs:145:             .unwrap_or_default();
+crates/backend/catalog/objectaddress/src/identity.rs:827:                         "could not find tuple for default ACL {}",
+crates/backend/commands/sequence/src/lib.rs:206:             ERRCODE_WRONG_OBJECT_TYPE,
+crates/backend/commands/tablecmds/src/lib.rs:291:             || relkind == types_rel::RELKIND_FOREIGN_TABLE
+crates/backend/commands/tsearchcmds/src/lib.rs:246:         let mut v = PgVec::new_in(mcx);
+crates/backend/commands/user/src/lib.rs:269: fn str_arg<'a>(d: &DefElem<'a>) -> &'a str {
+crates/backend/executor/execexpr/src/interp.rs:352:         Kernel::JustAssignVarVirt { src, attnum, resultnum } => {
+crates/backend/executor/execmain/src/lanev2.rs:964:     observed: Option<RefuseReason>,
+crates/backend/executor/execmain/src/lanev2.rs:8143:             _ => false,
+crates/backend/executor/execmain/src/lanev2.rs:9214:         emit: &mut E,
+crates/backend/executor/execmain/src/lanev2/exprkey.rs:638:             let mut calls = Vec::with_capacity(xk.ncalls as usize);
+crates/backend/executor/execmain/src/lanev2/exprkey.rs:1712:         None
+crates/backend/executor/execmain/src/lanev2/runtime_agg.rs:4883:     cap.clamp((1 << 16).min(trip), u32::MAX as u64 / 2) as u32
+crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs:219:                     self.cross("combine envelope");
+crates/backend/executor/lanefold/src/lib.rs:1557:                     guards.push(g);
+crates/backend/executor/lanefold/src/lib.rs:2004:         FloatConv::None => values[i].as_f64(),
+crates/backend/executor/nodeagg/src/lib.rs:5229:     match kind {
+crates/backend/executor/nodeseqscan/src/lib.rs:1915:             nquals: 0,
+crates/backend/executor/nodeseqscan/src/lib.rs:4148:     node: &SeqScan<'mcx>,
+crates/backend/libpq/auth/src/lib.rs:435:         &remote_port,
+crates/backend/nodes/nodes_core/src/print.rs:261:     mcx: Mcx<'mcx>,
+crates/backend/optimizer/plan/planner/src/selfuncs.rs:1963:             index_correlation: 0.0,
+crates/backend/optimizer/plan/planner/src/setrefs.rs:4871:             phv.phnullingrels,
+crates/backend/parser/parse_clause/src/lib.rs:3624:     Box::new(
+crates/backend/parser/parse_func/src/lib.rs:579:                             "ParseFuncOrColumn",
+crates/backend/parser/parser_analyze/src/rules.rs:203:                 return Err(feature_not_supported("cannot refer to NEW within WITH query"));
+crates/backend/postmaster/walsummarizer/src/lib.rs:1122:         if tli != 0 && tli != file_tli {
+crates/backend/regex/regex_core/src/regex_locale.rs:327:             if st.is_default && c <= 127 {
+crates/backend/replication/logical/proto/src/lib.rs:879:             end_lsn: r.get_int64()?,
+crates/backend/replication/logical/worker/src/lib.rs:208:     let mut flush = InvalidXLogRecPtr;
+crates/backend/replication/slot/src/lib.rs:405:     slot.with_mutex(|| {
+crates/backend/storage/aio/aio_uring/src/lib.rs:532:             if io_settled(&st, slot, generation) {
+crates/backend/storage/file/fd/src/vfd.rs:134:     DATA_SYNC_RETRY, data_sync_retry, set_data_sync_retry, bool, false;
+crates/backend/storage/freespace/freespace/src/fsmpage.rs:165:                     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+crates/backend/storage/lmgr/lock/src/waitqueue.rs:295:                 timeout_seams::EnableTimeoutAfterParams {
+crates/backend/storage/lmgr/predicate/src/engine.rs:1973:                 if in_parallel_mode() {
+crates/backend/tcop/postgres/src/sim_net.rs:1954:                 pgsync::thread::sleep(std::time::Duration::from_millis(1));
+crates/backend/utils/adt/adt_amutils/src/lib.rs:198:         amcaninclude: false,
+crates/backend/utils/adt/adt_timestamp/src/builtins.rs:480:         let len = crate::interval::intervaltypmodout(typmod, &mut tmp)?;
+crates/backend/utils/adt/arrayfuncs/src/expanded.rs:238:     eah.dnulls = None;
+crates/backend/utils/adt/float/src/funcs.rs:550:         return Err(input_out_of_range().into());
+crates/backend/utils/adt/formatting/src/num.rs:968:                         continue;
+crates/backend/utils/adt/rangetypes/src/ops.rs:219:     Box::new(
+crates/backend/utils/error/elog/src/report.rs:891:         body.push(0);
+crates/backend/utils/hash/dynahash/src/lib.rs:1113:     let p = hash_alloc(hashp, new_dirsize);
+crates/backend/utils/misc/guc_funcs/src/alter_system.rs:139:             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+crates/contrib/dblink/src/registry.rs:176:         return Ok(());
+crates/contrib/intarray/src/gistbig.rs:392:     Ok(Datum::from_bool(retval))
+crates/contrib/pageinspect/src/btreefuncs.rs:24:     BtOpaque {
+crates/contrib/pg_stat_statements/src/srf.rs:194:                 push(&mut values, &mut nulls, Datum::from_f64(stddev));
+crates/contrib/pg_stat_statements/src/store.rs:37:     parallel_workers_launched: i64,
+crates/contrib/pg_trgm/src/gist.rs:373:     if a.allistrue {
+crates/contrib/pgcrypto/src/crypt/cryptdes.rs:244:             for j in 0..8usize {
+crates/contrib/pgcrypto/src/pgp/cfb.rs:119:                 dst[k] = self.fre[i] ^ self.encbuf[i];
+crates/contrib/tablefunc/src/crosstab.rs:117:         let mut attinmeta = AttInMetadata::new(&srf.tupdesc)?;
+crates/contrib/tsm_system_time/src/lib.rs:32:         if millis < 0.0 || millis.is_nan() {
+crates/interfaces/pgclient/src/lib.rs:224:         )?;
+crates/interfaces/pgclient/src/lib.rs:1111:                     return Err(self.err.clone());
+crates/pl/plpgsql/src/gram.rs:171:     fn current_token_is_not_variable(&self, t: &Tok) -> Box<PgError> {
+
+== VERDICT (pre-share audit, 2026-07-31) ==
+70-line random sample over the 261,176 uncovered SLOC (seed 20260731, script above in git history).
+- ~66/70: genuinely unexecuted logic — contrib features outside the regress corpus, replication/aio/client-side
+  code the server schedule never runs, error paths, and signature/field lines of never-executed functions.
+- 4/70: the two KNOWN bounded bogus-red classes, same as the rf lane's closed audit:
+  (a) macro-definition-body lines (pathnodes macro), (b) generator-macro invocation/arg lines
+  (seam_core::seam!, guc *_var! args) — kani axis corrects (a)/(b) via macro_attrib; the llvm axes do not.
+- 0/70 unexplained.
+Green spot-check: 20 covered lines across kani (adt_timestamp, mac8), regress (nodeagg), fuzz (float/io)
+— all plausible executable lines on the correct axis.

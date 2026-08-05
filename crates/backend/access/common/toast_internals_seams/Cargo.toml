@@ -1,0 +1,10 @@
+[package]
+name = "toast_internals_seams"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }

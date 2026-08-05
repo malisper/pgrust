@@ -1,0 +1,122 @@
+family	harness	tier	expected	outcome	wall_s	timeout_s	verdict	log
+geo-cmp	proofs::eq_box_overabove	unmeasured	unmeasured	unmeasured-green	21	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_overabove_.log
+geo-cmp	proofs::eq_box_overleft	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_overleft_.log
+geo-cmp	proofs::eq_box_ge_grid	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_ge_grid_.log
+geo-cmp	proofs::eq_box_gt_zero_plane	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_gt_zero_plane_.log
+geo-cmp	proofs::eq_box_left	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_left_.log
+geo-cmp	proofs::eq_box_lt_zero_plane	unmeasured	unmeasured	unmeasured-green	31	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_lt_zero_plane_.log
+geo-cmp	proofs::eq_box_overright	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_overright_.log
+geo-cmp	proofs::eq_box_ge_zero_plane	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_ge_zero_plane_.log
+geo-cmp	proofs::eq_box_height	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_height_.log
+geo-cmp	proofs::eq_box_le_grid	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_le_grid_.log
+geo-cmp	proofs::eq_box_le_zero_plane	unmeasured	unmeasured	unmeasured-green	41	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_le_zero_plane_.log
+geo-cmp	proofs::eq_box_overbelow	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_overbelow_.log
+geo-cmp	proofs::eq_box_right	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_right_.log
+geo-cmp	proofs::eq_box_eq_zero_plane	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_eq_zero_plane_.log
+geo-cmp	proofs::eq_point_above	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_point_above_.log
+geo-cmp	proofs::eq_box_gt_grid	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_gt_grid_.log
+geo-cmp	proofs::eq_point_below	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_point_below_.log
+geo-cmp	proofs::eq_box_lt_grid	unmeasured	unmeasured	unmeasured-green	51	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_lt_grid_.log
+geo-cmp	proofs::eq_point_horiz	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_point_horiz_.log
+geo-cmp	proofs::eq_box_width	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_width_.log
+geo-cmp	proofs::eq_point_left	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_point_left_.log
+geo-cmp	proofs::eq_point_right	unmeasured	unmeasured	unmeasured-green	21	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_point_right_.log
+geo-cmp	proofs::eq_point_vert	unmeasured	unmeasured	unmeasured-green	21	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_point_vert_.log
+geo-cmp	proofs::eq_box_overlap	unmeasured	unmeasured	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_overlap_.log
+geo-cmp	proofs::eq_point_ne	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_point_ne_.log
+geo-cmp	proofs::eq_point_eq	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_point_eq_.log
+geo-cmp	proofs::eq_box_same	unmeasured	unmeasured	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_same_.log
+gist-geo	proofs::eq_gist_box_same_nonnan	unmeasured	unmeasured	unmeasured-failed	50	600	NO-VERDICT	gist-geo--proofs__eq_gist_box_same_nonnan_.log
+gist-geo	proofs::eq_gist_box_consistent_nulls	unmeasured	unmeasured	unmeasured-green	61	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_box_consistent_nulls_.log
+gist-geo	proofs::eq_gist_box_same_nulls	unmeasured	unmeasured	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_box_same_nulls_.log
+gist-geo	proofs::control_gist_box_consistent_leaf_vs_internal	unmeasured	unmeasured	unmeasured-failed	70	600	VERIFICATION:- FAILED	gist-geo--proofs__control_gist_box_consistent_leaf_vs_internal_.log
+gist-geo	proofs::eq_gist_box_union_n2	unmeasured	unmeasured	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_box_union_n2_.log
+gist-geo	proofs::eq_gist_box_penalty_degenerate_y	unmeasured	unmeasured	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_box_penalty_degenerate_y_.log
+geo-cmp	proofs::probe_box_cn_full	unmeasured	unmeasured	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__probe_box_cn_full_.log
+gist-geo	proofs::eq_gist_circle_compress_noop	unmeasured	unmeasured	unmeasured-green	61	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_circle_compress_noop_.log
+gist-geo	proofs::eq_gist_box_union_n3	unmeasured	unmeasured	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_box_union_n3_.log
+gist-geo	proofs::eq_gist_point_compress_leaf	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_point_compress_leaf_.log
+gist-geo	proofs::eq_gist_point_compress_noop	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_point_compress_noop_.log
+gist-geo	proofs::eq_gist_point_consistent_badgroup	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_point_consistent_badgroup_.log
+gist-geo	proofs::eq_gist_point_consistent_group1	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_point_consistent_group1_.log
+gist-geo	proofs::eq_gist_point_fetch	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_point_fetch_.log
+gist-geo	proofs::eq_gist_poly_compress_leaf	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_poly_compress_leaf_.log
+gist-geo	proofs::eq_gist_poly_compress_noop	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_poly_compress_noop_.log
+gist-geo	proofs::eq_gist_point_distance_badstrategy	unmeasured	unmeasured	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_point_distance_badstrategy_.log
+gist-geo	proofs::eq_gist_translate_cmptype_common	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_translate_cmptype_common_.log
+gist-geo	proofs::grid_gist_box_penalty	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__grid_gist_box_penalty_.log
+gist-geo	proofs::eq_gist_point_distance_leaf_axis	unmeasured	unmeasured	unmeasured-green	130	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_point_distance_leaf_axis_.log
+gist-geo	proofs::eq_gist_point_distance_inbox	unmeasured	unmeasured	unmeasured-green	160	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_point_distance_inbox_.log
+gist-geo	proofs::probe_gist_box_same_nan_plane	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__probe_gist_box_same_nan_plane_.log
+gist-geo	proofs::eq_gist_circle_compress_leaf	unmeasured	unmeasured	unmeasured-green	301	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_circle_compress_leaf_.log
+int-cmp	proofs::eq_btboolcmp	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	int-cmp--proofs__eq_btboolcmp_.log
+int-cmp	proofs::eq_btequalimage	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	int-cmp--proofs__eq_btequalimage_.log
+int-cmp	proofs::eq_btint24cmp	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	int-cmp--proofs__eq_btint24cmp_.log
+int-cmp	proofs::eq_btint28cmp	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	int-cmp--proofs__eq_btint28cmp_.log
+int-cmp	proofs::eq_btint42cmp	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	int-cmp--proofs__eq_btint42cmp_.log
+int-cmp	proofs::eq_btint48cmp	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	int-cmp--proofs__eq_btint48cmp_.log
+int-cmp	proofs::eq_btint82cmp	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	int-cmp--proofs__eq_btint82cmp_.log
+int-cmp	proofs::eq_btint84cmp	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	int-cmp--proofs__eq_btint84cmp_.log
+int-cmp	proofs::neg_control_btboolcmp_argswap	unmeasured	unmeasured	unmeasured-failed	10	600	VERIFICATION:- FAILED	int-cmp--proofs__neg_control_btboolcmp_argswap_.log
+json-escape	census_len1_plain	unmeasured	unmeasured	unmeasured-failed	20	600	NO-VERDICT	json-escape--census_len1_plain_.log
+json-escape	census_len1_twochar	unmeasured	unmeasured	unmeasured-failed	10	600	NO-VERDICT	json-escape--census_len1_twochar_.log
+json-escape	census_len1_u04x	unmeasured	unmeasured	unmeasured-failed	10	600	NO-VERDICT	json-escape--census_len1_u04x_.log
+gist-geo	proofs::eq_gist_box_consistent_internal	unmeasured	unmeasured	unmeasured-green	502	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_box_consistent_internal_.log
+jsonb-gin	proofs::control_ginarray_null_skew	unmeasured	unmeasured	unmeasured-failed	20	600	VERIFICATION:- FAILED	jsonb-gin--proofs__control_ginarray_null_skew_.log
+gist-geo	proofs::eq_gist_point_consistent_group0	unmeasured	unmeasured	unmeasured-green	471	600	VERIFICATION:- SUCCESSFUL	gist-geo--proofs__eq_gist_point_consistent_group0_.log
+jsonb-gin	proofs::cover_jsp_shapes_len4	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__cover_jsp_shapes_len4_.log
+jsonb-gin	proofs::eq_consistent_jsonb_contains	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_consistent_jsonb_contains_.log
+jsonb-gin	proofs::eq_consistent_jsonb_exists	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_consistent_jsonb_exists_.log
+jsonb-gin	proofs::eq_consistent_jsonb_exists_all	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_consistent_jsonb_exists_all_.log
+jsonb-gin	proofs::eq_consistent_jsonb_exists_any	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_consistent_jsonb_exists_any_.log
+geo-cmp	proofs::probe_box_lt_full	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	geo-cmp--proofs__probe_box_lt_full_.log
+geo-cmp	proofs::probe_box_area_full	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	geo-cmp--proofs__probe_box_area_full_.log
+jsonb-gin	proofs::eq_consistent_jsonb_path_contains	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_consistent_jsonb_path_contains_.log
+gist-geo	proofs::eq_gist_box_consistent_leaf	unmeasured	unmeasured	unmeasured-timeout	603	600	NO-VERDICT	gist-geo--proofs__eq_gist_box_consistent_leaf_.log
+gist-geo	proofs::eq_gist_box_distance_strips	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	gist-geo--proofs__eq_gist_box_distance_strips_.log
+gist-geo	proofs::eq_gist_circle_consistent	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	gist-geo--proofs__eq_gist_circle_consistent_.log
+gist-geo	proofs::eq_gist_circle_distance_strips	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	gist-geo--proofs__eq_gist_circle_distance_strips_.log
+gist-geo	proofs::eq_gist_point_distance_xstrip	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	gist-geo--proofs__eq_gist_point_distance_xstrip_.log
+gist-geo	proofs::eq_gist_point_distance_ystrip	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	gist-geo--proofs__eq_gist_point_distance_ystrip_.log
+gist-geo	proofs::eq_gist_poly_consistent	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	gist-geo--proofs__eq_gist_poly_consistent_.log
+gist-geo	proofs::eq_gist_poly_distance_strips	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	gist-geo--proofs__eq_gist_poly_distance_strips_.log
+jsonb-gin	proofs::eq_ginarray_consistent_contained	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_ginarray_consistent_contained_.log
+jsonb-gin	proofs::eq_ginarray_consistent_contains	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_ginarray_consistent_contains_.log
+gist-geo	proofs::grid_gist_box_distance_vertex	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	gist-geo--proofs__grid_gist_box_distance_vertex_.log
+jsonb-gin	proofs::eq_ginarray_consistent_equal	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_ginarray_consistent_equal_.log
+jsonb-gin	proofs::eq_ginarray_consistent_overlap	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_ginarray_consistent_overlap_.log
+jsonb-gin	proofs::eq_ginarray_tri_contained	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_ginarray_tri_contained_.log
+gist-geo	proofs::grid_gist_point_distance_vertex	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	gist-geo--proofs__grid_gist_point_distance_vertex_.log
+jsonb-gin	proofs::eq_ginarray_tri_contains	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_ginarray_tri_contains_.log
+jsonb-gin	proofs::eq_ginarray_tri_equal	unmeasured	unmeasured	unmeasured-green	31	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_ginarray_tri_equal_.log
+jsonb-gin	proofs::eq_ginarray_tri_overlap	unmeasured	unmeasured	unmeasured-green	31	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_ginarray_tri_overlap_.log
+gist-geo	proofs::probe_gist_box_penalty_full	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	gist-geo--proofs__probe_gist_box_penalty_full_.log
+int-arith	proofs::cover_recv_both_arms	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	int-arith--proofs__cover_recv_both_arms_.log
+jsonb-gin	proofs::control_extract_hash_seam_skew	unmeasured	unmeasured	unmeasured-rss-kill	452	600	NO-VERDICT	jsonb-gin--proofs__control_extract_hash_seam_skew_.log
+jsonb-gin	proofs::eq_extract_jsonb_arr_n1	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	jsonb-gin--proofs__eq_extract_jsonb_arr_n1_.log
+jsonb-gin	proofs::eq_jsp_nokeys	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_jsp_nokeys_.log
+jsonb-gin	proofs::eq_extract_jsonb_path_arr_n1	unmeasured	unmeasured	unmeasured-rss-kill	381	600	NO-VERDICT	jsonb-gin--proofs__eq_extract_jsonb_path_arr_n1_.log
+jsonb-gin	proofs::eq_extract_jsonb_arr_n3	unmeasured	unmeasured	unmeasured-rss-kill	411	600	NO-VERDICT	jsonb-gin--proofs__eq_extract_jsonb_arr_n3_.log
+jsonb-gin	proofs::eq_jsp_path_nokeys	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_jsp_path_nokeys_.log
+jsonb-gin	proofs::eq_extract_jsonb_arr_n2	unmeasured	unmeasured	unmeasured-rss-kill	431	600	NO-VERDICT	jsonb-gin--proofs__eq_extract_jsonb_arr_n2_.log
+jsonb-gin	proofs::eq_extract_jsonb_obj_n1	unmeasured	unmeasured	unmeasured-rss-kill	431	600	NO-VERDICT	jsonb-gin--proofs__eq_extract_jsonb_obj_n1_.log
+jsonb-gin	proofs::eq_extract_jsonb_path_str_n1	unmeasured	unmeasured	unmeasured-rss-kill	381	600	NO-VERDICT	jsonb-gin--proofs__eq_extract_jsonb_path_str_n1_.log
+jsonb-gin	proofs::eq_extract_jsonb_path_arr_n2	unmeasured	unmeasured	unmeasured-rss-kill	421	600	NO-VERDICT	jsonb-gin--proofs__eq_extract_jsonb_path_arr_n2_.log
+jsonb-gin	proofs::eq_extract_jsonb_path_arr_n3	unmeasured	unmeasured	unmeasured-rss-kill	401	600	NO-VERDICT	jsonb-gin--proofs__eq_extract_jsonb_path_arr_n3_.log
+jsonb-gin	proofs::eq_extract_jsonb_arr_n0	unmeasured	unmeasured	unmeasured-rss-kill	521	600	NO-VERDICT	jsonb-gin--proofs__eq_extract_jsonb_arr_n0_.log
+jsonb-gin	proofs::control_jsp_wrong_entry	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__control_jsp_wrong_entry_.log
+jsonb-gin	proofs::eq_jsp_bin_and2	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_bin_and2_.log
+jsonb-gin	proofs::eq_jsp_bin_and3	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_bin_and3_.log
+jsonb-gin	proofs::eq_jsp_bin_and_or	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_bin_and_or_.log
+jsonb-gin	proofs::eq_jsp_bin_entry	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_bin_entry_.log
+jsonb-gin	proofs::eq_jsp_bin_or2	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_bin_or2_.log
+jsonb-gin	proofs::eq_jsp_bin_or_and	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_bin_or_and_.log
+jsonb-gin	proofs::eq_jsp_bin_pred_and2	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_bin_pred_and2_.log
+jsonb-gin	proofs::eq_jsp_path_bin_and_or	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_path_bin_and_or_.log
+jsonb-gin	proofs::eq_jsp_path_tri_or_and	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_path_tri_or_and_.log
+jsonb-gin	proofs::eq_jsp_tri_and2	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_tri_and2_.log
+jsonb-gin	proofs::eq_jsp_tri_and3	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_tri_and3_.log
+jsonb-gin	proofs::eq_jsp_tri_and_or	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_tri_and_or_.log
+jsonb-gin	proofs::eq_jsp_tri_entry	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_tri_entry_.log
+jsonb-gin	proofs::eq_jsp_tri_or2	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_tri_or2_.log
+jsonb-gin	proofs::eq_jsp_tri_or_and	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_tri_or_and_.log

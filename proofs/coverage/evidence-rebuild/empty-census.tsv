@@ -1,0 +1,2 @@
+# empty census: this capture merges ZERO kani harnesses (fuzz-only join); expected harness set is empty by construction
+family	suite_harness	kani_harness	status	rc	verdict

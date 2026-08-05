@@ -1,0 +1,6 @@
+small-fams	eq_enum_eq	
+small-fams	eq_enum_ne	
+small-fams	eq_oidlarger	
+small-fams	eq_oidsmaller	
+small-fams	eq_int8inc	
+small-fams	eq_int8dec	

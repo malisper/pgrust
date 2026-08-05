@@ -1,0 +1,26 @@
+[package]
+name = "auth_scram"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+elog = { path = "../../utils/error/elog" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+pg_b64 = { path = "../../../common/base64" }
+pg_sha2 = { path = "../../../common/sha2" }
+scram_common = { path = "../../../common/scram_common" }
+saslprep = { path = "../../../common/saslprep" }
+pg_strong_random = { path = "../../../port/pg_strong_random" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+auth_sasl = { path = "../auth_sasl" }
+be_secure_seams = { path = "../be_secure_seams" }
+pg_hmac = { path = "../../../common/hmac" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+types_startup = { path = "../../../_support/types/types_startup" }
+
+[dev-dependencies]
+ip = { path = "../../../common/ip" }

@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/activity/waitevent_seams/src/lib.rs","sloc":[3,4,7,8,11,12,15,16],"kani":[],"fuzz":[],"regress":[],"excluded":{"const-static":[1]}}

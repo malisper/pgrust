@@ -1,0 +1,11 @@
+/target
+**/target
+fleet-results/
+*.profraw
+**/target-*/
+scripts/__pycache__/
+proofs/coverage/__pycache__/
+
+# cargo-mutants working/output directory (transient audit artifacts)
+mutants.out/
+mutants.out.old/

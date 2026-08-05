@@ -1,0 +1,10 @@
+[package]
+name = "bloomfilter"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+hashfn = { path = "../../../common/hashfn" }
+types_error = { path = "../../../_support/types/types_error" }

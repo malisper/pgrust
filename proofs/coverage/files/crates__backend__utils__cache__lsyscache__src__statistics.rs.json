@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/cache/lsyscache/src/statistics.rs","sloc":[20,21,24,25,26,27,28,31,32,33,36,50,51,52,53,54,55,56,57,58,59,60,61,63,64,66,67,69,70,71,72,73,74,79,80],"kani":[],"fuzz":[],"regress":[24,25,31,32,33,36],"excluded":{"use-mod":[1,2,3,4,5,6],"attr":[41],"type-alias":[14],"const-static":[9,11,12],"typedef":[42,43,44,45,46,47],"thread-local":[16,17]}}

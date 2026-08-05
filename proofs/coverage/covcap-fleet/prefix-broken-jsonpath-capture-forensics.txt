@@ -1,0 +1,149 @@
+== coverage capture forensics: jsonpath_diff (cargo-fuzz coverage rc=0) ==
+-- corpus files on disk:  12214
+-- units replayed (log):  12214
+-- clean libFuzzer exits: 16
+-- raw profraw dir: /work/src/fuzz/coverage/jsonpath_diff/raw
+total 50896
+drwxr-xr-x. 2 root root   16384 Aug  1 05:38 .
+drwxr-xr-x. 3 root root      42 Aug  1 05:38 ..
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-0.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-1.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-10.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-11.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-12.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-13.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-14.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-15.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-2.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-3.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-4.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-5.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-6.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-7.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-8.profraw
+-rw-r--r--. 1 root root 3253200 Aug  1 05:38 batch-9.profraw
+-- llvm-profdata: /usr/local/rustup/toolchains/nightly-2026-07-17-aarch64-unknown-linux-gnu/lib/rustlib/aarch64-unknown-linux-gnu/bin/llvm-profdata
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-0.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 5982
+Maximum internal block count: 11037
+Total number of blocks: 79430
+Total count: 391550
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-1.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6234
+Maximum internal block count: 11528
+Total number of blocks: 79430
+Total count: 351224
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-10.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6324
+Maximum internal block count: 11660
+Total number of blocks: 79430
+Total count: 327133
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-11.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6352
+Maximum internal block count: 11693
+Total number of blocks: 79430
+Total count: 325421
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-12.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6436
+Maximum internal block count: 11847
+Total number of blocks: 79430
+Total count: 329522
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-13.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6808
+Maximum internal block count: 12507
+Total number of blocks: 79430
+Total count: 363785
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-14.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6732
+Maximum internal block count: 12606
+Total number of blocks: 79430
+Total count: 406202
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-15.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6098
+Maximum internal block count: 11539
+Total number of blocks: 79430
+Total count: 408317
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-2.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6174
+Maximum internal block count: 11418
+Total number of blocks: 79430
+Total count: 373476
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-3.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6204
+Maximum internal block count: 11462
+Total number of blocks: 79430
+Total count: 390653
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-4.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6160
+Maximum internal block count: 11429
+Total number of blocks: 79430
+Total count: 387064
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-5.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6098
+Maximum internal block count: 11286
+Total number of blocks: 79430
+Total count: 360764
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-6.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6190
+Maximum internal block count: 11396
+Total number of blocks: 79430
+Total count: 375392
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-7.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6260
+Maximum internal block count: 11550
+Total number of blocks: 79430
+Total count: 369064
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-8.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6304
+Maximum internal block count: 11627
+Total number of blocks: 79430
+Total count: 369717
+---- /work/src/fuzz/coverage/jsonpath_diff/raw/batch-9.profraw (3253200 bytes)
+Instrumentation level: Front-end
+Total functions: 35042
+Maximum function count: 6424
+Maximum internal block count: 11891
+Total number of blocks: 79430
+Total count: 367655
+-- merged profdata:
+Instrumentation level: Front-end
+Total functions: 402
+Maximum function count: 100780
+Maximum internal block count: 186461
+Total number of blocks: 1175
+Total count: 5896939
+-- covbin candidates (find target -path *coverage* -name jsonpath_diff):
+     /work/src/fuzz/target/aarch64-unknown-linux-gnu/coverage/aarch64-unknown-linux-gnu/release/jsonpath_diff  24255c6937ad7d11e0cb2c591220bb38f83aa10902b851b26e4358cb27874d99  138748232 bytes
+-- fuzz (non-coverage) binary for contrast:
+/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/jsonpath_diff
+== end forensics: jsonpath_diff ==

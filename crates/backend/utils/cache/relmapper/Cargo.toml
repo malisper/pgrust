@@ -1,0 +1,37 @@
+[package]
+name = "relmapper"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+mcx = { path = "../../../../_support/mcx" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../init/init_small" }
+miscinit = { path = "../../init/miscinit" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+fd = { path = "../../../storage/file/fd" }
+crc32c = { path = "../../../../port/crc32c" }
+inval = { path = "../inval" }
+relmapper_seams = { path = "../relmapper_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
+catalog_storage_seams = { path = "../../../catalog/storage_seams" }
+relpath_seams = { path = "../../../../common/relpath_seams" }
+waitevent_seams = { path = "../../activity/waitevent_seams" }
+xlogreader_seams = { path = "../../../access/transam/xlogreader_seams" }
+libc = "0.2"
+
+[dev-dependencies]
+guc_tables = { path = "../../misc/guc_tables" }
+vfs = { path = "../../../storage/file/vfs" }
+sinval_seams = { path = "../../../storage/ipc/sinval_seams" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+aio_seams = { path = "../../../storage/aio/aio_seams" }
+pgstat_seams = { path = "../../activity/pgstat_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }

@@ -1,0 +1,14 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+brin-minmax	dist_proofs::eq_dist_date	dist_proofs::eq_dist_date	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_dist_float4	dist_proofs::eq_dist_float4	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_dist_inet_mismatch	dist_proofs::eq_dist_inet_mismatch	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_dist_int2	dist_proofs::eq_dist_int2	0	36	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_dist_int4	dist_proofs::eq_dist_int4	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_dist_int8	dist_proofs::eq_dist_int8	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_dist_pg_lsn	dist_proofs::eq_dist_pg_lsn	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_dist_tid	dist_proofs::eq_dist_tid	0	12	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_dist_time	dist_proofs::eq_dist_time	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_dist_timestamp	dist_proofs::eq_dist_timestamp	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_dist_timetz	dist_proofs::eq_dist_timetz	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_summary_in	dist_proofs::eq_summary_in	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-minmax	dist_proofs::eq_summary_recv	dist_proofs::eq_summary_recv	0	3	VERIFICATION:- SUCCESSFUL	RAN	1

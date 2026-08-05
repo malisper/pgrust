@@ -1,0 +1,13 @@
+brin-minmax	dist_proofs::eq_dist_int2	
+brin-minmax	dist_proofs::eq_dist_int4	
+brin-minmax	dist_proofs::eq_dist_int8	
+brin-minmax	dist_proofs::eq_dist_date	
+brin-minmax	dist_proofs::eq_dist_timestamp	
+brin-minmax	dist_proofs::eq_dist_pg_lsn	
+brin-minmax	dist_proofs::eq_dist_float4	
+brin-minmax	dist_proofs::eq_dist_tid	
+brin-minmax	dist_proofs::eq_dist_time	
+brin-minmax	dist_proofs::eq_dist_timetz	
+brin-minmax	dist_proofs::eq_dist_inet_mismatch	
+brin-minmax	dist_proofs::eq_summary_in	
+brin-minmax	dist_proofs::eq_summary_recv	

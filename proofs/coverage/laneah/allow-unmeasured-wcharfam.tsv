@@ -1,0 +1,65 @@
+# family<TAB>harness<TAB>reason — p1-laneah runs NO per-crate kanicov
+# re-run (standing campaign rule). The utf8 + encnames harness families
+# pre-date this lane and are per-commit green; their proof-covered lines
+# in common/wchar and mb/mbutils are carried as exception rows, never as
+# measured coverage.
+utf8	islegal_len1	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	islegal_len2	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	islegal_len3	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	islegal_len4	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	islegal_symlen_contract	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	islegal_symlen_out_of_contract	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	mblen_all_bytes	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	mblen_then_islegal	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_ascii_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_ascii_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_eucjp_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_eucjp_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_eucjis2004_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_eucjis2004_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_euckr_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_euckr_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_euccn_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_euccn_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_euctw_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_euctw_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_johab_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_johab_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_mule_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_mule_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_latin1_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_latin1_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_sjis_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_sjis_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_sjis2004_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_sjis2004_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_big5_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_big5_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_gbk_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_gbk_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_uhc_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_uhc_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_gb18030_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_gb18030_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_utf8_dsplen_lead1	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_utf8_dsplen_lead2	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_utf8_dsplen_lead3_lo	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_utf8_dsplen_lead3_hi	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_utf8_dsplen_lead4_lo	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_utf8_dsplen_lead4_hi	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_utf8_dsplen_lead_invalid	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	utf8_dsplen_partition_coverage	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_single_byte_band_mblen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_single_byte_band_dsplen	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_invalid_encoding_fallback	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_mbbisearch_nonspacing	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_mbbisearch_east_asian_fw	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	eq_ucs_wcwidth_full_u32	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+utf8	control_sjis_vs_big5_mblen_must_fail	must-fail control: contributes non-vacuity, never coverage
+encnames	proofs::eq_encoding_to_char_frame	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+encnames	proofs::eq_char_to_encoding_core_ascii	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+encnames	proofs::eq_char_to_encoding_core_utf8	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+encnames	proofs::spot_char_to_encoding_len63	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+encnames	proofs::spot_char_to_encoding_len64	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+encnames	proofs::witness_wrapper_non_utf8_plane	proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+encnames	proofs::control_encoding_to_char_frame_shifted	must-fail control: contributes non-vacuity, never coverage

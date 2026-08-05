@@ -1,0 +1,11 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+cash	proofs::control_cash_out_lconv_skew	proofs::control_cash_out_lconv_skew	1	3	VERIFICATION:- FAILED	FAILED-TO-RUN	1
+cash	proofs::eq_cash_in_len0	proofs::eq_cash_in_len0	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	proofs::eq_cash_in_len2	proofs::eq_cash_in_len2	0	462	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	proofs::eq_cash_in_len1	proofs::eq_cash_in_len1	0	386	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	proofs::eq_cash_in_len2	proofs::eq_cash_in_len2	0	314	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	proofs::eq_cash_in_len2_fd0	proofs::eq_cash_in_len2_fd0	0	325	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	proofs::eq_cash_in_len2_fd1	proofs::eq_cash_in_len2_fd1	0	296	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	proofs::eq_cash_in_len2_fd0	proofs::eq_cash_in_len2_fd0	0	354	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	proofs::eq_cash_in_len2_fd10	proofs::eq_cash_in_len2_fd10	0	440	VERIFICATION:- SUCCESSFUL	RAN	1
+cash	proofs::eq_cash_in_len2_fd1	proofs::eq_cash_in_len2_fd1	0	389	VERIFICATION:- SUCCESSFUL	RAN	1

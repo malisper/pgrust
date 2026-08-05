@@ -1,0 +1,1 @@
+$.a ? (exists(@.b)) . c.datetime() == $.d.date()

@@ -1,0 +1,30 @@
+[package]
+name = "catalog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catalog"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_rel = { path = "../../../_support/types/rel" }
+catalog_seams = { path = "../catalog_seams" }
+namespace_seams = { path = "../namespace_seams" }
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+genam = { path = "../../access/index/genam" }
+varsup = { path = "../../access/transam/varsup" }
+init_small = { path = "../../utils/init/init_small" }
+relpath = { path = "../../../common/relpath" }
+
+[dev-dependencies]
+types_tuple = { path = "../../../_support/types/types_tuple" }

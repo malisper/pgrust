@@ -1,0 +1,1 @@
+$ ? (@ like_regex "patwith\x50\\f\\\m\\mmmmmmmmat&~t@r\x50\\\\\RRRRmmm\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\.date()'\m\\mmmmmmmmommmmRRR1.RRRRRRRRRRRRRRt50\\\\\\mRRRRRRRRRRR.date()'-\\\rn flag "isim")

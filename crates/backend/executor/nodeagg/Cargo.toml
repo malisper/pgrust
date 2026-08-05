@@ -1,0 +1,63 @@
+[package]
+name = "nodeagg"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeagg"
+path = "src/lib.rs"
+
+[dependencies]
+stringhash = { path = "../../../common/stringhash" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+mcx = { path = "../../../_support/mcx" }
+mcxt_stats = { path = "../../utils/mmgr/mcxt_stats" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+nodes_core = { path = "../../nodes/nodes_core" }
+types_pathnodes = { path = "../../../_support/types/pathnodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+coerce = { path = "../../parser/coerce" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+execexpr = { path = "../execexpr" }
+execgrouping = { path = "../execgrouping" }
+lanefold = { path = "../lanefold" }
+lanetable = { path = "../lanetable" }
+execscan = { path = "../execscan" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_portal = { path = "../../../_support/types/portal" }
+tuplesort = { path = "../../utils/sort/tuplesort" }
+sort_storage = { path = "../../utils/sort/sort_storage" }
+hyperloglog = { path = "../../lib/hyperloglog" }
+hashfn = { path = "../../../common/hashfn" }
+heaptuple = { path = "../../access/common/heaptuple" }
+init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+adt_numeric = { path = "../../utils/adt/numeric" }
+pqformat = { path = "../../libpq/pqformat" }
+varlena = { path = "../../utils/adt/varlena" }
+detoast = { path = "../../access/common/detoast" }
+
+[dev-dependencies]
+pglz = { path = "../../../common/pglz" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+elog = { path = "../../utils/error/elog" }
+fd = { path = "../../storage/file/fd" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+resowner = { path = "../../utils/resowner/resowner" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }

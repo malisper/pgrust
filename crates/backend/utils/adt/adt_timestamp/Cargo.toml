@@ -1,0 +1,39 @@
+[package]
+name = "adt_timestamp"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_timestamp"
+path = "src/lib.rs"
+
+[dependencies]
+pg_clock = { path = "../../../../port/pg_clock" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+pqformat = { path = "../../../libpq/pqformat" }
+hashfn = { path = "../../../../common/hashfn" }
+numeric = { package = "adt_numeric", path = "../numeric" }
+numutils = { path = "../numutils" }
+adt_datetime = { path = "../adt_datetime" }
+float = { package = "adt_float", path = "../float" }
+localtime = { path = "../../../timezone/localtime" }
+pgtz = { path = "../../../timezone/pgtz" }
+strftime = { path = "../../../timezone/strftime" }
+timestamp_seams = { path = "../timestamp_seams" }
+xact = { path = "../../../access/transam/xact" }
+elog = { path = "../../error/elog" }
+funcapi = { path = "../../fmgr/funcapi" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+libc = "0.2"
+
+[dev-dependencies]
+guc_tables = { path = "../../misc/guc_tables" }
+fd = { path = "../../../storage/file/fd" }
+xact_seams = { path = "../../../access/transam/xact_seams" }

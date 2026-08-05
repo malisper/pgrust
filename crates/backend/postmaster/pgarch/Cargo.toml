@@ -1,0 +1,48 @@
+[package]
+name = "pgarch"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgarch"
+path = "src/lib.rs"
+
+[dependencies]
+pg_clock = { path = "../../../port/pg_clock" }
+pgstat = { path = "../../utils/activity/pgstat" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_guc = { path = "../../../_support/types/types_guc" }
+datum = { path = "../../../_support/types/datum" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+auxprocess = { path = "../auxprocess" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+dynahash = { path = "../../utils/hash/dynahash" }
+elog = { path = "../../utils/error/elog" }
+fd = { path = "../../storage/file/fd" }
+guc_file = { path = "../../utils/misc/guc_file" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+interrupt = { path = "../interrupt" }
+ipc = { path = "../../storage/ipc/ipc" }
+latch = { path = "../../storage/ipc/latch" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+resowner = { path = "../../utils/resowner/resowner" }
+shell_archive = { path = "../../archive/shell_archive" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+libc = "0.2"
+
+[dev-dependencies]
+xact_seams = { path = "../../access/transam/xact_seams" }

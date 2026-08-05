@@ -1,0 +1,110 @@
+# libFuzzer dictionary for pgcryptofam_diff (lane p1-pgcryptofam).
+#
+# The target is parser-shaped on both compared faces: crypt()/gen_salt()
+# settings are magic-prefix dispatched (px_crypt_list) and the armor face is
+# a line-oriented PGP envelope. Those are multi-byte literal compares —
+# exactly the class CmpLog/-use_value_profile can crack but that random
+# mutation reaches only by luck. Use with:
+#   -dict=pgcryptofam_diff.dict -use_value_profile=1
+#
+# Every token below is a literal that appears in the VENDORED 18.3 C
+# (contrib/pgcrypto/{px-crypt,crypt-gensalt,crypt-sha,pgp-armor}.c) or in the
+# SQL surface the driver drives. Tokens are the byte strings only — the
+# driver's arm/mode selector bytes are positional and are not dictionary
+# material.
+
+# ---- px_crypt_list dispatch prefixes (px-crypt.c:88-99), in table order ----
+# $2$ has a NULL handler (=> "crypt(3) returned NULL"/39000) and $2b$/$2y$
+# deliberately have NO row, so they fall to the traditional-DES catch-all.
+kw_bf_a="$2a$"
+kw_bf_x="$2x$"
+kw_bf_null="$2$"
+kw_bf_b="$2b$"
+kw_bf_y="$2y$"
+kw_md5="$1$"
+kw_sha256="$5$"
+kw_sha512="$6$"
+kw_xdes="_"
+kw_unknown_magic="$7$"
+
+# ---- crypt-sha.c rounds option (the D6/D12/D17 evidence lives here) ----
+kw_rounds="rounds="
+kw_rounds_sha256="$5$rounds="
+kw_rounds_sha512="$6$rounds="
+kw_rounds_min="rounds=1000"
+kw_rounds_max="rounds=999999999"
+kw_rounds_empty="rounds=$"
+kw_rounds_zero="rounds=0$"
+# strtol leniency C inherits and the port must match: sign + leading space
+kw_rounds_plus="rounds=+"
+kw_rounds_minus="rounds=-"
+kw_rounds_space="rounds= "
+# int32 truncation boundaries (strtoint truncates, errno ignored)
+kw_2_31="2147483648"
+kw_2_32="4294967296"
+
+# ---- bcrypt cost digits (crypt-blowfish.c:617-627 accepts 00..31) ----
+kw_cost_04="$2a$04$"
+kw_cost_05="$2a$05$"
+kw_cost_31="$2a$31$"
+
+# ---- gen_salt() algorithm names (px-crypt.c gen_list; pg_strcasecmp) ----
+kw_algo_des="des"
+kw_algo_md5="md5"
+kw_algo_xdes="xdes"
+kw_algo_bf="bf"
+kw_algo_sha256c="sha256crypt"
+kw_algo_sha512c="sha512crypt"
+
+# ---- digest()/hmac() algorithm names (px_find_digest) ----
+kw_h_md5="md5"
+kw_h_sha1="sha1"
+kw_h_sha224="sha224"
+kw_h_sha256="sha256"
+kw_h_sha384="sha384"
+kw_h_sha512="sha512"
+
+# ---- pgp-armor.c envelope (armor_header / armor_footer / find_header) ----
+kw_armor_begin="-----BEGIN PGP MESSAGE-----"
+kw_armor_end="-----END PGP MESSAGE-----"
+kw_sep_begin="-----BEGIN"
+kw_sep_end="-----END"
+kw_dashes="-----"
+# armor header lines are split on ": " and terminated by \n (D8 shapes)
+kw_hdr_sep=": "
+kw_hdr_version="Version: "
+kw_hdr_comment="Comment: "
+kw_hdr_charset="Charset: "
+kw_crlf="\x0d\x0a"
+
+# ---- base64 / CRC24 tail shapes the armor decoder keys on ----
+kw_crc_eq="="
+kw_pad2="=="
+kw_crc_line="\x0a="
+
+# ---- itoa64 alphabet edges (crypt-gensalt.c / crypt-md5.c) ----
+# The alphabet is ./0-9A-Za-z; these are the boundary bytes whose in/out-of
+# alphabet decision the salt validators turn on.
+kw_itoa64_lo="."
+kw_itoa64_slash="/"
+kw_itoa64_0="0"
+kw_itoa64_9="9"
+kw_itoa64_A="A"
+kw_itoa64_Z="Z"
+kw_itoa64_a="a"
+kw_itoa64_z="z"
+# just outside the alphabet on each side (crypt-sha.c rejects these)
+kw_out_dash="-"
+kw_out_colon=":"
+kw_out_at="@"
+kw_out_lbracket="["
+kw_out_backtick="`"
+kw_out_lbrace="{"
+kw_out_star="*"
+kw_high_80="\x80"
+kw_high_ff="\xff"
+
+# ---- xdes count encodings (crypt-gensalt.c:62-65, 4 itoa64 chars) ----
+kw_xdes_725="_J9.."
+kw_xdes_min="_/..."
+kw_xdes_max="_zzzz"

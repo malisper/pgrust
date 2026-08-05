@@ -1,0 +1,425 @@
+{
+ "expected": 59,
+ "ran": 0,
+ "walled": 5,
+ "failed_to_run": 54,
+ "waived": 59,
+ "kaniraw_files": 0,
+ "kaniraw_without_census_row": 0,
+ "census_closed": true,
+ "unmeasured": [
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_dtk_m_shiftdom",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_interval_mask_shiftdom",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_is_valid_julian_full",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_isleap_full",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_j2day_full",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_j2date_spots",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_dt2time_spots",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_overflows_full",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::panicfree_date2j_full",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::panicfree_j2date_full",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::panicfree_dt2time_full",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::panicfree_isoweek2j_full",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::control_panicfree_isoweek2j_checked_sub",
+   "verdict": "EXPECTED-FAIL-OK",
+   "rc": "0",
+   "waiver": "must-fail negative control: contributes non-vacuity evidence, never coverage; asserts its intended check fails"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_date2isoweek_spots",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_date2isoyear_spots",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_date2isoyearday_spots",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_date2isoweek_mday_face",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_isoweek2date_spots",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_isoweekdate2date_wday_band",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_datebsearch_date_cells",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_datebsearch_delta_cells",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_decode_special_cells",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_decode_units_cells",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::check_date_token_tables_concrete",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::check_date_token_table_one_concrete",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_float_time_overflows_intfields",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_float_time_overflows_sec_cells",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::control_hlp_j2day_skew",
+   "verdict": "EXPECTED-FAIL-OK",
+   "rc": "0",
+   "waiver": "must-fail negative control: contributes non-vacuity evidence, never coverage; asserts its intended check fails"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::control_hlp_float_time_overflows_sec_skew",
+   "verdict": "EXPECTED-FAIL-OK",
+   "rc": "0",
+   "waiver": "must-fail negative control: contributes non-vacuity evidence, never coverage; asserts its intended check fails"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_day",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 41s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_daym1",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 31s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_days_only",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 31s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_eod_negone",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 31s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_eod_one",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_i64max",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_i64max_eod",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_months_only",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_negday",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_negone",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_noon_day",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_notfinite_max",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 20s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_notfinite_min",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 20s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_one",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_twoday",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_time_pm_iv_zero",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_timetz_pm_iv_day",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_timetz_pm_iv_eod",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_timetz_pm_iv_i64max",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_timetz_pm_iv_negday",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_timetz_pm_iv_negone",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_timetz_pm_iv_notfinite",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 20s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_timetz_pm_iv_one",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_timetz_pm_iv_zero",
+   "verdict": "VERIFICATION-SUCCESSFUL-on-fleet",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::control_time_pl_interval_no_wrap",
+   "verdict": "EXPECTED-FAIL-OK",
+   "rc": "0",
+   "waiver": "must-fail negative control: contributes non-vacuity evidence, never coverage; asserts its intended check fails"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_date2j_full",
+   "verdict": "WALLED",
+   "rc": "124",
+   "waiver": "wall-recorded: 601s>600s cap under cadical, CBMC per-property refinement phase (NOT symex); genuine wall, re-audited 2026-07-31"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_j2date_full",
+   "verdict": "WALLED",
+   "rc": "124",
+   "waiver": "wall-recorded: 601s>600s cap under cadical, CBMC per-property refinement phase (NOT symex); genuine wall, re-audited 2026-07-31"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_dt2time_full",
+   "verdict": "WALLED",
+   "rc": "124",
+   "waiver": "wall-recorded: 601s>600s cap under cadical, CBMC per-property refinement phase (NOT symex); genuine wall, re-audited 2026-07-31"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_isoweek2j_ad_band",
+   "verdict": "WALLED",
+   "rc": "124",
+   "waiver": "wall-recorded: 601s>600s cap under cadical, CBMC per-property refinement phase (NOT symex); genuine wall, re-audited 2026-07-31"
+  },
+  {
+   "family": "datetime-b",
+   "harness": "hlp::eq_isoweek2j_bc_band",
+   "verdict": "WALLED",
+   "rc": "124",
+   "waiver": "wall-recorded: 601s>600s cap under cadical, CBMC per-property refinement phase (NOT symex); genuine wall, re-audited 2026-07-31"
+  }
+ ]
+}

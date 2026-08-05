@@ -1,0 +1,17 @@
+#!/bin/bash
+# Reads a SQL query from stdin, runs it via psql against the `test` DB.
+# stdout: result. stderr last line: seconds.
+set -e
+. "$(dirname "$0")/env.sh"
+query=$(cat)
+out=$(printf '\\timing\n%s\n' "$query" | "$PSQL" -h "$CB_SOCK" -p 5432 -U postgres test -t 2>&1)
+status=$?
+if printf '%s\n' "$out" | grep -q '^ERROR\|psql: error'; then
+    printf '%s\n' "$out" >&2
+    exit 1
+fi
+printf '%s\n' "$out" | grep -v '^Time:'
+time_ms=$(printf '%s\n' "$out" | grep -oP 'Time:\s+\K[0-9]+\.[0-9]+' | tail -n1)
+if [ -z "$time_ms" ]; then echo "no timing in psql output" >&2; exit 1; fi
+awk -v ms="$time_ms" 'BEGIN { printf "%.3f\n", ms / 1000 }' >&2
+exit "$status"

@@ -1,0 +1,1 @@
+{"path":"crates/contrib/citext/src/lib.rs","sloc":[21,22,23,24,30,31,32,33,38,39,40,41,42,43,44,45,46,47,48,55,56,60,61,65,66],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[10,11,13,14,15],"const-static":[19]}}

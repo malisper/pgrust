@@ -1,0 +1,17 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+bitutils	eq_ceil_log2_32	harnesses::eq_ceil_log2_32	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_ceil_log2_64	harnesses::eq_ceil_log2_64	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_leftmost_one_pos32	harnesses::eq_leftmost_one_pos32	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_leftmost_one_pos64	harnesses::eq_leftmost_one_pos64	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_nextpower2_32	harnesses::eq_nextpower2_32	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_nextpower2_64	harnesses::eq_nextpower2_64	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_popcount32	harnesses::eq_popcount32	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_popcount64	harnesses::eq_popcount64	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_popcount_buf_small	harnesses::eq_popcount_buf_small	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_popcount_masked_buf_small	harnesses::eq_popcount_masked_buf_small	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_prevpower2_32	harnesses::eq_prevpower2_32	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_prevpower2_64	harnesses::eq_prevpower2_64	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_rightmost_one_pos32	harnesses::eq_rightmost_one_pos32	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_rightmost_one_pos64	harnesses::eq_rightmost_one_pos64	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_rotate_left32	harnesses::eq_rotate_left32	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bitutils	eq_rotate_right32	harnesses::eq_rotate_right32	0	0	VERIFICATION:- SUCCESSFUL	RAN	1

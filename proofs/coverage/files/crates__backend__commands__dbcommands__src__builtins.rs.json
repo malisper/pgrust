@@ -1,0 +1,1 @@
+{"path":"crates/backend/commands/dbcommands/src/builtins.rs","sloc":[11,12,13,14,15,16,17,19,21,22,23,24,28,29],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2,3,4],"const-static":[32],"thread-local":[6,7,8]}}

@@ -1,0 +1,27 @@
+[package]
+name = "commands_constraint"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_constraint"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_rel = { path = "../../../_support/types/rel" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_nbtree = { path = "../../../_support/types/types_nbtree" }
+types_trigger = { path = "../../../_support/types/types_trigger" }
+types_trigger_call = { path = "../../../_support/types/types_trigger_call" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+exectuples = { path = "../../executor/exectuples" }
+execindexing = { path = "../../executor/execindexing" }
+indexam = { path = "../../access/index/indexam" }
+tableam = { path = "../../access/table/tableam" }

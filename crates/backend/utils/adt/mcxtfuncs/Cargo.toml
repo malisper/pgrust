@@ -1,0 +1,21 @@
+[package]
+name = "adt_mcxtfuncs"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+funcapi = { path = "../../fmgr/funcapi" }
+mcxt_stats = { path = "../../mmgr/mcxt_stats" }
+mbutils = { path = "../../mb/mbutils" }
+varlena = { path = "../varlena" }
+elog = { path = "../../error/elog" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+procarray = { path = "../../../storage/ipc/procarray" }
+procsignal = { path = "../../../storage/ipc/procsignal" }

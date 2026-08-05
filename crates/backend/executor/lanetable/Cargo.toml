@@ -1,0 +1,16 @@
+[package]
+name = "lanetable"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lanetable"
+path = "src/lib.rs"
+
+[dependencies]
+# GL-CONCMEM-1: the process footprint ledger — the table charges its
+# plain-Rust block bytes (chunked row stores / entry arrays / key arena)
+# so the memory watchdog and the GL-MEMCEIL-1 ceiling see engine memory.
+# Ledger face only (atomics); no mcx features.
+mcx = { path = "../../../_support/mcx", default-features = false }

@@ -1,0 +1,4 @@
+€);
+
+-- weights are completely ignored
+select websearch_to_tsquery(

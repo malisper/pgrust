@@ -1,0 +1,43 @@
+[package]
+name = "parse_relation"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_relation"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+elog = { path = "../../utils/error/elog" }
+format_type = { path = "../../utils/adt/format_type" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+tupdesc = { path = "../../access/common/tupdesc" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+mbutils = { path = "../../utils/mb/mbutils" }
+mcx = { path = "../../../_support/mcx" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+parse_relation_seams = { path = "../parse_relation_seams" }
+parse_utilcmd_seams = { path = "../parse_utilcmd_seams" }
+parser_small1 = { path = "../parser_small1" }
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+relation_seams = { path = "../../access/common/relation_seams" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+table = { path = "../../access/table/table" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+varlena = { path = "../../utils/adt/varlena" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+[dev-dependencies]
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }

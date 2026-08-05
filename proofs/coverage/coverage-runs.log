@@ -1,0 +1,30 @@
+# Kani --coverage run ledger for the 2026-07-30 capture (head 69c3c7eb90
+# + cherry-pick ca801b45b1 as cf2caf1bec). All runs: SUITE.tsv flags +
+# `--coverage -Z source-coverage`, cargo-kani 0.67.0, macOS aarch64,
+# host load 15-25 throughout (walls are not clean timings).
+#
+# family        tier        harnesses  completed  verdicts
+geo-cmp         per-commit  26         26         all VERIFICATION SUCCESSFUL
+float-cmp       per-commit  32         32         all SUCCESSFUL
+float-arith     per-commit  13         13         all SUCCESSFUL
+numeric-probe   per-commit  17         17         all SUCCESSFUL
+network         per-commit  15         15         all SUCCESSFUL
+varbit-rows     per-commit  27         27         all SUCCESSFUL
+bytea-cmp       per-commit  26 (24 uniq) 24       all SUCCESSFUL
+text-cmp        per-commit  9          9          all SUCCESSFUL
+text-slice      per-commit  19 (14 uniq) 5        5 SUCCESSFUL; 9 WALLED under
+#                                                  coverage (75-560s timeouts;
+#                                                  seconds in the plain tier):
+#   eq_bytea_substr eq_bytea_substr_no_len eq_byteacat eq_text_left_latin1
+#   eq_text_right_latin1 eq_text_substr_latin1 eq_text_substr_no_len_latin1
+#   eq_textcat eq_textpos_latin1
+jsonb-probe     release-gate 8         5          5 SUCCESSFUL via run-cmp.sh
+#                                                  (EXTRA="--coverage -Z source-coverage
+#                                                  --no-unwinding-checks");
+#   eq_cmp_bool_raw_vs_arr TIMEOUT 280s (baseline 1.7s)
+#   eq_cmp_bool_1_2        TIMEOUT 290s (baseline 81s)
+#   eq_cmp_obj_obj_1_2     RSS>6GiB watchdog kill at 226s (baseline 22.4s)
+#
+# Totals: 165 harnesses attempted, 151 completed with coverage, 14 walled.
+# No completed harness changed verdict under --coverage (all remained
+# SUCCESSFUL, matching their ledger status).

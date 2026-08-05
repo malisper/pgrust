@@ -1,0 +1,28 @@
+{
+ "crate": "backend/nodes/queryjumble",
+ "lane": "p1-queryjumble",
+ "capture_sha": "df615dc9e1caca58baa4ff3cb2dcd4720dfedc09",
+ "fleet_job": "pgrust-fuzz-campaign-1785627852-3e8c-36752",
+ "execs": 10000000,
+ "divergences": 0,
+ "sanitizer_artifacts": 0,
+ "planes": [
+  "P0 bridge out-text witness",
+  "queryId",
+  "clocations full array",
+  "highest_extern_param_id",
+  "has_squashed_lists",
+  "CleanQuerytext offset/loc/len",
+  "errcode parity"
+ ],
+ "union": {
+  "fuzz": "queryjumble_diff (committed corpus fuzz/corpus/queryjumble_diff, 3322 inputs = minimized union of local+fleet legs 22523->3310 + directed/emitted seeds)",
+  "exhaustive": "queryjumble_diff::tests::flags_exhaustive (IsQueryIdEnabled/EnableQueryId reachable state machine, 21 lockstep cells vs verbatim C, dedicated-process run 2026-08-01)"
+ },
+ "coverage": {
+  "lib.rs": "129/136 measured (7 exception rows)",
+  "walker.rs": "456/1726 measured (bridge-constructible universe; 1270 lines carried by stage-2-pending exception rows per coordinator ruling 2026-08-01)"
+ },
+ "exceptions": "EXCEPTIONS.tsv (225 rows: 4 lib.rs + 221 walker.rs incl. 183 per-tag stage-2 rows)",
+ "reopen_obligation": "stage-2 raw/utility universe: programmatic dual construction route in phase1-routes.tsv; NOT-YET-CONSTRUCTIBLE.txt names all 185 tags"
+}

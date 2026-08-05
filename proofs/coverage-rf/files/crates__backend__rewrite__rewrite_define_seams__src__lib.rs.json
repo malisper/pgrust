@@ -1,0 +1,1 @@
+{"path":"crates/backend/rewrite/rewrite_define_seams/src/lib.rs","sloc":[5,7,10,13,14,15,16,17,18],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2,3]}}

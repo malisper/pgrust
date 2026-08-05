@@ -1,0 +1,13 @@
+mac	macaddr_cmp_equiv	
+mac	macaddr_out_equiv	
+mac	eq_macaddr_not	
+mac	eq_macaddr_and	
+mac	eq_macaddr_or	
+mac	eq_macaddr_trunc	
+mac	eq_macaddr_lt	
+mac	eq_macaddr_le	
+mac	eq_macaddr_eq2	
+mac	eq_macaddr_ge	
+mac	eq_macaddr_gt	
+mac	eq_macaddr_ne	
+mac	eq_macaddr_in_len_0	

@@ -1,0 +1,12 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+pg_lsn	drift_pg_lsn_out_master_format	drift_pg_lsn_out_master_format	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_cmp	eq_pg_lsn_cmp	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_eq	eq_pg_lsn_eq	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_ge	eq_pg_lsn_ge	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_gt	eq_pg_lsn_gt	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_larger	eq_pg_lsn_larger	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_le	eq_pg_lsn_le	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_lt	eq_pg_lsn_lt	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_ne	eq_pg_lsn_ne	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_out	eq_pg_lsn_out	0	16	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_smaller	eq_pg_lsn_smaller	0	2	VERIFICATION:- SUCCESSFUL	RAN	1

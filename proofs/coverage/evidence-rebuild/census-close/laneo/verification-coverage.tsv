@@ -1,0 +1,12 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/utils/adt/encode/src/builtins.rs	25	0	16	0	16
+crates/backend/utils/adt/encode/src/lib.rs	290	0	271	0	271
+crates/backend/utils/adt/encode/src/tests.rs	0	0	0	0	0
+crates/common/pglz/src/lib.rs	231	0	208	0	208
+crates/common/pglz/src/tests.rs	0	0	0	0	0
+crates/common/sha2/src/lib.rs	220	0	213	0	213
+crates/common/sha2/src/tests.rs	0	0	0	0	0
+CRATE:crates/backend/utils/adt/encode	315	0	287	0	287
+CRATE:crates/common/pglz	231	0	208	0	208
+CRATE:crates/common/sha2	220	0	213	0	213
+TOTAL	766	0	708	0	708

@@ -1,0 +1,20 @@
+[package]
+name = "shell_archive"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "shell_archive"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }
+elog = { path = "../../utils/error/elog" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+percentrepl = { path = "../../../common/percentrepl" }
+wait_error = { path = "../../../common/wait_error" }
+
+[dev-dependencies]
+libc = "0.2"

@@ -1,0 +1,2 @@
+Å), to_tsquery('));
+SELECT ts_rewrite(to_tsquery(

@@ -1,0 +1,125 @@
+-- rowtypes lane corpus: ordered row comparisons (RowCompareExpr), row
+-- equality composition, IS [NOT] DISTINCT over rows, composite field
+-- selection (FieldSelect), record cmp/eq family orderings, hash_record via
+-- hash agg shapes, record_in/out literals. Byte-diffed pgrust vs C 18.3.
+-- C NULL semantics inside row comparison are per-column: exercised heavily.
+SELECT (1,2) < (1,3);
+SELECT (1,2) < (1,2);
+SELECT (1,2) <= (1,2);
+SELECT (1,2) > (0,9);
+SELECT (1,2) >= (2,0);
+SELECT (1,2,3) < (1,2,4);
+SELECT (1,'b') < (1,'c');
+SELECT ('a','b') >= ('a','b');
+SELECT (1, NULL) < (2, 3);
+SELECT (1, NULL) < (1, 3);
+SELECT (NULL, 1) < (2, 3);
+SELECT (1, NULL) <= (1, NULL);
+SELECT (1,2) < (NULL, 0);
+SELECT (1,2) = (1,2);
+SELECT (1,2) = (1,3);
+SELECT (1,2) <> (1,3);
+SELECT (1,NULL) = (1,2);
+SELECT (1,NULL) = (1,NULL);
+SELECT (1,NULL) <> (1,NULL);
+SELECT (2,1) = (2,1.0);
+SELECT ROW(1,2) < ROW(1,3);
+SELECT ROW(1) < ROW(2);
+SELECT (1,2) IS DISTINCT FROM (1,2);
+SELECT (1,2) IS DISTINCT FROM (1,3);
+SELECT (1,NULL) IS DISTINCT FROM (1,NULL);
+SELECT (1,NULL) IS NOT DISTINCT FROM (1,NULL);
+SELECT (1,NULL) IS DISTINCT FROM (1,2);
+CREATE TABLE rowt (a int, b int, c text);
+INSERT INTO rowt VALUES (1, 10, 'x'), (1, 20, 'y'), (2, 5, 'z'), (2, NULL, 'w'), (NULL, 1, 'v');
+SELECT * FROM rowt WHERE (a,b) < (2,5) ORDER BY a, b, c;
+SELECT * FROM rowt WHERE (a,b) >= (1,20) ORDER BY a, b, c;
+SELECT * FROM rowt WHERE (a,b) <= (2,5) ORDER BY a, b, c;
+SELECT * FROM rowt WHERE (a,b) = (1,10);
+SELECT * FROM rowt WHERE (a,b) <> (1,10) ORDER BY a, b, c;
+EXPLAIN (COSTS OFF) SELECT * FROM rowt WHERE (a,b) < (2,5);
+EXPLAIN SELECT * FROM rowt WHERE (a,b) < (2,5);
+-- composite type + field selection
+CREATE TYPE complex AS (r float8, i float8);
+CREATE TYPE fullname AS (first text, last text);
+CREATE TABLE people (fn fullname, bd date);
+INSERT INTO people VALUES ('(Joe,Blow)', '1984-01-10');
+INSERT INTO people VALUES (ROW('Ann', 'Smith'), '1990-05-01');
+INSERT INTO people VALUES (NULL, '2000-01-01');
+SELECT (fn).first, (fn).last FROM people ORDER BY bd;
+SELECT (fn).first || ' ' || (fn).last AS full FROM people WHERE (fn).first = 'Joe';
+SELECT fn FROM people ORDER BY bd;
+SELECT (people.fn).last FROM people WHERE fn IS NOT NULL ORDER BY 1;
+SELECT (ROW('a','b')::fullname).first;
+SELECT ((1.5, 2.5)::complex).r;
+-- record literals through I/O
+SELECT '(1,2)'::complex;
+SELECT '( 3 , 4 )'::complex;
+SELECT '("quoted , string",5)'::fullname;
+SELECT '(,)'::fullname;
+SELECT '(Joe,)'::fullname;
+SELECT '(Joe)'::fullname;
+SELECT '(Joe,Blow,extra)'::fullname;
+SELECT 'Joe'::fullname;
+SELECT '(Joe,Blow'::fullname;
+-- record comparison family over composites
+SELECT ROW('a','b')::fullname = ROW('a','b')::fullname;
+SELECT ROW('a','b')::fullname < ROW('a','c')::fullname;
+EXPLAIN (COSTS OFF) SELECT fn FROM people WHERE fn IS NOT NULL ORDER BY fn;
+SELECT fn < ROW('Boo','Boo')::fullname AS lt, fn FROM people WHERE fn IS NOT NULL;
+SELECT btrecordcmp(fn, ROW('Boo','Boo')::fullname) AS cmp FROM people WHERE fn IS NOT NULL;
+SELECT btrecordcmp(ROW('Joe','Blow'), ROW('Ann','Smith'));
+SELECT fn FROM people ORDER BY fn NULLS LAST;
+SELECT btrecordcmp(ROW('Joe','Blow')::fullname, ROW('Ann','Smith')::fullname);
+SELECT record_lt(ROW('Joe','Blow')::fullname, ROW('Ann','Smith')::fullname);
+SELECT v FROM (VALUES (ROW('Joe','Blow')::fullname), (ROW('Ann','Smith')::fullname)) t(v) ORDER BY v;
+SELECT (fn).first < 'Boo', (fn).last < 'Boo' FROM people WHERE fn IS NOT NULL;
+SELECT btrecordcmp(a.fn, b.fn) FROM people a, people b WHERE (a.fn).first = 'Joe' AND (b.fn).first = 'Ann';
+CREATE TYPE onefloat AS (f float8);
+CREATE TYPE onetext AS (t text);
+SELECT v FROM (VALUES ('(2)'::onefloat), ('(1)'::onefloat)) t(v) ORDER BY v;
+SELECT v FROM (VALUES ('(b)'::onetext), ('(a)'::onetext)) t(v) ORDER BY v;
+SELECT v FROM (VALUES ('(b)'::onetext), ('(a)'::onetext)) t(v) ORDER BY v DESC;
+SELECT v FROM (VALUES ('(b)'::onetext), ('(c)'::onetext), ('(a)'::onetext)) t(v) ORDER BY v;
+SELECT v, v > '(a)'::onetext FROM (VALUES ('(b)'::onetext), ('(a)'::onetext)) t(v) ORDER BY v;
+CREATE TABLE people2 (fn fullname);
+INSERT INTO people2 VALUES ('(Joe,Blow)'), ('(Ann,Smith)');
+SELECT fn FROM people2 ORDER BY fn;
+SELECT x FROM ctab2 ORDER BY x;
+DROP TABLE people2;
+DROP TYPE onefloat;
+DROP TYPE onetext;
+SELECT fn FROM people WHERE fn IS NOT NULL ORDER BY fn;
+SELECT fn FROM people WHERE fn IS NOT NULL ORDER BY fn DESC;
+SELECT DISTINCT fn FROM people WHERE fn IS NOT NULL ORDER BY fn;
+CREATE TABLE ctab (x complex);
+INSERT INTO ctab VALUES ('(1,2)'), ('(1,3)'), ('(0,9)'), ('(1,2)'), (NULL);
+SELECT x FROM ctab ORDER BY x;
+SELECT x FROM ctab ORDER BY x DESC NULLS LAST;
+SELECT DISTINCT x FROM ctab ORDER BY x;
+SELECT x, count(*) FROM ctab GROUP BY x ORDER BY x;
+-- record cmp with NULL columns inside rows
+INSERT INTO ctab VALUES ('(1,)');
+SELECT x FROM ctab ORDER BY x;
+SELECT x FROM ctab WHERE x = '(1,)' ORDER BY x;
+SELECT x FROM ctab WHERE x > '(1,2)' ORDER BY x;
+SELECT btrecordcmp(ROW(1,2), ROW(1,3));
+SELECT btrecordcmp(ROW(1,2), ROW(1,2));
+SELECT btrecordcmp(ROW(2,NULL), ROW(2,1));
+SELECT btrecordcmp(ROW(2,NULL), ROW(2,NULL));
+SELECT ROW(1,2) = ROW(1,2.0);
+SELECT ROW(1,2)::complex >= ROW(1,2)::complex;
+SELECT record_larger(ROW(1,2)::complex, ROW(1,3)::complex);
+SELECT record_smaller(ROW(1,2)::complex, ROW(1,3)::complex);
+-- error shapes
+SELECT ROW(1,2) = ROW(1,2,3);
+SELECT ROW(1,'x') > ROW(1,2);
+-- rowcomparesel: planner estimate path over stats
+ANALYZE rowt;
+EXPLAIN SELECT * FROM rowt WHERE (a,b) < (2,5);
+SELECT * FROM rowt WHERE (a,b,c) < (2,5,'zz') ORDER BY a,b,c;
+DROP TABLE ctab;
+DROP TABLE people;
+DROP TABLE rowt;
+DROP TYPE fullname;
+DROP TYPE complex;

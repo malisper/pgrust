@@ -1,0 +1,26 @@
+[package]
+name = "lsyscache"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_pathnodes = { path = "../../../../_support/types/pathnodes" }
+syscache_seams = { path = "../syscache_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+typcache_seams = { path = "../typcache_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+lsyscache_seams = { path = "../lsyscache_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+init_small = { path = "../../init/init_small" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+adt_scalar = { path = "../../adt/scalar" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+format_type = { path = "../../adt/format_type" }
+readfuncs = { path = "../../../nodes/readfuncs" }

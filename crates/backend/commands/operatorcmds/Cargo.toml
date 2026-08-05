@@ -1,0 +1,36 @@
+[package]
+name = "operatorcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "operatorcmds"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+elog = { path = "../../utils/error/elog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+heaptuple = { path = "../../access/common/heaptuple" }
+table = { path = "../../access/table/table" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
+pg_operator = { path = "../../catalog/pg_operator" }
+parse_oper = { path = "../../parser/parse_oper" }
+parse_func = { path = "../../parser/parse_func" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+commands_define = { path = "../commands_define" }
+format_type = { path = "../../utils/adt/format_type" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+miscinit = { path = "../../utils/init/miscinit" }
+superuser = { path = "../../utils/misc/superuser" }
+dependency_seams = { path = "../../catalog/dependency_seams" }

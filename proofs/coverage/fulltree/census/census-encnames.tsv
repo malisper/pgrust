@@ -1,0 +1,3 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+encnames	proofs::eq_encoding_to_char_frame	proofs::eq_encoding_to_char_frame	0	71	VERIFICATION:- SUCCESSFUL	RAN	1
+encnames	proofs::witness_wrapper_non_utf8_plane	proofs::witness_wrapper_non_utf8_plane	0	20	VERIFICATION:- SUCCESSFUL	RAN	1

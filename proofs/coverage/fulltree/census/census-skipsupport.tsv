@@ -1,0 +1,26 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+skipsupport	proofs::eq_bool_decrement	proofs::eq_bool_decrement	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_bool_increment	proofs::eq_bool_increment	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_char_decrement	proofs::eq_char_decrement	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_char_increment	proofs::eq_char_increment	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_date_decrement	proofs::eq_date_decrement	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_date_increment	proofs::eq_date_increment	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_int2_decrement	proofs::eq_int2_decrement	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_int2_increment	proofs::eq_int2_increment	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_int4_decrement	proofs::eq_int4_decrement	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_int4_increment	proofs::eq_int4_increment	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_int8_decrement	proofs::eq_int8_decrement	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_int8_increment	proofs::eq_int8_increment	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_oid_decrement	proofs::eq_oid_decrement	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_oid_increment	proofs::eq_oid_increment	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_sentinels_btbool	proofs::eq_sentinels_btbool	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_sentinels_btchar	proofs::eq_sentinels_btchar	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_sentinels_btint2	proofs::eq_sentinels_btint2	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_sentinels_btint4	proofs::eq_sentinels_btint4	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_sentinels_btint8	proofs::eq_sentinels_btint8	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_sentinels_btoid	proofs::eq_sentinels_btoid	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_sentinels_date	proofs::eq_sentinels_date	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_sentinels_timestamp	proofs::eq_sentinels_timestamp	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_timestamp_decrement_is_int8	proofs::eq_timestamp_decrement_is_int8	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_timestamp_dt_sentinel_constants	proofs::eq_timestamp_dt_sentinel_constants	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+skipsupport	proofs::eq_timestamp_increment_is_int8	proofs::eq_timestamp_increment_is_int8	0	1	VERIFICATION:- SUCCESSFUL	RAN	1

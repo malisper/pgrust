@@ -1,0 +1,19 @@
+# proofs/coverage/p1-new4-uuidossp/summary.tsv — lane p1-new4, crate contrib/uuid_ossp
+# lane branch proofs/p1-new4; target fuzz/fuzz_targets/uuidossp_diff.rs
+# denominator: SLOC v2 + const data tables excluded (proofs/coverage/SLOC-RULE-V2.md,
+#   computed with proofs/coverage/sloc_rules.py; matches phase1-expansion-census sloc 128)
+# measured: FLEET capture — job pgrust-fuzz-campaign-1785615321-5ba5-53407 @
+#   458f3a1ce96e7886c4994a1a9e4950ed2ba3a341 (final lane sha), 10,000,000 execs,
+#   0 divergences, 0 sanitizer artifacts, rc=0; coverage.lcov banked gzipped next
+#   to this file (full grown corpus, 116 inputs).  Prior CONFIRM at 8c5e4e5bc5c9
+#   (pre-arm-8 differential planes): job pgrust-fuzz-campaign-1785614413-1883-54546,
+#   10,000,000 execs, 0 divergences, rc=0.
+# exceptions: proofs/coverage/phase1-exceptions.tsv rows with author=p1-new4
+# rendered-red eyeball audit: all 11 residual lines individually printed and
+#   classified 2026-08-01 (no unexplained red): 5 macro-literal rows of the
+#   fc_const_uuid! invocation (wrapper bodies THEMSELVES fuzz-measured via the
+#   fc plane; DA attaches to the expansion), 1 unreachable nibble arm, 4
+#   entropy-failure defensive lines, 1 clock same-tick bump arm.
+# EQUATION: sloc = measured + exceptions + unaccounted, unaccounted MUST be 0
+crate	sloc_v2	measured	exceptions	unaccounted	c_counterpart
+contrib/uuid_ossp	128	117	11	0	contrib/uuid-ossp/uuid-ossp.c (HAVE_UUID_E2FS path)

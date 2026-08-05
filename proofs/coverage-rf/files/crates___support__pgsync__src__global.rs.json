@@ -1,0 +1,1 @@
+{"path":"crates/_support/pgsync/src/global.rs","sloc":[57,68,69,70,75,76,77,78,79,82,83,85,86,87,89,90,91,97,98,99,100,102,118,119,120,121,122,124,125],"kani":[],"fuzz":[],"regress":[],"excluded":{"arm-head":[55,65],"use-mod":[109],"attr":[53,62,63,108,117],"const-static":[113,114],"macro-scaffold":[54,56,58,64,111]}}

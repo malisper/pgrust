@@ -1,0 +1,21 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+bool	eq_bool_accum	harnesses::eq_bool_accum	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_accum_inv	harnesses::eq_bool_accum_inv	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_alltrue	harnesses::eq_bool_alltrue	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_anytrue	harnesses::eq_bool_anytrue	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_int4	harnesses::eq_bool_int4	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_booleq	harnesses::eq_booleq	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boolge	harnesses::eq_boolge	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boolgt	harnesses::eq_boolgt	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boolle	harnesses::eq_boolle	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boollt	harnesses::eq_boollt	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boolne	harnesses::eq_boolne	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boolout	harnesses::eq_boolout	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_int4_bool	harnesses::eq_int4_bool	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l0	harnesses::eq_parse_bool_with_len_l0	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l1	harnesses::eq_parse_bool_with_len_l1	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l2	harnesses::eq_parse_bool_with_len_l2	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l3	harnesses::eq_parse_bool_with_len_l3	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l4	harnesses::eq_parse_bool_with_len_l4	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l5	harnesses::eq_parse_bool_with_len_l5	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l6	harnesses::eq_parse_bool_with_len_l6	0	7	VERIFICATION:- SUCCESSFUL	RAN	1

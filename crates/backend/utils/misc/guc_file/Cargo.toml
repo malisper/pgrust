@@ -1,0 +1,21 @@
+[package]
+name = "guc_file"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "guc_file"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+elog = { path = "../../error/elog" }
+init_small = { path = "../../init/init_small" }
+guc_seams = { path = "../guc_seams" }
+guc_file_seams = { path = "../guc_file_seams" }
+conffiles_seams = { path = "../conffiles_seams" }
+
+[dev-dependencies]
+guc_tables = { path = "../guc_tables" }

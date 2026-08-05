@@ -1,0 +1,8 @@
+# fmt_num_diff dictionary: NUM keywords + suffixes (NUM_keywords table,
+# formatting.c @ 62d6c7d3df) + numeric literal shapes.
+"," "." "0" "9" "B" "C" "D" "EEEE" "FM" "G" "L" "MI" "PL" "PR" "RN" "SG"
+"S" "TH" "V" "b" "c" "d" "eeee" "fm" "g" "l" "mi" "pl" "pr" "rn" "sg" "s"
+"th" "v"
+"NaN" "Infinity" "-Infinity" "<" ">" "+" "-" "$"
+"485" "-485" "12,345.678" "0.0000000001" "9223372036854775807" "1e308"
+"2147483647" "-2147483648" "99999999999999999999"

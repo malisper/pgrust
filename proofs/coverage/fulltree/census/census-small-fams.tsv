@@ -1,0 +1,7 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+small-fams	eq_enum_eq	proofs::eq_enum_eq	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+small-fams	eq_enum_ne	proofs::eq_enum_ne	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+small-fams	eq_int8dec	proofs::eq_int8dec	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+small-fams	eq_int8inc	proofs::eq_int8inc	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+small-fams	eq_oidlarger	proofs::eq_oidlarger	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+small-fams	eq_oidsmaller	proofs::eq_oidsmaller	0	2	VERIFICATION:- SUCCESSFUL	RAN	1

@@ -1,0 +1,79 @@
+# proofs/brin-minmax runqueue — brin_minmax_multi DISTANCE lane
+# (tail-triage group 2; compile-only pre-build 2026-07-29, NOT yet run).
+# The original minmax seam lane (add_value/consistent/union/opcinfo) is
+# already proved and keeps its recipe in run-all.sh — do not re-run it here.
+#
+# Rows: 4621-4625 (int2/int4/int8/float4/float8), 4627 tid, 4628 uuid,
+# 4629 date, 4630 time, 4632 timetz, 4633 pg_lsn, 4634 macaddr,
+# 4635 macaddr8, 4636 inet, 4637 timestamp, 4638 summary_in,
+# 4640 summary_recv. Skipped: 4626 numeric / 4631 interval / 4639
+# summary_out (ledger-excluded), 4641 summary_send (byteasend delegation —
+# bytea-family rig, out of lane).
+#
+# FAMILY RULES: distance harnesses link ONLY c/pg_brin_multi_dist.c (mbconv
+# law — never add c/pg_brin_minmax.c to these lines). --no-overflow-checks
+# on EVERY line (float rule + the by-design wrapping integer subtractions).
+# kissat for expected-green, DEFAULT for the control/probe (kissat never
+# terminates on failing harnesses); solver stays PER-HARNESS — retry the
+# other solver before recording any wall. ONE run at a time under the RSS
+# watchdog; judge near-30s on kani-reported Verification Time. Run from
+# proofs/brin-minmax/.
+#
+# --- scalar distances: full-domain (int->f64 widen precedent: casts lane
+#     0.24-0.33s flat) ---
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+
+dist_proofs::eq_dist_int2 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_int2 --exact   # expect PROVED(full-i16 pair) — 4621
+dist_proofs::eq_dist_int4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_int4 --exact   # expect PROVED(full-i32 pair) — 4622
+dist_proofs::eq_dist_int8 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_int8 --exact   # expect PROVED(full-i64 pair; per-side f64 widen incl double rounding) — 4623
+dist_proofs::eq_dist_date | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_date --exact   # expect PROVED(full-i32 pair) — 4629
+dist_proofs::eq_dist_time | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_time --exact   # expect PROVED(full-i64 pair; subtract-THEN-widen order claim) — 4630
+dist_proofs::eq_dist_timestamp | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_timestamp --exact   # expect PROVED(full-i64 pair; widen-then-subtract order claim) — 4637
+dist_proofs::eq_dist_pg_lsn | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_pg_lsn --exact   # expect PROVED(full-u64 pair; wrapping_sub claim) — 4633
+#
+# --- float distances: NaN lattice full + finite fenced to the a1<=a2
+#     caller contract (shipped debug_assert = C Assert) ---
+dist_proofs::eq_dist_float4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_float4 --exact   # expect PROVED(NaN lattice + a1<=a2 plane, every payload) — 4624
+dist_proofs::eq_dist_float8 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_float8 --exact   # expect PROVED(same) — 4625
+#
+# --- tid: uint32-wrap comment claim + MaxHeapTuplesPerPage wiring assert ---
+dist_proofs::eq_dist_tid | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_tid --exact   # expect PROVED(full 6x u16; u32 wrap in-theorem) — 4627
+#
+# --- byte-chain distances: /256 is a POW2 divide (geo-cmp law: full-domain
+#     provable). If one walls BOTH solvers: fallback = per-byte-prefix cells
+#     (literal leading bytes) + native differential — NOT a magnitude
+#     ladder (loop-free per-step circuit is band-immune) ---
+dist_proofs::eq_dist_macaddr | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_macaddr --exact   # expect PROVED(full 6-byte pairs, lex fence) — 4634; prove FIRST to calibrate the chain cost
+dist_proofs::eq_dist_macaddr8 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_macaddr8 --exact   # expect PROVED(full 8-byte pairs) — 4635
+dist_proofs::eq_dist_uuid | green | release-gate | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_uuid --exact   # expect PROVED(full 16-byte pairs) or release-gate tier; 16-deep chain — 4628
+#
+# --- timetz: fenced eq + wrap-plane probe ---
+dist_proofs::eq_dist_timetz | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_timetz --exact   # expect PROVED(full i64 times x |zone|<=86400 fence) — 4632
+dist_proofs::probe_dist_timetz_zone_wrap | info | probe | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --harness dist_proofs::probe_dist_timetz_zone_wrap --exact   # expect VERIFICATION FAILED (zone-wrap plane: C int32-subtracts zones before widening, Rust widens first). DEFAULT solver. Decode cex, ground-truth on docker postgres:18 BEFORE recording; expected adjudication: ratified-unreachable (timetz_in bounds zone). A PASS = plane closed, re-examine.
+#
+# --- inet: per-family cells + mismatch arm (masked-prefix fence computed
+#     in-harness; detoast seam pruned by literal 4B headers) ---
+dist_proofs::eq_dist_inet_mismatch | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_inet_mismatch --exact   # expect PROVED(constant-1.0 arm) — 4636
+dist_proofs::eq_dist_inet_v4 | green | release-gate | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_inet_v4 --exact   # expect PROVED(full 4-byte + bits, masked fence) — 4636
+dist_proofs::eq_dist_inet_v6 | green | release-gate | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --harness dist_proofs::eq_dist_inet_v6 --exact   # expect PROVED(full 16-byte + bits) or release-gate; try DEFAULT on wall (varlena arg path — solver inversion seen on byref families)
+#
+# --- summary_in/recv: error-class-only rows (verdict + level + sqlstate
+#     via verbatim MAKE_SQLSTATE encoder; PgError ctor stubbed) ---
+dist_proofs::eq_summary_in | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --harness dist_proofs::eq_summary_in --exact   # expect PROVED(error-class 0A000) — 4638; DEFAULT solver (single-shot error arm)
+dist_proofs::eq_summary_recv | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --harness dist_proofs::eq_summary_recv --exact   # expect PROVED(error-class 0A000) — 4640
+#
+# --- negative control: DEFAULT solver, MUST FAIL with decodable cex
+#     (a PASS = broken gate, stop the lane) ---
+dist_proofs::control_dist_int4_swapped | must-fail | control | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --harness dist_proofs::control_dist_int4_swapped --exact   # expect VERIFICATION FAILED (any a1 != a2)
+#
+# LEDGER WORDING when green: wrapper-level (LocalFcinfo frame + dispatch
+# table oid wiring in-theorem); fences named per row (a1<=a2 / lex a<=b /
+# masked-prefix / |zone|<=86400); summary rows "error-class-only, message
+# text out of proof". Do not overstate: eq harnesses prove the CONTRACT
+# domain; out-of-contract planes are only characterized by the timetz probe.

@@ -1,0 +1,20 @@
+[package]
+name = "fdnb"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+
+# Loom lives ONLY under --cfg loom, dev-only: the duplex protocol models in
+# tests/loom.rs (LOOM-BREADTH inc-2 item 1). Zero native codegen impact — the
+# lib never references loom, and the test file is `#![cfg(loom)]`.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

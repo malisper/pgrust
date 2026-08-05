@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/transam/slru/src/shmem.rs","sloc":[15,16,20,21,23,27,28,29,44,45,49,50,52,59,60,61,63],"kani":[],"fuzz":[],"regress":[15,16,20,21,23,27,28,29,44,45,49,50,52,59,60,63],"excluded":{"else-only":[62],"attr":[19,26,48],"typedef":[3,4,5,33,34,35],"impl-header":[8,9,11,38,39,41]}}

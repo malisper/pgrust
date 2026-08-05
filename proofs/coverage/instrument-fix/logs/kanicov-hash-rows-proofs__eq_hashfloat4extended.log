@@ -1,0 +1,3566 @@
+Kani Rust Verifier 0.67.0 (cargo plugin)
+warning: variant `Malloc` is never constructed
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/lib.rs:64:5
+   |
+61 | enum Backend {
+   |      ------- variant in this enum
+...
+64 |     Malloc,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `chunk_size` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/aset.rs:284:4
+    |
+284 | fn chunk_size(idx: usize) -> usize {
+    |    ^^^^^^^^^^
+
+warning: method `mem_allocated` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/aset.rs:340:19
+    |
+306 | impl AllocSet {
+    | ------------- method in this implementation
+...
+340 |     pub(crate) fn mem_allocated(&self) -> usize {
+    |                   ^^^^^^^^^^^^^
+
+warning: variant `ROW_MARK_EXCLUSIVE` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:897:5
+    |
+897 |     ROW_MARK_EXCLUSIVE = 0,
+    |     ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkExclusive`
+    |
+    = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variant `ROW_MARK_NOKEYEXCLUSIVE` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:898:5
+    |
+898 |     ROW_MARK_NOKEYEXCLUSIVE = 1,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkNokeyexclusive`
+
+warning: variant `ROW_MARK_SHARE` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:899:5
+    |
+899 |     ROW_MARK_SHARE = 2,
+    |     ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkShare`
+
+warning: variant `ROW_MARK_KEYSHARE` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:900:5
+    |
+900 |     ROW_MARK_KEYSHARE = 3,
+    |     ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkKeyshare`
+
+warning: variant `ROW_MARK_REFERENCE` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:901:5
+    |
+901 |     ROW_MARK_REFERENCE = 4,
+    |     ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkReference`
+
+warning: variant `ROW_MARK_COPY` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:902:5
+    |
+902 |     ROW_MARK_COPY = 5,
+    |     ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkCopy`
+
+warning: unused imports: `LOG_DESTINATION_CSVLOG` and `LOG_DESTINATION_JSONLOG`
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/error/elog/src/config.rs:10:61
+   |
+10 |     ErrorLevel, PGErrorVerbosity, PgError, PgResult, ERROR, LOG_DESTINATION_CSVLOG,
+   |                                                             ^^^^^^^^^^^^^^^^^^^^^^
+11 |     LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, NOTICE, WARNING,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `OptNodeList`
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/readfuncs/src/lib.rs:12:53
+   |
+12 | use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
+   |                                                     ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `CoerceViaIO`
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/readfuncs/src/lib.rs:22:19
+   |
+22 |     CoalesceExpr, CoerceViaIO, CoercionForm, Const, FieldSelect, FieldStore, FromExpr, FuncExpr,
+   |                   ^^^^^^^^^^^
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/outfuncs/src/lib.rs:522:9
+    |
+124 |         NodeTag::T_CaseExpr => {
+    |         ------------------- matches all the relevant values
+...
+522 |         NodeTag::T_CaseExpr => {
+    |         ^^^^^^^^^^^^^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/outfuncs/src/lib.rs:532:9
+    |
+134 |         NodeTag::T_CaseWhen => {
+    |         ------------------- matches all the relevant values
+...
+532 |         NodeTag::T_CaseWhen => {
+    |         ^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/outfuncs/src/lib.rs:587:9
+    |
+150 |         NodeTag::T_WindowFunc => {
+    |         --------------------- matches all the relevant values
+...
+587 |         NodeTag::T_WindowFunc => {
+    |         ^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/outfuncs/src/lib.rs:606:9
+    |
+194 |         NodeTag::T_SetOperationStmt => {
+    |         --------------------------- matches all the relevant values
+...
+606 |         NodeTag::T_SetOperationStmt => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/outfuncs/src/lib.rs:727:9
+    |
+479 |         NodeTag::T_NotifyStmt => out_notify_stmt(
+    |         --------------------- matches all the relevant values
+...
+727 |         NodeTag::T_NotifyStmt => {
+    |         ^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: variable does not need to be mutable
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/pathnodes/src/run.rs:381:13
+    |
+381 |         let mut add = |outer: &mut crate::Relids<'mcx>, id: i32| {
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/pathnodes/src/run.rs:414:17
+    |
+414 |             let mut add = |outer: &mut crate::Relids<'mcx>, id: i32| {
+    |                 ----^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: unused import: `SetFunctionReturnMode`
+ --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:4:62
+  |
+4 | use fmgr::{ExprDoneCond, FmgrInfo, FunctionCallInfoBaseData, SetFunctionReturnMode};
+  |                                                              ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `init_MultiFuncCall` should have a snake case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:44:8
+   |
+44 | pub fn init_MultiFuncCall<'a>(
+   |        ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `init_multi_func_call`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: function `per_MultiFuncCall` should have a snake case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:64:8
+   |
+64 | pub fn per_MultiFuncCall(flinfo: &mut FmgrInfo) -> &mut FuncCallContext {
+   |        ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `per_multi_func_call`
+
+warning: function `end_MultiFuncCall` should have a snake case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:70:8
+   |
+70 | pub fn end_MultiFuncCall(flinfo: &mut FmgrInfo) {
+   |        ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `end_multi_func_call`
+
+warning: type `spgChooseIn` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:92:12
+   |
+92 | pub struct spgChooseIn {
+   |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseIn`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `spgChooseOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:104:10
+    |
+104 | pub enum spgChooseOut {
+    |          ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseOut`
+
+warning: type `spgPickSplitIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:127:12
+    |
+127 | pub struct spgPickSplitIn {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitIn`
+
+warning: type `spgPickSplitOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:134:12
+    |
+134 | pub struct spgPickSplitOut {
+    |            ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitOut`
+
+warning: type `spgInnerConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:157:12
+    |
+157 | pub struct spgInnerConsistentIn<'a> {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentIn`
+
+warning: type `spgInnerConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:175:12
+    |
+175 | pub struct spgInnerConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentOut`
+
+warning: type `spgLeafConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:199:12
+    |
+199 | pub struct spgLeafConsistentIn {
+    |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentIn`
+
+warning: type `spgLeafConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:212:12
+    |
+212 | pub struct spgLeafConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentOut`
+
+warning: type `spgxlogState` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:15:12
+   |
+15 | pub struct spgxlogState {
+   |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogState`
+
+warning: type `spgxlogAddLeaf` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:40:12
+   |
+40 | pub struct spgxlogAddLeaf {
+   |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddLeaf`
+
+warning: type `spgxlogMoveLeafs` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:76:12
+   |
+76 | pub struct spgxlogMoveLeafs {
+   |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogMoveLeafs`
+
+warning: type `spgxlogAddNode` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:115:12
+    |
+115 | pub struct spgxlogAddNode {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddNode`
+
+warning: type `spgxlogSplitTuple` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:154:12
+    |
+154 | pub struct spgxlogSplitTuple {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogSplitTuple`
+
+warning: type `spgxlogPickSplit` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:184:12
+    |
+184 | pub struct spgxlogPickSplit {
+    |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogPickSplit`
+
+warning: type `spgxlogVacuumLeaf` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:238:12
+    |
+238 | pub struct spgxlogVacuumLeaf {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumLeaf`
+
+warning: type `spgxlogVacuumRoot` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:271:12
+    |
+271 | pub struct spgxlogVacuumRoot {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRoot`
+
+warning: type `spgxlogVacuumRedirect` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:295:12
+    |
+295 | pub struct spgxlogVacuumRedirect {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRedirect`
+
+warning: type `spgConfigIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/lib.rs:237:12
+    |
+237 | pub struct spgConfigIn {
+    |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigIn`
+
+warning: type `spgConfigOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/lib.rs:242:12
+    |
+242 | pub struct spgConfigOut {
+    |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigOut`
+
+warning: unreachable pattern
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/nodes_core/src/node_funcs.rs:47:9
+   |
+30 |         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
+   |         ---------------------- matches all the relevant values
+...
+47 |         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
+   |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+   |
+   = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/nodes_core/src/node_funcs.rs:194:9
+    |
+163 |         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
+    |         ---------------------- matches all the relevant values
+...
+194 |         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
+    |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/nodes_core/src/node_funcs.rs:296:9
+    |
+279 |         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
+    |         ---------------------- matches all the relevant values
+...
+296 |         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
+    |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/nodes_core/src/node_funcs.rs:476:9
+    |
+424 |         NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
+    |         ---------------------- matches all the relevant values
+...
+476 |         NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
+    |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unused import: `MemoryContext`
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/cache/typcache/src/lib.rs:19:16
+   |
+19 | use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
+   |                ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `addedafter` is never read
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/element.rs:545:26
+    |
+545 |     let mut addedafter = 0i32;
+    |                          ^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/expanded.rs:144:55
+    |
+141 |     unsafe {
+    |     ------ because it's nested under this `unsafe` block
+...
+144 |         parentcontext.register_reset_callback(move || unsafe { drop(Box::from_raw(p)) });
+    |                                                       ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/expanded.rs:252:15
+    |
+252 |         cur + unsafe { varsize_any(value.as_usize() as *const u8) }
+    |               ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/io.rs:557:15
+    |
+557 |         -1 => unsafe { varsize_any(p) },
+    |               ^^^^^^ unnecessary `unsafe` block
+
+warning: constant `HASH_RECORD_OID` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/builtins.rs:522:7
+    |
+522 | const HASH_RECORD_OID: Oid = 6192;
+    |       ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `HASH_RECORD_EXTENDED_OID` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/builtins.rs:523:7
+    |
+523 | const HASH_RECORD_EXTENDED_OID: Oid = 6193;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/numeric/src/sortsupport.rs:21:17
+   |
+21 | struct AlignBuf([u8; 128]);
+   |        -------- ^^^^^^^^^
+   |        |
+   |        field in this struct
+   |
+   = help: consider removing this field
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `core::cmp::Ordering`
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/varlena/src/lib.rs:23:5
+   |
+23 | use core::cmp::Ordering;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `proof_support::stubs`
+  --> src/lib.rs:74:9
+   |
+74 |     use proof_support::stubs;
+   |         ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: Found the following unsupported constructs:
+             - caller_location (1)
+             - foreign function (1)
+         
+         Verification will fail if one or more of these constructs is reachable.
+         See https://model-checking.github.io/kani/rust-feature-support.html for more details.
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s
+Checking harness proofs::eq_hashfloat4extended...
+CBMC 6.8.0 (cbmc-6.8.0)
+CBMC version 6.8.0 (cbmc-6.8.0) 64-bit arm64 macos
+Reading GOTO program from file /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/hash-rows/target/kani/aarch64-apple-darwin/debug/deps/proof_hash_rows-65e3288cb9410c05__RNvNtCs3If61BwhuWl_15proof_hash_rows6proofs21eq_hashfloat4extended.out
+Generating GOTO Program
+Adding CPROVER library (arm64)
+Removal of function pointers and virtual functions
+Generic Property Instrumentation
+Running with 16 object bits, 48 offset bits (user-specified)
+Starting Bounded Model Checking
+Unwinding loop _RINvNtCs3If61BwhuWl_15proof_hash_rows6proofs4callKj2_INtNtCs6L0xoU5iSXA_5alloc5boxed3BoxNtNtCsfJe7BX3ldpw_11types_error8pg_error7PgErrorEEB4_.0 iteration 1 file src/lib.rs line 121 column 9 function proofs::call::<2, std::boxed::Box<types_error::PgError>> thread 0
+Unwinding loop _RINvNtCs3If61BwhuWl_15proof_hash_rows6proofs4callKj2_INtNtCs6L0xoU5iSXA_5alloc5boxed3BoxNtNtCsfJe7BX3ldpw_11types_error8pg_error7PgErrorEEB4_.0 iteration 2 file src/lib.rs line 121 column 9 function proofs::call::<2, std::boxed::Box<types_error::PgError>> thread 0
+Runtime Symex: 0.117755s
+size of program expression: 7249 steps
+slicing removed 4107 assignments
+Generated 368 VCC(s), 118 remaining after simplification
+Runtime Postprocess Equation: 0.00135279s
+Passing problem to propositional reduction
+converting SSA
+Runtime Convert SSA: 0.00977362s
+Running propositional reduction
+Post-processing
+Runtime Post-process: 6.458e-06s
+Solving with External SAT solver
+Writing temporary CNF
+Invoking SAT solver
+Solver returned code: 10
+result:SATISFIABLE
+Runtime Solver: 0.032263s
+Runtime decision procedure: 0.0422385s
+Running propositional reduction
+Solving with External SAT solver
+Writing temporary CNF
+Invoking SAT solver
+Solver returned code: 10
+result:SATISFIABLE
+Runtime Solver: 0.0789556s
+Runtime decision procedure: 0.0790242s
+Running propositional reduction
+Solving with External SAT solver
+Writing temporary CNF
+Invoking SAT solver
+Solver returned code: 10
+result:SATISFIABLE
+Runtime Solver: 0.0865263s
+Runtime decision procedure: 0.086597s
+Running propositional reduction
+Solving with External SAT solver
+Writing temporary CNF
+Invoking SAT solver
+Solver returned code: 10
+result:SATISFIABLE
+Runtime Solver: 0.132666s
+Runtime decision procedure: 0.132738s
+Running propositional reduction
+Solving with External SAT solver
+Writing temporary CNF
+Invoking SAT solver
+Solver returned code: 20
+result:UNSATISFIABLE
+Runtime Solver: 6.19109s
+Runtime decision procedure: 6.19113s
+
+RESULTS:
+Check 1: std::alloc::Layout::max_size_for_align.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:95:32 in function std::alloc::Layout::max_size_for_align
+
+Check 2: std::alloc::Layout::max_size_for_align.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_sub` which would overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:95:18 in function std::alloc::Layout::max_size_for_align
+
+Check 3: core::slice::index::slice_index_fail::do_panic::runtime.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:40:9 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 4: __rust_dealloc.assertion.1
+	 - Status: SUCCESS
+	 - Description: "Alignment is power of two"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:83 in function __rust_dealloc
+
+Check 5: __rust_dealloc.assertion.2
+	 - Status: SUCCESS
+	 - Description: "rust_dealloc must be called on an object whose allocated size matches its layout"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:85 in function __rust_dealloc
+
+Check 6: proofs::call::<2, std::boxed::Box<types_error::PgError>>.assertion.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:122:46 in function proofs::call::<2, std::boxed::Box<types_error::PgError>>
+
+Check 7: proofs::call::<2, std::boxed::Box<types_error::PgError>>.assertion.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:122:13 in function proofs::call::<2, std::boxed::Box<types_error::PgError>>
+
+Check 8: proofs::call::<2, std::boxed::Box<types_error::PgError>>.assertion.3
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: src/lib.rs:123:13 in function proofs::call::<2, std::boxed::Box<types_error::PgError>>
+
+Check 9: proof_hash_rows::proofs::call::<2, alloc::boxed::Box<types_error::pg_error::PgError>>.missing_definition.1
+	 - Status: SUCCESS
+	 - Description: "assertion"
+	 - Location: Unknown file in function proof_hash_rows::proofs::call::<2, alloc::boxed::Box<types_error::pg_error::PgError>>
+
+Check 10: proofs::call::<2, std::boxed::Box<types_error::PgError>>.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: src/lib.rs:125:15 in function proofs::call::<2, std::boxed::Box<types_error::PgError>>
+
+Check 11: proofs::call::<2, std::boxed::Box<types_error::PgError>>.assertion.4
+	 - Status: SUCCESS
+	 - Description: "hash row errored"
+	 - Location: src/lib.rs:127:23 in function proofs::call::<2, std::boxed::Box<types_error::PgError>>
+
+Check 12: std::fmt::Arguments::<'_>::from_str.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/fmt/mod.rs:820:38 in function std::fmt::Arguments::<'_>::from_str
+
+Check 13: std::ptr::drop_in_place::<std::vec::Vec<u8>>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::vec::Vec<u8>>
+
+Check 14: std::ptr::drop_in_place::<std::vec::Vec<u8>>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::vec::Vec<u8>>
+
+Check 15: hashfn::bytes3.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:65:18 in function hashfn::bytes3
+
+Check 16: hashfn::bytes3.assertion.2
+	 - Status: UNREACHABLE
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:66:26 in function hashfn::bytes3
+
+Check 17: hashfn::bytes3.assertion.3
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:66:24 in function hashfn::bytes3
+
+Check 18: hashfn::bytes3.assertion.4
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:66:14 in function hashfn::bytes3
+
+Check 19: hashfn::bytes3.assertion.5
+	 - Status: UNREACHABLE
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:68:18 in function hashfn::bytes3
+
+Check 20: hashfn::bytes3.assertion.6
+	 - Status: UNREACHABLE
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:69:26 in function hashfn::bytes3
+
+Check 21: hashfn::bytes3.assertion.7
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:69:24 in function hashfn::bytes3
+
+Check 22: hashfn::bytes3.assertion.8
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:69:14 in function hashfn::bytes3
+
+Check 23: hashfn::bytes3.assertion.9
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:72:24 in function hashfn::bytes3
+
+Check 24: types_fmgr::FunctionCallInfoBaseData::args_n::<2>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer dereference: address must be a multiple of its type's alignment"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:453:18 in function types_fmgr::FunctionCallInfoBaseData::args_n::<2>
+
+Check 25: types_fmgr::FunctionCallInfoBaseData::args_n::<2>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "null pointer dereference occurred"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:453:18 in function types_fmgr::FunctionCallInfoBaseData::args_n::<2>
+
+Check 26: types_fmgr::FunctionCallInfoBaseData::args_n::<2>.safety_check.3
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:453:18 in function types_fmgr::FunctionCallInfoBaseData::args_n::<2>
+
+Check 27: types_fmgr::FunctionCallInfoBaseData::args_n::<2>.safety_check.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:453:18 in function types_fmgr::FunctionCallInfoBaseData::args_n::<2>
+
+Check 28: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 29: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 30: std::ptr::drop_in_place::<alloc::raw_vec::RawVec<u8>>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<alloc::raw_vec::RawVec<u8>>
+
+Check 31: std::ptr::drop_in_place::<alloc::raw_vec::RawVec<u8>>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<alloc::raw_vec::RawVec<u8>>
+
+Check 32: hashfn::init.assertion.1
+	 - Status: SUCCESS
+	 - Description: "assertion failed: len <= i32::MAX as usize"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:11:5 in function hashfn::init
+
+Check 33: std::alloc::Layout::is_size_align_valid.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:68:5 in function std::alloc::Layout::is_size_align_valid
+
+Check 34: <u32 as std::intrinsics::fallback::DisjointBitOr>::disjoint_bitor.assume.1
+	 - Status: SUCCESS
+	 - Description: "Rust intrinsic assumption failed"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/fallback.rs:138:26 in function <u32 as std::intrinsics::fallback::DisjointBitOr>::disjoint_bitor
+
+Check 35: std::result::Result::<[u8; 4], std::array::TryFromSliceError>::unwrap.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1231:15 in function std::result::Result::<[u8; 4], std::array::TryFromSliceError>::unwrap
+
+Check 36: hashfn::word.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:59:31 in function hashfn::word
+
+Check 37: std::panic::Location::<'_>::caller.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "caller_location is not currently supported by Kani. Please post your example at https://github.com/model-checking/kani/issues/374"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic/location.rs:147:9 in function std::panic::Location::<'_>::caller
+
+Check 38: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1717:15 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 39: core::num::<impl usize>::unchecked_mul.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_mul` which would overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:1117:17 in function core::num::<impl usize>::unchecked_mul
+
+Check 40: kani::rustc_intrinsics::offset::<u8, *const u8, usize>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset in bytes overflows isize"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<u8, *const u8, usize>
+
+Check 41: kani::rustc_intrinsics::offset::<u8, *const u8, usize>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "Offset result and original pointer must point to the same allocation"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<u8, *const u8, usize>
+
+Check 42: std::intrinsics::rotate_left::<u32>.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to multiply with overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:2022:49 in function std::intrinsics::rotate_left::<u32>
+
+Check 43: std::intrinsics::rotate_left::<u32>.assertion.2
+	 - Status: SUCCESS
+	 - Description: "attempt to calculate the remainder with a divisor of zero"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:2022:41 in function std::intrinsics::rotate_left::<u32>
+
+Check 44: std::intrinsics::rotate_left::<u32>.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to calculate the remainder with a divisor of zero"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:2022:41 in function std::intrinsics::rotate_left::<u32>
+
+Check 45: kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani_core/src/models.rs:23:13 in function kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>
+
+Check 46: kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "failed to compute `size_of_val`"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>
+
+Check 47: kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>.assertion.1
+	 - Status: SUCCESS
+	 - Description: "cannot compute `size_of_val` for extern types"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>
+
+Check 48: hashfn::hash_core.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:27 in function hashfn::hash_core
+
+Check 49: hashfn::hash_core.assertion.2
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:17 in function hashfn::hash_core
+
+Check 50: hashfn::hash_core.assertion.3
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:50 in function hashfn::hash_core
+
+Check 51: hashfn::hash_core.assertion.4
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:40 in function hashfn::hash_core
+
+Check 52: hashfn::hash_core.assertion.5
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:74 in function hashfn::hash_core
+
+Check 53: hashfn::hash_core.assertion.6
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:64 in function hashfn::hash_core
+
+Check 54: hashfn::hash_core.assertion.7
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:42 in function hashfn::hash_core
+
+Check 55: hashfn::hash_core.assertion.8
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:32 in function hashfn::hash_core
+
+Check 56: hashfn::hash_core.assertion.9
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:65 in function hashfn::hash_core
+
+Check 57: hashfn::hash_core.assertion.10
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:55 in function hashfn::hash_core
+
+Check 58: hashfn::hash_core.assertion.11
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:127:42 in function hashfn::hash_core
+
+Check 59: hashfn::hash_core.assertion.12
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:127:32 in function hashfn::hash_core
+
+Check 60: hashfn::hash_core.assertion.13
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:42 in function hashfn::hash_core
+
+Check 61: hashfn::hash_core.assertion.14
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:60 in function hashfn::hash_core
+
+Check 62: hashfn::hash_core.assertion.15
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:50 in function hashfn::hash_core
+
+Check 63: hashfn::hash_core.assertion.16
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:83 in function hashfn::hash_core
+
+Check 64: hashfn::hash_core.assertion.17
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:73 in function hashfn::hash_core
+
+Check 65: hashfn::hash_core.assertion.18
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:42 in function hashfn::hash_core
+
+Check 66: hashfn::hash_core.assertion.19
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:60 in function hashfn::hash_core
+
+Check 67: hashfn::hash_core.assertion.20
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:50 in function hashfn::hash_core
+
+Check 68: hashfn::hash_core.assertion.21
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:109:42 in function hashfn::hash_core
+
+Check 69: hashfn::hash_core.assertion.22
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:42 in function hashfn::hash_core
+
+Check 70: hashfn::hash_core.assertion.23
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:60 in function hashfn::hash_core
+
+Check 71: hashfn::hash_core.assertion.24
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:50 in function hashfn::hash_core
+
+Check 72: hashfn::hash_core.assertion.25
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:83 in function hashfn::hash_core
+
+Check 73: hashfn::hash_core.assertion.26
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:73 in function hashfn::hash_core
+
+Check 74: hashfn::hash_core.assertion.27
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:43 in function hashfn::hash_core
+
+Check 75: hashfn::hash_core.assertion.28
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:61 in function hashfn::hash_core
+
+Check 76: hashfn::hash_core.assertion.29
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:51 in function hashfn::hash_core
+
+Check 77: hashfn::hash_core.assertion.30
+	 - Status: UNREACHABLE
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:101:43 in function hashfn::hash_core
+
+Check 78: hashfn::hash_bytes_extended.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to shift right with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:155:28 in function hashfn::hash_bytes_extended
+
+Check 79: hashfn::hash_bytes_extended.assertion.2
+	 - Status: SUCCESS
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:160:5 in function hashfn::hash_bytes_extended
+
+Check 80: types_fmgr::fcinfo::arity_panic.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:503:5 in function types_fmgr::fcinfo::arity_panic
+
+Check 81: kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani_core/src/models.rs:43:13 in function kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>
+
+Check 82: kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "failed to compute `align_of_val`"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>
+
+Check 83: kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>.assertion.1
+	 - Status: SUCCESS
+	 - Description: "cannot compute `align_of_val` for extern types"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>
+
+Check 84: core::slice::index::slice_index_fail::do_panic::runtime.assertion.2
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:58:9 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 85: <usize as kani::rustc_intrinsics::ToISize>::to_isize.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani_core/src/models.rs:176:17 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 86: <usize as kani::rustc_intrinsics::ToISize>::to_isize.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset value overflows isize"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 87: <usize as kani::rustc_intrinsics::ToISize>::to_isize.assertion.1
+	 - Status: SUCCESS
+	 - Description: "internal error: entered unreachable code"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 88: proofs::eq_hashfloat4extended.assertion.1
+	 - Status: SUCCESS
+	 - Description: "assertion failed: r.as_u64() == c"
+	 - Location: src/lib.rs:245:5 in function proofs::eq_hashfloat4extended
+
+Check 89: <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:435:5 in function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index
+
+Check 90: <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:441:22 in function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index
+
+Check 91: <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:441:22 in function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index
+
+Check 92: core::slice::index::slice_index_fail::do_panic::runtime.assertion.3
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:68:5 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 93: core::slice::index::slice_index_fail::do_panic::runtime.assertion.4
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:49:9 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 94: std::result::unwrap_failed.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1867:5 in function std::result::unwrap_failed
+
+Check 95: <std::ops::RangeFrom<usize> as std::slice::SliceIndex<[u8]>>::index.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_sub` which would overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:573:27 in function <std::ops::RangeFrom<usize> as std::slice::SliceIndex<[u8]>>::index
+
+Check 96: <std::ops::RangeFrom<usize> as std::slice::SliceIndex<[u8]>>::index.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:574:13 in function <std::ops::RangeFrom<usize> as std::slice::SliceIndex<[u8]>>::index
+
+Check 97: <std::ops::RangeFrom<usize> as std::slice::SliceIndex<[u8]>>::index.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:574:13 in function <std::ops::RangeFrom<usize> as std::slice::SliceIndex<[u8]>>::index
+
+Check 98: kani::mem::cbmc::same_allocation.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "Kani does not support reasoning about pointer to unallocated memory"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::mem::cbmc::same_allocation
+
+Check 99: core::num::<impl usize>::checked_sub.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_sub` which would overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:812:31 in function core::num::<impl usize>::checked_sub
+
+Check 100: core::slice::<impl [u8]>::as_array::<4>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/mod.rs:854:31 in function core::slice::<impl [u8]>::as_array::<4>
+
+Check 101: core::slice::<impl [u8]>::as_array::<4>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/mod.rs:854:31 in function core::slice::<impl [u8]>::as_array::<4>
+
+Check 102: std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1338:15 in function std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>
+
+Check 103: <u32 as std::intrinsics::fallback::FunnelShift>::unchecked_funnel_shl.assume.1
+	 - Status: SUCCESS
+	 - Description: "Rust intrinsic assumption failed"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/fallback.rs:170:26 in function <u32 as std::intrinsics::fallback::FunnelShift>::unchecked_funnel_shl
+
+Check 104: <u32 as std::intrinsics::fallback::FunnelShift>::unchecked_funnel_shl.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to shift by excessive shift distance"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/fallback.rs:183:29 in function <u32 as std::intrinsics::fallback::FunnelShift>::unchecked_funnel_shl
+
+Check 105: <u32 as std::intrinsics::fallback::FunnelShift>::unchecked_funnel_shl.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to subtract with overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/fallback.rs:184:55 in function <u32 as std::intrinsics::fallback::FunnelShift>::unchecked_funnel_shl
+
+Check 106: <u32 as std::intrinsics::fallback::FunnelShift>::unchecked_funnel_shl.arithmetic_overflow.2
+	 - Status: SUCCESS
+	 - Description: "attempt to shift by excessive shift distance"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/fallback.rs:184:29 in function <u32 as std::intrinsics::fallback::FunnelShift>::unchecked_funnel_shl
+
+Check 107: alloc::raw_vec::RawVecInner::deallocate.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:830:5 in function alloc::raw_vec::RawVecInner::deallocate
+
+Check 108: core::panicking::panic_nounwind_fmt::runtime.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "call to foreign "Rust" function `_RNvCs1hStedNDpZ2_7___rustc17rust_begin_unwind` is not currently supported by Kani. Please post your example at https://github.com/model-checking/kani/issues/new/choose"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:110:17 in function core::panicking::panic_nounwind_fmt::runtime
+
+Check 109: std::ptr::Alignment::new.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/alignment.rs:64:13 in function std::ptr::Alignment::new
+
+Check 110: alloc::raw_vec::RawVecInner::deallocate.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:832:38 in function alloc::raw_vec::RawVecInner::deallocate
+
+Check 111: pg_hash_bytes_extended.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:442 in function pg_hash_bytes_extended
+
+Check 112: pg_hash_bytes_extended.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:442 in function pg_hash_bytes_extended
+
+Check 113: pg_hash_bytes_extended.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:442 in function pg_hash_bytes_extended
+
+Check 114: pg_hash_bytes_extended.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:442 in function pg_hash_bytes_extended
+
+Check 115: pg_hash_bytes_extended.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:442 in function pg_hash_bytes_extended
+
+Check 116: pg_hash_bytes_extended.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:442 in function pg_hash_bytes_extended
+
+Check 117: pg_hash_bytes_extended.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:443 in function pg_hash_bytes_extended
+
+Check 118: pg_hash_bytes_extended.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:443 in function pg_hash_bytes_extended
+
+Check 119: pg_hash_bytes_extended.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:443 in function pg_hash_bytes_extended
+
+Check 120: pg_hash_bytes_extended.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:443 in function pg_hash_bytes_extended
+
+Check 121: pg_hash_bytes_extended.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:443 in function pg_hash_bytes_extended
+
+Check 122: pg_hash_bytes_extended.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:443 in function pg_hash_bytes_extended
+
+Check 123: pg_hash_bytes_extended.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:444 in function pg_hash_bytes_extended
+
+Check 124: pg_hash_bytes_extended.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:444 in function pg_hash_bytes_extended
+
+Check 125: pg_hash_bytes_extended.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:444 in function pg_hash_bytes_extended
+
+Check 126: pg_hash_bytes_extended.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:444 in function pg_hash_bytes_extended
+
+Check 127: pg_hash_bytes_extended.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:444 in function pg_hash_bytes_extended
+
+Check 128: pg_hash_bytes_extended.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:444 in function pg_hash_bytes_extended
+
+Check 129: pg_hash_bytes_extended.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:495 in function pg_hash_bytes_extended
+
+Check 130: pg_hash_bytes_extended.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:495 in function pg_hash_bytes_extended
+
+Check 131: pg_hash_bytes_extended.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:495 in function pg_hash_bytes_extended
+
+Check 132: pg_hash_bytes_extended.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:495 in function pg_hash_bytes_extended
+
+Check 133: pg_hash_bytes_extended.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:495 in function pg_hash_bytes_extended
+
+Check 134: pg_hash_bytes_extended.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:495 in function pg_hash_bytes_extended
+
+Check 135: pg_hash_bytes_extended.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:498 in function pg_hash_bytes_extended
+
+Check 136: pg_hash_bytes_extended.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:498 in function pg_hash_bytes_extended
+
+Check 137: pg_hash_bytes_extended.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:498 in function pg_hash_bytes_extended
+
+Check 138: pg_hash_bytes_extended.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:498 in function pg_hash_bytes_extended
+
+Check 139: pg_hash_bytes_extended.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:498 in function pg_hash_bytes_extended
+
+Check 140: pg_hash_bytes_extended.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:498 in function pg_hash_bytes_extended
+
+Check 141: pg_hash_bytes_extended.pointer_dereference.31
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:501 in function pg_hash_bytes_extended
+
+Check 142: pg_hash_bytes_extended.pointer_dereference.32
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:501 in function pg_hash_bytes_extended
+
+Check 143: pg_hash_bytes_extended.pointer_dereference.33
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:501 in function pg_hash_bytes_extended
+
+Check 144: pg_hash_bytes_extended.pointer_dereference.34
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:501 in function pg_hash_bytes_extended
+
+Check 145: pg_hash_bytes_extended.pointer_dereference.35
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:501 in function pg_hash_bytes_extended
+
+Check 146: pg_hash_bytes_extended.pointer_dereference.36
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:501 in function pg_hash_bytes_extended
+
+Check 147: pg_hash_bytes_extended.pointer_dereference.37
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:505 in function pg_hash_bytes_extended
+
+Check 148: pg_hash_bytes_extended.pointer_dereference.38
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:505 in function pg_hash_bytes_extended
+
+Check 149: pg_hash_bytes_extended.pointer_dereference.39
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:505 in function pg_hash_bytes_extended
+
+Check 150: pg_hash_bytes_extended.pointer_dereference.40
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:505 in function pg_hash_bytes_extended
+
+Check 151: pg_hash_bytes_extended.pointer_dereference.41
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:505 in function pg_hash_bytes_extended
+
+Check 152: pg_hash_bytes_extended.pointer_dereference.42
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:505 in function pg_hash_bytes_extended
+
+Check 153: pg_hash_bytes_extended.pointer_dereference.43
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:506 in function pg_hash_bytes_extended
+
+Check 154: pg_hash_bytes_extended.pointer_dereference.44
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:506 in function pg_hash_bytes_extended
+
+Check 155: pg_hash_bytes_extended.pointer_dereference.45
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:506 in function pg_hash_bytes_extended
+
+Check 156: pg_hash_bytes_extended.pointer_dereference.46
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:506 in function pg_hash_bytes_extended
+
+Check 157: pg_hash_bytes_extended.pointer_dereference.47
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:506 in function pg_hash_bytes_extended
+
+Check 158: pg_hash_bytes_extended.pointer_dereference.48
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:506 in function pg_hash_bytes_extended
+
+Check 159: pg_hash_bytes_extended.pointer_dereference.49
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:509 in function pg_hash_bytes_extended
+
+Check 160: pg_hash_bytes_extended.pointer_dereference.50
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:509 in function pg_hash_bytes_extended
+
+Check 161: pg_hash_bytes_extended.pointer_dereference.51
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:509 in function pg_hash_bytes_extended
+
+Check 162: pg_hash_bytes_extended.pointer_dereference.52
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:509 in function pg_hash_bytes_extended
+
+Check 163: pg_hash_bytes_extended.pointer_dereference.53
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:509 in function pg_hash_bytes_extended
+
+Check 164: pg_hash_bytes_extended.pointer_dereference.54
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:509 in function pg_hash_bytes_extended
+
+Check 165: pg_hash_bytes_extended.pointer_dereference.55
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:512 in function pg_hash_bytes_extended
+
+Check 166: pg_hash_bytes_extended.pointer_dereference.56
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:512 in function pg_hash_bytes_extended
+
+Check 167: pg_hash_bytes_extended.pointer_dereference.57
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:512 in function pg_hash_bytes_extended
+
+Check 168: pg_hash_bytes_extended.pointer_dereference.58
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:512 in function pg_hash_bytes_extended
+
+Check 169: pg_hash_bytes_extended.pointer_dereference.59
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:512 in function pg_hash_bytes_extended
+
+Check 170: pg_hash_bytes_extended.pointer_dereference.60
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:512 in function pg_hash_bytes_extended
+
+Check 171: pg_hash_bytes_extended.pointer_dereference.61
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:515 in function pg_hash_bytes_extended
+
+Check 172: pg_hash_bytes_extended.pointer_dereference.62
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:515 in function pg_hash_bytes_extended
+
+Check 173: pg_hash_bytes_extended.pointer_dereference.63
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:515 in function pg_hash_bytes_extended
+
+Check 174: pg_hash_bytes_extended.pointer_dereference.64
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:515 in function pg_hash_bytes_extended
+
+Check 175: pg_hash_bytes_extended.pointer_dereference.65
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:515 in function pg_hash_bytes_extended
+
+Check 176: pg_hash_bytes_extended.pointer_dereference.66
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:515 in function pg_hash_bytes_extended
+
+Check 177: pg_hash_bytes_extended.pointer_dereference.67
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:518 in function pg_hash_bytes_extended
+
+Check 178: pg_hash_bytes_extended.pointer_dereference.68
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:518 in function pg_hash_bytes_extended
+
+Check 179: pg_hash_bytes_extended.pointer_dereference.69
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:518 in function pg_hash_bytes_extended
+
+Check 180: pg_hash_bytes_extended.pointer_dereference.70
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:518 in function pg_hash_bytes_extended
+
+Check 181: pg_hash_bytes_extended.pointer_dereference.71
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:518 in function pg_hash_bytes_extended
+
+Check 182: pg_hash_bytes_extended.pointer_dereference.72
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:518 in function pg_hash_bytes_extended
+
+Check 183: pg_hash_bytes_extended.pointer_dereference.73
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:521 in function pg_hash_bytes_extended
+
+Check 184: pg_hash_bytes_extended.pointer_dereference.74
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:521 in function pg_hash_bytes_extended
+
+Check 185: pg_hash_bytes_extended.pointer_dereference.75
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:521 in function pg_hash_bytes_extended
+
+Check 186: pg_hash_bytes_extended.pointer_dereference.76
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:521 in function pg_hash_bytes_extended
+
+Check 187: pg_hash_bytes_extended.pointer_dereference.77
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:521 in function pg_hash_bytes_extended
+
+Check 188: pg_hash_bytes_extended.pointer_dereference.78
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:521 in function pg_hash_bytes_extended
+
+Check 189: pg_hash_bytes_extended.pointer_dereference.79
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:524 in function pg_hash_bytes_extended
+
+Check 190: pg_hash_bytes_extended.pointer_dereference.80
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:524 in function pg_hash_bytes_extended
+
+Check 191: pg_hash_bytes_extended.pointer_dereference.81
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:524 in function pg_hash_bytes_extended
+
+Check 192: pg_hash_bytes_extended.pointer_dereference.82
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:524 in function pg_hash_bytes_extended
+
+Check 193: pg_hash_bytes_extended.pointer_dereference.83
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:524 in function pg_hash_bytes_extended
+
+Check 194: pg_hash_bytes_extended.pointer_dereference.84
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:524 in function pg_hash_bytes_extended
+
+Check 195: pg_hash_bytes_extended.pointer_dereference.85
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:527 in function pg_hash_bytes_extended
+
+Check 196: pg_hash_bytes_extended.pointer_dereference.86
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:527 in function pg_hash_bytes_extended
+
+Check 197: pg_hash_bytes_extended.pointer_dereference.87
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:527 in function pg_hash_bytes_extended
+
+Check 198: pg_hash_bytes_extended.pointer_dereference.88
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:527 in function pg_hash_bytes_extended
+
+Check 199: pg_hash_bytes_extended.pointer_dereference.89
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:527 in function pg_hash_bytes_extended
+
+Check 200: pg_hash_bytes_extended.pointer_dereference.90
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:527 in function pg_hash_bytes_extended
+
+Check 201: pg_hash_bytes_extended.pointer_dereference.91
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 202: pg_hash_bytes_extended.pointer_dereference.92
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 203: pg_hash_bytes_extended.pointer_dereference.93
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 204: pg_hash_bytes_extended.pointer_dereference.94
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 205: pg_hash_bytes_extended.pointer_dereference.95
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 206: pg_hash_bytes_extended.pointer_dereference.96
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 207: pg_hash_bytes_extended.pointer_dereference.97
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 208: pg_hash_bytes_extended.pointer_dereference.98
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 209: pg_hash_bytes_extended.pointer_dereference.99
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 210: pg_hash_bytes_extended.pointer_dereference.100
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 211: pg_hash_bytes_extended.pointer_dereference.101
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 212: pg_hash_bytes_extended.pointer_dereference.102
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 213: pg_hash_bytes_extended.pointer_dereference.103
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 214: pg_hash_bytes_extended.pointer_dereference.104
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 215: pg_hash_bytes_extended.pointer_dereference.105
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 216: pg_hash_bytes_extended.pointer_dereference.106
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 217: pg_hash_bytes_extended.pointer_dereference.107
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 218: pg_hash_bytes_extended.pointer_dereference.108
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 219: pg_hash_bytes_extended.pointer_dereference.109
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 220: pg_hash_bytes_extended.pointer_dereference.110
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 221: pg_hash_bytes_extended.pointer_dereference.111
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 222: pg_hash_bytes_extended.pointer_dereference.112
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 223: pg_hash_bytes_extended.pointer_dereference.113
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 224: pg_hash_bytes_extended.pointer_dereference.114
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:544 in function pg_hash_bytes_extended
+
+Check 225: pg_hash_bytes_extended.pointer_dereference.115
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 226: pg_hash_bytes_extended.pointer_dereference.116
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 227: pg_hash_bytes_extended.pointer_dereference.117
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 228: pg_hash_bytes_extended.pointer_dereference.118
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 229: pg_hash_bytes_extended.pointer_dereference.119
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 230: pg_hash_bytes_extended.pointer_dereference.120
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 231: pg_hash_bytes_extended.pointer_dereference.121
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 232: pg_hash_bytes_extended.pointer_dereference.122
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 233: pg_hash_bytes_extended.pointer_dereference.123
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 234: pg_hash_bytes_extended.pointer_dereference.124
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 235: pg_hash_bytes_extended.pointer_dereference.125
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 236: pg_hash_bytes_extended.pointer_dereference.126
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 237: pg_hash_bytes_extended.pointer_dereference.127
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 238: pg_hash_bytes_extended.pointer_dereference.128
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 239: pg_hash_bytes_extended.pointer_dereference.129
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 240: pg_hash_bytes_extended.pointer_dereference.130
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 241: pg_hash_bytes_extended.pointer_dereference.131
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 242: pg_hash_bytes_extended.pointer_dereference.132
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 243: pg_hash_bytes_extended.pointer_dereference.133
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 244: pg_hash_bytes_extended.pointer_dereference.134
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 245: pg_hash_bytes_extended.pointer_dereference.135
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 246: pg_hash_bytes_extended.pointer_dereference.136
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 247: pg_hash_bytes_extended.pointer_dereference.137
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 248: pg_hash_bytes_extended.pointer_dereference.138
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:545 in function pg_hash_bytes_extended
+
+Check 249: pg_hash_bytes_extended.pointer_dereference.139
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 250: pg_hash_bytes_extended.pointer_dereference.140
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 251: pg_hash_bytes_extended.pointer_dereference.141
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 252: pg_hash_bytes_extended.pointer_dereference.142
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 253: pg_hash_bytes_extended.pointer_dereference.143
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 254: pg_hash_bytes_extended.pointer_dereference.144
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 255: pg_hash_bytes_extended.pointer_dereference.145
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 256: pg_hash_bytes_extended.pointer_dereference.146
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 257: pg_hash_bytes_extended.pointer_dereference.147
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 258: pg_hash_bytes_extended.pointer_dereference.148
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 259: pg_hash_bytes_extended.pointer_dereference.149
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 260: pg_hash_bytes_extended.pointer_dereference.150
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 261: pg_hash_bytes_extended.pointer_dereference.151
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 262: pg_hash_bytes_extended.pointer_dereference.152
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 263: pg_hash_bytes_extended.pointer_dereference.153
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 264: pg_hash_bytes_extended.pointer_dereference.154
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 265: pg_hash_bytes_extended.pointer_dereference.155
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 266: pg_hash_bytes_extended.pointer_dereference.156
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 267: pg_hash_bytes_extended.pointer_dereference.157
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 268: pg_hash_bytes_extended.pointer_dereference.158
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 269: pg_hash_bytes_extended.pointer_dereference.159
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 270: pg_hash_bytes_extended.pointer_dereference.160
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 271: pg_hash_bytes_extended.pointer_dereference.161
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 272: pg_hash_bytes_extended.pointer_dereference.162
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:546 in function pg_hash_bytes_extended
+
+Check 273: pg_hash_bytes_extended.pointer_dereference.163
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:596 in function pg_hash_bytes_extended
+
+Check 274: pg_hash_bytes_extended.pointer_dereference.164
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:596 in function pg_hash_bytes_extended
+
+Check 275: pg_hash_bytes_extended.pointer_dereference.165
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:596 in function pg_hash_bytes_extended
+
+Check 276: pg_hash_bytes_extended.pointer_dereference.166
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:596 in function pg_hash_bytes_extended
+
+Check 277: pg_hash_bytes_extended.pointer_dereference.167
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:596 in function pg_hash_bytes_extended
+
+Check 278: pg_hash_bytes_extended.pointer_dereference.168
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:596 in function pg_hash_bytes_extended
+
+Check 279: pg_hash_bytes_extended.pointer_dereference.169
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:599 in function pg_hash_bytes_extended
+
+Check 280: pg_hash_bytes_extended.pointer_dereference.170
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:599 in function pg_hash_bytes_extended
+
+Check 281: pg_hash_bytes_extended.pointer_dereference.171
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:599 in function pg_hash_bytes_extended
+
+Check 282: pg_hash_bytes_extended.pointer_dereference.172
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:599 in function pg_hash_bytes_extended
+
+Check 283: pg_hash_bytes_extended.pointer_dereference.173
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:599 in function pg_hash_bytes_extended
+
+Check 284: pg_hash_bytes_extended.pointer_dereference.174
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:599 in function pg_hash_bytes_extended
+
+Check 285: pg_hash_bytes_extended.pointer_dereference.175
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:602 in function pg_hash_bytes_extended
+
+Check 286: pg_hash_bytes_extended.pointer_dereference.176
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:602 in function pg_hash_bytes_extended
+
+Check 287: pg_hash_bytes_extended.pointer_dereference.177
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:602 in function pg_hash_bytes_extended
+
+Check 288: pg_hash_bytes_extended.pointer_dereference.178
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:602 in function pg_hash_bytes_extended
+
+Check 289: pg_hash_bytes_extended.pointer_dereference.179
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:602 in function pg_hash_bytes_extended
+
+Check 290: pg_hash_bytes_extended.pointer_dereference.180
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:602 in function pg_hash_bytes_extended
+
+Check 291: pg_hash_bytes_extended.pointer_dereference.181
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:606 in function pg_hash_bytes_extended
+
+Check 292: pg_hash_bytes_extended.pointer_dereference.182
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:606 in function pg_hash_bytes_extended
+
+Check 293: pg_hash_bytes_extended.pointer_dereference.183
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:606 in function pg_hash_bytes_extended
+
+Check 294: pg_hash_bytes_extended.pointer_dereference.184
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:606 in function pg_hash_bytes_extended
+
+Check 295: pg_hash_bytes_extended.pointer_dereference.185
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:606 in function pg_hash_bytes_extended
+
+Check 296: pg_hash_bytes_extended.pointer_dereference.186
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:606 in function pg_hash_bytes_extended
+
+Check 297: pg_hash_bytes_extended.pointer_dereference.187
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:609 in function pg_hash_bytes_extended
+
+Check 298: pg_hash_bytes_extended.pointer_dereference.188
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:609 in function pg_hash_bytes_extended
+
+Check 299: pg_hash_bytes_extended.pointer_dereference.189
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:609 in function pg_hash_bytes_extended
+
+Check 300: pg_hash_bytes_extended.pointer_dereference.190
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:609 in function pg_hash_bytes_extended
+
+Check 301: pg_hash_bytes_extended.pointer_dereference.191
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:609 in function pg_hash_bytes_extended
+
+Check 302: pg_hash_bytes_extended.pointer_dereference.192
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:609 in function pg_hash_bytes_extended
+
+Check 303: pg_hash_bytes_extended.pointer_dereference.193
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:612 in function pg_hash_bytes_extended
+
+Check 304: pg_hash_bytes_extended.pointer_dereference.194
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:612 in function pg_hash_bytes_extended
+
+Check 305: pg_hash_bytes_extended.pointer_dereference.195
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:612 in function pg_hash_bytes_extended
+
+Check 306: pg_hash_bytes_extended.pointer_dereference.196
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:612 in function pg_hash_bytes_extended
+
+Check 307: pg_hash_bytes_extended.pointer_dereference.197
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:612 in function pg_hash_bytes_extended
+
+Check 308: pg_hash_bytes_extended.pointer_dereference.198
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:612 in function pg_hash_bytes_extended
+
+Check 309: pg_hash_bytes_extended.pointer_dereference.199
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:615 in function pg_hash_bytes_extended
+
+Check 310: pg_hash_bytes_extended.pointer_dereference.200
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:615 in function pg_hash_bytes_extended
+
+Check 311: pg_hash_bytes_extended.pointer_dereference.201
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:615 in function pg_hash_bytes_extended
+
+Check 312: pg_hash_bytes_extended.pointer_dereference.202
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:615 in function pg_hash_bytes_extended
+
+Check 313: pg_hash_bytes_extended.pointer_dereference.203
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:615 in function pg_hash_bytes_extended
+
+Check 314: pg_hash_bytes_extended.pointer_dereference.204
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:615 in function pg_hash_bytes_extended
+
+Check 315: pg_hash_bytes_extended.pointer_dereference.205
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:618 in function pg_hash_bytes_extended
+
+Check 316: pg_hash_bytes_extended.pointer_dereference.206
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:618 in function pg_hash_bytes_extended
+
+Check 317: pg_hash_bytes_extended.pointer_dereference.207
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:618 in function pg_hash_bytes_extended
+
+Check 318: pg_hash_bytes_extended.pointer_dereference.208
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:618 in function pg_hash_bytes_extended
+
+Check 319: pg_hash_bytes_extended.pointer_dereference.209
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:618 in function pg_hash_bytes_extended
+
+Check 320: pg_hash_bytes_extended.pointer_dereference.210
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:618 in function pg_hash_bytes_extended
+
+Check 321: pg_hash_bytes_extended.pointer_dereference.211
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:621 in function pg_hash_bytes_extended
+
+Check 322: pg_hash_bytes_extended.pointer_dereference.212
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:621 in function pg_hash_bytes_extended
+
+Check 323: pg_hash_bytes_extended.pointer_dereference.213
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:621 in function pg_hash_bytes_extended
+
+Check 324: pg_hash_bytes_extended.pointer_dereference.214
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:621 in function pg_hash_bytes_extended
+
+Check 325: pg_hash_bytes_extended.pointer_dereference.215
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:621 in function pg_hash_bytes_extended
+
+Check 326: pg_hash_bytes_extended.pointer_dereference.216
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:621 in function pg_hash_bytes_extended
+
+Check 327: pg_hash_bytes_extended.pointer_dereference.217
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:624 in function pg_hash_bytes_extended
+
+Check 328: pg_hash_bytes_extended.pointer_dereference.218
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:624 in function pg_hash_bytes_extended
+
+Check 329: pg_hash_bytes_extended.pointer_dereference.219
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:624 in function pg_hash_bytes_extended
+
+Check 330: pg_hash_bytes_extended.pointer_dereference.220
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:624 in function pg_hash_bytes_extended
+
+Check 331: pg_hash_bytes_extended.pointer_dereference.221
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:624 in function pg_hash_bytes_extended
+
+Check 332: pg_hash_bytes_extended.pointer_dereference.222
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:624 in function pg_hash_bytes_extended
+
+Check 333: pg_hash_bytes_extended.pointer_dereference.223
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_hash_rows.c:627 in function pg_hash_bytes_extended
+
+Check 334: pg_hash_bytes_extended.pointer_dereference.224
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_hash_rows.c:627 in function pg_hash_bytes_extended
+
+Check 335: pg_hash_bytes_extended.pointer_dereference.225
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_hash_rows.c:627 in function pg_hash_bytes_extended
+
+Check 336: pg_hash_bytes_extended.pointer_dereference.226
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_hash_rows.c:627 in function pg_hash_bytes_extended
+
+Check 337: pg_hash_bytes_extended.pointer_dereference.227
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_hash_rows.c:627 in function pg_hash_bytes_extended
+
+Check 338: pg_hash_bytes_extended.pointer_dereference.228
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_hash_rows.c:627 in function pg_hash_bytes_extended
+
+Check 339: __rust_dealloc.precondition_instance.1
+	 - Status: SUCCESS
+	 - Description: "free argument must be NULL or valid pointer"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 340: __rust_dealloc.precondition_instance.2
+	 - Status: SUCCESS
+	 - Description: "free argument must be dynamic object"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 341: __rust_dealloc.precondition_instance.3
+	 - Status: SUCCESS
+	 - Description: "free argument has offset zero"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 342: __rust_dealloc.precondition_instance.4
+	 - Status: SUCCESS
+	 - Description: "double free"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 343: __rust_dealloc.precondition_instance.5
+	 - Status: SUCCESS
+	 - Description: "free called for new[] object"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 344: __rust_dealloc.precondition_instance.6
+	 - Status: SUCCESS
+	 - Description: "free called for stack-allocated object"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 345: std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1338:15 in function std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>
+
+Check 346: std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1340:21 in function std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>
+
+Check 347: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 348: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 349: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 350: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 351: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 352: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 353: std::alloc::Layout::size.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 354: std::alloc::Layout::size.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 355: std::alloc::Layout::size.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 356: std::alloc::Layout::size.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 357: std::alloc::Layout::size.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 358: std::alloc::Layout::size.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 359: hashfn::hash_core.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:27 in function hashfn::hash_core
+
+Check 360: hashfn::hash_core.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:27 in function hashfn::hash_core
+
+Check 361: hashfn::hash_core.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:27 in function hashfn::hash_core
+
+Check 362: hashfn::hash_core.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:27 in function hashfn::hash_core
+
+Check 363: hashfn::hash_core.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:27 in function hashfn::hash_core
+
+Check 364: hashfn::hash_core.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:27 in function hashfn::hash_core
+
+Check 365: hashfn::hash_core.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:50 in function hashfn::hash_core
+
+Check 366: hashfn::hash_core.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:50 in function hashfn::hash_core
+
+Check 367: hashfn::hash_core.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:50 in function hashfn::hash_core
+
+Check 368: hashfn::hash_core.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:50 in function hashfn::hash_core
+
+Check 369: hashfn::hash_core.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:50 in function hashfn::hash_core
+
+Check 370: hashfn::hash_core.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:50 in function hashfn::hash_core
+
+Check 371: hashfn::hash_core.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:74 in function hashfn::hash_core
+
+Check 372: hashfn::hash_core.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:74 in function hashfn::hash_core
+
+Check 373: hashfn::hash_core.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:74 in function hashfn::hash_core
+
+Check 374: hashfn::hash_core.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:74 in function hashfn::hash_core
+
+Check 375: hashfn::hash_core.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:74 in function hashfn::hash_core
+
+Check 376: hashfn::hash_core.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:138:74 in function hashfn::hash_core
+
+Check 377: hashfn::hash_core.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:42 in function hashfn::hash_core
+
+Check 378: hashfn::hash_core.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:42 in function hashfn::hash_core
+
+Check 379: hashfn::hash_core.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:42 in function hashfn::hash_core
+
+Check 380: hashfn::hash_core.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:42 in function hashfn::hash_core
+
+Check 381: hashfn::hash_core.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:42 in function hashfn::hash_core
+
+Check 382: hashfn::hash_core.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:42 in function hashfn::hash_core
+
+Check 383: hashfn::hash_core.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:65 in function hashfn::hash_core
+
+Check 384: hashfn::hash_core.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:65 in function hashfn::hash_core
+
+Check 385: hashfn::hash_core.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:65 in function hashfn::hash_core
+
+Check 386: hashfn::hash_core.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:65 in function hashfn::hash_core
+
+Check 387: hashfn::hash_core.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:65 in function hashfn::hash_core
+
+Check 388: hashfn::hash_core.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:132:65 in function hashfn::hash_core
+
+Check 389: hashfn::hash_core.pointer_dereference.31
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:127:42 in function hashfn::hash_core
+
+Check 390: hashfn::hash_core.pointer_dereference.32
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:127:42 in function hashfn::hash_core
+
+Check 391: hashfn::hash_core.pointer_dereference.33
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:127:42 in function hashfn::hash_core
+
+Check 392: hashfn::hash_core.pointer_dereference.34
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:127:42 in function hashfn::hash_core
+
+Check 393: hashfn::hash_core.pointer_dereference.35
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:127:42 in function hashfn::hash_core
+
+Check 394: hashfn::hash_core.pointer_dereference.36
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:127:42 in function hashfn::hash_core
+
+Check 395: hashfn::hash_core.pointer_dereference.37
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:42 in function hashfn::hash_core
+
+Check 396: hashfn::hash_core.pointer_dereference.38
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:42 in function hashfn::hash_core
+
+Check 397: hashfn::hash_core.pointer_dereference.39
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:42 in function hashfn::hash_core
+
+Check 398: hashfn::hash_core.pointer_dereference.40
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:42 in function hashfn::hash_core
+
+Check 399: hashfn::hash_core.pointer_dereference.41
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:42 in function hashfn::hash_core
+
+Check 400: hashfn::hash_core.pointer_dereference.42
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:42 in function hashfn::hash_core
+
+Check 401: hashfn::hash_core.pointer_dereference.43
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:60 in function hashfn::hash_core
+
+Check 402: hashfn::hash_core.pointer_dereference.44
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:60 in function hashfn::hash_core
+
+Check 403: hashfn::hash_core.pointer_dereference.45
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:60 in function hashfn::hash_core
+
+Check 404: hashfn::hash_core.pointer_dereference.46
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:60 in function hashfn::hash_core
+
+Check 405: hashfn::hash_core.pointer_dereference.47
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:60 in function hashfn::hash_core
+
+Check 406: hashfn::hash_core.pointer_dereference.48
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:60 in function hashfn::hash_core
+
+Check 407: hashfn::hash_core.pointer_dereference.49
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:83 in function hashfn::hash_core
+
+Check 408: hashfn::hash_core.pointer_dereference.50
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:83 in function hashfn::hash_core
+
+Check 409: hashfn::hash_core.pointer_dereference.51
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:83 in function hashfn::hash_core
+
+Check 410: hashfn::hash_core.pointer_dereference.52
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:83 in function hashfn::hash_core
+
+Check 411: hashfn::hash_core.pointer_dereference.53
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:83 in function hashfn::hash_core
+
+Check 412: hashfn::hash_core.pointer_dereference.54
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:117:83 in function hashfn::hash_core
+
+Check 413: hashfn::hash_core.pointer_dereference.55
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:42 in function hashfn::hash_core
+
+Check 414: hashfn::hash_core.pointer_dereference.56
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:42 in function hashfn::hash_core
+
+Check 415: hashfn::hash_core.pointer_dereference.57
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:42 in function hashfn::hash_core
+
+Check 416: hashfn::hash_core.pointer_dereference.58
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:42 in function hashfn::hash_core
+
+Check 417: hashfn::hash_core.pointer_dereference.59
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:42 in function hashfn::hash_core
+
+Check 418: hashfn::hash_core.pointer_dereference.60
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:42 in function hashfn::hash_core
+
+Check 419: hashfn::hash_core.pointer_dereference.61
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:60 in function hashfn::hash_core
+
+Check 420: hashfn::hash_core.pointer_dereference.62
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:60 in function hashfn::hash_core
+
+Check 421: hashfn::hash_core.pointer_dereference.63
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:60 in function hashfn::hash_core
+
+Check 422: hashfn::hash_core.pointer_dereference.64
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:60 in function hashfn::hash_core
+
+Check 423: hashfn::hash_core.pointer_dereference.65
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:60 in function hashfn::hash_core
+
+Check 424: hashfn::hash_core.pointer_dereference.66
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:113:60 in function hashfn::hash_core
+
+Check 425: hashfn::hash_core.pointer_dereference.67
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:109:42 in function hashfn::hash_core
+
+Check 426: hashfn::hash_core.pointer_dereference.68
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:109:42 in function hashfn::hash_core
+
+Check 427: hashfn::hash_core.pointer_dereference.69
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:109:42 in function hashfn::hash_core
+
+Check 428: hashfn::hash_core.pointer_dereference.70
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:109:42 in function hashfn::hash_core
+
+Check 429: hashfn::hash_core.pointer_dereference.71
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:109:42 in function hashfn::hash_core
+
+Check 430: hashfn::hash_core.pointer_dereference.72
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:109:42 in function hashfn::hash_core
+
+Check 431: hashfn::hash_core.pointer_dereference.73
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:42 in function hashfn::hash_core
+
+Check 432: hashfn::hash_core.pointer_dereference.74
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:42 in function hashfn::hash_core
+
+Check 433: hashfn::hash_core.pointer_dereference.75
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:42 in function hashfn::hash_core
+
+Check 434: hashfn::hash_core.pointer_dereference.76
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:42 in function hashfn::hash_core
+
+Check 435: hashfn::hash_core.pointer_dereference.77
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:42 in function hashfn::hash_core
+
+Check 436: hashfn::hash_core.pointer_dereference.78
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:42 in function hashfn::hash_core
+
+Check 437: hashfn::hash_core.pointer_dereference.79
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:60 in function hashfn::hash_core
+
+Check 438: hashfn::hash_core.pointer_dereference.80
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:60 in function hashfn::hash_core
+
+Check 439: hashfn::hash_core.pointer_dereference.81
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:60 in function hashfn::hash_core
+
+Check 440: hashfn::hash_core.pointer_dereference.82
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:60 in function hashfn::hash_core
+
+Check 441: hashfn::hash_core.pointer_dereference.83
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:60 in function hashfn::hash_core
+
+Check 442: hashfn::hash_core.pointer_dereference.84
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:60 in function hashfn::hash_core
+
+Check 443: hashfn::hash_core.pointer_dereference.85
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:83 in function hashfn::hash_core
+
+Check 444: hashfn::hash_core.pointer_dereference.86
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:83 in function hashfn::hash_core
+
+Check 445: hashfn::hash_core.pointer_dereference.87
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:83 in function hashfn::hash_core
+
+Check 446: hashfn::hash_core.pointer_dereference.88
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:83 in function hashfn::hash_core
+
+Check 447: hashfn::hash_core.pointer_dereference.89
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:83 in function hashfn::hash_core
+
+Check 448: hashfn::hash_core.pointer_dereference.90
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:104:83 in function hashfn::hash_core
+
+Check 449: hashfn::hash_core.pointer_dereference.91
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:43 in function hashfn::hash_core
+
+Check 450: hashfn::hash_core.pointer_dereference.92
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:43 in function hashfn::hash_core
+
+Check 451: hashfn::hash_core.pointer_dereference.93
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:43 in function hashfn::hash_core
+
+Check 452: hashfn::hash_core.pointer_dereference.94
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:43 in function hashfn::hash_core
+
+Check 453: hashfn::hash_core.pointer_dereference.95
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:43 in function hashfn::hash_core
+
+Check 454: hashfn::hash_core.pointer_dereference.96
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:43 in function hashfn::hash_core
+
+Check 455: hashfn::hash_core.pointer_dereference.97
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:61 in function hashfn::hash_core
+
+Check 456: hashfn::hash_core.pointer_dereference.98
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:61 in function hashfn::hash_core
+
+Check 457: hashfn::hash_core.pointer_dereference.99
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:61 in function hashfn::hash_core
+
+Check 458: hashfn::hash_core.pointer_dereference.100
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:61 in function hashfn::hash_core
+
+Check 459: hashfn::hash_core.pointer_dereference.101
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:61 in function hashfn::hash_core
+
+Check 460: hashfn::hash_core.pointer_dereference.102
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:102:61 in function hashfn::hash_core
+
+Check 461: hashfn::hash_core.pointer_dereference.103
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:101:43 in function hashfn::hash_core
+
+Check 462: hashfn::hash_core.pointer_dereference.104
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:101:43 in function hashfn::hash_core
+
+Check 463: hashfn::hash_core.pointer_dereference.105
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:101:43 in function hashfn::hash_core
+
+Check 464: hashfn::hash_core.pointer_dereference.106
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:101:43 in function hashfn::hash_core
+
+Check 465: hashfn::hash_core.pointer_dereference.107
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:101:43 in function hashfn::hash_core
+
+Check 466: hashfn::hash_core.pointer_dereference.108
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:101:43 in function hashfn::hash_core
+
+Check 467: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 468: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 469: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 470: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 471: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 472: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 473: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 474: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 475: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 476: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 477: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 478: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 479: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 480: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 481: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 482: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 483: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 484: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 485: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:524:13 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 486: std::intrinsics::rotate_left::<u32>.division-by-zero.1
+	 - Status: SUCCESS
+	 - Description: "division by zero"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:2022:41 in function std::intrinsics::rotate_left::<u32>
+
+Check 487: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1717:15 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 488: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 489: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 490: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 491: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 492: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 493: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 494: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 495: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 496: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 497: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 498: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 499: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 500: hashfn::bytes3.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:66:24 in function hashfn::bytes3
+
+Check 501: hashfn::bytes3.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:66:24 in function hashfn::bytes3
+
+Check 502: hashfn::bytes3.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:66:24 in function hashfn::bytes3
+
+Check 503: hashfn::bytes3.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:66:24 in function hashfn::bytes3
+
+Check 504: hashfn::bytes3.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:66:24 in function hashfn::bytes3
+
+Check 505: hashfn::bytes3.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:66:24 in function hashfn::bytes3
+
+Check 506: hashfn::bytes3.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:69:24 in function hashfn::bytes3
+
+Check 507: hashfn::bytes3.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:69:24 in function hashfn::bytes3
+
+Check 508: hashfn::bytes3.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:69:24 in function hashfn::bytes3
+
+Check 509: hashfn::bytes3.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:69:24 in function hashfn::bytes3
+
+Check 510: hashfn::bytes3.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:69:24 in function hashfn::bytes3
+
+Check 511: hashfn::bytes3.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:69:24 in function hashfn::bytes3
+
+Check 512: hashfn::bytes3.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:72:24 in function hashfn::bytes3
+
+Check 513: hashfn::bytes3.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:72:24 in function hashfn::bytes3
+
+Check 514: hashfn::bytes3.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:72:24 in function hashfn::bytes3
+
+Check 515: hashfn::bytes3.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:72:24 in function hashfn::bytes3
+
+Check 516: hashfn::bytes3.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:72:24 in function hashfn::bytes3
+
+Check 517: hashfn::bytes3.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/common/hashfn/src/lib.rs:72:24 in function hashfn::bytes3
+
+Check 518: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 519: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 520: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 521: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 522: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 523: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 524: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 525: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 526: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 527: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 528: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 529: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 530: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 531: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 532: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 533: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 534: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 535: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 536: __builtin___memcpy_chk.pointer.1
+	 - Status: SUCCESS
+	 - Description: "same object violation in (const char *)(const void *)&bits >= (const char *)(void *)&result + (signed long int)sizeof(float8) /*8ul*/ "
+	 - Location: <builtin-library-__builtin___memcpy_chk>:27 in function __builtin___memcpy_chk
+
+Check 537: __builtin___memcpy_chk.pointer.2
+	 - Status: SUCCESS
+	 - Description: "same object violation in (const char *)(void *)&result >= (const char *)(const void *)&bits + (signed long int)sizeof(float8) /*8ul*/ "
+	 - Location: <builtin-library-__builtin___memcpy_chk>:28 in function __builtin___memcpy_chk
+
+Check 538: get_float8_nan.precondition_instance.1
+	 - Status: SUCCESS
+	 - Description: "memcpy src/dst overlap"
+	 - Location: c/pg_hash_rows.c:732 in function get_float8_nan
+
+Check 539: get_float8_nan.precondition_instance.2
+	 - Status: SUCCESS
+	 - Description: "memcpy source region readable"
+	 - Location: c/pg_hash_rows.c:732 in function get_float8_nan
+
+Check 540: get_float8_nan.precondition_instance.3
+	 - Status: SUCCESS
+	 - Description: "memcpy destination region writeable"
+	 - Location: c/pg_hash_rows.c:732 in function get_float8_nan
+
+Check 541: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 542: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 543: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 544: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 545: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 546: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 547: std::alloc::Layout::is_size_align_valid.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:69:27 in function std::alloc::Layout::is_size_align_valid
+
+Check 548: proofs::call::<2, std::boxed::Box<types_error::PgError>>.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:122:46 in function proofs::call::<2, std::boxed::Box<types_error::PgError>>
+
+Check 549: proofs::call::<2, std::boxed::Box<types_error::PgError>>.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:122:13 in function proofs::call::<2, std::boxed::Box<types_error::PgError>>
+
+Check 550: proofs::call::<2, std::boxed::Box<types_error::PgError>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:125:18 in function proofs::call::<2, std::boxed::Box<types_error::PgError>>
+
+Check 551: pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+
+Check 552: pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+
+Check 553: pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+
+Check 554: pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+
+Check 555: pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+
+Check 556: pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+
+Check 557: core::slice::<impl [u8]>::as_array::<4>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/mod.rs:857:13 in function core::slice::<impl [u8]>::as_array::<4>
+
+Check 558: std::alloc::Layout::align.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 559: std::alloc::Layout::align.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 560: std::alloc::Layout::align.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 561: std::alloc::Layout::align.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 562: std::alloc::Layout::align.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 563: std::alloc::Layout::align.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 564: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:310:15 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 565: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:310:15 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 566: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:310:15 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 567: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:310:15 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 568: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:310:15 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 569: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:310:15 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 570: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:311:16 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 571: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:311:16 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 572: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:311:16 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 573: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:311:16 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 574: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:311:16 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 575: adt_float::builtins::fc_hashfloat4extended.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:311:16 in function adt_float::builtins::fc_hashfloat4extended
+
+Check 576: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 577: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 578: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 579: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 580: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 581: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 582: types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:228:22 in function types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new
+
+Check 583: types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:229:25 in function types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new
+
+Check 584: types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:230:25 in function types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new
+
+Check 585: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 586: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 587: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 588: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 589: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 590: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+
+SUMMARY:
+ ** 0 of 590 failed (41 unreachable)
+
+VERIFICATION:- SUCCESSFUL
+
+Source-based code coverage results:
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::as_f32)
+ * 134:5 - 136:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::as_i64)
+ * 118:5 - 120:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::as_u64)
+ * 126:5 - 128:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::from_f32)
+ * 130:5 - 132:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::from_i64)
+ * 114:5 - 116:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::from_u64)
+ * 122:5 - 124:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::null)
+ * 28:5 - 30:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::NullableDatum::null)
+ * 169:5 - 174:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::NullableDatum::value)
+ * 162:5 - 167:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs (types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new)
+ * 226:5 - 236:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs (types_fmgr::FunctionCallInfoBaseData::args_n::<2>)
+ * 448:5 - 449:31 COVERED
+ * 450:13 - 450:41 UNCOVERED
+ * 451:9 - 454:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs (types_fmgr::fcinfo::arity_panic)
+ * 502:1 - 503:11 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/builtins.rs (adt_float::builtins::fc_hashfloat4extended)
+ * 308:1 - 312:18 COVERED
+ * 313:16 - 313:41 COVERED
+ * 314:5 - 315:93 COVERED
+ * 316:1 - 316:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/builtins.rs (adt_float::builtins::float8_hash_image)
+ * 288:1 - 289:28 COVERED
+ * 289:9 - 297:2 COVERED
+ * 290:9 - 290:17 COVERED
+ * 291:15 - 291:25 COVERED
+ * 292:9 - 292:12 UNCOVERED
+ * 294:9 - 294:12 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/common/hashfn/src/lib.rs (hashfn::bytes3)
+ * 63:1 - 65:25 UNCOVERED
+ * 65:26 - 67:6 UNCOVERED
+ * 67:5 - 67:6 UNCOVERED
+ * 68:8 - 68:25 UNCOVERED
+ * 68:26 - 70:6 UNCOVERED
+ * 70:5 - 70:6 UNCOVERED
+ * 71:8 - 71:21 UNCOVERED
+ * 71:22 - 73:6 UNCOVERED
+ * 73:5 - 73:6 UNCOVERED
+ * 74:5 - 75:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/common/hashfn/src/lib.rs (hashfn::final_mix)
+ * 39:1 - 55:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/common/hashfn/src/lib.rs (hashfn::hash_bytes_extended)
+ * 151:1 - 154:17 COVERED
+ * 154:18 - 158:6 COVERED
+ * 158:5 - 158:6 COVERED
+ * 159:10 - 161:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/common/hashfn/src/lib.rs (hashfn::hash_core)
+ * 80:1 - 83:20 COVERED
+ * 84:12 - 84:24 UNCOVERED
+ * 84:25 - 86:10 UNCOVERED
+ * 86:16 - 88:10 UNCOVERED
+ * 89:17 - 90:22 UNCOVERED
+ * 91:5 - 91:6 COVERED
+ * 92:11 - 92:24 COVERED
+ * 92:25 - 98:6 UNCOVERED
+ * 99:11 - 99:18 COVERED
+ * 100:14 - 100:16 UNCOVERED
+ * 101:14 - 101:49 UNCOVERED
+ * 102:14 - 102:72 UNCOVERED
+ * 104:13 - 104:95 UNCOVERED
+ * 106:14 - 106:44 UNCOVERED
+ * 107:14 - 110:10 UNCOVERED
+ * 111:14 - 114:10 UNCOVERED
+ * 115:14 - 118:10 UNCOVERED
+ * 119:14 - 122:10 COVERED
+ * 124:14 - 128:10 UNCOVERED
+ * 129:15 - 133:10 UNCOVERED
+ * 134:14 - 140:10 UNCOVERED
+ * 142:13 - 143:11 COVERED
+ * 144:1 - 144:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/common/hashfn/src/lib.rs (hashfn::init)
+ * 10:1 - 11:18 COVERED
+ * 11:19 - 11:43 COVERED
+ * 12:13 - 13:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/common/hashfn/src/lib.rs (hashfn::mix)
+ * 16:1 - 36:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/common/hashfn/src/lib.rs (hashfn::word)
+ * 58:1 - 60:2 COVERED
+
+src/lib.rs (proofs::call::<2, std::boxed::Box<types_error::PgError>>)
+ * 111:5 - 120:22 COVERED
+ * 121:15 - 121:20 COVERED
+ * 121:21 - 124:10 COVERED
+ * 125:15 - 125:31 COVERED
+ * 126:16 - 129:6 COVERED
+ * 127:23 - 127:29 UNCOVERED
+
+src/lib.rs (proofs::eq_hashfloat4extended)
+ * 148:13 - 158:14 COVERED
+
+Verification Time: 7.3298035s
+
+[info] Coverage results saved to /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/hash-rows/target/kani/aarch64-apple-darwin/kanicov_2026-07-30_23-42
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.

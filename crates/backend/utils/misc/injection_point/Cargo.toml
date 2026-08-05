@@ -1,0 +1,16 @@
+[package]
+name = "injection_point"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "injection_point"
+path = "src/lib.rs"
+
+[dependencies]
+pgsync = { path = "../../../../_support/pgsync" }
+elog = { path = "../../error/elog" }
+types_error = { path = "../../../../_support/types/types_error" }
+condition_variable = { path = "../../../storage/lmgr/condition_variable" }
+waitevent = { path = "../../activity/waitevent" }

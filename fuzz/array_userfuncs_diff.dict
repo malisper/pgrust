@@ -1,0 +1,30 @@
+# array_userfuncs_diff dictionary: selector bytes + magic i32/u64 values.
+"\x00"
+"\x01"
+"\x02"
+"\x03"
+"\x04"
+"\x05"
+"\x06"
+"\x07"
+"\x08"
+"\x09"
+"\x0a"
+"\x0b"
+# i32 extremes (lbs / n / start planes)
+"\xff\xff\xff\x7f"
+"\x00\x00\x00\x80"
+"\xff\xff\xff\xff"
+"\x00\x00\x00\x00"
+"\x01\x00\x00\x00"
+# array oids little-endian (1007, 1009)
+"\xef\x03\x00\x00"
+"\xf1\x03\x00\x00"
+# element oids big-endian (deserialize wire ints are network order)
+"\x00\x00\x00\x17"
+"\x00\x00\x00\x19"
+"\x00\x00\x03\xef"
+"\x00\x00\x03\xf1"
+# MAXDIM-shaped ndims values (network order)
+"\x00\x00\x00\x06"
+"\x00\x00\x00\x07"

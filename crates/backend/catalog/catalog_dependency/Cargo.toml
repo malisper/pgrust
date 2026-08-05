@@ -1,0 +1,52 @@
+[package]
+name = "catalog_dependency"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+dependency_seams = { path = "../dependency_seams" }
+event_trigger_seams = { path = "../../commands/event_trigger_seams" }
+sequence_seams = { path = "../../commands/sequence_seams" }
+catalog = { path = "../catalog" }
+catalog_heap = { path = "../catalog_heap" }
+catalog_namespace = { path = "../catalog_namespace" }
+format_type = { path = "../../utils/adt/format_type" }
+catalog_index = { path = "../catalog_index" }
+catalog_indexing = { path = "../catalog_indexing" }
+catalog_objectaddress = { path = "../objectaddress" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+datum = { path = "../../../_support/types/datum" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+genam = { path = "../../access/index/genam" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+miscinit = { path = "../../utils/init/miscinit" }
+elog = { path = "../../utils/error/elog" }
+mcx = { path = "../../../_support/mcx" }
+init_small = { path = "../../utils/init/init_small" }
+types_nodes = { path = "../../../_support/types/nodes" }
+nodes_core = { path = "../../nodes/nodes_core" }
+pg_attrdef = { path = "../pg_attrdef" }
+policy_seams = { path = "../../commands/policy_seams" }
+publicationcmds_seams = { path = "../../commands/publicationcmds_seams" }
+statscmds = { path = "../../commands/statscmds" }
+trigger = { path = "../../commands/trigger" }
+pg_constraint = { path = "../pg_constraint" }
+rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
+pg_depend = { path = "../pg_depend" }
+pg_shdepend = { path = "../pg_shdepend" }
+seclabel = { path = "../../commands/seclabel" }
+pg_largeobject = { path = "../pg_largeobject" }
+pg_type = { path = "../pg_type" }
+table = { path = "../../access/table/table" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+xact = { path = "../../access/transam/xact" }
+pg_namespace = { path = "../pg_namespace" }
+functioncmds = { path = "../../commands/functioncmds" }
+extension = { path = "../../commands/extension" }

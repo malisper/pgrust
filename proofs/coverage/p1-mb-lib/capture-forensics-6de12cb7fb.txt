@@ -1,0 +1,149 @@
+== coverage capture forensics: radixtree_diff (cargo-fuzz coverage rc=0) ==
+-- corpus files on disk:  1980
+-- units replayed (log):  1980
+-- clean libFuzzer exits: 16
+-- raw profraw dir: /work/src/fuzz/coverage/radixtree_diff/raw
+total 10064
+drwxr-xr-x. 2 root root  16384 Aug  1 16:49 .
+drwxr-xr-x. 3 root root     42 Aug  1 16:49 ..
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-0.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-1.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-10.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-11.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-12.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-13.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-14.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-15.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-2.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-3.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-4.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-5.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-6.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-7.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-8.profraw
+-rw-r--r--. 1 root root 642680 Aug  1 16:49 batch-9.profraw
+-- llvm-profdata: /usr/local/rustup/toolchains/nightly-2026-07-17-aarch64-unknown-linux-gnu/lib/rustlib/aarch64-unknown-linux-gnu/bin/llvm-profdata
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-0.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 2849024
+Maximum internal block count: 2765320
+Total number of blocks: 1083
+Total count: 23970349
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-1.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 2740480
+Maximum internal block count: 2688734
+Total number of blocks: 1083
+Total count: 22697226
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-10.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 2113024
+Maximum internal block count: 2094036
+Total number of blocks: 1083
+Total count: 17843044
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-11.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 2709760
+Maximum internal block count: 2662263
+Total number of blocks: 1083
+Total count: 18386594
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-12.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 170496
+Maximum internal block count: 170134
+Total number of blocks: 1083
+Total count: 1415946
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-13.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 2145792
+Maximum internal block count: 2073990
+Total number of blocks: 1083
+Total count: 21142076
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-14.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 4349184
+Maximum internal block count: 4187815
+Total number of blocks: 1083
+Total count: 36552592
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-15.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 11424839
+Maximum internal block count: 11084153
+Total number of blocks: 1083
+Total count: 149325109
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-2.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 1915648
+Maximum internal block count: 1860166
+Total number of blocks: 1083
+Total count: 18729817
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-3.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 2724096
+Maximum internal block count: 2707752
+Total number of blocks: 1083
+Total count: 28735614
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-4.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 2971904
+Maximum internal block count: 2927487
+Total number of blocks: 1083
+Total count: 34294752
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-5.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 3024640
+Maximum internal block count: 2984027
+Total number of blocks: 1083
+Total count: 22363597
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-6.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 3259136
+Maximum internal block count: 3201706
+Total number of blocks: 1083
+Total count: 35550385
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-7.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 2885632
+Maximum internal block count: 2877886
+Total number of blocks: 1083
+Total count: 20900575
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-8.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 2959872
+Maximum internal block count: 2950103
+Total number of blocks: 1083
+Total count: 26225178
+---- /work/src/fuzz/coverage/radixtree_diff/raw/batch-9.profraw (642680 bytes)
+Instrumentation level: Front-end
+Total functions: 350
+Maximum function count: 2831360
+Maximum internal block count: 2824944
+Total number of blocks: 1083
+Total count: 30421209
+-- merged profdata:
+Instrumentation level: Front-end
+Total functions: 261
+Maximum function count: 51475649
+Maximum internal block count: 50060516
+Total number of blocks: 883
+Total count: 508554063
+-- covbin candidates (find target -path *coverage* -name radixtree_diff):
+     /work/src/fuzz/target/aarch64-unknown-linux-gnu/coverage/aarch64-unknown-linux-gnu/release/radixtree_diff  bf2e4d69f190f7e67b6e0451fef0aaa60b1e9e8a6c5ee55efb2c96a9cecf2532  123056000 bytes
+-- fuzz (non-coverage) binary for contrast:
+/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/radixtree_diff
+== end forensics: radixtree_diff ==

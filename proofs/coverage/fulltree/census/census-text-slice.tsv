@@ -1,0 +1,20 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+text-slice	eq_byteaoctetlen	proofs::eq_byteaoctetlen	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+text-slice	eq_byteapos	proofs::eq_byteapos	0	18	VERIFICATION:- SUCCESSFUL	RAN	1
+text-slice	eq_text_starts_with_latin1	proofs::eq_text_starts_with_latin1	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+text-slice	eq_textlen_latin1	proofs::eq_textlen_latin1	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+text-slice	eq_textoctetlen	proofs::eq_textoctetlen	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+text-slice	proofs::eq_bytea_substr	proofs::eq_bytea_substr	124	300	WALLED-TIMEOUT-300s	WALLED	0
+text-slice	proofs::eq_bytea_substr_no_len	proofs::eq_bytea_substr_no_len	124	300	WALLED-TIMEOUT-300s	WALLED	0
+text-slice	proofs::eq_byteacat	proofs::eq_byteacat	124	300	WALLED-TIMEOUT-300s	WALLED	0
+text-slice	proofs::eq_byteaoctetlen	proofs::eq_byteaoctetlen	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+text-slice	proofs::eq_byteapos	proofs::eq_byteapos	0	16	VERIFICATION:- SUCCESSFUL	RAN	1
+text-slice	proofs::eq_text_left_latin1	proofs::eq_text_left_latin1	124	300	WALLED-TIMEOUT-300s	WALLED	0
+text-slice	proofs::eq_text_right_latin1	proofs::eq_text_right_latin1	124	300	WALLED-TIMEOUT-300s	WALLED	0
+text-slice	proofs::eq_text_starts_with_latin1	proofs::eq_text_starts_with_latin1	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+text-slice	proofs::eq_text_substr_latin1	proofs::eq_text_substr_latin1	124	300	WALLED-TIMEOUT-300s	WALLED	0
+text-slice	proofs::eq_text_substr_no_len_latin1	proofs::eq_text_substr_no_len_latin1	124	300	WALLED-TIMEOUT-300s	WALLED	0
+text-slice	proofs::eq_textcat	proofs::eq_textcat	124	300	WALLED-TIMEOUT-300s	WALLED	0
+text-slice	proofs::eq_textlen_latin1	proofs::eq_textlen_latin1	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+text-slice	proofs::eq_textoctetlen	proofs::eq_textoctetlen	0	12	VERIFICATION:- SUCCESSFUL	RAN	1
+text-slice	proofs::eq_textpos_latin1	proofs::eq_textpos_latin1	124	300	WALLED-TIMEOUT-300s	WALLED	0

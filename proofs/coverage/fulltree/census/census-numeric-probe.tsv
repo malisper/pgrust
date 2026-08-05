@@ -1,0 +1,18 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+numeric-probe	proofs::cover_int_numeric_bands	proofs::cover_int_numeric_bands	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_in_range_err_nan	proofs::eq_in_range_err_nan	0	11	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_in_range_val_nan	proofs::eq_in_range_val_nan	0	34	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_int2_sum	proofs::eq_int2_sum	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_int4_sum	proofs::eq_int4_sum	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_int8_numeric_spot_i64_max	proofs::eq_int8_numeric_spot_i64_max	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_int8_numeric_spot_i64_min	proofs::eq_int8_numeric_spot_i64_min	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_int8_numeric_spot_nd3_hi	proofs::eq_int8_numeric_spot_nd3_hi	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_int8_numeric_spot_nd3_lo	proofs::eq_int8_numeric_spot_nd3_lo	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_int8_numeric_spot_nd4_hi	proofs::eq_int8_numeric_spot_nd4_hi	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_int8_numeric_spot_nd4_lo	proofs::eq_int8_numeric_spot_nd4_lo	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_int8_numeric_spot_nd5_lo	proofs::eq_int8_numeric_spot_nd5_lo	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_int8_numeric_spot_trailzero	proofs::eq_int8_numeric_spot_trailzero	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_numeric_scale_nd4	proofs::eq_numeric_scale_nd4	0	23	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_numeric_sign_nd4	proofs::eq_numeric_sign_nd4	0	17	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_numeric_typmod_codec	proofs::eq_numeric_typmod_codec	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+numeric-probe	proofs::eq_numerictypmodin	proofs::eq_numerictypmodin	0	6	VERIFICATION:- SUCCESSFUL	RAN	1

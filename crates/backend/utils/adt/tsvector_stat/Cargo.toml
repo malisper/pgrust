@@ -1,0 +1,33 @@
+[package]
+name = "adt_tsvector_stat"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_tsvector_stat"
+path = "src/lib.rs"
+
+[dependencies]
+typcache_seams = { path = "../../cache/typcache_seams" }
+adt_tsvector_core = { path = "../tsvector_core" }
+to_tsany = { path = "../../../tsearch/to_tsany" }
+ts_parse = { path = "../../../tsearch/ts_parse" }
+ts_cache = { path = "../../cache/ts_cache" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_trigger = { path = "../../../../_support/types/types_trigger" }
+types_trigger_call = { path = "../../../../_support/types/types_trigger_call" }
+coerce = { path = "../../../parser/coerce" }
+datum = { path = "../../../../_support/types/datum" }
+detoast = { path = "../../../access/common/detoast" }
+funcapi = { path = "../../fmgr/funcapi" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+mbutils = { path = "../../mb/mbutils" }
+mcx = { path = "../../../../_support/mcx" }
+spi = { path = "../../../executor/spi" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+varlena = { path = "../varlena" }

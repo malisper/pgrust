@@ -1,0 +1,26 @@
+[package]
+name = "md"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "md"
+path = "src/lib.rs"
+
+[dependencies]
+aio_core = { path = "../../aio/aio_core" }
+pgsync = { path = "../../../../_support/pgsync" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+elog = { path = "../../../utils/error/elog" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+init_small = { path = "../../../utils/init/init_small" }
+pgstat = { path = "../../../utils/activity/pgstat" }
+fd = { path = "../../file/fd" }
+xlogutils = { path = "../../../access/transam/xlogutils" }
+sync_seams = { path = "../../sync/sync_seams" }
+relpath_seams = { path = "../../../../common/relpath_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+libc = "0.2"

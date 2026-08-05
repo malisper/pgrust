@@ -1,0 +1,7415 @@
+{
+ "rule": "v2+no-const-tables",
+ "note": "every const-table span excluded from the denominator; reason 'const-array-heuristic' rows are the ones to review \u2014 a span swallowing real logic is a defect",
+ "total_spans": 673,
+ "total_lines": 139290,
+ "by_reason": {
+  "generated-file": 109,
+  "const-array-heuristic": 564
+ },
+ "spans": [
+  {
+   "path": "crates/common/unicode_norm/src/tables.rs",
+   "head_line": 4,
+   "span": [
+    5,
+    41063
+   ],
+   "lines": 34215,
+   "reason": "generated-file",
+   "head": "pub(crate) static UnicodeDecompMain: [pg_unicode_decomposition; 6843] = ["
+  },
+  {
+   "path": "crates/common/unicode_norm/src/tables.rs",
+   "head_line": 41064,
+   "span": [
+    41065,
+    46203
+   ],
+   "lines": 5138,
+   "reason": "generated-file",
+   "head": "pub(crate) static UnicodeDecomp_codepoints: [uint32; 5138] = ["
+  },
+  {
+   "path": "crates/common/unicode_norm/src/qc_tables.rs",
+   "head_line": 1471,
+   "span": [
+    1472,
+    6568
+   ],
+   "lines": 5096,
+   "reason": "generated-file",
+   "head": "pub(crate) static UnicodeNormProps_NFKC_QC: [pg_unicode_normprops; 5096] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/sjis2004.rs",
+   "head_line": 1505,
+   "span": [
+    1506,
+    6406
+   ],
+   "lines": 4900,
+   "reason": "generated-file",
+   "head": "static SHIFT_JIS_2004_FROM_UNICODE_TREE_TABLE: [u16; 39196] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc2004.rs",
+   "head_line": 1506,
+   "span": [
+    1507,
+    6403
+   ],
+   "lines": 4896,
+   "reason": "generated-file",
+   "head": "static EUC_JIS_2004_FROM_UNICODE_TREE_TABLE: [u32; 39163] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/uhc.rs",
+   "head_line": 3045,
+   "span": [
+    3046,
+    7392
+   ],
+   "lines": 4346,
+   "reason": "generated-file",
+   "head": "static UHC_FROM_UNICODE_TREE_TABLE: [u16; 34768] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/johab.rs",
+   "head_line": 2887,
+   "span": [
+    2888,
+    7203
+   ],
+   "lines": 4315,
+   "reason": "generated-file",
+   "head": "static JOHAB_FROM_UNICODE_TREE_TABLE: [u16; 34515] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc_kr.rs",
+   "head_line": 1083,
+   "span": [
+    1084,
+    5329
+   ],
+   "lines": 4245,
+   "reason": "generated-file",
+   "head": "static EUC_KR_FROM_UNICODE_TREE_TABLE: [u16; 33954] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/gb18030.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    4104
+   ],
+   "lines": 4100,
+   "reason": "generated-file",
+   "head": "static GB18030_TO_UNICODE_TREE_TABLE: [u32; 32795] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/gb18030.rs",
+   "head_line": 4113,
+   "span": [
+    4114,
+    8111
+   ],
+   "lines": 3997,
+   "reason": "generated-file",
+   "head": "static GB18030_FROM_UNICODE_TREE_TABLE: [u32; 31972] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc_tw.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    3388
+   ],
+   "lines": 3384,
+   "reason": "generated-file",
+   "head": "static EUC_TW_TO_UNICODE_TREE_TABLE: [u32; 27068] = ["
+  },
+  {
+   "path": "crates/backend/utils/fmgr/fmgr_core/src/canonical.rs",
+   "head_line": 18,
+   "span": [
+    19,
+    3121
+   ],
+   "lines": 3102,
+   "reason": "const-array-heuristic",
+   "head": "pub const CANONICAL: &[CanonicalBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/gbk.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    3049
+   ],
+   "lines": 3045,
+   "reason": "generated-file",
+   "head": "static GBK_TO_UNICODE_TREE_TABLE: [u32; 24354] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/uhc.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    3036
+   ],
+   "lines": 3032,
+   "reason": "generated-file",
+   "head": "static UHC_TO_UNICODE_TREE_TABLE: [u32; 24256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/gbk.rs",
+   "head_line": 3058,
+   "span": [
+    3059,
+    6084
+   ],
+   "lines": 3025,
+   "reason": "generated-file",
+   "head": "static GBK_FROM_UNICODE_TREE_TABLE: [u16; 24198] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc_jp.rs",
+   "head_line": 1795,
+   "span": [
+    1796,
+    4718
+   ],
+   "lines": 2922,
+   "reason": "generated-file",
+   "head": "static EUC_JP_FROM_UNICODE_TREE_TABLE: [u32; 23370] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/johab.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    2878
+   ],
+   "lines": 2874,
+   "reason": "generated-file",
+   "head": "static JOHAB_TO_UNICODE_TREE_TABLE: [u32; 22987] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/sjis.rs",
+   "head_line": 1112,
+   "span": [
+    1113,
+    3975
+   ],
+   "lines": 2862,
+   "reason": "generated-file",
+   "head": "static SJIS_FROM_UNICODE_TREE_TABLE: [u16; 22895] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/big5.rs",
+   "head_line": 2149,
+   "span": [
+    2150,
+    5005
+   ],
+   "lines": 2855,
+   "reason": "generated-file",
+   "head": "static BIG5_FROM_UNICODE_TREE_TABLE: [u16; 22839] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc_tw.rs",
+   "head_line": 3397,
+   "span": [
+    3398,
+    6228
+   ],
+   "lines": 2830,
+   "reason": "generated-file",
+   "head": "static EUC_TW_FROM_UNICODE_TREE_TABLE: [u32; 22640] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc_cn.rs",
+   "head_line": 987,
+   "span": [
+    988,
+    3694
+   ],
+   "lines": 2706,
+   "reason": "generated-file",
+   "head": "static EUC_CN_FROM_UNICODE_TREE_TABLE: [u16; 21644] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/big5.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    2140
+   ],
+   "lines": 2136,
+   "reason": "generated-file",
+   "head": "static BIG5_TO_UNICODE_TREE_TABLE: [u32; 17088] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc_jp.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    1786
+   ],
+   "lines": 1782,
+   "reason": "generated-file",
+   "head": "static EUC_JP_TO_UNICODE_TREE_TABLE: [u32; 14254] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc2004.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    1470
+   ],
+   "lines": 1466,
+   "reason": "generated-file",
+   "head": "static EUC_JIS_2004_TO_UNICODE_TREE_TABLE: [u32; 11727] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/sjis2004.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    1469
+   ],
+   "lines": 1465,
+   "reason": "generated-file",
+   "head": "static SHIFT_JIS_2004_TO_UNICODE_TREE_TABLE: [u32; 11716] = ["
+  },
+  {
+   "path": "crates/common/unicode_norm/src/qc_tables.rs",
+   "head_line": 4,
+   "span": [
+    5,
+    1257
+   ],
+   "lines": 1252,
+   "reason": "generated-file",
+   "head": "pub(crate) static UnicodeNormProps_NFC_QC: [pg_unicode_normprops; 1252] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/sjis.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    1103
+   ],
+   "lines": 1099,
+   "reason": "generated-file",
+   "head": "static SJIS_TO_UNICODE_TREE_TABLE: [u32; 8786] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc_kr.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    1074
+   ],
+   "lines": 1070,
+   "reason": "generated-file",
+   "head": "static EUC_KR_TO_UNICODE_TREE_TABLE: [u32; 8553] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc_cn.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    978
+   ],
+   "lines": 974,
+   "reason": "generated-file",
+   "head": "static EUC_CN_TO_UNICODE_TREE_TABLE: [u32; 7792] = ["
+  },
+  {
+   "path": "crates/contrib/isn/src/tables.rs",
+   "head_line": 210,
+   "span": [
+    211,
+    1121
+   ],
+   "lines": 910,
+   "reason": "const-array-heuristic",
+   "head": "pub static ISBN_RANGE: &[Range] = &["
+  },
+  {
+   "path": "crates/common/unicode_norm/src/qc_tables.rs",
+   "head_line": 6570,
+   "span": [
+    6571,
+    7421
+   ],
+   "lines": 850,
+   "reason": "generated-file",
+   "head": "pub(crate) static NFKC_QC_h: [i16; 10193] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/interval_corpus.rs",
+   "head_line": 591,
+   "span": [
+    592,
+    1438
+   ],
+   "lines": 846,
+   "reason": "const-array-heuristic",
+   "head": "pub static ARITH: &[(&str, &str, &str, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/lib.rs",
+   "head_line": 885,
+   "span": [
+    886,
+    1558
+   ],
+   "lines": 588,
+   "reason": "const-array-heuristic",
+   "head": "pub const CONV_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/interval_corpus.rs",
+   "head_line": 5,
+   "span": [
+    6,
+    475
+   ],
+   "lines": 469,
+   "reason": "const-array-heuristic",
+   "head": "pub static INTERVAL_IN_OK: &[(&str, &str)] = &["
+  },
+  {
+   "path": "crates/common/saslprep/src/tables.rs",
+   "head_line": 62,
+   "span": [
+    63,
+    459
+   ],
+   "lines": 396,
+   "reason": "const-array-heuristic",
+   "head": "pub const UNASSIGNED_CODEPOINT_RANGES: &[(u32, u32)] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 427,
+   "span": [
+    428,
+    817
+   ],
+   "lines": 389,
+   "reason": "generated-file",
+   "head": "pub static IBMKANJI: [IbmKanji; 389] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/geo/src/ws_tests.rs",
+   "head_line": 43,
+   "span": [
+    44,
+    425
+   ],
+   "lines": 381,
+   "reason": "const-array-heuristic",
+   "head": "const CASES: &[(u32, &str, &str, &str, &str, Option<&str>)] = &["
+  },
+  {
+   "path": "crates/common/saslprep/src/tables.rs",
+   "head_line": 498,
+   "span": [
+    499,
+    859
+   ],
+   "lines": 360,
+   "reason": "const-array-heuristic",
+   "head": "pub const L_CAT_CODEPOINT_RANGES: &[(u32, u32)] = &["
+  },
+  {
+   "path": "crates/common/wchar/src/tables.rs",
+   "head_line": 2,
+   "span": [
+    3,
+    337
+   ],
+   "lines": 334,
+   "reason": "const-array-heuristic",
+   "head": "pub static NONSPACING: [mbinterval; 334] = ["
+  },
+  {
+   "path": "crates/_support/types/nodes/src/bms_c_vectors.rs",
+   "head_line": 45,
+   "span": [
+    46,
+    349
+   ],
+   "lines": 303,
+   "reason": "const-array-heuristic",
+   "head": "pub const NEXT_FROM_VECTORS: &[(i32, i32, i32)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/rowtypes/src/c_cases.rs",
+   "head_line": 29,
+   "span": [
+    30,
+    300
+   ],
+   "lines": 270,
+   "reason": "generated-file",
+   "head": "pub(crate) const IN_CASES: &[InCase] = &["
+  },
+  {
+   "path": "crates/pl/plpgsql/src/errcodes.rs",
+   "head_line": 4,
+   "span": [
+    5,
+    256
+   ],
+   "lines": 251,
+   "reason": "const-array-heuristic",
+   "head": "pub static EXCEPTION_LABEL_MAP: &[(&str, [u8; 5])] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/geo/src/builtins.rs",
+   "head_line": 944,
+   "span": [
+    945,
+    1175
+   ],
+   "lines": 230,
+   "reason": "const-array-heuristic",
+   "head": "pub const GEO_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_misc/src/catalog_fk.rs",
+   "head_line": 5,
+   "span": [
+    6,
+    224
+   ],
+   "lines": 219,
+   "reason": "const-array-heuristic",
+   "head": "pub const SYS_FK_RELATIONSHIPS: &[SysFkRelationship] = &["
+  },
+  {
+   "path": "crates/common/unicode_norm/src/qc_tables.rs",
+   "head_line": 1259,
+   "span": [
+    1260,
+    1469
+   ],
+   "lines": 209,
+   "reason": "generated-file",
+   "head": "pub(crate) static NFC_QC_h: [i16; 2505] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/pgstatfuncs/src/lib.rs",
+   "head_line": 548,
+   "span": [
+    549,
+    773
+   ],
+   "lines": 206,
+   "reason": "const-array-heuristic",
+   "head": "pub const PGSTATFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/tcop/cmdtag/src/lib.rs",
+   "head_line": 34,
+   "span": [
+    35,
+    228
+   ],
+   "lines": 193,
+   "reason": "const-array-heuristic",
+   "head": "pub static TAG_BEHAVIOR: [CommandTagBehavior; 193] = ["
+  },
+  {
+   "path": "crates/backend/tcop/utility/src/consts.rs",
+   "head_line": 200,
+   "span": [
+    201,
+    394
+   ],
+   "lines": 193,
+   "reason": "const-array-heuristic",
+   "head": "pub(crate) const CMDTAG_NAMES: &[(CommandTag, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/jsonpath/src/vectors.rs",
+   "head_line": 2,
+   "span": [
+    3,
+    189
+   ],
+   "lines": 186,
+   "reason": "const-array-heuristic",
+   "head": "pub static OK_VECTORS: &[(&str, &str)] = &["
+  },
+  {
+   "path": "crates/backend/access/transam/rmgr/src/lib.rs",
+   "head_line": 134,
+   "span": [
+    135,
+    333
+   ],
+   "lines": 176,
+   "reason": "const-array-heuristic",
+   "head": "pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 722,
+   "span": [
+    723,
+    926
+   ],
+   "lines": 166,
+   "reason": "const-array-heuristic",
+   "head": "pub static ConfigureNamesInt: &[GucIntSetting] = &["
+  },
+  {
+   "path": "crates/common/ryu/src/d2s_table.rs",
+   "head_line": 155,
+   "span": [
+    156,
+    319
+   ],
+   "lines": 163,
+   "reason": "const-array-heuristic",
+   "head": "pub static DOUBLE_POW5_SPLIT: [[u64; 2]; 326] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/builtins.rs",
+   "head_line": 1160,
+   "span": [
+    1161,
+    1316
+   ],
+   "lines": 155,
+   "reason": "const-array-heuristic",
+   "head": "pub const DATE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/float/src/builtins.rs",
+   "head_line": 479,
+   "span": [
+    480,
+    633
+   ],
+   "lines": 153,
+   "reason": "const-array-heuristic",
+   "head": "pub const FLOAT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/common/wchar/src/lib.rs",
+   "head_line": 1466,
+   "span": [
+    1468,
+    1645
+   ],
+   "lines": 147,
+   "reason": "const-array-heuristic",
+   "head": "pub static pg_wchar_table: [pg_wchar_tbl; _PG_LAST_ENCODING_ as usize] = ["
+  },
+  {
+   "path": "crates/common/ryu/src/d2s_table.rs",
+   "head_line": 6,
+   "span": [
+    7,
+    153
+   ],
+   "lines": 146,
+   "reason": "const-array-heuristic",
+   "head": "pub static DOUBLE_POW5_INV_SPLIT: [[u64; 2]; 292] = ["
+  },
+  {
+   "path": "crates/backend/executor/lanereg/src/lib.rs",
+   "head_line": 394,
+   "span": [
+    396,
+    569
+   ],
+   "lines": 145,
+   "reason": "const-array-heuristic",
+   "head": "pub static ENTRIES: &[BatchFn] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 539,
+   "span": [
+    540,
+    720
+   ],
+   "lines": 135,
+   "reason": "const-array-heuristic",
+   "head": "pub static ConfigureNamesBool: &[GucBoolSetting] = &["
+  },
+  {
+   "path": "crates/common/wchar/src/tables.rs",
+   "head_line": 340,
+   "span": [
+    341,
+    463
+   ],
+   "lines": 122,
+   "reason": "const-array-heuristic",
+   "head": "pub static EAST_ASIAN_FW: [mbinterval; 122] = ["
+  },
+  {
+   "path": "crates/contrib/isn/src/tables.rs",
+   "head_line": 24,
+   "span": [
+    25,
+    144
+   ],
+   "lines": 119,
+   "reason": "const-array-heuristic",
+   "head": "pub static EAN13_RANGE: &[Range] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/numeric/src/builtins.rs",
+   "head_line": 1238,
+   "span": [
+    1239,
+    1352
+   ],
+   "lines": 113,
+   "reason": "const-array-heuristic",
+   "head": "pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 629,
+   "span": [
+    630,
+    742
+   ],
+   "lines": 112,
+   "reason": "const-array-heuristic",
+   "head": "pub const DCH_KEYWORDS: &[KeyWord] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/varlena/src/builtins.rs",
+   "head_line": 912,
+   "span": [
+    913,
+    1025
+   ],
+   "lines": 112,
+   "reason": "const-array-heuristic",
+   "head": "pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/pg_locale/src/chklocale.rs",
+   "head_line": 17,
+   "span": [
+    18,
+    128
+   ],
+   "lines": 110,
+   "reason": "const-array-heuristic",
+   "head": "const ENCODING_MATCH_LIST: &[(pg_enc, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_timestamp/src/builtins.rs",
+   "head_line": 1360,
+   "span": [
+    1361,
+    1470
+   ],
+   "lines": 109,
+   "reason": "const-array-heuristic",
+   "head": "pub const TIMESTAMP_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 1328,
+   "span": [
+    1329,
+    1437
+   ],
+   "lines": 107,
+   "reason": "const-array-heuristic",
+   "head": "pub const ACL_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/access/common/reloptions/src/lib.rs",
+   "head_line": 154,
+   "span": [
+    155,
+    269
+   ],
+   "lines": 106,
+   "reason": "const-array-heuristic",
+   "head": "static RELOPTS: &[OptDef] = &["
+  },
+  {
+   "path": "crates/backend/executor/execmain/src/lanev2/census.rs",
+   "head_line": 582,
+   "span": [
+    585,
+    763
+   ],
+   "lines": 101,
+   "reason": "const-array-heuristic",
+   "head": "pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/int/src/builtins.rs",
+   "head_line": 443,
+   "span": [
+    444,
+    545
+   ],
+   "lines": 100,
+   "reason": "const-array-heuristic",
+   "head": "pub const INT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 968,
+   "span": [
+    969,
+    1065
+   ],
+   "lines": 96,
+   "reason": "generated-file",
+   "head": "static WIN1256_FROM_UNICODE_TREE_TABLE: [u16; 765] = ["
+  },
+  {
+   "path": "crates/backend/regex/regex_core/src/regex_locale.rs",
+   "head_line": 402,
+   "span": [
+    403,
+    498
+   ],
+   "lines": 95,
+   "reason": "const-array-heuristic",
+   "head": "const CNAMES: &[Cname] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 785,
+   "span": [
+    786,
+    880
+   ],
+   "lines": 94,
+   "reason": "const-array-heuristic",
+   "head": "pub const DCH_INDEX: [i32; KEYWORD_INDEX_SIZE] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 883,
+   "span": [
+    884,
+    978
+   ],
+   "lines": 94,
+   "reason": "const-array-heuristic",
+   "head": "pub const NUM_INDEX: [i32; KEYWORD_INDEX_SIZE] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/int8/src/builtins.rs",
+   "head_line": 346,
+   "span": [
+    347,
+    439
+   ],
+   "lines": 91,
+   "reason": "const-array-heuristic",
+   "head": "pub const INT8_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/cyrillic.rs",
+   "head_line": 182,
+   "span": [
+    183,
+    274
+   ],
+   "lines": 91,
+   "reason": "generated-file",
+   "head": "static KOI8U_FROM_UNICODE_TREE_TABLE: [u16; 727] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/multirangetypes/src/builtins.rs",
+   "head_line": 881,
+   "span": [
+    882,
+    973
+   ],
+   "lines": 88,
+   "reason": "const-array-heuristic",
+   "head": "pub const MULTIRANGETYPES_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/cache/cache_syscache/src/cacheinfo.rs",
+   "head_line": 104,
+   "span": [
+    105,
+    190
+   ],
+   "lines": 85,
+   "reason": "const-array-heuristic",
+   "head": "pub const CACHEINFO: [CacheDesc; SYS_CACHE_SIZE] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/cyrillic.rs",
+   "head_line": 45,
+   "span": [
+    46,
+    131
+   ],
+   "lines": 85,
+   "reason": "generated-file",
+   "head": "static KOI8R_FROM_UNICODE_TREE_TABLE: [u16; 678] = ["
+  },
+  {
+   "path": "crates/backend/replication/origin/src/funcs.rs",
+   "head_line": 229,
+   "span": [
+    230,
+    326
+   ],
+   "lines": 84,
+   "reason": "const-array-heuristic",
+   "head": "pub const ORIGIN_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/pl/plpgsql/src/scanner.rs",
+   "head_line": 155,
+   "span": [
+    156,
+    239
+   ],
+   "lines": 83,
+   "reason": "const-array-heuristic",
+   "head": "pub static UNRESERVED_PL_KEYWORDS: &[(&str, i32)] = &["
+  },
+  {
+   "path": "crates/backend/utils/activity/waitevent/src/lib.rs",
+   "head_line": 158,
+   "span": [
+    159,
+    240
+   ],
+   "lines": 81,
+   "reason": "const-array-heuristic",
+   "head": "static WAIT_EVENT_IO_NAMES: [&str; 81] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/mbutils/src/lib.rs",
+   "head_line": 87,
+   "span": [
+    88,
+    169
+   ],
+   "lines": 81,
+   "reason": "const-array-heuristic",
+   "head": "static PG_ENCNAME: [(&str, pg_enc); 81] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/int8/src/builtins.rs",
+   "head_line": 448,
+   "span": [
+    449,
+    527
+   ],
+   "lines": 78,
+   "reason": "const-array-heuristic",
+   "head": "pub static INT8_THIN: &[ThinBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 1233,
+   "span": [
+    1234,
+    1312
+   ],
+   "lines": 78,
+   "reason": "generated-file",
+   "head": "static WIN1258_FROM_UNICODE_TREE_TABLE: [u16; 618] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 983,
+   "span": [
+    984,
+    1070
+   ],
+   "lines": 77,
+   "reason": "const-array-heuristic",
+   "head": "pub static ConfigureNamesString: &[GucStringSetting] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_misc/src/builtins.rs",
+   "head_line": 1257,
+   "span": [
+    1258,
+    1338
+   ],
+   "lines": 75,
+   "reason": "const-array-heuristic",
+   "head": "pub const MISC_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/int/src/builtins.rs",
+   "head_line": 554,
+   "span": [
+    555,
+    630
+   ],
+   "lines": 75,
+   "reason": "const-array-heuristic",
+   "head": "pub static INT_THIN: &[ThinBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/scalar/src/builtins.rs",
+   "head_line": 576,
+   "span": [
+    577,
+    652
+   ],
+   "lines": 75,
+   "reason": "const-array-heuristic",
+   "head": "pub const SCALAR_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/jsonb/src/builtins.rs",
+   "head_line": 958,
+   "span": [
+    959,
+    1032
+   ],
+   "lines": 73,
+   "reason": "const-array-heuristic",
+   "head": "pub const JSONB_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/tables.rs",
+   "head_line": 15,
+   "span": [
+    16,
+    88
+   ],
+   "lines": 72,
+   "reason": "const-array-heuristic",
+   "head": "pub static DATETKTBL: [DateTkn; 72] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 45,
+   "span": [
+    46,
+    118
+   ],
+   "lines": 72,
+   "reason": "generated-file",
+   "head": "static WIN866_FROM_UNICODE_TREE_TABLE: [u16; 571] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 845,
+   "span": [
+    846,
+    917
+   ],
+   "lines": 71,
+   "reason": "generated-file",
+   "head": "static WIN1255_FROM_UNICODE_TREE_TABLE: [u16; 562] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 723,
+   "span": [
+    724,
+    794
+   ],
+   "lines": 70,
+   "reason": "generated-file",
+   "head": "static WIN1254_FROM_UNICODE_TREE_TABLE: [u16; 557] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/pg_upgrade_support/src/lib.rs",
+   "head_line": 346,
+   "span": [
+    347,
+    426
+   ],
+   "lines": 69,
+   "reason": "const-array-heuristic",
+   "head": "pub const PG_UPGRADE_SUPPORT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/contrib/postgres_fdw/src/option.rs",
+   "head_line": 25,
+   "span": [
+    26,
+    95
+   ],
+   "lines": 69,
+   "reason": "const-array-heuristic",
+   "head": "pub(crate) const POSTGRES_FDW_OPTIONS: &[(&str, Oid, bool)] = &["
+  },
+  {
+   "path": "crates/backend/utils/fmgr/fmgr_core/src/ported.rs",
+   "head_line": 4,
+   "span": [
+    5,
+    73
+   ],
+   "lines": 68,
+   "reason": "const-array-heuristic",
+   "head": "const TABLES: &[&[FmgrBuiltin]] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 497,
+   "span": [
+    498,
+    563
+   ],
+   "lines": 65,
+   "reason": "generated-file",
+   "head": "static WIN1252_FROM_UNICODE_TREE_TABLE: [u16; 513] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 1116,
+   "span": [
+    1117,
+    1182
+   ],
+   "lines": 65,
+   "reason": "generated-file",
+   "head": "static WIN1257_FROM_UNICODE_TREE_TABLE: [u16; 513] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/rowtypes/src/c_cases.rs",
+   "head_line": 303,
+   "span": [
+    304,
+    368
+   ],
+   "lines": 64,
+   "reason": "generated-file",
+   "head": "pub(crate) const OUT_CASES: &[OutCase] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 979,
+   "span": [
+    980,
+    1044
+   ],
+   "lines": 64,
+   "reason": "generated-file",
+   "head": "static ISO8859_14_FROM_UNICODE_TREE_TABLE: [u16; 507] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 273,
+   "span": [
+    274,
+    338
+   ],
+   "lines": 64,
+   "reason": "generated-file",
+   "head": "static WIN1250_FROM_UNICODE_TREE_TABLE: [u16; 507] = ["
+  },
+  {
+   "path": "crates/backend/postmaster/launch_backend/src/lib.rs",
+   "head_line": 45,
+   "span": [
+    46,
+    128
+   ],
+   "lines": 63,
+   "reason": "const-array-heuristic",
+   "head": "static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/tables.rs",
+   "head_line": 90,
+   "span": [
+    91,
+    152
+   ],
+   "lines": 61,
+   "reason": "const-array-heuristic",
+   "head": "pub static DELTATKTBL: [DateTkn; 61] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/rangetypes/src/builtins.rs",
+   "head_line": 742,
+   "span": [
+    743,
+    804
+   ],
+   "lines": 60,
+   "reason": "const-array-heuristic",
+   "head": "pub const RANGETYPES_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/catalog/objectaddress/src/builtins.rs",
+   "head_line": 21,
+   "span": [
+    22,
+    81
+   ],
+   "lines": 59,
+   "reason": "const-array-heuristic",
+   "head": "static OBJECT_TYPE_MAP: &[(&str, Option<ObjectType>)] = &["
+  },
+  {
+   "path": "crates/backend/utils/activity/waitevent/src/lib.rs",
+   "head_line": 85,
+   "span": [
+    86,
+    143
+   ],
+   "lines": 57,
+   "reason": "const-array-heuristic",
+   "head": "static WAIT_EVENT_IPC_NAMES: [&str; 57] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 614,
+   "span": [
+    615,
+    672
+   ],
+   "lines": 57,
+   "reason": "generated-file",
+   "head": "static WIN1253_FROM_UNICODE_TREE_TABLE: [u16; 454] = ["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/m5_suppress.rs",
+   "head_line": 241,
+   "span": [
+    242,
+    312
+   ],
+   "lines": 56,
+   "reason": "const-array-heuristic",
+   "head": "pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 389,
+   "span": [
+    390,
+    446
+   ],
+   "lines": 56,
+   "reason": "generated-file",
+   "head": "static WIN1251_FROM_UNICODE_TREE_TABLE: [u16; 446] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/regproc/src/builtins.rs",
+   "head_line": 169,
+   "span": [
+    170,
+    225
+   ],
+   "lines": 55,
+   "reason": "const-array-heuristic",
+   "head": "pub const REGPROC_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/commands/tablecmds/src/drop.rs",
+   "head_line": 53,
+   "span": [
+    54,
+    117
+   ],
+   "lines": 54,
+   "reason": "const-array-heuristic",
+   "head": "const DROP_MSG_STRINGS: &[DropMsgStrings] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/jsonpath/src/path.rs",
+   "head_line": 74,
+   "span": [
+    75,
+    129
+   ],
+   "lines": 54,
+   "reason": "const-array-heuristic",
+   "head": "const ALL_ITEM_TYPES: [ItemType; 54] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 1180,
+   "span": [
+    1181,
+    1235
+   ],
+   "lines": 54,
+   "reason": "generated-file",
+   "head": "static ISO8859_16_FROM_UNICODE_TREE_TABLE: [u16; 425] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/pseudotypes/src/builtins.rs",
+   "head_line": 164,
+   "span": [
+    165,
+    218
+   ],
+   "lines": 53,
+   "reason": "const-array-heuristic",
+   "head": "pub const PSEUDOTYPES_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 168,
+   "span": [
+    169,
+    222
+   ],
+   "lines": 53,
+   "reason": "generated-file",
+   "head": "static WIN874_FROM_UNICODE_TREE_TABLE: [u16; 421] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/regexp/src/builtins.rs",
+   "head_line": 652,
+   "span": [
+    653,
+    705
+   ],
+   "lines": 51,
+   "reason": "const-array-heuristic",
+   "head": "pub const REGEXP_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/commands/subscriptioncmds/src/conninfo.rs",
+   "head_line": 9,
+   "span": [
+    10,
+    60
+   ],
+   "lines": 50,
+   "reason": "const-array-heuristic",
+   "head": "const KNOWN_OPTIONS: &[&str] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/network/src/builtins.rs",
+   "head_line": 423,
+   "span": [
+    424,
+    474
+   ],
+   "lines": 50,
+   "reason": "const-array-heuristic",
+   "head": "pub const NETWORK_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/varbit/src/lib.rs",
+   "head_line": 1199,
+   "span": [
+    1200,
+    1251
+   ],
+   "lines": 50,
+   "reason": "const-array-heuristic",
+   "head": "pub const VARBIT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/xml/src/chvalid.rs",
+   "head_line": 6,
+   "span": [
+    7,
+    57
+   ],
+   "lines": 50,
+   "reason": "const-array-heuristic",
+   "head": "const XML_IS_BASE_CHAR_SRNG: &[(u16, u16)] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 45,
+   "span": [
+    46,
+    95
+   ],
+   "lines": 49,
+   "reason": "generated-file",
+   "head": "static ISO8859_2_FROM_UNICODE_TREE_TABLE: [u16; 386] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 245,
+   "span": [
+    246,
+    295
+   ],
+   "lines": 49,
+   "reason": "generated-file",
+   "head": "static ISO8859_4_FROM_UNICODE_TREE_TABLE: [u16; 385] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 513,
+   "span": [
+    514,
+    563
+   ],
+   "lines": 49,
+   "reason": "generated-file",
+   "head": "static ISO8859_7_FROM_UNICODE_TREE_TABLE: [u16; 386] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 359,
+   "span": [
+    360,
+    409
+   ],
+   "lines": 49,
+   "reason": "generated-file",
+   "head": "pub static CNSPLANE2TOBIG5LEVEL2: [Codes; 49] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 309,
+   "span": [
+    310,
+    358
+   ],
+   "lines": 48,
+   "reason": "generated-file",
+   "head": "pub static BIG5LEVEL2TOCNSPLANE2: [Codes; 48] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/lib.rs",
+   "head_line": 51,
+   "span": [
+    52,
+    100
+   ],
+   "lines": 48,
+   "reason": "const-array-heuristic",
+   "head": "pub static config_group_names: &[&str] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 146,
+   "span": [
+    147,
+    194
+   ],
+   "lines": 47,
+   "reason": "generated-file",
+   "head": "static ISO8859_3_FROM_UNICODE_TREE_TABLE: [u16; 373] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 1072,
+   "span": [
+    1073,
+    1130
+   ],
+   "lines": 47,
+   "reason": "const-array-heuristic",
+   "head": "pub static ConfigureNamesEnum: &[GucEnumSetting] = &["
+  },
+  {
+   "path": "crates/common/ryu/src/f2s.rs",
+   "head_line": 44,
+   "span": [
+    45,
+    92
+   ],
+   "lines": 47,
+   "reason": "const-array-heuristic",
+   "head": "static FLOAT_POW5_SPLIT: [u64; 47] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/arrayfuncs/src/builtins.rs",
+   "head_line": 980,
+   "span": [
+    981,
+    1026
+   ],
+   "lines": 44,
+   "reason": "const-array-heuristic",
+   "head": "pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/mbutils/src/lib.rs",
+   "head_line": 37,
+   "span": [
+    38,
+    80
+   ],
+   "lines": 42,
+   "reason": "const-array-heuristic",
+   "head": "static PG_ENC2NAME: [&str; wchar::_PG_LAST_ENCODING_ as usize] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 701,
+   "span": [
+    702,
+    743
+   ],
+   "lines": 41,
+   "reason": "generated-file",
+   "head": "static ISO8859_9_FROM_UNICODE_TREE_TABLE: [u16; 324] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 886,
+   "span": [
+    887,
+    928
+   ],
+   "lines": 41,
+   "reason": "generated-file",
+   "head": "static ISO8859_13_FROM_UNICODE_TREE_TABLE: [u16; 326] = ["
+  },
+  {
+   "path": "crates/_support/types/nodes/src/bms_c_vectors.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    44
+   ],
+   "lines": 40,
+   "reason": "const-array-heuristic",
+   "head": "pub const NEXT_MEMBER_VECTORS: &[(&[i32], &[i32], &[i32])] = &["
+  },
+  {
+   "path": "crates/backend/executor/execmain/src/lanev2/stats.rs",
+   "head_line": 250,
+   "span": [
+    251,
+    291
+   ],
+   "lines": 40,
+   "reason": "const-array-heuristic",
+   "head": "pub(super) const ALL: [ShapeClass; N_CLASSES] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/varchar/src/builtins.rs",
+   "head_line": 379,
+   "span": [
+    380,
+    420
+   ],
+   "lines": 40,
+   "reason": "const-array-heuristic",
+   "head": "pub const VARCHAR_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 794,
+   "span": [
+    795,
+    835
+   ],
+   "lines": 40,
+   "reason": "generated-file",
+   "head": "static ISO8859_10_FROM_UNICODE_TREE_TABLE: [u16; 319] = ["
+  },
+  {
+   "path": "crates/backend/storage/lmgr/lock/src/lib.rs",
+   "head_line": 69,
+   "span": [
+    70,
+    108
+   ],
+   "lines": 38,
+   "reason": "const-array-heuristic",
+   "head": "static LOCK_CONFLICTS: [LOCKMASK; MaxLockMode as usize + 1] = ["
+  },
+  {
+   "path": "crates/backend/catalog/objectaddress/src/properties.rs",
+   "head_line": 56,
+   "span": [
+    57,
+    94
+   ],
+   "lines": 37,
+   "reason": "const-array-heuristic",
+   "head": "static OBJECT_PROPERTY: [ObjectPropertyType; 37] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/json/src/builtins.rs",
+   "head_line": 424,
+   "span": [
+    425,
+    462
+   ],
+   "lines": 37,
+   "reason": "const-array-heuristic",
+   "head": "pub const JSON_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/name/src/builtins.rs",
+   "head_line": 222,
+   "span": [
+    223,
+    264
+   ],
+   "lines": 37,
+   "reason": "const-array-heuristic",
+   "head": "pub const NAME_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/cash/src/builtins.rs",
+   "head_line": 252,
+   "span": [
+    253,
+    289
+   ],
+   "lines": 36,
+   "reason": "const-array-heuristic",
+   "head": "pub const CASH_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 745,
+   "span": [
+    746,
+    782
+   ],
+   "lines": 36,
+   "reason": "const-array-heuristic",
+   "head": "pub const NUM_KEYWORDS: &[KeyWord] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/jsonpath/src/vectors.rs",
+   "head_line": 191,
+   "span": [
+    192,
+    228
+   ],
+   "lines": 36,
+   "reason": "const-array-heuristic",
+   "head": "pub static ERR_VECTORS: &[(&str, &str, Option<&str>)] = &["
+  },
+  {
+   "path": "crates/common/saslprep/src/tables.rs",
+   "head_line": 23,
+   "span": [
+    24,
+    60
+   ],
+   "lines": 36,
+   "reason": "const-array-heuristic",
+   "head": "pub const PROHIBITED_OUTPUT_RANGES: &[(u32, u32)] = &["
+  },
+  {
+   "path": "crates/backend/catalog/objectaddress/src/builtins.rs",
+   "head_line": 677,
+   "span": [
+    678,
+    718
+   ],
+   "lines": 35,
+   "reason": "const-array-heuristic",
+   "head": "pub static OBJECTADDRESS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 571,
+   "span": [
+    572,
+    614
+   ],
+   "lines": 35,
+   "reason": "const-array-heuristic",
+   "head": "pub const DCH_SUFF: &[KeySuffix] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 346,
+   "span": [
+    347,
+    382
+   ],
+   "lines": 35,
+   "reason": "generated-file",
+   "head": "static ISO8859_5_FROM_UNICODE_TREE_TABLE: [u16; 274] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 614,
+   "span": [
+    615,
+    650
+   ],
+   "lines": 35,
+   "reason": "generated-file",
+   "head": "static ISO8859_8_FROM_UNICODE_TREE_TABLE: [u16; 279] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/mbutils/src/builtins.rs",
+   "head_line": 103,
+   "span": [
+    104,
+    144
+   ],
+   "lines": 35,
+   "reason": "const-array-heuristic",
+   "head": "pub const MBUTILS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/lockfuncs/src/lib.rs",
+   "head_line": 391,
+   "span": [
+    392,
+    428
+   ],
+   "lines": 34,
+   "reason": "const-array-heuristic",
+   "head": "pub const LOCKFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 53,
+   "span": [
+    54,
+    88
+   ],
+   "lines": 34,
+   "reason": "const-array-heuristic",
+   "head": "pub static DESC_PG_CLASS: [FormData_pg_attribute; 34] = ["
+  },
+  {
+   "path": "crates/common/saslprep/src/tables.rs",
+   "head_line": 461,
+   "span": [
+    462,
+    496
+   ],
+   "lines": 34,
+   "reason": "const-array-heuristic",
+   "head": "pub const RAND_A_L_CAT_CODEPOINT_RANGES: &[(u32, u32)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/jsonpath/src/scan.rs",
+   "head_line": 96,
+   "span": [
+    97,
+    130
+   ],
+   "lines": 33,
+   "reason": "const-array-heuristic",
+   "head": "static KEYWORDS: &[Keyword] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 1095,
+   "span": [
+    1096,
+    1129
+   ],
+   "lines": 33,
+   "reason": "generated-file",
+   "head": "static ISO8859_15_FROM_UNICODE_TREE_TABLE: [u16; 263] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/to_tsany/src/builtins.rs",
+   "head_line": 251,
+   "span": [
+    252,
+    284
+   ],
+   "lines": 32,
+   "reason": "const-array-heuristic",
+   "head": "pub const TO_TSANY_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 175,
+   "span": [
+    176,
+    208
+   ],
+   "lines": 32,
+   "reason": "const-array-heuristic",
+   "head": "pub static DESC_PG_TYPE: [FormData_pg_attribute; 32] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/cyrillic.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    36
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static KOI8R_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/cyrillic.rs",
+   "head_line": 140,
+   "span": [
+    141,
+    173
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static KOI8U_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    36
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_2_TO_UNICODE_TREE_TABLE: [u16; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 104,
+   "span": [
+    105,
+    137
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_3_TO_UNICODE_TREE_TABLE: [u16; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 203,
+   "span": [
+    204,
+    236
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_4_TO_UNICODE_TREE_TABLE: [u16; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 304,
+   "span": [
+    305,
+    337
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_5_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 471,
+   "span": [
+    472,
+    504
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_7_TO_UNICODE_TREE_TABLE: [u32; 254] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 572,
+   "span": [
+    573,
+    605
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_8_TO_UNICODE_TREE_TABLE: [u32; 254] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 659,
+   "span": [
+    660,
+    692
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_9_TO_UNICODE_TREE_TABLE: [u16; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 752,
+   "span": [
+    753,
+    785
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_10_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 844,
+   "span": [
+    845,
+    877
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_13_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 937,
+   "span": [
+    938,
+    970
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_14_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 1053,
+   "span": [
+    1054,
+    1086
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_15_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 1138,
+   "span": [
+    1139,
+    1171
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static ISO8859_16_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    36
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static WIN866_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 231,
+   "span": [
+    232,
+    264
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static WIN1250_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 347,
+   "span": [
+    348,
+    380
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static WIN1251_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 455,
+   "span": [
+    456,
+    488
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static WIN1252_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 572,
+   "span": [
+    573,
+    605
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static WIN1253_TO_UNICODE_TREE_TABLE: [u32; 254] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 681,
+   "span": [
+    682,
+    714
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static WIN1254_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 803,
+   "span": [
+    804,
+    836
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static WIN1255_TO_UNICODE_TREE_TABLE: [u32; 254] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 926,
+   "span": [
+    927,
+    959
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static WIN1256_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 1074,
+   "span": [
+    1075,
+    1107
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static WIN1257_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 1191,
+   "span": [
+    1192,
+    1224
+   ],
+   "lines": 32,
+   "reason": "generated-file",
+   "head": "static WIN1258_TO_UNICODE_TREE_TABLE: [u32; 256] = ["
+  },
+  {
+   "path": "crates/common/wchar/src/tables.rs",
+   "head_line": 465,
+   "span": [
+    466,
+    498
+   ],
+   "lines": 32,
+   "reason": "const-array-heuristic",
+   "head": "static UTF8_TRANSITION: [u32; 256] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 430,
+   "span": [
+    431,
+    462
+   ],
+   "lines": 31,
+   "reason": "generated-file",
+   "head": "static ISO8859_6_FROM_UNICODE_TREE_TABLE: [u16; 248] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/win.rs",
+   "head_line": 127,
+   "span": [
+    128,
+    159
+   ],
+   "lines": 31,
+   "reason": "generated-file",
+   "head": "static WIN874_TO_UNICODE_TREE_TABLE: [u32; 248] = ["
+  },
+  {
+   "path": "crates/common/ryu/src/f2s.rs",
+   "head_line": 10,
+   "span": [
+    11,
+    42
+   ],
+   "lines": 31,
+   "reason": "const-array-heuristic",
+   "head": "static FLOAT_POW5_INV_SPLIT: [u64; 31] = ["
+  },
+  {
+   "path": "crates/backend/access/session/src/lib.rs",
+   "head_line": 79,
+   "span": [
+    80,
+    110
+   ],
+   "lines": 30,
+   "reason": "const-array-heuristic",
+   "head": "pub const SESSION_ENVELOPE_MANIFEST: &[EnvelopeMember] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/interval_corpus.rs",
+   "head_line": 477,
+   "span": [
+    478,
+    508
+   ],
+   "lines": 30,
+   "reason": "const-array-heuristic",
+   "head": "pub static INTERVAL_IN_ERR: &[(&str, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 134,
+   "span": [
+    135,
+    165
+   ],
+   "lines": 30,
+   "reason": "const-array-heuristic",
+   "head": "pub static DESC_PG_PROC: [FormData_pg_attribute; 30] = ["
+  },
+  {
+   "path": "crates/backend/snowball/dict_snowball/src/dict.rs",
+   "head_line": 42,
+   "span": [
+    43,
+    72
+   ],
+   "lines": 29,
+   "reason": "const-array-heuristic",
+   "head": "static UNPORTED_LANGS: &[&str] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/iso8859.rs",
+   "head_line": 391,
+   "span": [
+    392,
+    421
+   ],
+   "lines": 29,
+   "reason": "generated-file",
+   "head": "static ISO8859_6_TO_UNICODE_TREE_TABLE: [u16; 230] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 314,
+   "span": [
+    315,
+    344
+   ],
+   "lines": 29,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_ROOT: [DmLetter; 29] = ["
+  },
+  {
+   "path": "crates/backend/commands/event_trigger/src/srf.rs",
+   "head_line": 305,
+   "span": [
+    306,
+    338
+   ],
+   "lines": 28,
+   "reason": "const-array-heuristic",
+   "head": "pub static EVENT_TRIGGER_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/statistics/stats_import/src/lib.rs",
+   "head_line": 20,
+   "span": [
+    21,
+    53
+   ],
+   "lines": 28,
+   "reason": "const-array-heuristic",
+   "head": "pub const STATS_IMPORT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/ruleutils/src/builtins.rs",
+   "head_line": 427,
+   "span": [
+    428,
+    456
+   ],
+   "lines": 28,
+   "reason": "const-array-heuristic",
+   "head": "pub const RULEUTILS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 928,
+   "span": [
+    929,
+    981
+   ],
+   "lines": 28,
+   "reason": "const-array-heuristic",
+   "head": "pub static ConfigureNamesReal: &[GucRealSetting] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/pg_controldata/src/lib.rs",
+   "head_line": 150,
+   "span": [
+    151,
+    183
+   ],
+   "lines": 28,
+   "reason": "const-array-heuristic",
+   "head": "pub const PG_CONTROLDATA_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/like/src/builtins.rs",
+   "head_line": 190,
+   "span": [
+    191,
+    218
+   ],
+   "lines": 27,
+   "reason": "const-array-heuristic",
+   "head": "pub const LIKE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 281,
+   "span": [
+    282,
+    308
+   ],
+   "lines": 26,
+   "reason": "generated-file",
+   "head": "pub static CNSPLANE1TOBIG5LEVEL1: [Codes; 26] = ["
+  },
+  {
+   "path": "crates/backend/access/gin/gin_vocab/src/lib.rs",
+   "head_line": 268,
+   "span": [
+    269,
+    294
+   ],
+   "lines": 25,
+   "reason": "const-array-heuristic",
+   "head": "pub const ALL: [GinBtreeType; 25] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/xid8funcs/src/builtins.rs",
+   "head_line": 166,
+   "span": [
+    167,
+    192
+   ],
+   "lines": 25,
+   "reason": "const-array-heuristic",
+   "head": "pub const XID8FUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 98,
+   "span": [
+    99,
+    124
+   ],
+   "lines": 25,
+   "reason": "const-array-heuristic",
+   "head": "pub static DESC_PG_ATTRIBUTE: [FormData_pg_attribute; 25] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc2004.rs",
+   "head_line": 1479,
+   "span": [
+    1480,
+    1505
+   ],
+   "lines": 25,
+   "reason": "generated-file",
+   "head": "pub static LUMAPEUC_JIS_2004_COMBINED: [LocalToUtfCombined; 25] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/euc2004.rs",
+   "head_line": 6412,
+   "span": [
+    6413,
+    6438
+   ],
+   "lines": 25,
+   "reason": "generated-file",
+   "head": "pub static ULMAPEUC_JIS_2004_COMBINED: [UtfToLocalCombined; 25] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 254,
+   "span": [
+    255,
+    280
+   ],
+   "lines": 25,
+   "reason": "generated-file",
+   "head": "pub static BIG5LEVEL1TOCNSPLANE1: [Codes; 25] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/sjis2004.rs",
+   "head_line": 1478,
+   "span": [
+    1479,
+    1504
+   ],
+   "lines": 25,
+   "reason": "generated-file",
+   "head": "pub static LUMAPSHIFT_JIS_2004_COMBINED: [LocalToUtfCombined; 25] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/sjis2004.rs",
+   "head_line": 6415,
+   "span": [
+    6416,
+    6441
+   ],
+   "lines": 25,
+   "reason": "generated-file",
+   "head": "pub static ULMAPSHIFT_JIS_2004_COMBINED: [UtfToLocalCombined; 25] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc/src/units.rs",
+   "head_line": 32,
+   "span": [
+    33,
+    58
+   ],
+   "lines": 25,
+   "reason": "const-array-heuristic",
+   "head": "static MEMORY_UNIT_CONVERSION_TABLE: [UnitConversion; 25] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/parser.rs",
+   "head_line": 31,
+   "span": [
+    32,
+    56
+   ],
+   "lines": 24,
+   "reason": "const-array-heuristic",
+   "head": "pub static TOK_ALIAS: [&str; (LASTNUM + 1) as usize] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/parser.rs",
+   "head_line": 58,
+   "span": [
+    59,
+    83
+   ],
+   "lines": 24,
+   "reason": "const-array-heuristic",
+   "head": "pub static LEX_DESCR: [&str; (LASTNUM + 1) as usize] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/tsvector_core/src/builtins.rs",
+   "head_line": 438,
+   "span": [
+    439,
+    463
+   ],
+   "lines": 24,
+   "reason": "const-array-heuristic",
+   "head": "pub const TSVECTOR_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/xml/src/chvalid.rs",
+   "head_line": 60,
+   "span": [
+    61,
+    85
+   ],
+   "lines": 24,
+   "reason": "const-array-heuristic",
+   "head": "const XML_IS_COMBINING_SRNG: &[(u16, u16)] = &["
+  },
+  {
+   "path": "crates/contrib/pgcrypto/src/crypt/cryptdes.rs",
+   "head_line": 37,
+   "span": [
+    39,
+    78
+   ],
+   "lines": 24,
+   "reason": "const-array-heuristic",
+   "head": "const SBOX: [[u8; 64]; 8] = ["
+  },
+  {
+   "path": "crates/pl/plpgsql/src/scanner.rs",
+   "head_line": 127,
+   "span": [
+    128,
+    152
+   ],
+   "lines": 24,
+   "reason": "const-array-heuristic",
+   "head": "pub static RESERVED_PL_KEYWORDS: &[(&str, i32)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/interval_corpus.rs",
+   "head_line": 1440,
+   "span": [
+    1441,
+    1464
+   ],
+   "lines": 23,
+   "reason": "const-array-heuristic",
+   "head": "pub static SORT_INPUT: &[&str] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/interval_corpus.rs",
+   "head_line": 1466,
+   "span": [
+    1467,
+    1490
+   ],
+   "lines": 23,
+   "reason": "const-array-heuristic",
+   "head": "pub static SORT_EXPECTED: &[&str] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/oracle_compat/src/builtins.rs",
+   "head_line": 159,
+   "span": [
+    160,
+    183
+   ],
+   "lines": 23,
+   "reason": "const-array-heuristic",
+   "head": "pub const ORACLE_COMPAT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/access/brin/brin_minmax_multi/src/builtins.rs",
+   "head_line": 360,
+   "span": [
+    361,
+    383
+   ],
+   "lines": 22,
+   "reason": "const-array-heuristic",
+   "head": "pub const MINMAX_MULTI_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/rowtypes/src/lib.rs",
+   "head_line": 307,
+   "span": [
+    308,
+    330
+   ],
+   "lines": 22,
+   "reason": "const-array-heuristic",
+   "head": "pub const ROWTYPES_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/xml/src/builtins.rs",
+   "head_line": 204,
+   "span": [
+    205,
+    228
+   ],
+   "lines": 22,
+   "reason": "const-array-heuristic",
+   "head": "pub const XML_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/access/brin/brin_funcs/src/lib.rs",
+   "head_line": 259,
+   "span": [
+    260,
+    284
+   ],
+   "lines": 21,
+   "reason": "const-array-heuristic",
+   "head": "pub static BRIN_FUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/access/transam/commit_ts/src/fmgr_builtins.rs",
+   "head_line": 12,
+   "span": [
+    13,
+    37
+   ],
+   "lines": 21,
+   "reason": "const-array-heuristic",
+   "head": "static COMMIT_TS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/commands/commands_async/src/builtins.rs",
+   "head_line": 60,
+   "span": [
+    61,
+    85
+   ],
+   "lines": 21,
+   "reason": "const-array-heuristic",
+   "head": "pub static ASYNC_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/commands/sequence/src/builtins.rs",
+   "head_line": 16,
+   "span": [
+    17,
+    41
+   ],
+   "lines": 21,
+   "reason": "const-array-heuristic",
+   "head": "static SEQUENCE_INTROSPECT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/storage/ipc/shmem/src/lib.rs",
+   "head_line": 281,
+   "span": [
+    282,
+    306
+   ],
+   "lines": 21,
+   "reason": "const-array-heuristic",
+   "head": "pub const SHMEM_BUILTINS: &[types_fmgr::FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/interval_corpus.rs",
+   "head_line": 567,
+   "span": [
+    568,
+    589
+   ],
+   "lines": 21,
+   "reason": "const-array-heuristic",
+   "head": "pub static INTERVAL_TYPMOD: &[(&str, &str, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/array_userfuncs/src/builtins.rs",
+   "head_line": 626,
+   "span": [
+    627,
+    648
+   ],
+   "lines": 21,
+   "reason": "const-array-heuristic",
+   "head": "pub const ARRAY_USERFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/genfile/src/builtins.rs",
+   "head_line": 418,
+   "span": [
+    419,
+    440
+   ],
+   "lines": 21,
+   "reason": "const-array-heuristic",
+   "head": "pub const GENFILE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/partitionfuncs/src/lib.rs",
+   "head_line": 8,
+   "span": [
+    9,
+    33
+   ],
+   "lines": 21,
+   "reason": "const-array-heuristic",
+   "head": "pub static PARTITIONFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/access/nbtree/compare/src/builtins.rs",
+   "head_line": 67,
+   "span": [
+    68,
+    89
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "pub const NBT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/libpq/be_fsstubs/src/fmgr_builtins.rs",
+   "head_line": 168,
+   "span": [
+    169,
+    189
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "pub const FSSTUBS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/regex/regex_core/src/regex_export_free_error.rs",
+   "head_line": 121,
+   "span": [
+    122,
+    142
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "static RERRS: &[Rerr] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/mac8/src/builtins.rs",
+   "head_line": 156,
+   "span": [
+    157,
+    177
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "pub const MAC8_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/numutils/src/lib.rs",
+   "head_line": 488,
+   "span": [
+    489,
+    509
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "const POWERS_OF_TEN: [u64; 20] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/tsquery_core/src/builtins.rs",
+   "head_line": 204,
+   "span": [
+    205,
+    225
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "pub const TSQUERY_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 37,
+   "span": [
+    38,
+    58
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "const K512: [u64; 80] = ["
+  },
+  {
+   "path": "crates/backend/access/gist/gistproc/src/lib.rs",
+   "head_line": 939,
+   "span": [
+    940,
+    959
+   ],
+   "lines": 19,
+   "reason": "const-array-heuristic",
+   "head": "pub const GISTPROC_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/storage/lmgr/lwlock/src/lib.rs",
+   "head_line": 63,
+   "span": [
+    64,
+    83
+   ],
+   "lines": 19,
+   "reason": "const-array-heuristic",
+   "head": "const BUILTIN_TRANCHE_NAMES: [&str; LWTRANCHE_FIRST_USER_DEFINED as usize] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/parser.rs",
+   "head_line": 511,
+   "span": [
+    512,
+    531
+   ],
+   "lines": 19,
+   "reason": "const-array-heuristic",
+   "head": "static STRANGE_LETTER: &[u32] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 268,
+   "span": [
+    269,
+    288
+   ],
+   "lines": 19,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_TAG: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_enum/src/builtins.rs",
+   "head_line": 145,
+   "span": [
+    146,
+    165
+   ],
+   "lines": 19,
+   "reason": "const-array-heuristic",
+   "head": "pub static ENUM_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/bool/src/builtins.rs",
+   "head_line": 201,
+   "span": [
+    202,
+    221
+   ],
+   "lines": 19,
+   "reason": "const-array-heuristic",
+   "head": "pub const BOOL_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/pg_lsn/src/builtins.rs",
+   "head_line": 153,
+   "span": [
+    154,
+    173
+   ],
+   "lines": 19,
+   "reason": "const-array-heuristic",
+   "head": "pub const PG_LSN_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/uuid/src/builtins.rs",
+   "head_line": 146,
+   "span": [
+    147,
+    166
+   ],
+   "lines": 19,
+   "reason": "const-array-heuristic",
+   "head": "pub const UUID_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/_support/types/types_core/src/init.rs",
+   "head_line": 26,
+   "span": [
+    27,
+    45
+   ],
+   "lines": 18,
+   "reason": "const-array-heuristic",
+   "head": "pub const ALL: [BackendType; BACKEND_NUM_TYPES] = ["
+  },
+  {
+   "path": "crates/backend/statistics/stats_import/src/attribute_stats.rs",
+   "head_line": 77,
+   "span": [
+    78,
+    96
+   ],
+   "lines": 18,
+   "reason": "const-array-heuristic",
+   "head": "static ATTARGINFO: [StatsArgInfo; NUM_ATTRIBUTE_STATS_ARGS] = ["
+  },
+  {
+   "path": "crates/backend/utils/activity/waitevent/src/lib.rs",
+   "head_line": 52,
+   "span": [
+    53,
+    71
+   ],
+   "lines": 18,
+   "reason": "const-array-heuristic",
+   "head": "static WAIT_EVENT_ACTIVITY_NAMES: [&str; 18] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 248,
+   "span": [
+    249,
+    268
+   ],
+   "lines": 18,
+   "reason": "const-array-heuristic",
+   "head": "const TABLE_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_amutils/src/lib.rs",
+   "head_line": 48,
+   "span": [
+    49,
+    67
+   ],
+   "lines": 18,
+   "reason": "const-array-heuristic",
+   "head": "const AM_PROPNAMES: &[(&str, Prop)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/tsgistidx/src/lib.rs",
+   "head_line": 913,
+   "span": [
+    914,
+    932
+   ],
+   "lines": 18,
+   "reason": "const-array-heuristic",
+   "head": "pub const TSGISTIDX_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 218,
+   "span": [
+    219,
+    237
+   ],
+   "lines": 18,
+   "reason": "const-array-heuristic",
+   "head": "pub static DESC_PG_DATABASE: [FormData_pg_attribute; 18] = ["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 303,
+   "span": [
+    304,
+    322
+   ],
+   "lines": 18,
+   "reason": "const-array-heuristic",
+   "head": "pub static DESC_PG_SUBSCRIPTION: [FormData_pg_attribute; 18] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc/src/units.rs",
+   "head_line": 60,
+   "span": [
+    61,
+    79
+   ],
+   "lines": 18,
+   "reason": "const-array-heuristic",
+   "head": "static TIME_UNIT_CONVERSION_TABLE: [UnitConversion; 18] = ["
+  },
+  {
+   "path": "crates/backend/lib/integerset/src/lib.rs",
+   "head_line": 399,
+   "span": [
+    400,
+    417
+   ],
+   "lines": 17,
+   "reason": "const-array-heuristic",
+   "head": "const SIMPLE8B_MODES: [Simple8bMode; 17] = ["
+  },
+  {
+   "path": "crates/backend/replication/slotfuncs/src/builtins.rs",
+   "head_line": 552,
+   "span": [
+    553,
+    571
+   ],
+   "lines": 17,
+   "reason": "const-array-heuristic",
+   "head": "pub const SLOTFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/mac/src/builtins.rs",
+   "head_line": 145,
+   "span": [
+    146,
+    163
+   ],
+   "lines": 17,
+   "reason": "const-array-heuristic",
+   "head": "pub const MAC_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/libpq/hba/src/lib.rs",
+   "head_line": 44,
+   "span": [
+    45,
+    61
+   ],
+   "lines": 16,
+   "reason": "const-array-heuristic",
+   "head": "pub static USER_AUTH_NAME: [&str; 16] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 182,
+   "span": [
+    183,
+    199
+   ],
+   "lines": 16,
+   "reason": "const-array-heuristic",
+   "head": "const MAKEACLITEM_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/interval_corpus.rs",
+   "head_line": 510,
+   "span": [
+    511,
+    527
+   ],
+   "lines": 16,
+   "reason": "const-array-heuristic",
+   "head": "pub static INTERVAL_OUT_SQL_STANDARD: &[(&str, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/interval_corpus.rs",
+   "head_line": 529,
+   "span": [
+    530,
+    546
+   ],
+   "lines": 16,
+   "reason": "const-array-heuristic",
+   "head": "pub static INTERVAL_OUT_POSTGRES_VERBOSE: &[(&str, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/interval_corpus.rs",
+   "head_line": 548,
+   "span": [
+    549,
+    565
+   ],
+   "lines": 16,
+   "reason": "const-array-heuristic",
+   "head": "pub static INTERVAL_OUT_ISO_8601: &[(&str, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/tsvector_stat/src/lib.rs",
+   "head_line": 252,
+   "span": [
+    253,
+    271
+   ],
+   "lines": 16,
+   "reason": "const-array-heuristic",
+   "head": "pub const TS_STAT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 2,
+   "span": [
+    3,
+    19
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static ISO2KOI: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 20,
+   "span": [
+    21,
+    37
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static KOI2ISO: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 38,
+   "span": [
+    39,
+    55
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static WIN12512KOI: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 56,
+   "span": [
+    57,
+    73
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static KOI2WIN1251: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 74,
+   "span": [
+    75,
+    91
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static WIN8662KOI: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 92,
+   "span": [
+    93,
+    109
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static KOI2WIN866: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 110,
+   "span": [
+    111,
+    127
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static WIN8662WIN1251: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 128,
+   "span": [
+    129,
+    145
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static WIN12512WIN866: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 146,
+   "span": [
+    147,
+    163
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static ISO2WIN1251: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 164,
+   "span": [
+    165,
+    181
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static WIN12512ISO: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 182,
+   "span": [
+    183,
+    199
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static ISO2WIN866: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 200,
+   "span": [
+    201,
+    217
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static WIN8662ISO: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 218,
+   "span": [
+    219,
+    235
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static WIN1250_2_ISO88592: [u8; 128] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 236,
+   "span": [
+    237,
+    253
+   ],
+   "lines": 16,
+   "reason": "generated-file",
+   "head": "pub static ISO88592_2_WIN1250: [u8; 128] = ["
+  },
+  {
+   "path": "crates/port/pg_bitutils/src/lib.rs",
+   "head_line": 2,
+   "span": [
+    3,
+    19
+   ],
+   "lines": 16,
+   "reason": "const-array-heuristic",
+   "head": "pub const PG_NUMBER_OF_ONES: [u8; 256] = ["
+  },
+  {
+   "path": "crates/backend/commands/foreigncmds/src/options.rs",
+   "head_line": 262,
+   "span": [
+    263,
+    278
+   ],
+   "lines": 15,
+   "reason": "const-array-heuristic",
+   "head": "const LIBPQ_CONNINFO_OPTIONS: &[(&str, Oid)] = &["
+  },
+  {
+   "path": "crates/backend/snowball/dict_snowball/src/dict.rs",
+   "head_line": 19,
+   "span": [
+    20,
+    38
+   ],
+   "lines": 15,
+   "reason": "const-array-heuristic",
+   "head": "static STEMMER_MODULES: [StemmerModule; 3] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 29,
+   "span": [
+    30,
+    45
+   ],
+   "lines": 15,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_ASCII_WORD: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/contrib/file_fdw/src/lib.rs",
+   "head_line": 38,
+   "span": [
+    39,
+    54
+   ],
+   "lines": 15,
+   "reason": "const-array-heuristic",
+   "head": "const VALID_OPTIONS: &[(&str, Oid)] = &["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/m5_suppress.rs",
+   "head_line": 1615,
+   "span": [
+    1616,
+    1630
+   ],
+   "lines": 14,
+   "reason": "const-array-heuristic",
+   "head": "pub(crate) const PLAIN_FOLD_AGGS: &[u32] = &["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/m5_suppress.rs",
+   "head_line": 5949,
+   "span": [
+    5950,
+    5964
+   ],
+   "lines": 14,
+   "reason": "const-array-heuristic",
+   "head": "pub const CLASS_NAMES: [&str; N_CLASSES] = ["
+  },
+  {
+   "path": "crates/backend/rewrite/rewrite_handler/src/lib.rs",
+   "head_line": 3187,
+   "span": [
+    3188,
+    3204
+   ],
+   "lines": 14,
+   "reason": "const-array-heuristic",
+   "head": "pub const REWRITE_BUILTINS: &[types_fmgr::FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 56,
+   "span": [
+    57,
+    71
+   ],
+   "lines": 14,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_UNSIGNED_INT: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/char/src/builtins.rs",
+   "head_line": 106,
+   "span": [
+    107,
+    121
+   ],
+   "lines": 14,
+   "reason": "const-array-heuristic",
+   "head": "pub const CHAR_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/dbsize/src/builtins.rs",
+   "head_line": 93,
+   "span": [
+    94,
+    108
+   ],
+   "lines": 14,
+   "reason": "const-array-heuristic",
+   "head": "pub const DBSIZE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/domains/src/lib.rs",
+   "head_line": 165,
+   "span": [
+    166,
+    182
+   ],
+   "lines": 14,
+   "reason": "const-array-heuristic",
+   "head": "pub const DOMAINS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/xmlmap/src/builtins.rs",
+   "head_line": 159,
+   "span": [
+    160,
+    174
+   ],
+   "lines": 14,
+   "reason": "const-array-heuristic",
+   "head": "pub const XMLMAP_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/lib.rs",
+   "head_line": 34,
+   "span": [
+    35,
+    49
+   ],
+   "lines": 14,
+   "reason": "const-array-heuristic",
+   "head": "pub static GucSource_Names: &[&str] = &["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/m5_suppress.rs",
+   "head_line": 1639,
+   "span": [
+    1640,
+    1653
+   ],
+   "lines": 13,
+   "reason": "const-array-heuristic",
+   "head": "const INTCASE_POLY_AGGS: &[u32] = &["
+  },
+  {
+   "path": "crates/backend/parser/gram_core/src/actions.rs",
+   "head_line": 11274,
+   "span": [
+    11275,
+    11288
+   ],
+   "lines": 13,
+   "reason": "const-array-heuristic",
+   "head": "static OBJECT_TYPE_ANY_NAME: [ObjectType; 13] = ["
+  },
+  {
+   "path": "crates/backend/statistics/statistics/src/builtins.rs",
+   "head_line": 217,
+   "span": [
+    218,
+    231
+   ],
+   "lines": 13,
+   "reason": "const-array-heuristic",
+   "head": "pub const STATISTICS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 2,
+   "span": [
+    3,
+    16
+   ],
+   "lines": 13,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_BASE: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/jsonpath_exec/src/lib.rs",
+   "head_line": 1811,
+   "span": [
+    1812,
+    1825
+   ],
+   "lines": 13,
+   "reason": "const-array-heuristic",
+   "head": "static FMT_STR: [&[u8]; 13] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/orderedsetaggs/src/lib.rs",
+   "head_line": 33,
+   "span": [
+    34,
+    47
+   ],
+   "lines": 13,
+   "reason": "const-array-heuristic",
+   "head": "pub const ORDEREDSETAGGS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/lib.rs",
+   "head_line": 811,
+   "span": [
+    812,
+    825
+   ],
+   "lines": 13,
+   "reason": "const-array-heuristic",
+   "head": "const ISO8859_FAMILY: [pg_enc; 13] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/utf8_procs.rs",
+   "head_line": 211,
+   "span": [
+    213,
+    226
+   ],
+   "lines": 13,
+   "reason": "const-array-heuristic",
+   "head": "const GB18030_RANGES: [(u32, u32, u32, u32); 13] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 231,
+   "span": [
+    232,
+    245
+   ],
+   "lines": 13,
+   "reason": "const-array-heuristic",
+   "head": "pub static server_message_level_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/_support/pgrust/trace/src/lib.rs",
+   "head_line": 27,
+   "span": [
+    28,
+    40
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "pub const ALL: &[Category] = &["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/m5_suppress.rs",
+   "head_line": 1684,
+   "span": [
+    1685,
+    1697
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "const GROUPED_SINK_AGGS_AVG: &[u32] = &["
+  },
+  {
+   "path": "crates/backend/replication/logical/logicalfuncs/src/lib.rs",
+   "head_line": 415,
+   "span": [
+    416,
+    430
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "pub const LOGICALFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/storage/ipc/dsm_core/src/dsm_impl.rs",
+   "head_line": 27,
+   "span": [
+    28,
+    43
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "pub static DYNAMIC_SHARED_MEMORY_OPTIONS: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/timezone/strftime/src/lib.rs",
+   "head_line": 16,
+   "span": [
+    17,
+    29
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "const MONTH: [&[u8]; 12] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 366,
+   "span": [
+    367,
+    379
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HOST_DOMAIN: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/activity/pgstat/src/lib.rs",
+   "head_line": 60,
+   "span": [
+    61,
+    73
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "const NAMES: [(&str, PgStat_Kind); 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/activity/waitevent/src/lib.rs",
+   "head_line": 245,
+   "span": [
+    246,
+    258
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "static LOCK_TAG_TYPE_NAMES: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 65,
+   "span": [
+    66,
+    78
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "pub const MONTHS_FULL: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/jsonpath_exec/src/builtins.rs",
+   "head_line": 261,
+   "span": [
+    262,
+    274
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "pub const JSONPATH_EXEC_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/lockfuncs/src/lib.rs",
+   "head_line": 25,
+   "span": [
+    26,
+    38
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "const LOCK_TAG_TYPE_NAMES: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 247,
+   "span": [
+    248,
+    260
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "pub static DESC_PG_AUTHID: [FormData_pg_attribute; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 260,
+   "span": [
+    261,
+    273
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "pub static icu_validation_level_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_misc/src/lib.rs",
+   "head_line": 325,
+   "span": [
+    326,
+    338
+   ],
+   "lines": 11,
+   "reason": "const-array-heuristic",
+   "head": "pub const MISC_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/fmgr_builtins.rs",
+   "head_line": 144,
+   "span": [
+    145,
+    156
+   ],
+   "lines": 11,
+   "reason": "const-array-heuristic",
+   "head": "pub const FORMATTING_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 217,
+   "span": [
+    218,
+    229
+   ],
+   "lines": 11,
+   "reason": "const-array-heuristic",
+   "head": "pub static client_message_level_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 410,
+   "span": [
+    411,
+    422
+   ],
+   "lines": 11,
+   "reason": "const-array-heuristic",
+   "head": "pub static synchronous_commit_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/optimizer/path/costsize/src/runtime_model.rs",
+   "head_line": 122,
+   "span": [
+    123,
+    133
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "pub const ALL: [RuntimeClass; 10] = ["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/m5_suppress.rs",
+   "head_line": 1659,
+   "span": [
+    1660,
+    1670
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "const GROUPED_SINK_AGGS: &[u32] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 249,
+   "span": [
+    250,
+    260
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_TAG_NAME: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/activity/waitevent/src/lib.rs",
+   "head_line": 145,
+   "span": [
+    146,
+    156
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "static WAIT_EVENT_TIMEOUT_NAMES: [&str; 10] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 396,
+   "span": [
+    397,
+    408
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "const DATABASE_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 904,
+   "span": [
+    905,
+    916
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "const COLUMN_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 357,
+   "span": [
+    358,
+    368
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "pub static compute_query_id_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 385,
+   "span": [
+    386,
+    396
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "pub static auto_explain_loglevel_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/common/md5/src/lib.rs",
+   "head_line": 16,
+   "span": [
+    17,
+    27
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "const K: [u32; 64] = ["
+  },
+  {
+   "path": "crates/contrib/isn/src/tables.rs",
+   "head_line": 12,
+   "span": [
+    13,
+    23
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "pub static EAN13_INDEX: [[u32; 2]; 10] = ["
+  },
+  {
+   "path": "crates/contrib/isn/src/tables.rs",
+   "head_line": 147,
+   "span": [
+    148,
+    158
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "pub static ISMN_INDEX: [[u32; 2]; 10] = ["
+  },
+  {
+   "path": "crates/contrib/isn/src/tables.rs",
+   "head_line": 168,
+   "span": [
+    169,
+    179
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "pub static ISSN_INDEX: [[u32; 2]; 10] = ["
+  },
+  {
+   "path": "crates/contrib/isn/src/tables.rs",
+   "head_line": 183,
+   "span": [
+    184,
+    194
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "pub static UPC_INDEX: [[u32; 2]; 10] = ["
+  },
+  {
+   "path": "crates/contrib/isn/src/tables.rs",
+   "head_line": 198,
+   "span": [
+    199,
+    209
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "pub static ISBN_INDEX: [[u32; 2]; 10] = ["
+  },
+  {
+   "path": "crates/contrib/isn/src/tables.rs",
+   "head_line": 1124,
+   "span": [
+    1125,
+    1135
+   ],
+   "lines": 10,
+   "reason": "const-array-heuristic",
+   "head": "pub static ISBN_INDEX_NEW: [[u32; 2]; 10] = ["
+  },
+  {
+   "path": "crates/backend/access/common/reloptions/src/lib.rs",
+   "head_line": 85,
+   "span": [
+    86,
+    95
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "const VACUUM_INDEX_CLEANUP_VALUES: &[(&str, i32)] = &["
+  },
+  {
+   "path": "crates/backend/access/transam/transam_xlog/src/guc_vars.rs",
+   "head_line": 118,
+   "span": [
+    119,
+    128
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "pub(crate) const ARCHIVE_MODE_OPTIONS: &[types_guc::config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/storage/lmgr/lock/src/lib.rs",
+   "head_line": 110,
+   "span": [
+    111,
+    120
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "static LOCK_MODE_NAMES: [&str; 9] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/builtins.rs",
+   "head_line": 255,
+   "span": [
+    256,
+    265
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "pub const WPARSER_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 88,
+   "span": [
+    89,
+    98
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_SPACE: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/activity/waitevent/src/lib.rs",
+   "head_line": 73,
+   "span": [
+    74,
+    83
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "static WAIT_EVENT_CLIENT_NAMES: [&str; 9] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 617,
+   "span": [
+    618,
+    627
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "pub(crate) const ROLE_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/multirangetypes/src/corpus_tests.rs",
+   "head_line": 47,
+   "span": [
+    48,
+    57
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "const TYPES: &[T] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 345,
+   "span": [
+    346,
+    355
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "pub static backslash_quote_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 398,
+   "span": [
+    399,
+    408
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "pub static constraint_exclusion_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 424,
+   "span": [
+    425,
+    434
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "pub static huge_pages_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 442,
+   "span": [
+    443,
+    452
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "pub static recovery_prefetch_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 454,
+   "span": [
+    455,
+    464
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "pub static debug_parallel_query_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 514,
+   "span": [
+    515,
+    524
+   ],
+   "lines": 9,
+   "reason": "const-array-heuristic",
+   "head": "pub static wal_compression_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/backup/basebackup/src/lib.rs",
+   "head_line": 93,
+   "span": [
+    94,
+    102
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "const EXCLUDE_FILES: &[ExcludeListItem] = &["
+  },
+  {
+   "path": "crates/backend/executor/lanereg/src/lib.rs",
+   "head_line": 91,
+   "span": [
+    92,
+    100
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "pub const ALL_TIERS: &[Tier] = &["
+  },
+  {
+   "path": "crates/backend/parser/gram_core/src/actions.rs",
+   "head_line": 11295,
+   "span": [
+    11296,
+    11304
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "static DROP_TYPE_NAME: [ObjectType; 8] = ["
+  },
+  {
+   "path": "crates/backend/tcop/backend_startup/src/lib.rs",
+   "head_line": 755,
+   "span": [
+    756,
+    764
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "const COMPAT_OPTIONS: [(&str, u32); 8] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 18,
+   "span": [
+    19,
+    27
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_NUM_WORD: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 184,
+   "span": [
+    185,
+    193
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_XML_ENTITY: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 226,
+   "span": [
+    227,
+    235
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_TAG_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 355,
+   "span": [
+    356,
+    364
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HOST_DOMAIN_SECOND: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 402,
+   "span": [
+    403,
+    411
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HOST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 463,
+   "span": [
+    464,
+    472
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_FILE: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/activity/pgstat/src/io.rs",
+   "head_line": 156,
+   "span": [
+    157,
+    165
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "pub const IOOP_ALL: [IOOp; IOOP_NUM_TYPES] = ["
+  },
+  {
+   "path": "crates/backend/utils/activity/pgstat/src/slru.rs",
+   "head_line": 29,
+   "span": [
+    30,
+    38
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "static SLRU_NAMES: [&str; SLRU_NUM_ELEMENTS] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/cryptohashfuncs/src/lib.rs",
+   "head_line": 72,
+   "span": [
+    73,
+    81
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "pub const CRYPTOHASH_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/tsrank/src/builtins.rs",
+   "head_line": 138,
+   "span": [
+    139,
+    147
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "pub const TSRANK_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/lib.rs",
+   "head_line": 123,
+   "span": [
+    124,
+    133
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "const WAL_LEVEL_OPTIONS: &[types_guc::config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 301,
+   "span": [
+    302,
+    310
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "pub static syslog_facility_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/common/base64/src/lib.rs",
+   "head_line": 7,
+   "span": [
+    8,
+    16
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "const B64LOOKUP: [i8; 128] = ["
+  },
+  {
+   "path": "crates/common/saslprep/src/tables.rs",
+   "head_line": 12,
+   "span": [
+    13,
+    21
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "pub const COMMONLY_MAPPED_TO_NOTHING_RANGES: &[(u32, u32)] = &["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 18,
+   "span": [
+    19,
+    27
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "const K256: [u32; 64] = ["
+  },
+  {
+   "path": "crates/_support/seams_init/src/lib.rs",
+   "head_line": 449,
+   "span": [
+    450,
+    460
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 7] = ["
+  },
+  {
+   "path": "crates/backend/access/spgist/spgist_box/src/lib.rs",
+   "head_line": 569,
+   "span": [
+    570,
+    577
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub const SPGIST_BOX_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/catalog/catalog_namespace/src/builtins.rs",
+   "head_line": 45,
+   "span": [
+    46,
+    53
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub const NAMESPACE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/executor/execmain/src/lanev2/router.rs",
+   "head_line": 102,
+   "span": [
+    103,
+    110
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub(super) const ALL: [ArmClass; N_ARMS] = ["
+  },
+  {
+   "path": "crates/backend/executor/execmain/src/lanev2/stats.rs",
+   "head_line": 847,
+   "span": [
+    848,
+    855
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "const ENGAGE_ARMS: [&str; 7] = ["
+  },
+  {
+   "path": "crates/backend/main/main_main/src/lib.rs",
+   "head_line": 50,
+   "span": [
+    51,
+    59
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "const DISPATCH_OPTION_NAMES: &[(DispatchOption, &str)] = &["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/m5_suppress.rs",
+   "head_line": 2175,
+   "span": [
+    2176,
+    2183
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "const HEAP_CMP_AGGS: &[u32] = &["
+  },
+  {
+   "path": "crates/backend/timezone/strftime/src/lib.rs",
+   "head_line": 31,
+   "span": [
+    32,
+    39
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "const WEEKDAY: [&[u8]; 7] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/dict/src/lib.rs",
+   "head_line": 157,
+   "span": [
+    158,
+    165
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub const DICT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 419,
+   "span": [
+    420,
+    427
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_FILE_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 438,
+   "span": [
+    439,
+    446
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_PATH_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 526,
+   "span": [
+    527,
+    534
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_ASCII_WORD: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 88,
+   "span": [
+    89,
+    96
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub const DAYS: [&str; 7] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/network_gist/src/lib.rs",
+   "head_line": 518,
+   "span": [
+    519,
+    526
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub const NETWORK_GIST_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/rangetypes_gist/src/lib.rs",
+   "head_line": 1198,
+   "span": [
+    1199,
+    1206
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub const RANGETYPES_GIST_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/windowfuncs/src/lib.rs",
+   "head_line": 142,
+   "span": [
+    143,
+    150
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub const WINDOWFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 270,
+   "span": [
+    271,
+    278
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub static DESC_PG_AUTH_MEMBERS: [FormData_pg_attribute; 7] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 416,
+   "span": [
+    417,
+    424
+   ],
+   "lines": 7,
+   "reason": "generated-file",
+   "head": "pub static B2C3: [[u16; 2]; 7] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/lib.rs",
+   "head_line": 24,
+   "span": [
+    25,
+    32
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub static GucContext_Names: &[&str] = &["
+  },
+  {
+   "path": "crates/contrib/isn/src/lib.rs",
+   "head_line": 47,
+   "span": [
+    48,
+    55
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "const ISN_NAMES: [&str; 7] = ["
+  },
+  {
+   "path": "crates/backend/access/gin/gin_funcs/src/lib.rs",
+   "head_line": 104,
+   "span": [
+    105,
+    111
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub static GIN_FUNCS_BUILTINS: &[FmgrBuiltin] = &[FmgrBuiltin {"
+  },
+  {
+   "path": "crates/backend/access/spgist/spgist_text/src/lib.rs",
+   "head_line": 551,
+   "span": [
+    552,
+    558
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub const SPGIST_TEXT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/access/transam/twophase/src/srf.rs",
+   "head_line": 12,
+   "span": [
+    13,
+    19
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static TWOPHASE_BUILTINS: &[FmgrBuiltin] = &[FmgrBuiltin {"
+  },
+  {
+   "path": "crates/backend/access/transam/xlogprefetcher/src/lib.rs",
+   "head_line": 666,
+   "span": [
+    667,
+    673
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static XLOGPREFETCHER_BUILTINS: &[FmgrBuiltin] = &[FmgrBuiltin {"
+  },
+  {
+   "path": "crates/backend/catalog/catalog_heap/src/lib.rs",
+   "head_line": 68,
+   "span": [
+    69,
+    75
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub static SysAtt: [FormData_pg_attribute; 6] = ["
+  },
+  {
+   "path": "crates/backend/catalog/pg_proc/src/lib.rs",
+   "head_line": 1117,
+   "span": [
+    1118,
+    1124
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static PG_PROC_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[types_fmgr::FmgrBuiltin {"
+  },
+  {
+   "path": "crates/backend/commands/opclasscmds/src/builtins.rs",
+   "head_line": 11,
+   "span": [
+    12,
+    18
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub static OPCLASS_BUILTINS: &[FmgrBuiltin] = &[FmgrBuiltin {"
+  },
+  {
+   "path": "crates/backend/commands/prepare/src/lib.rs",
+   "head_line": 37,
+   "span": [
+    38,
+    44
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub const PREPARE_BUILTINS: &[FmgrBuiltin] = &[FmgrBuiltin {"
+  },
+  {
+   "path": "crates/backend/executor/execmain/src/lanev2/coverage.rs",
+   "head_line": 196,
+   "span": [
+    197,
+    203
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub static LANEV2_BUILTINS: &[FmgrBuiltin] = &[FmgrBuiltin {"
+  },
+  {
+   "path": "crates/backend/executor/execmain/src/lanev2/router.rs",
+   "head_line": 300,
+   "span": [
+    301,
+    307
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "const ALL: [ArmCounter; N_COUNTERS] = ["
+  },
+  {
+   "path": "crates/backend/executor/execmain/src/lanev2/tail_source.rs",
+   "head_line": 197,
+   "span": [
+    198,
+    204
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "const ALL: [T3Shape; 6] = ["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/predtest.rs",
+   "head_line": 679,
+   "span": [
+    681,
+    687
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static RC_IMPLIES_TABLE: [[bool; 6]; 6] = ["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/predtest.rs",
+   "head_line": 690,
+   "span": [
+    691,
+    697
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static RC_REFUTES_TABLE: [[bool; 6]; 6] = ["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/predtest.rs",
+   "head_line": 700,
+   "span": [
+    701,
+    707
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static RC_IMPLIC_TABLE: [[CompareType; 6]; 6] = ["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/predtest.rs",
+   "head_line": 710,
+   "span": [
+    711,
+    717
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static RC_REFUTE_TABLE: [[CompareType; 6]; 6] = ["
+  },
+  {
+   "path": "crates/backend/replication/logical/relation/src/lib.rs",
+   "head_line": 389,
+   "span": [
+    390,
+    396
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub const LOGICALRELATION_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[types_fmgr::FmgrBuiltin"
+  },
+  {
+   "path": "crates/backend/statistics/stats_import/src/relation_stats.rs",
+   "head_line": 21,
+   "span": [
+    22,
+    28
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static RELARGINFO: [StatsArgInfo; NUM_RELATION_STATS_ARGS] = ["
+  },
+  {
+   "path": "crates/backend/storage/aio/aio_funcs/src/lib.rs",
+   "head_line": 22,
+   "span": [
+    23,
+    29
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub const AIO_FUNCS_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[types_fmgr::FmgrBuiltin {"
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 47,
+   "span": [
+    48,
+    54
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_WORD: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 79,
+   "span": [
+    80,
+    86
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_SIGNED_INT: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 106,
+   "span": [
+    107,
+    113
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_UDECIMAL: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 121,
+   "span": [
+    122,
+    128
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_DECIMAL: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 175,
+   "span": [
+    176,
+    182
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_XML_ENTITY_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 429,
+   "span": [
+    430,
+    436
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_FILE_TWIDDLE: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 543,
+   "span": [
+    544,
+    550
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_WORD: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 575,
+   "span": [
+    576,
+    582
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_PARSE_HYPHEN: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 599,
+   "span": [
+    600,
+    606
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_ASCII_WORD_PART: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/activity/waitevent/src/funcs.rs",
+   "head_line": 58,
+   "span": [
+    59,
+    65
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub const WAITEVENT_BUILTINS: &[FmgrBuiltin] = &[FmgrBuiltin {"
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 597,
+   "span": [
+    598,
+    604
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub(crate) const SEQUENCE_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 606,
+   "span": [
+    607,
+    614
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub(crate) const PARAMETER_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/dbsize/src/builtins.rs",
+   "head_line": 111,
+   "span": [
+    112,
+    118
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "const SIZE_PRETTY_UNITS: &[(&str, u32, bool, u8)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/pseudorandomfuncs/src/builtins.rs",
+   "head_line": 48,
+   "span": [
+    49,
+    55
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub const PSEUDORANDOM_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_funcs/src/settings.rs",
+   "head_line": 286,
+   "span": [
+    287,
+    293
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "const FLAG_NAMES: &[(i32, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_funcs/src/settings.rs",
+   "head_line": 326,
+   "span": [
+    327,
+    333
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub const GUC_FUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/lib.rs",
+   "head_line": 136,
+   "span": [
+    137,
+    144
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "const RECOVERY_TARGET_ACTION_OPTIONS: &[types_guc::config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/pg_config/src/lib.rs",
+   "head_line": 74,
+   "span": [
+    75,
+    81
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub const PG_CONFIG_BUILTINS: &[FmgrBuiltin] = &[FmgrBuiltin {"
+  },
+  {
+   "path": "crates/backend/utils/mmgr/portalmem/src/funcs.rs",
+   "head_line": 27,
+   "span": [
+    28,
+    34
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub const PORTALMEM_BUILTINS: &[FmgrBuiltin] = &[FmgrBuiltin {"
+  },
+  {
+   "path": "crates/common/saslprep/src/tables.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    10
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub const NON_ASCII_SPACE_RANGES: &[(u32, u32)] = &["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 273,
+   "span": [
+    274,
+    280
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_T: [DmLetter; 6] = ["
+  },
+  {
+   "path": "crates/backend/access/brin/brin_bloom/src/builtins.rs",
+   "head_line": 66,
+   "span": [
+    67,
+    72
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub const BLOOM_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/access/rmgrdesc/src/xlogdesc.rs",
+   "head_line": 42,
+   "span": [
+    43,
+    48
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub const wal_level_options: &[(&str, i32, bool)] = &["
+  },
+  {
+   "path": "crates/backend/access/spgist/spgist_quadtree/src/lib.rs",
+   "head_line": 402,
+   "span": [
+    403,
+    408
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub const SPGIST_QUAD_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/access/transam/transam_xlog/src/guc_vars.rs",
+   "head_line": 110,
+   "span": [
+    111,
+    116
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub(crate) const WAL_SYNC_METHOD_OPTIONS: &[types_guc::config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/access/transam/twophase_rmgr/src/lib.rs",
+   "head_line": 17,
+   "span": [
+    18,
+    23
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub static twophase_recover_callbacks: [Option<TwoPhaseCallback>; NUM_TWOPHASE_RM] = ["
+  },
+  {
+   "path": "crates/backend/access/transam/twophase_rmgr/src/lib.rs",
+   "head_line": 25,
+   "span": [
+    26,
+    31
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub static twophase_postcommit_callbacks: [Option<TwoPhaseCallback>; NUM_TWOPHASE_RM] = ["
+  },
+  {
+   "path": "crates/backend/access/transam/twophase_rmgr/src/lib.rs",
+   "head_line": 33,
+   "span": [
+    34,
+    39
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub static twophase_postabort_callbacks: [Option<TwoPhaseCallback>; NUM_TWOPHASE_RM] = ["
+  },
+  {
+   "path": "crates/backend/access/transam/twophase_rmgr/src/lib.rs",
+   "head_line": 41,
+   "span": [
+    42,
+    47
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub static twophase_standby_recover_callbacks: [Option<TwoPhaseCallback>; NUM_TWOPHASE_RM]"
+  },
+  {
+   "path": "crates/backend/backup/basebackup/src/lib.rs",
+   "head_line": 1055,
+   "span": [
+    1056,
+    1061
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "const CHECKSUM_BASE_OFFSETS: [u32; N_SUMS] = ["
+  },
+  {
+   "path": "crates/backend/commands/sequence_seams/src/builtins.rs",
+   "head_line": 37,
+   "span": [
+    38,
+    43
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub const SEQUENCE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/lib/radixtree/src/lib.rs",
+   "head_line": 110,
+   "span": [
+    111,
+    116
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "const CLASS_FANOUT: [usize; NUM_SIZE_CLASSES] = ["
+  },
+  {
+   "path": "crates/backend/lib/radixtree/src/lib.rs",
+   "head_line": 118,
+   "span": [
+    119,
+    124
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "const CLASS_ALLOC_SIZE: [usize; NUM_SIZE_CLASSES] = ["
+  },
+  {
+   "path": "crates/backend/lib/radixtree/src/lib.rs",
+   "head_line": 126,
+   "span": [
+    127,
+    132
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "const CLASS_NAME: [&str; NUM_SIZE_CLASSES] = ["
+  },
+  {
+   "path": "crates/backend/optimizer/path/costsize/src/runtime_model.rs",
+   "head_line": 423,
+   "span": [
+    424,
+    429
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "const DEFAULT_DECIDE_CLASSES: [&str; 5] = ["
+  },
+  {
+   "path": "crates/backend/replication/slot/src/lib.rs",
+   "head_line": 1847,
+   "span": [
+    1848,
+    1853
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub static SLOT_INVALIDATION_CAUSES: [SlotInvalidationCauseMap; RS_INVAL_MAX_CAUSES + 1] ="
+  },
+  {
+   "path": "crates/backend/storage/buffer/bufmgr/src/write.rs",
+   "head_line": 165,
+   "span": [
+    166,
+    171
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "const CHECKSUM_BASE_OFFSETS: [u32; N_SUMS] = ["
+  },
+  {
+   "path": "crates/backend/tcop/backend_startup/src/lib.rs",
+   "head_line": 783,
+   "span": [
+    784,
+    789
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "const OPTIONS: [(&str, u32); 5] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 155,
+   "span": [
+    156,
+    161
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_MANTISSA_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 195,
+   "span": [
+    196,
+    201
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_XML_ENTITY_NUM_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 312,
+   "span": [
+    313,
+    318
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_COMMENT_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 387,
+   "span": [
+    388,
+    393
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_PORT: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 455,
+   "span": [
+    456,
+    461
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_PATH_SECOND: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 474,
+   "span": [
+    475,
+    480
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_FILE_NEXT: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 518,
+   "span": [
+    519,
+    524
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_ASCII_WORD_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 559,
+   "span": [
+    560,
+    565
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_NUM_WORD: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 567,
+   "span": [
+    568,
+    573
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_DIGIT_LOOKAHEAD: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 591,
+   "span": [
+    592,
+    597
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_WORD_PART: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 615,
+   "span": [
+    616,
+    621
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_UNSIGNED_INT: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/network_spgist/src/lib.rs",
+   "head_line": 519,
+   "span": [
+    520,
+    525
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub const NETWORK_SPGIST_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/rangetypes_spgist/src/lib.rs",
+   "head_line": 598,
+   "span": [
+    599,
+    604
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub const RANGETYPES_SPGIST_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 333,
+   "span": [
+    334,
+    339
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub static SHARED_BOOTSTRAP_CATALOGS: [&BootstrapCatalog; 5] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 477,
+   "span": [
+    478,
+    483
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "const SSL_PROTOCOL_VERSIONS_INFO: [config_enum_entry; 5] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 233,
+   "span": [
+    234,
+    239
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_S: [DmLetter; 5] = ["
+  },
+  {
+   "path": "crates/contrib/isn/src/tables.rs",
+   "head_line": 159,
+   "span": [
+    160,
+    165
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub static ISMN_RANGE: &[Range] = &["
+  },
+  {
+   "path": "crates/contrib/isn/src/tables.rs",
+   "head_line": 1136,
+   "span": [
+    1137,
+    1142
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "pub static ISBN_RANGE_NEW: &[Range] = &["
+  },
+  {
+   "path": "crates/contrib/pageinspect/src/rawpage.rs",
+   "head_line": 188,
+   "span": [
+    189,
+    194
+   ],
+   "lines": 5,
+   "reason": "const-array-heuristic",
+   "head": "const CHECKSUM_BASE_OFFSETS: [u32; N_SUMS] = ["
+  },
+  {
+   "path": "crates/backend/access/spgist/spgist_kdtree/src/lib.rs",
+   "head_line": 309,
+   "span": [
+    310,
+    314
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub const SPGIST_KD_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/access/transam/parallel/src/lib.rs",
+   "head_line": 272,
+   "span": [
+    273,
+    277
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "const UNPORTED_INTERNAL_WORKERS: &[&str] = &["
+  },
+  {
+   "path": "crates/backend/commands/explain/src/node.rs",
+   "head_line": 2128,
+   "span": [
+    2129,
+    2133
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "const METHOD_BITS: [TuplesortMethod; 4] = ["
+  },
+  {
+   "path": "crates/backend/parser/gram_core/src/actions.rs",
+   "head_line": 11289,
+   "span": [
+    11290,
+    11294
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static OBJECT_TYPE_NAME: [ObjectType; 4] = ["
+  },
+  {
+   "path": "crates/backend/postmaster/postmaster/src/crash_signals.rs",
+   "head_line": 10,
+   "span": [
+    11,
+    15
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "const CRASH_SIGS: [(i32, &str); 4] = ["
+  },
+  {
+   "path": "crates/backend/statistics/stats_import/src/attribute_stats.rs",
+   "head_line": 104,
+   "span": [
+    105,
+    109
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static CLEARARGINFO: [StatsArgInfo; C_NUM_ATTRIBUTE_STATS_ARGS] = ["
+  },
+  {
+   "path": "crates/backend/storage/ipc/signalfuncs/src/lib.rs",
+   "head_line": 213,
+   "span": [
+    214,
+    218
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub const SIGNALFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 148,
+   "span": [
+    149,
+    153
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_VERSION: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 209,
+   "span": [
+    210,
+    214
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_XML_ENTITY_NUM: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 216,
+   "span": [
+    217,
+    221
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_XML_ENTITY_HEX_NUM: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 290,
+   "span": [
+    291,
+    295
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_TAG_ESCAPE_K: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 297,
+   "span": [
+    298,
+    302
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_TAG_ESCAPE_KK: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 338,
+   "span": [
+    339,
+    343
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_CLOSE_COMMENT_LAST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 348,
+   "span": [
+    349,
+    353
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HOST_FIRST_DOMAIN: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 395,
+   "span": [
+    396,
+    400
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HOST_FIRST_AN: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 448,
+   "span": [
+    449,
+    453
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_PATH_FIRST_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 536,
+   "span": [
+    537,
+    541
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_WORD_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 552,
+   "span": [
+    553,
+    557
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_NUM_WORD_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 584,
+   "span": [
+    585,
+    589
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_PARSE_HYPHEN_HYPHEN: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 608,
+   "span": [
+    609,
+    613
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_HYPHEN_NUM_WORD_PART: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 420,
+   "span": [
+    421,
+    425
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "const SCHEMA_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 427,
+   "span": [
+    428,
+    432
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "const LARGEOBJECT_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_amutils/src/lib.rs",
+   "head_line": 608,
+   "span": [
+    609,
+    613
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub const AMUTILS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/dbsize/src/builtins.rs",
+   "head_line": 46,
+   "span": [
+    47,
+    51
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "const ALL_FORKS: [types_core::ForkNumber; 4] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/jsonpath/src/builtins.rs",
+   "head_line": 93,
+   "span": [
+    94,
+    98
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub const JSONPATH_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/xml/src/chvalid.rs",
+   "head_line": 88,
+   "span": [
+    89,
+    93
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "const XML_IS_DIGIT_SRNG: &[(u16, u16)] = &["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 288,
+   "span": [
+    289,
+    293
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static DESC_PG_SHSECLABEL: [FormData_pg_attribute; 4] = ["
+  },
+  {
+   "path": "crates/backend/utils/cache/relcache/src/schemapg.rs",
+   "head_line": 342,
+   "span": [
+    343,
+    347
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static LOCAL_BOOTSTRAP_CATALOGS: [&BootstrapCatalog; 4] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/maps/local_tables.rs",
+   "head_line": 410,
+   "span": [
+    411,
+    415
+   ],
+   "lines": 4,
+   "reason": "generated-file",
+   "head": "pub static B1C4: [[u16; 2]; 4] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 253,
+   "span": [
+    254,
+    258
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static intervalstyle_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 281,
+   "span": [
+    282,
+    286
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static log_statement_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 288,
+   "span": [
+    289,
+    293
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static isolation_level_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 377,
+   "span": [
+    378,
+    382
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static auto_explain_format_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/common/md5/src/lib.rs",
+   "head_line": 9,
+   "span": [
+    10,
+    14
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "const S: [u32; 64] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 89,
+   "span": [
+    90,
+    94
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_A: [DmLetter; 4] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 104,
+   "span": [
+    105,
+    109
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_C: [DmLetter; 4] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 122,
+   "span": [
+    123,
+    127
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_D: [DmLetter; 4] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 128,
+   "span": [
+    129,
+    133
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_E: [DmLetter; 4] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 137,
+   "span": [
+    138,
+    142
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_I: [DmLetter; 4] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 281,
+   "span": [
+    282,
+    286
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_U: [DmLetter; 4] = ["
+  },
+  {
+   "path": "crates/contrib/pgcrypto/src/crypt/cryptdes.rs",
+   "head_line": 85,
+   "span": [
+    86,
+    90
+   ],
+   "lines": 4,
+   "reason": "const-array-heuristic",
+   "head": "const CRYPT_BITS32: [u32; 32] = ["
+  },
+  {
+   "path": "crates/backend/access/common/reloptions/src/lib.rs",
+   "head_line": 97,
+   "span": [
+    98,
+    101
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "const GIST_BUFFERING_VALUES: &[(&str, i32)] = &["
+  },
+  {
+   "path": "crates/backend/commands/extension_seams/src/builtins.rs",
+   "head_line": 29,
+   "span": [
+    30,
+    33
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub const EXTENSION_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/executor/lanereg/src/lib.rs",
+   "head_line": 340,
+   "span": [
+    341,
+    344
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "const COV_AOT_CMP_SAOP: &[TierCov] = &["
+  },
+  {
+   "path": "crates/backend/executor/lanereg/src/lib.rs",
+   "head_line": 345,
+   "span": [
+    346,
+    349
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "const COV_ARITH_INT4: &[TierCov] = &["
+  },
+  {
+   "path": "crates/backend/optimizer/path/costsize/src/runtime_model.rs",
+   "head_line": 224,
+   "span": [
+    225,
+    228
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub const SERIAL_FIT_UNUSABLE: [RuntimeClass; 3] = ["
+  },
+  {
+   "path": "crates/backend/optimizer/plan/planner/src/m5_suppress.rs",
+   "head_line": 1855,
+   "span": [
+    1856,
+    1859
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "const HAVING_CMP_FNS: &[u32] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 73,
+   "span": [
+    74,
+    77
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_SIGNED_INT_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 100,
+   "span": [
+    101,
+    104
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_UDECIMAL_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 115,
+   "span": [
+    116,
+    119
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_DECIMAL_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 130,
+   "span": [
+    131,
+    134
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_VER_VERSION: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 136,
+   "span": [
+    137,
+    140
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_SVER_VERSION: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 142,
+   "span": [
+    143,
+    146
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_VERSION_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 163,
+   "span": [
+    164,
+    167
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_MANTISSA_SIGN: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 169,
+   "span": [
+    170,
+    173
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_MANTISSA: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 203,
+   "span": [
+    204,
+    207
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_XML_ENTITY_HEX_NUM_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 237,
+   "span": [
+    238,
+    241
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_XML_BEGIN: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 243,
+   "span": [
+    244,
+    247
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_TAG_CLOSE_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 262,
+   "span": [
+    263,
+    266
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_TAG_BEGIN_END: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 320,
+   "span": [
+    321,
+    324
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_COMMENT_LAST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 326,
+   "span": [
+    327,
+    330
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_COMMENT: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 332,
+   "span": [
+    333,
+    336
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_CLOSE_COMMENT_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 381,
+   "span": [
+    382,
+    385
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_PORT_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 413,
+   "span": [
+    414,
+    417
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_EMAIL: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 482,
+   "span": [
+    483,
+    486
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_URL_PATH_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 491,
+   "span": [
+    492,
+    495
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_URL_PATH: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 497,
+   "span": [
+    498,
+    501
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_FURL: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 503,
+   "span": [
+    504,
+    507
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_PROTOCOL_FIRST: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 509,
+   "span": [
+    510,
+    513
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_PROTOCOL_SECOND: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_ascii/src/lib.rs",
+   "head_line": 144,
+   "span": [
+    145,
+    148
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub const ASCII_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/cash/src/lib.rs",
+   "head_line": 486,
+   "span": [
+    487,
+    490
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "const SMALL_WORDS: [&str; 28] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/quote/src/builtins.rs",
+   "head_line": 37,
+   "span": [
+    38,
+    41
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub const QUOTE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/xml/src/chvalid.rs",
+   "head_line": 96,
+   "span": [
+    97,
+    100
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "const XML_IS_EXTENDER_SRNG: &[(u16, u16)] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc/src/name.rs",
+   "head_line": 3,
+   "span": [
+    4,
+    7
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub const MAP_OLD_GUC_NAMES: &[(&str, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 247,
+   "span": [
+    248,
+    251
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static hnsw_iterative_scan_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 275,
+   "span": [
+    276,
+    279
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static log_error_verbosity_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 295,
+   "span": [
+    296,
+    299
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static session_replication_role_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 312,
+   "span": [
+    313,
+    316
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static track_function_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 318,
+   "span": [
+    319,
+    322
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static stats_fetch_consistency: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 334,
+   "span": [
+    335,
+    338
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static regex_engine_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 370,
+   "span": [
+    371,
+    374
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static pgss_track_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 436,
+   "span": [
+    437,
+    440
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static huge_pages_status_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 466,
+   "span": [
+    467,
+    470
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static plan_cache_mode_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 153,
+   "span": [
+    154,
+    157
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_O: [DmLetter; 3] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 200,
+   "span": [
+    201,
+    204
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SH: [DmLetter; 3] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 219,
+   "span": [
+    220,
+    223
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_ST: [DmLetter; 3] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 228,
+   "span": [
+    229,
+    232
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SZ: [DmLetter; 3] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 250,
+   "span": [
+    251,
+    254
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_TS: [DmLetter; 3] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 265,
+   "span": [
+    266,
+    269
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_TT: [DmLetter; 3] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 309,
+   "span": [
+    310,
+    313
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_Z: [DmLetter; 3] = ["
+  },
+  {
+   "path": "crates/contrib/pgcrypto/src/crypt/cryptdes.rs",
+   "head_line": 18,
+   "span": [
+    19,
+    22
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "const IP: [u8; 64] = ["
+  },
+  {
+   "path": "crates/contrib/pgcrypto/src/crypt/cryptdes.rs",
+   "head_line": 24,
+   "span": [
+    25,
+    28
+   ],
+   "lines": 3,
+   "reason": "const-array-heuristic",
+   "head": "const KEY_PERM: [u8; 56] = ["
+  },
+  {
+   "path": "crates/_support/types/types_core/src/fmgr.rs",
+   "head_line": 16,
+   "span": [
+    17,
+    19
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const FMGR_ABI_EXTRA: [u8; 32] = ["
+  },
+  {
+   "path": "crates/backend/access/common/reloptions/src/lib.rs",
+   "head_line": 103,
+   "span": [
+    104,
+    106
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const VIEW_CHECK_OPTION_VALUES: &[(&str, i32)] = &["
+  },
+  {
+   "path": "crates/backend/catalog/pg_publication/src/lib.rs",
+   "head_line": 1122,
+   "span": [
+    1123,
+    1125
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const PUBLICATION_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/commands/foreigncmds_seams/src/lib.rs",
+   "head_line": 78,
+   "span": [
+    79,
+    81
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const FOREIGN_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/executor/execexpr/src/interp.rs",
+   "head_line": 2509,
+   "span": [
+    2510,
+    2512
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const NAMES: [&str; 9] = ["
+  },
+  {
+   "path": "crates/backend/executor/lanereg/src/lib.rs",
+   "head_line": 328,
+   "span": [
+    329,
+    331
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const COV_AOT_CMP: &[TierCov] = &["
+  },
+  {
+   "path": "crates/backend/executor/lanereg/src/lib.rs",
+   "head_line": 363,
+   "span": [
+    364,
+    366
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const COV_ARITH_INT8_JIT: &[TierCov] = &["
+  },
+  {
+   "path": "crates/backend/executor/lanereg/src/lib.rs",
+   "head_line": 372,
+   "span": [
+    373,
+    375
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const COV_ARITH_MIX24: &[TierCov] = &["
+  },
+  {
+   "path": "crates/backend/executor/nodeagg/src/merge.rs",
+   "head_line": 56,
+   "span": [
+    57,
+    59
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub(crate) const COMBINE_WHITELIST: &[Oid] = &["
+  },
+  {
+   "path": "crates/backend/executor/sql_functions/src/lib.rs",
+   "head_line": 73,
+   "span": [
+    74,
+    76
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "static FUNCTIONS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/regex/regex_core/src/regex_locale.rs",
+   "head_line": 500,
+   "span": [
+    501,
+    503
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const CLASS_NAMES: [&str; NUM_CCLASSES as usize] = ["
+  },
+  {
+   "path": "crates/backend/snowball/dict_snowball/src/builtins.rs",
+   "head_line": 38,
+   "span": [
+    39,
+    41
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const SNOWBALL_CLANG: &[(&str, i16, PGFunction)] = &["
+  },
+  {
+   "path": "crates/backend/storage/aio/aio_core/src/lib.rs",
+   "head_line": 56,
+   "span": [
+    58,
+    60
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const IO_METHOD_OPTIONS: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/timezone/localtime/src/lib.rs",
+   "head_line": 167,
+   "span": [
+    168,
+    170
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const MON_LENGTHS: [[i32; MONSPERYEAR]; 2] = ["
+  },
+  {
+   "path": "crates/backend/tsearch/spell/src/builtins.rs",
+   "head_line": 38,
+   "span": [
+    39,
+    41
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const SPELL_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/tsearch/wparser_def/src/tables.rs",
+   "head_line": 304,
+   "span": [
+    305,
+    307
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "static ACTION_TPS_IN_TAG_BACK_SLESHED: &[TParserStateActionItem] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 410,
+   "span": [
+    411,
+    413
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const FUNCTION_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 415,
+   "span": [
+    416,
+    418
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const USAGE_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/acl/src/builtins.rs",
+   "head_line": 592,
+   "span": [
+    593,
+    595
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub(crate) const TABLESPACE_PRIV_MAP: &[PrivMapEntry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/calendar.rs",
+   "head_line": 1,
+   "span": [
+    2,
+    4
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static DAY_TAB: [[i32; 13]; 2] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_timestamp/src/lib.rs",
+   "head_line": 1100,
+   "span": [
+    1101,
+    1103
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const CHAIN: [i32; 10] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/encode/src/builtins.rs",
+   "head_line": 45,
+   "span": [
+    46,
+    48
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const ENCODE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/dch_entry.rs",
+   "head_line": 495,
+   "span": [
+    496,
+    498
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const YSUM: [[i32; 13]; 2] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/hbafuncs/src/lib.rs",
+   "head_line": 14,
+   "span": [
+    15,
+    17
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static HBAFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/mcxtfuncs/src/lib.rs",
+   "head_line": 165,
+   "span": [
+    166,
+    168
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const MCXTFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/tsginidx/src/builtins.rs",
+   "head_line": 32,
+   "span": [
+    33,
+    35
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const TSGINIDX_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/tsquery_rewrite/src/lib.rs",
+   "head_line": 329,
+   "span": [
+    330,
+    332
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const TSQUERY_REWRITE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/fmgr/fmgr_core/src/lib.rs",
+   "head_line": 283,
+   "span": [
+    284,
+    286
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const THIN_TABLES: &[&[::fmgr::ThinBuiltin]] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/conv/src/lib.rs",
+   "head_line": 806,
+   "span": [
+    807,
+    809
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const WIN_FAMILY: [pg_enc; 11] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 212,
+   "span": [
+    213,
+    215
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static bytea_output_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 324,
+   "span": [
+    325,
+    327
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static xmlbinary_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 329,
+   "span": [
+    330,
+    332
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static xmloption_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 340,
+   "span": [
+    341,
+    343
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static pgrust_parallel_engine_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 472,
+   "span": [
+    473,
+    475
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static password_encryption_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 492,
+   "span": [
+    493,
+    495
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static debug_logical_replication_streaming_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 501,
+   "span": [
+    502,
+    504
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static shared_memory_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/rls/src/lib.rs",
+   "head_line": 88,
+   "span": [
+    89,
+    91
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const RLS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 60,
+   "span": [
+    61,
+    63
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const SHA384_H0: [u64; 8] = ["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 65,
+   "span": [
+    66,
+    68
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const SHA512_H0: [u64; 8] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 28,
+   "span": [
+    29,
+    31
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_1_X_X_OR_4_4_4: [DmCodes; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 41,
+   "span": [
+    42,
+    44
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_3_3_3_OR_4_4_4: [DmCodes; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 54,
+   "span": [
+    55,
+    57
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_5_5_5_OR_45_45_45: [DmCodes; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 58,
+   "span": [
+    59,
+    61
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_5_5_5_OR_4_4_4: [DmCodes; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 77,
+   "span": [
+    78,
+    80
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_94_94_94_OR_4_4_4: [DmCodes; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 84,
+   "span": [
+    85,
+    87
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_X_X_6_OR_X_X_X: [DmCodes; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 110,
+   "span": [
+    111,
+    113
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_DR: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 114,
+   "span": [
+    115,
+    117
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_DS: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 118,
+   "span": [
+    119,
+    121
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_DZ: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 143,
+   "span": [
+    144,
+    146
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_K: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 158,
+   "span": [
+    159,
+    161
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_P: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 162,
+   "span": [
+    163,
+    165
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_R: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 172,
+   "span": [
+    173,
+    175
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SCHTS: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 176,
+   "span": [
+    177,
+    179
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SCHT: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 180,
+   "span": [
+    181,
+    183
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SCH: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 196,
+   "span": [
+    197,
+    199
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SHT: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 208,
+   "span": [
+    209,
+    211
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_STR: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 215,
+   "span": [
+    216,
+    218
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_STS: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 224,
+   "span": [
+    225,
+    227
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SZC: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 243,
+   "span": [
+    244,
+    246
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_TR: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 261,
+   "span": [
+    262,
+    264
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_TTS: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 305,
+   "span": [
+    306,
+    308
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_ZS: [DmLetter; 2] = ["
+  },
+  {
+   "path": "crates/contrib/pgcrypto/src/crypt/cryptdes.rs",
+   "head_line": 32,
+   "span": [
+    33,
+    35
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const COMP_PERM: [u8; 48] = ["
+  },
+  {
+   "path": "crates/contrib/pgcrypto/src/crypt/cryptdes.rs",
+   "head_line": 80,
+   "span": [
+    81,
+    83
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const PBOX: [u8; 32] = ["
+  },
+  {
+   "path": "crates/backend/libpq/libpq_pqsignal/src/lib.rs",
+   "head_line": 39,
+   "span": [
+    40,
+    41
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const NEVER_BLOCK_SIGNALS: [c_int; 8] = ["
+  },
+  {
+   "path": "crates/backend/timezone/strftime/src/lib.rs",
+   "head_line": 13,
+   "span": [
+    14,
+    15
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const MON: [&[u8]; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/calendar.rs",
+   "head_line": 6,
+   "span": [
+    7,
+    8
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static MONTHS: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/calendar.rs",
+   "head_line": 10,
+   "span": [
+    11,
+    12
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static DAYS: [&str; 7] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_timestamp/src/interval.rs",
+   "head_line": 1629,
+   "span": [
+    1630,
+    1631
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const CHAIN: [i32; 8] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 83,
+   "span": [
+    84,
+    85
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub const MONTHS: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 135,
+   "span": [
+    136,
+    137
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub const RM_MONTHS_UPPER: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 139,
+   "span": [
+    140,
+    141
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub const RM_MONTHS_LOWER: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/numutils/src/lib.rs",
+   "head_line": 480,
+   "span": [
+    481,
+    482
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const POWERS_OF_TEN: [u32; 10] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/waitfuncs/src/lib.rs",
+   "head_line": 66,
+   "span": [
+    67,
+    68
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub const WAITFUNCS_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 497,
+   "span": [
+    498,
+    499
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static recovery_init_sync_method_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 510,
+   "span": [
+    511,
+    512
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static default_toast_compression_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 531,
+   "span": [
+    532,
+    533
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static file_copy_method_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/tables.rs",
+   "head_line": 535,
+   "span": [
+    536,
+    537
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static file_extend_method_options: &[config_enum_entry] = &["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 29,
+   "span": [
+    30,
+    31
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const SHA224_H0: [u32; 8] = ["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 33,
+   "span": [
+    34,
+    35
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const SHA256_H0: [u32; 8] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 13,
+   "span": [
+    14,
+    15
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_0_1_X: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 16,
+   "span": [
+    17,
+    18
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_0_7_X: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 19,
+   "span": [
+    20,
+    21
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_0_X_X: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 22,
+   "span": [
+    23,
+    24
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_1_1_X: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 25,
+   "span": [
+    26,
+    27
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_1_X_X: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 32,
+   "span": [
+    33,
+    34
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_2_43_43: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 35,
+   "span": [
+    36,
+    37
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_2_4_4: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 38,
+   "span": [
+    39,
+    40
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_3_3_3: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 45,
+   "span": [
+    46,
+    47
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_4_4_4: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 48,
+   "span": [
+    49,
+    50
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_5_54_54: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 51,
+   "span": [
+    52,
+    53
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_5_5_5: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 62,
+   "span": [
+    63,
+    64
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_5_5_X: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 65,
+   "span": [
+    66,
+    67
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_66_66_66: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 68,
+   "span": [
+    69,
+    70
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_6_6_6: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 71,
+   "span": [
+    72,
+    73
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_7_7_7: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 74,
+   "span": [
+    75,
+    76
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_8_8_8: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 81,
+   "span": [
+    82,
+    83
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "static CODES_9_9_9: [DmCodes; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 95,
+   "span": [
+    96,
+    97
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_CH: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 98,
+   "span": [
+    99,
+    100
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_CS: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 101,
+   "span": [
+    102,
+    103
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_CZ: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 134,
+   "span": [
+    135,
+    136
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_F: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 147,
+   "span": [
+    148,
+    149
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_M: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 150,
+   "span": [
+    151,
+    152
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_N: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 166,
+   "span": [
+    167,
+    168
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SCHTC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 169,
+   "span": [
+    170,
+    171
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SCHTSC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 184,
+   "span": [
+    185,
+    186
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 187,
+   "span": [
+    188,
+    189
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SHC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 190,
+   "span": [
+    191,
+    192
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SHTC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 193,
+   "span": [
+    194,
+    195
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_SHTS: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 205,
+   "span": [
+    206,
+    207
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_STC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 212,
+   "span": [
+    213,
+    214
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_STSC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 240,
+   "span": [
+    241,
+    242
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_TC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 247,
+   "span": [
+    248,
+    249
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_TSC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 255,
+   "span": [
+    256,
+    257
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_TTC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 258,
+   "span": [
+    259,
+    260
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_TTSC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 270,
+   "span": [
+    271,
+    272
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_TZ: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 287,
+   "span": [
+    288,
+    289
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_ZDZ: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 290,
+   "span": [
+    291,
+    292
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_ZD: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 293,
+   "span": [
+    294,
+    295
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_ZHDZ: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 296,
+   "span": [
+    297,
+    298
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_ZHD: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 299,
+   "span": [
+    300,
+    301
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_ZH: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/dm_table.rs",
+   "head_line": 302,
+   "span": [
+    303,
+    304
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static LETTER_ZSC: [DmLetter; 1] = ["
+  },
+  {
+   "path": "crates/contrib/fuzzystrmatch/src/lib.rs",
+   "head_line": 78,
+   "span": [
+    79,
+    80
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const METAPHONE_CODES: [u8; 26] = ["
+  },
+  {
+   "path": "crates/interfaces/pgclient/src/conninfo.rs",
+   "head_line": 16,
+   "span": [
+    17,
+    18
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub const CONNINFO_OPTIONS: &[ConnOption] = &["
+  }
+ ]
+}

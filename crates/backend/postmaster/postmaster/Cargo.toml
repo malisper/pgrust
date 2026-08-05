@@ -1,0 +1,88 @@
+[package]
+name = "postmaster"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postmaster"
+path = "src/lib.rs"
+
+[dependencies]
+aio_core = { path = "../../storage/aio/aio_core" }
+pg_clock = { path = "../../../port/pg_clock" }
+seam_core = { path = "../../../_support/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_guc = { path = "../../../_support/types/types_guc" }
+elog = { path = "../../utils/error/elog" }
+init_small = { path = "../../utils/init/init_small" }
+pg_path = { path = "../../../port/pg_path" }
+pg_string = { path = "../../../common/string" }
+miscinit = { path = "../../utils/init/miscinit" }
+postinit = { path = "../../utils/init/postinit" }
+pg_locale = { path = "../../utils/adt/pg_locale" }
+regexp_alt = { path = "../../utils/adt/regexp_alt" }
+guc = { path = "../../utils/misc/guc" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+guc_file = { path = "../../utils/misc/guc_file" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+latch = { path = "../../storage/ipc/latch" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }
+pmsignal = { path = "../../storage/ipc/pmsignal" }
+pgarch = { path = "../pgarch" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+fd = { path = "../../storage/file/fd" }
+vfs = { path = "../../storage/file/vfs" }
+ipc = { path = "../../storage/ipc/ipc" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+dsm_core = { path = "../../storage/ipc/dsm_core" }
+ipci = { path = "../../storage/ipc/ipci" }
+varsup = { path = "../../access/transam/varsup" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+launch_backend = { path = "../launch_backend" }
+memwatchdog = { path = "../memwatchdog" }
+slotsync = { path = "../../replication/slotsync" }
+backend_startup = { path = "../../tcop/backend_startup" }
+be_secure = { path = "../../libpq/be_secure" }
+bgworker = { path = "../bgworker" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+ipci_seams = { path = "../../storage/ipc/ipci_seams" }
+pmchild_seams = { path = "../pmchild_seams" }
+postmaster_seams = { path = "../postmaster_seams" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+auth_seams = { path = "../../libpq/auth_seams" }
+autovacuum_seams = { path = "../autovacuum_seams" }
+syslogger = { path = "../syslogger" }
+syslogger_seams = { path = "../syslogger_seams" }
+janitor_seams = { path = "../janitor_seams" }
+launcher_seams = { path = "../../replication/launcher_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+types_dest = { path = "../../../_support/types/types_dest" }
+libc = "0.2"
+
+[dev-dependencies]
+pmchild = { path = "../pmchild" }
+shmem = { path = "../../storage/ipc/shmem" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+controldata_utils = { path = "../../../common/controldata_utils" }
+pgstat = { path = "../../utils/activity/pgstat" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+scalar_seams = { path = "../../utils/adt/scalar_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+file_seams = { path = "../../storage/file/file_seams" }
+backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
+pg_prng = { path = "../../../common/pg_prng" }

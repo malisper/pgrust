@@ -1,0 +1,1 @@
+{"path":"crates/backend/catalog/pg_inherits_seams/src/lib.rs","sloc":[4,5],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2]}}

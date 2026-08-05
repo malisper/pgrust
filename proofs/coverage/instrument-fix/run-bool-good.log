@@ -1,0 +1,10 @@
+
+== run-kani-coverage census ==
+  jobs considered:            4
+  ran (kaniraw produced):     4
+  walled (timeout 300s):     0
+  failed to run (UNMEASURED): 0
+  no SUITE row:               0
+  census: /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/coverage/instrument-fix/census-bool-good.tsv
+  all 4 jobs measured.
+rc=0

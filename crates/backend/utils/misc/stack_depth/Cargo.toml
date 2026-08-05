@@ -1,0 +1,12 @@
+[package]
+name = "stack_depth"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+guc = { path = "../guc" }
+stack_depth_core = { path = "../stack_depth_core" }
+guc_tables = { path = "../guc_tables" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }

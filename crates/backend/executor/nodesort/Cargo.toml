@@ -1,0 +1,23 @@
+[package]
+name = "nodesort"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+exectuples = { path = "../exectuples" }
+heaptuple = { path = "../../access/common/heaptuple" }
+executils = { path = "../executils" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+tuplesort = { path = "../../utils/sort/tuplesort" }
+mcx = { path = "../../../_support/mcx" }
+init_small = { path = "../../utils/init/init_small" }
+
+[dev-dependencies]
+syscache_seams = { path = "../../utils/cache/syscache_seams" }

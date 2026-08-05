@@ -1,0 +1,16 @@
+# proofs/coverage-laneh/mutants-triage.tsv — survivor triage for fleet job
+# pgrust-mutants-audit-1785494101-1688-3537 @ cb69d23611c (p1-laneh batch).
+# In-crate: 446 mutants, 347 caught in-crate, 39 caught by the fuzz replay
+# rail, 35 unviable. 18 rows needed triage; disposition per row below.
+# columns: mutant<TAB>disposition<TAB>evidence
+mutant	disposition	evidence
+pg_prng/src/lib.rs:40 && -> ||	caught-by-rail	fleet rail-sweep caught (corpus (0,1)/(1,0) seed_check states)
+pg_prng/src/lib.rs:53 - -> + (u64_range)	killed-verified	fleet rail-timeout was infra; local apply-mutant -> decoder_fuzz arm_sweep + corpus replay FAIL in <1s (panic lib.rs:53)
+pg_prng/src/lib.rs:76 > -> >= (i64_range)	arid-equivalent	PROOF: differs only at rmax==rmin; mutant computes rmin + u64_range(0,0); u64_range(0,0) hits its own empty arm (0>0 false) -> val=0, NO draw, state untouched -> value rmin, state identical. No input can distinguish.
+arrayutils/src/lib.rs:84 delete - (soft -1 sentinel)	REAL-HOLE-FIXED	driver never asserted the soft-path sentinel on the Rust-only ndim>len arm; fixed: arrayutils_diff arm 0 now asserts -1 + in-crate test nitems_max_array_size_boundary; kill verified apply/restore
+arrayutils/src/lib.rs:101 > -> >= (MaxArraySize bound)	REAL-HOLE-FIXED	corpus never hit nitems == MaxArraySize exactly; fixed: 4 deliberate boundary seeds (seed-maxsize*) + in-crate boundary test; kill verified apply/restore
+arrayutils/src/lib.rs:157 -= -> /= (mda_get_offset_values)	killed-verified	fleet rail-timeout was infra; local apply-mutant -> differential tests FAIL immediately
+arrayutils/src/lib.rs:172 -= -> /= (mda_next_tuple)	killed-verified	same
+hashfn/src/lib.rs:102,104x2,113,117x2,132,138x2 | -> ^ (hash_core tails)	arid-equivalent	PROOF: every OR merges operands with disjoint bit ranges (byte k[i] shifted to distinct 8-bit lanes); for disjoint x,y: x|y == x^y. No input can distinguish.
+hashfn/src/lib.rs:160,177 | -> ^ ((b<<32)|c packing)	arid-equivalent	disjoint halves: b<<32 occupies bits 32..64, c bits 0..32
+hashfn/src/lib.rs:196 | -> ^ (rotate_high_and_low_32bits)	arid-equivalent	masks 0xfffffffefffffffe and 0x100000001 are disjoint (AND = 0)

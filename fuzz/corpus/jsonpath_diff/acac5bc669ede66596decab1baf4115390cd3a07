@@ -1,0 +1,1 @@
+$ like_regex "pat~t@\p#\\\\\m\\Mmmmmmmm#mmmmRRRRRRRRRRRR\\m\\Mmmmt~t@\p#\\\\\m\\Mmmmmmmm#")

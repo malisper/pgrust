@@ -1,0 +1,40 @@
+[package]
+name = "aio_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "aio_core"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+datum = { path = "../../../../_support/types/datum" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+aio_seams = { path = "../aio_seams" }
+bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
+smgr_seams = { path = "../../smgr/smgr_seams" }
+ipc_seams = { path = "../../ipc/ipc_seams" }
+# Plain cargo dep on the DST P1 VFS leaf crate (fd's idiom): the synchronous
+# executor's preadv/pwritev must route through the provider — product builds
+# monomorphize to the same single libc syscall (P1 zero-cost law), and the
+# sim world's fds are foreign to the kernel (raw libc there is EBADF).
+vfs = { path = "../../file/vfs" }
+miscinit = { path = "../../../utils/init/miscinit" }
+init_small = { path = "../../../utils/init/init_small" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+lwlock = { path = "../../lmgr/lwlock" }
+condition_variable = { path = "../../lmgr/condition_variable" }
+latch = { path = "../../ipc/latch" }
+shmem = { path = "../../ipc/shmem" }
+resowner = { path = "../../../utils/resowner/resowner" }
+elog = { path = "../../../utils/error/elog" }
+interrupt = { path = "../../../postmaster/interrupt" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }

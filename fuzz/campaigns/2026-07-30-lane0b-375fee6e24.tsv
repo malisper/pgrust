@@ -1,0 +1,9 @@
+# Fleet fuzz-campaign record — lane-0b done-gate confirm run
+# job pgrust-fuzz-campaign-1785473319-2dab-93871, sha 375fee6e24eaccacf1480837228659856fbbf39d, c8g.4xlarge, 2026-07-30
+# columns: target status execs corpus_in corpus_out divergences cov_lines wall_s
+# sanitizer_artifacts separated from divergences as of fabled fleet/fuzz-campaign abce08c8398: NONE of either.
+uuid_diff	run	10000000	214	246	0	1096	1235
+mac_diff	run	10000000	1104	1336	0	1340	302
+name_diff	run	10000000	635	848	0	1683	387
+cash_diff	run	10000000	662	687	0	1312	308
+float_out_diff	run	10000000	589	589	0	791	286

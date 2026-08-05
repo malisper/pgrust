@@ -1,0 +1,44 @@
+[package]
+name = "fd"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fd"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+elog = { path = "../../../utils/error/elog" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+pg_prng = { path = "../../../../common/pg_prng" }
+init_small = { path = "../../../utils/init/init_small" }
+file_seams = { path = "../file_seams" }
+resowner_seams = { path = "../../../utils/resowner/resowner_seams" }
+ipc_seams = { path = "../../ipc/ipc_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+aio_seams = { path = "../../aio/aio_seams" }
+startup_seams = { path = "../../../postmaster/startup_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+# Plain cargo dep on the DST P1 VFS leaf crate — no cycle, hence no registry
+# seam (AGENTS.md seam doctrine; DST P1 contract §1.1).
+vfs = { path = "../vfs" }
+pg_string = { path = "../../../../common/string" }
+libc = "0.2"
+
+[dev-dependencies]
+resowner = { path = "../../../utils/resowner/resowner" }
+
+# `pgrust_sim` mirrors vfs's declaration (contract §1.2): non-default cfg set
+# only by the sim harness's RUSTFLAGS; fd's sim-only regression tests use it.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

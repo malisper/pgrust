@@ -1,0 +1,44 @@
+# proofs/spgist-inet runqueue — SP-GiST inet_ops opclass (rows 3795 3796
+# 3798 3799; 3797 picksplit NOT harnessed — stays blocked(refactor:
+# symbolic nTuples + mcx node arrays) per ledger).
+# PRE-BUILD LANE 2026-07-29: harnesses written + codegen-gated ONLY
+#   (cargo kani --only-codegen -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c : PASS, exit 0).
+# ZERO kani/cbmc solves have been run. Expected classes are claim-before-code
+# triage, not verdicts.
+#
+# Run from proofs/spgist-inet/, ONE at a time, own-process-group kill on
+# timeout. kissat for expected-green; DEFAULT for controls/covers/decodes
+# (kissat never terminates on failing harnesses); solver choice PER-HARNESS
+# (inversions are real). -Z stubbing load-bearing everywhere (mcx stubs).
+# unwind(12) on the AF4 walk harnesses bounds bitncmp's 8-bit tail loop +
+# bitncommon's diff shift loop + <=4-byte memcmp; do NOT raise it — tighten
+# first if unwinding assertions fire (dead-copy law).
+#
+# Ledger wording owed on green: "fmgr/protocol-struct level; modulo
+# static-buffer allocator model; fences: inet datatype invariant
+# (family {2,3}, bits<=maxbits), zero-initialized out structs, AF4 plane
+# where named".
+#
+# harness | expected | tier | command
+proofs::eq_inet_spg_config            | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat --harness proofs::eq_inet_spg_config --exact             # expect: PROVED — 4 literal stores + untouched-field claim (row 3795)
+proofs::eq_inet_spg_choose_nopfx      | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat --harness proofs::eq_inet_spg_choose_nopfx --exact       # expect: PROVED(either family) fast — family test + passthroughs (row 3796)
+proofs::eq_inet_spg_choose_famsplit   | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat --harness proofs::eq_inet_spg_choose_famsplit --exact    # expect: PROVED — 2-node SplitTuple literals (row 3796)
+proofs::eq_inet_spg_choose_af4        | GREEN/ladder | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat --harness proofs::eq_inet_spg_choose_af4 --exact     # expect: ladder — bitncmp+bitncommon+cidr mask + fresh-prefix IMAGE parity (10-byte images, small); if the image claim walls, split match-arm-only (scalar) + concrete split spots (row 3796)
+proofs::eq_inet_spg_inner_nopfx       | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat --harness proofs::eq_inet_spg_inner_nopfx --exact        # expect: PROVED(nkeys<=2, full-u16 strategies, either family) — which-lattice only (row 3798)
+proofs::eq_inet_spg_inner_af4_nkeys1  | GREEN/ladder | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat --harness proofs::eq_inet_spg_inner_af4_nkeys1 --exact # expect: ladder — full consistent_bitmap checks 0-5 (row 3798); nkeys<=2 follow-up only after this lands
+proofs::eq_inet_spg_inner_allsame     | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat --harness proofs::eq_inet_spg_inner_allsame --exact      # expect: PROVED — ~0 bitmap + emission loop (row 3798)
+proofs::eq_inet_spg_leaf_af4_nkeys2   | GREEN/ladder | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat --harness proofs::eq_inet_spg_leaf_af4_nkeys2 --exact # expect: ladder — checks 0-6 incl whole-address bitncmp, 2 keys (row 3799); drop to nkeys<=1 before recording a wall
+proofs::eq_inet_spg_leaf_mixed_family | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat --harness proofs::eq_inet_spg_leaf_mixed_family --exact  # expect: PROVED — cross-family check-0 arm (row 3799)
+proofs::cover_spgist_regimes          | COVERS    | control      | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --harness proofs::cover_spgist_regimes --exact                          # expect: all 5 covers SATISFIED (DEFAULT solver)
+proofs::control_spgist_leaf_strategy_skew | MUST-FAIL | control  | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --harness proofs::control_spgist_leaf_strategy_skew --exact             # expect: VERIFICATION FAILED w/ decodable counterexample (RTLess vs RTLessEqual skew; DEFAULT solver)
+#
+# NOTES (claim-before-code):
+# - AF6 equal-family walks (16-byte addr memcmp through symbolic offsets)
+#   are the uuid[]-class byte-width tier — NOT harnessed tonight; screen as
+#   a follow-up cell after the AF4 rungs land (typcache law 2 precedent).
+# - The choose split arm's cidr memcpy has a (bits+7)/8 derived length
+#   (<=4 here) — if it symex-walls, that is the derived-length law, not a
+#   divergence; fall back to literal-commonbits cells.
+# - Rust debug_asserts inside fc_inet_spg_choose (nNodes==2/4) are
+#   compiled into kani builds; harness inputs satisfy them by construction
+#   (they mirror C's Assert, compiled out in the C shim).

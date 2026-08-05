@@ -1,0 +1,1 @@
+{"path":"crates/_support/pgsync/src/loom_world.rs","sloc":[36,37],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[6,7,8,9,13,20,24,25,26,29,30,31]}}

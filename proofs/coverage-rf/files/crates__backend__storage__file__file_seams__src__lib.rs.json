@@ -1,0 +1,1 @@
+{"path":"crates/backend/storage/file/file_seams/src/lib.rs","sloc":[3,4,7,8,11,12,15,16,19,20,23,24,25,26,27,30,32],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1]}}

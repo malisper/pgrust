@@ -1,0 +1,99 @@
+[package]
+name = "utility"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+dfmgr = { path = "../../utils/fmgr/dfmgr" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
+rewrite_define = { path = "../../rewrite/rewrite_define" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+event_trigger = { path = "../../commands/event_trigger" }
+foreigncmds = { path = "../../commands/foreigncmds" }
+aclchk = { path = "../../catalog/aclchk" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+parse_clause = { path = "../../parser/parse_clause" }
+tablecmds = { path = "../../commands/tablecmds" }
+trigger = { path = "../../commands/trigger" }
+typecmds = { path = "../../commands/typecmds" }
+commands_policy = { path = "../../commands/policy" }
+commands_publicationcmds = { path = "../../commands/publicationcmds" }
+subscriptioncmds = { path = "../../commands/subscriptioncmds" }
+commands_alter = { path = "../../commands/alter" }
+commands_dropcmds = { path = "../../commands/dropcmds" }
+collationcmds = { path = "../../commands/collationcmds" }
+conversioncmds = { path = "../../commands/conversioncmds" }
+proclang = { path = "../../commands/proclang" }
+schemacmds = { path = "../../commands/schemacmds" }
+dbcommands = { path = "../../commands/dbcommands" }
+commands_tablespace = { path = "../../commands/tablespace" }
+functioncmds = { path = "../../commands/functioncmds" }
+commands_amcmds = { path = "../../commands/amcmds" }
+statscmds = { path = "../../commands/statscmds" }
+commands_comment = { path = "../../commands/comment" }
+seclabel = { path = "../../commands/seclabel" }
+user = { path = "../../commands/user" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+sequence = { path = "../../commands/sequence" }
+parser_small1 = { path = "../../parser/parser_small1" }
+commands_view = { path = "../../commands/view" }
+types_rel = { path = "../../../_support/types/rel" }
+commands_analyze = { path = "../../commands/analyze" }
+commands_async = { path = "../../commands/commands_async" }
+commands_vacuum = { path = "../../commands/vacuum" }
+copy_cmd = { path = "../../commands/copy" }
+discard = { path = "../../commands/discard" }
+explain = { path = "../../commands/explain" }
+commands_createas = { path = "../../commands/createas" }
+matview_seams = { path = "../../commands/matview_seams" }
+portalcmds = { path = "../../commands/portalcmds" }
+prepare = { path = "../../commands/prepare" }
+guc_funcs = { path = "../../utils/misc/guc_funcs" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_portal = { path = "../../../_support/types/portal" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+elog = { path = "../../utils/error/elog" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+miscinit = { path = "../../utils/init/miscinit" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+checkpointer_seams = { path = "../../postmaster/checkpointer_seams" }
+lockcmds = { path = "../../commands/lockcmds" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+twophase_seams = { path = "../../access/transam/twophase_seams" }
+xact = { path = "../../access/transam/xact" }
+cmdtag = { path = "../cmdtag" }
+portalmem = { path = "../../utils/mmgr/portalmem" }
+tcop_dest = { path = "../dest" }
+utility_seams = { path = "../utility_seams" }
+seam_core = { path = "../../../_support/seam_core" }
+catalog_toasting = { path = "../../catalog/catalog_toasting" }
+reloptions = { path = "../../access/common/reloptions" }
+catalog = { path = "../../catalog/catalog" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+commands_cluster = { path = "../../commands/cluster" }
+indexcmds = { path = "../../commands/indexcmds" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+init_small = { path = "../../utils/init/init_small" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+
+operatorcmds = { path = "../../commands/operatorcmds" }
+aggregatecmds = { path = "../../commands/aggregatecmds" }
+opclasscmds = { path = "../../commands/opclasscmds" }
+extension = { path = "../../commands/extension" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
+tsearchcmds = { path = "../../commands/tsearchcmds" }
+
+[dev-dependencies]
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_dest = { path = "../../../_support/types/types_dest" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }

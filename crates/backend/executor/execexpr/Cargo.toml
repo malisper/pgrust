@@ -1,0 +1,81 @@
+[package]
+name = "execexpr"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+adt_formatting = { path = "../../utils/adt/formatting" }
+adt_json = { path = "../../utils/adt/json" }
+adt_jsonb = { path = "../../utils/adt/jsonb" }
+hstore_subs_seams = { path = "../hstore_subs_seams" }
+adt_jsonpath_exec = { path = "../../utils/adt/jsonpath_exec" }
+adt_numeric = { path = "../../utils/adt/numeric" }
+jit_deform = { path = "../../../_support/jit_deform" }
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+sequence_seams = { path = "../../commands/sequence_seams" }
+types_error = { path = "../../../_support/types/types_error" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+numutils = { path = "../../utils/adt/numutils" }
+varlena = { path = "../../utils/adt/varlena" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_portal = { path = "../../../_support/types/portal" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+# memchr::memmem = the strsearch contains-qual kernel's substring search
+# (measured choice: notes/strsearch-parity-2026-07-12.md).
+memchr = "2"
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+adt_date = { path = "../../utils/adt/adt_date" }
+adt_datetime = { path = "../../utils/adt/adt_datetime" }
+adt_xml = { path = "../../utils/adt/xml" }
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+tupdesc = { path = "../../access/common/tupdesc" }
+typcache = { path = "../../utils/cache/typcache" }
+heaptuple = { path = "../../access/common/heaptuple" }
+arrayutils = { path = "../../utils/adt/arrayutils" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+format_type = { path = "../../utils/adt/format_type" }
+exectuples = { path = "../exectuples" }
+lanereg = { path = "../lanereg" }
+heaptoast = { path = "../../access/heap/heaptoast" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+nodes_core = { path = "../../nodes/nodes_core" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+adt_scalar = { path = "../../utils/adt/scalar" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small = { path = "../../utils/init/init_small" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+pgstat = { path = "../../utils/activity/pgstat" }
+# strsearch contains-qual census: encoding gate (generic_match_text's arms).
+mbutils = { path = "../../utils/mb/mbutils" }
+wchar = { path = "../../../common/wchar" }
+
+[features]
+bench-internals = []
+
+[dev-dependencies]
+adt_float = { path = "../../utils/adt/float" }
+# strsearch contains-kernel parity-fuzz oracle (the real per-row matcher).
+adt_like = { path = "../../utils/adt/like" }
+pg_locale = { path = "../../utils/adt/pg_locale" }
+adt_jsonpath = { path = "../../utils/adt/jsonpath" }
+mbutils = { path = "../../utils/mb/mbutils" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+wchar = { path = "../../../common/wchar" }
+clauses = { path = "../../optimizer/util/clauses" }
+adt_int = { path = "../../utils/adt/int" }
+pgtz = { path = "../../timezone/pgtz" }
+elog = { path = "../../utils/error/elog" }
+fd = { path = "../../storage/file/fd" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }

@@ -1,0 +1,5 @@
+‚) ORDER BY ndoc DESC, nentry DESC, word;
+
+--dictionaries and to_tsvector
+
+SELECT ts_lexize(

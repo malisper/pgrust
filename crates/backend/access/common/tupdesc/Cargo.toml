@@ -1,0 +1,19 @@
+[package]
+name = "tupdesc"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+hashfn = { path = "../../../../common/hashfn" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+format_type = { path = "../../../utils/adt/format_type" }
+
+[dev-dependencies]
+namespace_seams = { path = "../../../catalog/namespace_seams" }

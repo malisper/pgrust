@@ -1,0 +1,1 @@
+{"path":"crates/backend/optimizer/plan/planner/src/geqo/recombination.rs","sloc":[8,9,10,12,13,14,15,17,34,35],"kani":[],"fuzz":[],"regress":[8,9,10,12,13,14,15,17],"excluded":{"use-mod":[3,4],"attr":[21,22,32,33],"typedef":[23,24,25,26,27]}}

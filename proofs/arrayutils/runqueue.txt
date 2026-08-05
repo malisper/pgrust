@@ -1,0 +1,13 @@
+# proofs/arrayutils — p1-laneh runqueue (2026-07-31). Execute from proofs/arrayutils/.
+# Format: <harness> | <expected> | <tier> | <command>
+# n_items/get_offset walled locally at 560s UNDER MULTI-LANE LOAD (25 solvers);
+# fleet gets the low-load verdict of record. timeout 900 for those rows.
+harnesses::eq_array_get_n_items | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_array_get_n_items --exact --solver kissat
+harnesses::ndim_wider_than_slice_always_errors | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::ndim_wider_than_slice_always_errors --exact --solver kissat
+harnesses::eq_array_check_bounds | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_array_check_bounds --exact --solver kissat
+harnesses::eq_array_get_offset | green | release-gate | timeout 900 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_array_get_offset --exact --solver kissat
+harnesses::eq_mda_get_range | green | per-commit | cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_mda_get_range --exact --solver kissat
+harnesses::eq_mda_get_prod | green | per-commit | cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_mda_get_prod --exact --solver kissat
+harnesses::eq_mda_get_offset_values | green | per-commit | cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_mda_get_offset_values --exact --solver kissat
+harnesses::eq_mda_next_tuple | green | per-commit | cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_mda_next_tuple --exact --solver kissat
+harnesses::control_get_offset_wrong_value | must-fail | per-commit | cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::control_get_offset_wrong_value --exact

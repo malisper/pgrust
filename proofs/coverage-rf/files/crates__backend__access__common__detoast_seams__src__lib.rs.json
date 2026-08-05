@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/common/detoast_seams/src/lib.rs","sloc":[9,10,13,15,16,17,18,19,20,25,26,27,28,29,30],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2]}}

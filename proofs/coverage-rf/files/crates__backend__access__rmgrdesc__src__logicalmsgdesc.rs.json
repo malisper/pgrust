@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/rmgrdesc/src/logicalmsgdesc.rs","sloc":[10,11,12,14,15,16,17,18,19,20,21,23,24,25,26,27,28,29,30,31,34,37,38,39,41],"kani":[],"fuzz":[],"regress":[],"excluded":{"else-only":[40],"use-mod":[1,2,3,4],"const-static":[8]}}

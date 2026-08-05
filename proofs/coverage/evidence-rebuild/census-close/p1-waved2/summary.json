@@ -1,0 +1,28 @@
+{
+ "generated": "2026-08-02T01:25:00+00:00",
+ "crate": "backend/access/rmgrdesc",
+ "lane": "p1-waved2 (adopted after agent kill; lane continuation)",
+ "head_sha_lane_branch": "2ba82c87419cec9a89689f908f526383d921f18e",
+ "code_sha_of_record": "baa778810f3449bf289c65aa3685914f0528ec76",
+ "sloc_rule": "SLOC v2 + tables excluded; DA-line grain from llvm-cov lcov export; carve-census v2-SLOC 1610 (A-carve row)",
+ "equation": "1565 fuzz-measured + 95 exception lines (75 ledger rows) == 1660 DA lines over src/lib.rs + all 21 desc files; residual line set byte-identical to the exceptions ledger (MATCH-EXPECTED check in lane log)",
+ "union_inputs": [
+  {
+   "kind": "fuzz-lcov",
+   "file": "fuzz-rmgrdesc_diff-local-20260801.lcov.gz",
+   "capture": "cargo +nightly-2026-07-17 fuzz coverage rmgrdesc_diff over the COMMITTED final bank (3,304 inputs = libFuzzer -merge=1 of committed 9,165 + fleet 10M snapshot 9,029 + directed residual seeds, PLUS re-emitted deterministic arm-sweep/witness seeds [merge drops identify-table line coverage: per-arm string returns share edges] + 6-file gate-close floor delta) on aarch64-apple-darwin",
+   "result": "1565/1660 DA lines covered across the 22 in-scope files; 95 uncovered, all carried as exception rows (proofs/coverage/exceptions.tsv p1-waved2 batch)"
+  },
+  {
+   "kind": "fleet-campaign",
+   "job": "pgrust-fuzz-campaign-1785632795-43b4-73969 (floor of record, FIXED runner a4ed674bd2)",
+   "sha": "baa778810f3449bf289c65aa3685914f0528ec76",
+   "verdict": "outcome=complete rc=0; 10,846,376 execs (10M requested), 0 divergences, 0 sanitizer artifacts, 0 stray artifacts, cov_lines 3603, wall 40s fork=14",
+   "predecessor": "pgrust-fuzz-campaign-1785628885-3fae-74561 @ 26390b1554: 10,000,000/10,000,000 execs, 0 divergences, 0 sanitizer; its 24 'unclassified stray artifacts' adjudicated 100% pre-existing git-committed evidence files from other lanes (regexp_diff fleet-evidence + network_diff triage) — verdict UPHELD, runner since excludes tracked files (fabled a4ed674bd2, sweep_skipped_tracked/unclassified now 0)"
+  }
+ ],
+ "exceptions": "95 lines / 75 rows, three mechanisms: (1) 64 `)?;` appendf!/StringInfo closer lines = the `?` ERROR branch (rig-probe ratified real span, not unmappable) whose only Err source is allocation failure — C's palloc OOM is a noreturn ereport (defensive-c-parity); (2) 26 lib.rs lines: FmtSink/append_args error plumb (same mechanism), rec_data/block_data defensive guards duplicated at every call site, and the private default backend_timestamptz_to_str displaced by the harness's IDENTICAL pg_waldump-pattern mirror hook (logic exercised on the compared text plane every exec); (3) 5 dead/domain arms: gin no-image-no-data implicit-else x2 (C reads block-0 data unguarded so the builder never suppresses), heap_desc chain-exit (all 8 opmask values handled, same dead structure as C), xact gid-without-NUL (builder NUL-terminates gids; C %s past gidlen is UB), xlog 'unknown' compression method (dead in BOTH implementations: BKPIMAGE_COMPRESSED implies a method bit) and InvalidForkNumber (decoder-validated forknum 0..3)",
+ "product_bugs": "2 found by the floor, FIXED and LANDED to main f77ff54391f3af94478eee69692a228e68bfdfbd: hash_desc append_g6 PANIC on non-finite num_tuples (crash-class: format!(\"{:.5e}\") emits no 'e' for NaN/Inf) and -0.0 sign drop vs C %g. Negative-controlled regression tests verified: both FAIL on pre-fix code (non-finite one with the original panic). Landing CONFIRM: pgrust-fast-tests-f77ff54391-1785631445-0fa3 PASS (build+crash-smoke+scalar e2e) + battery job pgrust-fast-tests-f77ff54391-1785632612-3727 (cargo ALL + regress-diff; see claims row for verdict)",
+ "sibling_sweep": "bug-CLASS sweep across all desc arms (129 info-arms / 21 files): the ONLY float conversions in all 24 C rmgrdesc-family TUs are the two %g in hashdesc.c (num_tuples/ntuples), both flowing through the fixed append_g6; Rust crate greps clean for f64/f32/precision/scientific formatting outside hashdesc.rs. Negative-zero/INF/NAN sign sensitivity exists only for floats, so hash_desc was the entire class instance set. CLEARED.",
+ "harness_notes": "MAXALIGN builder parity bug fixed at 26390b1554 (+regression test); C-bool canonicalization table = documented domain constraint (bool_offsets); injection sweep 8/8 killed at 39198cf; per-exec MemoryContext leak fixed f1665c50; harness domain widened at gate-close: XACT_COMPLETION_* high bits + block0_nodata suppression plane (heap2/btree guarded arms only)"
+}

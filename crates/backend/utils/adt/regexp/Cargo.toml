@@ -1,0 +1,28 @@
+[package]
+name = "adt_regexp"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_regexp"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+mbutils = { path = "../../mb/mbutils" }
+regex = { path = "../../../../_support/types/regex" }
+regex_core = { path = "../../../regex/regex_core" }
+regexp_seams = { path = "../regexp_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+varlena = { path = "../varlena" }
+arrayfuncs = { path = "../arrayfuncs" }
+funcapi_srf = { path = "../../fmgr/funcapi_srf" }
+regexp_alt = { path = "../regexp_alt" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+
+[dev-dependencies]
+wchar = { path = "../../../../common/wchar" }

@@ -1,0 +1,25 @@
+[package]
+name = "adt_varchar"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+arrayfuncs = { path = "../arrayfuncs" }
+datum = { path = "../../../../_support/types/datum" }
+hashfn = { path = "../../../../common/hashfn" }
+mbutils = { path = "../../mb/mbutils" }
+mcx = { path = "../../../../_support/mcx" }
+numutils = { path = "../numutils" }
+pg_locale_seams = { path = "../pg_locale_seams" }
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+varlena = { path = "../varlena" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+
+[dev-dependencies]
+wchar = { path = "../../../../common/wchar" }

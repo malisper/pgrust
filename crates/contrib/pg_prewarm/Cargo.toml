@@ -1,0 +1,30 @@
+[package]
+name = "pg_prewarm"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_prewarm"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_rel = { path = "../../_support/types/rel" }
+types_storage = { path = "../../_support/types/types_storage" }
+types_nodes = { path = "../../_support/types/nodes" }
+relation = { path = "../../backend/access/common/relation" }
+catalog_index = { path = "../../backend/catalog/catalog_index" }
+aclchk = { path = "../../backend/catalog/aclchk" }
+pg_class_seams = { path = "../../backend/catalog/pg_class_seams" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+lmgr_seams = { path = "../../backend/storage/lmgr/lmgr_seams" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
+smgr = { path = "../../backend/storage/smgr/smgr" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }

@@ -1,0 +1,16 @@
+[package]
+name = "proof-numeric-probe"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_numeric = { path = "../../crates/backend/utils/adt/numeric" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }
+datum = { path = "../../crates/_support/types/datum" }
+types_error = { path = "../../crates/_support/types/types_error" }
+# tail lane (N1-N3): wrapper-level agg/scale harnesses + mcx-stub targets
+# (kani::stub needs direct deps)
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+mcx = { path = "../../crates/_support/mcx" }

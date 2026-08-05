@@ -1,0 +1,33 @@
+[package]
+name = "hba"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "hba"
+path = "src/lib.rs"
+
+[dependencies]
+acl_seams = { path = "../../utils/adt/acl_seams" }
+auth_seams = { path = "../auth_seams" }
+conffiles_seams = { path = "../../utils/misc/conffiles_seams" }
+elog = { path = "../../utils/error/elog" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+hba_seams = { path = "../hba_seams" }
+ifaddr = { path = "../ifaddr" }
+ip = { path = "../../../common/ip" }
+libc = "0.2"
+pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }
+types_core = { path = "../../../_support/types/types_core" }
+regex = { path = "../../../_support/types/regex" }
+regex_core_seams = { path = "../../regex/regex_core_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+walsender_seams = { path = "../../replication/walsender_seams" }
+
+[dev-dependencies]
+regex_core = { path = "../../regex/regex_core" }
+mbutils = { path = "../../utils/mb/mbutils" }

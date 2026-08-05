@@ -1,0 +1,115 @@
+p1-pgcryptofam residual accounting — lane p1-pgcryptofam-resid
+crate crates/contrib/pgcrypto @ f8231ca7535106f5e15d1e439f8b1c433d6b64fc
+lcov of record: fleet floor pgrust-fuzz-campaign-1785664060-1cd9-61609
+(10,209,267 execs / 0 divergences / rc=0), s3 fuzz-campaign path per lane log.
+
+THE EQUATION (v2 SLOC, exclude_const_tables=True, test-scope filtered;
+recomputed by classify.py from the lcov of record and asserted):
+
+    3036 = 1153 (measured) + 248 (exception rows) + 1635 (carved rows)
+    unaccounted = 0
+
+In-scope files (1401 SLOC): crypt.rs 141/133, crypt/bcrypt.rs 117/116,
+crypt/cryptdes.rs 346/332, crypt/desc.rs 14/14, crypt/shacrypt.rs 231/209,
+hashing.rs 38/38, lib.rs 305/146, pgp/armor.rs 209/165  (sloc/measured).
+Carved family (1635 SLOC, whole files, OpenSSL-provider oracle carve):
+cipher.rs 193 + pgp/{cfb 108, compress 51, consts 71, context 92,
+decrypt 190, encrypt 121, keyid 128, mod 99, mpi 95, packet 88, pubdec 66,
+pubenc 57, pubkey 179, s2k 97}.
+
+PER-CLASS TALLY of the 248 in-scope residual lines (ledger rows appended to
+proofs/coverage/phase1-exceptions.tsv, author p1-pgcryptofam-resid, 65 rows
+expanding to exactly 248 + 1635 = 1883 unique (file,line) pairs):
+
+  182  census-OUT-carve      SRF surface (lib.rs fc_pgp_armor_headers 13 +
+                             armor.rs extract_armor_headers/find_subslice 36),
+                             carved-family wrappers (cipher_err + fc_cipher! +
+                             pgp sym/pub/key_id wrappers + notice machinery +
+                             dispatch rows, 109), fipsmode 2, dfmgr-miss arm 1,
+                             driver-domain shapes (1-arg armor 1, short-varlena
+                             re-expansion 6, array dims/count/NULL rejections
+                             12), cost-bound carve (shacrypt >MAX clamp 4 +
+                             no-rounds output 1) — every row names its
+                             sub-reason; unit-test witnesses cited where they
+                             exist (armor_header_tests::*, shacrypt clamp test,
+                             divergence_witness D13).
+   25  defensive-c-parity    each row cites the vendored C counterpart
+                             (fuzz/core/csrc/pgcryptofam/vendor/...) and why
+                             the arm is equally dead in C through the same
+                             dispatch/guard.
+   18  const-eval-only       all 18 are const/static ITEM lines — heads of
+                             multi-line initializers or their literal
+                             continuation lines — VERIFIED to carry NO DA
+                             record (unmapped, not unwitnessed) in both the
+                             record lcov and the probe lcov:
+                               crypt.rs:167 static GEN_LIST head
+                               crypt.rs:242 static PX_CRYPT_LIST head
+                               cryptdes.rs:22 const CRYPT_A64 head
+                               cryptdes.rs:23 CRYPT_A64 b"..." continuation
+                               cryptdes.rs:25/31/39/44/87/92 const IP/KEY_PERM/
+                                 COMP_PERM/SBOX/PBOX/CRYPT_BITS32 table heads
+                               shacrypt.rs:224 const SHA256_TRANSPOSE head
+                               shacrypt.rs:225 its b"..." continuation
+                               shacrypt.rs:226 const SHA512_TRANSPOSE head
+                               shacrypt.rs:227-229 its b"..." continuations
+                               armor.rs:2 const BASE64 head
+                               armor.rs:3 its b"..." continuation
+   14  excluded-state        function-grain excluded(state) members carried at
+                             line grain (the ledger's sanctioned convention):
+                               lib.rs:70 — GUC (needs pgcrypto.
+                                 builtin_crypto_enabled='off' in the session
+                                 store; no fuzz arm sets GUCs)
+                               lib.rs:150-161 (10) — ENTROPY (fc_pg_random_bytes:
+                                 output is pg_strong_random bytes; no
+                                 deterministic differential oracle exists for
+                                 the function, so the whole body incl. its
+                                 range-check arm is the PRNG surface)
+                               lib.rs:164-166 (3) — ENTROPY (fc_pg_random_uuid
+                                 -> gen_random_uuid)
+    5  unreachable-arm       lib.rs:28-30 (CryptError::Unsupported constructed
+                             nowhere), shacrypt.rs:183 (digest len 32/64 never
+                             ≡0 mod 3), armor.rs:243 (Rust-only bounds guard;
+                             crc_eq+5 <= len-9 by the END-header invariant)
+    4  instrument-unmappable crypt.rs:76 (`Some(` expression head),
+                             cryptdes.rs:547-548 + armor.rs:165 (deferred-init
+                             `let x: T;` declarations) — all noDA with
+                             DA-covered neighbors in BOTH captures; a
+                             DIFFERENT false-red shape from the tree-wide
+                             fc*!-macro class (which in this crate appears at
+                             lib.rs:145-148 and is carried under the carve
+                             rows since the expansions are carved anyway).
+
+SEED-GAP COUNT: ZERO — and the claim was falsification-tested, not assumed.
+29 directed adversarial probes (probes/, built from the driver's documented
+input encoding, one per residual line flagged as possibly reachable) were
+replayed through the shipped differential target:
+  - replay: 34 execs (27-probe set), 0 divergences, exit 0
+  - coverage replay (probes.lcov via cargo +nightly-2026-07-17 fuzz coverage
+    + llvm-cov export): falsify.py verdict = REFUTED lines: 0. No probe
+    covered ANY of the 248 residual lines, while the guard/neighbor lines
+    around every probed line show probe DA 1..3584 — the probes reached each
+    neighborhood and the lines stayed dead for the classified reason, not for
+    want of trying. crypt.rs:76 reproduced noDA-with-covered-body (77/78
+    DA=1) in the fresh capture, confirming the false-red class.
+
+RENDERED-RED AUDIT (rendered-red.txt = all 248 lines with source text and
+neighbor DA): zero unexplained bogus-red. Every red line is one of the six
+classes above; the two false-UNCOVERED instrument shapes present are the 4
+instrument-unmappable lines and the fc_cipher! invocation lines (lib.rs
+145-148, subsumed by the carve).
+
+FLAGS FOR THE COORDINATOR (not defects, honesty notes):
+  1. lib.rs:325, 364-369, 410-413, 425-427, 437-439, 465-467 (19 lines) are
+     production-reachable but outside the DRIVER's input shape (fixed 3-arg
+     pg_armor call; 4B-header, equal-count, 1-D, never-NULL text[] images).
+     They are NOT closable by corpus seeds — closing them needs a driver
+     extension (arg-count/array-shape/NULL modes), which would obsolete the
+     10.2M-exec floor of record. All but the 6 short-varlena lines carry
+     18.3-captured unit-test witnesses (armor_header_tests); the short-varlena
+     re-expansion arm (lib.rs:364-369) has NO in-tree witness today.
+  2. shacrypt rounds in (1e9, 2^31): C clamps DOWN to 999,999,999 and RUNS
+     them — the cost bound rightly refuses the band in-harness; the clamp
+     lines are unit-witnessed (clamp_notice_prints_the_truncated_signed_value).
+  3. No product changes were made; no never_reached!/always_true! macros were
+     inserted (the lane's product is frozen; task rules prefer reporting over
+     touching crates/contrib/pgcrypto).

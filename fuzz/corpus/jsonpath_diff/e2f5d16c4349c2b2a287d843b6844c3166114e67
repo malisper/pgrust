@@ -1,0 +1,1 @@
+$ ? (@ like_regex "0att\\^N^^^^[[[ah^^\^^N^^^^[[:alpha:]^\^^N:alpha:]]^^^[[:alpha:]]^^\^^Nha:]^^^[[:alpha:]]^^\[la:p:]^^^[[:alpha:]]^^^[[[[ah[la:p:]^^^[[:alpha:]]^^^[[:alpha:]]^^\^^N^^^^[[:alpha:]^\^^N:alpha:]]^^^[[:alpha:]]^^\^^Nha:]^^^[[:alpha:]]^^\\\\\n" flag "isim")

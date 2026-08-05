@@ -1,0 +1,77 @@
+== coverage capture forensics: detoast_diff (cargo-fuzz coverage rc=0) ==
+-- corpus files on disk:  708
+-- units replayed (log):  708
+-- clean libFuzzer exits: 7
+-- raw profraw dir: /work/src/fuzz/coverage/detoast_diff/raw
+total 4396
+drwxr-xr-x. 2 root root    167 Aug  1 20:18 .
+drwxr-xr-x. 3 root root     42 Aug  1 20:18 ..
+-rw-r--r--. 1 root root 641080 Aug  1 20:18 batch-0.profraw
+-rw-r--r--. 1 root root 641080 Aug  1 20:18 batch-1.profraw
+-rw-r--r--. 1 root root 641080 Aug  1 20:18 batch-2.profraw
+-rw-r--r--. 1 root root 641080 Aug  1 20:18 batch-3.profraw
+-rw-r--r--. 1 root root 641080 Aug  1 20:18 batch-4.profraw
+-rw-r--r--. 1 root root 641080 Aug  1 20:18 batch-5.profraw
+-rw-r--r--. 1 root root 641080 Aug  1 20:18 batch-6.profraw
+-- llvm-profdata: /usr/local/rustup/toolchains/nightly-2026-07-17-aarch64-unknown-linux-gnu/lib/rustlib/aarch64-unknown-linux-gnu/bin/llvm-profdata
+---- /work/src/fuzz/coverage/detoast_diff/raw/batch-0.profraw (641080 bytes)
+Instrumentation level: Front-end
+Total functions: 344
+Maximum function count: 123690
+Maximum internal block count: 32040
+Total number of blocks: 879
+Total count: 330516
+---- /work/src/fuzz/coverage/detoast_diff/raw/batch-1.profraw (641080 bytes)
+Instrumentation level: Front-end
+Total functions: 344
+Maximum function count: 73339
+Maximum internal block count: 23700
+Total number of blocks: 879
+Total count: 241375
+---- /work/src/fuzz/coverage/detoast_diff/raw/batch-2.profraw (641080 bytes)
+Instrumentation level: Front-end
+Total functions: 344
+Maximum function count: 58574
+Maximum internal block count: 19082
+Total number of blocks: 879
+Total count: 199648
+---- /work/src/fuzz/coverage/detoast_diff/raw/batch-3.profraw (641080 bytes)
+Instrumentation level: Front-end
+Total functions: 344
+Maximum function count: 48609
+Maximum internal block count: 17692
+Total number of blocks: 879
+Total count: 174390
+---- /work/src/fuzz/coverage/detoast_diff/raw/batch-4.profraw (641080 bytes)
+Instrumentation level: Front-end
+Total functions: 344
+Maximum function count: 32177
+Maximum internal block count: 14508
+Total number of blocks: 879
+Total count: 133476
+---- /work/src/fuzz/coverage/detoast_diff/raw/batch-5.profraw (641080 bytes)
+Instrumentation level: Front-end
+Total functions: 344
+Maximum function count: 52708
+Maximum internal block count: 15117
+Total number of blocks: 879
+Total count: 179490
+---- /work/src/fuzz/coverage/detoast_diff/raw/batch-6.profraw (641080 bytes)
+Instrumentation level: Front-end
+Total functions: 344
+Maximum function count: 251843
+Maximum internal block count: 273861
+Total number of blocks: 879
+Total count: 1502514
+-- merged profdata:
+Instrumentation level: Front-end
+Total functions: 190
+Maximum function count: 640940
+Maximum internal block count: 396000
+Total number of blocks: 498
+Total count: 2761409
+-- covbin candidates (find target -path *coverage* -name detoast_diff):
+     /work/src/fuzz/target/aarch64-unknown-linux-gnu/coverage/aarch64-unknown-linux-gnu/release/detoast_diff  758b5df12f0d6f9fb2506f27d2a1d5d2180f6afc70e5f26a4b797c1f037e8768  122717256 bytes
+-- fuzz (non-coverage) binary for contrast:
+/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/detoast_diff
+== end forensics: detoast_diff ==

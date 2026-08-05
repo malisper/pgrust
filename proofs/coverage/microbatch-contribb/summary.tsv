@@ -1,0 +1,47 @@
+# proofs/coverage/microbatch-contribb/summary.tsv — per-crate coverage
+# equation for lane p1-mb-contribb (target contribb_diff, 10 selector arms
+# over two crates). Oracle: verbatim vendored PostgreSQL 18.3 (Stamp-18.3,
+# upstream 62d6c7d3df) in fuzz/core/csrc/pg_contribb_io.c PLUS the
+# generated flex/bison parser TUs csrc/contribb/{segparse,segscan,
+# cubeparse,cubescan}.c (bison 2.3 / flex 2.6.4 over the verbatim
+# grammars; provenance banners in each file).
+#
+# Capture of record (local, macOS arm64, 2026-08-01): full committed corpus
+# (fuzz/corpus/contribb_diff, ~4400 inputs) replayed under cargo fuzz
+# coverage; lcov banked here (contribb_diff.lcov.gz). Local campaign
+# volume: ~9.1M execs (1.6M triage + 1.5M + 4M + 2M rounds post-fix; the
+# final 7.5M with 0 divergences, 0 panics). Fleet 10M CONFIRM =
+# coordinator follow-up.
+#
+# THREE ORACLE PLATFORM PINS (documented in build.rs + shim headers):
+#   -funsigned-char (seg sigd/ext char signedness = fleet Linux/aarch64),
+#   opt_level(2) (clang -O3 changes distance_1D NaN-lane semantics),
+#   pg_cb_snprintf %g (Apple libc keeps trailing zeros on rounding ties;
+#   glibc — the ratified oracle — strips them; seg PLUMIN sigd depends).
+#
+# TWO PGRUST FIXES LANDED BY THIS LANE (both bison-default-reduction
+# error-ordering divergences found by the fuzzer, regression tests in the
+# crates):
+#   seg/parse.rs: swapped-boundaries 22023 now beats trailing-garbage 42601;
+#   cube/parse.rs: box actions (dim checks + float8in 22003/22P02) now beat
+#   trailing-garbage 22P02, all four grammar alternatives.
+#
+# GiST carve (lane charter): gist.rs in each crate is a file-granularity
+# excluded-state exception (C gseg_*/g_cube_* sections carved from the
+# oracle the same way); their SLOC appears below as exception_rows.
+#
+# equation per crate/file: v2_sloc = fuzz_measured + a0 + exception_rows +
+# measurement_notes, 0 unaccounted.
+# SLOC rule: v2 + tables excluded (sloc_rules.py, line_table = lcov DA set).
+crate	file	v2_sloc	fuzz_measured	a0	exception_rows	measurement_notes	unaccounted	residual_lines
+contrib/seg	crates/contrib/seg/src/lib.rs	109	102	0	0	7	0	114-120 (seg_bool_fn! call sites; expansions measured — llvm attributes macro-expansion coverage to the definition lines; every generated fc_* is driven by arm 2)
+contrib/seg	crates/contrib/seg/src/repr.rs	17	17	0	0	0	0	-
+contrib/seg	crates/contrib/seg/src/parse.rs	170	170	0	0	0	0	-
+contrib/seg	crates/contrib/seg/src/out.rs	129	124	0	1	4	0	35 (c_format_g NaN return: unreachable-arm — seg floats parse via float4in which rejects Inf/NaN literals, and finite plumin arithmetic can overflow to Inf but never NaN; C %g "nan" arm equally dead) + 23,24,59,60 (multiline format! arg literals, executed, instrument-unmappable)
+contrib/seg	crates/contrib/seg/src/ops.rs	106	102	0	4	0	0	192-196 (rt_seg_size: GiST-penalty-only helper, gist-carve; C seg.c 708-715 static rt_seg_size equally outside the oracle's driven surface)
+contrib/seg	crates/contrib/seg/src/gist.rs	95	0	0	95	0	0	whole file: GiST support carve (lane charter; C gseg_* seg.c 36-44+56-69+189-537 carved from the oracle identically)
+contrib/cube	crates/contrib/cube/src/lib.rs	395	394	0	1	0	0	161 (cstring_to_text `?` OOM-branch region in fc_cube_send; defensive-c-parity — C's palloc OOM is a hard abort)
+contrib/cube	crates/contrib/cube/src/repr.rs	56	56	0	0	0	0	-
+contrib/cube	crates/contrib/cube/src/parse.rs	188	186	0	0	2	0	212,272 (multiline format! detail literals, executed error constructors, instrument-unmappable)
+contrib/cube	crates/contrib/cube/src/ops.rs	151	144	0	6	1	0	48,68 (unreachable-arm, C-parity dead code: c_max<0 after c_min passed 0-tests is impossible incl. NaN/-0 cases; C cube.c 983+1006 equally dead) + 259-262 (coord_llur internal_page arm: g_cube_distance non-leaf face, gist-carve; C cube.c 1402-1504) + 251 (`let mut result;` uninit decl, no generated code, instrument-unmappable)
+contrib/cube	crates/contrib/cube/src/gist.rs	169	0	0	169	0	0	whole file: GiST support carve (lane charter; C g_cube_* cube.c 50-63+384-747+1402-1504 carved from the oracle identically)

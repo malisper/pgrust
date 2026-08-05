@@ -1,0 +1,16 @@
+# proofs/float-agg RETRY runqueue — batchB (fleet 994f9977/1785310905) follow-up
+# 2026-07-29 runner-harvester lane 2.
+# Canonical 4-col pipe rows: <harness> | <expected> | <tier> | <command>
+#
+#  1. grid_regr_intercept: batchB timeout at 120s -> 480s (4x), kissat.
+#  2. grid_stddev_pop/stddev_samp/corr: batchB VERIFICATION FAILED in 20s
+#     each (the three sqrt-containing grids; var_pop/var_samp/r2 siblings
+#     all passed). Suspected dsqrt goto-link artifact class (TRIAGE: native
+#     dsqrt parity proven, FAILED only in the goto-linked program). Re-run
+#     with DEFAULT solver + concrete-playback to produce decodable
+#     counterexamples for the decode lane. info: adjudication owed, never
+#     record divergence without native + docker ground truth.
+proofs::grid_regr_intercept | info | wall-retry | timeout 480 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_regr_intercept --exact
+proofs::grid_stddev_pop | info | probe | timeout 300 cargo kani -Z c-ffi -Z stubbing -Z concrete-playback --concrete-playback=print --c-lib c/pg_float_agg.c --no-overflow-checks --harness proofs::grid_stddev_pop --exact
+proofs::grid_stddev_samp | info | probe | timeout 300 cargo kani -Z c-ffi -Z stubbing -Z concrete-playback --concrete-playback=print --c-lib c/pg_float_agg.c --no-overflow-checks --harness proofs::grid_stddev_samp --exact
+proofs::grid_corr | info | probe | timeout 300 cargo kani -Z c-ffi -Z stubbing -Z concrete-playback --concrete-playback=print --c-lib c/pg_float_agg.c --no-overflow-checks --harness proofs::grid_corr --exact

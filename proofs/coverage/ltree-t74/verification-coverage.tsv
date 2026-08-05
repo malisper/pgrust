@@ -1,0 +1,10 @@
+file	sloc	kani	fuzz	regress	any
+crates/contrib/ltree/src/array.rs	54	0	50	0	50
+crates/contrib/ltree/src/crc.rs	12	0	6	0	6
+crates/contrib/ltree/src/gist.rs	608	0	0	0	0
+crates/contrib/ltree/src/io.rs	645	0	627	0	627
+crates/contrib/ltree/src/lib.rs	506	0	282	0	282
+crates/contrib/ltree/src/op.rs	347	0	315	0	315
+crates/contrib/ltree/src/repr.rs	149	0	141	0	141
+CRATE:crates/contrib/ltree	2321	0	1421	0	1421
+TOTAL	2321	0	1421	0	1421

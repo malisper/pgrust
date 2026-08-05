@@ -1,0 +1,74 @@
+[package]
+name = "prepare"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "prepare"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_portal = { path = "../../../_support/types/portal" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+elog = { path = "../../utils/error/elog" }
+plancache = { path = "../../utils/cache/plancache" }
+portalmem = { path = "../../utils/mmgr/portalmem" }
+pquery = { path = "../../tcop/pquery" }
+tcop_dest = { path = "../../tcop/dest" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+xact = { path = "../../access/transam/xact" }
+parser_seams = { path = "../../parser/parser_seams" }
+utility_seams = { path = "../../tcop/utility_seams" }
+postgres = { path = "../../tcop/postgres" }
+prepare_seams = { path = "../prepare_seams" }
+parse_expr = { path = "../../parser/parse_expr" }
+parse_collate = { path = "../../parser/parse_collate" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+parser_small1 = { path = "../../parser/parser_small1" }
+coerce = { path = "../../parser/coerce" }
+format_type = { path = "../../utils/adt/format_type" }
+execexpr = { path = "../../executor/execexpr" }
+mbutils = { path = "../../utils/mb/mbutils" }
+datum = { path = "../../../_support/types/datum" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_hash = { path = "../../../_support/types/hash" }
+dynahash = { path = "../../utils/hash/dynahash" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+varlena = { path = "../../utils/adt/varlena" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+createas_seams = { path = "../createas_seams" }
+
+[dev-dependencies]
+types_dest = { path = "../../../_support/types/types_dest" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
+utility = { path = "../../tcop/utility" }
+cmdtag = { path = "../../tcop/cmdtag" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+miscinit = { path = "../../utils/init/miscinit" }
+parser_analyze = { path = "../../parser/parser_analyze" }
+analyze_seams = { path = "../../parser/analyze_seams" }
+rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
+planner_seams = { path = "../../optimizer/plan/planner_seams" }
+execmain_seams = { path = "../../executor/execmain_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+xact_portal_seams = { path = "../../access/transam/xact_portal_seams" }
+resowner_portal_seams = { path = "../../utils/resowner/resowner_portal_seams" }
+ipc_portal_seams = { path = "../../storage/ipc/ipc_portal_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+inval_seams = { path = "../../utils/cache/inval_seams" }
+lock_seams = { path = "../../storage/lmgr/lock_seams" }
+catalog_seams = { path = "../../catalog/catalog_seams" }
+portalcmds_seams = { path = "../portalcmds_seams" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }

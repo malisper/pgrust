@@ -1,0 +1,121 @@
+family	harness	tier	expected	outcome	wall_s	timeout_s	verdict	log
+network	arith_proofs::eq_inetpl_v4	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--arith_proofs__eq_inetpl_v4_.log
+network	arith_proofs::eq_inetmi_int8_v4	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	network--arith_proofs__eq_inetmi_int8_v4_.log
+network	arith_proofs::eq_inetmi_int8_v6	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	network--arith_proofs__eq_inetmi_int8_v6_.log
+network	ntop_spot_proofs::spot_cidr_out_v4_full	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_cidr_out_v4_full_.log
+network	arith_proofs::eq_inetpl_v6	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	network--arith_proofs__eq_inetpl_v6_.log
+network	ntop_spot_proofs::control_ntop_host_vs_show	unmeasured	unmeasured	unmeasured-failed	20	600	VERIFICATION:- FAILED	network--ntop_spot_proofs__control_ntop_host_vs_show_.log
+network	ntop_spot_proofs::spot_cidr_abbrev_v4_partial	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_cidr_abbrev_v4_partial_.log
+network	ntop_spot_proofs::spot_cidr_abbrev_v4_zero	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_cidr_abbrev_v4_zero_.log
+network	ntop_spot_proofs::spot_cidr_abbrev_v6_v4mapped	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_cidr_abbrev_v6_v4mapped_.log
+network	ntop_spot_proofs::spot_cidr_abbrev_v6_words	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_cidr_abbrev_v6_words_.log
+network	ntop_spot_proofs::spot_cidr_abbrev_v6_zero	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_cidr_abbrev_v6_zero_.log
+network	ntop_spot_proofs::spot_cidr_out_v4_mask	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_cidr_out_v4_mask_.log
+network	ntop_spot_proofs::spot_cidr_out_v6_mask	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_cidr_out_v6_mask_.log
+network	ntop_spot_proofs::spot_inet_abbrev_v4	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_inet_abbrev_v4_.log
+network	ntop_spot_proofs::spot_inet_abbrev_v6	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_inet_abbrev_v6_.log
+network	ntop_spot_proofs::spot_inet_out_v4_full	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_inet_out_v4_full_.log
+network	ntop_spot_proofs::spot_inet_out_v4_mask	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_inet_out_v4_mask_.log
+network	ntop_spot_proofs::spot_inet_out_v6_compress	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_inet_out_v6_compress_.log
+network	ntop_spot_proofs::spot_network_host_v4	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_network_host_v4_.log
+network	ntop_spot_proofs::spot_network_show_v4	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_network_show_v4_.log
+network	ntop_spot_proofs::spot_network_show_v6	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_network_show_v6_.log
+network	ntop_spot_proofs::spot_inet_out_v6_v4mapped	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_inet_out_v6_v4mapped_.log
+network	ntop_spot_proofs::spot_network_host_v6	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	network--ntop_spot_proofs__spot_network_host_v6_.log
+jsonb-gin	proofs::eq_strategy_constants	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_strategy_constants_.log
+jsonb-gin	proofs::eq_triconsistent_jsonb_contains	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_triconsistent_jsonb_contains_.log
+jsonb-gin	proofs::eq_triconsistent_jsonb_exists_all	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_triconsistent_jsonb_exists_all_.log
+jsonb-gin	proofs::eq_triconsistent_jsonb_exists	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_triconsistent_jsonb_exists_.log
+jsonb-gin	proofs::eq_triconsistent_jsonb_path_contains	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_triconsistent_jsonb_path_contains_.log
+jsonb-gin	proofs::eq_triconsistent_jsonb_exists_any	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	jsonb-gin--proofs__eq_triconsistent_jsonb_exists_any_.log
+numeric-probe	proofs::eq_in_range_base_nan	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_base_nan_.log
+numeric-probe	proofs::cover_numeric_min_scale_regimes	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__cover_numeric_min_scale_regimes_.log
+numeric-probe	proofs::eq_in_range_err_neg_long	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_err_neg_long_.log
+numeric-probe	proofs::eq_in_range_err_neg_short	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_err_neg_short_.log
+numeric-probe	proofs::eq_in_range_err_ninf	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_err_ninf_.log
+numeric-probe	proofs::eq_in_range_off_pinf	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_off_pinf_.log
+numeric-probe	proofs::ctl_numeric_min_scale_weight_skew	unmeasured	unmeasured	unmeasured-failed	30	600	VERIFICATION:- FAILED	numeric-probe--proofs__ctl_numeric_min_scale_weight_skew_.log
+numeric-probe	proofs::eq_in_range_base_ninf	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_base_ninf_.log
+numeric-probe	proofs::eq_in_range_base_pinf	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_base_pinf_.log
+numeric-probe	proofs::eq_in_range_spot_cancel	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_spot_cancel_.log
+numeric-probe	proofs::eq_in_range_val_ninf	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_val_ninf_.log
+numeric-probe	proofs::eq_in_range_val_pinf	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_val_pinf_.log
+numeric-probe	proofs::eq_in_range_spot_borrow	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_spot_borrow_.log
+numeric-probe	proofs::eq_numeric_min_scale_nd4	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_numeric_min_scale_nd4_.log
+numeric-probe	proofs::eq_in_range_spot_neg_base	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_spot_neg_base_.log
+numeric-probe	proofs::eq_in_range_spot_carry	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_spot_carry_.log
+numeric-probe	proofs::eq_in_range_spot_zero_off_sub	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_in_range_spot_zero_off_sub_.log
+oracle-compat	proofs::control_dobyteatrim_short_set	unmeasured	unmeasured	unmeasured-failed	20	600	VERIFICATION:- FAILED	oracle-compat--proofs__control_dobyteatrim_short_set_.log
+oracle-compat	proofs::eq_anychar_typmodout_band	unmeasured	unmeasured	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	oracle-compat--proofs__eq_anychar_typmodout_band_.log
+numeric-probe	proofs::cover_numeric_trim_scale_regimes	unmeasured	unmeasured	unmeasured-green	150	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__cover_numeric_trim_scale_regimes_.log
+oracle-compat	proofs::cover_oracle_regimes	unmeasured	unmeasured	unmeasured-rss-kill	261	600	NO-VERDICT	oracle-compat--proofs__cover_oracle_regimes_.log
+numeric-probe	proofs::eq_numeric_send_snd2	unmeasured	unmeasured	unmeasured-rss-kill	311	600	NO-VERDICT	numeric-probe--proofs__eq_numeric_send_snd2_.log
+oracle-compat	proofs::eq_lpad_latin1	unmeasured	unmeasured	unmeasured-rss-kill	60	600	NO-VERDICT	oracle-compat--proofs__eq_lpad_latin1_.log
+oracle-compat	proofs::eq_lpad_err_plane	unmeasured	unmeasured	unmeasured-green	100	600	VERIFICATION:- SUCCESSFUL	oracle-compat--proofs__eq_lpad_err_plane_.log
+numeric-probe	proofs::eq_numeric_send_snd3	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	numeric-probe--proofs__eq_numeric_send_snd3_.log
+numeric-probe	proofs::eq_numeric_trim_scale_nd4	unmeasured	unmeasured	unmeasured-green	381	600	VERIFICATION:- SUCCESSFUL	numeric-probe--proofs__eq_numeric_trim_scale_nd4_.log
+oracle-compat	proofs::eq_name_bpchar	unmeasured	unmeasured	unmeasured-rss-kill	50	600	NO-VERDICT	oracle-compat--proofs__eq_name_bpchar_.log
+oracle-compat	proofs::eq_repeat_small	unmeasured	unmeasured	unmeasured-rss-kill	40	600	NO-VERDICT	oracle-compat--proofs__eq_repeat_small_.log
+oracle-compat	proofs::eq_repeat_err_plane	unmeasured	unmeasured	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	oracle-compat--proofs__eq_repeat_err_plane_.log
+oracle-compat	proofs::spot_anychar_typmodout_wide	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	oracle-compat--proofs__spot_anychar_typmodout_wide_.log
+oracle-compat	proofs::eq_rpad_latin1	unmeasured	unmeasured	unmeasured-rss-kill	60	600	NO-VERDICT	oracle-compat--proofs__eq_rpad_latin1_.log
+numeric-probe	proofs::eq_numeric_send_snd4	unmeasured	unmeasured	unmeasured-rss-kill	481	600	NO-VERDICT	numeric-probe--proofs__eq_numeric_send_snd4_.log
+jsonb-gin	proofs::eq_jsp_tri_pred_or2	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	jsonb-gin--proofs__eq_jsp_tri_pred_or2_.log
+oracle-compat	proofs::eq_rpad_err_plane	unmeasured	unmeasured	unmeasured-green	120	600	VERIFICATION:- SUCCESSFUL	oracle-compat--proofs__eq_rpad_err_plane_.log
+numeric-arith	proofs::eq_mul_var_nd4	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	numeric-arith--proofs__eq_mul_var_nd4_.log
+numeric-arith	proofs::eq_mul_var_nd3	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	numeric-arith--proofs__eq_mul_var_nd3_.log
+numeric-arith	proofs::eq_mul_var_nd2	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	numeric-arith--proofs__eq_mul_var_nd2_.log
+numeric-arith	proofs::eq_add_var_nd4	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	numeric-arith--proofs__eq_add_var_nd4_.log
+numeric-arith	proofs::eq_sub_var_nd4	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	numeric-arith--proofs__eq_sub_var_nd4_.log
+oracle-compat	proofs::spot_fc_btrim_utf8	unmeasured	unmeasured	unmeasured-green	100	600	VERIFICATION:- SUCCESSFUL	oracle-compat--proofs__spot_fc_btrim_utf8_.log
+numeric-probe	proofs::eq_int8_numeric_nd5	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	numeric-probe--proofs__eq_int8_numeric_nd5_.log
+numeric-probe	proofs::eq_int8_numeric_nd4	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	numeric-probe--proofs__eq_int8_numeric_nd4_.log
+oracle-compat	proofs::eq_text_reverse_latin1	unmeasured	unmeasured	unmeasured-green	191	600	VERIFICATION:- SUCCESSFUL	oracle-compat--proofs__eq_text_reverse_latin1_.log
+oracle-compat	proofs::eq_dobyteatrim_window	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	oracle-compat--proofs__eq_dobyteatrim_window_.log
+oracle-compat	proofs::eq_dotrim1_window	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	oracle-compat--proofs__eq_dotrim1_window_.log
+oracle-compat	proofs::spot_translate_utf8	unmeasured	unmeasured	unmeasured-green	100	600	VERIFICATION:- SUCCESSFUL	oracle-compat--proofs__spot_translate_utf8_.log
+oracle-compat	proofs::eq_dotrim_window_latin1	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	oracle-compat--proofs__eq_dotrim_window_latin1_.log
+oracle-compat	proofs::eq_dotrim_window_utf8	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	oracle-compat--proofs__eq_dotrim_window_utf8_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d1	unmeasured	unmeasured	unmeasured-green	231	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d1_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d0	unmeasured	unmeasured	unmeasured-green	241	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d0_.log
+oracle-compat	proofs::spot_text_reverse_utf8	unmeasured	unmeasured	unmeasured-rss-kill	251	600	NO-VERDICT	oracle-compat--proofs__spot_text_reverse_utf8_.log
+scalar-misc	wave5::eq_oidrecv_core_len3	unmeasured	unmeasured	unmeasured-failed	20	600	NO-VERDICT	scalar-misc--wave5__eq_oidrecv_core_len3_.log
+scalar-misc	wave5::eq_oidrecv_core_len8	unmeasured	unmeasured	unmeasured-failed	10	600	NO-VERDICT	scalar-misc--wave5__eq_oidrecv_core_len8_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d10	unmeasured	unmeasured	unmeasured-green	261	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d10_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d11	unmeasured	unmeasured	unmeasured-green	251	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d11_.log
+strings-scalar	proofs::control_toast_typlen_skew	unmeasured	unmeasured	unmeasured-failed	10	600	VERIFICATION:- FAILED	strings-scalar--proofs__control_toast_typlen_skew_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d12	unmeasured	unmeasured	unmeasured-green	261	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d12_.log
+strings-scalar	proofs::control_btvarstrequalimage_det_skew	unmeasured	unmeasured	unmeasured-failed	20	600	VERIFICATION:- FAILED	strings-scalar--proofs__control_btvarstrequalimage_det_skew_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d3	unmeasured	unmeasured	unmeasured-green	220	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d3_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d2	unmeasured	unmeasured	unmeasured-green	230	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d2_.log
+strings-scalar	proofs::cover_byteain_regimes	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	strings-scalar--proofs__cover_byteain_regimes_.log
+strings-scalar	proofs::cover_toast_regimes	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	strings-scalar--proofs__cover_toast_regimes_.log
+strings-scalar	proofs::eq_btvarstrequalimage	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	strings-scalar--proofs__eq_btvarstrequalimage_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d4	unmeasured	unmeasured	unmeasured-green	221	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d4_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d5	unmeasured	unmeasured	unmeasured-green	231	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d5_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d6	unmeasured	unmeasured	unmeasured-green	231	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d6_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d7	unmeasured	unmeasured	unmeasured-green	230	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d7_.log
+strings-scalar	proofs::eq_pg_column_size_cstring	unmeasured	unmeasured	unmeasured-green	90	600	VERIFICATION:- SUCCESSFUL	strings-scalar--proofs__eq_pg_column_size_cstring_.log
+text-slice	wave8::control_bytea_int4_short	unmeasured	unmeasured	unmeasured-failed	20	600	VERIFICATION:- FAILED	text-slice--wave8__control_bytea_int4_short_.log
+text-slice	wave8::cover_bytea_int_err_arms	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__cover_bytea_int_err_arms_.log
+text-slice	wave8::cover_byteaoverlay_regimes	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__cover_byteaoverlay_regimes_.log
+text-slice	wave8::eq_bytea_bit_count	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__eq_bytea_bit_count_.log
+strings-scalar	proofs::control_byteain_len_skew	unmeasured	unmeasured	unmeasured-failed	160	600	VERIFICATION:- FAILED	strings-scalar--proofs__control_byteain_len_skew_.log
+text-slice	wave8::eq_bytea_int2	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__eq_bytea_int2_.log
+text-slice	wave8::eq_bytea_int4	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__eq_bytea_int4_.log
+text-slice	wave8::eq_bytea_int8	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__eq_bytea_int8_.log
+oracle-compat	proofs::spot_fc_trims1	unmeasured	unmeasured	unmeasured-rss-kill	512	600	NO-VERDICT	oracle-compat--proofs__spot_fc_trims1_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d8	unmeasured	unmeasured	unmeasured-green	251	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d8_.log
+oracle-compat	proofs::spot_fc_trims_text	unmeasured	unmeasured	unmeasured-rss-kill	521	600	NO-VERDICT	oracle-compat--proofs__spot_fc_trims_text_.log
+pg_lsn	wave5::eq_pg_lsn_recv_core_d9	unmeasured	unmeasured	unmeasured-green	251	600	VERIFICATION:- SUCCESSFUL	pg_lsn--wave5__eq_pg_lsn_recv_core_d9_.log
+strings-scalar	proofs::eq_pg_column_compression_varlena	unmeasured	unmeasured	unmeasured-rss-kill	211	600	NO-VERDICT	strings-scalar--proofs__eq_pg_column_compression_varlena_.log
+oracle-compat	proofs::spot_fc_byteatrims	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	oracle-compat--proofs__spot_fc_byteatrims_.log
+text-slice	wave8::control_bytea_reverse_short	unmeasured	unmeasured	unmeasured-rss-kill	151	600	NO-VERDICT	text-slice--wave8__control_bytea_reverse_short_.log
+oracle-compat	proofs::spot_pads_utf8	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	oracle-compat--proofs__spot_pads_utf8_.log
+strings-scalar	proofs::eq_byteain_escape_verdict	unmeasured	unmeasured	unmeasured-green	271	600	VERIFICATION:- SUCCESSFUL	strings-scalar--proofs__eq_byteain_escape_verdict_.log
+oracle-compat	proofs::spot_translate_latin1	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	oracle-compat--proofs__spot_translate_latin1_.log
+strings-scalar	proofs::eq_pg_column_size_varlena	unmeasured	unmeasured	unmeasured-rss-kill	511	600	NO-VERDICT	strings-scalar--proofs__eq_pg_column_size_varlena_.log
+strings-scalar	proofs::eq_pg_column_compression_nonvarlena	unmeasured	unmeasured	unmeasured-rss-kill	541	600	NO-VERDICT	strings-scalar--proofs__eq_pg_column_compression_nonvarlena_.log
+strings-scalar	proofs::eq_byteain_escape_content_len4	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	strings-scalar--proofs__eq_byteain_escape_content_len4_.log
+strings-scalar	proofs::eq_pg_column_size_fixed	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	strings-scalar--proofs__eq_pg_column_size_fixed_.log
+strings-scalar	proofs::eq_pg_column_toast_chunk_id	unmeasured	unmeasured	unmeasured-rss-kill	571	600	NO-VERDICT	strings-scalar--proofs__eq_pg_column_toast_chunk_id_.log

@@ -1,0 +1,35 @@
+#!/bin/bash
+# PARLOAD adaptation of the upstream postgresql/load (tuned row): same flow
+# (drop/create db, DDL, single-txn TRUNCATE + COPY FREEZE, VACUUM ANALYZE),
+# with the ingest sort INSIDE the server during COPY (declared ordering via
+# PGRUST_COPY_PRESORT) instead of an external pre-sort, and server-side COPY
+# of the raw hits.tsv. The armed-engine restarts below are part of the timed
+# Load window, as is everything else in this script.
+set -eu
+D="$(dirname "$0")"; . "$D/env.sh"
+PARLOAD_ENV="PGRUST_RUNTIME=1 PGRUST_COPY_PRESORT=counterid,eventdate,userid,eventtime,watchid PGRUST_PARALLEL_COPY=1 PGRUST_PARALLEL_COPY_SORT=1 PGRUST_PARALLEL_COPY_TRACE=1 PGRUST_PARALLEL_COPY_DOP=16 PGRUST_CBSTORE_FASTHASH=1 PGRUST_PARALLEL_COPY_STITCH_POOL=8 PGRUST_PARALLEL_COPY_FILL_V2=1 PGRUST_PARALLEL_COPY_FILL_PREFETCH=6 PGRUST_PARALLEL_COPY_SORT_MEM=512 PGRUST_COPY_RUNLZ4=1 PGRUST_ANALYZE_SAMPLE_POOL=12 PGRUST_ANALYZE_TRACE=1 PGRUST_CBSTORE_DICT_FRAMES=1 PGRUST_PARALLEL_COPY_SORT_MEMRUNS=${CB_MEMRUNS_MB:-15360}"
+chmod 644 "$HITS"
+"$D/stop"
+env RUST_MIN_STACK=33554432 RUST_BACKTRACE=1 \
+  PGRUST_TZDIR="$PGTZDIR" PGRUST_PGSHAREDIR="$PGSHARE" \
+  $PARLOAD_ENV \
+  "$CB_BIN" -D "$CB_DD" -k "$CB_SOCK" -p 5432 -c listen_addresses='' \
+  >>"$CB_DD/server.log" 2>&1 &
+for i in $(seq 1 300); do "$D/check" >/dev/null 2>&1 && break; sleep 1; done
+"$D/check" >/dev/null
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -t -c "DROP DATABASE IF EXISTS test"
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -t -c "CREATE DATABASE test"
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -v ON_ERROR_STOP=1 test -t < "$D/create.sql"
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -v ON_ERROR_STOP=1 test <<SQL
+BEGIN;
+TRUNCATE TABLE hits;
+COPY hits FROM '$HITS' WITH (FREEZE);
+COMMIT;
+SQL
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -v ON_ERROR_STOP=1 test -t -c 'VACUUM ANALYZE hits'
+rm -f "$HITS"
+"$D/stop"
+"$D/start"
+for i in $(seq 1 300); do "$D/check" >/dev/null 2>&1 && break; sleep 1; done
+"$D/check" >/dev/null
+sync

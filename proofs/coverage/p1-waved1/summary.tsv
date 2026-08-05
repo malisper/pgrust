@@ -1,0 +1,55 @@
+# proofs/coverage/p1-waved1/summary.tsv — coverage equation of record for the
+# backend/access/transam/xlogreader FAMILY-GRAIN carve (lane p1-waved1,
+# census A-carve row, stub_req=none; IN = pure WAL-decode surface, OUT =
+# callback-IO page assembly / WALRead / read-ahead queue — see
+# mkequation.py's span table, derived from the census row + target header).
+#
+# CAPTURE PROVENANCE: full committed corpus replay (fuzz/corpus/
+# xlogreader_diff, 3876 inputs = local corpus UNION fleet corpora of jobs
+# 1-3, grow-only libFuzzer -merge=1) under cargo fuzz coverage + sysroot
+# llvm-cov, macOS local, tree = proofs/p1-waved1 @ 5656cfd417 + corpus merge
+# (banked in the same commit as this file). Fuzz-only crate: no Kani rows.
+#
+# FLEET FLOOR (all adjudicated from S3 campaign-stats.json, outcome
+# 'complete', rc=0, divergences 0, sanitizer artifacts 0):
+#   job1 pgrust-fuzz-campaign-1785631413-3224-29509 @ d761593149  10,000,000 execs, wall 4627s
+#   job2 pgrust-fuzz-campaign-1785634813-5c6a-10055 @ cbf2098b79  10,000,000 execs, wall 5544s (malformation-op builder)
+#   job3 pgrust-fuzz-campaign-1785636482-3d14-47867 @ 5656cfd417  10,000,000 execs, wall 5470s (FINAL sha: + caller-contract probes) <- floor of record
+#   plus local: 2.5M burst + full-corpus replays; injection sweep D1-D16
+#   (13 real defects KILLED 13/13 across both sessions, 2 no-op negative
+#   controls SURVIVED by design, 1 arid mutant superseded by a killed one).
+#
+# EQUATION: 519 in-scope v2 instrumented lines = 508 fuzz-measured
+#           + 11 exception rows (proofs/coverage/phase1-exceptions.tsv,
+#           author p1-waved1) = 519/519. Zero unaccounted.
+# Residual classes: decode cross-check-4 arm (dead in C too, derivation
+# proof in the row), oversized-alloc OOM arm (C palloc infallible),
+# UnknownMethod arm x2 (BKPIMAGE_COMPRESSED implies a method bit),
+# RestoreBlockImage no-decoded-record arm x2 (C NULL-derefs before its
+# guards — finding F5; pgrust safer).
+#
+span	instrumented	covered	uncovered_lines
+XLByteToSeg (segment math) [82-84]	3	3	-
+XLogSegmentOffset (segment math) [86-88]	3	3	-
+lsn_fmt (errormsg LSN rendering) [100-102]	3	3	-
+XLogFileName (segment math) [104-112]	6	6	-
+crc_init/crc_comp/crc_fin (record CRC32C) [114-122]	9	9	-
+XLogPageHeaderSize (page-header validation) [126-132]	5	5	-
+read_u16/u32/u64 (decode primitives) [146-163]	18	18	-
+parse_page_header (page-header validation) [165-180]	16	16	-
+parse_xlog_record (record-header decode) [192-201]	10	10	-
+parse_rel_file_locator (block-ref decode) [203-209]	7	7	-
+record_crc (ValidXLogRecord CRC) [211-217]	7	7	-
+DecodeXLogRecordRequiredSpace [273-280]	8	8	-
+ValidXLogRecordHeader [1238-1296]	36	36	-
+XLogReaderValidatePageHeader (entry) [1325-1349]	22	22	-
+RestoreBlockImage (entry) [1519-1562]	35	33	[1528, 1529]
+validate_page_header (core) [1636-1754]	68	68	-
+PayloadSink::put (decode_record support) [1780-1799]	15	15	-
+decode_record (C DecodeXLogRecord) [1802-2122]	207	200	[1966, 1967, 1968, 1974, 2036, 2037, 2041]
+restore_err_msg [2134-2158]	9	8	[2149]
+restore_image_core [2160-2205]	32	31	[2190]
+
+TOTAL in-scope instrumented lines: 519
+covered by fuzz: 508
+residual (must equal recorded exceptions): 11: [1528, 1529, 1966, 1967, 1968, 1974, 2036, 2037, 2041, 2149, 2190]

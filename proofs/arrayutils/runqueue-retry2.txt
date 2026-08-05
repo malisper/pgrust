@@ -1,0 +1,9 @@
+# p1-laneh RETRY-2 (2026-07-31): retry-1 job -24465 died BackoffLimitExceeded
+# with no artifacts (suspected node OOM at conc 2). conc 1 + 3000s caps.
+# mda_get_range/prod/next_tuple + eq_seed solved LOCALLY green post-unwind-fix
+# (4s/32s/13s/500s kissat); only the heavy rows return to the fleet.
+# Format: <harness> | <expected> | <tier> | <command>
+harnesses::eq_array_get_n_items | green | release-gate | timeout 3000 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_array_get_n_items --exact --solver kissat
+harnesses::ndim_wider_than_slice_always_errors | green | release-gate | timeout 3000 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::ndim_wider_than_slice_always_errors --exact --solver kissat
+harnesses::eq_array_check_bounds | green | release-gate | timeout 3000 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_array_check_bounds --exact --solver kissat
+harnesses::eq_mda_get_offset_values | green | release-gate | timeout 3000 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_mda_get_offset_values --exact --solver kissat

@@ -1,0 +1,3 @@
+Å);
+
+SET default_text_search_cnglishSELECT to_tsvector(

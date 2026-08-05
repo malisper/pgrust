@@ -1,0 +1,9 @@
+[package]
+name = "proof-md5-hex"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+pg_md5 = { path = "../../crates/common/md5" }

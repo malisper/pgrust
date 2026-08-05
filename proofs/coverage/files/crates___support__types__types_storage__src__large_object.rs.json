@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/types_storage/src/large_object.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1],"attr":[13],"const-static":[3,4,6,8],"typedef":[14,15,16,17,18,19]}}

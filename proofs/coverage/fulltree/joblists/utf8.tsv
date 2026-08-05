@@ -1,0 +1,39 @@
+utf8	islegal_len1	proofs::islegal_len1
+utf8	islegal_len2	proofs::islegal_len2
+utf8	islegal_len3	proofs::islegal_len3
+utf8	islegal_len4	proofs::islegal_len4
+utf8	islegal_symlen_contract	proofs::islegal_symlen_contract
+utf8	islegal_symlen_out_of_contract	proofs::islegal_symlen_out_of_contract
+utf8	mblen_all_bytes	proofs::mblen_all_bytes
+utf8	mblen_then_islegal	proofs::mblen_then_islegal
+utf8	eq_ascii_mblen	
+utf8	eq_ascii_dsplen	
+utf8	eq_eucjp_mblen	
+utf8	eq_eucjp_dsplen	
+utf8	eq_eucjis2004_mblen	
+utf8	eq_eucjis2004_dsplen	
+utf8	eq_euckr_mblen	
+utf8	eq_euckr_dsplen	
+utf8	eq_euccn_mblen	
+utf8	eq_euccn_dsplen	
+utf8	eq_euctw_mblen	
+utf8	eq_euctw_dsplen	
+utf8	eq_johab_mblen	
+utf8	eq_johab_dsplen	
+utf8	eq_mule_mblen	
+utf8	eq_mule_dsplen	
+utf8	eq_latin1_mblen	
+utf8	eq_latin1_dsplen	
+utf8	eq_sjis_mblen	
+utf8	eq_sjis_dsplen	
+utf8	eq_sjis2004_mblen	
+utf8	eq_sjis2004_dsplen	
+utf8	eq_big5_mblen	
+utf8	eq_big5_dsplen	
+utf8	eq_gbk_mblen	
+utf8	eq_gbk_dsplen	
+utf8	eq_uhc_mblen	
+utf8	eq_uhc_dsplen	
+utf8	eq_gb18030_mblen	
+utf8	eq_gb18030_dsplen	
+utf8	eq_single_byte_band_mblen	kernel_proofs::eq_single_byte_band_mblen

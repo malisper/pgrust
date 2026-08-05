@@ -1,0 +1,56 @@
+[package]
+name = "gin"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+gin_vocab = { path = "../gin_vocab" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_relscan = { path = "../../index/relscan" }
+tidbitmap = { path = "../../../nodes/tidbitmap" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+xloginsert = { path = "../../transam/xloginsert" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+freespace = { path = "../../../storage/freespace/freespace" }
+init_small = { path = "../../../utils/init/init_small" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+format_type = { path = "../../../utils/adt/format_type" }
+gin_trgm_seams = { path = "../gin_trgm_seams" }
+gin_hstore_seams = { path = "../gin_hstore_seams" }
+gin_btree_seams = { path = "../gin_btree_seams" }
+gin_int4_seams = { path = "../gin_int4_seams" }
+nbtree = { path = "../../nbtree/nbtree" }
+detoast = { path = "../../common/detoast" }
+adt_jsonb = { path = "../../../utils/adt/jsonb" }
+arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
+varlena = { path = "../../../utils/adt/varlena" }
+adt_tsginidx = { path = "../../../utils/adt/tsginidx" }
+adt_tsvector_core = { path = "../../../utils/adt/tsvector_core" }
+xact = { path = "../../transam/xact" }
+pg_prng = { path = "../../../../common/pg_prng" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+varsup_seams = { path = "../../transam/varsup_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+miscinit = { path = "../../../utils/init/miscinit" }
+
+[dev-dependencies]
+pglz = { path = "../../../../common/pglz" }

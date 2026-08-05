@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/adt/pg_locale_seams/src/lib.rs","sloc":[12,13,17,18,21,24,25,26,27,28,31,33,36,38,41,46,47,48,49,50,53,56,57,58,59,60,63,67],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2]}}

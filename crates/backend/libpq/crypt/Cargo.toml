@@ -1,0 +1,20 @@
+[package]
+name = "crypt"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "crypt"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+elog = { path = "../../utils/error/elog" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+pg_md5 = { path = "../../../common/md5" }
+auth_scram = { path = "../auth_scram" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }

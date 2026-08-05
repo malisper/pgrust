@@ -1,0 +1,3016 @@
+Kani Rust Verifier 0.67.0 (cargo plugin)
+warning: variant `Malloc` is never constructed
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/lib.rs:64:5
+   |
+61 | enum Backend {
+   |      ------- variant in this enum
+...
+64 |     Malloc,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `chunk_size` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/aset.rs:284:4
+    |
+284 | fn chunk_size(idx: usize) -> usize {
+    |    ^^^^^^^^^^
+
+warning: method `mem_allocated` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/aset.rs:340:19
+    |
+306 | impl AllocSet {
+    | ------------- method in this implementation
+...
+340 |     pub(crate) fn mem_allocated(&self) -> usize {
+    |                   ^^^^^^^^^^^^^
+
+warning: variant `ROW_MARK_EXCLUSIVE` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:897:5
+    |
+897 |     ROW_MARK_EXCLUSIVE = 0,
+    |     ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkExclusive`
+    |
+    = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variant `ROW_MARK_NOKEYEXCLUSIVE` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:898:5
+    |
+898 |     ROW_MARK_NOKEYEXCLUSIVE = 1,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkNokeyexclusive`
+
+warning: variant `ROW_MARK_SHARE` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:899:5
+    |
+899 |     ROW_MARK_SHARE = 2,
+    |     ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkShare`
+
+warning: variant `ROW_MARK_KEYSHARE` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:900:5
+    |
+900 |     ROW_MARK_KEYSHARE = 3,
+    |     ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkKeyshare`
+
+warning: variant `ROW_MARK_REFERENCE` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:901:5
+    |
+901 |     ROW_MARK_REFERENCE = 4,
+    |     ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkReference`
+
+warning: variant `ROW_MARK_COPY` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/nodes/src/plannodes.rs:902:5
+    |
+902 |     ROW_MARK_COPY = 5,
+    |     ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `RowMarkCopy`
+
+warning: unused imports: `LOG_DESTINATION_CSVLOG` and `LOG_DESTINATION_JSONLOG`
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/error/elog/src/config.rs:10:61
+   |
+10 |     ErrorLevel, PGErrorVerbosity, PgError, PgResult, ERROR, LOG_DESTINATION_CSVLOG,
+   |                                                             ^^^^^^^^^^^^^^^^^^^^^^
+11 |     LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, NOTICE, WARNING,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `OptNodeList`
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/readfuncs/src/lib.rs:12:53
+   |
+12 | use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
+   |                                                     ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `CoerceViaIO`
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/readfuncs/src/lib.rs:22:19
+   |
+22 |     CoalesceExpr, CoerceViaIO, CoercionForm, Const, FieldSelect, FieldStore, FromExpr, FuncExpr,
+   |                   ^^^^^^^^^^^
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/outfuncs/src/lib.rs:522:9
+    |
+124 |         NodeTag::T_CaseExpr => {
+    |         ------------------- matches all the relevant values
+...
+522 |         NodeTag::T_CaseExpr => {
+    |         ^^^^^^^^^^^^^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/outfuncs/src/lib.rs:532:9
+    |
+134 |         NodeTag::T_CaseWhen => {
+    |         ------------------- matches all the relevant values
+...
+532 |         NodeTag::T_CaseWhen => {
+    |         ^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/outfuncs/src/lib.rs:587:9
+    |
+150 |         NodeTag::T_WindowFunc => {
+    |         --------------------- matches all the relevant values
+...
+587 |         NodeTag::T_WindowFunc => {
+    |         ^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/outfuncs/src/lib.rs:606:9
+    |
+194 |         NodeTag::T_SetOperationStmt => {
+    |         --------------------------- matches all the relevant values
+...
+606 |         NodeTag::T_SetOperationStmt => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/outfuncs/src/lib.rs:727:9
+    |
+479 |         NodeTag::T_NotifyStmt => out_notify_stmt(
+    |         --------------------- matches all the relevant values
+...
+727 |         NodeTag::T_NotifyStmt => {
+    |         ^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: variable does not need to be mutable
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/pathnodes/src/run.rs:381:13
+    |
+381 |         let mut add = |outer: &mut crate::Relids<'mcx>, id: i32| {
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/pathnodes/src/run.rs:414:17
+    |
+414 |             let mut add = |outer: &mut crate::Relids<'mcx>, id: i32| {
+    |                 ----^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: unused import: `SetFunctionReturnMode`
+ --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:4:62
+  |
+4 | use fmgr::{ExprDoneCond, FmgrInfo, FunctionCallInfoBaseData, SetFunctionReturnMode};
+  |                                                              ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `init_MultiFuncCall` should have a snake case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:44:8
+   |
+44 | pub fn init_MultiFuncCall<'a>(
+   |        ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `init_multi_func_call`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: function `per_MultiFuncCall` should have a snake case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:64:8
+   |
+64 | pub fn per_MultiFuncCall(flinfo: &mut FmgrInfo) -> &mut FuncCallContext {
+   |        ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `per_multi_func_call`
+
+warning: function `end_MultiFuncCall` should have a snake case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/fmgr/funcapi_srf/src/lib.rs:70:8
+   |
+70 | pub fn end_MultiFuncCall(flinfo: &mut FmgrInfo) {
+   |        ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `end_multi_func_call`
+
+warning: type `spgChooseIn` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:92:12
+   |
+92 | pub struct spgChooseIn {
+   |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseIn`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `spgChooseOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:104:10
+    |
+104 | pub enum spgChooseOut {
+    |          ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseOut`
+
+warning: type `spgPickSplitIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:127:12
+    |
+127 | pub struct spgPickSplitIn {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitIn`
+
+warning: type `spgPickSplitOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:134:12
+    |
+134 | pub struct spgPickSplitOut {
+    |            ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitOut`
+
+warning: type `spgInnerConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:157:12
+    |
+157 | pub struct spgInnerConsistentIn<'a> {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentIn`
+
+warning: type `spgInnerConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:175:12
+    |
+175 | pub struct spgInnerConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentOut`
+
+warning: type `spgLeafConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:199:12
+    |
+199 | pub struct spgLeafConsistentIn {
+    |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentIn`
+
+warning: type `spgLeafConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:212:12
+    |
+212 | pub struct spgLeafConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentOut`
+
+warning: type `spgxlogState` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:15:12
+   |
+15 | pub struct spgxlogState {
+   |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogState`
+
+warning: type `spgxlogAddLeaf` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:40:12
+   |
+40 | pub struct spgxlogAddLeaf {
+   |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddLeaf`
+
+warning: type `spgxlogMoveLeafs` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:76:12
+   |
+76 | pub struct spgxlogMoveLeafs {
+   |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogMoveLeafs`
+
+warning: type `spgxlogAddNode` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:115:12
+    |
+115 | pub struct spgxlogAddNode {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddNode`
+
+warning: type `spgxlogSplitTuple` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:154:12
+    |
+154 | pub struct spgxlogSplitTuple {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogSplitTuple`
+
+warning: type `spgxlogPickSplit` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:184:12
+    |
+184 | pub struct spgxlogPickSplit {
+    |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogPickSplit`
+
+warning: type `spgxlogVacuumLeaf` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:238:12
+    |
+238 | pub struct spgxlogVacuumLeaf {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumLeaf`
+
+warning: type `spgxlogVacuumRoot` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:271:12
+    |
+271 | pub struct spgxlogVacuumRoot {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRoot`
+
+warning: type `spgxlogVacuumRedirect` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:295:12
+    |
+295 | pub struct spgxlogVacuumRedirect {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRedirect`
+
+warning: type `spgConfigIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/lib.rs:237:12
+    |
+237 | pub struct spgConfigIn {
+    |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigIn`
+
+warning: type `spgConfigOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/lib.rs:242:12
+    |
+242 | pub struct spgConfigOut {
+    |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigOut`
+
+warning: unreachable pattern
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/nodes_core/src/node_funcs.rs:47:9
+   |
+30 |         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
+   |         ---------------------- matches all the relevant values
+...
+47 |         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
+   |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+   |
+   = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/nodes_core/src/node_funcs.rs:194:9
+    |
+163 |         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
+    |         ---------------------- matches all the relevant values
+...
+194 |         NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
+    |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/nodes_core/src/node_funcs.rs:296:9
+    |
+279 |         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
+    |         ---------------------- matches all the relevant values
+...
+296 |         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
+    |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/nodes/nodes_core/src/node_funcs.rs:476:9
+    |
+424 |         NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
+    |         ---------------------- matches all the relevant values
+...
+476 |         NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
+    |         ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unused import: `MemoryContext`
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/cache/typcache/src/lib.rs:19:16
+   |
+19 | use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
+   |                ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `addedafter` is never read
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/element.rs:545:26
+    |
+545 |     let mut addedafter = 0i32;
+    |                          ^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/expanded.rs:144:55
+    |
+141 |     unsafe {
+    |     ------ because it's nested under this `unsafe` block
+...
+144 |         parentcontext.register_reset_callback(move || unsafe { drop(Box::from_raw(p)) });
+    |                                                       ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/expanded.rs:252:15
+    |
+252 |         cur + unsafe { varsize_any(value.as_usize() as *const u8) }
+    |               ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/io.rs:557:15
+    |
+557 |         -1 => unsafe { varsize_any(p) },
+    |               ^^^^^^ unnecessary `unsafe` block
+
+warning: constant `HASH_RECORD_OID` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/builtins.rs:522:7
+    |
+522 | const HASH_RECORD_OID: Oid = 6192;
+    |       ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `HASH_RECORD_EXTENDED_OID` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/arrayfuncs/src/builtins.rs:523:7
+    |
+523 | const HASH_RECORD_EXTENDED_OID: Oid = 6193;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/numeric/src/sortsupport.rs:21:17
+   |
+21 | struct AlignBuf([u8; 128]);
+   |        -------- ^^^^^^^^^
+   |        |
+   |        field in this struct
+   |
+   = help: consider removing this field
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Point`
+ --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/geo/src/path.rs:2:25
+  |
+2 | use ::types_core::geo::{Point, BOX, PATH_HEADER_SIZE};
+  |                         ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `stubs`
+  --> src/ext.rs:46:39
+   |
+46 |     use proof_support::{call1, call2, stubs};
+   |                                       ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `mcx_stubs` and `stubs`
+  --> src/ext2.rs:50:39
+   |
+50 |     use proof_support::{call1, call2, mcx_stubs, stubs, FcFn};
+   |                                       ^^^^^^^^^  ^^^^^
+
+warning: unused imports: `mcx_stubs` and `stubs`
+  --> src/ext3.rs:40:25
+   |
+40 |     use proof_support::{mcx_stubs, stubs, FcFn};
+   |                         ^^^^^^^^^  ^^^^^
+
+warning: unused imports: `mcx_stubs` and `stubs`
+  --> src/ext4.rs:30:25
+   |
+30 |     use proof_support::{mcx_stubs, stubs};
+   |                         ^^^^^^^^^  ^^^^^
+
+warning: unused imports: `mcx_stubs` and `stubs`
+  --> src/ext5.rs:34:25
+   |
+34 |     use proof_support::{mcx_stubs, stubs, FcFn};
+   |                         ^^^^^^^^^  ^^^^^
+
+warning: unused import: `stubs`
+  --> src/lib.rs:64:39
+   |
+64 |     use proof_support::{call1, call2, stubs};
+   |                                       ^^^^^
+
+warning: constant `POLY_BUF` is never used
+  --> src/ext5.rs:58:11
+   |
+58 |     const POLY_BUF: usize = 4 + 36 + 16 * CAP;
+   |           ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `poly_img` is never used
+  --> src/ext5.rs:76:8
+   |
+76 |     fn poly_img(npts: i32, bb: [f64; 4], pts: &[(f64, f64)]) -> [u8; POLY_BUF] {
+   |        ^^^^^^^^
+
+warning: function `call2n` is never used
+  --> src/ext5.rs:96:8
+   |
+96 |     fn call2n(fc: FcFn<Box<PgError>>, a: *const u8, b: *const u8) -> (Result<Datum, Box<PgError>>, bool) {
+   |        ^^^^^^
+
+warning: Found the following unsupported constructs:
+             - caller_location (1)
+             - foreign function (1)
+         
+         Verification will fail if one or more of these constructs is reachable.
+         See https://model-checking.github.io/kani/rust-feature-support.html for more details.
+
+warning: Kani currently does not support concurrency. The following constructs will be treated as sequential operations:
+             - atomic_load (3)
+         
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+Checking harness ext3::proofs_ext3::eq_poly_overleft...
+CBMC 6.8.0 (cbmc-6.8.0)
+CBMC version 6.8.0 (cbmc-6.8.0) 64-bit arm64 macos
+Reading GOTO program from file /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/geo-cmp/target/kani/aarch64-apple-darwin/debug/deps/proof_geo_cmp-bd79f2bdbcc1e2aa__RNvNtNtCs4aLvt2ZhjUt_13proof_geo_cmp4ext311proofs_ext316eq_poly_overleft.out
+Generating GOTO Program
+Adding CPROVER library (arm64)
+Removal of function pointers and virtual functions
+Generic Property Instrumentation
+Running with 16 object bits, 48 offset bits (user-specified)
+Starting Bounded Model Checking
+Unwinding loop _RNvNtNtCs4aLvt2ZhjUt_13proof_geo_cmp4ext311proofs_ext38poly_img.0 iteration 1 file src/ext3.rs line 123 column 9 function ext3::proofs_ext3::poly_img thread 0
+Unwinding loop _RNvNtNtCs4aLvt2ZhjUt_13proof_geo_cmp4ext311proofs_ext38poly_img.0 iteration 1 file src/ext3.rs line 123 column 9 function ext3::proofs_ext3::poly_img thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs line 497 column 5 function types_fmgr::fcinfo::result_mcx_unarmed thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs line 410 column 21 function types_fmgr::FunctionCallInfoBaseData::result_mcx thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 2173 column 15 function <std::result::Result<&[u8], std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/geo/src/builtins.rs line 50 column 30 function adt_geo::builtins::arg_poly thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 49 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 68 column 5 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 443 column 13 function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1338 column 15 function std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError> thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 1717 column 15 function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 1231 column 15 function std::result::Result::<[u8; 4], std::array::TryFromSliceError>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 1867 column 5 function std::result::unwrap_failed thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 1233 column 23 function std::result::Result::<[u8; 4], std::array::TryFromSliceError>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 40 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 49 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 68 column 5 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 443 column 13 function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 435 column 5 function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 40 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 49 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 58 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 68 column 5 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 443 column 13 function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 2173 column 15 function <std::result::Result<adt_geo::PolyRef<'_>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs line 497 column 5 function types_fmgr::fcinfo::result_mcx_unarmed thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs line 410 column 21 function types_fmgr::FunctionCallInfoBaseData::result_mcx thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 2173 column 15 function <std::result::Result<&[u8], std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/geo/src/builtins.rs line 50 column 30 function adt_geo::builtins::arg_poly thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 49 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 68 column 5 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 443 column 13 function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs line 1338 column 15 function std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError> thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 1717 column 15 function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 1231 column 15 function std::result::Result::<[u8; 4], std::array::TryFromSliceError>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 1867 column 5 function std::result::unwrap_failed thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 1233 column 23 function std::result::Result::<[u8; 4], std::array::TryFromSliceError>::unwrap thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 40 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 49 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 68 column 5 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 443 column 13 function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 435 column 5 function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 40 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 49 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 58 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 68 column 5 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2449 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic.rs line 178 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs line 443 column 13 function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 2173 column 15 function <std::result::Result<adt_geo::PolyRef<'_>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch thread 0
+aborting path on assume(false) at file src/lib.rs line 0 column 0 function adt_geo::builtins::fc_poly_overleft thread 0
+aborting path on assume(false) at file src/ext3.rs line 150 column 15 function ext3::proofs_ext3::expect_ok thread 0
+aborting path on assume(false) at file src/ext3.rs line 152 column 23 function ext3::proofs_ext3::expect_ok thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs line 830 column 5 function alloc::raw_vec::RawVecInner::deallocate thread 0
+Runtime Symex: 1.26602s
+size of program expression: 51134 steps
+slicing removed 33919 assignments
+Generated 3190 VCC(s), 1255 remaining after simplification
+Runtime Postprocess Equation: 0.0153965s
+Passing problem to propositional reduction
+converting SSA
+Runtime Convert SSA: 0.0963358s
+Running propositional reduction
+Post-processing
+Runtime Post-process: 0.106075s
+Solving with External SAT solver
+Writing temporary CNF
+Invoking SAT solver
+Solver returned code: 10
+result:SATISFIABLE
+Runtime Solver: 0.424549s
+Runtime decision procedure: 0.523109s
+Running propositional reduction
+Solving with External SAT solver
+Writing temporary CNF
+Invoking SAT solver
+Solver returned code: 20
+result:UNSATISFIABLE
+Runtime Solver: 0.821291s
+Runtime decision procedure: 0.821388s
+
+RESULTS:
+Check 1: adt_geo::PolyRef::<'_>::from_payload.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to subtract with overflow"
+	 - Location: ../../crates/backend/utils/adt/geo/src/lib.rs:265:20 in function adt_geo::PolyRef::<'_>::from_payload
+
+Check 2: adt_geo::PolyRef::<'_>::from_payload.assertion.2
+	 - Status: SUCCESS
+	 - Description: "attempt to multiply with overflow"
+	 - Location: ../../crates/backend/utils/adt/geo/src/lib.rs:269:37 in function adt_geo::PolyRef::<'_>::from_payload
+
+Check 3: adt_geo::PolyRef::<'_>::from_payload.assertion.3
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../crates/backend/utils/adt/geo/src/lib.rs:269:30 in function adt_geo::PolyRef::<'_>::from_payload
+
+Check 4: detoast_seams::detoast_attr::call.missing_definition.1
+	 - Status: SUCCESS
+	 - Description: "assertion"
+	 - Location: Unknown file in function detoast_seams::detoast_attr::call
+
+Check 5: types_tuple::varatt::varatt_is_1b.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "null pointer dereference occurred"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:70:13 in function types_tuple::varatt::varatt_is_1b
+
+Check 6: <std::result::Result<types_fmgr::PackedVarlena<'_>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<types_fmgr::PackedVarlena<'_>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 7: __rust_dealloc.assertion.1
+	 - Status: SUCCESS
+	 - Description: "Alignment is power of two"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:83 in function __rust_dealloc
+
+Check 8: __rust_dealloc.assertion.2
+	 - Status: SUCCESS
+	 - Description: "rust_dealloc must be called on an object whose allocated size matches its layout"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:85 in function __rust_dealloc
+
+Check 9: std::slice::from_raw_parts_mut::<'_, u8>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/raw.rs:194:9 in function std::slice::from_raw_parts_mut::<'_, u8>
+
+Check 10: std::slice::from_raw_parts_mut::<'_, u8>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/raw.rs:194:9 in function std::slice::from_raw_parts_mut::<'_, u8>
+
+Check 11: adt_geo::builtins::varlena_payload.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../crates/backend/utils/adt/geo/src/builtins.rs:42:8 in function adt_geo::builtins::varlena_payload
+
+Check 12: core::slice::index::slice_index_fail::do_panic::runtime.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:68:5 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 13: kani::rustc_intrinsics::offset::<u8, *const u8, usize>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset in bytes overflows isize"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<u8, *const u8, usize>
+
+Check 14: kani::rustc_intrinsics::offset::<u8, *const u8, usize>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "Offset result and original pointer must point to the same allocation"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<u8, *const u8, usize>
+
+Check 15: detoast_seams::detoast_attr::__uninstalled_stub.assertion.1
+	 - Status: SUCCESS
+	 - Description: "concat! ("seam not installed: ", module_path! ())"
+	 - Location: ../../crates/backend/access/common/detoast_seams/src/lib.rs:9:1 in function detoast_seams::detoast_attr::__uninstalled_stub
+
+Check 16: types_fmgr::fcinfo::result_mcx_unarmed.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:497:5 in function types_fmgr::fcinfo::result_mcx_unarmed
+
+Check 17: types_tuple::varatt::varatt_is_4b_u.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "null pointer dereference occurred"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:90:13 in function types_tuple::varatt::varatt_is_4b_u
+
+Check 18: core::panicking::panic_nounwind_fmt::runtime.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "call to foreign "Rust" function `_RNvCs1hStedNDpZ2_7___rustc17rust_begin_unwind` is not currently supported by Kani. Please post your example at https://github.com/model-checking/kani/issues/new/choose"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:110:17 in function core::panicking::panic_nounwind_fmt::runtime
+
+Check 19: core::slice::index::slice_index_fail::do_panic::runtime.assertion.2
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:40:9 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 20: types_tuple::varatt::varsize_4b_word.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to shift right with overflow"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:32:5 in function types_tuple::varatt::varsize_4b_word
+
+Check 21: kani::mem::cbmc::same_allocation.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "Kani does not support reasoning about pointer to unallocated memory"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::mem::cbmc::same_allocation
+
+Check 22: std::ptr::drop_in_place::<std::vec::Vec<u8>>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::vec::Vec<u8>>
+
+Check 23: std::ptr::drop_in_place::<std::vec::Vec<u8>>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::vec::Vec<u8>>
+
+Check 24: std::slice::from_raw_parts::<'_, u8>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/raw.rs:139:9 in function std::slice::from_raw_parts::<'_, u8>
+
+Check 25: std::slice::from_raw_parts::<'_, u8>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/raw.rs:139:9 in function std::slice::from_raw_parts::<'_, u8>
+
+Check 26: core::slice::<impl [u8]>::as_array::<4>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/mod.rs:854:31 in function core::slice::<impl [u8]>::as_array::<4>
+
+Check 27: core::slice::<impl [u8]>::as_array::<4>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/mod.rs:854:31 in function core::slice::<impl [u8]>::as_array::<4>
+
+Check 28: std::panic::Location::<'_>::caller.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "caller_location is not currently supported by Kani. Please post your example at https://github.com/model-checking/kani/issues/374"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic/location.rs:147:9 in function std::panic::Location::<'_>::caller
+
+Check 29: std::alloc::Layout::max_size_for_align.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:95:32 in function std::alloc::Layout::max_size_for_align
+
+Check 30: std::alloc::Layout::max_size_for_align.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_sub` which would overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:95:18 in function std::alloc::Layout::max_size_for_align
+
+Check 31: types_tuple::varatt::varatt_is_1b_e.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "null pointer dereference occurred"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:80:12 in function types_tuple::varatt::varatt_is_1b_e
+
+Check 32: types_tuple::varatt::varsize_1b.safety_check.1
+	 - Status: UNREACHABLE
+	 - Description: "null pointer dereference occurred"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:107:14 in function types_tuple::varatt::varsize_1b
+
+Check 33: types_tuple::varatt::varsize_1b.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift right with overflow"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:107:13 in function types_tuple::varatt::varsize_1b
+
+Check 34: std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:18 in function std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>
+
+Check 35: std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:18 in function std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>
+
+Check 36: std::ptr::drop_in_place::<alloc::raw_vec::RawVec<u8>>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<alloc::raw_vec::RawVec<u8>>
+
+Check 37: std::ptr::drop_in_place::<alloc::raw_vec::RawVec<u8>>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<alloc::raw_vec::RawVec<u8>>
+
+Check 38: kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani_core/src/models.rs:43:13 in function kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>
+
+Check 39: kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "failed to compute `align_of_val`"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>
+
+Check 40: kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>.assertion.1
+	 - Status: SUCCESS
+	 - Description: "cannot compute `align_of_val` for extern types"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::align_of_val_raw::<types_error::PgError>
+
+Check 41: <usize as kani::rustc_intrinsics::ToISize>::to_isize.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani_core/src/models.rs:176:17 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 42: <usize as kani::rustc_intrinsics::ToISize>::to_isize.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset value overflows isize"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 43: <usize as kani::rustc_intrinsics::ToISize>::to_isize.assertion.1
+	 - Status: SUCCESS
+	 - Description: "internal error: entered unreachable code"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 44: ext3::proofs_ext3::expect_ok.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: src/ext3.rs:150:15 in function ext3::proofs_ext3::expect_ok
+
+Check 45: ext3::proofs_ext3::expect_ok.assertion.1
+	 - Status: SUCCESS
+	 - Description: "infallible geo varlena op errored"
+	 - Location: src/ext3.rs:152:23 in function ext3::proofs_ext3::expect_ok
+
+Check 46: std::result::unwrap_failed.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1867:5 in function std::result::unwrap_failed
+
+Check 47: core::num::<impl usize>::checked_sub.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_sub` which would overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:812:31 in function core::num::<impl usize>::checked_sub
+
+Check 48: core::num::<impl usize>::unchecked_mul.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_mul` which would overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:1117:17 in function core::num::<impl usize>::unchecked_mul
+
+Check 49: std::alloc::Layout::is_size_align_valid.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:68:5 in function std::alloc::Layout::is_size_align_valid
+
+Check 50: core::slice::copy_from_slice_impl::len_mismatch_fail::do_panic::runtime.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/mod.rs:5117:9 in function core::slice::copy_from_slice_impl::len_mismatch_fail::do_panic::runtime
+
+Check 51: <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 52: core::slice::index::slice_index_fail::do_panic::runtime.assertion.3
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:49:9 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 53: ext3::proofs_ext3::poly_img.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to multiply with overflow"
+	 - Location: src/ext3.rs:115:27 in function ext3::proofs_ext3::poly_img
+
+Check 54: ext3::proofs_ext3::poly_img.assertion.2
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: src/ext3.rs:115:21 in function ext3::proofs_ext3::poly_img
+
+Check 55: ext3::proofs_ext3::poly_img.assertion.3
+	 - Status: SUCCESS
+	 - Description: "attempt to shift left with overflow"
+	 - Location: src/ext3.rs:116:34 in function ext3::proofs_ext3::poly_img
+
+Check 56: ext3::proofs_ext3::poly_img.assertion.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:118:35 in function ext3::proofs_ext3::poly_img
+
+Check 57: ext3::proofs_ext3::poly_img.assertion.5
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:119:36 in function ext3::proofs_ext3::poly_img
+
+Check 58: ext3::proofs_ext3::poly_img.assertion.6
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:120:36 in function ext3::proofs_ext3::poly_img
+
+Check 59: ext3::proofs_ext3::poly_img.assertion.7
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:121:36 in function ext3::proofs_ext3::poly_img
+
+Check 60: ext3::proofs_ext3::poly_img.assertion.8
+	 - Status: SUCCESS
+	 - Description: "attempt to multiply with overflow"
+	 - Location: src/ext3.rs:124:28 in function ext3::proofs_ext3::poly_img
+
+Check 61: ext3::proofs_ext3::poly_img.assertion.9
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: src/ext3.rs:124:23 in function ext3::proofs_ext3::poly_img
+
+Check 62: ext3::proofs_ext3::poly_img.assertion.10
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: src/ext3.rs:125:20 in function ext3::proofs_ext3::poly_img
+
+Check 63: ext3::proofs_ext3::poly_img.assertion.11
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:125:46 in function ext3::proofs_ext3::poly_img
+
+Check 64: ext3::proofs_ext3::poly_img.assertion.12
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: src/ext3.rs:126:15 in function ext3::proofs_ext3::poly_img
+
+Check 65: ext3::proofs_ext3::poly_img.assertion.13
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: src/ext3.rs:126:24 in function ext3::proofs_ext3::poly_img
+
+Check 66: ext3::proofs_ext3::poly_img.assertion.14
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:126:51 in function ext3::proofs_ext3::poly_img
+
+Check 67: ext3::proofs_ext3::poly_img.assertion.15
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: src/ext3.rs:127:13 in function ext3::proofs_ext3::poly_img
+
+Check 68: ext3::proofs_ext3::call2v.assertion.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:135:9 in function ext3::proofs_ext3::call2v
+
+Check 69: ext3::proofs_ext3::call2v.assertion.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:136:9 in function ext3::proofs_ext3::call2v
+
+Check 70: proof_geo_cmp::ext3::proofs_ext3::call2v.missing_definition.1
+	 - Status: SUCCESS
+	 - Description: "assertion"
+	 - Location: Unknown file in function proof_geo_cmp::ext3::proofs_ext3::call2v
+
+Check 71: adt_geo::builtins::arg_poly.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../crates/backend/utils/adt/geo/src/builtins.rs:50:30 in function adt_geo::builtins::arg_poly
+
+Check 72: <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index_mut.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:448:5 in function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index_mut
+
+Check 73: <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index_mut.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:454:22 in function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index_mut
+
+Check 74: <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index_mut.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:454:22 in function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index_mut
+
+Check 75: alloc::raw_vec::RawVecInner::deallocate.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:830:5 in function alloc::raw_vec::RawVecInner::deallocate
+
+Check 76: std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1338:15 in function std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>
+
+Check 77: types_fmgr::FunctionCallInfoBaseData::arg.assertion.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:443:9 in function types_fmgr::FunctionCallInfoBaseData::arg
+
+Check 78: <std::result::Result<adt_geo::PolyRef<'_>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<adt_geo::PolyRef<'_>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 79: core::num::<impl usize>::abs_diff.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to subtract with overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:2852:21 in function core::num::<impl usize>::abs_diff
+
+Check 80: core::num::<impl usize>::abs_diff.assertion.2
+	 - Status: UNREACHABLE
+	 - Description: "attempt to subtract with overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:2854:21 in function core::num::<impl usize>::abs_diff
+
+Check 81: adt_geo::builtins::fc_poly_overleft.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: src/lib.rs:0:0 in function adt_geo::builtins::fc_poly_overleft
+
+Check 82: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1717:15 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 83: kani::rustc_intrinsics::offset::<u8, *mut u8, usize>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset in bytes overflows isize"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<u8, *mut u8, usize>
+
+Check 84: kani::rustc_intrinsics::offset::<u8, *mut u8, usize>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "Offset result and original pointer must point to the same allocation"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<u8, *mut u8, usize>
+
+Check 85: types_fmgr::FunctionCallInfoBaseData::result_mcx.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:407:15 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 86: std::sync::atomic::atomic_load::<*mut ()>.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3961:15 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 87: std::sync::atomic::atomic_load::<*mut ()>.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3966:23 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 88: std::sync::atomic::atomic_load::<*mut ()>.assertion.2
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3965:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 89: std::fmt::Arguments::<'_>::from_str.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/fmt/mod.rs:820:38 in function std::fmt::Arguments::<'_>::from_str
+
+Check 90: allocator_api2::stable::assume.assertion.1
+	 - Status: SUCCESS
+	 - Description: "internal error: entered unreachable code"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/mod.rs:73:9 in function allocator_api2::stable::assume
+
+Check 91: core::slice::index::slice_index_fail::do_panic::runtime.assertion.4
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:58:9 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 92: types_tuple::varatt::varsize_external.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:165:5 in function types_tuple::varatt::varsize_external
+
+Check 93: types_tuple::varatt::vartag_size.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:20:14 in function types_tuple::varatt::vartag_size
+
+Check 94: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 95: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 96: kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani_core/src/models.rs:23:13 in function kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>
+
+Check 97: kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "failed to compute `size_of_val`"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>
+
+Check 98: kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>.assertion.1
+	 - Status: SUCCESS
+	 - Description: "cannot compute `size_of_val` for extern types"
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::size_of_val_raw::<types_error::PgError>
+
+Check 99: std::ptr::const_ptr::<impl *const ()>::is_aligned_to.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to subtract with overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/const_ptr.rs:1377:23 in function std::ptr::const_ptr::<impl *const ()>::is_aligned_to
+
+Check 100: std::ptr::const_ptr::<impl *const ()>::is_aligned_to.assertion.2
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/const_ptr.rs:1374:13 in function std::ptr::const_ptr::<impl *const ()>::is_aligned_to
+
+Check 101: types_fmgr::PackedVarlena::<'_>::data.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to subtract with overflow"
+	 - Location: ../../crates/_support/types/fmgr/src/getarg.rs:97:21 in function types_fmgr::PackedVarlena::<'_>::data
+
+Check 102: types_fmgr::PackedVarlena::<'_>::data.assertion.2
+	 - Status: SUCCESS
+	 - Description: "attempt to subtract with overflow"
+	 - Location: ../../crates/_support/types/fmgr/src/getarg.rs:102:21 in function types_fmgr::PackedVarlena::<'_>::data
+
+Check 103: types_fmgr::getarg::detoast_arg.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../crates/_support/types/fmgr/src/getarg.rs:115:16 in function types_fmgr::getarg::detoast_arg
+
+Check 104: <std::result::Result<&[u8], std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<&[u8], std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 105: <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:435:5 in function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index
+
+Check 106: <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:441:22 in function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index
+
+Check 107: <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:441:22 in function <std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::index
+
+Check 108: core::ub_checks::is_valid_allocation_size.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to divide by zero"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ub_checks.rs:149:54 in function core::ub_checks::is_valid_allocation_size
+
+Check 109: core::ub_checks::is_valid_allocation_size.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to divide by zero"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ub_checks.rs:149:54 in function core::ub_checks::is_valid_allocation_size
+
+Check 110: types_tuple::varatt::vartag_external.safety_check.1
+	 - Status: UNREACHABLE
+	 - Description: "null pointer dereference occurred"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:123:5 in function types_tuple::varatt::vartag_external
+
+Check 111: core::ub_checks::maybe_is_nonoverlapping::runtime.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:2437:9 in function core::ub_checks::maybe_is_nonoverlapping::runtime
+
+Check 112: ext3::proofs_ext3::eq_poly_overleft.assertion.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:38 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 113: ext3::proofs_ext3::eq_poly_overleft.assertion.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:44 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 114: ext3::proofs_ext3::eq_poly_overleft.assertion.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:50 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 115: ext3::proofs_ext3::eq_poly_overleft.assertion.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:56 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 116: ext3::proofs_ext3::eq_poly_overleft.assertion.5
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:62 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 117: ext3::proofs_ext3::eq_poly_overleft.assertion.6
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:68 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 118: ext3::proofs_ext3::eq_poly_overleft.assertion.7
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:74 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 119: ext3::proofs_ext3::eq_poly_overleft.assertion.8
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:80 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 120: ext3::proofs_ext3::eq_poly_overleft.assertion.9
+	 - Status: SUCCESS
+	 - Description: "assertion failed: r.as_bool() as c_int == c"
+	 - Location: src/ext3.rs:263:5 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 121: std::result::Result::<[u8; 4], std::array::TryFromSliceError>::unwrap.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1231:15 in function std::result::Result::<[u8; 4], std::array::TryFromSliceError>::unwrap
+
+Check 122: std::ptr::copy_nonoverlapping::<u8>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "`src` must be properly aligned"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:547:14 in function std::ptr::copy_nonoverlapping::<u8>
+
+Check 123: std::ptr::copy_nonoverlapping::<u8>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "`dst` must be properly aligned"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:547:14 in function std::ptr::copy_nonoverlapping::<u8>
+
+Check 124: std::ptr::copy_nonoverlapping::<u8>.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "copy_nonoverlapping: attempt to compute number in bytes which would overflow"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:547:14 in function std::ptr::copy_nonoverlapping::<u8>
+
+Check 125: memcpy.pointer.1
+	 - Status: SUCCESS
+	 - Description: "same object violation in (const char *)(void *)src >= (const char *)(void *)dst + (signed long int)(count * sizeof(unsigned char) /*1*/ )"
+	 - Location: <builtin-library-memcpy>:33 in function memcpy
+
+Check 126: memcpy.pointer.2
+	 - Status: SUCCESS
+	 - Description: "same object violation in (const char *)(void *)dst >= (const char *)(void *)src + (signed long int)(count * sizeof(unsigned char) /*1*/ )"
+	 - Location: <builtin-library-memcpy>:34 in function memcpy
+
+Check 127: std::ptr::copy_nonoverlapping::<u8>.precondition_instance.1
+	 - Status: SUCCESS
+	 - Description: "memcpy src/dst overlap"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:547:14 in function std::ptr::copy_nonoverlapping::<u8>
+
+Check 128: std::ptr::copy_nonoverlapping::<u8>.precondition_instance.2
+	 - Status: SUCCESS
+	 - Description: "memcpy source region readable"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:547:14 in function std::ptr::copy_nonoverlapping::<u8>
+
+Check 129: std::ptr::copy_nonoverlapping::<u8>.precondition_instance.3
+	 - Status: SUCCESS
+	 - Description: "memcpy destination region writeable"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:547:14 in function std::ptr::copy_nonoverlapping::<u8>
+
+Check 130: pg_poly_overleft.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2483 in function pg_poly_overleft
+
+Check 131: pg_poly_overleft.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2483 in function pg_poly_overleft
+
+Check 132: pg_poly_overleft.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2483 in function pg_poly_overleft
+
+Check 133: pg_poly_overleft.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2483 in function pg_poly_overleft
+
+Check 134: ext3::proofs_ext3::eq_poly_overleft.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:38 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 135: ext3::proofs_ext3::eq_poly_overleft.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:44 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 136: ext3::proofs_ext3::eq_poly_overleft.array_bounds.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:50 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 137: ext3::proofs_ext3::eq_poly_overleft.array_bounds.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:56 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 138: ext3::proofs_ext3::eq_poly_overleft.array_bounds.5
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:62 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 139: ext3::proofs_ext3::eq_poly_overleft.array_bounds.6
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:68 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 140: ext3::proofs_ext3::eq_poly_overleft.array_bounds.7
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:74 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 141: ext3::proofs_ext3::eq_poly_overleft.array_bounds.8
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:257:80 in function ext3::proofs_ext3::eq_poly_overleft
+
+Check 142: types_tuple::varatt::vartag_external.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:123:5 in function types_tuple::varatt::vartag_external
+
+Check 143: types_tuple::varatt::vartag_external.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:123:5 in function types_tuple::varatt::vartag_external
+
+Check 144: types_tuple::varatt::vartag_external.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:123:5 in function types_tuple::varatt::vartag_external
+
+Check 145: types_tuple::varatt::vartag_external.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:123:5 in function types_tuple::varatt::vartag_external
+
+Check 146: types_tuple::varatt::vartag_external.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:123:5 in function types_tuple::varatt::vartag_external
+
+Check 147: types_tuple::varatt::vartag_external.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:123:5 in function types_tuple::varatt::vartag_external
+
+Check 148: __rust_dealloc.precondition_instance.1
+	 - Status: SUCCESS
+	 - Description: "free argument must be NULL or valid pointer"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 149: __rust_dealloc.precondition_instance.2
+	 - Status: SUCCESS
+	 - Description: "free argument must be dynamic object"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 150: __rust_dealloc.precondition_instance.3
+	 - Status: SUCCESS
+	 - Description: "free argument has offset zero"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 151: __rust_dealloc.precondition_instance.4
+	 - Status: SUCCESS
+	 - Description: "double free"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 152: __rust_dealloc.precondition_instance.5
+	 - Status: SUCCESS
+	 - Description: "free called for new[] object"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 153: __rust_dealloc.precondition_instance.6
+	 - Status: SUCCESS
+	 - Description: "free called for stack-allocated object"
+	 - Location: ../../../../../.kani/kani-0.67.0/library/kani/kani_lib.c:87 in function __rust_dealloc
+
+Check 154: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 155: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 156: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 157: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 158: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 159: std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<types_error::PgError>>
+
+Check 160: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3964:23 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 161: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3964:23 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 162: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3964:23 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 163: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3964:23 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 164: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3964:23 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 165: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3964:23 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 166: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3963:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 167: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3963:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 168: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3963:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 169: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3963:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 170: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3963:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 171: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3963:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 172: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3962:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 173: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3962:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 174: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3962:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 175: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3962:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 176: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3962:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 177: std::sync::atomic::atomic_load::<*mut ()>.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/sync/atomic.rs:3962:24 in function std::sync::atomic::atomic_load::<*mut ()>
+
+Check 178: types_fmgr::FunctionCallInfoBaseData::result_mcx.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:407:15 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 179: types_fmgr::FunctionCallInfoBaseData::result_mcx.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:407:15 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 180: types_fmgr::FunctionCallInfoBaseData::result_mcx.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:407:15 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 181: types_fmgr::FunctionCallInfoBaseData::result_mcx.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:407:15 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 182: types_fmgr::FunctionCallInfoBaseData::result_mcx.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:409:18 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 183: types_fmgr::FunctionCallInfoBaseData::result_mcx.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:409:18 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 184: types_fmgr::FunctionCallInfoBaseData::result_mcx.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:409:18 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 185: types_fmgr::FunctionCallInfoBaseData::result_mcx.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:409:18 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 186: types_fmgr::FunctionCallInfoBaseData::result_mcx.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:409:18 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 187: types_fmgr::FunctionCallInfoBaseData::result_mcx.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:409:18 in function types_fmgr::FunctionCallInfoBaseData::result_mcx
+
+Check 188: adt_geo::poly::poly_overleft.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:5 in function adt_geo::poly::poly_overleft
+
+Check 189: adt_geo::poly::poly_overleft.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:5 in function adt_geo::poly::poly_overleft
+
+Check 190: adt_geo::poly::poly_overleft.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:5 in function adt_geo::poly::poly_overleft
+
+Check 191: adt_geo::poly::poly_overleft.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:5 in function adt_geo::poly::poly_overleft
+
+Check 192: adt_geo::poly::poly_overleft.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:5 in function adt_geo::poly::poly_overleft
+
+Check 193: adt_geo::poly::poly_overleft.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:5 in function adt_geo::poly::poly_overleft
+
+Check 194: adt_geo::poly::poly_overleft.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:26 in function adt_geo::poly::poly_overleft
+
+Check 195: adt_geo::poly::poly_overleft.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:26 in function adt_geo::poly::poly_overleft
+
+Check 196: adt_geo::poly::poly_overleft.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:26 in function adt_geo::poly::poly_overleft
+
+Check 197: adt_geo::poly::poly_overleft.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:26 in function adt_geo::poly::poly_overleft
+
+Check 198: adt_geo::poly::poly_overleft.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:26 in function adt_geo::poly::poly_overleft
+
+Check 199: adt_geo::poly::poly_overleft.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/backend/utils/adt/geo/src/poly.rs:15:26 in function adt_geo::poly::poly_overleft
+
+Check 200: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1717:15 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 201: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 202: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 203: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 204: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 205: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 206: std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:1718:17 in function std::result::Result::<&[u8; 4], std::array::TryFromSliceError>::copied
+
+Check 207: adt_geo::builtins::fc_poly_overleft.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/backend/utils/adt/geo/src/builtins.rs:766:21 in function adt_geo::builtins::fc_poly_overleft
+
+Check 208: adt_geo::builtins::fc_poly_overleft.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/backend/utils/adt/geo/src/builtins.rs:768:21 in function adt_geo::builtins::fc_poly_overleft
+
+Check 209: std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1338:15 in function std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>
+
+Check 210: std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1340:21 in function std::option::Option::<&[u8; 4]>::ok_or::<std::array::TryFromSliceError>
+
+Check 211: alloc::raw_vec::RawVecInner::deallocate.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:832:38 in function alloc::raw_vec::RawVecInner::deallocate
+
+Check 212: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 213: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 214: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 215: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 216: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 217: std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<types_error::ErrorLocation>>
+
+Check 218: std::alloc::Layout::is_size_align_valid.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:69:27 in function std::alloc::Layout::is_size_align_valid
+
+Check 219: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 220: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 221: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 222: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 223: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 224: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:523:39 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 225: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 226: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 227: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 228: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 229: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 230: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:531:67 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 231: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 232: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 233: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 234: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 235: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 236: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:533:23 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 237: alloc::raw_vec::RawVecInner::current_memory.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:524:13 in function alloc::raw_vec::RawVecInner::current_memory
+
+Check 238: std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>
+
+Check 239: std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>
+
+Check 240: std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>
+
+Check 241: std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>
+
+Check 242: std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>
+
+Check 243: std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<mcx::MemoryContext>::as_ref::<'_>
+
+Check 244: std::ptr::Alignment::new.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/alignment.rs:64:13 in function std::ptr::Alignment::new
+
+Check 245: std::alloc::Layout::align.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 246: std::alloc::Layout::align.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 247: std::alloc::Layout::align.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 248: std::alloc::Layout::align.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 249: std::alloc::Layout::align.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 250: std::alloc::Layout::align.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:152:9 in function std::alloc::Layout::align
+
+Check 251: types_fmgr::FunctionCallInfoBaseData::arg.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:443:9 in function types_fmgr::FunctionCallInfoBaseData::arg
+
+Check 252: types_fmgr::FunctionCallInfoBaseData::arg.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:443:9 in function types_fmgr::FunctionCallInfoBaseData::arg
+
+Check 253: types_fmgr::FunctionCallInfoBaseData::arg.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:443:9 in function types_fmgr::FunctionCallInfoBaseData::arg
+
+Check 254: types_fmgr::FunctionCallInfoBaseData::arg.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:443:9 in function types_fmgr::FunctionCallInfoBaseData::arg
+
+Check 255: types_fmgr::FunctionCallInfoBaseData::arg.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:443:9 in function types_fmgr::FunctionCallInfoBaseData::arg
+
+Check 256: types_fmgr::FunctionCallInfoBaseData::arg.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:443:9 in function types_fmgr::FunctionCallInfoBaseData::arg
+
+Check 257: types_fmgr::FunctionCallInfoBaseData::arg.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:443:9 in function types_fmgr::FunctionCallInfoBaseData::arg
+
+Check 258: pg_poly_stage.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_geo_cmp.c:2356 in function pg_poly_stage
+
+Check 259: pg_poly_stage.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_geo_cmp.c:2356 in function pg_poly_stage
+
+Check 260: pg_poly_stage.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_geo_cmp.c:2356 in function pg_poly_stage
+
+Check 261: pg_poly_stage.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2356 in function pg_poly_stage
+
+Check 262: pg_poly_stage.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2356 in function pg_poly_stage
+
+Check 263: pg_poly_stage.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_geo_cmp.c:2356 in function pg_poly_stage
+
+Check 264: pg_poly_stage.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_geo_cmp.c:2357 in function pg_poly_stage
+
+Check 265: pg_poly_stage.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_geo_cmp.c:2357 in function pg_poly_stage
+
+Check 266: pg_poly_stage.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_geo_cmp.c:2357 in function pg_poly_stage
+
+Check 267: pg_poly_stage.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2357 in function pg_poly_stage
+
+Check 268: pg_poly_stage.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2357 in function pg_poly_stage
+
+Check 269: pg_poly_stage.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_geo_cmp.c:2357 in function pg_poly_stage
+
+Check 270: pg_poly_stage.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_geo_cmp.c:2358 in function pg_poly_stage
+
+Check 271: pg_poly_stage.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_geo_cmp.c:2358 in function pg_poly_stage
+
+Check 272: pg_poly_stage.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_geo_cmp.c:2358 in function pg_poly_stage
+
+Check 273: pg_poly_stage.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2358 in function pg_poly_stage
+
+Check 274: pg_poly_stage.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2358 in function pg_poly_stage
+
+Check 275: pg_poly_stage.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_geo_cmp.c:2358 in function pg_poly_stage
+
+Check 276: pg_poly_stage.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_geo_cmp.c:2359 in function pg_poly_stage
+
+Check 277: pg_poly_stage.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_geo_cmp.c:2359 in function pg_poly_stage
+
+Check 278: pg_poly_stage.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_geo_cmp.c:2359 in function pg_poly_stage
+
+Check 279: pg_poly_stage.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2359 in function pg_poly_stage
+
+Check 280: pg_poly_stage.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2359 in function pg_poly_stage
+
+Check 281: pg_poly_stage.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_geo_cmp.c:2359 in function pg_poly_stage
+
+Check 282: pg_poly_stage.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_geo_cmp.c:2360 in function pg_poly_stage
+
+Check 283: pg_poly_stage.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_geo_cmp.c:2360 in function pg_poly_stage
+
+Check 284: pg_poly_stage.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_geo_cmp.c:2360 in function pg_poly_stage
+
+Check 285: pg_poly_stage.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2360 in function pg_poly_stage
+
+Check 286: pg_poly_stage.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2360 in function pg_poly_stage
+
+Check 287: pg_poly_stage.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_geo_cmp.c:2360 in function pg_poly_stage
+
+Check 288: pg_poly_stage.pointer_dereference.31
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 289: pg_poly_stage.pointer_dereference.32
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 290: pg_poly_stage.pointer_dereference.33
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 291: pg_poly_stage.pointer_dereference.34
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 292: pg_poly_stage.pointer_dereference.35
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 293: pg_poly_stage.pointer_dereference.36
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 294: pg_poly_stage.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 295: pg_poly_stage.pointer_dereference.37
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 296: pg_poly_stage.pointer_dereference.38
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 297: pg_poly_stage.pointer_dereference.39
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 298: pg_poly_stage.pointer_dereference.40
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 299: pg_poly_stage.pointer_dereference.41
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 300: pg_poly_stage.pointer_dereference.42
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_geo_cmp.c:2363 in function pg_poly_stage
+
+Check 301: pg_poly_stage.pointer_dereference.43
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 302: pg_poly_stage.pointer_dereference.44
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 303: pg_poly_stage.pointer_dereference.45
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 304: pg_poly_stage.pointer_dereference.46
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 305: pg_poly_stage.pointer_dereference.47
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 306: pg_poly_stage.pointer_dereference.48
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 307: pg_poly_stage.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 308: pg_poly_stage.pointer_dereference.49
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 309: pg_poly_stage.pointer_dereference.50
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 310: pg_poly_stage.pointer_dereference.51
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 311: pg_poly_stage.pointer_dereference.52
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 312: pg_poly_stage.pointer_dereference.53
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 313: pg_poly_stage.pointer_dereference.54
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_geo_cmp.c:2364 in function pg_poly_stage
+
+Check 314: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 315: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 316: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 317: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 318: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 319: std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::vec::Vec<u8>>>
+
+Check 320: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 321: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 322: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 323: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 324: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 325: <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<types_error::PgError> as std::ops::Drop>::drop
+
+Check 326: <std::result::Result<adt_geo::PolyRef<'_>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<adt_geo::PolyRef<'_>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 327: <std::result::Result<adt_geo::PolyRef<'_>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2175:23 in function <std::result::Result<adt_geo::PolyRef<'_>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 328: types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:228:22 in function types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new
+
+Check 329: types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:229:25 in function types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new
+
+Check 330: types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:230:25 in function types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new
+
+Check 331: <std::result::Result<&[u8], std::boxed::Box<types_error::PgError>> as std::ops::FromResidual<std::result::Result<std::convert::Infallible, std::boxed::Box<types_error::PgError>>>>::from_residual.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2189:23 in function <std::result::Result<&[u8], std::boxed::Box<types_error::PgError>> as std::ops::FromResidual<std::result::Result<std::convert::Infallible, std::boxed::Box<types_error::PgError>>>>::from_residual
+
+Check 332: types_tuple::varatt::varatt_is_4b_u.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:90:13 in function types_tuple::varatt::varatt_is_4b_u
+
+Check 333: types_tuple::varatt::varatt_is_4b_u.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:90:13 in function types_tuple::varatt::varatt_is_4b_u
+
+Check 334: types_tuple::varatt::varatt_is_4b_u.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:90:13 in function types_tuple::varatt::varatt_is_4b_u
+
+Check 335: types_tuple::varatt::varatt_is_4b_u.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:90:13 in function types_tuple::varatt::varatt_is_4b_u
+
+Check 336: types_tuple::varatt::varatt_is_4b_u.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:90:13 in function types_tuple::varatt::varatt_is_4b_u
+
+Check 337: types_tuple::varatt::varatt_is_4b_u.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:90:13 in function types_tuple::varatt::varatt_is_4b_u
+
+Check 338: std::alloc::Layout::size.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 339: std::alloc::Layout::size.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 340: std::alloc::Layout::size.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 341: std::alloc::Layout::size.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 342: std::alloc::Layout::size.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 343: std::alloc::Layout::size.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/alloc/layout.rs:140:9 in function std::alloc::Layout::size
+
+Check 344: adt_geo::builtins::arg_poly.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/backend/utils/adt/geo/src/builtins.rs:50:30 in function adt_geo::builtins::arg_poly
+
+Check 345: core::slice::<impl [u8]>::as_array::<4>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/mod.rs:857:13 in function core::slice::<impl [u8]>::as_array::<4>
+
+Check 346: ext3::proofs_ext3::call2v.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:135:9 in function ext3::proofs_ext3::call2v
+
+Check 347: ext3::proofs_ext3::call2v.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:136:9 in function ext3::proofs_ext3::call2v
+
+Check 348: ext3::proofs_ext3::call2v.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/ext3.rs:137:12 in function ext3::proofs_ext3::call2v
+
+Check 349: pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+
+Check 350: pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+
+Check 351: pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+
+Check 352: pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+
+Check 353: pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+
+Check 354: pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+
+Check 355: <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 356: <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2175:23 in function <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 357: <std::result::Result<&[u8], std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<&[u8], std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 358: <std::result::Result<&[u8], std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2175:23 in function <std::result::Result<&[u8], std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 359: <std::result::Result<adt_geo::PolyRef<'_>, std::boxed::Box<types_error::PgError>> as std::ops::FromResidual<std::result::Result<std::convert::Infallible, std::boxed::Box<types_error::PgError>>>>::from_residual.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2189:23 in function <std::result::Result<adt_geo::PolyRef<'_>, std::boxed::Box<types_error::PgError>> as std::ops::FromResidual<std::result::Result<std::convert::Infallible, std::boxed::Box<types_error::PgError>>>>::from_residual
+
+Check 360: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 361: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 362: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 363: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 364: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 365: std::ptr::drop_in_place::<std::option::Option<std::string::String>>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::option::Option<std::string::String>>
+
+Check 366: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 367: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 368: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 369: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 370: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 371: alloc::raw_vec::RawVecInner::non_null::<u8>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:504:9 in function alloc::raw_vec::RawVecInner::non_null::<u8>
+
+Check 372: types_tuple::varatt::varatt_is_1b.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:70:13 in function types_tuple::varatt::varatt_is_1b
+
+Check 373: types_tuple::varatt::varatt_is_1b.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:70:13 in function types_tuple::varatt::varatt_is_1b
+
+Check 374: types_tuple::varatt::varatt_is_1b.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:70:13 in function types_tuple::varatt::varatt_is_1b
+
+Check 375: types_tuple::varatt::varatt_is_1b.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:70:13 in function types_tuple::varatt::varatt_is_1b
+
+Check 376: types_tuple::varatt::varatt_is_1b.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:70:13 in function types_tuple::varatt::varatt_is_1b
+
+Check 377: types_tuple::varatt::varatt_is_1b.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:70:13 in function types_tuple::varatt::varatt_is_1b
+
+Check 378: pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+
+Check 379: pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+
+Check 380: pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+
+Check 381: pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+
+Check 382: pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+
+Check 383: pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+
+Check 384: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 385: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 386: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 387: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 388: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 389: std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::result::Result<datum::Datum, std::boxed::Box<types_error::PgError>>>
+
+Check 390: allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/vec/mod.rs:2171:61 in function allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>
+
+Check 391: allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/vec/mod.rs:2171:61 in function allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>
+
+Check 392: allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/vec/mod.rs:2171:61 in function allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>
+
+Check 393: allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/vec/mod.rs:2171:61 in function allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>
+
+Check 394: allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/vec/mod.rs:2171:61 in function allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>
+
+Check 395: allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/vec/mod.rs:2171:61 in function allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>
+
+Check 396: allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/raw_vec.rs:310:9 in function allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr
+
+Check 397: allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/raw_vec.rs:310:9 in function allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr
+
+Check 398: allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/raw_vec.rs:310:9 in function allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr
+
+Check 399: allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/raw_vec.rs:310:9 in function allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr
+
+Check 400: allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/raw_vec.rs:310:9 in function allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr
+
+Check 401: allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/raw_vec.rs:310:9 in function allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr
+
+Check 402: std::ptr::read::<u32>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1708:9 in function std::ptr::read::<u32>
+
+Check 403: std::ptr::read::<u32>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1708:9 in function std::ptr::read::<u32>
+
+Check 404: std::ptr::read::<u32>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1708:9 in function std::ptr::read::<u32>
+
+Check 405: std::ptr::read::<u32>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1708:9 in function std::ptr::read::<u32>
+
+Check 406: std::ptr::read::<u32>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1708:9 in function std::ptr::read::<u32>
+
+Check 407: std::ptr::read::<u32>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1708:9 in function std::ptr::read::<u32>
+
+Check 408: types_fmgr::getarg::detoast_arg.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/getarg.rs:115:16 in function types_fmgr::getarg::detoast_arg
+
+Check 409: ext3::proofs_ext3::poly_img.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:118:35 in function ext3::proofs_ext3::poly_img
+
+Check 410: ext3::proofs_ext3::poly_img.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:119:36 in function ext3::proofs_ext3::poly_img
+
+Check 411: ext3::proofs_ext3::poly_img.array_bounds.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:120:36 in function ext3::proofs_ext3::poly_img
+
+Check 412: ext3::proofs_ext3::poly_img.array_bounds.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/ext3.rs:121:36 in function ext3::proofs_ext3::poly_img
+
+Check 413: ext3::proofs_ext3::poly_img.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/ext3.rs:125:46 in function ext3::proofs_ext3::poly_img
+
+Check 414: ext3::proofs_ext3::poly_img.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/ext3.rs:125:46 in function ext3::proofs_ext3::poly_img
+
+Check 415: ext3::proofs_ext3::poly_img.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/ext3.rs:125:46 in function ext3::proofs_ext3::poly_img
+
+Check 416: ext3::proofs_ext3::poly_img.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/ext3.rs:125:46 in function ext3::proofs_ext3::poly_img
+
+Check 417: ext3::proofs_ext3::poly_img.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/ext3.rs:125:46 in function ext3::proofs_ext3::poly_img
+
+Check 418: ext3::proofs_ext3::poly_img.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/ext3.rs:125:46 in function ext3::proofs_ext3::poly_img
+
+Check 419: ext3::proofs_ext3::poly_img.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/ext3.rs:126:51 in function ext3::proofs_ext3::poly_img
+
+Check 420: ext3::proofs_ext3::poly_img.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/ext3.rs:126:51 in function ext3::proofs_ext3::poly_img
+
+Check 421: ext3::proofs_ext3::poly_img.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/ext3.rs:126:51 in function ext3::proofs_ext3::poly_img
+
+Check 422: ext3::proofs_ext3::poly_img.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/ext3.rs:126:51 in function ext3::proofs_ext3::poly_img
+
+Check 423: ext3::proofs_ext3::poly_img.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/ext3.rs:126:51 in function ext3::proofs_ext3::poly_img
+
+Check 424: ext3::proofs_ext3::poly_img.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/ext3.rs:126:51 in function ext3::proofs_ext3::poly_img
+
+Check 425: types_tuple::varatt::varsize_1b.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:107:14 in function types_tuple::varatt::varsize_1b
+
+Check 426: types_tuple::varatt::varsize_1b.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:107:14 in function types_tuple::varatt::varsize_1b
+
+Check 427: types_tuple::varatt::varsize_1b.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:107:14 in function types_tuple::varatt::varsize_1b
+
+Check 428: types_tuple::varatt::varsize_1b.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:107:14 in function types_tuple::varatt::varsize_1b
+
+Check 429: types_tuple::varatt::varsize_1b.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:107:14 in function types_tuple::varatt::varsize_1b
+
+Check 430: types_tuple::varatt::varsize_1b.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:107:14 in function types_tuple::varatt::varsize_1b
+
+Check 431: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 432: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 433: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 434: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 435: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 436: <std::vec::Vec<u8> as std::ops::Drop>::drop.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4076:81 in function <std::vec::Vec<u8> as std::ops::Drop>::drop
+
+Check 437: types_tuple::varatt::varatt_is_1b_e.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:80:12 in function types_tuple::varatt::varatt_is_1b_e
+
+Check 438: types_tuple::varatt::varatt_is_1b_e.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:80:12 in function types_tuple::varatt::varatt_is_1b_e
+
+Check 439: types_tuple::varatt::varatt_is_1b_e.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:80:12 in function types_tuple::varatt::varatt_is_1b_e
+
+Check 440: types_tuple::varatt::varatt_is_1b_e.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:80:12 in function types_tuple::varatt::varatt_is_1b_e
+
+Check 441: types_tuple::varatt::varatt_is_1b_e.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:80:12 in function types_tuple::varatt::varatt_is_1b_e
+
+Check 442: types_tuple::varatt::varatt_is_1b_e.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/_support/types/types_tuple/src/varatt.rs:80:12 in function types_tuple::varatt::varatt_is_1b_e
+
+
+SUMMARY:
+ ** 0 of 442 failed (11 unreachable)
+
+VERIFICATION:- SUCCESSFUL
+
+Source-based code coverage results:
+
+/Users/malisper/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/mod.rs (allocator_api2::stable::assume)
+ * 71:1 - 72:10 UNCOVERED
+ * 73:9 - 73:27 UNCOVERED
+ * 74:5 - 75:2 UNCOVERED
+
+/Users/malisper/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/raw_vec.rs (allocator_api2::stable::raw_vec::RawVec::<u8, mcx::Mcx<'_>>::ptr)
+ * 309:5 - 311:6 UNCOVERED
+
+/Users/malisper/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/vec/mod.rs (allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::as_mut_ptr)
+ * 1216:5 - 1224:6 UNCOVERED
+
+/Users/malisper/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/stable/vec/mod.rs (allocator_api2::stable::vec::Vec::<u8, mcx::Mcx<'_>>::leak::<'_>)
+ * 2166:5 - 2172:6 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/lib.rs (mcx::MemoryContext::mcx)
+ * 1110:5 - 1112:6 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/seam_core/src/lib.rs (detoast_seams::detoast_attr::__uninstalled_stub)
+ * 101:13 - 102:23 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/seam_core/src/lib.rs (detoast_seams::detoast_attr::call)
+ * 127:13 - 132:14 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::as_bool)
+ * 45:5 - 47:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::as_usize)
+ * 36:5 - 38:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::from_bool)
+ * 40:5 - 42:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::from_usize)
+ * 32:5 - 34:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::null)
+ * 28:5 - 30:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::NullableDatum::null)
+ * 169:5 - 174:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::NullableDatum::value)
+ * 162:5 - 167:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs (types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new)
+ * 226:5 - 236:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs (types_fmgr::FunctionCallInfoBaseData::arg)
+ * 442:5 - 444:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs (types_fmgr::FunctionCallInfoBaseData::result_mcx)
+ * 406:5 - 407:30 UNCOVERED
+ * 409:18 - 412:6 UNCOVERED
+ * 410:21 - 410:39 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs (types_fmgr::fcinfo::result_mcx_unarmed)
+ * 496:1 - 497:11 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/getarg.rs (types_fmgr::PackedVarlena::<'_>::data)
+ * 91:5 - 94:45 COVERED
+ * 95:17 - 98:18 UNCOVERED
+ * 100:17 - 103:18 COVERED
+ * 106:5 - 106:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/getarg.rs (types_fmgr::getarg::<impl types_fmgr::FunctionCallInfoBaseData>::arg_ptr)
+ * 180:5 - 182:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/getarg.rs (types_fmgr::getarg::<impl types_fmgr::FunctionCallInfoBaseData>::arg_varlena_packed)
+ * 187:5 - 191:40 COVERED
+ * 191:46 - 191:70 COVERED
+ * 191:74 - 191:100 COVERED
+ * 193:24 - 193:54 UNCOVERED
+ * 194:13 - 198:15 COVERED
+ * 200:5 - 200:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/getarg.rs (types_fmgr::getarg::detoast_arg)
+ * 112:1 - 115:60 UNCOVERED
+ * 115:9 - 119:7 UNCOVERED
+ * 115:61 - 115:62 UNCOVERED
+ * 120:1 - 120:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_core/src/geo.rs (types_core::BOX::from_datum_bytes)
+ * 128:5 - 133:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_core/src/geo.rs (types_core::Point::from_datum_bytes)
+ * 10:5 - 19:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_tuple/src/varatt.rs (types_tuple::varatt::varatt_is_1b)
+ * 68:1 - 73:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_tuple/src/varatt.rs (types_tuple::varatt::varatt_is_1b_e)
+ * 78:1 - 83:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_tuple/src/varatt.rs (types_tuple::varatt::varatt_is_4b_u)
+ * 88:1 - 93:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_tuple/src/varatt.rs (types_tuple::varatt::varsize_1b)
+ * 105:1 - 110:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_tuple/src/varatt.rs (types_tuple::varatt::varsize_4b)
+ * 115:1 - 117:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_tuple/src/varatt.rs (types_tuple::varatt::varsize_4b_word)
+ * 31:1 - 33:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_tuple/src/varatt.rs (types_tuple::varatt::varsize_any)
+ * 171:1 - 172:24 UNCOVERED
+ * 173:9 - 173:27 UNCOVERED
+ * 174:15 - 174:29 UNCOVERED
+ * 175:9 - 175:21 UNCOVERED
+ * 177:9 - 177:21 UNCOVERED
+ * 179:1 - 179:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_tuple/src/varatt.rs (types_tuple::varatt::varsize_external)
+ * 164:1 - 166:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_tuple/src/varatt.rs (types_tuple::varatt::vartag_external)
+ * 122:1 - 124:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_tuple/src/varatt.rs (types_tuple::varatt::vartag_size)
+ * 15:1 - 16:14 UNCOVERED
+ * 17:28 - 17:29 UNCOVERED
+ * 18:52 - 18:53 UNCOVERED
+ * 19:26 - 19:28 UNCOVERED
+ * 20:14 - 20:20 UNCOVERED
+ * 22:1 - 22:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/geo/src/builtins.rs (adt_geo::builtins::arg_poly)
+ * 49:1 - 50:64 COVERED
+ * 50:8 - 50:29 COVERED
+ * 50:67 - 50:68 UNCOVERED
+ * 51:1 - 51:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/geo/src/builtins.rs (adt_geo::builtins::fc_poly_overleft)
+ * 764:9 - 766:45 COVERED
+ * 766:17 - 768:45 COVERED
+ * 766:51 - 766:52 UNCOVERED
+ * 768:17 - 769:48 COVERED
+ * 768:51 - 768:52 UNCOVERED
+ * 770:9 - 770:10 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/geo/src/builtins.rs (adt_geo::builtins::varlena_payload)
+ * 41:1 - 42:44 COVERED
+ * 42:47 - 42:48 UNCOVERED
+ * 42:49 - 42:53 COVERED
+ * 43:1 - 43:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/geo/src/lib.rs (adt_geo::PolyRef::<'_>::from_payload)
+ * 262:5 - 271:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/geo/src/poly.rs (adt_geo::poly::poly_overleft)
+ * 14:1 - 16:2 COVERED
+
+src/ext3.rs (ext3::proofs_ext3::any_f64)
+ * 79:5 - 81:6 COVERED
+
+src/ext3.rs (ext3::proofs_ext3::call2v)
+ * 133:5 - 138:6 COVERED
+
+src/ext3.rs (ext3::proofs_ext3::eq_poly_overleft)
+ * 251:13 - 259:14 COVERED
+
+src/ext3.rs (ext3::proofs_ext3::expect_ok)
+ * 149:5 - 150:16 COVERED
+ * 151:16 - 154:6 COVERED
+ * 152:23 - 152:29 UNCOVERED
+
+src/ext3.rs (ext3::proofs_ext3::poly_img)
+ * 113:5 - 122:22 COVERED
+ * 123:15 - 123:28 COVERED
+ * 123:29 - 128:10 COVERED
+ * 129:9 - 130:6 COVERED
+
+Verification Time: 8.972245s
+
+[info] Coverage results saved to /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/geo-cmp/target/kani/aarch64-apple-darwin/kanicov_2026-07-31_00-16
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.

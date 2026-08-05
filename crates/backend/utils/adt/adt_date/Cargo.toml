@@ -1,0 +1,32 @@
+[package]
+name = "adt_date"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_date"
+path = "src/lib.rs"
+
+[dependencies]
+adt_datetime = { path = "../adt_datetime" }
+adt_timestamp = { path = "../adt_timestamp" }
+numeric = { package = "adt_numeric", path = "../numeric" }
+xact = { path = "../../../access/transam/xact" }
+datum = { path = "../../../../_support/types/datum" }
+hashfn = { path = "../../../../common/hashfn" }
+mcx = { path = "../../../../_support/mcx" }
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+elog = { path = "../../error/elog" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+
+[dev-dependencies]
+pgtz = { path = "../../../timezone/pgtz" }
+guc_tables = { path = "../../misc/guc_tables" }
+fd = { path = "../../../storage/file/fd" }
+xact_seams = { path = "../../../access/transam/xact_seams" }

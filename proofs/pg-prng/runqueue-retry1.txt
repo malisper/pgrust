@@ -1,0 +1,5 @@
+# p1-laneh RETRY (2026-07-31): eq_seed timed out at 600s in fleet job -21199
+# (local kissat green in ~2s — splitmix64 3x 64-bit mult chain is
+# solver-variance-prone). 1800s cap.
+# Format: <harness> | <expected> | <tier> | <command>
+harnesses::eq_seed | green | per-commit | timeout 1800 cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_seed --exact --solver kissat

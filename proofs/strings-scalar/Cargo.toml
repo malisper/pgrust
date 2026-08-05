@@ -1,0 +1,17 @@
+[package]
+name = "proof_strings_scalar"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+detoast = { path = "../../crates/backend/access/common/detoast" }
+datum = { path = "../../crates/_support/types/datum" }
+mcx = { path = "../../crates/_support/mcx" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+pg_locale_seams = { path = "../../crates/backend/utils/adt/pg_locale_seams" }
+proof_support = { path = "../support", features = ["mcx-stubs"] }

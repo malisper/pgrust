@@ -1,0 +1,18 @@
+[package]
+name = "copyfuncs"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+stack_depth_core = { path = "../../utils/misc/stack_depth_core" }
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+outfuncs = { path = "../outfuncs" }
+readfuncs = { path = "../readfuncs" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

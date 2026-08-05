@@ -1,0 +1,2 @@
+Å) ORDER B<!--ESC, nentry DESC, word LIMIT 10;
+SELECT * FROM ts_stat(

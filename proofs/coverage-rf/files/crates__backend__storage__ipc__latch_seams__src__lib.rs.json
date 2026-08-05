@@ -1,0 +1,1 @@
+{"path":"crates/backend/storage/ipc/latch_seams/src/lib.rs","sloc":[1,4,9,10,13,14,17,18,21,22,25,26],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[7]}}

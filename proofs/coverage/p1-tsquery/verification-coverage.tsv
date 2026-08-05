@@ -1,0 +1,13 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/utils/adt/tsquery_core/src/builtins.rs	123	0	116	0	116
+crates/backend/utils/adt/tsquery_core/src/cleanup.rs	158	0	152	0	152
+crates/backend/utils/adt/tsquery_core/src/io.rs	220	0	215	0	215
+crates/backend/utils/adt/tsquery_core/src/lib.rs	0	0	0	0	0
+crates/backend/utils/adt/tsquery_core/src/parse.rs	422	0	398	0	398
+crates/backend/utils/adt/tsquery_core/src/qsort.rs	92	0	92	0	92
+crates/backend/utils/adt/tsquery_core/src/tests.rs	0	0	0	0	0
+crates/backend/utils/adt/tsquery_core/src/util.rs	183	0	159	0	159
+crates/backend/utils/adt/tsquery_rewrite/src/lib.rs	199	0	126	0	126
+CRATE:crates/backend/utils/adt/tsquery_core	1198	0	1132	0	1132
+CRATE:crates/backend/utils/adt/tsquery_rewrite	199	0	126	0	126
+TOTAL	1397	0	1258	0	1258

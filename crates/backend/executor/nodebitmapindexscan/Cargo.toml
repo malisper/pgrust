@@ -1,0 +1,23 @@
+[package]
+name = "nodebitmapindexscan"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+postgres_seams = { path = "../../tcop/postgres_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+indexam = { path = "../../access/index/indexam" }
+tidbitmap = { path = "../../nodes/tidbitmap" }
+nodeindexscan = { path = "../nodeindexscan" }
+executils = { path = "../executils" }
+init_small = { path = "../../utils/init/init_small" }

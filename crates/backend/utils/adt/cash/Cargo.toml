@@ -1,0 +1,19 @@
+[package]
+name = "adt_cash"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+adt_float = { path = "../float" }
+adt_int8 = { path = "../int8" }
+adt_numeric = { path = "../numeric" }
+pg_locale = { path = "../pg_locale" }
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+varlena = { path = "../varlena" }

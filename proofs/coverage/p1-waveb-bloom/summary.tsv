@@ -1,0 +1,34 @@
+# proofs/coverage/p1-waveb-bloom/summary.tsv — per-file coverage equation for
+# lane p1-waveb, unit brin_bloom (target brin_bloom_diff; crate
+# crates/backend/access/brin/brin_bloom, carve_files src/lib.rs+src/builtins.rs).
+#
+# CAPTURE PROVENANCE (LOCAL — p1-tupaccess precedent labeling):
+#   full corpus replay (fuzz/corpus/brin_bloom_diff, 412 inputs: 28 named
+#   directed seeds + fuzzer-retained entries from the two local smoke
+#   campaigns) under `fuzz/cov-export.sh brin_bloom_diff`
+#   (cargo fuzz coverage + sysroot llvm-cov), macOS/aarch64, worktree at
+#   proofs/p1-waveb-bloom merge base ecdf78a02d9fc01089aaa4cd5c570db2f48801da
+#   (includes origin/proofs/p1-waveb with the fleet GNU-ld fix + main
+#   2b17a6760a). Banked as coverage.lcov.gz (250,568 DA lines tree-wide).
+#   FLEET FLOOR PENDING: submit the 10M floor when the lane rebases onto the
+#   fixed fuzz workspace; local capture is the campaign-law tiebreaker
+#   meanwhile (CAMPAIGN-INTELLIGENCE §C).
+#
+# Functional verdicts (LOCAL): smoke campaigns 2,519,832 execs (pre-residual
+#   driver) + 2,446,210 execs @ 13.5k/s (post-residual driver with lazy/bogus
+#   hash modes + shortify short-header arms), ZERO divergences. One
+#   harness-defect crash found+fixed during smoke (bogus-mode too-large
+#   preemption, regression seed seed-bogus-toolarge-preempt); injection sweep
+#   13 plants / 12 caught / 1 proven-equivalent mutant (fuzz/
+#   README-TODO-brin_bloom_diff.md).
+#
+# Exception rows: proofs/coverage/exceptions.tsv author p1-waveb (11 rows,
+#   pending review) + 1 measurement-note block (builtins.rs 62-64 const-eval,
+#   3 DA lines, scan_fgram COMPILE-TIME ITEMS precedent).
+#
+# equation per file: DA_total = fuzz_measured + exception_row_lines
+#   + measurement_note_lines, 0 unaccounted. (DA line-table denominators from
+#   this capture; ranking cells recut from this lcov at the next refresh.)
+file	da_total	fuzz_measured	exception_row_lines	measurement_note_lines	unaccounted	exception_classes
+crates/backend/access/brin/brin_bloom/src/lib.rs	217	214	3	0	0	platform-other 1 (BE varatt arm, line 116) + unreachable-arm 1 (pinned-hash `?` Err edge, line 261) + defensive-c-parity 1 (invalid-strategy panic, line 265)
+crates/backend/access/brin/brin_bloom/src/builtins.rs	37	13	21	3	0	proof-covered-unmeasured 13 (cannot_accept 7-10 + summary_in 12-14 + summary_recv 16-18 + summary_send 35/37/38; ledger 4596/4598/4599, proofs/brin-bloom SUITE rows) + excluded-state 8 (fc_options 40/43-45/49/52/59-60; oid 4595 LocalRelopts registry) + const-eval notes 3 (62-64)

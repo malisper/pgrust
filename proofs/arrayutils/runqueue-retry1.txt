@@ -1,0 +1,13 @@
+# p1-laneh RETRY (2026-07-31) after fleet job -21199:
+#   mda_* = memcmp-unwind artifact (assert_eq! on [i32;6] -> builtin memcmp,
+#   25-iter byte loop; unwind raised 8->32 at this sha).
+#   n_items / ndim_wider / check_bounds = rss-kill under default cap; rerun
+#   under KANI_SOLVE_RSS_GB=40 --conc 2 (big-memory shape).
+# Format: <harness> | <expected> | <tier> | <command>
+harnesses::eq_array_get_n_items | green | release-gate | timeout 1800 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_array_get_n_items --exact --solver kissat
+harnesses::ndim_wider_than_slice_always_errors | green | release-gate | timeout 1800 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::ndim_wider_than_slice_always_errors --exact --solver kissat
+harnesses::eq_array_check_bounds | green | release-gate | timeout 1800 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_array_check_bounds --exact --solver kissat
+harnesses::eq_mda_get_range | green | per-commit | timeout 900 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_mda_get_range --exact --solver kissat
+harnesses::eq_mda_get_prod | green | per-commit | timeout 900 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_mda_get_prod --exact --solver kissat
+harnesses::eq_mda_get_offset_values | green | per-commit | timeout 900 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_mda_get_offset_values --exact --solver kissat
+harnesses::eq_mda_next_tuple | green | per-commit | timeout 900 cargo kani -Z c-ffi --c-lib c_arrayutils.c --harness harnesses::eq_mda_next_tuple --exact --solver kissat

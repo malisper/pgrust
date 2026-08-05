@@ -1,0 +1,28 @@
+# proofs/coverage/microbatch-netfam/summary.tsv — per-crate coverage
+# equation for lane p1-mb-netfam (target netfam_diff, selector arms per
+# fuzz/core/src/netfam_diff.rs). Oracle: verbatim vendored PostgreSQL 18.3
+# (Stamp-18.3, upstream 62d6c7d3df) in fuzz/core/csrc/pg_netfam_io.c
+# (assembled by scratchpad/assemble_netfam.sh, sed-extracted verbatim).
+#
+# Capture of record (local, macOS arm64, 2026-08-01): full committed corpus
+# (fuzz/corpus/netfam_diff, 1100+ inputs) replayed under cargo fuzz
+# coverage; lcov banked here (netfam_diff.lcov.gz). Local campaign volume:
+# 15.3M execs across two rounds (9.9M + 5.4M), 0 divergences, 0 panics.
+# Fleet 10M CONFIRM = coordinator follow-up.
+# a0-strength evidence: tests::cidr_exhaustive_bits (bits 0..=200 x 3
+# families + malformed shapes + None arm), tests::run_cb_cells (every
+# addr-family x mask-kind cell) — both shapes also inside the fuzz arms,
+# so their lines are fuzz-measured.
+#
+# Comparison planes: value bytes/bits + error verdict + exact sqlstate
+# class (08P01/XX000/22021/54000) + no-panic; StringInfo len/capacity/
+# cursor after every send op; putmessage (msgtype, body) at the seam;
+# live-interface walks compared entry-for-entry.
+#
+# equation per crate: v2_sloc = fuzz_measured + exception_rows, 0 unaccounted.
+# SLOC rule: v2 + tables excluded (sloc_rules.py denominator, line_table =
+# lcov DA set); pqformat/src/tests.rs = cfg-test-mod, out of scope
+# (test_scope oracle).
+crate	file	v2_sloc	fuzz_measured	a0	exception_rows	unaccounted	residual_lines
+backend/libpq/ifaddr	crates/backend/libpq/ifaddr/src/lib.rs	113	103	0	10	0	119 (NULL-ifa_addr, excluded-state) + 149 (getifaddrs failure, excluded-state) + 168-176 (cfg(not(unix)) fallback, platform-other)
+backend/libpq/pqformat	crates/backend/libpq/pqformat/src/lib.rs	180	177	0	3	0	278+295+321 (client-encoding conversion arms, excluded-state — charter carve)

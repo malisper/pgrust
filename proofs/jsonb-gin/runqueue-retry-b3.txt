@@ -1,0 +1,44 @@
+# proofs/jsonb-gin RETRY runqueue b3 — w2-fmgr lane 2026-07-30. FLEET-BOUND.
+# Canonical 4-col pipe rows: <harness> | <expected> | <tier> | <command>
+#
+# Why b3 exists (banked in ledger rows 3484/3487/3488/3489 notes):
+#  1. Every jsp shape cell has now double-timed-out on KISSAT ONLY
+#     (batchB @994f9977 75s; retry-b2 300s). The solver-inversion law
+#     (TRIAGE: "solver choice is strictly per-harness"; measured default-
+#     beats-kissat on mixed-arm harnesses) has NOT been tested on these —
+#     b3 runs the identical cells on the DEFAULT solver at 300s. A default
+#     timeout here completes the inversion test and upgrades the ledger
+#     wall note from "kissat only" to "both solvers"; a green un-walls the
+#     jsp arm.
+#  2. control_jsp_wrong_entry is still UNADJUDICATED (240s + 481s
+#     no-verdict) — an unadjudicated must-fail is gate-blindness; it DOES
+#     gate. Pass condition: VERIFICATION FAILED with a decodable
+#     counterexample. Narrow-plane variant may be needed if it still walls
+#     (a FAILED with no decodable playback is a WALL, not a witness).
+#  3. The extract cells are NOT retried here: they rss-killed at BOTH
+#     fleet tiers (240s/720s, 371-561s kill) — per TRIAGE wall class 8
+#     (memory walls are cap-relative), their next step is the @40GB
+#     high-memory retry tier, not another same-cap run. Ledger rows
+#     3482/3485 carry the wall verdicts; control_extract_hash_seam_skew
+#     rides with that @40GB batch too.
+
+# ---- jsp shape cells, DEFAULT solver (inversion test) ----
+proofs::eq_jsp_bin_entry | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_bin_entry --exact
+proofs::eq_jsp_bin_and2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_bin_and2 --exact
+proofs::eq_jsp_bin_or2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_bin_or2 --exact
+proofs::eq_jsp_bin_and3 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_bin_and3 --exact
+proofs::eq_jsp_bin_and_or | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_bin_and_or --exact
+proofs::eq_jsp_bin_or_and | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_bin_or_and --exact
+proofs::eq_jsp_tri_entry | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_tri_entry --exact
+proofs::eq_jsp_tri_and2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_tri_and2 --exact
+proofs::eq_jsp_tri_or2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_tri_or2 --exact
+proofs::eq_jsp_tri_and3 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_tri_and3 --exact
+proofs::eq_jsp_tri_and_or | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_tri_and_or --exact
+proofs::eq_jsp_tri_or_and | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_tri_or_and --exact
+proofs::eq_jsp_bin_pred_and2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_bin_pred_and2 --exact
+proofs::eq_jsp_tri_pred_or2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_tri_pred_or2 --exact
+proofs::eq_jsp_path_bin_and_or | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_path_bin_and_or --exact
+proofs::eq_jsp_path_tri_or_and | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::eq_jsp_path_tri_or_and --exact
+
+# ---- unadjudicated jsp control (GATES; default solver per must-fail law) --
+proofs::control_jsp_wrong_entry | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::control_jsp_wrong_entry --exact

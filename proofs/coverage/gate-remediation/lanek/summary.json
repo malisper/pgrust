@@ -1,0 +1,251 @@
+{
+ "generated": "2026-07-31T23:43:12+00:00",
+ "head_sha": "e55e06b53d0587eac63fc7905cc215f561eade18",
+ "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
+ "sloc_rule_id": "v2+no-const-tables",
+ "sloc_exclusions": {
+  "use-mod": 111,
+  "attr": 69,
+  "typedef": 151,
+  "thread-local": 6,
+  "else-only": 106,
+  "loop-only": 2,
+  "arm-head": 124,
+  "impl-header": 7,
+  "const-static": 229,
+  "const-table": 406,
+  "unsafe-only": 1,
+  "arrow-only": 1,
+  "type-alias": 1,
+  "macro-scaffold": 1
+ },
+ "line_table_inputs": [
+  "fuzz/coverage/fmt_dch_diff.lcov",
+  "fuzz/coverage/fmt_num_diff.lcov"
+ ],
+ "census": {
+  "expected": null,
+  "census_closed": false,
+  "kaniraw_files": 0,
+  "note": "run with --no-census-required: harnesses that failed to run are indistinguishable from covered-nothing; DO NOT PUBLISH"
+ },
+ "macro_attribution": {
+  "enabled": true,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": {
+   "files": 164,
+   "macro_defs": 320,
+   "generator_macros": 221,
+   "call_blocks": 468,
+   "decl_lines": 2293
+  }
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 0,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [
+    "fuzz/coverage/fmt_dch_diff.lcov",
+    "fuzz/coverage/fmt_num_diff.lcov"
+   ],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/formatting"
+ ],
+ "totals": {
+  "sloc": 3445,
+  "kani": 0,
+  "fuzz": 3164,
+  "regress": 0,
+  "any": 3164,
+  "pct": {
+   "kani": 0.0,
+   "fuzz": 91.84,
+   "regress": 0.0,
+   "any": 91.84
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 49,
+   "covered_sloc_in_touched_files": 5493,
+   "sloc_of_touched_files": 17919
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "formatting",
+   "path": "crates/backend/utils/adt/formatting",
+   "sloc": 3445,
+   "kani": 0,
+   "fuzz": 3164,
+   "regress": 0,
+   "any": 3164,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 91.84,
+    "regress": 0.0,
+    "any": 91.84
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/formatting/src/cache.rs",
+     "sloc": 100,
+     "kani": 0,
+     "fuzz": 90,
+     "regress": 0,
+     "any": 90,
+     "detail": "files/crates__backend__utils__adt__formatting__src__cache.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/case.rs",
+     "sloc": 75,
+     "kani": 0,
+     "fuzz": 60,
+     "regress": 0,
+     "any": 60,
+     "detail": "files/crates__backend__utils__adt__formatting__src__case.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/dch.rs",
+     "sloc": 529,
+     "kani": 0,
+     "fuzz": 500,
+     "regress": 0,
+     "any": 500,
+     "detail": "files/crates__backend__utils__adt__formatting__src__dch.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/dch_entry.rs",
+     "sloc": 488,
+     "kani": 0,
+     "fuzz": 451,
+     "regress": 0,
+     "any": 451,
+     "detail": "files/crates__backend__utils__adt__formatting__src__dch_entry.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/dch_fromchar.rs",
+     "sloc": 547,
+     "kani": 0,
+     "fuzz": 473,
+     "regress": 0,
+     "any": 473,
+     "detail": "files/crates__backend__utils__adt__formatting__src__dch_fromchar.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/fmgr_builtins.rs",
+     "sloc": 78,
+     "kani": 0,
+     "fuzz": 68,
+     "regress": 0,
+     "any": 68,
+     "detail": "files/crates__backend__utils__adt__formatting__src__fmgr_builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/fromchar.rs",
+     "sloc": 276,
+     "kani": 0,
+     "fuzz": 248,
+     "regress": 0,
+     "any": 248,
+     "detail": "files/crates__backend__utils__adt__formatting__src__fromchar.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/isoweek.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__formatting__src__isoweek.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/lib.rs",
+     "sloc": 2,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__formatting__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/num.rs",
+     "sloc": 669,
+     "kani": 0,
+     "fuzz": 643,
+     "regress": 0,
+     "any": 643,
+     "detail": "files/crates__backend__utils__adt__formatting__src__num.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/num_entry.rs",
+     "sloc": 390,
+     "kani": 0,
+     "fuzz": 375,
+     "regress": 0,
+     "any": 375,
+     "detail": "files/crates__backend__utils__adt__formatting__src__num_entry.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/parse.rs",
+     "sloc": 197,
+     "kani": 0,
+     "fuzz": 192,
+     "regress": 0,
+     "any": 192,
+     "detail": "files/crates__backend__utils__adt__formatting__src__parse.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+     "sloc": 94,
+     "kani": 0,
+     "fuzz": 64,
+     "regress": 0,
+     "any": 64,
+     "detail": "files/crates__backend__utils__adt__formatting__src__tables.rs.json"
+    }
+   ]
+  }
+ ],
+ "auto_exceptions": {
+  "rows": 49,
+  "by_class": {
+   "auto:fmt-cont": 20,
+   "auto:table-head": 12,
+   "auto:call-str-cont": 5,
+   "auto:let-decl": 10,
+   "auto:brace-table-head": 2
+  },
+  "line_tables": [
+   "fuzz/coverage/fmt_dch_diff.lcov",
+   "fuzz/coverage/fmt_num_diff.lcov"
+  ],
+  "stats": {
+   "uncovered_lines": 281,
+   "unclassified": 231,
+   "vetoed_da_present[auto:call-str-cont]": 1
+  },
+  "note": "mechanical instrument-unmappable classification; see auto-exceptions.tsv header. auto: rows are measurement notes, never denominator changes."
+ }
+}

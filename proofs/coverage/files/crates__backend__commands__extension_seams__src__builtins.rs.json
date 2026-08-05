@@ -1,0 +1,1 @@
+{"path":"crates/backend/commands/extension_seams/src/builtins.rs","sloc":[7,8,11,12,13,14,15,18,19,20,21,22,25,26,29],"kani":[],"fuzz":[],"regress":[7,8,11,12,13,14,15],"excluded":{"use-mod":[3,4,5],"const-table":[30,31,32]}}

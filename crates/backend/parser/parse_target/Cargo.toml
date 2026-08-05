@@ -1,0 +1,36 @@
+[package]
+name = "parse_target"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_target"
+path = "src/lib.rs"
+
+[dependencies]
+coerce = { path = "../coerce" }
+datum = { path = "../../../_support/types/datum" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+init_small = { path = "../../utils/init/init_small" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+elog = { path = "../../utils/error/elog" }
+format_type = { path = "../../utils/adt/format_type" }
+mbutils = { path = "../../utils/mb/mbutils" }
+mcx = { path = "../../../_support/mcx" }
+nodes_core = { path = "../../nodes/nodes_core" }
+parse_expr = { path = "../parse_expr" }
+parse_func_seams = { path = "../parse_func_seams" }
+parse_relation = { path = "../parse_relation" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+parser_small1 = { path = "../parser_small1" }
+tupdesc = { path = "../../access/common/tupdesc" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+[dev-dependencies]
+datum = { path = "../../../_support/types/datum" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }

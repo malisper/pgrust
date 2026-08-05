@@ -1,0 +1,2 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+spgist-geo	proofs::eq_spg_text_config_core	proofs::eq_spg_text_config_core	0	7	VERIFICATION:- SUCCESSFUL	RAN	1

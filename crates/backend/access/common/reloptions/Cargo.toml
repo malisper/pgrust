@@ -1,0 +1,23 @@
+[package]
+name = "reloptions"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+adt_bool = { path = "../../../utils/adt/bool" }
+guc = { path = "../../../utils/misc/guc" }
+define = { path = "../../../commands/define" }
+elog = { path = "../../../utils/error/elog" }
+varlena = { path = "../../../utils/adt/varlena" }
+tableam_vocab = { version = "0.1.0", path = "../../table/tableam_vocab" }
+
+[dev-dependencies]

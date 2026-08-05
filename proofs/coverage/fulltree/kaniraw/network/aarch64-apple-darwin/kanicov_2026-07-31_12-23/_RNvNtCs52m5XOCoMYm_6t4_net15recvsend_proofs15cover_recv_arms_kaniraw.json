@@ -1,0 +1,1 @@
+{"data":{"src/lib.rs":[{"function":"recvsend_proofs::cover_recv_arms","term":{"Counter":0},"region":{"file":"src/lib.rs","start":[1472,5],"end":[1498,6]},"status":"COVERED"}]}}

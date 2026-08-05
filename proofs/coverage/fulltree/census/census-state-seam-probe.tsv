@@ -1,0 +1,6 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+state-seam-probe	proofs::eq_aclcontains	proofs::eq_aclcontains	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+state-seam-probe	proofs::eq_aclitem_eq	proofs::eq_aclitem_eq	0	70	VERIFICATION:- SUCCESSFUL	RAN	1
+state-seam-probe	proofs::eq_hash_aclitem	proofs::eq_hash_aclitem	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+state-seam-probe	proofs::eq_hash_aclitem_extended	proofs::eq_hash_aclitem_extended	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+state-seam-probe	proofs::eq_makeaclitem_bits	proofs::eq_makeaclitem_bits	0	2	VERIFICATION:- SUCCESSFUL	RAN	1

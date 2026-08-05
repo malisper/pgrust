@@ -1,0 +1,1 @@
+$ ? (@ like_regex "patte l,,,,,l,TH,,,,pE(?!?)^,,._rege,,.|.gi(rs)ega,,,,i,,,is(r)ega.k,(rs)ega.k, "a")

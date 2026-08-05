@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/gin/gin_int4_seams/src/lib.rs","sloc":[9,12,15,17,18,19,20,21,22],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[7]}}

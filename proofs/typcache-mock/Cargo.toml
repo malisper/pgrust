@@ -1,0 +1,30 @@
+[package]
+name = "typcache_mock"
+version = "0.1.0"
+edition = "2021"
+
+# TEST/FUZZ/PROOF-ONLY CRATE — deliberately OUTSIDE the pgrust workspace (like
+# every proofs/* crate), so it can never enter the shipped server's dependency
+# graph. Additionally, install() collides (seam double-install panic) with any
+# binary that boots the real catalog stack, so accidental linkage is loud.
+[workspace]
+
+[dependencies]
+seam_core = { path = "../../crates/_support/seam_core" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }
+syscache_seams = { path = "../../crates/backend/utils/cache/syscache_seams" }
+indexcmds_seams = { path = "../../crates/backend/commands/indexcmds_seams" }
+fmgr_core = { path = "../../crates/backend/utils/fmgr/fmgr_core" }
+typcache = { path = "../../crates/backend/utils/cache/typcache" }
+detoast = { path = "../../crates/backend/access/common/detoast" }
+miscinit_seams = { path = "../../crates/backend/utils/init/miscinit_seams" }
+
+[dev-dependencies]
+mcx = { path = "../../crates/_support/mcx" }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+lsyscache = { path = "../../crates/backend/utils/cache/lsyscache" }
+arrayfuncs = { path = "../../crates/backend/utils/adt/arrayfuncs" }
+array_userfuncs = { path = "../../crates/backend/utils/adt/array_userfuncs" }

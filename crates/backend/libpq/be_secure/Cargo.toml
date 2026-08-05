@@ -1,0 +1,47 @@
+[package]
+name = "be_secure"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "be_secure"
+path = "src/lib.rs"
+
+[features]
+# `ssl` (default ON) = C's USE_SSL. Off (or on wasm32, where vendored OpenSSL
+# does not build) the be_tls_* boundary compiles to !USE_SSL stubs; the
+# shipped native binary is unchanged (feature default-on, dep present).
+default = ["ssl"]
+ssl = ["dep:be_secure_openssl"]
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+init_small = { path = "../../utils/init/init_small" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+pqcomm = { path = "../pqcomm" }
+be_secure_seams = { path = "../be_secure_seams" }
+elog = { path = "../../utils/error/elog" }
+types_core = { path = "../../../_support/types/types_core" }
+libc = "0.2"
+
+# openssl-src (vendored C) does not compile for wasm32; on wasm the ssl
+# feature has no dep to activate and the stub arm takes over.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+be_secure_openssl = { path = "../be_secure_openssl", optional = true }
+
+[dev-dependencies]
+fd = { path = "../../storage/file/fd" }
+ip = { path = "../../../common/ip" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+latch = { path = "../../storage/ipc/latch" }
+mcx = { path = "../../../_support/mcx" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+pqcomm_seams = { path = "../pqcomm_seams" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+types_startup = { path = "../../../_support/types/types_startup" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }

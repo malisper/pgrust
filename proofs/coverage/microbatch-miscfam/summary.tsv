@@ -1,0 +1,25 @@
+# proofs/coverage/microbatch-miscfam/summary.tsv — per-crate coverage
+# equation for lane p1-mb-miscfam (target miscfam_diff, one selector arm
+# per crate). Oracle: verbatim vendored PostgreSQL 18.3 (Stamp-18.3,
+# upstream 62d6c7d3df) in fuzz/core/csrc/pg_miscfam_io.c.
+#
+# Capture of record (local, macOS arm64, 2026-07-31): full committed corpus
+# (fuzz/corpus/miscfam_diff, 1214+ inputs) replayed under cargo fuzz
+# coverage; lcov banked here (miscfam_diff.lcov.gz). Local campaign volume:
+# 12.9M execs across three rounds (4.36M + 8.37M + 0.2M top-ups), 0
+# divergences, 0 panics. Fleet 10M CONFIRM = coordinator follow-up.
+# a0 evidence: tests::pg_class_exhaustive (256/256 u8 relkinds asserted),
+# tests::cmdtag_exhaustive (193/193 tags x flags x enum roundtrip x
+# build_qc) — both also inside the fuzz arms, so their lines are
+# fuzz-measured (a0 column = 0 by construction, strength recorded in
+# phase1-routes.tsv evidence).
+#
+# equation per crate: v2_sloc = fuzz_measured + a0 + exception_rows, 0 unaccounted.
+# SLOC rule: v2 + tables excluded (sloc_rules.py denominator, line_table = lcov DA set).
+crate	file	v2_sloc	fuzz_measured	a0	exception_rows	unaccounted	residual_lines
+backend/tcop/cmdtag	crates/backend/tcop/cmdtag/src/lib.rs	60	54	0	6	0	23-27 (t! macro body, const-eval-only) + 34 (table head)
+backend/catalog/pg_class	crates/backend/catalog/pg_class/src/lib.rs	19	19	0	0	0	-
+contrib/earthdistance	crates/contrib/earthdistance/src/lib.rs	30	30	0	0	0	-
+backend/utils/misc/pg_rusage	crates/backend/utils/misc/pg_rusage/src/lib.rs	45	42	0	3	0	44-45 (wasm arm, platform-other) + 91 (write! arg, instrument-unmappable)
+backend/access/transam/xlogstats	crates/backend/access/transam/xlogstats/src/lib.rs	39	32	0	7	0	30-36 (const ZEROED initializer, const-eval-only)
+_support/types/stringinfo	crates/_support/types/stringinfo/src/lib.rs	122	120	0	2	0	232+236 (format! literals in enlarge_error, instrument-unmappable)

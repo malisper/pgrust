@@ -1,0 +1,19 @@
+[package]
+name = "tablesample"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+hashfn = { path = "../../../../common/hashfn" }
+clauses = { path = "../../../optimizer/util/clauses" }
+tableam_vocab = { path = "../../table/tableam_vocab" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+tsm_system_rows = { path = "../../../../contrib/tsm_system_rows" }
+tsm_system_time = { path = "../../../../contrib/tsm_system_time" }

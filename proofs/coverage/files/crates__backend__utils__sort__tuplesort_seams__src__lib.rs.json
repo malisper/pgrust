@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/sort/tuplesort_seams/src/lib.rs","sloc":[7,8,9,10,11,12,13,14,15,16,50,51,52,53,54,55],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2,3,4,5],"attr":[28],"typedef":[29,31,33,35,37],"trait-header":[40],"fn-decl":[42,44,47]}}

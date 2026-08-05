@@ -1,0 +1,49 @@
+[package]
+name = "plancache"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+types_portal = { path = "../../../../_support/types/portal" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+elog = { path = "../../error/elog" }
+inval = { path = "../inval" }
+cache_syscache = { path = "../cache_syscache" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }
+execscan = { path = "../../../executor/execscan" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+guc_tables = { path = "../../misc/guc_tables" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+miscinit = { path = "../../init/miscinit" }
+parser_analyze = { path = "../../../parser/parser_analyze" }
+analyze_seams = { path = "../../../parser/analyze_seams" }
+copyfuncs = { path = "../../../nodes/copyfuncs" }
+rewrite_handler_seams = { path = "../../../rewrite/rewrite_handler_seams" }
+planner_seams = { path = "../../../optimizer/plan/planner_seams" }
+pquery_seams = { path = "../../../tcop/pquery_seams" }
+snapmgr = { path = "../../time/snapmgr" }
+utility_seams = { path = "../../../tcop/utility_seams" }
+plancache_portal_seams = { path = "../plancache_portal_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+
+[dev-dependencies]
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+syscache_seams = { path = "../syscache_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+inval_seams = { path = "../inval_seams" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }

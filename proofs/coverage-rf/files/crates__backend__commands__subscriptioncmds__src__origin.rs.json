@@ -1,0 +1,1 @@
+{"path":"crates/backend/commands/subscriptioncmds/src/origin.rs","sloc":[9,10,11,13,17,18,21,22,25,26,27,28,29,31],"kani":[],"fuzz":[],"regress":[9,10,13,17,18,21,22,25,26,27,28,29,31],"excluded":{"else-only":[12],"use-mod":[4,5,6]}}

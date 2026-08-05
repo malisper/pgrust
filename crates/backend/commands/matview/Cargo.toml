@@ -1,0 +1,58 @@
+[package]
+name = "commands_matview"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_matview"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_portal = { path = "../../../_support/types/portal" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+matview_seams = { path = "../matview_seams" }
+commands_cluster = { path = "../cluster" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+fd = { path = "../../storage/file/fd" }
+elog = { path = "../../utils/error/elog" }
+execmain_seams = { path = "../../executor/execmain_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+genam = { path = "../../access/index/genam" }
+guc = { path = "../../utils/misc/guc" }
+heapam = { path = "../../access/heap/heapam" }
+heaptuple = { path = "../../access/common/heaptuple" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+miscinit = { path = "../../utils/init/miscinit" }
+multixact = { path = "../../access/transam/multixact" }
+pgstat = { path = "../../utils/activity/pgstat" }
+postgres = { path = "../../tcop/postgres" }
+procarray = { path = "../../storage/ipc/procarray" }
+readfuncs = { path = "../../nodes/readfuncs" }
+relcache = { path = "../../utils/cache/relcache" }
+rewrite_handler = { path = "../../rewrite/rewrite_handler" }
+ruleutils = { path = "../../utils/adt/ruleutils" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+table = { path = "../../access/table/table" }
+tableam = { path = "../../access/table/tableam" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+tcop_dest = { path = "../../tcop/dest" }
+xact = { path = "../../access/transam/xact" }
+spi = { path = "../../executor/spi" }
+indexam = { path = "../../access/index/indexam" }
+execindexing = { path = "../../executor/execindexing" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_pathnodes = { path = "../../../_support/types/pathnodes" }

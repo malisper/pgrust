@@ -1,0 +1,22 @@
+[package]
+name = "proof-xid8snap"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+xid8funcs = { path = "../../crates/backend/utils/adt/xid8funcs" }
+# parse_snapshot harness: error type (sqlstate parity), allocator seam and
+# the mcx-stub recipe (tiny-proof-heap: largest allocation is the snapshot
+# image, 4 + 20 + 8*nxip bytes with nxip <= 2 at the proved input caps).
+types_error = { path = "../../crates/_support/types/types_error" }
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }
+# --- wave sendrecv (pg_snapshot_recv/send wire rows, pg_lsn/uuid wave-5 rig) ---
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+stringinfo = { path = "../../crates/_support/types/stringinfo" }
+
+[build-dependencies]
+cc = "1"

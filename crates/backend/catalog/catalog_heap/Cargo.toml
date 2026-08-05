@@ -1,0 +1,55 @@
+[package]
+name = "catalog_heap"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catalog_heap"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+datum = { path = "../../../_support/types/datum" }
+mcx = { path = "../../../_support/mcx" }
+catalog = { path = "../catalog" }
+catalog_indexing = { path = "../catalog_indexing" }
+catalog_storage = { path = "../catalog_storage" }
+heaptuple = { path = "../../access/common/heaptuple" }
+table = { path = "../../access/table/table" }
+relation = { path = "../../access/common/relation" }
+tableam = { path = "../../access/table/tableam" }
+pg_type = { path = "../pg_type" }
+pg_depend = { path = "../pg_depend" }
+relcache = { path = "../../utils/cache/relcache" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+partcache = { path = "../../utils/cache/partcache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+pg_inherits = { path = "../pg_inherits" }
+genam = { path = "../../access/index/genam" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+format_type = { path = "../../utils/adt/format_type" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+pgstat = { path = "../../utils/activity/pgstat" }
+types_scan = { path = "../../../_support/types/types_scan" }
+xact = { path = "../../access/transam/xact" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+init_small = { path = "../../utils/init/init_small" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+indexam = { path = "../../access/index/indexam" }
+catalog_index_seams = { path = "../catalog_index_seams" }
+pg_constraint = { path = "../pg_constraint" }
+outfuncs = { path = "../../nodes/outfuncs" }
+varlena = { path = "../../utils/adt/varlena" }
+inval = { path = "../../utils/cache/inval" }
+types_nodes = { path = "../../../_support/types/nodes" }
+aclchk_seams = { path = "../aclchk_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+trigger_seams = { path = "../../commands/trigger_seams" }

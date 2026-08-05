@@ -1,0 +1,14 @@
+[package]
+name = "proof-encnames"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+mbutils = { path = "../../crates/backend/utils/mb/mbutils" }
+# wrapper-plane divergence witness calls the SHIPPED fmgr wrapper
+adt_misc = { path = "../../crates/backend/utils/adt/adt_misc" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }
+datum = { path = "../../crates/_support/types/datum" }

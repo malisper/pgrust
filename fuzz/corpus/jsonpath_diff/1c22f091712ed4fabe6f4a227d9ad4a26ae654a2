@@ -1,0 +1,1 @@
+$ ? (@ like_regex "patt@r\u{3F605}\\\\\\\\\\\\**{last\\\\\\\.0\\\\\\\n"'flag*"isim")

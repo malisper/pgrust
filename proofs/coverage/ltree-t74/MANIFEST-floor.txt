@@ -1,0 +1,13 @@
+===== FLEET JOB MANIFEST =====
+
+description:
+  task #74 ltree_diff 10M FLOOR at 33db5df8ae (final/ltree-cexact): C-exact on-disk adoption + v6 OOM/slow-unit bounds; deadline sized from MEASURED 610 exec/s
+
+job_name: pgrust-fuzz-campaign-1785783435-3e89-34711
+job_type: fuzz-campaign
+git_ref: 33db5df8aed37a37209c99c6d3d744e6269d43f2
+repo_url: https://github.com/Pager-Free/pgrust-fast.git
+build_kind: fast
+sha: 33db5df8aed3
+started_utc: 2026-08-03T18:59:53Z
+hostname: pgrust-fuzz-campaign-1785783435-3e89-34711-s4p7b

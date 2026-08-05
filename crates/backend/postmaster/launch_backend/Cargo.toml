@@ -1,0 +1,79 @@
+[package]
+name = "launch_backend"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "launch_backend"
+path = "src/lib.rs"
+
+# PERMIT-S1: `pgrust_sim` selects the spawn-door scheduler registration; the
+# cfg comes from harness/CI RUSTFLAGS only (law §0.1 of sim-net-e2e).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }
+
+[dependencies]
+guc = { path = "../../utils/misc/guc" }
+pmsignal = { path = "../../storage/ipc/pmsignal" }
+types_core = { path = "../../../_support/types/types_core" }
+types_startup = { path = "../../../_support/types/types_startup" }
+init_small = { path = "../../utils/init/init_small" }
+fd = { path = "../../storage/file/fd" }
+miscinit = { path = "../../utils/init/miscinit" }
+runtime = { path = "../../executor/runtime" }
+bgjobs = { path = "../bgjobs" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+backend_startup = { path = "../../tcop/backend_startup" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+autovacuum = { path = "../autovacuum" }
+bgworker = { path = "../bgworker" }
+bgwriter = { path = "../bgwriter" }
+io_worker = { path = "../io_worker" }
+checkpointer = { path = "../checkpointer" }
+pgarch = { path = "../pgarch" }
+walsummarizer = { path = "../walsummarizer" }
+walreceiver = { path = "../../replication/walreceiver" }
+slotsync = { path = "../../replication/slotsync" }
+postmaster_startup = { path = "../startup" }
+walwriter = { path = "../walwriter" }
+pmchild_seams = { path = "../pmchild_seams" }
+postmaster_seams = { path = "../postmaster_seams" }
+interrupt = { path = "../interrupt" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+ipc = { path = "../../storage/ipc/ipc" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+parallel = { path = "../../access/transam/parallel" }
+postinit = { path = "../../utils/init/postinit" }
+elog = { path = "../../utils/error/elog" }
+types_error = { path = "../../../_support/types/types_error" }
+# PERMIT-S1 (WS-CORE): the spawn-door registration surface. Native/loom
+# builds see an (effectively empty) support crate; only `--cfg pgrust_sim`
+# compiles the scheduler arm.
+pgsync = { path = "../../../_support/pgsync" }
+# SIMVFS-SHARED (s2 §6 item 1): shared-universe capture/adopt at the spawn
+# doors — sim-only code paths; vfs is a leaf crate (no cycle).
+vfs = { path = "../../storage/file/vfs" }
+sinval = { path = "../../storage/ipc/sinval" }
+mcx = { path = "../../../_support/mcx" }
+mcxt_stats = { path = "../../utils/mmgr/mcxt_stats" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }
+waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
+libc = "0.2"
+
+syslogger_seams = { path = "../syslogger_seams" }
+
+# env-to-guc train: read the process-global `pgrust.runtime` GUC backing cell to
+# gate the runtime-pool spawn (rtpool::start_if_enabled). Was dev-only.
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+[dev-dependencies]
+xact_seams = { path = "../../access/transam/xact_seams" }
+scalar_seams = { path = "../../utils/adt/scalar_seams" }
+types_guc = { path = "../../../_support/types/types_guc" }
+ip = { path = "../../../common/ip" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }
+libc = "0.2"

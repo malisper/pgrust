@@ -1,0 +1,73 @@
+[package]
+name = "functioncmds"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pgstat = { path = "../../utils/activity/pgstat" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+parser_small1 = { path = "../../parser/parser_small1" }
+mbutils = { path = "../../utils/mb/mbutils" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+pg_proc = { path = "../../catalog/pg_proc" }
+pg_type = { path = "../../catalog/pg_type" }
+commands_define = { path = "../commands_define" }
+elog = { path = "../../utils/error/elog" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+aclchk = { path = "../../catalog/aclchk" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+format_type = { path = "../../utils/adt/format_type" }
+miscinit = { path = "../../utils/init/miscinit" }
+superuser = { path = "../../utils/misc/superuser" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_rel = { path = "../../../_support/types/rel" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+datum = { path = "../../../_support/types/datum" }
+extension = { path = "../extension" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_portal = { path = "../../../_support/types/portal" }
+tcop_dest = { path = "../../tcop/dest" }
+pquery_seams = { path = "../../tcop/pquery_seams" }
+execexpr = { path = "../../executor/execexpr" }
+exectuples_output = { path = "../../executor/exectuples_output" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+tupdesc = { path = "../../access/common/tupdesc" }
+nodes_core = { path = "../../nodes/nodes_core" }
+heaptuple = { path = "../../access/common/heaptuple" }
+catalog = { path = "../../catalog/catalog" }
+pg_cast = { path = "../../catalog/pg_cast" }
+pg_depend = { path = "../../catalog/pg_depend" }
+catalog_objectaddress = { path = "../../catalog/objectaddress" }
+adt_acl = { path = "../../utils/adt/acl" }
+coerce = { path = "../../parser/coerce" }
+parse_expr = { path = "../../parser/parse_expr" }
+parse_collate = { path = "../../parser/parse_collate" }
+var_seams = { path = "../../optimizer/util/var_seams" }
+outfuncs = { path = "../../nodes/outfuncs" }
+parse_func = { path = "../../parser/parse_func" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+analyze_seams = { path = "../../parser/analyze_seams" }
+utility_seams = { path = "../../tcop/utility_seams" }
+cmdtag = { path = "../../tcop/cmdtag" }
+guc = { path = "../../utils/misc/guc" }
+guc_funcs = { path = "../../utils/misc/guc_funcs" }
+varlena = { path = "../../utils/adt/varlena" }

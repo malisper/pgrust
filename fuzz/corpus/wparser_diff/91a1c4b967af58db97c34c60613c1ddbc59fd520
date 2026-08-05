@@ -1,0 +1,4 @@
+s peng list
+create temp tab”šß…endtest (ts tsvector);
+create index pendtest_idx on pendtest using gin(ts);
+insert into pendtest values (to_tsvector(

@@ -1,0 +1,27 @@
+[package]
+name = "nodehash"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+hashfn = { path = "../../../common/hashfn" }
+execexpr = { path = "../execexpr" }
+fd = { path = "../../storage/file/fd" }
+parallel = { path = "../../access/transam/parallel" }
+pg_barrier = { path = "../../storage/ipc/pg_barrier" }
+sharedtuplestore = { path = "../../utils/sort/sharedtuplestore" }
+init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+heaptuple = { path = "../../access/common/heaptuple" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+

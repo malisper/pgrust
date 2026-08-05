@@ -1,0 +1,1 @@
+Ğexists($.a.datetime()) && $.b.date() == $.c.date()

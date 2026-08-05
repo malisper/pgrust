@@ -1,0 +1,3 @@
+));
+
+SELECT ts_rank_cd(to_tsvector(

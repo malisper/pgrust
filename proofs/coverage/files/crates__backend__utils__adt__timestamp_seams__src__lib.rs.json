@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/adt/timestamp_seams/src/lib.rs","sloc":[4,5,26,27,30,31,35,36],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2],"attr":[9],"typedef":[10,11,12,13,14,15,16,17,18,19,20,21,22,23]}}

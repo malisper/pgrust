@@ -1,0 +1,14 @@
+{
+  "job": "pgrust-mutants-audit-1785512413-556c-21594",
+  "sha": "4bb37b72cfe9a71a5c6fd9b87d4a3ff02ccd2cc9",
+  "cargo_mutants": "27.1.0",
+  "timeout_s": 300,
+  "rail": "unavailable",
+  "rail_carved_tests": "",
+  "missed_in_crate_total": 250,
+  "genuinely_missed_total": 250,
+  "rc": 1,
+  "crates": [
+    {"crate": "crates/backend/utils/mb/conv", "outcome": "run", "total": 673, "caught_in_crate": 328, "missed_in_crate": 250, "caught_by_rail": 0, "genuinely_missed": 250, "rail_unviable": 0, "rail_timeout": 0, "rail_other": 0, "rail_unswept": 0, "unviable": 95, "timeout": 0, "wall_s": 2276}
+  ]
+}

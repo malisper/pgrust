@@ -1,0 +1,1 @@
+{"path":"crates/backend/tcop/pquery_seams/src/lib.rs","sloc":[15,17,18,19,20,23,26,29,31,34,38,39,40,41],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2,3,4,5],"attr":[8],"typedef":[9,10,11,12]}}

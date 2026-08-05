@@ -1,0 +1,33 @@
+[package]
+name = "shm_mq"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "shm_mq"
+path = "src/lib.rs"
+
+[dependencies]
+pg_clock = { path = "../../../../port/pg_clock" }
+bgworker_seams = { path = "../../../postmaster/bgworker_seams" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
+latch = { path = "../latch" }
+libc = "0.2"
+waiter = { path = "../waiter" }
+lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+s_lock_seams = { path = "../../lmgr/s_lock_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+waiteventset_seams = { path = "../waiteventset_seams" }
+
+[dev-dependencies]
+ipc_seams = { path = "../ipc_seams" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+shmem_seams = { path = "../shmem_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+waiteventset = { path = "../waiteventset" }

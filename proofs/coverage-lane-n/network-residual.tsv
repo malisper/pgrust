@@ -1,0 +1,241 @@
+# proofs/coverage-lane-n/network-residual.tsv — adt/network residual adjudication
+# (p1-lanen, 2026-07-31). Merge of record: kani capture (proofs/sloc-rule-v2,
+# 15/15 harnesses, source unchanged since 69c3c7eb90) UNION fleet fuzz lcov
+# (jobs pgrust-fuzz-campaign-1785481804-5bb3-66755 @2d395af5024 + -1785483251-7777-99627
+# @3efbbfa104d, 2x10.0M execs, 0 divergences), SLOC v2 tables-excluded.
+# IN-SCOPE 1187/1400 = 84.79% measured; 213 residual lines below, all adjudicated;
+# 68 lines CARVED out-of-scope (claim scope_note): builtins.rs 291-304
+# (network_subset_support - blocked: planner node + port gap, ledger 1173) and
+# builtins.rs 310-397 (session_addr/port + client/server quartet - blocked:
+# libc FFI + session state, ledger 2196-2199).
+# classes:
+#   instrument-structural-false-red    - decls/attrs/else/loop/match-arm continuation
+#                                        lines llvm-cov leaves unmapped (known class)
+#   macro-invocation-unmapped-executed - fc*! macro def+invocation lines; the generated
+#                                        wrappers EXECUTE every fleet exec via the fc
+#                                        planes (tree-wide fc*! false-UNCOVERED class)
+#   const-eval-machinery-unmapped      - const fn/static registry machinery, const-evaluated
+#   defensive-c-parity                 - dst/size-guard + cold format-error arms mirroring C
+#                                        (inet_net_ntop.c/inet_cidr_ntop.c emsgsize class),
+#                                        unreachable through the shipped 50-byte OUT buffer
+#                                        and 4/16-byte fenced addrs
+#   stateful-sortsupport-carve         - abbrev.rs HLL cardinality estimator (abort()) +
+#                                        state struct: stateful sortsupport heuristic,
+#                                        documented target skip
+#   soft-error-plane-unwired           - builtins.rs:52 network_in escontext soft-Ok(None)
+#                                        arm; target drives hard-error plane only. FLAGGED
+#                                        follow-up: wire ErrorSaveNode fc plane.
+file	line	class	source
+crates/backend/utils/adt/network/src/abbrev.rs	3	instrument-structural-false-red	use crate::{InetRef, PGSQL_AF_INET, PGSQL_AF_INET6};
+crates/backend/utils/adt/network/src/abbrev.rs	4	instrument-structural-false-red	use hyperloglog::HyperLogLog;
+crates/backend/utils/adt/network/src/abbrev.rs	6	instrument-structural-false-red	const ABBREV_BITS_INET4_NETMASK_SIZE: u32 = 6;
+crates/backend/utils/adt/network/src/abbrev.rs	7	instrument-structural-false-red	const ABBREV_BITS_INET4_SUBNET: u32 = 25;
+crates/backend/utils/adt/network/src/abbrev.rs	9	stateful-sortsupport-carve	pub struct NetworkAbbrevState {
+crates/backend/utils/adt/network/src/abbrev.rs	10	stateful-sortsupport-carve	input_count: i64,
+crates/backend/utils/adt/network/src/abbrev.rs	11	stateful-sortsupport-carve	estimating: bool,
+crates/backend/utils/adt/network/src/abbrev.rs	12	stateful-sortsupport-carve	abbr_card: HyperLogLog,
+crates/backend/utils/adt/network/src/abbrev.rs	15	stateful-sortsupport-carve	impl NetworkAbbrevState {
+crates/backend/utils/adt/network/src/abbrev.rs	33	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/abbrev.rs	45	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/abbrev.rs	71	stateful-sortsupport-carve	pub fn abort(&mut self, memtupcount: i32) -> bool {
+crates/backend/utils/adt/network/src/abbrev.rs	72	stateful-sortsupport-carve	if memtupcount < 10000 || self.input_count < 10000 || !self.estimating {
+crates/backend/utils/adt/network/src/abbrev.rs	73	stateful-sortsupport-carve	return false;
+crates/backend/utils/adt/network/src/abbrev.rs	75	stateful-sortsupport-carve	let card = self.abbr_card.estimate();
+crates/backend/utils/adt/network/src/abbrev.rs	76	stateful-sortsupport-carve	if card > 100000.0 {
+crates/backend/utils/adt/network/src/abbrev.rs	77	stateful-sortsupport-carve	self.estimating = false;
+crates/backend/utils/adt/network/src/abbrev.rs	78	stateful-sortsupport-carve	return false;
+crates/backend/utils/adt/network/src/abbrev.rs	80	stateful-sortsupport-carve	card < self.input_count as f64 / 2000.0 + 0.5
+crates/backend/utils/adt/network/src/abbrev.rs	84	instrument-structural-false-red	impl Default for NetworkAbbrevState {
+crates/backend/utils/adt/network/src/builtins.rs	5	instrument-structural-false-red	use std::borrow::Cow;
+crates/backend/utils/adt/network/src/builtins.rs	7	instrument-structural-false-red	use ::datum::{Datum, Varlena};
+crates/backend/utils/adt/network/src/builtins.rs	8	instrument-structural-false-red	use ::mcx::Mcx;
+crates/backend/utils/adt/network/src/builtins.rs	9	instrument-structural-false-red	use ::types_core::Oid;
+crates/backend/utils/adt/network/src/builtins.rs	10	instrument-structural-false-red	use ::types_error::PgResult;
+crates/backend/utils/adt/network/src/builtins.rs	11	instrument-structural-false-red	use ::types_fmgr::{
+crates/backend/utils/adt/network/src/builtins.rs	12	instrument-structural-false-red	byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as
+crates/backend/utils/adt/network/src/builtins.rs	13	instrument-structural-false-red	PGFunction,
+crates/backend/utils/adt/network/src/builtins.rs	16	instrument-structural-false-red	use crate::{InetRef, InetValue, INET_OUT_BUFLEN};
+crates/backend/utils/adt/network/src/builtins.rs	52	soft-error-plane-unwired	None => Ok(Datum::from_usize(0)),
+crates/backend/utils/adt/network/src/builtins.rs	66	instrument-structural-false-red	std::thread_local! {
+crates/backend/utils/adt/network/src/builtins.rs	67	const-eval-machinery-unmapped	static OUT_SCRATCH: core::cell::UnsafeCell<[u8; INET_OUT_BUFLEN + 1]> =
+crates/backend/utils/adt/network/src/builtins.rs	68	instrument-structural-false-red	const { core::cell::UnsafeCell::new([0; INET_OUT_BUFLEN + 1]) };
+crates/backend/utils/adt/network/src/builtins.rs	119	macro-invocation-unmapped-executed	macro_rules! fc_cmp {
+crates/backend/utils/adt/network/src/builtins.rs	120	macro-invocation-unmapped-executed	($($fc:ident: $op:tt;)*) => {$(
+crates/backend/utils/adt/network/src/builtins.rs	125	macro-invocation-unmapped-executed	)*};
+crates/backend/utils/adt/network/src/builtins.rs	128	macro-invocation-unmapped-executed	fc_cmp! {
+crates/backend/utils/adt/network/src/builtins.rs	129	macro-invocation-unmapped-executed	fc_network_lt: <;
+crates/backend/utils/adt/network/src/builtins.rs	130	macro-invocation-unmapped-executed	fc_network_le: <=;
+crates/backend/utils/adt/network/src/builtins.rs	131	macro-invocation-unmapped-executed	fc_network_eq: ==;
+crates/backend/utils/adt/network/src/builtins.rs	132	macro-invocation-unmapped-executed	fc_network_ge: >=;
+crates/backend/utils/adt/network/src/builtins.rs	133	macro-invocation-unmapped-executed	fc_network_gt: >;
+crates/backend/utils/adt/network/src/builtins.rs	134	macro-invocation-unmapped-executed	fc_network_ne: !=;
+crates/backend/utils/adt/network/src/builtins.rs	154	macro-invocation-unmapped-executed	macro_rules! fc_bool2 {
+crates/backend/utils/adt/network/src/builtins.rs	155	macro-invocation-unmapped-executed	($($fc:ident: $core:ident;)*) => {$(
+crates/backend/utils/adt/network/src/builtins.rs	160	macro-invocation-unmapped-executed	)*};
+crates/backend/utils/adt/network/src/builtins.rs	163	macro-invocation-unmapped-executed	fc_bool2! {
+crates/backend/utils/adt/network/src/builtins.rs	164	macro-invocation-unmapped-executed	fc_network_sub: network_sub;
+crates/backend/utils/adt/network/src/builtins.rs	165	macro-invocation-unmapped-executed	fc_network_subeq: network_subeq;
+crates/backend/utils/adt/network/src/builtins.rs	166	macro-invocation-unmapped-executed	fc_network_sup: network_sup;
+crates/backend/utils/adt/network/src/builtins.rs	167	macro-invocation-unmapped-executed	fc_network_supeq: network_supeq;
+crates/backend/utils/adt/network/src/builtins.rs	168	macro-invocation-unmapped-executed	fc_network_overlap: network_overlap;
+crates/backend/utils/adt/network/src/builtins.rs	169	macro-invocation-unmapped-executed	fc_inet_same_family: inet_same_family;
+crates/backend/utils/adt/network/src/builtins.rs	187	macro-invocation-unmapped-executed	macro_rules! fc_text1 {
+crates/backend/utils/adt/network/src/builtins.rs	188	macro-invocation-unmapped-executed	($($fc:ident: $core:ident;)*) => {$(
+crates/backend/utils/adt/network/src/builtins.rs	196	macro-invocation-unmapped-executed	)*};
+crates/backend/utils/adt/network/src/builtins.rs	199	macro-invocation-unmapped-executed	fc_text1! {
+crates/backend/utils/adt/network/src/builtins.rs	200	macro-invocation-unmapped-executed	fc_network_host: network_host_into;
+crates/backend/utils/adt/network/src/builtins.rs	201	macro-invocation-unmapped-executed	fc_network_show: network_show_into;
+crates/backend/utils/adt/network/src/builtins.rs	202	macro-invocation-unmapped-executed	fc_inet_abbrev: inet_abbrev_into;
+crates/backend/utils/adt/network/src/builtins.rs	203	macro-invocation-unmapped-executed	fc_cidr_abbrev: cidr_abbrev_into;
+crates/backend/utils/adt/network/src/builtins.rs	206	macro-invocation-unmapped-executed	macro_rules! fc_inet1 {
+crates/backend/utils/adt/network/src/builtins.rs	207	macro-invocation-unmapped-executed	($($fc:ident: $core:ident;)*) => {$(
+crates/backend/utils/adt/network/src/builtins.rs	212	macro-invocation-unmapped-executed	)*};
+crates/backend/utils/adt/network/src/builtins.rs	215	macro-invocation-unmapped-executed	fc_inet1! {
+crates/backend/utils/adt/network/src/builtins.rs	216	macro-invocation-unmapped-executed	fc_network_broadcast: network_broadcast;
+crates/backend/utils/adt/network/src/builtins.rs	217	macro-invocation-unmapped-executed	fc_network_network: network_network;
+crates/backend/utils/adt/network/src/builtins.rs	218	macro-invocation-unmapped-executed	fc_network_netmask: network_netmask;
+crates/backend/utils/adt/network/src/builtins.rs	219	macro-invocation-unmapped-executed	fc_network_hostmask: network_hostmask;
+crates/backend/utils/adt/network/src/builtins.rs	220	macro-invocation-unmapped-executed	fc_inetnot: inetnot;
+crates/backend/utils/adt/network/src/builtins.rs	400	instrument-structural-false-red	const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
+crates/backend/utils/adt/network/src/builtins.rs	401	const-eval-machinery-unmapped	FmgrBuiltin {
+crates/backend/utils/adt/network/src/builtins.rs	402	const-eval-machinery-unmapped	foid,
+crates/backend/utils/adt/network/src/builtins.rs	403	const-eval-machinery-unmapped	name,
+crates/backend/utils/adt/network/src/builtins.rs	404	const-eval-machinery-unmapped	nargs,
+crates/backend/utils/adt/network/src/builtins.rs	405	instrument-structural-false-red	strict: true,
+crates/backend/utils/adt/network/src/builtins.rs	406	instrument-structural-false-red	retset: false,
+crates/backend/utils/adt/network/src/builtins.rs	407	const-eval-machinery-unmapped	func,
+crates/backend/utils/adt/network/src/builtins.rs	411	instrument-structural-false-red	const fn nb(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmgr
+crates/backend/utils/adt/network/src/builtins.rs	412	const-eval-machinery-unmapped	FmgrBuiltin {
+crates/backend/utils/adt/network/src/builtins.rs	413	const-eval-machinery-unmapped	foid,
+crates/backend/utils/adt/network/src/builtins.rs	414	const-eval-machinery-unmapped	name,
+crates/backend/utils/adt/network/src/builtins.rs	415	const-eval-machinery-unmapped	nargs,
+crates/backend/utils/adt/network/src/builtins.rs	416	instrument-structural-false-red	strict: false,
+crates/backend/utils/adt/network/src/builtins.rs	417	instrument-structural-false-red	retset: false,
+crates/backend/utils/adt/network/src/builtins.rs	418	const-eval-machinery-unmapped	func,
+crates/backend/utils/adt/network/src/builtins.rs	423	instrument-structural-false-red	pub const NETWORK_BUILTINS: &[FmgrBuiltin] = &[
+crates/backend/utils/adt/network/src/cidr_ntop.rs	5	instrument-structural-false-red	use crate::{PGSQL_AF_INET, PGSQL_AF_INET6};
+crates/backend/utils/adt/network/src/cidr_ntop.rs	12	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/cidr_ntop.rs	13	instrument-structural-false-red	None
+crates/backend/utils/adt/network/src/cidr_ntop.rs	21	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/cidr_ntop.rs	42	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/cidr_ntop.rs	47	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/cidr_ntop.rs	57	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/cidr_ntop.rs	73	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/cidr_ntop.rs	86	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/cidr_ntop.rs	96	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/cidr_ntop.rs	178	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/cidr_ntop.rs	195	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/cidr_ntop.rs	202	instrument-structural-false-red	const HEX: &[u8; 16] = b"0123456789abcdef";
+crates/backend/utils/adt/network/src/cidr_ntop.rs	206	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/lib.rs	8	instrument-structural-false-red	pub mod abbrev;
+crates/backend/utils/adt/network/src/lib.rs	9	instrument-structural-false-red	pub mod builtins;
+crates/backend/utils/adt/network/src/lib.rs	10	instrument-structural-false-red	mod cidr_ntop;
+crates/backend/utils/adt/network/src/lib.rs	11	instrument-structural-false-red	mod ntop;
+crates/backend/utils/adt/network/src/lib.rs	12	instrument-structural-false-red	mod pton;
+crates/backend/utils/adt/network/src/lib.rs	25	instrument-structural-false-red	pub const PGSQL_AF_INET: u8 = 2;
+crates/backend/utils/adt/network/src/lib.rs	26	instrument-structural-false-red	pub const PGSQL_AF_INET6: u8 = 3;
+crates/backend/utils/adt/network/src/lib.rs	29	instrument-structural-false-red	pub const INET_OUT_BUFLEN: usize = 50;
+crates/backend/utils/adt/network/src/lib.rs	31	instrument-structural-false-red	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+crates/backend/utils/adt/network/src/lib.rs	32	instrument-structural-false-red	pub struct InetValue {
+crates/backend/utils/adt/network/src/lib.rs	33	instrument-structural-false-red	pub family: u8,
+crates/backend/utils/adt/network/src/lib.rs	34	instrument-structural-false-red	pub bits: u8,
+crates/backend/utils/adt/network/src/lib.rs	35	instrument-structural-false-red	pub ipaddr: [u8; 16],
+crates/backend/utils/adt/network/src/lib.rs	38	instrument-structural-false-red	impl InetValue {
+crates/backend/utils/adt/network/src/lib.rs	39	instrument-structural-false-red	#[inline]
+crates/backend/utils/adt/network/src/lib.rs	43	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/lib.rs	48	instrument-structural-false-red	#[inline]
+crates/backend/utils/adt/network/src/lib.rs	52	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/lib.rs	68	instrument-structural-false-red	#[inline]
+crates/backend/utils/adt/network/src/lib.rs	80	instrument-structural-false-red	#[derive(Clone, Copy, Debug)]
+crates/backend/utils/adt/network/src/lib.rs	81	instrument-structural-false-red	pub struct InetRef<'a> {
+crates/backend/utils/adt/network/src/lib.rs	82	instrument-structural-false-red	pub family: u8,
+crates/backend/utils/adt/network/src/lib.rs	83	instrument-structural-false-red	pub bits: u8,
+crates/backend/utils/adt/network/src/lib.rs	84	instrument-structural-false-red	pub addr: &'a [u8],
+crates/backend/utils/adt/network/src/lib.rs	87	instrument-structural-false-red	impl<'a> InetRef<'a> {
+crates/backend/utils/adt/network/src/lib.rs	96	instrument-structural-false-red	#[inline]
+crates/backend/utils/adt/network/src/lib.rs	100	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/lib.rs	105	instrument-structural-false-red	#[inline]
+crates/backend/utils/adt/network/src/lib.rs	109	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/lib.rs	126	instrument-structural-false-red	#[cold]
+crates/backend/utils/adt/network/src/lib.rs	127	instrument-structural-false-red	#[inline(never)]
+crates/backend/utils/adt/network/src/lib.rs	130	instrument-structural-false-red	"invalid input syntax for type {}: \"{src}\"",
+crates/backend/utils/adt/network/src/lib.rs	136	instrument-structural-false-red	#[cold]
+crates/backend/utils/adt/network/src/lib.rs	137	instrument-structural-false-red	#[inline(never)]
+crates/backend/utils/adt/network/src/lib.rs	144	instrument-structural-false-red	#[cold]
+crates/backend/utils/adt/network/src/lib.rs	145	instrument-structural-false-red	#[inline(never)]
+crates/backend/utils/adt/network/src/lib.rs	146	defensive-c-parity	fn could_not_format_err() -> PgError {
+crates/backend/utils/adt/network/src/lib.rs	148	defensive-c-parity	PgError::error("could not format inet value")
+crates/backend/utils/adt/network/src/lib.rs	149	defensive-c-parity	.with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION)
+crates/backend/utils/adt/network/src/lib.rs	152	instrument-structural-false-red	#[cold]
+crates/backend/utils/adt/network/src/lib.rs	153	instrument-structural-false-red	#[inline(never)]
+crates/backend/utils/adt/network/src/lib.rs	159	instrument-structural-false-red	#[cold]
+crates/backend/utils/adt/network/src/lib.rs	160	instrument-structural-false-red	#[inline(never)]
+crates/backend/utils/adt/network/src/lib.rs	166	instrument-structural-false-red	#[cold]
+crates/backend/utils/adt/network/src/lib.rs	167	instrument-structural-false-red	#[inline(never)]
+crates/backend/utils/adt/network/src/lib.rs	172	instrument-structural-false-red	#[cold]
+crates/backend/utils/adt/network/src/lib.rs	173	instrument-structural-false-red	#[inline(never)]
+crates/backend/utils/adt/network/src/lib.rs	185	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/lib.rs	223	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/lib.rs	297	defensive-c-parity	return Err(Box::new(PgError::error(format!(
+crates/backend/utils/adt/network/src/lib.rs	298	defensive-c-parity	"invalid inet bit length: {bits}"
+crates/backend/utils/adt/network/src/lib.rs	389	instrument-structural-false-red	Some(p) => p,
+crates/backend/utils/adt/network/src/lib.rs	413	defensive-c-parity	Box::new(
+crates/backend/utils/adt/network/src/lib.rs	414	defensive-c-parity	PgError::error("could not format cidr value")
+crates/backend/utils/adt/network/src/lib.rs	415	defensive-c-parity	.with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION),
+crates/backend/utils/adt/network/src/lib.rs	424	instrument-structural-false-red	_ => 0,
+crates/backend/utils/adt/network/src/lib.rs	441	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/lib.rs	497	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/lib.rs	520	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/lib.rs	599	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/ntop.rs	6	instrument-structural-false-red	use crate::{PGSQL_AF_INET, PGSQL_AF_INET6};
+crates/backend/utils/adt/network/src/ntop.rs	8	instrument-structural-false-red	const NS_IN6ADDRSZ: usize = 16;
+crates/backend/utils/adt/network/src/ntop.rs	9	instrument-structural-false-red	const NS_INT16SZ: usize = 2;
+crates/backend/utils/adt/network/src/ntop.rs	15	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/ntop.rs	30	instrument-structural-false-red	const HEX: &[u8; 16] = b"0123456789abcdef";
+crates/backend/utils/adt/network/src/ntop.rs	34	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/ntop.rs	53	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/ntop.rs	54	instrument-structural-false-red	None
+crates/backend/utils/adt/network/src/ntop.rs	65	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/ntop.rs	70	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/ntop.rs	78	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/ntop.rs	87	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/ntop.rs	105	defensive-c-parity	return 0;
+crates/backend/utils/adt/network/src/ntop.rs	124	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/ntop.rs	127	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/ntop.rs	183	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/ntop.rs	203	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/pton.rs	6	instrument-structural-false-red	use crate::{PGSQL_AF_INET, PGSQL_AF_INET6};
+crates/backend/utils/adt/network/src/pton.rs	8	instrument-structural-false-red	const NS_IN6ADDRSZ: usize = 16;
+crates/backend/utils/adt/network/src/pton.rs	9	instrument-structural-false-red	const NS_INT16SZ: usize = 2;
+crates/backend/utils/adt/network/src/pton.rs	10	instrument-structural-false-red	const NS_INADDRSZ: usize = 4;
+crates/backend/utils/adt/network/src/pton.rs	12	instrument-structural-false-red	#[inline]
+crates/backend/utils/adt/network/src/pton.rs	17	instrument-structural-false-red	#[inline]
+crates/backend/utils/adt/network/src/pton.rs	24	instrument-structural-false-red	#[inline]
+crates/backend/utils/adt/network/src/pton.rs	30	instrument-structural-false-red	#[inline]
+crates/backend/utils/adt/network/src/pton.rs	34	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/pton.rs	44	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/pton.rs	50	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/pton.rs	53	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/pton.rs	54	instrument-structural-false-red	None
+crates/backend/utils/adt/network/src/pton.rs	64	instrument-structural-false-red	let mut bits: i32;
+crates/backend/utils/adt/network/src/pton.rs	74	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/pton.rs	78	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/pton.rs	114	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/pton.rs	116	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/pton.rs	145	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/pton.rs	154	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/pton.rs	176	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/pton.rs	188	instrument-structural-false-red	} else {
+crates/backend/utils/adt/network/src/pton.rs	200	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/pton.rs	213	instrument-structural-false-red	let mut tmp: i32;
+crates/backend/utils/adt/network/src/pton.rs	214	instrument-structural-false-red	let mut bits: i32;
+crates/backend/utils/adt/network/src/pton.rs	217	instrument-structural-false-red	let mut ch;
+crates/backend/utils/adt/network/src/pton.rs	218	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/pton.rs	225	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/pton.rs	255	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/pton.rs	282	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/pton.rs	300	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/pton.rs	330	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/pton.rs	376	defensive-c-parity	return None;
+crates/backend/utils/adt/network/src/pton.rs	398	instrument-structural-false-red	loop {
+crates/backend/utils/adt/network/src/pton.rs	492	instrument-structural-false-red	#[inline]

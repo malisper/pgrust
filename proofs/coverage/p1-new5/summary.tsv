@@ -1,0 +1,2 @@
+crate	file	da_lines	fleet_measured	exception_lines	fleet_jobs	final_sha
+crates/backend/access/common/tidstore	src/lib.rs	182	172	10	pgrust-fuzz-campaign-1785619533-7370-62958(floor @3fdcb1c17d99),pgrust-fuzz-campaign-1785620765-0b9e-64382(final/coverage-of-record @5db76f647b25)	5db76f647b250a7dc3d33796b36e7a8546815274

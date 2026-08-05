@@ -1,0 +1,121 @@
+family	harness	tier	expected	outcome	wall_s	timeout_s	verdict	log
+text-slice	wave8::eq_bytea_larger	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__eq_bytea_larger_.log
+text-slice	wave8::eq_bytea_smaller	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__eq_bytea_smaller_.log
+text-slice	wave8::eq_textout	unmeasured	unmeasured	unmeasured-green	61	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__eq_textout_.log
+text-slice	wave8::spot_textin	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__spot_textin_.log
+text-slice	wave8::eq_int4_bytea	unmeasured	unmeasured	unmeasured-green	111	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__eq_int4_bytea_.log
+text-slice	wave8::eq_int8_bytea	unmeasured	unmeasured	unmeasured-green	111	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__eq_int8_bytea_.log
+text-slice	wave8::eq_int2_bytea	unmeasured	unmeasured	unmeasured-green	121	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__eq_int2_bytea_.log
+text-slice	wave8::eq_bytea_reverse	unmeasured	unmeasured	unmeasured-rss-kill	251	600	NO-VERDICT	text-slice--wave8__eq_bytea_reverse_.log
+text-slice	wave8::eq_to_hex32	unmeasured	unmeasured	unmeasured-rss-kill	251	600	NO-VERDICT	text-slice--wave8__eq_to_hex32_.log
+text-slice	wave8::eq_byteasend	unmeasured	unmeasured	unmeasured-rss-kill	261	600	NO-VERDICT	text-slice--wave8__eq_byteasend_.log
+text-slice	wave8::eq_to_oct32	unmeasured	unmeasured	unmeasured-rss-kill	231	600	NO-VERDICT	text-slice--wave8__eq_to_oct32_.log
+text-slice	wave8::eq_to_hex64	unmeasured	unmeasured	unmeasured-rss-kill	271	600	NO-VERDICT	text-slice--wave8__eq_to_hex64_.log
+text-slice	wave8::spot_unknownout	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	text-slice--wave8__spot_unknownout_.log
+text-slice	wave8::spot_to_hex32	unmeasured	unmeasured	unmeasured-rss-kill	210	600	NO-VERDICT	text-slice--wave8__spot_to_hex32_.log
+text-slice	wave8::eq_to_oct64	unmeasured	unmeasured	unmeasured-rss-kill	311	600	NO-VERDICT	text-slice--wave8__eq_to_oct64_.log
+text-slice	wave8::spot_unknownin	unmeasured	unmeasured	unmeasured-rss-kill	100	600	NO-VERDICT	text-slice--wave8__spot_unknownin_.log
+text-slice	wave8::spot_to_hex64	unmeasured	unmeasured	unmeasured-rss-kill	250	600	NO-VERDICT	text-slice--wave8__spot_to_hex64_.log
+text-slice	wave8::eq_textsend	unmeasured	unmeasured	unmeasured-rss-kill	402	600	NO-VERDICT	text-slice--wave8__eq_textsend_.log
+text-slice	wave8::spot_to_oct32	unmeasured	unmeasured	unmeasured-rss-kill	221	600	NO-VERDICT	text-slice--wave8__spot_to_oct32_.log
+text-slice	wave8::eq_byteaoverlay_no_len	unmeasured	unmeasured	unmeasured-rss-kill	502	600	NO-VERDICT	text-slice--wave8__eq_byteaoverlay_no_len_.log
+text-slice	wave8::eq_byteaoverlay	unmeasured	unmeasured	unmeasured-rss-kill	512	600	NO-VERDICT	text-slice--wave8__eq_byteaoverlay_.log
+text-slice	wave8::spot_to_oct64	unmeasured	unmeasured	unmeasured-rss-kill	301	600	NO-VERDICT	text-slice--wave8__spot_to_oct64_.log
+text-slice	wave8::eq_to_bin32	unmeasured	unmeasured	unmeasured-rss-kill	572	600	NO-VERDICT	text-slice--wave8__eq_to_bin32_.log
+text-slice	wave8::eq_hashvarlena	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	text-slice--wave8__eq_hashvarlena_.log
+text-slice	wave8::eq_to_bin64	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	text-slice--wave8__eq_to_bin64_.log
+text-slice	wave8::eq_hashvarlena_extended	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	text-slice--wave8__eq_hashvarlena_extended_.log
+text-slice	wave8::spot_to_bin32	unmeasured	unmeasured	unmeasured-rss-kill	541	600	NO-VERDICT	text-slice--wave8__spot_to_bin32_.log
+text-slice	wave8::spot_unknownsend	unmeasured	unmeasured	unmeasured-rss-kill	361	600	NO-VERDICT	text-slice--wave8__spot_unknownsend_.log
+uuid	wave5::eq_uuid_recv_core_d0	unmeasured	unmeasured	unmeasured-green	391	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d0_.log
+uuid	wave5::eq_uuid_recv_core_d10	unmeasured	unmeasured	unmeasured-green	331	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d10_.log
+text-slice	wave8::spot_to_bin64	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	text-slice--wave8__spot_to_bin64_.log
+uuid	wave5::eq_uuid_recv_core_d1	unmeasured	unmeasured	unmeasured-green	422	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d1_.log
+uuid	wave5::eq_uuid_recv_core_d11	unmeasured	unmeasured	unmeasured-green	432	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d11_.log
+uuid	wave5::eq_uuid_recv_core_d15	unmeasured	unmeasured	unmeasured-green	301	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d15_.log
+uuid	wave5::eq_uuid_recv_core_d12	unmeasured	unmeasured	unmeasured-green	432	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d12_.log
+uuid	wave5::eq_uuid_recv_core_d13	unmeasured	unmeasured	unmeasured-green	431	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d13_.log
+uuid	wave5::eq_uuid_recv_core_d16	unmeasured	unmeasured	unmeasured-green	331	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d16_.log
+uuid	wave5::eq_uuid_recv_core_d14	unmeasured	unmeasured	unmeasured-green	371	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d14_.log
+uuid	wave5::eq_uuid_recv_core_d20	unmeasured	unmeasured	unmeasured-rss-kill	291	600	NO-VERDICT	uuid--wave5__eq_uuid_recv_core_d20_.log
+uuid	wave5::eq_uuid_recv_core_d2	unmeasured	unmeasured	unmeasured-green	432	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d2_.log
+uuid	wave5::eq_uuid_recv_core_d17	unmeasured	unmeasured	unmeasured-green	482	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d17_.log
+uuid	wave5::eq_uuid_recv_core_d7	unmeasured	unmeasured	unmeasured-green	331	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d7_.log
+uuid	wave5::eq_uuid_recv_core_d3	unmeasured	unmeasured	unmeasured-green	432	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d3_.log
+uuid	wave5::eq_uuid_recv_core_d4	unmeasured	unmeasured	unmeasured-green	432	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d4_.log
+uuid	wave5::eq_uuid_recv_core_d18	unmeasured	unmeasured	unmeasured-green	502	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d18_.log
+uuid	wave5::eq_uuid_recv_core_d8	unmeasured	unmeasured	unmeasured-green	331	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d8_.log
+uuid	wave5::eq_uuid_recv_core_ok16_0	unmeasured	unmeasured	unmeasured-green	291	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok16_0_.log
+uuid	wave5::eq_uuid_recv_core_d5	unmeasured	unmeasured	unmeasured-green	441	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d5_.log
+uuid	wave5::eq_uuid_recv_core_d6	unmeasured	unmeasured	unmeasured-green	442	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d6_.log
+uuid	wave5::eq_uuid_recv_core_ok17_0	unmeasured	unmeasured	unmeasured-green	321	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok17_0_.log
+uuid	wave5::eq_uuid_recv_core_d19	unmeasured	unmeasured	unmeasured-green	552	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d19_.log
+uuid	wave5::eq_uuid_recv_core_ok17_1	unmeasured	unmeasured	unmeasured-green	321	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok17_1_.log
+uuid	wave5::eq_uuid_recv_core_ok18_0	unmeasured	unmeasured	unmeasured-green	351	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok18_0_.log
+uuid	wave5::eq_uuid_recv_core_ok18_1	unmeasured	unmeasured	unmeasured-green	351	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok18_1_.log
+vector-io	proofs::eq_i2vin_len0	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	vector-io--proofs__eq_i2vin_len0_.log
+vector-io	proofs::control_ovout_value_skew	unmeasured	unmeasured	unmeasured-failed	100	600	VERIFICATION:- FAILED	vector-io--proofs__control_ovout_value_skew_.log
+uuid	wave5::eq_uuid_recv_core_d9	unmeasured	unmeasured	unmeasured-green	441	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_d9_.log
+uuid	wave5::eq_uuid_recv_core_ok18_2	unmeasured	unmeasured	unmeasured-green	351	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok18_2_.log
+vector-io	proofs::control_ovin_shifted_input	unmeasured	unmeasured	unmeasured-failed	180	600	VERIFICATION:- FAILED	vector-io--proofs__control_ovin_shifted_input_.log
+vector-io	proofs::eq_i2vout_n0	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	vector-io--proofs__eq_i2vout_n0_.log
+vector-io	proofs::cover_ovin_both_arms	unmeasured	unmeasured	unmeasured-failed	190	600	VERIFICATION:- FAILED	vector-io--proofs__cover_ovin_both_arms_.log
+uuid	wave5::eq_uuid_recv_core_ok19_0	unmeasured	unmeasured	unmeasured-green	381	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok19_0_.log
+uuid	wave5::eq_uuid_recv_core_ok19_1	unmeasured	unmeasured	unmeasured-green	381	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok19_1_.log
+uuid	wave5::eq_uuid_recv_core_ok19_2	unmeasured	unmeasured	unmeasured-green	381	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok19_2_.log
+uuid	wave5::eq_uuid_recv_core_ok19_3	unmeasured	unmeasured	unmeasured-green	381	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok19_3_.log
+uuid	wave5::eq_uuid_recv_core_ok20_2	unmeasured	unmeasured	unmeasured-rss-kill	371	600	NO-VERDICT	uuid--wave5__eq_uuid_recv_core_ok20_2_.log
+vector-io	proofs::eq_ovin_len0	unmeasured	unmeasured	unmeasured-failed	50	600	VERIFICATION:- FAILED	vector-io--proofs__eq_ovin_len0_.log
+uuid	wave5::eq_uuid_recv_core_ok20_0	unmeasured	unmeasured	unmeasured-green	421	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok20_0_.log
+uuid	wave5::eq_uuid_recv_core_ok20_1	unmeasured	unmeasured	unmeasured-green	421	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok20_1_.log
+vector-io	proofs::eq_i2vout_n2_band100	unmeasured	unmeasured	unmeasured-rss-kill	100	600	NO-VERDICT	vector-io--proofs__eq_i2vout_n2_band100_.log
+uuid	wave5::eq_uuid_recv_core_ok20_3	unmeasured	unmeasured	unmeasured-green	421	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok20_3_.log
+vector-io	proofs::eq_i2vout_n2	unmeasured	unmeasured	unmeasured-rss-kill	171	600	NO-VERDICT	vector-io--proofs__eq_i2vout_n2_.log
+uuid	wave5::eq_uuid_recv_core_ok20_4	unmeasured	unmeasured	unmeasured-green	422	600	VERIFICATION:- SUCCESSFUL	uuid--wave5__eq_uuid_recv_core_ok20_4_.log
+vector-io	proofs::eq_ovout_n0	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	vector-io--proofs__eq_ovout_n0_.log
+vector-io	proofs::eq_ovin_len1	unmeasured	unmeasured	unmeasured-failed	130	600	VERIFICATION:- FAILED	vector-io--proofs__eq_ovin_len1_.log
+vector-io	proofs::eq_i2vout_n1	unmeasured	unmeasured	unmeasured-green	241	600	VERIFICATION:- SUCCESSFUL	vector-io--proofs__eq_i2vout_n1_.log
+vector-io	proofs::eq_ovout_n1	unmeasured	unmeasured	unmeasured-rss-kill	60	600	NO-VERDICT	vector-io--proofs__eq_ovout_n1_.log
+vector-io	proofs::eq_ovout_n2	unmeasured	unmeasured	unmeasured-rss-kill	70	600	NO-VERDICT	vector-io--proofs__eq_ovout_n2_.log
+xid8snap	proofs::spot_parse_empty	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	xid8snap--proofs__spot_parse_empty_.log
+vector-io	proofs::eq_i2vout_spot_mixed	unmeasured	unmeasured	unmeasured-green	241	600	VERIFICATION:- SUCCESSFUL	vector-io--proofs__eq_i2vout_spot_mixed_.log
+vector-io	proofs::eq_ovin_len5	unmeasured	unmeasured	unmeasured-rss-kill	180	600	NO-VERDICT	vector-io--proofs__eq_ovin_len5_.log
+vector-io	proofs::eq_i2vout_spot_bounds	unmeasured	unmeasured	unmeasured-green	291	600	VERIFICATION:- SUCCESSFUL	vector-io--proofs__eq_i2vout_spot_bounds_.log
+vector-io	proofs::eq_ovin_len2	unmeasured	unmeasured	unmeasured-failed	231	600	VERIFICATION:- FAILED	vector-io--proofs__eq_ovin_len2_.log
+vector-io	proofs::eq_ovout_spots	unmeasured	unmeasured	unmeasured-failed	200	600	VERIFICATION:- FAILED	vector-io--proofs__eq_ovout_spots_.log
+vector-io	proofs::eq_i2vin_len2	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	vector-io--proofs__eq_i2vin_len2_.log
+vector-io	proofs::eq_i2vin_len1	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	vector-io--proofs__eq_i2vin_len1_.log
+vector-io	proofs::eq_i2vin_len3	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	vector-io--proofs__eq_i2vin_len3_.log
+vector-io	proofs::eq_i2vin_len4	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	vector-io--proofs__eq_i2vin_len4_.log
+vector-io	proofs::eq_i2vin_len5	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	vector-io--proofs__eq_i2vin_len5_.log
+vector-io	proofs::eq_i2vin_spots	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	vector-io--proofs__eq_i2vin_spots_.log
+vector-io	proofs::eq_ovin_len3	unmeasured	unmeasured	unmeasured-failed	411	600	VERIFICATION:- FAILED	vector-io--proofs__eq_ovin_len3_.log
+xid8snap	proofs::spot_parse_dedup	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	xid8snap--proofs__spot_parse_dedup_.log
+xid8snap	proofs::spot_parse_bad_tail	unmeasured	unmeasured	unmeasured-rss-kill	402	600	NO-VERDICT	xid8snap--proofs__spot_parse_bad_tail_.log
+xid8snap	proofs::spot_parse_garbage	unmeasured	unmeasured	unmeasured-rss-kill	392	600	NO-VERDICT	xid8snap--proofs__spot_parse_garbage_.log
+vector-io	proofs::eq_ovin_len4	unmeasured	unmeasured	unmeasured-failed	562	600	VERIFICATION:- FAILED	vector-io--proofs__eq_ovin_len4_.log
+xid8snap	proofs::spot_parse_inner_space	unmeasured	unmeasured	unmeasured-rss-kill	401	600	NO-VERDICT	xid8snap--proofs__spot_parse_inner_space_.log
+xid8snap	proofs::spot_parse_missing_colon	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	xid8snap--proofs__spot_parse_missing_colon_.log
+jsonb-probe	proofs::eq_jsonb_int8_special	unmeasured	unmeasured	unmeasured-failed	10	600	NO-VERDICT	jsonb-probe--proofs__eq_jsonb_int8_special_.log
+xid8snap	proofs::spot_parse_one_xip	unmeasured	unmeasured	unmeasured-rss-kill	381	600	NO-VERDICT	xid8snap--proofs__spot_parse_one_xip_.log
+xid8snap	proofs::spot_parse_neg_sign	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	xid8snap--proofs__spot_parse_neg_sign_.log
+jsonb-probe	proofs::eq_jsonb_int4_special	unmeasured	unmeasured	unmeasured-failed	10	600	NO-VERDICT	jsonb-probe--proofs__eq_jsonb_int4_special_.log
+jsonb-probe	proofs::eq_jsonb_int2_special	unmeasured	unmeasured	unmeasured-failed	10	600	NO-VERDICT	jsonb-probe--proofs__eq_jsonb_int2_special_.log
+jsonb-probe	proofs::eq_jsonb_float8_special	unmeasured	unmeasured	unmeasured-failed	10	600	NO-VERDICT	jsonb-probe--proofs__eq_jsonb_float8_special_.log
+vector-io	proofs::eq_ovin_spots	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	vector-io--proofs__eq_ovin_spots_.log
+jsonb-probe	proofs::eq_jsonb_float4_special	unmeasured	unmeasured	unmeasured-failed	10	600	NO-VERDICT	jsonb-probe--proofs__eq_jsonb_float4_special_.log
+jsonb-probe	proofs::eq_build_array_noargs	unmeasured	unmeasured	unmeasured-rss-kill	40	600	NO-VERDICT	jsonb-probe--proofs__eq_build_array_noargs_.log
+jsonb-probe	proofs::eq_build_object_noargs	unmeasured	unmeasured	unmeasured-rss-kill	40	600	NO-VERDICT	jsonb-probe--proofs__eq_build_object_noargs_.log
+xid8snap	proofs::spot_parse_trailing_comma	unmeasured	unmeasured	unmeasured-rss-kill	381	600	NO-VERDICT	xid8snap--proofs__spot_parse_trailing_comma_.log
+xid8snap	proofs::spot_parse_two_xips	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	xid8snap--proofs__spot_parse_two_xips_.log
+xid8snap	proofs::spot_parse_unordered	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	xid8snap--proofs__spot_parse_unordered_.log
+xid8snap	proofs::spot_parse_xip_at_xmax	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	xid8snap--proofs__spot_parse_xip_at_xmax_.log
+xid8snap	proofs::spot_parse_xip_below_xmin	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	xid8snap--proofs__spot_parse_xip_below_xmin_.log
+xid8snap	proofs::spot_parse_xmax_lt_xmin	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	xid8snap--proofs__spot_parse_xmax_lt_xmin_.log
+jsonb-probe	proofs::eq_path_arr_bigsub	unmeasured	unmeasured	unmeasured-rss-kill	260	600	NO-VERDICT	jsonb-probe--proofs__eq_path_arr_bigsub_.log
+jsonb-probe	proofs::eq_path_nested_len2	unmeasured	unmeasured	unmeasured-rss-kill	280	600	NO-VERDICT	jsonb-probe--proofs__eq_path_nested_len2_.log
+xid8snap	proofs::spot_parse_zero_xmin	unmeasured	unmeasured	unmeasured-rss-kill	380	600	NO-VERDICT	xid8snap--proofs__spot_parse_zero_xmin_.log
+xid8snap	proofs::spot_parse_zero_xmax	unmeasured	unmeasured	unmeasured-rss-kill	391	600	NO-VERDICT	xid8snap--proofs__spot_parse_zero_xmax_.log
+xid8snap	proofs::spot_parse_overflow_sat	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	xid8snap--proofs__spot_parse_overflow_sat_.log
+xid8snap	proofs::spot_parse_u64_max	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	xid8snap--proofs__spot_parse_u64_max_.log
+jsonb-probe	proofs::eq_jsonb_int8_w4n5	unmeasured	unmeasured	unmeasured-green	361	600	VERIFICATION:- SUCCESSFUL	jsonb-probe--proofs__eq_jsonb_int8_w4n5_.log

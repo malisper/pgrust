@@ -1,0 +1,28 @@
+# proofs/coverage/p1-waveb/summary.tsv — final-sha per-crate coverage
+# equations for lane p1-waveb (BRIN pair: backend/access/brin/brin_bloom +
+# backend/access/brin/brin_minmax_multi), targets brin_bloom_diff and
+# brin_minmax_multi_diff.
+#
+# CAPTURE PROVENANCE (LOCAL — labeled per coordinator ruling 2026-08-01):
+#   full committed corpus replay under `fuzz/cov-export.sh <target>`
+#   (cargo fuzz coverage + sysroot llvm-cov), macOS/aarch64, lane branch
+#   proofs/p1-waveb @ 0d31e3add90e7e5ec4a30825e1d34eb466b294d4 (contains the
+#   fuzz-workspace GNU-ld link fix, main 2b17a6760a). Banked here as
+#   brin_bloom_diff.lcov.gz / brin_minmax_multi_diff.lcov.gz (253,148 DA
+#   lines tree-wide each, before crate filtering; DA aggregated max-hit).
+#   Fleet 10M functional floors (separate from this capture):
+#     brin_bloom_diff       job pgrust-fuzz-campaign-1785629003-1ed5-87867 @ 54eb5ca3ed (bloom files identical to 0d31e3add9)
+#     brin_minmax_multi_diff job pgrust-fuzz-campaign-1785629196-1df8-94598 @ 0d31e3add9
+#   Verdicts recorded in the claims-row done note from S3 artifacts.
+#
+# Per-unit derivations + exception row details: proofs/coverage/p1-waveb-bloom/
+# and proofs/coverage/p1-waveb-mm/ (unit banks); exception rows in
+# proofs/coverage/exceptions.tsv (author p1-waveb, 11 bloom + 33 mm rows;
+# measurement-note lines documented in the exceptions.tsv comment blocks).
+#
+# columns: crate	file	da_total	measured	exception_lines	measurement_note_lines	unaccounted
+backend/access/brin/brin_bloom	src/lib.rs	217	214	3	0	0
+backend/access/brin/brin_bloom	src/builtins.rs	37	13	21	3	0
+backend/access/brin/brin_minmax_multi	src/lib.rs	263	253	10	0	0
+backend/access/brin/brin_minmax_multi	src/builtins.rs	258	244	11	3	0
+backend/access/brin/brin_minmax_multi	src/ranges.rs	697	667	30	0	0

@@ -1,0 +1,15 @@
+[package]
+name = "adt_quote"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+varlena = { path = "../varlena" }
+keywords = { path = "../../../../common/keywords" }
+guc_tables = { path = "../../misc/guc_tables" }

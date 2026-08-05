@@ -1,0 +1,13 @@
+===== FLEET JOB MANIFEST =====
+
+description:
+  [LONG-JOB: 7200s fork=15 fuzz leg (30 CPU-h floor) + compile-bomb slow-unit serial triage tail] p1-regexcore-2: regex/regex_core campaign-of-record resubmit r2. r1 -1785599452 FAILED fast (12min, lld duplicate pg_reg_getcolor at the two-engine-copy co-residence; NOT a deadline problem) — rename set completed + nm-verified at 2aa2a97665. Predecessor -1785565238 FAILED DeadlineExceeded pre-covcap-fix.
+
+job_name: pgrust-fuzz-campaign-1785600521-3cb1-56522
+job_type: fuzz-campaign
+git_ref: 2aa2a97665eb279e5f97dd07d9f850b4dfad3124
+repo_url: https://github.com/Pager-Free/pgrust-fast.git
+build_kind: fast
+sha: 2aa2a97665eb
+started_utc: 2026-08-01T16:10:23Z
+hostname: pgrust-fuzz-campaign-1785600521-3cb1-56522-cghb7

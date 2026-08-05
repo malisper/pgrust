@@ -1,0 +1,4 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+brin-opcinfo	proofs::eq_bloom_opcinfo	proofs::eq_bloom_opcinfo	0	40	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-opcinfo	proofs::eq_inclusion_opcinfo	proofs::eq_inclusion_opcinfo	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+brin-opcinfo	proofs::eq_minmax_multi_opcinfo	proofs::eq_minmax_multi_opcinfo	0	2	VERIFICATION:- SUCCESSFUL	RAN	1

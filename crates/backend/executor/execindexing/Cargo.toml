@@ -1,0 +1,81 @@
+[package]
+name = "execindexing"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+types_brin = { path = "../../../_support/types/types_brin" }
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_nbtree = { path = "../../../_support/types/types_nbtree" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+indexam = { path = "../../access/index/indexam" }
+types_relscan = { path = "../../access/index/relscan" }
+genam_seams = { path = "../../access/index/genam_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+relcache_build_seams = { path = "../../utils/cache/relcache_build_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_scan = { path = "../../../_support/types/types_scan" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+heapam = { path = "../../access/heap/heapam" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+heapam_visibility = { path = "../../access/heap/heapam_visibility" }
+pruneheap = { path = "../../access/heap/pruneheap" }
+procarray = { path = "../../storage/ipc/procarray" }
+catalog = { path = "../../catalog/catalog" }
+xact = { path = "../../access/transam/xact" }
+types_nodes = { path = "../../../_support/types/nodes" }
+readfuncs = { path = "../../nodes/readfuncs" }
+nodes_core = { path = "../../nodes/nodes_core" }
+clauses = { path = "../../optimizer/util/clauses" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
+inval = { path = "../../utils/cache/inval" }
+execexpr = { path = "../execexpr" }
+tuplesort = { path = "../../utils/sort/tuplesort" }
+init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+
+adt_rangetypes = { path = "../../utils/adt/rangetypes" }
+adt_multirangetypes = { path = "../../utils/adt/multirangetypes" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+
+[dev-dependencies]
+test_boot = { path = "../../../_support/test_boot" }
+nbtree = { path = "../../access/nbtree/nbtree" }
+nodeindexscan = { path = "../nodeindexscan" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_relscan = { path = "../../access/index/relscan" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+xloginsert_seams = { path = "../../access/transam/xloginsert_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+relation_seams = { path = "../../access/common/relation_seams" }
+freespace_seams = { path = "../../storage/freespace/freespace_seams" }
+seam_core = { path = "../../../_support/seam_core" }
+types_nodes = { path = "../../../_support/types/nodes" }
+heaptuple = { path = "../../access/common/heaptuple" }
+tableam = { path = "../../access/table/tableam" }
+rmgr = { path = "../../access/transam/rmgr" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+catalog_seams = { path = "../../catalog/catalog_seams" }
+pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
+heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
+smgr_seams = { path = "../../storage/smgr/smgr_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+genam_seams = { path = "../../access/index/genam_seams" }

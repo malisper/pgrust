@@ -1,0 +1,683 @@
+11:31  up 1 day, 18:54, 4 users, load averages: 17.39 19.10 18.58
+=== eq_consistent_overlaps 11:31:21 ===
+=== eq_consistent_eq 11:31:21 ===
+=== eq_consistent_ne 11:31:21 ===
+=== eq_consistent_lt 11:31:21 ===
+=== eq_consistent_le 11:31:21 ===
+=== eq_consistent_eq 11:31:57 load=15.70
+VERIFICATION:- SUCCESSFUL
+Verification Time: 29.005823s
+=== eq_consistent_ne 11:32:28 load=20.55
+VERIFICATION:- SUCCESSFUL
+Verification Time: 19.791111s
+=== eq_consistent_lt 11:32:49 load=17.76
+VERIFICATION:- SUCCESSFUL
+Verification Time: 32.570137s
+=== eq_consistent_le 11:33:23 load=17.21
+VERIFICATION:- SUCCESSFUL
+Verification Time: 34.408985s
+=== eq_consistent_gt 11:33:59 load=16.86
+VERIFICATION:- SUCCESSFUL
+Verification Time: 38.5837s
+=== eq_consistent_ge 11:34:44 load=22.30
+VERIFICATION:- SUCCESSFUL
+Verification Time: 41.97456s
+=== eq_consistent_sub 11:35:28 load=22.23
+VERIFICATION:- SUCCESSFUL
+Verification Time: 12.629288s
+=== eq_consistent_subeq 11:35:42 load=19.96
+VERIFICATION:- SUCCESSFUL
+Verification Time: 16.812454s
+=== eq_consistent_sup 11:36:00 load=18.26
+VERIFICATION:- SUCCESSFUL
+Verification Time: 29.277481s
+=== eq_consistent_supeq 11:36:32 load=27.72
+VERIFICATION:- SUCCESSFUL
+Verification Time: 18.478563s
+=== eq_penalty 11:36:51 load=24.14
+=== eq_penalty 11:37:21 load=37.75
+	 - Description: "internal error: entered unreachable code"
+VERIFICATION:- SUCCESSFUL
+Verification Time: 7.1593757s
+=== eq_same 11:37:31 load=36.09
+Check 75: kani::rustc_intrinsics::size_of_val_raw::<std::io::error::Custom>.unreachable.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani_core/src/models.rs:23:13 in function kani::rustc_intrinsics::size_of_val_raw::<std::io::error::Custom>
+Check 76: kani::rustc_intrinsics::size_of_val_raw::<std::io::error::Custom>.safety_check.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::size_of_val_raw::<std::io::error::Custom>
+Check 77: kani::rustc_intrinsics::size_of_val_raw::<std::io::error::Custom>.assertion.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::size_of_val_raw::<std::io::error::Custom>
+Check 109: kani::rustc_intrinsics::align_of_val_raw::<std::io::error::Custom>.unreachable.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani_core/src/models.rs:43:13 in function kani::rustc_intrinsics::align_of_val_raw::<std::io::error::Custom>
+Check 110: kani::rustc_intrinsics::align_of_val_raw::<std::io::error::Custom>.safety_check.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::align_of_val_raw::<std::io::error::Custom>
+Check 111: kani::rustc_intrinsics::align_of_val_raw::<std::io::error::Custom>.assertion.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::align_of_val_raw::<std::io::error::Custom>
+Check 117: kani::rustc_intrinsics::align_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>.unreachable.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani_core/src/models.rs:43:13 in function kani::rustc_intrinsics::align_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>
+Check 118: kani::rustc_intrinsics::align_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>.safety_check.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::align_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>
+Check 119: kani::rustc_intrinsics::align_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>.assertion.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::align_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>
+Check 195: kani::rustc_intrinsics::size_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>.unreachable.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani_core/src/models.rs:23:13 in function kani::rustc_intrinsics::size_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>
+Check 196: kani::rustc_intrinsics::size_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>.safety_check.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::size_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>
+Check 197: kani::rustc_intrinsics::size_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>.assertion.1
+	 - Location: ../../../../../../runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::size_of_val_raw::<dyn std::error::Error + std::marker::Send + std::marker::Sync>
+Check 207: std::io::error::repr_bitpacked::decode_repr::<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>.assertion.1
+	 - Description: "internal error: entered unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:290:13 in function std::io::error::repr_bitpacked::decode_repr::<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>
+Check 208: std::io::error::repr_bitpacked::decode_repr::<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>.safety_check.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:279:47 in function std::io::error::repr_bitpacked::decode_repr::<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>
+Check 209: std::io::error::repr_bitpacked::decode_repr::<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>.safety_check.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:279:47 in function std::io::error::repr_bitpacked::decode_repr::<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>
+Check 210: std::io::error::repr_bitpacked::decode_repr::<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>.assertion.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:264:29 in function std::io::error::repr_bitpacked::decode_repr::<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>
+Check 211: std::io::error::repr_bitpacked::decode_repr::<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>.assertion.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:260:24 in function std::io::error::repr_bitpacked::decode_repr::<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>
+Check 227: std::alloc::handle_alloc_error::rt_error.unsupported_construct.1
+	 - Description: "call to foreign "Rust" function `_RNvCs1hStedNDpZ2_7___rustc26___rust_alloc_error_handler` is not currently supported by Kani. Please post your example at https://github.com/model-checking/kani/issues/new/choose"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/alloc.rs:366:5 in function std::alloc::handle_alloc_error::rt_error
+Check 244: core::str::slice_error_fail_rt.assertion.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/str/mod.rs:92:9 in function core::str::slice_error_fail_rt
+Check 245: core::str::slice_error_fail_rt.assertion.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/str/mod.rs:111:34 in function core::str::slice_error_fail_rt
+Check 246: core::str::slice_error_fail_rt.assertion.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/str/mod.rs:112:5 in function core::str::slice_error_fail_rt
+Check 247: core::str::slice_error_fail_rt.assertion.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/str/mod.rs:96:5 in function core::str::slice_error_fail_rt
+	 - Description: "inet_gist_same errored"
+Check 265: std::result::Result::<std::ptr::NonNull<[u8]>, allocator_api2::stable::alloc::AllocError>::map_err::<types_error::pg_error::PgError, {closure@types_fmgr::byref_result::{closure#0}}>.unreachable.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:966:15 in function std::result::Result::<std::ptr::NonNull<[u8]>, allocator_api2::stable::alloc::AllocError>::map_err::<types_error::pg_error::PgError, {closure@types_fmgr::byref_result::{closure#0}}>
+Check 276: std::io::error::repr_bitpacked::decode_repr::<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>.assertion.1
+	 - Description: "internal error: entered unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:290:13 in function std::io::error::repr_bitpacked::decode_repr::<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>
+Check 277: std::io::error::repr_bitpacked::decode_repr::<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>.safety_check.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:279:47 in function std::io::error::repr_bitpacked::decode_repr::<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>
+Check 278: std::io::error::repr_bitpacked::decode_repr::<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>.safety_check.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:279:47 in function std::io::error::repr_bitpacked::decode_repr::<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>
+Check 279: std::io::error::repr_bitpacked::decode_repr::<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>.assertion.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:264:29 in function std::io::error::repr_bitpacked::decode_repr::<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>
+Check 280: std::io::error::repr_bitpacked::decode_repr::<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>.assertion.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:260:24 in function std::io::error::repr_bitpacked::decode_repr::<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>
+Check 312: std::option::Option::<std::io::ErrorKind>::unwrap_or_else::<{closure@std::io::error::repr_bitpacked::decode_repr<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>::{closure#0}}>.unreachable.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1065:15 in function std::option::Option::<std::io::ErrorKind>::unwrap_or_else::<{closure@std::io::error::repr_bitpacked::decode_repr<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>::{closure#0}}>
+Check 443: <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch.unreachable.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch
+Check 841: std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>.safety_check.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>
+Check 842: std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>.safety_check.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:1009:15 in function std::io::Error::is_interrupted
+Check 901: alloc::raw_vec::handle_error.unreachable.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:845:11 in function alloc::raw_vec::handle_error
+Check 967: <std::result::Result<std::ptr::NonNull<[u8]>, types_error::pg_error::PgError> as std::ops::Try>::branch.unreachable.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<std::ptr::NonNull<[u8]>, types_error::pg_error::PgError> as std::ops::Try>::branch
+Check 1075: std::option::Option::<std::io::ErrorKind>::unwrap_or_else::<{closure@std::io::error::repr_bitpacked::decode_repr<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>::{closure#0}}>.unreachable.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1065:15 in function std::option::Option::<std::io::ErrorKind>::unwrap_or_else::<{closure@std::io::error::repr_bitpacked::decode_repr<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>::{closure#0}}>
+Check 1085: std::io::error::repr_bitpacked::Repr::new_os.assertion.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:177:23 in function std::io::error::repr_bitpacked::Repr::new_os
+Check 1103: core::ptr::drop_in_place::<alloc::boxed::Box<dyn core::error::Error + core::marker::Send + core::marker::Sync>>.missing_definition.1
+	 - Location: Unknown file in function core::ptr::drop_in_place::<alloc::boxed::Box<dyn core::error::Error + core::marker::Send + core::marker::Sync>>
+Check 1104: std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>.safety_check.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>
+Check 1105: std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>.safety_check.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>
+Check 1106: <std::result::Result<(), std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch.unreachable.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<(), std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch
+Check 1141: <std::result::Result<datum::Datum, std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch.unreachable.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<datum::Datum, std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch
+Check 1149: std::io::error::repr_bitpacked::Repr::data::{closure#0}.safety_check.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:219:42 in function std::io::error::repr_bitpacked::Repr::data::{closure#0}
+Check 1150: std::io::error::repr_bitpacked::Repr::data::{closure#0}.safety_check.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:219:42 in function std::io::error::repr_bitpacked::Repr::data::{closure#0}
+	 - Description: "internal error: entered unreachable code"
+	 - Description: "internal error: entered unreachable code"
+Check 1332: <std::result::Result<types_fmgr::PackedVarlena<'_>, std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch.unreachable.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<types_fmgr::PackedVarlena<'_>, std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch
+Check 1405: std::ptr::drop_in_place::<std::io::error::repr_bitpacked::Repr>.safety_check.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::io::error::repr_bitpacked::Repr>
+Check 1406: std::ptr::drop_in_place::<std::io::error::repr_bitpacked::Repr>.safety_check.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::io::error::repr_bitpacked::Repr>
+Check 1425: std::thread::local::panic_access_error.assertion.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/thread/local.rs:430:5 in function std::thread::local::panic_access_error
+Check 1862: <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop
+Check 1863: <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop
+Check 1864: <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop
+Check 1865: <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop
+Check 1866: <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop
+Check 1867: <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<std::io::error::Custom> as std::ops::Drop>::drop
+Check 1900: <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:243:33 in function <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop
+Check 1901: <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:243:33 in function <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop
+Check 1902: <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:243:33 in function <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop
+Check 1903: <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:243:33 in function <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop
+Check 1904: <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:243:33 in function <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop
+Check 1905: <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:243:33 in function <std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop
+Check 1968: std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>
+Check 1969: std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>
+Check 1970: std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>
+Check 1971: std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>
+Check 1972: std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>
+Check 1973: std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::io::error::ErrorData<std::boxed::Box<std::io::error::Custom>>>
+Check 2739: <std::result::Result<(), std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<(), std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch
+Check 2740: <std::result::Result<(), std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2174:22 in function <std::result::Result<(), std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch
+Check 3414: <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop
+Check 3415: <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop
+Check 3416: <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop
+Check 3417: <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop
+Check 3418: <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop
+Check 3419: <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1761:19 in function <std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> as std::ops::Drop>::drop
+Check 3441: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:201:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of
+Check 3442: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:201:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of
+Check 3443: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:201:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of
+Check 3444: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:201:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of
+Check 3445: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:201:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of
+Check 3446: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:201:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::align_of
+Check 3474: <std::result::Result<std::ptr::NonNull<[u8]>, types_error::pg_error::PgError> as std::ops::Try>::branch.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<std::ptr::NonNull<[u8]>, types_error::pg_error::PgError> as std::ops::Try>::branch
+Check 3475: <std::result::Result<std::ptr::NonNull<[u8]>, types_error::pg_error::PgError> as std::ops::Try>::branch.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2174:22 in function <std::result::Result<std::ptr::NonNull<[u8]>, types_error::pg_error::PgError> as std::ops::Try>::branch
+Check 3838: std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>
+Check 3839: std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>
+Check 3840: std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>
+Check 3841: std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>
+Check 3842: std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>
+Check 3843: std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<std::io::error::Custom>>
+Check 4077: std::io::error::repr_bitpacked::Repr::data.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:219:30 in function std::io::error::repr_bitpacked::Repr::data
+Check 4078: std::io::error::repr_bitpacked::Repr::data.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:219:30 in function std::io::error::repr_bitpacked::Repr::data
+Check 4079: std::io::error::repr_bitpacked::Repr::data.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:219:30 in function std::io::error::repr_bitpacked::Repr::data
+Check 4080: std::io::error::repr_bitpacked::Repr::data.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:219:30 in function std::io::error::repr_bitpacked::Repr::data
+Check 4081: std::io::error::repr_bitpacked::Repr::data.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:219:30 in function std::io::error::repr_bitpacked::Repr::data
+Check 4082: std::io::error::repr_bitpacked::Repr::data.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:219:30 in function std::io::error::repr_bitpacked::Repr::data
+Check 4810: <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch
+Check 4811: <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2175:23 in function <std::result::Result<allocator_api2::stable::vec::Vec<u8, mcx::Mcx<'_>>, std::boxed::Box<types_error::pg_error::PgError>> as std::ops::Try>::branch
+Check 5308: std::option::Option::<std::io::ErrorKind>::unwrap_or_else::<{closure@std::io::error::repr_bitpacked::decode_repr<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>::{closure#0}}>.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1065:15 in function std::option::Option::<std::io::ErrorKind>::unwrap_or_else::<{closure@std::io::error::repr_bitpacked::decode_repr<std::boxed::Box<std::io::error::Custom>, {closure@<std::io::error::repr_bitpacked::Repr as std::ops::Drop>::drop::{closure#0}}>::{closure#0}}>
+Check 5601: std::option::Option::<std::io::ErrorKind>::unwrap_or_else::<{closure@std::io::error::repr_bitpacked::decode_repr<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>::{closure#0}}>.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1065:15 in function std::option::Option::<std::io::ErrorKind>::unwrap_or_else::<{closure@std::io::error::repr_bitpacked::decode_repr<&std::io::error::Custom, {closure@std::io::error::repr_bitpacked::Repr::data::{closure#0}}>::{closure#0}}>
+Check 5614: std::boxed::Box::<types_error::pg_error::PgError>::new.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::pg_error::PgError>::new
+Check 5615: std::boxed::Box::<types_error::pg_error::PgError>::new.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::pg_error::PgError>::new
+Check 5616: std::boxed::Box::<types_error::pg_error::PgError>::new.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::pg_error::PgError>::new
+Check 5617: std::boxed::Box::<types_error::pg_error::PgError>::new.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::pg_error::PgError>::new
+Check 5618: std::boxed::Box::<types_error::pg_error::PgError>::new.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::pg_error::PgError>::new
+Check 5619: std::boxed::Box::<types_error::pg_error::PgError>::new.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::pg_error::PgError>::new
+Check 5851: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:194:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of
+Check 5852: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:194:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of
+Check 5853: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:194:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of
+Check 5854: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:194:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of
+Check 5855: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:194:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of
+Check 5856: std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/metadata.rs:194:18 in function std::ptr::DynMetadata::<dyn std::error::Error + std::marker::Send + std::marker::Sync>::size_of
+Check 5875: std::result::Result::<std::ptr::NonNull<[u8]>, allocator_api2::stable::alloc::AllocError>::map_err::<types_error::pg_error::PgError, {closure@types_fmgr::byref_result::{closure#0}}>.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:966:15 in function std::result::Result::<std::ptr::NonNull<[u8]>, allocator_api2::stable::alloc::AllocError>::map_err::<types_error::pg_error::PgError, {closure@types_fmgr::byref_result::{closure#0}}>
+Check 5876: std::result::Result::<std::ptr::NonNull<[u8]>, allocator_api2::stable::alloc::AllocError>::map_err::<types_error::pg_error::PgError, {closure@types_fmgr::byref_result::{closure#0}}>.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:967:22 in function std::result::Result::<std::ptr::NonNull<[u8]>, allocator_api2::stable::alloc::AllocError>::map_err::<types_error::pg_error::PgError, {closure@types_fmgr::byref_result::{closure#0}}>
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error.rs:223:45 in function <std::io::ErrorKind as std::cmp::PartialEq>::eq
+Check 6549: std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>
+Check 6550: std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>
+Check 6551: std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>
+Check 6552: std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>
+Check 6553: std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>
+Check 6554: std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:805:1 in function std::ptr::drop_in_place::<std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>
+Check 8338: alloc::raw_vec::handle_error.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:845:11 in function alloc::raw_vec::handle_error
+Check 8572: types_error::pg_error::PgError::new_impl.pointer_dereference.1
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:119:26 in function types_error::pg_error::PgError::new_impl
+Check 8573: types_error::pg_error::PgError::new_impl.pointer_dereference.2
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:120:21 in function types_error::pg_error::PgError::new_impl
+Check 8574: types_error::pg_error::PgError::new_impl.pointer_dereference.3
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:121:25 in function types_error::pg_error::PgError::new_impl
+Check 8575: types_error::pg_error::PgError::new_impl.pointer_dereference.4
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:122:19 in function types_error::pg_error::PgError::new_impl
+Check 8576: types_error::pg_error::PgError::new_impl.pointer_dereference.5
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:123:22 in function types_error::pg_error::PgError::new_impl
+Check 8577: types_error::pg_error::PgError::new_impl.pointer_dereference.6
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:124:24 in function types_error::pg_error::PgError::new_impl
+Check 8578: types_error::pg_error::PgError::new_impl.pointer_dereference.7
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:125:25 in function types_error::pg_error::PgError::new_impl
+Check 8579: types_error::pg_error::PgError::new_impl.pointer_dereference.8
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:126:21 in function types_error::pg_error::PgError::new_impl
+Check 8580: types_error::pg_error::PgError::new_impl.pointer_dereference.9
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:127:29 in function types_error::pg_error::PgError::new_impl
+Check 8581: types_error::pg_error::PgError::new_impl.pointer_dereference.10
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:133:27 in function types_error::pg_error::PgError::new_impl
+Check 8582: types_error::pg_error::PgError::new_impl.pointer_dereference.11
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:138:29 in function types_error::pg_error::PgError::new_impl
+Check 8583: types_error::pg_error::PgError::new_impl.pointer_dereference.12
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:139:26 in function types_error::pg_error::PgError::new_impl
+Check 8584: types_error::pg_error::PgError::new_impl.pointer_dereference.13
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:140:25 in function types_error::pg_error::PgError::new_impl
+Check 8585: types_error::pg_error::PgError::new_impl.pointer_dereference.14
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:141:26 in function types_error::pg_error::PgError::new_impl
+Check 8586: types_error::pg_error::PgError::new_impl.pointer_dereference.15
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:142:28 in function types_error::pg_error::PgError::new_impl
+Check 8587: types_error::pg_error::PgError::new_impl.pointer_dereference.16
+	 - Location: ../../crates/_support/types/types_error/src/pg_error.rs:143:30 in function types_error::pg_error::PgError::new_impl
+Check 8632: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.1
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8633: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.2
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8634: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.3
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8635: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.4
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8636: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.5
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8637: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.6
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8638: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.7
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8639: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.8
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8640: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.9
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8641: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.10
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8642: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.11
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8643: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.12
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8644: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.13
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8645: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.14
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8646: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.15
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8647: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.16
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8648: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.17
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8649: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.18
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8650: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.19
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8651: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.20
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8652: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.21
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8653: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.22
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8654: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.23
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8655: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.24
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8656: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.25
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8657: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.26
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8658: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.27
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8659: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.28
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8660: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.29
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8661: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.30
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8662: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.31
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8663: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.32
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8664: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.33
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8665: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.34
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8666: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.35
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8667: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.36
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8668: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.37
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8669: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.38
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8670: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.39
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8671: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.40
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8672: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.41
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8673: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.42
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8674: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.43
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8675: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.44
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8676: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.45
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8677: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.46
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8678: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.47
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8679: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.48
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8680: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.49
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8681: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.50
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8682: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.51
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8683: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.52
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8684: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.53
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8685: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.54
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8686: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.55
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8687: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.56
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8688: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.57
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8689: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.58
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8690: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.59
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8691: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.60
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8692: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.61
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8693: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.62
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8694: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.63
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8695: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.64
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8696: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.65
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8697: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.66
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8698: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.67
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8699: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.68
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8700: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.69
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8701: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.70
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8702: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.71
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8703: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.72
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8704: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.73
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8705: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.74
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8706: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.75
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8707: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.76
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8708: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.77
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8709: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.78
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8710: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.79
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8711: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.80
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8712: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.81
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8713: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.82
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8714: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.83
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8715: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.84
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:307:24 in function std::io::error::repr_bitpacked::kind_from_prim
+Check 8716: std::io::error::repr_bitpacked::kind_from_prim.pointer_dereference.85
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/io/error/repr_bitpacked.rs:308:22 in function std::io::error::repr_bitpacked::kind_from_prim
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.1890252s
+=== eq_union_n2 11:37:42 load=31.70
+	 - Description: "internal error: entered unreachable code"
+Failed Checks: assertion failed: p.commonbits == cb
+Failed Checks: unwinding assertion loop 0
+VERIFICATION:- FAILED
+Verification Time: 24.111277s
+=== eq_union_n3 11:38:08 load=29.77
+	 - Description: "internal error: entered unreachable code"
+Failed Checks: assertion failed: p.commonbits == cb
+Failed Checks: unwinding assertion loop 0
+VERIFICATION:- FAILED
+Verification Time: 45.479984s
+=== eq_union_n2 11:42:10 load=19.67
+VERIFICATION:- FAILED
+Verification Time: 28.974806s
+=== eq_union_n3 11:42:41 load=21.79
+VERIFICATION:- FAILED
+Verification Time: 103.62444s
+=== eq_union_n2 retry-ptr 11:48:19 load=17.27
+	 - Description: "internal error: entered unreachable code"
+VERIFICATION:- FAILED
+Verification Time: 23.023455s
+=== eq_union_n3 retry-ptr 11:48:44 load=15.32
+	 - Description: "internal error: entered unreachable code"
+VERIFICATION:- FAILED
+Verification Time: 47.801983s
+=== eq_union_n2 retry-carray 11:51:33 load=38.04
+	 - Description: "internal error: entered unreachable code"
+VERIFICATION:- FAILED
+Verification Time: 60.76144s
+=== eq_union_n3 retry-carray 11:52:36 load=42.20
+	 - Description: "internal error: entered unreachable code"
+VERIFICATION:- FAILED
+Verification Time: 69.973335s
+=== probe_bitncommon16 11:56:19 load=48.11
+	 - Description: "internal error: entered unreachable code"
+VERIFICATION:- SUCCESSFUL
+Verification Time: 8.787591s
+=== eq_union_n2 retry-locals 11:56:58 load=55.70
+VERIFICATION:- FAILED
+Verification Time: 19.185291s
+=== probe_union_c_vs_c 11:57:49 load=33.38
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.85355693s
+=== probe_union_rust_vs_c 11:58:05 load=28.86
+VERIFICATION:- FAILED
+Verification Time: 9.844795s
+=== probe_union_rust_vs_rust 11:58:17 load=25.46
+VERIFICATION:- FAILED
+Verification Time: 13.569737s
+=== probe_slice_across_iter_loop 12:00:05 load=14.52
+=== probe_slice_no_iter 12:00:06 load=14.52
+=== probe_slice_across_iter_loop 12:00:46 load=13.14
+VERIFICATION:- FAILED
+Verification Time: 3.590828s
+=== probe_slice_no_iter 12:00:51 load=12.97
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.1032937s
+=== probe_slice_prebuilt_refs 12:01:17 load=12.99
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.4215696s
+=== eq_union_n2 retry-prebuilt 12:01:46 load=13.34
+VERIFICATION:- SUCCESSFUL
+Verification Time: 16.525305s
+=== eq_union_n3 retry-prebuilt 12:02:04 load=14.69
+VERIFICATION:- SUCCESSFUL
+Verification Time: 34.254883s
+=== cover_strategy_partition 12:02:53 load=15.58
+Checking harness proofs::cover_strategy_partition...
+Reading GOTO program from file /Users/malisper/dev/pgrust-fast/.wt-w2-netseq/proofs/network-gist/target/kani/aarch64-apple-darwin/debug/deps/proof_network_gist-bffb3ddc77cd6ed9__RNvNtCsdbpcT6rVrfn_18proof_network_gist6proofs24cover_strategy_partition.out
+Check 2: proofs::cover_strategy_partition.assertion.1
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.01733975s
+=== cover_consistent_regimes 12:02:53 load=15.58
+Checking harness proofs::cover_consistent_regimes...
+Reading GOTO program from file /Users/malisper/dev/pgrust-fast/.wt-w2-netseq/proofs/network-gist/target/kani/aarch64-apple-darwin/debug/deps/proof_network_gist-65ebd424ab861515__RNvNtCsdbpcT6rVrfn_18proof_network_gist6proofs24cover_consistent_regimes.out
+Check 22: proofs::cover_consistent_regimes.assertion.1
+Check 23: proofs::cover_consistent_regimes.assertion.2
+Check 24: proofs::cover_consistent_regimes.cover.1
+Check 25: proofs::cover_consistent_regimes.assertion.3
+Check 26: proofs::cover_consistent_regimes.assertion.4
+Check 27: proofs::cover_consistent_regimes.cover.2
+Check 28: proofs::cover_consistent_regimes.cover.3
+Check 29: proofs::cover_consistent_regimes.cover.4
+Check 30: proofs::cover_consistent_regimes.cover.5
+Check 31: proofs::cover_consistent_regimes.cover.6
+Check 199: proofs::cover_consistent_regimes.array_bounds.1
+Check 200: proofs::cover_consistent_regimes.array_bounds.2
+Check 201: proofs::cover_consistent_regimes.array_bounds.3
+Check 202: proofs::cover_consistent_regimes.array_bounds.4
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.952425s
+=== cover_union_regimes 12:02:58 load=15.62
+Checking harness proofs::cover_union_regimes...
+Reading GOTO program from file /Users/malisper/dev/pgrust-fast/.wt-w2-netseq/proofs/network-gist/target/kani/aarch64-apple-darwin/debug/deps/proof_network_gist-eb0d3c37bcd77921__RNvNtCsdbpcT6rVrfn_18proof_network_gist6proofs19cover_union_regimes.out
+Check 15: proofs::cover_union_regimes.cover.1
+Check 16: proofs::cover_union_regimes.cover.2
+Check 17: proofs::cover_union_regimes.assertion.1
+Check 18: proofs::cover_union_regimes.assertion.2
+Check 19: proofs::cover_union_regimes.cover.3
+Check 20: proofs::cover_union_regimes.assertion.3
+Check 21: proofs::cover_union_regimes.assertion.4
+Check 22: proofs::cover_union_regimes.arithmetic_overflow.1
+Check 23: proofs::cover_union_regimes.arithmetic_overflow.2
+Check 24: proofs::cover_union_regimes.cover.4
+Check 242: proofs::cover_union_regimes.array_bounds.1
+Check 243: proofs::cover_union_regimes.array_bounds.2
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.0245156s
+=== cover_penalty_regimes 12:03:05 load=15.33
+Checking harness proofs::cover_penalty_regimes...
+Reading GOTO program from file /Users/malisper/dev/pgrust-fast/.wt-w2-netseq/proofs/network-gist/target/kani/aarch64-apple-darwin/debug/deps/proof_network_gist-9fc1e6b35bebc3c1__RNvNtCsdbpcT6rVrfn_18proof_network_gist6proofs21cover_penalty_regimes.out
+Check 10: proofs::cover_penalty_regimes.cover.1
+Check 11: proofs::cover_penalty_regimes.cover.2
+Check 12: proofs::cover_penalty_regimes.cover.3
+Check 13: proofs::cover_penalty_regimes.cover.4
+VERIFICATION:- SUCCESSFUL
+Verification Time: 2.2756739s
+=== spec_compress_nonleaf_identity 12:03:08 load=14.98
+VERIFICATION:- SUCCESSFUL
+Verification Time: 1.1276947s
+=== control_same_minbits_swap (MUST FAIL) 12:03:26
+VERIFICATION:- FAILED
+Verification Time: 2.3541956s
+=== eq_compress_leaf_v4 12:03:50 load=13.77
+warning: Found the following unsupported constructs:
+Check 161: kani::mem::cbmc::same_allocation.unsupported_construct.1
+Check 317: core::panicking::panic_nounwind_fmt::runtime.unsupported_construct.1
+Check 592: std::alloc::handle_alloc_error::rt_error.unsupported_construct.1
+Check 642: std::panic::Location::<'_>::caller.unsupported_construct.1
+Check 965: std::panicking::catch_unwind::<(), {closure@std::rt::thread_cleanup::{closure#0}}>.unsupported_construct.1
+VERIFICATION:- SUCCESSFUL
+Verification Time: 397.10458s
+=== eq_compress_leaf_v6 12:10:33 load=11.82
+warning: Found the following unsupported constructs:
+=== spec_compress_null_leafkey 12:18:05 load=37.77
+warning: Found the following unsupported constructs:
+Check 49: core::panicking::panic_nounwind_fmt::runtime.unsupported_construct.1
+Check 590: std::alloc::handle_alloc_error::rt_error.unsupported_construct.1
+Check 638: kani::mem::cbmc::same_allocation.unsupported_construct.1
+Check 751: std::panic::Location::<'_>::caller.unsupported_construct.1
+Check 901: std::panicking::catch_unwind::<(), {closure@std::rt::thread_cleanup::{closure#0}}>.unsupported_construct.1
+VERIFICATION:- SUCCESSFUL
+Verification Time: 331.20392s
+=== eq_fetch_v4 12:23:51 load=20.24
+warning: Found the following unsupported constructs:
+Check 465: std::panic::Location::<'_>::caller.unsupported_construct.1
+Check 807: std::alloc::handle_alloc_error::rt_error.unsupported_construct.1
+Check 821: std::panicking::catch_unwind::<(), {closure@std::rt::thread_cleanup::{closure#0}}>.unsupported_construct.1
+Check 854: kani::mem::cbmc::same_allocation.unsupported_construct.1
+Check 1067: core::panicking::panic_nounwind_fmt::runtime.unsupported_construct.1
+VERIFICATION:- SUCCESSFUL
+Verification Time: 316.2744s
+=== eq_fetch_v6 12:29:16 load=15.89
+warning: Found the following unsupported constructs:
+Check 257: std::panicking::catch_unwind::<(), {closure@std::rt::thread_cleanup::{closure#0}}>.unsupported_construct.1
+Check 488: std::panic::Location::<'_>::caller.unsupported_construct.1
+Check 576: core::panicking::panic_nounwind_fmt::runtime.unsupported_construct.1
+Check 655: std::alloc::handle_alloc_error::rt_error.unsupported_construct.1
+Check 694: kani::mem::cbmc::same_allocation.unsupported_construct.1
+VERIFICATION:- SUCCESSFUL
+Verification Time: 440.81686s
+=== eq_compress_leaf_v4 12:03:50 load=13.77
+VERIFICATION:- SUCCESSFUL
+Verification Time: 397.10458s
+=== eq_compress_leaf_v6 12:10:33 load=11.82
+=== spec_compress_null_leafkey 12:18:05 load=37.77
+VERIFICATION:- SUCCESSFUL
+Verification Time: 331.20392s
+=== eq_fetch_v4 12:23:51 load=20.24
+VERIFICATION:- SUCCESSFUL
+Verification Time: 316.2744s
+=== eq_fetch_v6 12:29:16 load=15.89
+VERIFICATION:- SUCCESSFUL
+Verification Time: 440.81686s
+=== eq_compress_leaf_v6 retry-default 12:37:20 load=21.55
+VERIFICATION:- FAILED
+Verification Time: 257.99512s
+=== eq_compress_leaf_v6 retry-unwind24 12:47:02 load=15.58
+VERIFICATION:- SUCCESSFUL
+Verification Time: 420.9777s
+=== eq_compress_leaf_v6 retry-unwind24 GREEN 420.98s (from task output)

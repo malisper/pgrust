@@ -1,0 +1,4 @@
+crates/backend/utils/adt/adt_timestamp/src/builtins.rs: IDENTICAL hit set (439 lines)
+crates/backend/utils/adt/adt_timestamp/src/interval.rs: IDENTICAL hit set (1203 lines)
+crates/backend/utils/adt/adt_timestamp/src/lib.rs: IDENTICAL hit set (888 lines)
+TOTAL A-only=0 B-only=0

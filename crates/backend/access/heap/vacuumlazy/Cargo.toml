@@ -1,0 +1,67 @@
+[package]
+name = "vacuumlazy"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "vacuumlazy"
+path = "src/lib.rs"
+
+[dependencies]
+pg_clock = { path = "../../../../port/pg_clock" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+tidstore = { path = "../../common/tidstore" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+miscinit = { path = "../../../utils/init/miscinit" }
+tableam_vocab = { path = "../../table/tableam_vocab" }
+tableam_seams = { path = "../../table/tableam_seams" }
+commands_vacuum = { path = "../../../commands/vacuum" }
+vacuumparallel = { path = "../../../commands/vacuumparallel" }
+xact = { path = "../../transam/xact" }
+elog = { path = "../../../utils/error/elog" }
+nbtree = { path = "../../nbtree/nbtree" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+pruneheap = { path = "../pruneheap" }
+visibilitymap = { path = "../visibilitymap" }
+freespace = { path = "../../../storage/freespace/freespace" }
+heapam = { path = "../heapam" }
+indexam = { path = "../../index/indexam" }
+heapam_visibility_seams = { path = "../heapam_visibility_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+init_small = { path = "../../../utils/init/init_small" }
+catalog_storage = { path = "../../../catalog/catalog_storage" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+pgstat = { path = "../../../utils/activity/pgstat" }
+pg_rusage = { path = "../../../utils/misc/pg_rusage" }
+instrument = { path = "../../../executor/instrument" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+adt_timestamp = { path = "../../../utils/adt/adt_timestamp" }
+varsup = { path = "../../transam/varsup" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+backend_progress = { path = "../../../utils/activity/backend_progress" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+# vacuum-morsels inc-2 (phase-I morselization behind PGRUST_RUNTIME_VACUUM=1)
+vacuum_morsels = { path = "../../../commands/vacuum_morsels" }
+runtime = { path = "../../../executor/runtime" }
+parallel = { path = "../../transam/parallel" }
+table = { path = "../../table/table" }
+latch = { path = "../../../storage/ipc/latch" }
+autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+
+[dev-dependencies]
+xlogutils_seams = { path = "../../transam/xlogutils_seams" }
+sinval_seams = { path = "../../../storage/ipc/sinval_seams" }

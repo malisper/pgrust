@@ -1,0 +1,63 @@
+{
+ "artifact": "adt/network done-gate remediation (p1-lanen-remediation)",
+ "date": "2026-07-31",
+ "basis_sha_main": "bd0ceab3fab77d94af700f1d03a792c70f8abc8f",
+ "lcov": {
+  "file": "fuzz-network_diff-a6d629e4fd.lcov.gz",
+  "md5_uncompressed": "0bdc71ab3c644bbb756be0dd0f3a778c",
+  "source": "/Users/malisper/dev/pgrust-fast/.wt-p1-lanen/fuzz/coverage/network_diff.lcov (lane-local re-export of the committed corpus fuzz/corpus/network_diff, ~2084 files)",
+  "generated_at_sha": "a6d629e4fdc46c35d5da992d903aee5d86850051 (proofs/p1-lanen head; network crate sources byte-identical to origin/main, git diff empty)",
+  "sf_path_prefix": "/Users/malisper/dev/pgrust-fast/.wt-p1-lanen/ (rebase SF: prefix to consume)",
+  "verification": "merge-coverage.py --sloc-rule v2 --exclude-const-tables --line-table-lcov <this> reproduces cov-resweep lanen summaries EXACTLY: sloc=1329 fuzz=1186 (proofs/coverage/cov-resweep/joins/lanen-{local,fleet}.summary.json @ a594887353, local==fleet line-set-identical)",
+  "fleet_jobs": [
+   "pgrust-fuzz-campaign-1785481804-5bb3-66755",
+   "pgrust-fuzz-campaign-1785483251-7777-99627"
+  ]
+ },
+ "equation": {
+  "old_of_record": {
+   "in_scope": 1400,
+   "measured": 1187,
+   "residual": 213,
+   "explanation": "denominator = pre-re-baseline v1 cut: sloc_rules @29dd58eab3 (before e25331c7e9 test-scope re-baseline), rule v1, tables-excluded gives whole-crate 1468; 1468 - 68-line lane carve = 1400 EXACTLY. Retired basis; also residual-header class breakdown summed 224 != 213 (miscounted header: actual file classes sum 213: 122 instrument-structural + 37 macro + 29 defensive + 13 sortsupport + 11 const-machinery + 1 soft-error)."
+  },
+  "new_of_record": {
+   "whole_crate_v2_plain": 1323,
+   "whole_crate_v2_line_table": 1329,
+   "carve_in_universe": 57,
+   "in_scope": 1272,
+   "measured_in_scope": 1186,
+   "covered_in_carve": 0,
+   "uncovered": 86,
+   "excepted": 77,
+   "recorded_residual": 9,
+   "closure": "1272 - 1186 = 86 = 77 + 9; uncovered - excepted - recorded = 0",
+   "pct_measured": "93.24% of in-scope (1186/1272); 89.24% of whole-crate universe (1186/1329)"
+  },
+  "residual_remap": {
+   "lane_rows": 213,
+   "dropped_outside_universe_or_carve": 127,
+   "dropped_covered_redundant": 0,
+   "kept_genuine_uncovered": 86,
+   "dropped_by_class": {
+    "instrument-structural-false-red": 105,
+    "stateful-sortsupport-carve": 5,
+    "const-eval-machinery-unmapped": 1,
+    "macro-invocation-unmapped-executed": 16
+   },
+   "note": "the 86 kept rows exactly tile the 86 uncovered in-scope lines (0 missing, 0 extra)"
+  },
+  "exception_classes_filed": {
+   "instrument-unmappable": 27,
+   "const-eval-only": 16,
+   "defensive-c-parity": 34
+  },
+  "reclassifications": "11 lane rows carried instrument-structural-false-red despite a DA record in the full line table (instrument-mapped, executable-unexecuted): 6 reclassified const-eval-only (const fn b/nb body), 5 reclassified defensive-c-parity (EAFNOSUPPORT default arms x3, network_host '/' arm, network_family default arm)"
+ },
+ "inputs": {
+  "residual_tsv": "origin/proofs/p1-lanen:proofs/coverage-lane-n/network-residual.tsv",
+  "cov_resweep": "origin/proofs/cov-resweep @ a594887353 proofs/coverage/cov-resweep/joins/lanen-{local,fleet}.summary.json",
+  "audit": "f400e635ec docs/verification/phase1-gate-audit-2026-07-31.md finding 9",
+  "tooling": "proofs/coverage/{tree-sloc.py,sloc_rules.py,merge-coverage.py} @ origin/main"
+ }
+}

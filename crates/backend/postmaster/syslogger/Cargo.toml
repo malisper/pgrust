@@ -1,0 +1,33 @@
+[package]
+name = "syslogger"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "syslogger"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+elog = { path = "../../utils/error/elog" }
+fd = { path = "../../storage/file/fd" }
+guc_file = { path = "../../utils/misc/guc_file" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+ipc = { path = "../../storage/ipc/ipc" }
+latch = { path = "../../storage/ipc/latch" }
+launch_backend = { path = "../launch_backend" }
+localtime = { path = "../../timezone/localtime" }
+miscinit = { path = "../../utils/init/miscinit" }
+pgtz = { path = "../../timezone/pgtz" }
+ps_status = { path = "../../utils/misc/ps_status" }
+strftime = { path = "../../timezone/strftime" }
+syslogger_seams = { path = "../syslogger_seams" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }
+libc = "0.2"

@@ -1,0 +1,4 @@
+bool	eq_bool_accum	proofs::eq_bool_accum
+bool	eq_bool_accum_inv	proofs::eq_bool_accum_inv
+bool	eq_bool_alltrue	proofs::eq_bool_alltrue
+bool	eq_bool_anytrue	proofs::eq_bool_anytrue

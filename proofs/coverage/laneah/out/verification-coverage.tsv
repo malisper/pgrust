@@ -1,0 +1,9 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/utils/mb/mbutils/src/builtins.rs	63	0	8	0	8
+crates/backend/utils/mb/mbutils/src/lib.rs	702	0	372	0	372
+crates/backend/utils/mb/mbutils/src/tests.rs	0	0	0	0	0
+crates/common/wchar/src/lib.rs	908	0	877	0	877
+crates/common/wchar/src/tables.rs	3	0	0	0	0
+CRATE:crates/backend/utils/mb/mbutils	765	0	380	0	380
+CRATE:crates/common/wchar	911	0	877	0	877
+TOTAL	1676	0	1257	0	1257

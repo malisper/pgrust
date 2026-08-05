@@ -1,0 +1,73 @@
+Parsed test spec with 6 sessions
+
+starting permutation: s1u1 nl s1c s3sel
+step s1u1: UPDATE jt SET v = v + 100 WHERE k = 1;
+step nl: UPDATE jt SET v = jt.v + js.delta FROM js WHERE jt.k = js.k AND jt.k = 1 RETURNING jt.k, jt.v; <waiting ...>
+step s1c: COMMIT;
+step nl: <... completed>
+k|  v
+-+---
+1|115
+(1 row)
+
+step s3sel: SELECT k, v FROM jt ORDER BY k;
+k|  v
+-+---
+1|115
+2| 20
+(2 rows)
+
+
+starting permutation: s1u1 hj s1c s3sel
+step s1u1: UPDATE jt SET v = v + 100 WHERE k = 1;
+step hj: UPDATE jt SET v = jt.v + js.delta FROM js WHERE jt.k = js.k AND jt.k = 1 RETURNING jt.k, jt.v; <waiting ...>
+step s1c: COMMIT;
+step hj: <... completed>
+k|  v
+-+---
+1|115
+(1 row)
+
+step s3sel: SELECT k, v FROM jt ORDER BY k;
+k|  v
+-+---
+1|115
+2| 20
+(2 rows)
+
+
+starting permutation: s1u1 mj s1c s3sel
+step s1u1: UPDATE jt SET v = v + 100 WHERE k = 1;
+step mj: UPDATE jt SET v = jt.v + js.delta FROM js WHERE jt.k = js.k AND jt.k = 1 RETURNING jt.k, jt.v; <waiting ...>
+step s1c: COMMIT;
+step mj: <... completed>
+k|  v
+-+---
+1|115
+(1 row)
+
+step s3sel: SELECT k, v FROM jt ORDER BY k;
+k|  v
+-+---
+1|115
+2| 20
+(2 rows)
+
+
+starting permutation: s1u1 ix s1c s3sel
+step s1u1: UPDATE jt SET v = v + 100 WHERE k = 1;
+step ix: UPDATE jt SET v = jt.v + js.delta FROM js WHERE jt.k = js.k AND jt.k = 1 RETURNING jt.k, jt.v; <waiting ...>
+step s1c: COMMIT;
+step ix: <... completed>
+k|  v
+-+---
+1|115
+(1 row)
+
+step s3sel: SELECT k, v FROM jt ORDER BY k;
+k|  v
+-+---
+1|115
+2| 20
+(2 rows)
+

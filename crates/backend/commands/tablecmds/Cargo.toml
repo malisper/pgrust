@@ -1,0 +1,123 @@
+[package]
+name = "tablecmds"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+types_relscan = { path = "../../access/index/relscan" }
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+rewrite_define = { path = "../../rewrite/rewrite_define" }
+reloptions = { path = "../../access/common/reloptions" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+tupdesc = { path = "../../access/common/tupdesc" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+parse_clause = { path = "../../parser/parse_clause" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+amapi = { path = "../../access/index/amapi" }
+xact = { path = "../../access/transam/xact" }
+datum = { path = "../../../_support/types/datum" }
+types_scan = { path = "../../../_support/types/types_scan" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+indexam = { path = "../../access/index/indexam" }
+heaptuple = { path = "../../access/common/heaptuple" }
+catalog = { path = "../../catalog/catalog" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
+event_trigger = { path = "../event_trigger" }
+inval = { path = "../../utils/cache/inval" }
+foreigncmds = { path = "../foreigncmds" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+superuser = { path = "../../utils/misc/superuser" }
+init_small = { path = "../../utils/init/init_small" }
+xloginsert = { path = "../../access/transam/xloginsert" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+sequence_seams = { path = "../sequence_seams" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_index = { path = "../../catalog/catalog_index" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+pg_attrdef = { path = "../../catalog/pg_attrdef" }
+varlena = { path = "../../utils/adt/varlena" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+pg_publication = { path = "../../catalog/pg_publication" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+readfuncs = { path = "../../nodes/readfuncs" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
+clauses = { path = "../../optimizer/util/clauses" }
+nodes_core = { path = "../../nodes/nodes_core" }
+mbutils = { path = "../../utils/mb/mbutils" }
+execexpr = { path = "../../executor/execexpr" }
+rewrite_handler = { path = "../../rewrite/rewrite_handler" }
+catalog_toasting = { path = "../../catalog/catalog_toasting" }
+outfuncs = { path = "../../nodes/outfuncs" }
+parse_expr = { path = "../../parser/parse_expr" }
+parse_relation = { path = "../../parser/parse_relation" }
+parser_small1 = { path = "../../parser/parser_small1" }
+parse_collate = { path = "../../parser/parse_collate" }
+coerce = { path = "../../parser/coerce" }
+vars = { path = "../../optimizer/util/vars" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+format_type = { path = "../../utils/adt/format_type" }
+catalog_storage = { path = "../../catalog/catalog_storage" }
+tableam = { path = "../../access/table/tableam" }
+pgrcolumnar = { path = "../../access/pgrcolumnar" }
+adt_acl = { path = "../../utils/adt/acl" }
+aclchk = { path = "../../catalog/aclchk" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+pgstat = { path = "../../utils/activity/pgstat" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+array = { package = "types_array", path = "../../../_support/types/array" }
+relcache = { path = "../../utils/cache/relcache" }
+types_trigger = { path = "../../../_support/types/types_trigger" }
+trigger = { path = "../trigger" }
+ri_triggers_seams = { path = "../../utils/adt/ri_triggers_seams" }
+exectuples = { path = "../../executor/exectuples" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+heapam = { path = "../../access/heap/heapam" }
+types_slot = { path = "../../../_support/types/types_slot" }
+pg_type = { path = "../../catalog/pg_type" }
+commands_cluster = { path = "../cluster" }
+relation_seams = { path = "../../access/common/relation_seams" }
+procarray = { path = "../../storage/ipc/procarray" }
+multixact = { path = "../../access/transam/multixact" }
+
+indexcmds_seams = { path = "../indexcmds_seams" }
+execindexing = { path = "../../executor/execindexing" }
+typcache = { path = "../../utils/cache/typcache" }
+commands_tablespace = { path = "../tablespace" }
+commands_amcmds = { path = "../amcmds" }
+user = { path = "../user" }
+partcache = { path = "../../utils/cache/partcache" }
+partbounds = { path = "../../partitioning/partbounds" }
+partdesc = { path = "../../partitioning/partdesc" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
+planner = { path = "../../optimizer/plan/planner" }
+ruleutils = { path = "../../utils/adt/ruleutils" }
+parser_seams = { path = "../../parser/parser_seams" }
+commands_comment = { path = "../comment" }
+smgr = { path = "../../storage/smgr/smgr" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }
+statscmds = { path = "../statscmds" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+typecmds_seams = { path = "../typecmds_seams" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }

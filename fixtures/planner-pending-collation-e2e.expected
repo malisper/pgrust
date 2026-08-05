@@ -1,0 +1,590 @@
+-- Differential fixture for the 18.5-pending planner/LIKE upstream fixes
+-- (fe5d629 qual pushdown past grouping, a99bd8d+51652c4 nondeterministic
+-- LIKE backslashes, d0bb49e exact-match indexqual). The in-pod C 18.4
+-- oracle predates these fixes, so this fixture runs one-binary against a
+-- frozen expected extracted from the upstream regression outputs.
+CREATE COLLATION case_sensitive (provider = icu, locale = '');
+NOTICE:  using standard form "und" for ICU locale ""
+CREATE COLLATION case_insensitive (provider = icu, locale = '@colStrength=secondary', deterministic = false);
+NOTICE:  using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
+CREATE COLLATION ignore_accents (provider = icu, locale = '@colStrength=primary;colCaseLevel=yes', deterministic = false);
+NOTICE:  using standard form "und-u-kc-ks-level1" for ICU locale "@colStrength=primary;colCaseLevel=yes"
+-- check that an upper-level qual is not pushed down if its operator is from a
+-- different btree opfamily than the subquery's grouping eqop
+--
+BEGIN;
+CREATE TYPE t_rec AS (x numeric);
+CREATE TEMP TABLE pdt (id int, a t_rec);
+INSERT INTO pdt VALUES
+  (1, ROW(1.00)::t_rec),
+  (2, ROW(1.0)::t_rec),
+  (3, ROW(2)::t_rec);
+-- DISTINCT ON: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a *= ROW(1.0)::t_rec;
+              QUERY PLAN               
+---------------------------------------
+ Subquery Scan on s
+   Filter: (s.a *= '(1.0)'::t_rec)
+   ->  Unique
+         ->  Sort
+               Sort Key: pdt.a, pdt.id
+               ->  Seq Scan on pdt
+(6 rows)
+
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a *= ROW(1.0)::t_rec;
+ id | a 
+----+---
+(0 rows)
+
+-- Window function PARTITION BY: conflict, qual stays outside the WindowAgg
+EXPLAIN (COSTS OFF)
+SELECT * FROM (
+  SELECT id, a, count(*) OVER (PARTITION BY a) AS cnt FROM pdt
+) s
+WHERE a *= ROW(1.0)::t_rec;
+                 QUERY PLAN                 
+--------------------------------------------
+ Subquery Scan on s
+   Filter: (s.a *= '(1.0)'::t_rec)
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY pdt.a)
+         ->  Sort
+               Sort Key: pdt.a
+               ->  Seq Scan on pdt
+(7 rows)
+
+SELECT * FROM (
+  SELECT id, a, count(*) OVER (PARTITION BY a) AS cnt FROM pdt
+) s
+WHERE a *= ROW(1.0)::t_rec;
+ id |   a   | cnt 
+----+-------+-----
+  2 | (1.0) |   2
+(1 row)
+
+-- Plain DISTINCT: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT a FROM pdt) s WHERE a *= ROW(1.0)::t_rec;
+            QUERY PLAN             
+-----------------------------------
+ Subquery Scan on s
+   Filter: (s.a *= '(1.0)'::t_rec)
+   ->  HashAggregate
+         Group Key: pdt.a
+         ->  Seq Scan on pdt
+(5 rows)
+
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
+-- Positive: compatible opfamily, safe to push past the grouping
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a = ROW(1.0)::t_rec;
+                 QUERY PLAN                 
+--------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: pdt.id
+         ->  Seq Scan on pdt
+               Filter: (a = '(1.0)'::t_rec)
+(5 rows)
+
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a = ROW(1.0)::t_rec;
+ id |   a    
+----+--------
+  1 | (1.00)
+(1 row)
+
+-- Set operations: any operation other than UNION ALL groups rows by equality,
+-- so the same opfamily-mismatch rules apply.
+CREATE TEMP TABLE u1 (a t_rec);
+CREATE TEMP TABLE u2 (a t_rec);
+INSERT INTO u1 VALUES (ROW(1.00)::t_rec), (ROW(1.0)::t_rec);
+INSERT INTO u2 VALUES (ROW(1.0)::t_rec);
+-- UNION: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 UNION SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+            QUERY PLAN             
+-----------------------------------
+ Subquery Scan on s
+   Filter: (s.a *= '(1.0)'::t_rec)
+   ->  HashAggregate
+         Group Key: u1.a
+         ->  Append
+               ->  Seq Scan on u1
+               ->  Seq Scan on u2
+(7 rows)
+
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
+-- INTERSECT: same
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 INTERSECT SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+            QUERY PLAN             
+-----------------------------------
+ Subquery Scan on s
+   Filter: (s.a *= '(1.0)'::t_rec)
+   ->  HashSetOp Intersect
+         ->  Seq Scan on u1
+         ->  Seq Scan on u2
+(5 rows)
+
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
+-- INTERSECT ALL: still groups
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 INTERSECT ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+            QUERY PLAN             
+-----------------------------------
+ Subquery Scan on s
+   Filter: (s.a *= '(1.0)'::t_rec)
+   ->  HashSetOp Intersect All
+         ->  Seq Scan on u1
+         ->  Seq Scan on u2
+(5 rows)
+
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
+-- UNION ALL of (UNION ...): an inner grouping node still exposes the
+-- conflict to a qual pushed down through the outer UNION ALL.
+EXPLAIN (COSTS OFF)
+SELECT * FROM (
+  (SELECT a FROM u1 UNION SELECT a FROM u2)
+  UNION ALL
+  SELECT a FROM u2
+) s
+WHERE a *= ROW(1.0)::t_rec;
+               QUERY PLAN               
+----------------------------------------
+ Subquery Scan on s
+   Filter: (s.a *= '(1.0)'::t_rec)
+   ->  Append
+         ->  HashAggregate
+               Group Key: u1.a
+               ->  Append
+                     ->  Seq Scan on u1
+                     ->  Seq Scan on u2
+         ->  Seq Scan on u2 u2_1
+(9 rows)
+
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
+-- UNION ALL only: no grouping anywhere, pushdown remains allowed.
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 UNION ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+              QUERY PLAN               
+---------------------------------------
+ Append
+   ->  Seq Scan on u1
+         Filter: (a *= '(1.0)'::t_rec)
+   ->  Seq Scan on u2
+         Filter: (a *= '(1.0)'::t_rec)
+(5 rows)
+
+SELECT * FROM (SELECT a FROM u1 UNION ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+   a   
+-------
+ (1.0)
+ (1.0)
+(2 rows)
+
+ROLLBACK;
+create type avg_rec as (x numeric);
+-- A HAVING clause that uses an equality operator from a different opfamily
+-- than the GROUP BY's eqop must NOT be pushed down to WHERE.
+create temp table t_having (id int, a avg_rec);
+insert into t_having values
+  (1, row(1.0)::avg_rec),
+  (2, row(1.00)::avg_rec),
+  (3, row(2)::avg_rec);
+-- the clause must stay in HAVING
+explain (costs off)
+select a, count(*) from t_having group by a having a *= row(1.0)::avg_rec;
+            QUERY PLAN             
+-----------------------------------
+ HashAggregate
+   Group Key: a
+   Filter: (a *= '(1.0)'::avg_rec)
+   ->  Seq Scan on t_having
+(4 rows)
+
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
+-- the clause must stay in HAVING
+explain (costs off)
+select a, count(*) from t_having group by a having a *= any (array[row(1.0)::avg_rec]);
+                 QUERY PLAN                  
+---------------------------------------------
+ HashAggregate
+   Group Key: a
+   Filter: (a *= ANY ('{(1.0)}'::avg_rec[]))
+   ->  Seq Scan on t_having
+(4 rows)
+
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
+-- the clause can be pushed down to WHERE
+explain (costs off)
+select a, count(*) from t_having group by a having a = row(1.0)::avg_rec;
+               QUERY PLAN               
+----------------------------------------
+ GroupAggregate
+   ->  Seq Scan on t_having
+         Filter: (a = '(1.0)'::avg_rec)
+(3 rows)
+
+select a, count(*) from t_having group by a having a = row(1.0)::avg_rec;
+   a   | count 
+-------+-------
+ (1.0) |     2
+(1 row)
+
+drop table t_having;
+drop type avg_rec;
+-- Test WHERE-pushdown past a grouping layer (DISTINCT, DISTINCT ON, window
+-- PARTITION BY) when the qual applies a different collation than the
+-- grouping column's nondeterministic collation.  The qual would distinguish
+-- rows the grouping considers equal, so it must NOT be pushed inside the
+-- subquery.
+CREATE TABLE pushdown_ci (id int, x text COLLATE case_insensitive);
+INSERT INTO pushdown_ci VALUES (1, 'ABC'), (2, 'abc'), (3, 'def');
+-- DISTINCT ON: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT ON (x) id, x FROM pushdown_ci ORDER BY x, id) s
+WHERE x = 'abc' COLLATE case_sensitive;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Subquery Scan on s
+   Filter: (s.x = 'abc'::text COLLATE case_sensitive)
+   ->  Unique
+         ->  Sort
+               Sort Key: pushdown_ci.x COLLATE case_insensitive, pushdown_ci.id
+               ->  Seq Scan on pushdown_ci
+(6 rows)
+
+SELECT * FROM (SELECT DISTINCT ON (x) id, x FROM pushdown_ci ORDER BY x, id) s
+WHERE x = 'abc' COLLATE case_sensitive;
+ id | x 
+----+---
+(0 rows)
+
+-- Window function PARTITION BY: conflict, qual stays outside the WindowAgg
+EXPLAIN (COSTS OFF)
+SELECT * FROM (
+  SELECT id, x, count(*) OVER (PARTITION BY x) AS cnt FROM pushdown_ci
+) s
+WHERE x = 'abc' COLLATE case_sensitive;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Subquery Scan on s
+   Filter: (s.x = 'abc'::text COLLATE case_sensitive)
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY pushdown_ci.x)
+         ->  Sort
+               Sort Key: pushdown_ci.x COLLATE case_insensitive
+               ->  Seq Scan on pushdown_ci
+(7 rows)
+
+SELECT * FROM (
+  SELECT id, x, count(*) OVER (PARTITION BY x) AS cnt FROM pushdown_ci
+) s
+WHERE x = 'abc' COLLATE case_sensitive;
+ id |  x  | cnt 
+----+-----+-----
+  2 | abc |   2
+(1 row)
+
+-- Plain DISTINCT: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT x FROM pushdown_ci) s
+WHERE x = 'abc' COLLATE case_sensitive;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Subquery Scan on s
+   Filter: (s.x = 'abc'::text COLLATE case_sensitive)
+   ->  HashAggregate
+         Group Key: pushdown_ci.x
+         ->  Seq Scan on pushdown_ci
+(5 rows)
+
+SELECT * FROM (SELECT DISTINCT x FROM pushdown_ci) s
+WHERE x = 'abc' COLLATE case_sensitive;
+ x 
+---
+(0 rows)
+
+-- Positive: matching collation, safe to push past the grouping
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT ON (x) id, x FROM pushdown_ci ORDER BY x, id) s
+WHERE x = 'abc' COLLATE case_insensitive;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: pushdown_ci.id
+         ->  Seq Scan on pushdown_ci
+               Filter: (x = 'abc'::text COLLATE case_insensitive)
+(5 rows)
+
+SELECT * FROM (SELECT DISTINCT ON (x) id, x FROM pushdown_ci ORDER BY x, id) s
+WHERE x = 'abc' COLLATE case_insensitive;
+ id |  x  
+----+-----
+  1 | ABC
+(1 row)
+
+-- Set operations: any operation other than UNION ALL groups rows by equality,
+-- so the same collation-mismatch rules apply.
+CREATE TABLE pushdown_ci2 (x text COLLATE case_insensitive);
+INSERT INTO pushdown_ci2 VALUES ('abc');
+-- UNION: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT x FROM pushdown_ci UNION SELECT x FROM pushdown_ci2) s
+WHERE x = 'abc' COLLATE case_sensitive;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Subquery Scan on s
+   Filter: (s.x = 'abc'::text COLLATE case_sensitive)
+   ->  HashAggregate
+         Group Key: pushdown_ci.x
+         ->  Append
+               ->  Seq Scan on pushdown_ci
+               ->  Seq Scan on pushdown_ci2
+(7 rows)
+
+SELECT * FROM (SELECT x FROM pushdown_ci UNION SELECT x FROM pushdown_ci2) s
+WHERE x = 'abc' COLLATE case_sensitive;
+ x 
+---
+(0 rows)
+
+-- INTERSECT: same
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT x FROM pushdown_ci INTERSECT SELECT x FROM pushdown_ci2) s
+WHERE x = 'abc' COLLATE case_sensitive;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Subquery Scan on s
+   Filter: (s.x = 'abc'::text COLLATE case_sensitive)
+   ->  HashSetOp Intersect
+         ->  Seq Scan on pushdown_ci
+         ->  Seq Scan on pushdown_ci2
+(5 rows)
+
+SELECT * FROM (SELECT x FROM pushdown_ci INTERSECT SELECT x FROM pushdown_ci2) s
+WHERE x = 'abc' COLLATE case_sensitive;
+ x 
+---
+(0 rows)
+
+-- INTERSECT ALL: still groups
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT x FROM pushdown_ci INTERSECT ALL SELECT x FROM pushdown_ci2) s
+WHERE x = 'abc' COLLATE case_sensitive;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Subquery Scan on s
+   Filter: (s.x = 'abc'::text COLLATE case_sensitive)
+   ->  HashSetOp Intersect All
+         ->  Seq Scan on pushdown_ci
+         ->  Seq Scan on pushdown_ci2
+(5 rows)
+
+SELECT * FROM (SELECT x FROM pushdown_ci INTERSECT ALL SELECT x FROM pushdown_ci2) s
+WHERE x = 'abc' COLLATE case_sensitive;
+ x 
+---
+(0 rows)
+
+-- Negative: a function over a grouping column with a nondeterministic
+-- collation, whose result is compared under no collation (an integer
+-- comparison), can distinguish values the grouping considers equal.
+-- PARTITION BY
+EXPLAIN (COSTS OFF)
+SELECT * FROM (
+  SELECT id, x, count(*) OVER (PARTITION BY x) AS cnt FROM pushdown_ci
+) s
+WHERE ascii(x) = 97;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Subquery Scan on s
+   Filter: (ascii(s.x) = 97)
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY pushdown_ci.x)
+         ->  Sort
+               Sort Key: pushdown_ci.x COLLATE case_insensitive
+               ->  Seq Scan on pushdown_ci
+(7 rows)
+
+SELECT * FROM (
+  SELECT id, x, count(*) OVER (PARTITION BY x) AS cnt FROM pushdown_ci
+) s
+WHERE ascii(x) = 97;
+ id |  x  | cnt 
+----+-----+-----
+  2 | abc |   2
+(1 row)
+
+-- Same with DISTINCT
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT x FROM pushdown_ci) s WHERE ascii(x) = 97;
+             QUERY PLAN              
+-------------------------------------
+ Subquery Scan on s
+   Filter: (ascii(s.x) = 97)
+   ->  HashAggregate
+         Group Key: pushdown_ci.x
+         ->  Seq Scan on pushdown_ci
+(5 rows)
+
+SELECT * FROM (SELECT DISTINCT x FROM pushdown_ci) s WHERE ascii(x) = 97;
+ x 
+---
+(0 rows)
+
+-- Same with Set operations
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT x FROM pushdown_ci UNION SELECT x FROM pushdown_ci2) s
+WHERE ascii(x) = 97;
+                 QUERY PLAN                 
+--------------------------------------------
+ Subquery Scan on s
+   Filter: (ascii(s.x) = 97)
+   ->  HashAggregate
+         Group Key: pushdown_ci.x
+         ->  Append
+               ->  Seq Scan on pushdown_ci
+               ->  Seq Scan on pushdown_ci2
+(7 rows)
+
+SELECT * FROM (SELECT x FROM pushdown_ci UNION SELECT x FROM pushdown_ci2) s
+WHERE ascii(x) = 97;
+ x 
+---
+(0 rows)
+
+DROP TABLE pushdown_ci2;
+DROP TABLE pushdown_ci;
+SELECT 'AB' LIKE 'ab' COLLATE case_insensitive AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT 'AB' LIKE 'a\b' COLLATE case_insensitive AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT 'AB' LIKE '\ab' COLLATE case_insensitive AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT 'AB' LIKE '\a%' COLLATE case_insensitive AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT 'AB' LIKE '\a\%' COLLATE case_insensitive AS f;
+ f 
+---
+ f
+(1 row)
+
+-- literal backslash with nondeterministic collation (bug #19474)
+SELECT 'back\slash' COLLATE ignore_accents LIKE 'back\slash%' ESCAPE '#';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'aäb' COLLATE ignore_accents LIKE 'a#äb' ESCAPE '#' AS multibyte_escape;
+ multibyte_escape 
+------------------
+ t
+(1 row)
+
+SELECT 'a\äb' COLLATE ignore_accents LIKE 'a\äb%' ESCAPE '#' AS backslash_multibyte;
+ backslash_multibyte 
+---------------------
+ t
+(1 row)
+
+SELECT 'a\b%c' COLLATE ignore_accents LIKE 'a#\b#%%c' ESCAPE '#' AS mixed_escapes;
+ mixed_escapes 
+---------------
+ t
+(1 row)
+
+SELECT 'backslash' COLLATE ignore_accents LIKE 'back\\slash%';
+ ?column? 
+----------
+ f
+(1 row)
+
+CREATE TABLE test1ci (x text COLLATE case_insensitive);
+INSERT INTO test1ci VALUES ('abc'), ('def'), ('ghi');
+CREATE UNIQUE INDEX ON test1ci (x);
+-- These queries should be able to use the index on test1ci.x:
+SET enable_seqscan = off;
+SET enable_indexonlyscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM test1ci WHERE x ~ '^abc$' COLLATE "C";
+                QUERY PLAN                 
+-------------------------------------------
+ Index Scan using test1ci_x_idx on test1ci
+   Index Cond: (x = 'abc'::text)
+   Filter: (x ~ '^abc$'::text COLLATE "C")
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM test1ci WHERE x LIKE 'abc' COLLATE case_insensitive;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Index Scan using test1ci_x_idx on test1ci
+   Index Cond: (x = 'abc'::text)
+   Filter: (x ~~ 'abc'::text COLLATE case_insensitive)
+(3 rows)
+
+RESET enable_seqscan;
+RESET enable_indexonlyscan;
+-- Regex exact-match optimization should use an index even when the expression
+-- and index have different collations, so long as the expression's collation
+-- is deterministic.  This example tests what we want because the optimizer
+-- does not perceive "C" collation (used by the system catalogs) as identical
+-- to "POSIX" collation.
+EXPLAIN (COSTS OFF)
+SELECT * FROM pg_class WHERE relname ~ '^pg_class$' COLLATE "POSIX";
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Index Scan using pg_class_relname_nsp_index on pg_class
+   Index Cond: (relname = 'pg_class'::text)
+   Filter: (relname ~ '^pg_class$'::text COLLATE "POSIX")
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM pg_class WHERE relname LIKE 'pg\_class' COLLATE "POSIX";
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Index Scan using pg_class_relname_nsp_index on pg_class
+   Index Cond: (relname = 'pg_class'::text)
+   Filter: (relname ~~ 'pg\_class'::text COLLATE "POSIX")
+(3 rows)
+
+DROP TABLE test1ci;
+DROP COLLATION ignore_accents;
+DROP COLLATION case_insensitive;
+DROP COLLATION case_sensitive;

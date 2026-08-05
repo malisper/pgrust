@@ -1,0 +1,20 @@
+[package]
+name = "catalog_indexing"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_slot = { path = "../../../_support/types/types_slot" }
+heaptuple = { path = "../../access/common/heaptuple" }
+heapam = { path = "../../access/heap/heapam" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+exectuples = { path = "../../executor/exectuples" }
+execindexing = { path = "../../executor/execindexing" }

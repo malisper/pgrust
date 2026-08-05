@@ -1,0 +1,1 @@
+{"path":"crates/backend/catalog/pg_database_seams/src/lib.rs","sloc":[34,38,39,40,41,44,46,47,48,49,52,55,56,57,58],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2,3],"const-static":[9,10,11],"typedef":[14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]}}

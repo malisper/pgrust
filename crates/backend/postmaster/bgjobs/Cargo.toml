@@ -1,0 +1,21 @@
+[package]
+name = "bgjobs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bgjobs"
+path = "src/lib.rs"
+
+[dependencies]
+pg_clock = { path = "../../../port/pg_clock" }
+pgsync = { path = "../../../_support/pgsync" }
+elog = { path = "../../utils/error/elog" }
+runtime = { path = "../../executor/runtime" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+waiter = { path = "../../storage/ipc/waiter" }
+
+[dev-dependencies]
+latch = { path = "../../storage/ipc/latch" }

@@ -1,0 +1,19 @@
+[package]
+name = "proof-arrayfuncs-hdr"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+arrayfuncs = { path = "../../crates/backend/utils/adt/arrayfuncs" }
+arrayutils = { path = "../../crates/backend/utils/adt/arrayutils" }
+datum = { path = "../../crates/_support/types/datum" }
+detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
+mcx = { path = "../../crates/_support/mcx" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }
+
+[build-dependencies]
+cc = "1"

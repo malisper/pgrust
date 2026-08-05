@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/transam/xloginsert_seams/src/lib.rs","sloc":[4,7,10,13,14,15,16,17,18,21,22,25,27,44,49,54,55,56,57,58,59,60,63,66,69,72,73,74,75,78,80],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2],"const-static":[40,41,45,46,47],"typedef":[32,33,34,35,36]}}

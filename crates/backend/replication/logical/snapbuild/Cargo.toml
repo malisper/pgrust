@@ -1,0 +1,35 @@
+[package]
+name = "snapbuild"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "snapbuild"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam_core" }
+crc32c = { path = "../../../../port/crc32c" }
+elog = { path = "../../../utils/error/elog" }
+fd = { path = "../../../storage/file/fd" }
+init_small = { path = "../../../utils/init/init_small" }
+procarray = { path = "../../../storage/ipc/procarray" }
+snapmgr = { path = "../../../utils/time/snapmgr" }
+xact = { path = "../../../access/transam/xact" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }
+heapam_xlog = { path = "../../../access/heap/heapam_xlog" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+standby = { path = "../../../storage/ipc/standby" }
+slot = { path = "../../slot" }
+reorderbuffer = { path = "../reorderbuffer" }
+snapbuild_seams = { path = "../../snapbuild_seams" }
+libc = "0.2"
+
+[dev-dependencies]
+xact_seams = { path = "../../../access/transam/xact_seams" }

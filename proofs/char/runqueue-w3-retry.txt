@@ -1,0 +1,1 @@
+wave5::eq_charrecv_core | green | release-gate | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c --harness wave5::eq_charrecv_core --exact

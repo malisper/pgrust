@@ -1,0 +1,35 @@
+[package]
+name = "parser_small1"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parser_small1"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+elog = { path = "../../utils/error/elog" }
+format_type = { path = "../../utils/adt/format_type" }
+libc = "0.2"
+lsyscache = { path = "../../utils/cache/lsyscache" }
+mbutils = { path = "../../utils/mb/mbutils" }
+mcx = { path = "../../../_support/mcx" }
+adt_varbit = { path = "../../utils/adt/varbit" }
+adt_numeric = { path = "../../utils/adt/numeric" }
+numutils = { path = "../../utils/adt/numutils" }
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+table = { path = "../../access/table/table" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+nodes_core = { path = "../../nodes/nodes_core" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+wchar = { path = "../../../common/wchar" }
+
+[dev-dependencies]
+namespace_seams = { path = "../../catalog/namespace_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_portal = { path = "../../../_support/types/portal" }

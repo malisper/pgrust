@@ -1,0 +1,1 @@
+{"path":"crates/backend/postmaster/auxprocess/src/lib.rs","sloc":[47,48,49,51,53,55,57,59,60,61,63,65,66,69,70,71,72,74,75,78],"kani":[],"fuzz":[],"regress":[69,70,71,72,74,75,78],"excluded":{"use-mod":[6,7],"attr":[3,4]}}

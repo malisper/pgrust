@@ -1,0 +1,1 @@
+{"path":"crates/backend/executor/execexpr/src/hstoresubs.rs","sloc":[18,19,20,21,25,26,27,28,30,31,34,35,36,38,39,40],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[4,5,7],"attr":[16,17],"typedef":[9,10,11,12,13]}}

@@ -1,0 +1,48 @@
+[package]
+name = "slot"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "slot"
+path = "src/lib.rs"
+
+[dependencies]
+injection_point = { path = "../../utils/misc/injection_point" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mcx = { path = "../../../_support/mcx" }
+crc32c = { path = "../../../port/crc32c" }
+slot_seams = { path = "../slot_seams" }
+pgstat = { path = "../../utils/activity/pgstat" }
+walsender_config = { path = "../walsender_config" }
+walsender_seams = { path = "../walsender_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+procarray = { path = "../../storage/ipc/procarray" }
+standby_seams = { path = "../../storage/ipc/standby_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+# signums only (the SIGTERM constant's portable home); calls stay seam-routed.
+procsignal = { path = "../../storage/ipc/procsignal" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+condition_variable = { path = "../../storage/lmgr/condition_variable" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+fd = { path = "../../storage/file/fd" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+elog = { path = "../../utils/error/elog" }
+init_small = { path = "../../utils/init/init_small" }
+miscinit = { path = "../../utils/init/miscinit" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+varlena = { path = "../../utils/adt/varlena" }
+guc = { path = "../../utils/misc/guc" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+wchar = { path = "../../../common/wchar" }
+libc = "0.2"

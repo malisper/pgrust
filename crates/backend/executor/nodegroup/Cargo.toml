@@ -1,0 +1,25 @@
+[package]
+name = "nodegroup"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+execexpr = { path = "../execexpr" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+init_small = { path = "../../utils/init/init_small" }
+
+[dev-dependencies]
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }

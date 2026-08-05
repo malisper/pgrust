@@ -1,0 +1,33 @@
+[package]
+name = "nodehashjoin"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+execexpr = { path = "../execexpr" }
+fd = { path = "../../storage/file/fd" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+init_small = { path = "../../utils/init/init_small" }
+instrument = { path = "../instrument" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+mcx = { path = "../../../_support/mcx" }
+nodehash = { path = "../nodehash" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+[dev-dependencies]
+# The real int4 join hash (hash_bytes_uint32) for the probe-economics
+# census tests — the HJPROBE-V2 adjudication input (notes/se-hjprobe-v2.md).
+hashfn = { path = "../../../common/hashfn" }
+# Concurrency-model coverage for the single-pass atomic-CAS build insert
+# (shared_build::SharedBuildDir, Phase 1a). loom explicitly drives its own
+# atomics in the `singlepass_loom` module, so the model runs under PLAIN
+# `cargo test -p nodehashjoin` (the runtime crate's lifecycle-loom precedent:
+# dev-dep loom, no --cfg loom needed when the test constructs loom types).
+loom = "0.7"

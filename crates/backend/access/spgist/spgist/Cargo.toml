@@ -1,0 +1,44 @@
+[package]
+name = "spgist"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_spgist = { path = "../../../../_support/types/types_spgist" }
+types_gist = { path = "../../../../_support/types/gist" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_relscan = { path = "../../index/relscan" }
+nbtree = { path = "../../nbtree/nbtree" }
+heaptuple = { path = "../../common/heaptuple" }
+tupdesc = { path = "../../common/tupdesc" }
+detoast = { path = "../../common/detoast" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+indexam_seams = { path = "../../index/indexam_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+transam_xlog = { path = "../../transam/transam_xlog" }
+xloginsert = { path = "../../transam/xloginsert" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+xact = { path = "../../transam/xact" }
+tidbitmap = { path = "../../../nodes/tidbitmap" }
+init_small = { path = "../../../utils/init/init_small" }
+freespace = { path = "../../../storage/freespace/freespace" }
+pg_prng = { path = "../../../../common/pg_prng" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+coerce = { path = "../../../parser/coerce" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }

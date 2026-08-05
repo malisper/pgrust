@@ -1,0 +1,46 @@
+[package]
+name = "lock"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lock"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_hash = { path = "../../../../_support/types/hash" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+dynahash = { path = "../../../utils/hash/dynahash" }
+s_lock_seams = { path = "../s_lock_seams" }
+lwlock = { path = "../lwlock" }
+lmgr_proc = { path = "../lmgr_proc" }
+lock_seams = { path = "../lock_seams" }
+deadlock_seams = { path = "../deadlock_seams" }
+procsignal_seams = { path = "../../ipc/procsignal_seams" }
+lmgr_seams = { path = "../lmgr_seams" }
+latch_seams = { path = "../../ipc/latch_seams" }
+standby_seams = { path = "../../ipc/standby_seams" }
+xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }
+init_small = { path = "../../../utils/init/init_small" }
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
+elog_seams = { path = "../../../utils/error/elog_seams" }
+resowner = { path = "../../../utils/resowner/resowner" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+
+[dev-dependencies]
+shmem_seams = { path = "../../ipc/shmem_seams" }
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+pmsignal_seams = { path = "../../ipc/pmsignal_seams" }
+ipc_seams = { path = "../../ipc/ipc_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }

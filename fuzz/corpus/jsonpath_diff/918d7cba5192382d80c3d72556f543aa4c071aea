@@ -1,0 +1,1 @@
+!$ >=(@ like_regex "\\ta@mnum()\\\\\\\\\\\w?wwwwwwwwwwwwwwwwwp.m.wwwwwww\ww\\ww@\\\\\\=\\^\\\\\\\w?ww-wwwwwwwwwwwwwwwp.m.w^_tmnum()\\\\\\\ww\\wwww\ww\\ww@\\\\\wwwwwwp.m.w^_tmnum()\\\\\\\ww\\wwww\ww\\ww@\\\\\\=\\^%\\\>\\\Y\\\1e+1-\\\n" flag "isim")

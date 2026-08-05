@@ -1,0 +1,67 @@
+[package]
+name = "ipci"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ipci"
+path = "src/lib.rs"
+
+[dependencies]
+predicate = { path = "../../lmgr/predicate" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
+guc = { path = "../../../utils/misc/guc" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+shmem = { path = "../shmem" }
+dsm_core = { path = "../dsm_core" }
+dsm_registry = { path = "../dsm_registry" }
+lwlock = { path = "../../lmgr/lwlock" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+lock = { path = "../../lmgr/lock" }
+bufmgr = { path = "../../buffer/bufmgr" }
+varsup = { path = "../../../access/transam/varsup" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }
+xlogprefetcher = { path = "../../../access/transam/xlogprefetcher" }
+commands_async = { path = "../../../commands/commands_async" }
+clog = { path = "../../../access/transam/clog" }
+commit_ts = { path = "../../../access/transam/commit_ts" }
+subtrans = { path = "../../../access/transam/subtrans" }
+multixact = { path = "../../../access/transam/multixact" }
+twophase = { path = "../../../access/transam/twophase" }
+sinval = { path = "../sinval" }
+pmsignal = { path = "../pmsignal" }
+procsignal = { path = "../procsignal" }
+aio_core = { path = "../../aio/aio_core" }
+checkpointer = { path = "../../../postmaster/checkpointer" }
+slot = { path = "../../../replication/slot" }
+origin = { path = "../../../replication/origin" }
+pgarch = { path = "../../../postmaster/pgarch" }
+walsummarizer = { path = "../../../postmaster/walsummarizer" }
+walreceiverfuncs = { path = "../../../replication/walreceiverfuncs" }
+syncscan = { path = "../../../access/common/syncscan" }
+waitevent = { path = "../../../utils/activity/waitevent" }
+procarray = { path = "../procarray" }
+ipci_seams = { path = "../ipci_seams" }
+pmchild_seams = { path = "../../../postmaster/pmchild_seams" }
+backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+
+[dev-dependencies]
+file_seams = { path = "../../file/file_seams" }
+shmem_seams = { path = "../shmem_seams" }
+ipc_seams = { path = "../ipc_seams" }
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+pg_prng = { path = "../../../../common/pg_prng" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+scalar_seams = { path = "../../../utils/adt/scalar_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+mbutils_seams = { path = "../../../utils/mb/mbutils_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+pgstat = { path = "../../../utils/activity/pgstat" }
+condition_variable_seams = { path = "../../lmgr/condition_variable_seams" }

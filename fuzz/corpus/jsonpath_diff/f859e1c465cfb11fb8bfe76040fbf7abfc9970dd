@@ -1,0 +1,1 @@
+$ ? (@ like_regex "patt@s\\\\.>eiling()\\\\@\000000starts with ^^^^^^^\\\0b100101\n" fla' "i

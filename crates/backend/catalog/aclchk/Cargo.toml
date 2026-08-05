@@ -1,0 +1,57 @@
+[package]
+name = "aclchk"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "aclchk"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_rel = { path = "../../../_support/types/rel" }
+superuser = { path = "../../utils/misc/superuser" }
+adt_acl = { path = "../../utils/adt/acl" }
+guc = { path = "../../utils/misc/guc" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+aclchk_seams = { path = "../aclchk_seams" }
+event_trigger_seams = { path = "../../commands/event_trigger_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+catcache = { path = "../../utils/cache/catcache" }
+catalog_namespace = { path = "../catalog_namespace" }
+table = { path = "../../access/table/table" }
+heaptuple = { path = "../../access/common/heaptuple" }
+catalog_indexing = { path = "../catalog_indexing" }
+pg_depend = { path = "../pg_depend" }
+pg_shdepend = { path = "../pg_shdepend" }
+catalog = { path = "../catalog" }
+types_scan = { path = "../../../_support/types/types_scan" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+dependency_seams = { path = "../dependency_seams" }
+xact = { path = "../../access/transam/xact" }
+miscinit = { path = "../../utils/init/miscinit" }
+init_small = { path = "../../utils/init/init_small" }
+lock_seams = { path = "../../storage/lmgr/lock_seams" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+elog = { path = "../../utils/error/elog" }
+
+pg_largeobject = { path = "../pg_largeobject" }
+pg_parameter_acl = { path = "../pg_parameter_acl" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+genam = { path = "../../access/index/genam" }
+parse_func_seams = { path = "../../parser/parse_func_seams" }
+parse_utilcmd_seams = { path = "../../parser/parse_utilcmd_seams" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+foreigncmds_seams = { path = "../../commands/foreigncmds_seams" }
+tablespace_seams = { path = "../../commands/tablespace_seams" }
+
+[dev-dependencies]
+init_small = { path = "../../utils/init/init_small" }

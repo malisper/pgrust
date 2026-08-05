@@ -1,0 +1,702 @@
+Kani Rust Verifier 0.67.0 (cargo plugin)
+warning: variant `Malloc` is never constructed
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/lib.rs:64:5
+   |
+61 | enum Backend {
+   |      ------- variant in this enum
+...
+64 |     Malloc,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `chunk_size` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/aset.rs:284:4
+    |
+284 | fn chunk_size(idx: usize) -> usize {
+    |    ^^^^^^^^^^
+
+warning: method `mem_allocated` is never used
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/mcx/src/aset.rs:340:19
+    |
+306 | impl AllocSet {
+    | ------------- method in this implementation
+...
+340 |     pub(crate) fn mem_allocated(&self) -> usize {
+    |                   ^^^^^^^^^^^^^
+
+warning: type `spgChooseIn` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:92:12
+   |
+92 | pub struct spgChooseIn {
+   |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseIn`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `spgChooseOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:104:10
+    |
+104 | pub enum spgChooseOut {
+    |          ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseOut`
+
+warning: type `spgPickSplitIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:127:12
+    |
+127 | pub struct spgPickSplitIn {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitIn`
+
+warning: type `spgPickSplitOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:134:12
+    |
+134 | pub struct spgPickSplitOut {
+    |            ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitOut`
+
+warning: type `spgInnerConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:157:12
+    |
+157 | pub struct spgInnerConsistentIn<'a> {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentIn`
+
+warning: type `spgInnerConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:175:12
+    |
+175 | pub struct spgInnerConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentOut`
+
+warning: type `spgLeafConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:199:12
+    |
+199 | pub struct spgLeafConsistentIn {
+    |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentIn`
+
+warning: type `spgLeafConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/state.rs:212:12
+    |
+212 | pub struct spgLeafConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentOut`
+
+warning: type `spgxlogState` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:15:12
+   |
+15 | pub struct spgxlogState {
+   |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogState`
+
+warning: type `spgxlogAddLeaf` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:40:12
+   |
+40 | pub struct spgxlogAddLeaf {
+   |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddLeaf`
+
+warning: type `spgxlogMoveLeafs` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:76:12
+   |
+76 | pub struct spgxlogMoveLeafs {
+   |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogMoveLeafs`
+
+warning: type `spgxlogAddNode` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:115:12
+    |
+115 | pub struct spgxlogAddNode {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddNode`
+
+warning: type `spgxlogSplitTuple` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:154:12
+    |
+154 | pub struct spgxlogSplitTuple {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogSplitTuple`
+
+warning: type `spgxlogPickSplit` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:184:12
+    |
+184 | pub struct spgxlogPickSplit {
+    |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogPickSplit`
+
+warning: type `spgxlogVacuumLeaf` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:238:12
+    |
+238 | pub struct spgxlogVacuumLeaf {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumLeaf`
+
+warning: type `spgxlogVacuumRoot` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:271:12
+    |
+271 | pub struct spgxlogVacuumRoot {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRoot`
+
+warning: type `spgxlogVacuumRedirect` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/xlog.rs:295:12
+    |
+295 | pub struct spgxlogVacuumRedirect {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRedirect`
+
+warning: type `spgConfigIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/lib.rs:237:12
+    |
+237 | pub struct spgConfigIn {
+    |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigIn`
+
+warning: type `spgConfigOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_spgist/src/lib.rs:242:12
+    |
+242 | pub struct spgConfigOut {
+    |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigOut`
+
+warning: unused doc comment
+   --> src/lib.rs:855:5
+    |
+855 | /     /// Half-symbolic mul: one fully-symbolic operand × special grid.
+856 | |     /// Probes whether symbolic×constant multiply is affordable (the
+857 | |     /// degrees/radians shape) even where symbolic×symbolic walls.
+    | |_____-------------------------------------------------------------^
+    |       |
+    |       rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `mcx_stubs` and `stubs`
+   --> src/lib.rs:702:25
+    |
+702 |     use proof_support::{mcx_stubs, stubs};
+    |                         ^^^^^^^^^  ^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `stub_pg_error_error` is never used
+   --> src/lib.rs:259:8
+    |
+259 |     fn stub_pg_error_error(_message: impl Into<String>) -> PgError {
+    |        ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: Found the following unsupported constructs:
+             - caller_location (1)
+             - foreign function (2)
+         
+         Verification will fail if one or more of these constructs is reachable.
+         See https://model-checking.github.io/kani/rust-feature-support.html for more details.
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
+Checking harness proofs::eq_float84div_zero...
+CBMC 6.8.0 (cbmc-6.8.0)
+CBMC version 6.8.0 (cbmc-6.8.0) 64-bit arm64 macos
+Reading GOTO program from file /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/float-arith/target/kani/aarch64-apple-darwin/debug/deps/proof_float_arith-eb0973ac40322109__RNvNtCsekEYcjtcxAW_17proof_float_arith6proofs18eq_float84div_zero.out
+Generating GOTO Program
+Adding CPROVER library (arm64)
+Removal of function pointers and virtual functions
+Generic Property Instrumentation
+Running with 16 object bits, 48 offset bits (user-specified)
+Starting Bounded Model Checking
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/lib.rs line 224 column 11 function adt_float::bits8 thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/lib.rs line 224 column 11 function adt_float::bits8 thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs line 2173 column 15 function <std::result::Result<f64, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch thread 0
+aborting path on assume(false) at file /Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/builtins.rs line 133 column 36 function adt_float::builtins::fc_float84div thread 0
+aborting path on assume(false) at file src/lib.rs line 905 column 23 function proofs::eq_float84div_zero thread 0
+Runtime Symex: 0.321969s
+size of program expression: 12655 steps
+slicing removed 10437 assignments
+Generated 185 VCC(s), 82 remaining after simplification
+Runtime Postprocess Equation: 0.00256483s
+Passing problem to propositional reduction
+converting SSA
+Runtime Convert SSA: 0.0229411s
+Running propositional reduction
+Post-processing
+Runtime Post-process: 4.667e-06s
+Solving with External SAT solver
+Writing temporary CNF
+Invoking SAT solver
+Solver returned code: 10
+result:SATISFIABLE
+Runtime Solver: 0.243715s
+Runtime decision procedure: 0.266867s
+Running propositional reduction
+Solving with External SAT solver
+Writing temporary CNF
+Invoking SAT solver
+Solver returned code: 10
+result:SATISFIABLE
+Runtime Solver: 0.22929s
+Runtime decision procedure: 0.229352s
+Running propositional reduction
+Solving with External SAT solver
+Writing temporary CNF
+Invoking SAT solver
+Solver returned code: 20
+result:UNSATISFIABLE
+Runtime Solver: 0.206042s
+Runtime decision procedure: 0.206082s
+
+RESULTS:
+Check 1: malloc.assertion.1
+	 - Status: SUCCESS
+	 - Description: "max allocation size exceeded"
+	 - Location: <builtin-library-malloc>:31 in function malloc
+
+Check 2: malloc.assertion.2
+	 - Status: SUCCESS
+	 - Description: "max allocation may fail"
+	 - Location: <builtin-library-malloc>:36 in function malloc
+
+Check 3: types_fmgr::FunctionCallInfoBaseData::args_n::<2>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer dereference: address must be a multiple of its type's alignment"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:453:18 in function types_fmgr::FunctionCallInfoBaseData::args_n::<2>
+
+Check 4: types_fmgr::FunctionCallInfoBaseData::args_n::<2>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "null pointer dereference occurred"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:453:18 in function types_fmgr::FunctionCallInfoBaseData::args_n::<2>
+
+Check 5: types_fmgr::FunctionCallInfoBaseData::args_n::<2>.safety_check.3
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:453:18 in function types_fmgr::FunctionCallInfoBaseData::args_n::<2>
+
+Check 6: types_fmgr::FunctionCallInfoBaseData::args_n::<2>.safety_check.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:453:18 in function types_fmgr::FunctionCallInfoBaseData::args_n::<2>
+
+Check 7: proofs::call2.assertion.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:213:9 in function proofs::call2
+
+Check 8: proofs::call2.assertion.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:214:9 in function proofs::call2
+
+Check 9: proof_float_arith::proofs::call2.missing_definition.1
+	 - Status: SUCCESS
+	 - Description: "assertion"
+	 - Location: Unknown file in function proof_float_arith::proofs::call2
+
+Check 10: types_fmgr::fcinfo::arity_panic.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:503:5 in function types_fmgr::fcinfo::arity_panic
+
+Check 11: adt_float::bits8.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../crates/backend/utils/adt/float/src/lib.rs:224:11 in function adt_float::bits8
+
+Check 12: proofs::eq_float84div_zero.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: src/lib.rs:905:23 in function proofs::eq_float84div_zero
+
+Check 13: proofs::eq_float84div_zero.cover.1
+	 - Status: SATISFIED
+	 - Description: "cover condition: cerr != 0"
+	 - Location: src/lib.rs:921:5 in function proofs::eq_float84div_zero
+
+Check 14: proofs::eq_float84div_zero.assertion.1
+	 - Status: SUCCESS
+	 - Description: "assertion failed: cerr == 3"
+	 - Location: src/lib.rs:921:5 in function proofs::eq_float84div_zero
+
+Check 15: proofs::eq_float84div_zero.cover.2
+	 - Status: SATISFIED
+	 - Description: "cover condition: cerr == 0"
+	 - Location: src/lib.rs:921:5 in function proofs::eq_float84div_zero
+
+Check 16: proofs::eq_float84div_zero.assertion.2
+	 - Status: SUCCESS
+	 - Description: "assertion failed: cerr == 0"
+	 - Location: src/lib.rs:921:5 in function proofs::eq_float84div_zero
+
+Check 17: proofs::eq_float84div_zero.assertion.3
+	 - Status: SUCCESS
+	 - Description: "assertion failed: d.as_f64 ().to_bits() == cval.to_bits()"
+	 - Location: src/lib.rs:921:5 in function proofs::eq_float84div_zero
+
+Check 18: <std::result::Result<f64, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:2173:15 in function <std::result::Result<f64, std::boxed::Box<types_error::PgError>> as std::ops::Try>::branch
+
+Check 19: adt_float::builtins::fc_float84div.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:36 in function adt_float::builtins::fc_float84div
+
+Check 20: std::boxed::Box::<types_error::PgError>::new.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::PgError>::new
+
+Check 21: std::boxed::Box::<types_error::PgError>::new.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::PgError>::new
+
+Check 22: std::boxed::Box::<types_error::PgError>::new.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::PgError>::new
+
+Check 23: std::boxed::Box::<types_error::PgError>::new.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::PgError>::new
+
+Check 24: std::boxed::Box::<types_error::PgError>::new.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::PgError>::new
+
+Check 25: std::boxed::Box::<types_error::PgError>::new.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:266:24 in function std::boxed::Box::<types_error::PgError>::new
+
+Check 26: pg_float84div.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: c/pg_float_arith.c:404 in function pg_float84div
+
+Check 27: pg_float84div.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: c/pg_float_arith.c:404 in function pg_float84div
+
+Check 28: pg_float84div.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: c/pg_float_arith.c:404 in function pg_float84div
+
+Check 29: pg_float84div.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: c/pg_float_arith.c:404 in function pg_float84div
+
+Check 30: pg_float84div.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: c/pg_float_arith.c:404 in function pg_float84div
+
+Check 31: pg_float84div.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: c/pg_float_arith.c:404 in function pg_float84div
+
+Check 32: adt_float::builtins::fc_float84div.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:42 in function adt_float::builtins::fc_float84div
+
+Check 33: adt_float::builtins::fc_float84div.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:42 in function adt_float::builtins::fc_float84div
+
+Check 34: adt_float::builtins::fc_float84div.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:42 in function adt_float::builtins::fc_float84div
+
+Check 35: adt_float::builtins::fc_float84div.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:42 in function adt_float::builtins::fc_float84div
+
+Check 36: adt_float::builtins::fc_float84div.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:42 in function adt_float::builtins::fc_float84div
+
+Check 37: adt_float::builtins::fc_float84div.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:42 in function adt_float::builtins::fc_float84div
+
+Check 38: adt_float::builtins::fc_float84div.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:57 in function adt_float::builtins::fc_float84div
+
+Check 39: adt_float::builtins::fc_float84div.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:57 in function adt_float::builtins::fc_float84div
+
+Check 40: adt_float::builtins::fc_float84div.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:57 in function adt_float::builtins::fc_float84div
+
+Check 41: adt_float::builtins::fc_float84div.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:57 in function adt_float::builtins::fc_float84div
+
+Check 42: adt_float::builtins::fc_float84div.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:57 in function adt_float::builtins::fc_float84div
+
+Check 43: adt_float::builtins::fc_float84div.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../crates/backend/utils/adt/float/src/builtins.rs:133:57 in function adt_float::builtins::fc_float84div
+
+Check 44: proofs::call2.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:213:9 in function proofs::call2
+
+Check 45: proofs::call2.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:214:9 in function proofs::call2
+
+Check 46: proofs::call2.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:215:12 in function proofs::call2
+
+Check 47: pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+
+Check 48: pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+
+Check 49: pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+
+Check 50: pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+
+Check 51: pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+
+Check 52: pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+
+Check 53: types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:228:22 in function types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new
+
+Check 54: types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:229:25 in function types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new
+
+Check 55: types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../crates/_support/types/fmgr/src/fcinfo.rs:230:25 in function types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new
+
+Check 56: types_error::PgError::error::<&str>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:264:26 in function types_error::PgError::error::<&str>
+
+Check 57: types_error::PgError::error::<&str>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:265:21 in function types_error::PgError::error::<&str>
+
+Check 58: types_error::PgError::error::<&str>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:266:25 in function types_error::PgError::error::<&str>
+
+Check 59: types_error::PgError::error::<&str>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:267:19 in function types_error::PgError::error::<&str>
+
+Check 60: types_error::PgError::error::<&str>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:268:22 in function types_error::PgError::error::<&str>
+
+Check 61: types_error::PgError::error::<&str>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:269:24 in function types_error::PgError::error::<&str>
+
+Check 62: types_error::PgError::error::<&str>.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:270:25 in function types_error::PgError::error::<&str>
+
+Check 63: types_error::PgError::error::<&str>.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:271:21 in function types_error::PgError::error::<&str>
+
+Check 64: types_error::PgError::error::<&str>.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:272:29 in function types_error::PgError::error::<&str>
+
+Check 65: types_error::PgError::error::<&str>.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:275:23 in function types_error::PgError::error::<&str>
+
+Check 66: types_error::PgError::error::<&str>.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:279:29 in function types_error::PgError::error::<&str>
+
+Check 67: types_error::PgError::error::<&str>.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:280:26 in function types_error::PgError::error::<&str>
+
+Check 68: types_error::PgError::error::<&str>.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:281:25 in function types_error::PgError::error::<&str>
+
+Check 69: types_error::PgError::error::<&str>.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:282:26 in function types_error::PgError::error::<&str>
+
+Check 70: types_error::PgError::error::<&str>.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:283:28 in function types_error::PgError::error::<&str>
+
+Check 71: types_error::PgError::error::<&str>.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/lib.rs:284:30 in function types_error::PgError::error::<&str>
+
+
+SUMMARY:
+ ** 0 of 69 failed
+
+ ** 2 of 2 cover properties satisfied
+
+
+VERIFICATION:- SUCCESSFUL
+
+Source-based code coverage results:
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::as_f32)
+ * 134:5 - 136:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::as_f64)
+ * 142:5 - 144:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::from_f32)
+ * 130:5 - 132:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::from_f64)
+ * 138:5 - 140:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::Datum::null)
+ * 28:5 - 30:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::NullableDatum::null)
+ * 169:5 - 174:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/datum/src/datum.rs (datum::NullableDatum::value)
+ * 162:5 - 167:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs (types_fmgr::FunctionCallInfoBaseData::<[datum::NullableDatum; 2]>::new)
+ * 226:5 - 236:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs (types_fmgr::FunctionCallInfoBaseData::args_n::<2>)
+ * 448:5 - 449:31 COVERED
+ * 450:13 - 450:41 UNCOVERED
+ * 451:9 - 454:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/fmgr/src/fcinfo.rs (types_fmgr::fcinfo::arity_panic)
+ * 502:1 - 503:11 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_error/src/pg_error.rs (types_error::PgError::error::<&str>)
+ * 150:5 - 152:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/_support/types/types_error/src/pg_error.rs (types_error::PgError::with_sqlstate)
+ * 273:5 - 276:6 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/builtins.rs (adt_float::builtins::fc_float84div)
+ * 131:9 - 133:71 COVERED
+ * 133:71 - 133:72 COVERED
+ * 134:9 - 134:10 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/funcs.rs (adt_float::float84div)
+ * 843:1 - 845:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/lib.rs (adt_float::bits8)
+ * 223:1 - 224:12 UNCOVERED
+ * 225:12 - 225:39 UNCOVERED
+ * 226:13 - 226:25 UNCOVERED
+ * 228:1 - 228:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/lib.rs (adt_float::f8_div_inf_cold)
+ * 183:1 - 184:27 UNCOVERED
+ * 185:16 - 185:50 UNCOVERED
+ * 186:5 - 187:25 UNCOVERED
+ * 188:1 - 188:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/lib.rs (adt_float::f8_div_zero_cold)
+ * 201:1 - 202:19 UNCOVERED
+ * 202:23 - 202:42 UNCOVERED
+ * 203:16 - 203:51 UNCOVERED
+ * 204:5 - 205:25 UNCOVERED
+ * 206:1 - 206:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/lib.rs (adt_float::float8_div)
+ * 306:1 - 307:19 COVERED
+ * 307:23 - 307:37 COVERED
+ * 308:16 - 308:40 COVERED
+ * 309:5 - 311:26 COVERED
+ * 312:16 - 312:50 UNCOVERED
+ * 313:5 - 314:21 COVERED
+ * 315:16 - 315:57 UNCOVERED
+ * 316:5 - 317:15 COVERED
+ * 318:1 - 318:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/lib.rs (adt_float::float_overflow_error)
+ * 71:1 - 73:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/lib.rs (adt_float::float_underflow_error)
+ * 77:1 - 80:2 UNCOVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/lib.rs (adt_float::float_zero_divide_error)
+ * 84:1 - 86:2 COVERED
+
+/Users/malisper/dev/pgrust-fast/.wt-covfix/crates/backend/utils/adt/float/src/lib.rs (adt_float::zero_divide_boxed)
+ * 210:1 - 212:2 COVERED
+
+src/lib.rs (proofs::any_f32)
+ * 244:5 - 246:6 COVERED
+
+src/lib.rs (proofs::any_f32_zero)
+ * 872:5 - 876:6 COVERED
+
+src/lib.rs (proofs::any_f64)
+ * 247:5 - 249:6 COVERED
+
+src/lib.rs (proofs::call2)
+ * 211:5 - 216:6 COVERED
+
+src/lib.rs (proofs::eq_float84div_zero)
+ * 900:13 - 905:84 COVERED
+ * 906:24 - 910:22 COVERED
+ * 911:25 - 915:22 COVERED
+ * 917:13 - 917:14 COVERED
+
+Verification Time: 1.4693214s
+
+[info] Coverage results saved to /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/float-arith/target/kani/aarch64-apple-darwin/kanicov_2026-07-30_23-33
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.

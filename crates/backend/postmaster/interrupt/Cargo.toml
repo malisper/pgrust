@@ -1,0 +1,21 @@
+[package]
+name = "interrupt"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "interrupt"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+ipc = { path = "../../storage/ipc/ipc" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }

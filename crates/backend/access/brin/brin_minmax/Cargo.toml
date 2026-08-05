@@ -1,0 +1,17 @@
+[package]
+name = "brin_minmax"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_brin = { path = "../../../../_support/types/types_brin" }
+brin_tuple = { path = "../brin_tuple" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }

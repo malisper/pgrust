@@ -1,0 +1,9 @@
+text-cmp	eq_texteq	proofs::eq_texteq
+text-cmp	eq_textne	proofs::eq_textne
+text-cmp	eq_text_lt	
+text-cmp	eq_text_le	
+text-cmp	eq_text_gt	
+text-cmp	eq_text_ge	
+text-cmp	eq_bttextcmp	proofs::eq_bttextcmp
+text-cmp	eq_text_larger	
+text-cmp	eq_text_smaller	

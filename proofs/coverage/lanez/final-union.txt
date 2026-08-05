@@ -1,0 +1,12 @@
+src/cyrillic_and_mic.rs 48 / 48
+src/euc2004_sjis2004.rs 179 / 217
+src/euc_cn_and_mic.rs 87 / 87
+src/euc_jp_and_sjis.rs 426 / 428
+src/euc_kr_and_mic.rs 90 / 90
+src/euc_tw_and_big5.rs 298 / 298
+src/euc_tw_and_big5/big5.rs 88 / 89
+src/latin2_and_win1250.rs 76 / 76
+src/latin_and_mic.rs 20 / 20
+src/lib.rs 633 / 642
+src/utf8_procs.rs 62 / 65
+FINAL UNION: 2007 / 2060

@@ -1,0 +1,188 @@
+{
+ "generated": "2026-07-31T23:08:46+00:00",
+ "head_sha": "a594887353161e3130aa451f7bfba1915226f11a",
+ "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
+ "sloc_rule_id": "v2+no-const-tables",
+ "sloc_exclusions": {
+  "use-mod": 4,
+  "attr": 17,
+  "const-static": 7,
+  "arm-head": 1,
+  "else-only": 2,
+  "loop-only": 1,
+  "typedef": 3,
+  "impl-header": 1,
+  "thread-local": 2
+ },
+ "line_table_inputs": [
+  "/Users/malisper/dev/pgrust-fast/.wt-covresweep/fuzz/coverage/pg_prng_diff.lcov",
+  "/Users/malisper/dev/pgrust-fast/.wt-covresweep/fuzz/coverage/arrayutils_diff.lcov",
+  "/Users/malisper/dev/pgrust-fast/.wt-covresweep/fuzz/coverage/hashfn_diff.lcov"
+ ],
+ "census": {
+  "expected": 0,
+  "ran": 0,
+  "walled": 0,
+  "failed_to_run": 0,
+  "waived": 0,
+  "kaniraw_files": 0,
+  "kaniraw_without_census_row": 0,
+  "census_closed": true,
+  "unmeasured": []
+ },
+ "macro_attribution": {
+  "enabled": true,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": {
+   "files": 158,
+   "macro_defs": 320,
+   "generator_macros": 221,
+   "call_blocks": 468,
+   "decl_lines": 2293
+  }
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 0,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [
+    "/Users/malisper/dev/pgrust-fast/.wt-covresweep/fuzz/coverage/pg_prng_diff.lcov",
+    "/Users/malisper/dev/pgrust-fast/.wt-covresweep/fuzz/coverage/arrayutils_diff.lcov",
+    "/Users/malisper/dev/pgrust-fast/.wt-covresweep/fuzz/coverage/hashfn_diff.lcov"
+   ],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/arrayutils",
+  "crates/common/hashfn",
+  "crates/common/pg_prng"
+ ],
+ "totals": {
+  "sloc": 341,
+  "kani": 0,
+  "fuzz": 325,
+  "regress": 0,
+  "any": 325,
+  "pct": {
+   "kani": 0.0,
+   "fuzz": 95.31,
+   "regress": 0.0,
+   "any": 95.31
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 4,
+   "covered_sloc_in_touched_files": 395,
+   "sloc_of_touched_files": 611
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "arrayutils",
+   "path": "crates/backend/utils/adt/arrayutils",
+   "sloc": 102,
+   "kani": 0,
+   "fuzz": 95,
+   "regress": 0,
+   "any": 95,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 93.14,
+    "regress": 0.0,
+    "any": 93.14
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/arrayutils/src/lib.rs",
+     "sloc": 102,
+     "kani": 0,
+     "fuzz": 95,
+     "regress": 0,
+     "any": 95,
+     "detail": "files/crates__backend__utils__adt__arrayutils__src__lib.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "hashfn",
+   "path": "crates/common/hashfn",
+   "sloc": 164,
+   "kani": 0,
+   "fuzz": 163,
+   "regress": 0,
+   "any": 163,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 99.39,
+    "regress": 0.0,
+    "any": 99.39
+   },
+   "files": [
+    {
+     "path": "crates/common/hashfn/src/lib.rs",
+     "sloc": 164,
+     "kani": 0,
+     "fuzz": 163,
+     "regress": 0,
+     "any": 163,
+     "detail": "files/crates__common__hashfn__src__lib.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "pg_prng",
+   "path": "crates/common/pg_prng",
+   "sloc": 75,
+   "kani": 0,
+   "fuzz": 67,
+   "regress": 0,
+   "any": 67,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 89.33,
+    "regress": 0.0,
+    "any": 89.33
+   },
+   "files": [
+    {
+     "path": "crates/common/pg_prng/src/lib.rs",
+     "sloc": 75,
+     "kani": 0,
+     "fuzz": 67,
+     "regress": 0,
+     "any": 67,
+     "detail": "files/crates__common__pg_prng__src__lib.rs.json"
+    },
+    {
+     "path": "crates/common/pg_prng/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__common__pg_prng__src__tests.rs.json"
+    }
+   ]
+  }
+ ]
+}

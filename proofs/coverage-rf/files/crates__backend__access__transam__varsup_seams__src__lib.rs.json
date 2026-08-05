@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/transam/varsup_seams/src/lib.rs","sloc":[4,6,9,11,14,17,20,22,25,27],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2]}}

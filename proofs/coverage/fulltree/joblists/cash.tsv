@@ -1,0 +1,11 @@
+cash	eq_cash_eq	
+cash	eq_cash_ne	
+cash	eq_cash_lt	
+cash	eq_cash_le	
+cash	eq_cash_gt	
+cash	eq_cash_ge	
+cash	eq_cash_cmp	
+cash	eq_cashlarger	
+cash	eq_cashsmaller	
+cash	eq_cash_pl	
+cash	eq_cash_mi	

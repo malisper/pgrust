@@ -1,0 +1,28 @@
+e obsolete)
+BRT    -10800    # Brasil Time (obsolete)
+COT    -18000    # Columbia Time (obsolete)
+CDT    -18000 D  # Central Daylight Time
+CLST   -10800 D  # Chile Summer Time (obsolete)
+CLT    America/Santiago  # Chie (obsolete)
+CST    -21600    # Central Standard Time (America)
+EDT    -14400 D  # Eastern Daylight Saving Time
+EGST      mer Time (obsolete)
+EGT     -3600    # East Greenland Time (Svalbard & Jan Mayen) (obsolete)
+EST    -18000    # Eastern Standard Time (America Time (obsolete)
+FNST    -3600 D  # Fernando de Noronha Summer Time (obsolete)
+GFT    -10800    # French Guiana Time (obsolete)
+GYT    America/Guyana  # Guyana Time (obsolete)
+e (America)
+FNT     -7200    # Fernando de Noronha Time (obsolete)
+FNST    -3600 D  # Fernando de Noronha Summer Time (obsolete)
+GFT    -10800    # French Guiana Time (obsolete)
+GYT    Americ-light Tight Time
+NFT    -12600    # Newfoundland Time (not in IANA database)
+NST   e
+PET    -18000    # Peru Time (obsolete)
+PDT    -25200 D  # Pacif Pierre & Miquelon Daylight Time (obsolete)
+PMST   -10800    # Pierre & Miquelon Standard Time (obsolete)
+PST    -28800    # Pacific Standard Time
+PYST   -10800 D  # Paraguay Summer Time (obsolete)
+PYT    (obsolete)
+BRA    -10800    # Brazil Time (not inop

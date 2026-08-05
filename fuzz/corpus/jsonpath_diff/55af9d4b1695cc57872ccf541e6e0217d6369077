@@ -1,0 +1,1 @@
+$ ? (@ like_regex "#ma{4,3}n" l& g "(@ lik\\_regex "# "(ms#)

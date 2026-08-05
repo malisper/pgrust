@@ -1,0 +1,31 @@
+[package]
+name = "adt_jsonpath"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_jsonpath"
+path = "src/lib.rs"
+
+[dependencies]
+adt_formatting = { path = "../formatting" }
+adt_json = { path = "../json" }
+adt_numeric = { path = "../numeric" }
+datum = { path = "../../../../_support/types/datum" }
+mbutils = { path = "../../mb/mbutils" }
+mcx = { path = "../../../../_support/mcx" }
+numutils = { path = "../numutils" }
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }
+pqformat = { path = "../../../libpq/pqformat" }
+regex_core = { path = "../../../regex/regex_core" }
+stack_depth = { path = "../../misc/stack_depth" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+varlena = { path = "../varlena" }
+
+[dev-dependencies]
+wchar = { path = "../../../../common/wchar" }

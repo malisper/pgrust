@@ -1,0 +1,89 @@
+{
+ "rule": "v2+no-const-tables",
+ "note": "every const-table span excluded from the denominator; reason 'const-array-heuristic' rows are the ones to review \u2014 a span swallowing real logic is a defect",
+ "total_spans": 7,
+ "total_lines": 36,
+ "by_reason": {
+  "generated-file": 0,
+  "const-array-heuristic": 7
+ },
+ "spans": [
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 37,
+   "span": [
+    38,
+    58
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "const K512: [u64; 80] = ["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 18,
+   "span": [
+    19,
+    27
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "const K256: [u32; 64] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/encode/src/builtins.rs",
+   "head_line": 45,
+   "span": [
+    46,
+    48
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub const ENCODE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 60,
+   "span": [
+    61,
+    63
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const SHA384_H0: [u64; 8] = ["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 65,
+   "span": [
+    66,
+    68
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const SHA512_H0: [u64; 8] = ["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 29,
+   "span": [
+    30,
+    31
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const SHA224_H0: [u32; 8] = ["
+  },
+  {
+   "path": "crates/common/sha2/src/lib.rs",
+   "head_line": 33,
+   "span": [
+    34,
+    35
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const SHA256_H0: [u32; 8] = ["
+  }
+ ]
+}

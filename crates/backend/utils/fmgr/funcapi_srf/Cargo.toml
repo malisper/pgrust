@@ -1,0 +1,10 @@
+[package]
+name = "funcapi_srf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }

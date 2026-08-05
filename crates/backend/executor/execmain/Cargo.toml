@@ -1,0 +1,224 @@
+[package]
+name = "execmain"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pgsync = { path = "../../../_support/pgsync" }
+pg_clock = { path = "../../../port/pg_clock" }
+# slease v2 sweeper (GL-SLEASE-2) + GL-STMTTASK-2 quantum-yield sweeper:
+# waiter is the sanctioned timed-park surface (timeout timer-thread
+# precedent; DST clock hook).
+waiter = { path = "../../storage/ipc/waiter" }
+parallel = { path = "../../access/transam/parallel" }
+runtime = { path = "../runtime" }
+spillset = { path = "../spillset" }
+nodes_core = { path = "../../nodes/nodes_core" }
+tqueue = { path = "../tqueue" }
+shm_mq = { path = "../../storage/ipc/shm_mq" }
+tuplesort = { path = "../../utils/sort/tuplesort" }
+latch = { path = "../../storage/ipc/latch" }
+types_storage = { path = "../../../_support/types/types_storage" }
+trigger = { path = "../../commands/trigger" }
+nodemodifytable = { path = "../nodemodifytable" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_portal = { path = "../../../_support/types/portal" }
+tcop_dest = { path = "../../tcop/dest" }
+execjunk = { path = "../execjunk" }
+execmain_seams = { path = "../execmain_seams" }
+seam_core = { path = "../../../_support/seam_core" }
+plancache_portal_seams = { path = "../../utils/cache/plancache_portal_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+executils = { path = "../executils" }
+execpartition = { path = "../execpartition" }
+partprune = { path = "../../partitioning/partprune" }
+instrument = { path = "../instrument" }
+execexpr = { path = "../execexpr" }
+varlena = { path = "../../utils/adt/varlena" }
+execscan = { path = "../execscan" }
+execgrouping = { path = "../execgrouping" }
+nodefunctionscan = { path = "../nodefunctionscan" }
+nodetablefuncscan = { path = "../nodetablefuncscan" }
+nodevaluesscan = { path = "../nodevaluesscan" }
+nodeforeignscan = { path = "../nodeforeignscan" }
+nodectescan = { path = "../nodectescan" }
+nodenamedtuplestorescan = { path = "../nodenamedtuplestorescan" }
+noderecursiveunion = { path = "../noderecursiveunion" }
+nodeworktablescan = { path = "../nodeworktablescan" }
+nodeseqscan = { path = "../nodeseqscan" }
+nodesamplescan = { path = "../nodesamplescan" }
+nodeindexscan = { path = "../nodeindexscan" }
+indexam = { path = "../../access/index/indexam" }
+nodetidscan = { path = "../nodetidscan" }
+nodetidrangescan = { path = "../nodetidrangescan" }
+portalmem = { path = "../../utils/mmgr/portalmem" }
+nodeindexonlyscan = { path = "../nodeindexonlyscan" }
+nodebitmapindexscan = { path = "../nodebitmapindexscan" }
+nodebitmapheapscan = { path = "../nodebitmapheapscan" }
+tidbitmap = { path = "../../nodes/tidbitmap" }
+nodeagg = { path = "../nodeagg" }
+lanefold = { path = "../lanefold" }
+laneexec = { path = "../laneexec" }
+lanestitch = { path = "../lanestitch" }
+nodematerial = { path = "../nodematerial" }
+nodememoize = { path = "../nodememoize" }
+nodesort = { path = "../nodesort" }
+nodeincrementalsort = { path = "../nodeincrementalsort" }
+nodegroup = { path = "../nodegroup" }
+nodeunique = { path = "../nodeunique" }
+nodeappend = { path = "../nodeappend" }
+nodemergeappend = { path = "../nodemergeappend" }
+nodesetop = { path = "../nodesetop" }
+nodelimit = { path = "../nodelimit" }
+nodehash = { path = "../nodehash" }
+nodehashjoin = { path = "../nodehashjoin" }
+nodemergejoin = { path = "../nodemergejoin" }
+nodewindowagg = { path = "../nodewindowagg" }
+nodenestloop = { path = "../nodenestloop" }
+exectuples = { path = "../exectuples" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+hashfn = { path = "../../../common/hashfn" }
+tupdesc = { path = "../../access/common/tupdesc" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+tuplestore = { path = "../../utils/sort/tuplestore" }
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+xact = { path = "../../access/transam/xact" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+datum = { path = "../../../_support/types/datum" }
+types_rel = { path = "../../../_support/types/rel" }
+# WS-K heap batch-source readahead: execmain sees bufmgr ONLY through the
+# seam crate (prefetch_buffer, advisory).
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+# GL-STMTTASK-1: the statement task's cancel-chase vector (SendThreadSignal
+# to the serving worker's leased identity) + the drive bracket's cancel
+# disposition install. Already an indirect dep through parallel.
+procsignal = { path = "../../storage/ipc/procsignal" }
+nodelockrows = { path = "../nodelockrows" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+pgstat = { path = "../../utils/activity/pgstat" }
+tableam = { path = "../../access/table/tableam" }
+# W2a block-run worker-direct writes: target open + bulk-insert state +
+# the parallel-write token live below the executor.
+table = { path = "../../access/table/table" }
+heapam = { path = "../../access/heap/heapam" }
+# SEAM-WIRING (SE10-GATES item 1): relam_is_pgrcolumnar for the §4.1
+# CURRENT-OF eligibility probe's AM narrowing (execcurrent.rs).
+reloptions = { path = "../../access/common/reloptions" }
+[dev-dependencies]
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+adt_numeric = { path = "../../utils/adt/numeric" }
+spi_seams = { path = "../spi_seams" }
+parallel = { path = "../../access/transam/parallel" }
+bgworker = { path = "../../postmaster/bgworker" }
+shm_mq = { path = "../../storage/ipc/shm_mq" }
+tqueue = { path = "../tqueue" }
+shmem = { path = "../../storage/ipc/shmem" }
+elog = { path = "../../utils/error/elog" }
+guc = { path = "../../utils/misc/guc" }
+adt_bool = { path = "../../utils/adt/bool" }
+adt_float = { path = "../../utils/adt/float" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+xloginsert = { path = "../../access/transam/xloginsert" }
+xlogutils = { path = "../../access/transam/xlogutils" }
+heapam_visibility = { path = "../../access/heap/heapam_visibility" }
+clog = { path = "../../access/transam/clog" }
+subtrans = { path = "../../access/transam/subtrans" }
+transam = { path = "../../access/transam/transam" }
+varsup = { path = "../../access/transam/varsup" }
+procarray = { path = "../../storage/ipc/procarray" }
+inval = { path = "../../utils/cache/inval" }
+pgstat = { path = "../../utils/activity/pgstat" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }
+latch = { path = "../../storage/ipc/latch" }
+miscinit = { path = "../../utils/init/miscinit" }
+combocid = { path = "../../utils/time/combocid" }
+pg_enum = { path = "../../catalog/pg_enum" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+pmsignal = { path = "../../storage/ipc/pmsignal" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+controldata_utils = { path = "../../../common/controldata_utils" }
+ipc = { path = "../../storage/ipc/ipc" }
+lock = { path = "../../storage/lmgr/lock" }
+types_startup = { path = "../../../_support/types/types_startup" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+xact = { path = "../../access/transam/xact" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
+deadlock_seams = { path = "../../storage/lmgr/deadlock_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
+lock_seams = { path = "../../storage/lmgr/lock_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+sync_seams = { path = "../../storage/sync/sync_seams" }
+slot_seams = { path = "../../replication/slot_seams" }
+sinval_seams = { path = "../../storage/ipc/sinval_seams" }
+logical_worker_seams = { path = "../../replication/logical_worker_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+trigger_seams = { path = "../../commands/trigger_seams" }
+async_seams = { path = "../../commands/async_seams" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+be_fsstubs_seams = { path = "../../libpq/be_fsstubs_seams" }
+catalog_index_seams = { path = "../../catalog/catalog_index_seams" }
+catalog_storage_seams = { path = "../../catalog/storage_seams" }
+multixact_seams = { path = "../../access/transam/multixact_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+catcache_seams = { path = "../../utils/cache/catcache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+logical_seams = { path = "../../replication/logical_seams" }
+snapbuild_seams = { path = "../../replication/snapbuild_seams" }
+origin_seams = { path = "../../replication/origin_seams" }
+commit_ts_seams = { path = "../../access/transam/commit_ts_seams" }
+syncrep_seams = { path = "../../replication/syncrep_seams" }
+backend_progress_seams = { path = "../../utils/activity/backend_progress_seams" }
+pmchild_seams = { path = "../../postmaster/pmchild_seams" }
+fd = { path = "../../storage/file/fd" }
+resowner = { path = "../../utils/resowner/resowner" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+tuplestore = { path = "../../utils/sort/tuplestore" }
+tstore_receiver = { path = "../tstore_receiver" }
+datum = { path = "../../../_support/types/datum" }
+types_rel = { path = "../../../_support/types/rel" }
+types_storage = { path = "../../../_support/types/types_storage" }
+relation_seams = { path = "../../access/common/relation_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+# WS-J express-lane A/B corpus (tests::express_ab): fake btree pages + the
+# xlog-active probe the nbtree read path consults.
+types_nbtree = { path = "../../../_support/types/types_nbtree" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+# WS-N dml A/B corpus (tests::dml_ab): CheckValidResultRel's replica-identity
+# probe on the fake result relation.
+execreplication_seams = { path = "../execreplication_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }

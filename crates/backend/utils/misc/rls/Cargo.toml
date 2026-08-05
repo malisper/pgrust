@@ -1,0 +1,27 @@
+[package]
+name = "rls"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rls"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+cache_syscache = { path = "../../cache/cache_syscache" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+aclchk = { path = "../../../catalog/aclchk" }
+adt_acl = { path = "../../adt/acl" }
+guc_tables = { path = "../guc_tables" }
+miscinit = { path = "../../init/miscinit" }
+elog = { path = "../../error/elog" }
+rls_seams = { path = "../rls_seams" }
+types_rel = { path = "../../../../_support/types/rel" }
+varlena = { path = "../../adt/varlena" }
+catalog_objectaddress = { path = "../../../catalog/objectaddress" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }

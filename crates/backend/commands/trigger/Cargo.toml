@@ -1,0 +1,69 @@
+[package]
+name = "trigger"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+trigger_seams = { path = "../trigger_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+xact = { path = "../../access/transam/xact" }
+types_error = { path = "../../../_support/types/types_error" }
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../_support/types/snapshot", package = "types_snapshot" }
+types_trigger = { path = "../../../_support/types/types_trigger" }
+ri_triggers_seams = { path = "../../utils/adt/ri_triggers_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+heaptuple = { path = "../../access/common/heaptuple" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+heapam = { path = "../../access/heap/heapam" }
+catalog = { path = "../../catalog/catalog" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+pg_depend = { path = "../../catalog/pg_depend" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+partdesc = { path = "../../partitioning/partdesc" }
+tupdesc = { path = "../../access/common/tupdesc" }
+relcache = { path = "../../utils/cache/relcache" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+inval = { path = "../../utils/cache/inval" }
+miscinit = { path = "../../utils/init/miscinit" }
+types_nodes = { path = "../../../_support/types/nodes" }
+nodes_core = { path = "../../nodes/nodes_core" }
+outfuncs = { path = "../../nodes/outfuncs" }
+vars = { path = "../../optimizer/util/vars" }
+parser_small1 = { path = "../../parser/parser_small1" }
+parse_relation = { path = "../../parser/parse_relation" }
+parse_clause = { path = "../../parser/parse_clause" }
+parse_collate = { path = "../../parser/parse_collate" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+superuser = { path = "../../utils/misc/superuser" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+init_small = { path = "../../utils/init/init_small" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+dependency_seams = { path = "../../catalog/dependency_seams" }
+mbutils = { path = "../../utils/mb/mbutils" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_trigger_call = { path = "../../../_support/types/types_trigger_call" }
+types_slot = { path = "../../../_support/types/types_slot" }
+execexpr = { path = "../../executor/execexpr" }
+readfuncs = { path = "../../nodes/readfuncs" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
+clauses = { path = "../../optimizer/util/clauses" }
+tuplestore = { path = "../../utils/sort/tuplestore" }
+exectuples = { path = "../../executor/exectuples" }
+types_portal = { path = "../../../_support/types/portal" }
+pgstat = { path = "../../utils/activity/pgstat" }
+guc_tables = { path = "../../utils/misc/guc_tables" }

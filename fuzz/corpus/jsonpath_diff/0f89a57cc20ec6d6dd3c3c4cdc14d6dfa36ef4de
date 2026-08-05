@@ -1,0 +1,1 @@
+;$ like_regex "^x" && $.b.datetim.a like_regex "^x" && $.b.datetime() == $.c.datetime()

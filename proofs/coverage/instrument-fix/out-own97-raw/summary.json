@@ -1,0 +1,818 @@
+{
+ "generated": "2026-07-31T00:26:42+00:00",
+ "head_sha": "d824ba3fe9376193455a7ce9202170a3d274ea8c",
+ "sloc_rule": "non-blank, non-comment-only lines containing at least one character besides whitespace and {}()[];, \u2014 see proofs/COVERAGE.md",
+ "census": {
+  "expected": 97,
+  "ran": 97,
+  "walled": 0,
+  "failed_to_run": 0,
+  "waived": 0,
+  "kaniraw_files": 97,
+  "kaniraw_without_census_row": 0,
+  "census_closed": true,
+  "unmeasured": []
+ },
+ "macro_attribution": {
+  "enabled": false,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": null
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 97,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/geo",
+  "crates/backend/utils/adt/float",
+  "crates/backend/utils/adt/numeric",
+  "crates/backend/utils/adt/varlena",
+  "crates/backend/utils/adt/network",
+  "crates/backend/utils/adt/varbit",
+  "crates/backend/utils/adt/jsonb"
+ ],
+ "totals": {
+  "sloc": 21986,
+  "kani": 245,
+  "fuzz": 0,
+  "regress": 0,
+  "any": 245,
+  "pct": {
+   "kani": 1.11,
+   "fuzz": 0.0,
+   "regress": 0.0,
+   "any": 1.11
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "float",
+   "path": "crates/backend/utils/adt/float",
+   "sloc": 2215,
+   "kani": 245,
+   "fuzz": 0,
+   "regress": 0,
+   "any": 245,
+   "pct": {
+    "kani": 11.06,
+    "fuzz": 0.0,
+    "regress": 0.0,
+    "any": 11.06
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/float/src/aggregates.rs",
+     "sloc": 225,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__float__src__aggregates.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/float/src/builtins.rs",
+     "sloc": 490,
+     "kani": 49,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 49,
+     "detail": "files/crates__backend__utils__adt__float__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/float/src/funcs.rs",
+     "sloc": 663,
+     "kani": 71,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 71,
+     "detail": "files/crates__backend__utils__adt__float__src__funcs.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/float/src/io.rs",
+     "sloc": 496,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__float__src__io.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/float/src/lib.rs",
+     "sloc": 341,
+     "kani": 125,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 125,
+     "detail": "files/crates__backend__utils__adt__float__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/float/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__float__src__tests.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "geo",
+   "path": "crates/backend/utils/adt/geo",
+   "sloc": 2819,
+   "kani": 0,
+   "fuzz": 0,
+   "regress": 0,
+   "any": 0,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 0.0,
+    "regress": 0.0,
+    "any": 0.0
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/geo/src/boxes.rs",
+     "sloc": 138,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__boxes.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/builtins.rs",
+     "sloc": 796,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/circle.rs",
+     "sloc": 122,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__circle.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/io.rs",
+     "sloc": 585,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__io.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/lib.rs",
+     "sloc": 277,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/line.rs",
+     "sloc": 137,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__line.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/lseg.rs",
+     "sloc": 89,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__lseg.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/path.rs",
+     "sloc": 110,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__path.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/point.rs",
+     "sloc": 81,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__point.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/poly.rs",
+     "sloc": 164,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__poly.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/proximity.rs",
+     "sloc": 320,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__proximity.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/geo/src/tests_full.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__geo__src__tests_full.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "jsonb",
+   "path": "crates/backend/utils/adt/jsonb",
+   "sloc": 5875,
+   "kani": 0,
+   "fuzz": 0,
+   "regress": 0,
+   "any": 0,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 0.0,
+    "regress": 0.0,
+    "any": 0.0
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/aggs.rs",
+     "sloc": 254,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__aggs.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/build.rs",
+     "sloc": 383,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__build.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/builtins.rs",
+     "sloc": 748,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/container.rs",
+     "sloc": 151,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__container.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/getfield.rs",
+     "sloc": 154,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__getfield.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/gin.rs",
+     "sloc": 549,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__gin.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/io.rs",
+     "sloc": 297,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__io.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/iter.rs",
+     "sloc": 170,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__iter.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/iterate.rs",
+     "sloc": 215,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__iterate.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/lib.rs",
+     "sloc": 15,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/mutate.rs",
+     "sloc": 562,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__mutate.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/ops.rs",
+     "sloc": 287,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__ops.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/populate.rs",
+     "sloc": 1381,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__populate.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/srfs.rs",
+     "sloc": 194,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__srfs.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/subs.rs",
+     "sloc": 71,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__subs.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__tests.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/jsonb/src/tojsonb.rs",
+     "sloc": 444,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__jsonb__src__tojsonb.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "network",
+   "path": "crates/backend/utils/adt/network",
+   "sloc": 1518,
+   "kani": 0,
+   "fuzz": 0,
+   "regress": 0,
+   "any": 0,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 0.0,
+    "regress": 0.0,
+    "any": 0.0
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/network/src/abbrev.rs",
+     "sloc": 57,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__network__src__abbrev.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/builtins.rs",
+     "sloc": 316,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__network__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/cidr_ntop.rs",
+     "sloc": 157,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__network__src__cidr_ntop.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/lib.rs",
+     "sloc": 490,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__network__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/ntop.rs",
+     "sloc": 142,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__network__src__ntop.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/pton.rs",
+     "sloc": 356,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__network__src__pton.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__network__src__tests.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "numeric",
+   "path": "crates/backend/utils/adt/numeric",
+   "sloc": 5713,
+   "kani": 0,
+   "fuzz": 0,
+   "regress": 0,
+   "any": 0,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 0.0,
+    "regress": 0.0,
+    "any": 0.0
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/numeric/src/aggregates.rs",
+     "sloc": 559,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__aggregates.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/arith.rs",
+     "sloc": 808,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__arith.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/builtins.rs",
+     "sloc": 864,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/fixed.rs",
+     "sloc": 332,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__fixed.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/io.rs",
+     "sloc": 395,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__io.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/keypack.rs",
+     "sloc": 67,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__keypack.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/lib.rs",
+     "sloc": 191,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/math.rs",
+     "sloc": 952,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__math.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/ops.rs",
+     "sloc": 788,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__ops.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/random.rs",
+     "sloc": 103,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__random.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/series.rs",
+     "sloc": 70,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__series.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/sortsupport.rs",
+     "sloc": 82,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__sortsupport.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__tests.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/numeric/src/var.rs",
+     "sloc": 502,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__numeric__src__var.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "varbit",
+   "path": "crates/backend/utils/adt/varbit",
+   "sloc": 866,
+   "kani": 0,
+   "fuzz": 0,
+   "regress": 0,
+   "any": 0,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 0.0,
+    "regress": 0.0,
+    "any": 0.0
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/varbit/src/lib.rs",
+     "sloc": 866,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varbit__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varbit/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varbit__src__tests.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "varlena",
+   "path": "crates/backend/utils/adt/varlena",
+   "sloc": 2980,
+   "kani": 0,
+   "fuzz": 0,
+   "regress": 0,
+   "any": 0,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 0.0,
+    "regress": 0.0,
+    "any": 0.0
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/varlena/src/abbrev.rs",
+     "sloc": 68,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__abbrev.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varlena/src/builtins.rs",
+     "sloc": 695,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varlena/src/bytea.rs",
+     "sloc": 365,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__bytea.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varlena/src/concat_format.rs",
+     "sloc": 418,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__concat_format.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varlena/src/levenshtein.rs",
+     "sloc": 159,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__levenshtein.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varlena/src/lib.rs",
+     "sloc": 767,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varlena/src/replace_regexp.rs",
+     "sloc": 151,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__replace_regexp.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varlena/src/split_text.rs",
+     "sloc": 154,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__split_text.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varlena/src/string_agg.rs",
+     "sloc": 122,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__string_agg.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varlena/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__tests.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/varlena/src/unicode.rs",
+     "sloc": 81,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__varlena__src__unicode.rs.json"
+    }
+   ]
+  }
+ ]
+}

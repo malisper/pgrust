@@ -1,0 +1,34 @@
+[package]
+name = "pg_constraint"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_scan = { path = "../../../_support/types/types_scan" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+outfuncs = { path = "../../nodes/outfuncs" }
+heaptuple = { path = "../../access/common/heaptuple" }
+varlena = { path = "../../utils/adt/varlena" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+catalog = { path = "../catalog" }
+catalog_seams = { path = "../catalog_seams" }
+catalog_indexing = { path = "../catalog_indexing" }
+pg_depend = { path = "../pg_depend" }
+nodes_core = { path = "../../nodes/nodes_core" }
+format_type = { path = "../../utils/adt/format_type" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+amapi = { path = "../../access/index/amapi" }

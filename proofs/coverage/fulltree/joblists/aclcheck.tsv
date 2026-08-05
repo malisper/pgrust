@@ -1,0 +1,7 @@
+aclcheck	proofs::diag_seam_visibility	
+aclcheck	proofs::diag_c_probe_strip	
+aclcheck	proofs::eq_aclinsert	
+aclcheck	proofs::eq_aclremove	
+aclcheck	proofs::control_membership_noskew	
+aclcheck	proofs::spot_acldefault_sql_bad_char	
+aclcheck	proofs::control_catalog_owner_noskew	

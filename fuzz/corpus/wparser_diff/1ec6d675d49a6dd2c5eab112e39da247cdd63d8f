@@ -1,0 +1,3 @@
+, txtkeyword);
+ALTER TABLE test_tsquery ADD COLUMN sample tsquery;
+UPDATE test_tsquery SET sample = to_tsquery(

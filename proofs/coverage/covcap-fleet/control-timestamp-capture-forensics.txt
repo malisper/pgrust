@@ -1,0 +1,149 @@
+== coverage capture forensics: timestamp_diff (cargo-fuzz coverage rc=0) ==
+-- corpus files on disk:  20708
+-- units replayed (log):  20708
+-- clean libFuzzer exits: 16
+-- raw profraw dir: /work/src/fuzz/coverage/timestamp_diff/raw
+total 47504
+drwxr-xr-x. 2 root root   16384 Aug  1 05:53 .
+drwxr-xr-x. 3 root root      42 Aug  1 05:53 ..
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-0.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-1.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-10.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-11.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-12.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-13.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-14.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-15.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-2.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-3.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-4.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-5.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-6.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-7.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-8.profraw
+-rw-r--r--. 1 root root 3036528 Aug  1 05:53 batch-9.profraw
+-- llvm-profdata: /usr/local/rustup/toolchains/nightly-2026-07-17-aarch64-unknown-linux-gnu/lib/rustlib/aarch64-unknown-linux-gnu/bin/llvm-profdata
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-0.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 262005
+Maximum internal block count: 280280
+Total number of blocks: 70923
+Total count: 2788129
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-1.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 131618
+Maximum internal block count: 185439
+Total number of blocks: 70923
+Total count: 2362208
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-10.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 248504
+Maximum internal block count: 266266
+Total number of blocks: 70923
+Total count: 2619373
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-11.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 183993
+Maximum internal block count: 196196
+Total number of blocks: 70923
+Total count: 2345544
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-12.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 209956
+Maximum internal block count: 224224
+Total number of blocks: 70923
+Total count: 2424204
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-13.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 222527
+Maximum internal block count: 238238
+Total number of blocks: 70923
+Total count: 2635462
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-14.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 197088
+Maximum internal block count: 210210
+Total number of blocks: 70923
+Total count: 2376580
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-15.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 196945
+Maximum internal block count: 210210
+Total number of blocks: 70923
+Total count: 2239066
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-2.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 158089
+Maximum internal block count: 168168
+Total number of blocks: 70923
+Total count: 2154607
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-3.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 222283
+Maximum internal block count: 238238
+Total number of blocks: 70923
+Total count: 2427699
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-4.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 183985
+Maximum internal block count: 196196
+Total number of blocks: 70923
+Total count: 2243727
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-5.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 170429
+Maximum internal block count: 182182
+Total number of blocks: 70923
+Total count: 2135073
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-6.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 274721
+Maximum internal block count: 294294
+Total number of blocks: 70923
+Total count: 2772292
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-7.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 170638
+Maximum internal block count: 182182
+Total number of blocks: 70923
+Total count: 2234005
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-8.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 196231
+Maximum internal block count: 210210
+Total number of blocks: 70923
+Total count: 2394812
+---- /work/src/fuzz/coverage/timestamp_diff/raw/batch-9.profraw (3036528 bytes)
+Instrumentation level: Front-end
+Total functions: 33046
+Maximum function count: 261697
+Maximum internal block count: 280280
+Total number of blocks: 70923
+Total count: 2629562
+-- merged profdata:
+Instrumentation level: Front-end
+Total functions: 999
+Maximum function count: 3290709
+Maximum internal block count: 3517514
+Total number of blocks: 3783
+Total count: 38782343
+-- covbin candidates (find target -path *coverage* -name timestamp_diff):
+     /work/src/fuzz/target/aarch64-unknown-linux-gnu/coverage/aarch64-unknown-linux-gnu/release/timestamp_diff  073549604f392c69d20ad41b4ffaf9627254914962d15acc8fdd69d775ce320a  127504832 bytes
+-- fuzz (non-coverage) binary for contrast:
+/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/timestamp_diff
+== end forensics: timestamp_diff ==

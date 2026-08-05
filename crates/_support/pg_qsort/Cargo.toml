@@ -1,0 +1,11 @@
+[package]
+name = "pg_qsort"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_qsort"
+path = "src/lib.rs"
+
+[dependencies]

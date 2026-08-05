@@ -1,0 +1,4 @@
+# w3-sendrecv lane runqueue: bool rows 2437 boolsend / 2971 booltext
+wave_sendtext::eq_boolsend | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bool.c --harness wave_sendtext::eq_boolsend --exact
+wave_sendtext::eq_booltext | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bool.c --harness wave_sendtext::eq_booltext --exact
+wave_sendtext::control_boolsend_negate | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bool.c --harness wave_sendtext::control_boolsend_negate --exact

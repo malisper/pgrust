@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/types_scan/src/sdir.rs","sloc":[12,13,14,15,16,20,21,22,23,27,28,31,32,35,36],"kani":[],"fuzz":[],"regress":[27,28,31,32,35,36],"excluded":{"use-mod":[10],"attr":[2,3],"typedef":[4,5,6,7]}}

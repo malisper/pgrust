@@ -1,0 +1,37 @@
+[package]
+name = "latch"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "latch"
+path = "src/lib.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"] }
+
+[dependencies]
+# THE single lock library (permit-s1): statics ride pgsync::process_global!,
+# atomics/Mutex are pgsync types — the ONLY cfg site for world selection.
+pgsync = { path = "../../../../_support/pgsync" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+init_small = { path = "../../../utils/init/init_small" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+latch_seams = { path = "../latch_seams" }
+procsignal_seams = { path = "../procsignal_seams" }
+waiteventset_seams = { path = "../waiteventset_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+waiter = { path = "../waiter" }
+lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
+
+# Solely for tests/loom.rs (the direct WaitLatch/SetLatch models — loom::model
+# + loom thread/atomic types in the test driver; src/ reaches loom only
+# through pgsync, the single cfg site).
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[dev-dependencies]
+loom = "0.7"

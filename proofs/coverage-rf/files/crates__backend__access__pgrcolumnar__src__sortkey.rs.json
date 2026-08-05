@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/pgrcolumnar/src/sortkey.rs","sloc":[28,29,30,31,32,33,38,39,47,48,49,50,52,55,57,58,61],"kani":[],"fuzz":[],"regress":[],"excluded":{"arm-head":[51,54,60],"use-mod":[24,25],"attr":[46]}}

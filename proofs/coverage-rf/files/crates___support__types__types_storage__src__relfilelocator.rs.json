@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/types_storage/src/relfilelocator.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,3],"attr":[6,7],"const-static":[13],"typedef":[8,9,10]}}

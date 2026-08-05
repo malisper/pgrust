@@ -1,0 +1,16 @@
+bitutils	eq_popcount32	harnesses::eq_popcount32
+bitutils	eq_popcount64	harnesses::eq_popcount64
+bitutils	eq_leftmost_one_pos32	harnesses::eq_leftmost_one_pos32
+bitutils	eq_leftmost_one_pos64	harnesses::eq_leftmost_one_pos64
+bitutils	eq_rightmost_one_pos32	harnesses::eq_rightmost_one_pos32
+bitutils	eq_rightmost_one_pos64	harnesses::eq_rightmost_one_pos64
+bitutils	eq_nextpower2_32	harnesses::eq_nextpower2_32
+bitutils	eq_nextpower2_64	harnesses::eq_nextpower2_64
+bitutils	eq_prevpower2_32	harnesses::eq_prevpower2_32
+bitutils	eq_prevpower2_64	harnesses::eq_prevpower2_64
+bitutils	eq_ceil_log2_32	harnesses::eq_ceil_log2_32
+bitutils	eq_ceil_log2_64	harnesses::eq_ceil_log2_64
+bitutils	eq_rotate_right32	harnesses::eq_rotate_right32
+bitutils	eq_rotate_left32	harnesses::eq_rotate_left32
+bitutils	eq_popcount_buf_small	harnesses::eq_popcount_buf_small
+bitutils	eq_popcount_masked_buf_small	harnesses::eq_popcount_masked_buf_small

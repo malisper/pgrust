@@ -1,0 +1,3 @@
+bytea-varbit	eq_esc_enc_len	proofs::eq_esc_enc_len
+bytea-varbit	eq_bit_cmp	proofs::eq_bit_cmp
+bytea-varbit	eq_pad_last	proofs::eq_pad_last

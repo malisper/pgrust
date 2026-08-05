@@ -1,0 +1,4 @@
+Å);
+
+-- parens are ignored, too
+select websearch_to_tsquery(

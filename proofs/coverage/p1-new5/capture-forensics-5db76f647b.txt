@@ -1,0 +1,149 @@
+== coverage capture forensics: tidstore_diff (cargo-fuzz coverage rc=0) ==
+-- corpus files on disk:  1805
+-- units replayed (log):  1805
+-- clean libFuzzer exits: 16
+-- raw profraw dir: /work/src/fuzz/coverage/tidstore_diff/raw
+total 10640
+drwxr-xr-x. 2 root root  16384 Aug  1 22:11 .
+drwxr-xr-x. 3 root root     42 Aug  1 22:11 ..
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-0.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-1.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-10.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-11.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-12.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-13.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-14.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-15.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-2.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-3.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-4.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-5.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-6.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-7.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-8.profraw
+-rw-r--r--. 1 root root 677840 Aug  1 22:11 batch-9.profraw
+-- llvm-profdata: /usr/local/rustup/toolchains/nightly-2026-07-17-aarch64-unknown-linux-gnu/lib/rustlib/aarch64-unknown-linux-gnu/bin/llvm-profdata
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-0.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 24832
+Maximum internal block count: 24415
+Total number of blocks: 1005
+Total count: 319577
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-1.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 8192
+Maximum internal block count: 8224
+Total number of blocks: 1005
+Total count: 169825
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-10.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 1336064
+Maximum internal block count: 1315840
+Total number of blocks: 1005
+Total count: 13092330
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-11.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 2506752
+Maximum internal block count: 2453065
+Total number of blocks: 1005
+Total count: 24110079
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-12.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 3885824
+Maximum internal block count: 3812338
+Total number of blocks: 1005
+Total count: 38077699
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-13.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 4012999
+Maximum internal block count: 4248089
+Total number of blocks: 1005
+Total count: 50113789
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-14.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 5599829
+Maximum internal block count: 6449442
+Total number of blocks: 1005
+Total count: 67324283
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-15.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 4328965
+Maximum internal block count: 4193726
+Total number of blocks: 1005
+Total count: 42437326
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-2.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 72960
+Maximum internal block count: 71703
+Total number of blocks: 1005
+Total count: 738909
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-3.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 347136
+Maximum internal block count: 345408
+Total number of blocks: 1005
+Total count: 2915450
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-4.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 503808
+Maximum internal block count: 499608
+Total number of blocks: 1005
+Total count: 5010568
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-5.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 585728
+Maximum internal block count: 579021
+Total number of blocks: 1005
+Total count: 5528492
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-6.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 614656
+Maximum internal block count: 611403
+Total number of blocks: 1005
+Total count: 6178013
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-7.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 871168
+Maximum internal block count: 862492
+Total number of blocks: 1005
+Total count: 7430941
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-8.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 1258752
+Maximum internal block count: 1242338
+Total number of blocks: 1005
+Total count: 11340944
+---- /work/src/fuzz/coverage/tidstore_diff/raw/batch-9.profraw (677840 bytes)
+Instrumentation level: Front-end
+Total functions: 362
+Maximum function count: 949504
+Maximum internal block count: 1026069
+Total number of blocks: 1005
+Total count: 11771302
+-- merged profdata:
+Instrumentation level: Front-end
+Total functions: 267
+Maximum function count: 26621758
+Maximum internal block count: 25627526
+Total number of blocks: 806
+Total count: 286559527
+-- covbin candidates (find target -path *coverage* -name tidstore_diff):
+     /work/src/fuzz/target/aarch64-unknown-linux-gnu/coverage/aarch64-unknown-linux-gnu/release/tidstore_diff  20bb742834f89783e5d2940ab1c69574590da2d5b6f1adbd72b902a61e02ffcd  130166984 bytes
+-- fuzz (non-coverage) binary for contrast:
+/work/src/fuzz/target/aarch64-unknown-linux-gnu/release/tidstore_diff
+== end forensics: tidstore_diff ==

@@ -1,0 +1,7 @@
+Å, '));
+
+--Rewrite sub system
+
+CREATE TABLE test_tsquery (txtkeyword TEXT, txtsample TEXT);
+\set ECHO none
+\copy test_tsquery from stdin

@@ -1,0 +1,1 @@
+{"path":"crates/backend/libpq/pqcomm_seams/src/lib.rs","sloc":[3,4,7,8,11,12,15,17,20,24,25,26,29,33,34,35,36,37,38,39,42,45,48,55],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1]}}

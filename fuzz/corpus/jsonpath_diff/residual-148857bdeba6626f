@@ -1,0 +1,1 @@
+ê$.a.timestamp() >= $.b.timestamp_tz()

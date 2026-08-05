@@ -1,0 +1,1 @@
+{"path":"crates/backend/parser/parse_collate_seams/src/lib.rs","sloc":[6,7,8,9,10,11],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2,3,4]}}

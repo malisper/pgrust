@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/cache/relcache/src/statextlist.rs","sloc":[12,13,14,15,16,18,19,20,21,24,25,26],"kani":[],"fuzz":[],"regress":[12,13,14,15,16,18,19,20,21,24,25,26],"excluded":{"use-mod":[1,3,4,5,7],"attr":[11]}}

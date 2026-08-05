@@ -1,0 +1,16 @@
+
+== coverage census ==
+  expected harnesses (census rows): 4
+  ran (kaniraw produced):           0
+  walled (timeout/OOM):             0
+  failed to run (UNMEASURED):       4
+  waived with a stated reason:      0
+  kaniraw files merged:             4
+    ERROR  bool/eq_bool_accum rc=- NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_accum harnesses::eq_bool_accum_inv
+    ERROR  bool/eq_bool_accum_inv rc=- NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_accum_inv
+    ERROR  bool/eq_bool_alltrue rc=- NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_alltrue
+    ERROR  bool/eq_bool_anytrue rc=- NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_anytrue
+CENSUS ERROR /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/coverage/instrument-fix/census-bool-bad.tsv:2: bool/eq_bool_accum status=FAILED-TO-RUN rc=- verdict=NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_accum harnesses::eq_bool_accum_inv produced NO coverage. UNMEASURED, not uncovered. Fix the harness name/run, or waive it explicitly in --allow-unmeasured with a reason.
+CENSUS ERROR /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/coverage/instrument-fix/census-bool-bad.tsv:3: bool/eq_bool_accum_inv status=FAILED-TO-RUN rc=- verdict=NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_accum_inv produced NO coverage. UNMEASURED, not uncovered. Fix the harness name/run, or waive it explicitly in --allow-unmeasured with a reason.
+CENSUS ERROR /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/coverage/instrument-fix/census-bool-bad.tsv:4: bool/eq_bool_alltrue status=FAILED-TO-RUN rc=- verdict=NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_alltrue produced NO coverage. UNMEASURED, not uncovered. Fix the harness name/run, or waive it explicitly in --allow-unmeasured with a reason.
+CENSUS ERROR /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/coverage/instrument-fix/census-bool-bad.tsv:5: bool/eq_bool_anytrue status=FAILED-TO-RUN rc=- verdict=NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_anytrue produced NO coverage. UNMEASURED, not uncovered. Fix the harness name/run, or waive it explicitly in --allow-unmeasured with a reason.

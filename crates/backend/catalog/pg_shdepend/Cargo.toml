@@ -1,0 +1,34 @@
+[package]
+name = "pg_shdepend"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_shdepend"
+path = "src/lib.rs"
+
+[dependencies]
+objectaddress_seams = { path = "../objectaddress_seams" }
+seam_core = { path = "../../../_support/seam_core" }
+types_nodes = { path = "../../../_support/types/nodes" }
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+heaptuple = { path = "../../access/common/heaptuple" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+catalog = { path = "../catalog" }
+catalog_indexing = { path = "../catalog_indexing" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+init_small = { path = "../../utils/init/init_small" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+tablespace_seams = { path = "../../commands/tablespace_seams" }
+policy_seams = { path = "../../commands/policy_seams" }

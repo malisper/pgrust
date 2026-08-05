@@ -1,0 +1,96 @@
+# proofs/float-agg runqueue — float8[] aggregate FINALS + transition
+# zero-arm planes (tail-triage group 1; compile-only pre-build 2026-07-29,
+# NOT yet run — this lane runs ZERO solves).
+# Rows: finals t3 1830/2512/1831/2513/1832; finals t6 2807-2817;
+# transitions 208/222/276/2806/3342 (zero-arm planes only; general arms
+# NOT harnessed — 53-bit wall + CBMC fp-contraction spec gap vs shipped
+# mul_add, see src/lib.rs header).
+#
+# FAMILY RULES: --no-overflow-checks on EVERY line (float law). kissat for
+# expected-green; DEFAULT solver for the control and for any harness that
+# might fail (kissat never terminates on failing harnesses). Solver choice
+# is PER-HARNESS — on any 30s+ kissat wall retry DEFAULT before recording
+# (inversion is real in float families). ONE run at a time under the RSS
+# watchdog (kill own process group only); cap wall at ~75s under multi-lane
+# load and judge on kani-reported Verification Time. Run from
+# proofs/float-agg/.
+#
+# --- SHIP FIRST: no-arithmetic t6 finals, fully symbolic (refutes the
+#     blanket "regr = state" exclusion) ---
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+
+proofs::eq_regr_sxx | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::eq_regr_sxx --exact   # expect PROVED(full-[f64;6]) fast — oid 2807
+proofs::eq_regr_syy | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::eq_regr_syy --exact   # expect PROVED(full-[f64;6]) fast — oid 2808
+proofs::eq_regr_sxy | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::eq_regr_sxy --exact   # expect PROVED(full-[f64;6]) fast — oid 2809
+#
+# --- shared nullity-parity theorems (verdict-only, fully symbolic; the
+#     unasserted C divide results should slice out — if either walls,
+#     split per-final before recording anything) ---
+proofs::eq_finals_nullity_t3 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --harness proofs::eq_finals_nullity_t3 --exact   # expect PROVED(verdict, full-[f64;3]) — 1830/2512/1831/2513/1832 nullity; DEFAULT solver (multi-assert: kissat pays per property batch; try kissat second)
+proofs::eq_finals_nullity_t6 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --harness proofs::eq_finals_nullity_t6 --exact   # expect PROVED(verdict, full-[f64;6]) — 2807-2817 nullity lattice incl n<1/n<2/sxx==0/syy==0
+#
+# --- literal-plane theorem ---
+proofs::eq_regr_r2_horizontal | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::eq_regr_r2_horizontal --exact   # expect PROVED(syy==0 plane, literal-pruned divide) — oid 2812 constant-1.0 arm
+#
+# --- check_float8_array (the shape check the finals' C prologue shims out;
+#     Err arm verdict-only, PgError/format stubbed) ---
+proofs::eq_check_float8_array_t3 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::eq_check_float8_array_t3 --exact   # expect PROVED(symbolic header words, exact-size image)
+proofs::eq_check_float8_array_t6 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::eq_check_float8_array_t6 --exact   # expect PROVED — sibling
+#
+# --- value grids (53-bit divide/sqrt finals; spots-grid tier, float-arith
+#     precedent 10-22s; 6x12 to 6x12x12x12 cells). If a grid walls both
+#     solvers: shrink S_GRID to the 8 core specials for that harness (edit,
+#     re-gate) — do NOT magnitude-ladder (loop-free circuits are
+#     band-immune) ---
+proofs::grid_avg | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_avg --exact   # expect PROVED(grid) — 1830
+proofs::grid_var_pop | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_var_pop --exact   # expect PROVED(grid) — 2512
+proofs::grid_var_samp | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_var_samp --exact   # expect PROVED(grid) — 1831
+proofs::grid_stddev_pop | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_stddev_pop --exact   # expect PROVED(grid; sqrt CBMC-native) — 2513
+proofs::grid_stddev_samp | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_stddev_samp --exact   # expect PROVED(grid) — 1832
+proofs::grid_regr_avgx | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_regr_avgx --exact   # expect PROVED(grid) — 2810
+proofs::grid_regr_avgy | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_regr_avgy --exact   # expect PROVED(grid) — 2811
+proofs::grid_covar_pop | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_covar_pop --exact   # expect PROVED(grid) — 2815
+proofs::grid_covar_samp | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_covar_samp --exact   # expect PROVED(grid) — 2816
+proofs::grid_regr_slope | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_regr_slope --exact   # expect PROVED(grid) — 2813
+proofs::grid_regr_r2 | green | release-gate | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_regr_r2 --exact   # expect PROVED(grid) release-gate tier (3 grid slots, product+divide) — 2812
+proofs::grid_corr | green | release-gate | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_corr --exact   # expect PROVED(grid) release-gate tier (sqrt-of-product + divide) — 2817
+proofs::grid_regr_intercept | green | release-gate | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::grid_regr_intercept --exact   # expect PROVED(grid) release-gate tier (chained divide, 4 grid slots) — 2814
+#
+# --- transition zero-arm planes (literal-zero pruning; NaN routing via
+#     canonical-NAN shim in-theorem; Err arms statically unreachable) ---
+proofs::plane_float8_accum_first | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::plane_float8_accum_first --exact   # expect PROVED(first-row plane, full-sym newval) — oid 222
+proofs::plane_float4_accum_first | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::plane_float4_accum_first --exact   # expect PROVED(first-row plane, full-sym f32) — oid 208
+proofs::plane_regr_accum_first | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::plane_regr_accum_first --exact   # expect PROVED(first-row plane, full-sym x+y; NaN routing matrix) — oid 2806
+proofs::plane_float8_combine_n1zero | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::plane_float8_combine_n1zero --exact   # expect PROVED(n1==0 identity plane) — oid 276
+proofs::plane_float8_combine_n2zero | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::plane_float8_combine_n2zero --exact   # expect PROVED(n2==0 identity plane) — oid 276
+proofs::plane_regr_combine_n1zero | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::plane_regr_combine_n1zero --exact   # expect PROVED(n1==0 identity plane) — oid 3342
+proofs::plane_regr_combine_n2zero | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --solver kissat --harness proofs::plane_regr_combine_n2zero --exact   # expect PROVED(n2==0 identity plane) — oid 3342
+#
+# --- negative control: DEFAULT solver, MUST FAIL with decodable cex
+#     (decode via -Z concrete-playback --concrete-playback=print; a PASS
+#     here = broken gate, stop the lane) ---
+proofs::control_var_samp_vs_c_var_pop | must-fail | control | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_agg.c --no-overflow-checks --harness proofs::control_var_samp_vs_c_var_pop --exact   # expect VERIFICATION FAILED (e.g. n=0.5: var_pop value vs var_samp NULL)
+#
+# LEDGER WORDING when green (per-row, do not overstate):
+#   finals: proved(nullity full-domain + value specials-grid; open-region
+#   values uncovered) for divide finals; proved(full-domain) for
+#   2807/2808/2809; transitions: proved(zero-arm plane; general arm
+#   excluded: 53-bit + fp-contraction spec gap). check_float8_array
+#   qualifier: "Err arm verdict-only (message text/location out of proof)".
+#
+# NOTE 2026-07-29 (fleet 994f9977/1785310905 adjudication): the three FAILED
+# verdicts — grid_stddev_pop, grid_stddev_samp, grid_corr — and the
+# grid_regr_intercept timeout are the CBMC sqrt/divide MODEL artifact class
+# (same family as float-arith spots_dsqrt subnormal decode; failed check is
+# the sqrt-result bit-compare). REFUTED by native differential:
+#   cargo run --release --bin native_diff_float_agg
+# (build.rs links the SAME vendored C natively) — exact grid domains of
+# every grid_* harness 32,616 checks + 8.0M random open-region sweeps,
+# 0 diffs. Rows record proved(nullity/planes) + tested(differential) for
+# the sqrt-bearing value grids; do NOT gate these three greens in-model.

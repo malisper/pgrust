@@ -1,0 +1,26 @@
+# p1-lanel owed residual — DISCHARGED by the p1-lanel2 closeout (2026-07-31).
+# The 382-line honest residual recorded at the lanel handoff (d81a7c13dc) is
+# CLOSED: every line is now either fuzz-measured by the six-target local
+# merge of record or carried by a recorded exception row in
+# proofs/coverage/phase1-exceptions.tsv. Zero owed lines remain.
+#
+# Closure map (class -> disposition):
+#   107 undriven fc wrappers            -> datetime_closeout_diff arms 3-7 (fuzz-measured)
+#    72 extract_* numeric faces         -> datetime_closeout_diff arms 0-2 vs verbatim C
+#                                          (ARG-CAPTURE numeric plane; no rival numeric oracle);
+#                                          5 infallible ?-edges / 3 no-DA lines -> exception rows
+#    68 cross-crate adt_timestamp wrappers -> laney merge (timestamp_diff corpus) +
+#                                          closeout wrapper arms (fuzz-measured)
+#    31 timetz part(tz) TRIAGE-HOLD     -> resolved (harness defect, sweep-triage 993cf70e12);
+#                                          proofs fleet-GREEN kani-suite-1785530147; float+numeric
+#                                          faces fuzz-measured by closeout arm 2
+#    25 fc_time_support planner node    -> planner-carve exception rows (fc_timestamp_support precedent)
+#    45 decode error/overflow arms      -> 9 fuzz-measured (timestamp_diff corpus); 33 adjudicated
+#                                          unreachable-arm with per-line static reasons; 3 no-DA
+#    34 lib.rs error ctors/soft faces   -> soft-error arm + date_pli/mii overflow arm (fuzz-measured);
+#                                          date_in default arm + AdjustTimeForTypmod negative branch
+#                                          -> defensive-c-parity rows
+#     2 interval-ctor cross-crate       -> fuzz-measured (timestamp_diff interval_in corpus)
+#
+# See README.md (closeout merge of record) and RED-LINE-AUDIT.md (refresh).
+# columns: file<TAB>line<TAB>enclosing_fn<TAB>why   (no data rows: nothing owed)

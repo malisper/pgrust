@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/rmgrdesc/src/genericdesc.rs","sloc":[6,7,8,9,10,12,13,14,15,17,18,20,23,26,27],"kani":[],"fuzz":[],"regress":[],"excluded":{"else-only":[19],"use-mod":[1,2,3,4]}}

@@ -1,0 +1,12 @@
+[package]
+name = "walsender_config"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "walsender_config"
+path = "src/lib.rs"
+
+[dependencies]
+guc_tables = { path = "../../utils/misc/guc_tables" }

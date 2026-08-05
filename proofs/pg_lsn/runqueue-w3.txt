@@ -1,0 +1,15 @@
+# w3-sendrecv lane runqueue: pg_lsn row 3238 pg_lsn_recv (+ family must-fail control)
+wave5::eq_pg_lsn_recv_core_d0 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d0 --exact
+wave5::eq_pg_lsn_recv_core_d1 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d1 --exact
+wave5::eq_pg_lsn_recv_core_d2 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d2 --exact
+wave5::eq_pg_lsn_recv_core_d3 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d3 --exact
+wave5::eq_pg_lsn_recv_core_d4 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d4 --exact
+wave5::eq_pg_lsn_recv_core_d5 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d5 --exact
+wave5::eq_pg_lsn_recv_core_d6 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d6 --exact
+wave5::eq_pg_lsn_recv_core_d7 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d7 --exact
+wave5::eq_pg_lsn_recv_core_d8 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d8 --exact
+wave5::eq_pg_lsn_recv_core_d9 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d9 --exact
+wave5::eq_pg_lsn_recv_core_d10 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d10 --exact
+wave5::eq_pg_lsn_recv_core_d11 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d11 --exact
+wave5::eq_pg_lsn_recv_core_d12 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::eq_pg_lsn_recv_core_d12 --exact
+wave5::control_pg_lsn_send_skew | must-fail | control | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::control_pg_lsn_send_skew --exact

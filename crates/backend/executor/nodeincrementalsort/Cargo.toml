@@ -1,0 +1,27 @@
+[package]
+name = "nodeincrementalsort"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+execexpr = { path = "../execexpr" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+tuplesort = { path = "../../utils/sort/tuplesort" }
+init_small = { path = "../../utils/init/init_small" }
+
+[dev-dependencies]
+datum = { path = "../../../_support/types/datum" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }

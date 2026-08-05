@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/cache/inval/src/bench_internals.rs","sloc":[10,11,12,13,14,15,16,17,18,22,23,24,28,29,30,31,32,33,34],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[4,5,7,8]}}

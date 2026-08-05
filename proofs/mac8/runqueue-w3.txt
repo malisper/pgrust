@@ -1,0 +1,3 @@
+# w3-sendrecv lane runqueue: mac8 row 3447 macaddr8_send
+w3_send::eq_macaddr8_send | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/mac8_shim.c --harness w3_send::eq_macaddr8_send --exact
+w3_send::control_macaddr8_send_skew | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/mac8_shim.c --harness w3_send::control_macaddr8_send_skew --exact

@@ -1,0 +1,1 @@
+{"path":"crates/contrib/postgres_fdw/src/lib.rs","sloc":[23,26,27,30,31],"kani":[],"fuzz":[],"regress":[30,31],"excluded":{"use-mod":[9,10,11,12,13,14,15,16,18],"attr":[7,22],"const-static":[20]}}

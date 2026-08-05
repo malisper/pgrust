@@ -1,0 +1,48 @@
+[package]
+name = "origin"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "origin"
+path = "src/lib.rs"
+
+[dependencies]
+pgsync = { path = "../../../_support/pgsync" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+datum = { path = "../../../_support/types/datum" }
+mcx = { path = "../../../_support/mcx" }
+elog = { path = "../../utils/error/elog" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+condition_variable = { path = "../../storage/lmgr/condition_variable" }
+ipc = { path = "../../storage/ipc/ipc" }
+init_small = { path = "../../utils/init/init_small" }
+fd = { path = "../../storage/file/fd" }
+crc32c = { path = "../../../port/crc32c" }
+libc = "0.2"
+origin_seams = { path = "../origin_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xloginsert = { path = "../../access/transam/xloginsert" }
+xlogreader_seams = { path = "../../access/transam/xlogreader_seams" }
+xact = { path = "../../access/transam/xact" }
+catalog = { path = "../../catalog/catalog" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+heaptuple = { path = "../../access/common/heaptuple" }
+varlena = { path = "../../utils/adt/varlena" }
+detoast = { path = "../../access/common/detoast" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+postgres_seams = { path = "../../tcop/postgres_seams" }

@@ -1,0 +1,23 @@
+# proofs/pg-prng — p1-laneh runqueue (2026-07-31). Execute from proofs/pg-prng/.
+# Format: <harness> | <expected> | <tier> | <command>
+# Local greens (low-load unavailable; solved under multi-lane load 0-2s each)
+# re-confirmed on fleet for uniform provenance. kissat = expected-green law;
+# the control runs DEFAULT solver (possibly-failing law).
+harnesses::eq_seed | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_seed --exact --solver kissat
+harnesses::eq_seed_check | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_seed_check --exact --solver kissat
+harnesses::eq_next_u64 | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_next_u64 --exact --solver kissat
+harnesses::eq_next_i64 | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_next_i64 --exact --solver kissat
+harnesses::eq_next_nonnegative_i64 | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_next_nonnegative_i64 --exact --solver kissat
+harnesses::eq_next_u32 | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_next_u32 --exact --solver kissat
+harnesses::eq_next_i32 | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_next_i32 --exact --solver kissat
+harnesses::eq_next_nonnegative_i32 | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_next_nonnegative_i32 --exact --solver kissat
+harnesses::eq_next_bool | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_next_bool --exact --solver kissat
+harnesses::eq_nonnegative_signs | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_nonnegative_signs --exact --solver kissat
+harnesses::eq_u64_range_empty | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_u64_range_empty --exact --solver kissat
+harnesses::eq_i64_range_empty | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_i64_range_empty --exact --solver kissat
+harnesses::eq_u64_range_span1 | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_u64_range_span1 --exact --solver kissat
+harnesses::eq_u64_range_span256 | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_u64_range_span256 --exact --solver kissat
+harnesses::eq_u64_range_span2p32 | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_u64_range_span2p32 --exact --solver kissat
+harnesses::eq_u64_range_full | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_u64_range_full --exact --solver kissat
+harnesses::eq_i64_range_pow2_cell | green | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::eq_i64_range_pow2_cell --exact --solver kissat
+harnesses::control_next_u64_wrong_value | must-fail | per-commit | cargo kani -Z c-ffi --c-lib c_pg_prng.c --harness harnesses::control_next_u64_wrong_value --exact

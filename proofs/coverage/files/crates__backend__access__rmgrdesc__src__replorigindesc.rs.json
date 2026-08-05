@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/rmgrdesc/src/replorigindesc.rs","sloc":[9,10,11,13,16,17,18,19,20,21,22,23,24,27,29,31,36,37,38,39,40],"kani":[],"fuzz":[],"regress":[],"excluded":{"arm-head":[14,26],"use-mod":[1,2,3,4],"const-static":[6,7]}}

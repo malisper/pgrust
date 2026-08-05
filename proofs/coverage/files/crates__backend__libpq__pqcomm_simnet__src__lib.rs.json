@@ -1,0 +1,1 @@
+{"path":"crates/backend/libpq/pqcomm_simnet/src/lib.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[48,50],"attr":[47,49]}}

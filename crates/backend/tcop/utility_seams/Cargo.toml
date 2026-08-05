@@ -1,0 +1,18 @@
+[package]
+name = "utility_seams"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_error = { path = "../../../_support/types/types_error" }
+types_portal = { path = "../../../_support/types/portal" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+tcop_dest = { path = "../dest" }

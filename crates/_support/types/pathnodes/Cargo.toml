@@ -1,0 +1,20 @@
+[package]
+name = "types_pathnodes"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[features]
+# Bisection control: reinstate the boxed Option<PgBox<Bitmapset>> Relids
+# representation (the pre-swap incumbent). No runtime knob is possible for a
+# type swap; this feature is the kill switch of record for GL-REPLAN-B-1.
+boxed_relids = []
+
+[dependencies]
+mcx = { path = "../../mcx" }
+types_core = { path = "../types_core" }
+datum = { path = "../datum" }
+types_hash = { path = "../hash" }
+types_nodes = { path = "../nodes" }
+types_error = { path = "../types_error" }
+types_portal = { path = "../portal" }

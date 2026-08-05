@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/types_storage/src/waiteventset.rs","sloc":[13,14,15,16,17,25,26,29,30],"kani":[],"fuzz":[],"regress":[25,26,29,30],"excluded":{"use-mod":[1],"attr":[21,36],"const-static":[3,4,5,6,7,8,10,11,12],"typedef":[22,37,38,39,40,41],"impl-header":[24]}}

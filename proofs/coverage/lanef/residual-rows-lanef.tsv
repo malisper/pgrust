@@ -1,0 +1,59 @@
+# residual-rows-lanef.tsv — MACHINE-READABLE residual rows for the p1-lanef
+# batches (crypto/hash: md5, sha1, hmac, scram_common, cryptohashfuncs;
+# tables: keywords, unicode_category). Same columns and semantics as
+# proofs/coverage/auto-exceptions.tsv: an `auto:` row is a MEASUREMENT NOTE
+# (the instrument emits no mapping for the line), NOT a semantic adjudication,
+# and it never moves a line out of any denominator.
+#
+# 4 of these 32 lines are reproduced mechanically by main's
+# merge-coverage.py --auto-exceptions (marked AUTO-CLASSIFIED); the other 28
+# are hand-classified against the same class vocabulary, with the classifier
+# gap that blocks each one recorded in lanef/AUTO-EXCEPTIONS-GAPS.md.
+#
+# Reconciled accounting (authoritative, fleet lcov captures of record):
+#   crypto/hash batch  275/295 v2-SLOC covered, 20 residual rows below
+#   tables batch       127/139 v2-SLOC covered, 12 residual rows below
+#   lane-F combined    402/434 v2-SLOC covered, 32 residual rows below
+# (An earlier lane note said "126" for the tables batch: that was the FIRST
+# tablesfam capture, before the GetScanKeyword hardening-arm line was
+# executed. 127/139 is the confirm capture and the number of record.)
+#
+# PARITY-SCOPE NOTE (not a residual line — executed, but not a C comparison):
+#   crates/common/keywords/src/lib.rs:45 `return None;` — the out-of-range
+#   GetScanKeyword arm. Verbatim C (kwlookup.h:38-42) has NO range check, so
+#   out-of-range is C UB and no parity claim is made; the Rust None arm is
+#   pgrust hardening asserted self-consistently by every exec. The oracle
+#   shim's range guard is harness plumbing, never an oracle.
+file	line	class	rule	evidence
+crates/common/hmac/src/lib.rs	23	auto:macro-decl-defn	declaration row inside a macro_rules! DEFINITION body (struct/const/assoc-type items generated per invocation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); the 4 generated width types execute in every hmac exec (finalize DA hot); classifier GAP 1 (AUTO-EXCEPTIONS-GAPS.md)
+crates/common/hmac/src/lib.rs	24	auto:macro-decl-defn	declaration row inside a macro_rules! DEFINITION body (struct/const/assoc-type items generated per invocation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); the 4 generated width types execute in every hmac exec (finalize DA hot); classifier GAP 1 (AUTO-EXCEPTIONS-GAPS.md)
+crates/common/hmac/src/lib.rs	25	auto:macro-decl-defn	declaration row inside a macro_rules! DEFINITION body (struct/const/assoc-type items generated per invocation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); the 4 generated width types execute in every hmac exec (finalize DA hot); classifier GAP 1 (AUTO-EXCEPTIONS-GAPS.md)
+crates/common/hmac/src/lib.rs	26	auto:macro-decl-defn	declaration row inside a macro_rules! DEFINITION body (struct/const/assoc-type items generated per invocation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); the 4 generated width types execute in every hmac exec (finalize DA hot); classifier GAP 1 (AUTO-EXCEPTIONS-GAPS.md)
+crates/common/hmac/src/lib.rs	27	auto:macro-decl-defn	declaration row inside a macro_rules! DEFINITION body (struct/const/assoc-type items generated per invocation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); the 4 generated width types execute in every hmac exec (finalize DA hot); classifier GAP 1 (AUTO-EXCEPTIONS-GAPS.md)
+crates/common/hmac/src/lib.rs	41	auto:macro-invocation-cont	multi-line generator-macro invocation (hmac_hash! head + argument continuation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); classifier GAP 2
+crates/common/hmac/src/lib.rs	42	auto:macro-invocation-cont	multi-line generator-macro invocation (hmac_hash! head + argument continuation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); classifier GAP 2
+crates/common/hmac/src/lib.rs	43	auto:macro-invocation-cont	multi-line generator-macro invocation (hmac_hash! head + argument continuation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); classifier GAP 2
+crates/common/hmac/src/lib.rs	44	auto:macro-invocation-cont	multi-line generator-macro invocation (hmac_hash! head + argument continuation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); classifier GAP 2
+crates/common/hmac/src/lib.rs	45	auto:macro-invocation-cont	multi-line generator-macro invocation (hmac_hash! head + argument continuation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); classifier GAP 2
+crates/common/hmac/src/lib.rs	46	auto:macro-invocation-cont	multi-line generator-macro invocation (hmac_hash! head + argument continuation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); classifier GAP 2
+crates/common/hmac/src/lib.rs	47	auto:macro-invocation-cont	multi-line generator-macro invocation (hmac_hash! head + argument continuation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); classifier GAP 2
+crates/common/hmac/src/lib.rs	48	auto:macro-invocation-cont	multi-line generator-macro invocation (hmac_hash! head + argument continuation)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); classifier GAP 2
+crates/common/hmac/src/lib.rs	61	auto:let-decl-noann	bare `let x;` deferred-init declaration without type ascription (no code emitted)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); the key-shrink arm it serves is DA-covered at lines 62-66,68; classifier GAP 4 (RE_LET_DECL requires `: T`)
+crates/common/md5/src/lib.rs	9	auto:table-head	multi-line const bracket-initializer head (S/K round tables; bodies excluded by --exclude-const-tables)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); AUTO-CLASSIFIED by merge-coverage.py --auto-exceptions
+crates/common/md5/src/lib.rs	16	auto:table-head	multi-line const bracket-initializer head (S/K round tables; bodies excluded by --exclude-const-tables)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); AUTO-CLASSIFIED by merge-coverage.py --auto-exceptions
+crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	68	auto:macro-decl-defn	`const fn b(..)` compile-time builder for the FmgrBuiltin registry (const-eval only)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); classifier GAP 1-adjacent
+crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	69	auto:macro-decl-defn	struct-literal body of the const fn builder (const-eval only)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); classifier GAP 1-adjacent
+crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	72	auto:table-head	multi-line const bracket-initializer head (CRYPTOHASH_BUILTINS registry)	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); AUTO-CLASSIFIED
+crates/common/scram_common/src/lib.rs	83	auto:fmt-cont	literal continuation line of a multi-line format! invocation	fleet cryptofam_diff 12M execs (job pgrust-fuzz-campaign-1785474235-2a47-55323); AUTO-CLASSIFIED (needs --line-table-lcov); neighbors DA-covered in every op-5 exec
+crates/common/keywords/src/lib.rs	6	auto:include-row	include!(concat!(env!("OUT_DIR"), ..)) build-generated module row (compile-time data)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); classifier GAP 3
+crates/common/keywords/src/lib.rs	30	auto:brace-table-head	multi-line `pub static X: T = T {` brace-initializer head/field rows (compile-time static data)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); tables compared exhaustively vs C by table_geometry/all_keyword_indexes; classifier GAP 3
+crates/common/keywords/src/lib.rs	31	auto:brace-table-head	multi-line `pub static X: T = T {` brace-initializer head/field rows (compile-time static data)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); tables compared exhaustively vs C by table_geometry/all_keyword_indexes; classifier GAP 3
+crates/common/keywords/src/lib.rs	32	auto:brace-table-head	multi-line `pub static X: T = T {` brace-initializer head/field rows (compile-time static data)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); tables compared exhaustively vs C by table_geometry/all_keyword_indexes; classifier GAP 3
+crates/common/keywords/src/lib.rs	33	auto:brace-table-head	multi-line `pub static X: T = T {` brace-initializer head/field rows (compile-time static data)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); tables compared exhaustively vs C by table_geometry/all_keyword_indexes; classifier GAP 3
+crates/common/keywords/src/lib.rs	34	auto:brace-table-head	multi-line `pub static X: T = T {` brace-initializer head/field rows (compile-time static data)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); tables compared exhaustively vs C by table_geometry/all_keyword_indexes; classifier GAP 3
+crates/common/keywords/src/lib.rs	35	auto:brace-table-head	multi-line `pub static X: T = T {` brace-initializer head/field rows (compile-time static data)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); tables compared exhaustively vs C by table_geometry/all_keyword_indexes; classifier GAP 3
+crates/common/keywords/src/lib.rs	38	auto:brace-table-head	multi-line static table binding (ScanKeywordCategories / ScanKeywordBareLabel)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); contents compared vs C at every index (all_keyword_indexes); classifier GAP 3
+crates/common/keywords/src/lib.rs	39	auto:brace-table-head	multi-line static table binding (ScanKeywordCategories / ScanKeywordBareLabel)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); contents compared vs C at every index (all_keyword_indexes); classifier GAP 3
+crates/common/keywords/src/lib.rs	40	auto:brace-table-head	multi-line static table binding (ScanKeywordCategories / ScanKeywordBareLabel)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); contents compared vs C at every index (all_keyword_indexes); classifier GAP 3
+crates/common/keywords/src/lib.rs	41	auto:brace-table-head	multi-line static table binding (ScanKeywordCategories / ScanKeywordBareLabel)	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); contents compared vs C at every index (all_keyword_indexes); classifier GAP 3
+crates/common/unicode_category/src/lib.rs	7	auto:include-row	include!(concat!(env!("OUT_DIR"), "/tables.rs")) build-generated module row	fleet tablesfam_diff 3M confirm (job pgrust-mutants... n/a; job pgrust-fuzz-campaign-1785476369-4d60-24422); classifier GAP 3

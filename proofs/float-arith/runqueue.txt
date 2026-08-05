@@ -1,0 +1,69 @@
+# proofs/float-arith runqueue — ROUNDING/CLASSIFICATION wave (compile-only
+# pre-build 2026-07-28; NOT yet run — solver slots owned elsewhere).
+# Rows: dround 228/1342, dtrunc 229/1343, dceil 2308/2320, dfloor 2309,
+# dsign 2310, dsqrt 230/1344 (PROBE), in_range_float8_float8 4139,
+# in_range_float4_float8 4140.
+#
+# FAMILY RULES (float law): --no-overflow-checks on EVERY line (CBMC's
+# default NaN-production checks are property noise, not parity). kissat for
+# expected-green; DEFAULT solver for controls (kissat never terminates on
+# failing harnesses). No unwind bounds needed (loop-free family). ONE run
+# at a time under the RSS watchdog; judge near-30s on kani-reported
+# Verification Time, cap wall at ~75s under multi-lane load.
+# Run from proofs/float-arith/.
+#
+# --- rounding five: full-domain, expected PROVED fast (rint/ceil/floor/
+#     compare circuits — no 53-bit mul/div; per-commit tier if <10s)
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+
+proofs::eq_dround | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_dround --exact   # expect: PROVED (full-f64) — oids 228/1342
+proofs::eq_dceil | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_dceil --exact   # expect: PROVED (full-f64) — oids 2308/2320
+proofs::eq_dfloor | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_dfloor --exact   # expect: PROVED (full-f64) — oid 2309
+proofs::eq_dsign | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_dsign --exact   # expect: PROVED (full-f64) — oid 2310
+proofs::eq_dtrunc | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_dtrunc --exact   # expect: PROVED (full-f64) — oids 229/1343
+#
+# --- dsqrt: PROBE (53-bit sqrt is CBMC-native but width-priced; class on
+#     the result). If eq_dsqrt walls BOTH solvers, spots_dsqrt is the
+#     standing fallback -> ledger `proved(specials grid + zero/neg/Inf/NaN
+#     arms; full-sym wall)`. spots_dsqrt Err arm is VERDICT-ONLY (Kani
+#     Err(Box) f64 defect — see witness pair; sqlstate parity lives in
+#     eq_dsqrt + native replay).
+proofs::eq_dsqrt | info | probe | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_dsqrt --exact   # expect: PROBE — PROVED or wall; try DEFAULT solver before recording wall (solver inversion is real in this family) | TRIAGE RVR: native parity proven (tests/dsqrt_grid_native.rs); FAILED only in the goto-linked program — mechanism isolation owed; do not gate green
+proofs::spots_dsqrt | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::spots_dsqrt --exact   # expect: PROVED (16-special grid) — oids 230/1344 fallback tier
+#
+# --- in_range pair: full-domain 5-arg (all symbolic incl NaN lattice +
+#     both bool flags), one f64 add/sub + compares = green per float law;
+#     release-gate tier if 10-30s.
+proofs::eq_in_range_float8_float8 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_in_range_float8_float8 --exact   # expect: PROVED (full domain incl 22013 reject arm) — oid 4139
+proofs::eq_in_range_float4_float8 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_in_range_float4_float8 --exact   # expect: PROVED (full domain incl 22013 reject arm) — oid 4140
+#
+# --- negative controls: DEFAULT solver, MUST FAIL with decodable cex
+#     (decode via -Z concrete-playback --concrete-playback=print before
+#     recording anything)
+proofs::control_dtrunc_vs_c_round | must-fail | control | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --harness proofs::control_dtrunc_vs_c_round --exact   # expect: VERIFICATION FAILED (rounding-section control)
+proofs::control_in_range_f8_vs_noreject | must-fail | control | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --harness proofs::control_in_range_f8_vs_noreject --exact   # expect: VERIFICATION FAILED (in_range-section control)
+#
+# Pre-existing crate harnesses (arithmetic wave) keep their module-doc run
+# matrix; the suite skip-list for known walls is in src/lib.rs top comment.
+#
+# --- width_bucket + send wave (added 2026-07-29, all solved locally under
+#     multi-lane load; kani-reported Verification Times noted) ---
+proofs::eq_width_bucket_reject | green | release-gate | timeout 150 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_width_bucket_reject --exact   # PROVED 34.3s — oid 320 all non-divide arms fully symbolic incl 2201G/22003 parity
+proofs::grid_width_bucket_float8 | green | release-gate | timeout 150 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::grid_width_bucket_float8 --exact   # PROVED 41.0s — 14-cell divide-arm grid (both directions, /2 arm, q==1.0 clamp cell)
+proofs::eq_float4send | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_float4send --exact   # PROVED 33.5s — oid 2425 full wire image incl varlena header; modulo static-buffer allocator model
+proofs::eq_float8send | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --solver kissat --harness proofs::eq_float8send --exact   # PROVED 56.6s — oid 2427
+proofs::control_float8send_vs_c_float4send | must-fail | control | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_float_arith.c --no-overflow-checks --harness proofs::control_float8send_vs_c_float4send --exact   # FAILS correctly 23.1s (img byte mismatch) — send-rig non-vacuity
+# NOTE 2026-07-29: spots_dsqrt now carries a SECOND model-defect carve
+# (subnormal inputs — CBMC sqrt model mis-rounds sqrt(denormal); decoded
+# fleet FAILED = concrete index 7 = 0x1, natively bit-exact in
+# tests/dsqrt_grid_native.rs). Re-solved PROVED 37.8s kissat —
+# reclassify release-gate tier. eq_dsqrt stays info (subnormal model
+# defect + Kani Err(Box) f64 corruption both live in full-symbolic form).
+# float4recv/float8recv: NOT harnessed — pointer-datum recv ABI symex
+# wall by int-arith precedent (int2/4/8recv); re-open on slice-core refactor.

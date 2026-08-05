@@ -1,0 +1,54 @@
+[package]
+name = "procarray"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+lwlock = { path = "../../lmgr/lwlock" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
+procarray_seams = { path = "../procarray_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+# Direct dep for the per-snapshot curcid read (GetCurrentCommandId(false) is a
+# TLS mirror load; the seam fn-pointer defeated inlining on the reuse HIT).
+xact = { path = "../../../access/transam/xact" }
+transam_seams = { path = "../../../access/transam/transam_seams" }
+subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
+xlogutils = { path = "../../../access/transam/xlogutils" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+varsup = { path = "../../../access/transam/varsup" }
+types_rel = { path = "../../../../_support/types/rel" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+init_small = { path = "../../../utils/init/init_small" }
+elog = { path = "../../../utils/error/elog" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+superuser_seams = { path = "../../../utils/misc/superuser_seams" }
+acl_seams = { path = "../../../utils/adt/acl_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+procsignal = { path = "../procsignal" }
+libc = "0.2"
+
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+
+[dev-dependencies]
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+s_lock_seams = { path = "../../lmgr/s_lock_seams" }
+latch_seams = { path = "../latch_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+ipc_seams = { path = "../ipc_seams" }
+deadlock_seams = { path = "../../lmgr/deadlock_seams" }
+pmsignal_seams = { path = "../pmsignal_seams" }
+lock_seams = { path = "../../lmgr/lock_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+shmem_seams = { path = "../shmem_seams" }
+condition_variable_seams = { path = "../../lmgr/condition_variable_seams" }
+syncrep_seams = { path = "../../../replication/syncrep_seams" }
+autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }

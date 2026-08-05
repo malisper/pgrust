@@ -1,0 +1,775 @@
+-- tz-surface differential corpus: TimeZone GUC, AT TIME ZONE, EXTRACT,
+-- date_trunc(+zone), now-family, make_timestamptz. Zones pinned to UTC,
+-- America/New_York (both 2025 DST edges), Asia/Kolkata (+05:30).
+-- Run via scripts/regress-diff.sh --sql fixtures/tz-e2e.sql.
+\set VERBOSITY verbose
+\pset pager off
+-- ===== TimeZone GUC forms =====
+SET TIME ZONE 'UTC';
+SHOW timezone;
+ TimeZone 
+----------
+ UTC
+(1 row)
+
+SHOW TIME ZONE;
+ TimeZone 
+----------
+ UTC
+(1 row)
+
+SELECT '2025-03-09 06:30:00+00'::timestamptz;
+         timestamptz          
+------------------------------
+ Sun Mar 09 06:30:00 2025 UTC
+(1 row)
+
+SET TIME ZONE 'America/New_York';
+SHOW timezone;
+     TimeZone     
+------------------
+ America/New_York
+(1 row)
+
+SELECT '2025-03-09 06:30:00+00'::timestamptz;
+         timestamptz          
+------------------------------
+ Sun Mar 09 01:30:00 2025 EST
+(1 row)
+
+SELECT '2025-03-09 02:30:00'::timestamptz;
+         timestamptz          
+------------------------------
+ Sun Mar 09 03:30:00 2025 EDT
+(1 row)
+
+SELECT '2025-11-02 01:30:00'::timestamptz;
+         timestamptz          
+------------------------------
+ Sun Nov 02 01:30:00 2025 EST
+(1 row)
+
+SELECT '2025-07-04 12:00:00'::timestamptz;
+         timestamptz          
+------------------------------
+ Fri Jul 04 12:00:00 2025 EDT
+(1 row)
+
+SELECT '2025-01-04 12:00:00'::timestamptz;
+         timestamptz          
+------------------------------
+ Sat Jan 04 12:00:00 2025 EST
+(1 row)
+
+SET timezone = 'Asia/Kolkata';
+SHOW timezone;
+   TimeZone   
+--------------
+ Asia/Kolkata
+(1 row)
+
+SELECT '2025-01-01 00:00:00+00'::timestamptz;
+         timestamptz          
+------------------------------
+ Wed Jan 01 05:30:00 2025 IST
+(1 row)
+
+SELECT '2025-01-01 00:00:00'::timestamptz;
+         timestamptz          
+------------------------------
+ Wed Jan 01 00:00:00 2025 IST
+(1 row)
+
+SET timezone TO 'America/New_York';
+SHOW timezone;
+     TimeZone     
+------------------
+ America/New_York
+(1 row)
+
+SET TIME ZONE -7;
+SHOW timezone;
+ TimeZone 
+----------
+ <-07>+07
+(1 row)
+
+SELECT '2025-01-01 00:00:00+00'::timestamptz;
+         timestamptz          
+------------------------------
+ Tue Dec 31 17:00:00 2024 -07
+(1 row)
+
+SET TIME ZONE 7.5;
+SHOW timezone;
+    TimeZone    
+----------------
+ <+07:30>-07:30
+(1 row)
+
+SELECT '2025-01-01 00:00:00+00'::timestamptz;
+           timestamptz           
+---------------------------------
+ Wed Jan 01 07:30:00 2025 +07:30
+(1 row)
+
+SET TIME ZONE DEFAULT;
+RESET timezone;
+RESET TIME ZONE;
+SET TIME ZONE 'invalid/zone';
+ERROR:  22023: invalid value for parameter "TimeZone": "invalid/zone"
+SET timezone = 'Not/AZone';
+ERROR:  22023: invalid value for parameter "TimeZone": "Not/AZone"
+SET TIME ZONE 'UTC';
+-- ===== AT TIME ZONE both directions across DST edges =====
+SELECT TIMESTAMP '2025-03-09 02:30:00' AT TIME ZONE 'America/New_York';
+           timezone           
+------------------------------
+ Sun Mar 09 07:30:00 2025 UTC
+(1 row)
+
+SELECT TIMESTAMP '2025-03-09 01:30:00' AT TIME ZONE 'America/New_York';
+           timezone           
+------------------------------
+ Sun Mar 09 06:30:00 2025 UTC
+(1 row)
+
+SELECT TIMESTAMP '2025-03-09 03:30:00' AT TIME ZONE 'America/New_York';
+           timezone           
+------------------------------
+ Sun Mar 09 07:30:00 2025 UTC
+(1 row)
+
+SELECT TIMESTAMP '2025-11-02 01:30:00' AT TIME ZONE 'America/New_York';
+           timezone           
+------------------------------
+ Sun Nov 02 06:30:00 2025 UTC
+(1 row)
+
+SELECT TIMESTAMPTZ '2025-03-09 06:30:00+00' AT TIME ZONE 'America/New_York';
+         timezone         
+--------------------------
+ Sun Mar 09 01:30:00 2025
+(1 row)
+
+SELECT TIMESTAMPTZ '2025-03-09 07:30:00+00' AT TIME ZONE 'America/New_York';
+         timezone         
+--------------------------
+ Sun Mar 09 03:30:00 2025
+(1 row)
+
+SELECT TIMESTAMPTZ '2025-11-02 05:30:00+00' AT TIME ZONE 'America/New_York';
+         timezone         
+--------------------------
+ Sun Nov 02 01:30:00 2025
+(1 row)
+
+SELECT TIMESTAMPTZ '2025-11-02 06:30:00+00' AT TIME ZONE 'America/New_York';
+         timezone         
+--------------------------
+ Sun Nov 02 01:30:00 2025
+(1 row)
+
+SELECT TIMESTAMP '2025-06-01 12:00:00' AT TIME ZONE 'Asia/Kolkata';
+           timezone           
+------------------------------
+ Sun Jun 01 06:30:00 2025 UTC
+(1 row)
+
+SELECT TIMESTAMPTZ '2025-06-01 12:00:00+00' AT TIME ZONE 'Asia/Kolkata';
+         timezone         
+--------------------------
+ Sun Jun 01 17:30:00 2025
+(1 row)
+
+SELECT TIMESTAMP '2025-06-01 12:00:00' AT TIME ZONE 'UTC';
+           timezone           
+------------------------------
+ Sun Jun 01 12:00:00 2025 UTC
+(1 row)
+
+SELECT timezone('UTC', TIMESTAMPTZ '2025-06-01 00:00:00+00');
+         timezone         
+--------------------------
+ Sun Jun 01 00:00:00 2025
+(1 row)
+
+SELECT timezone('America/New_York', TIMESTAMP '2025-11-02 01:30:00');
+           timezone           
+------------------------------
+ Sun Nov 02 06:30:00 2025 UTC
+(1 row)
+
+SELECT TIMESTAMP '2025-06-01 12:00:00' AT TIME ZONE 'EST';
+           timezone           
+------------------------------
+ Sun Jun 01 17:00:00 2025 UTC
+(1 row)
+
+SELECT TIMESTAMPTZ '2025-06-01 12:00:00+00' AT TIME ZONE 'EST';
+         timezone         
+--------------------------
+ Sun Jun 01 07:00:00 2025
+(1 row)
+
+SET TIME ZONE 'America/New_York';
+SELECT TIMESTAMPTZ '2025-06-01 12:00:00+00' AT LOCAL;
+         timezone         
+--------------------------
+ Sun Jun 01 08:00:00 2025
+(1 row)
+
+SELECT TIMESTAMP '2025-06-01 12:00:00' AT LOCAL;
+           timezone           
+------------------------------
+ Sun Jun 01 12:00:00 2025 EDT
+(1 row)
+
+SET TIME ZONE 'UTC';
+SELECT TIMESTAMP '2025-06-01 12:00:00' AT TIME ZONE 'Nowhere/Zone';
+ERROR:  22023: time zone "Nowhere/Zone" not recognized
+SELECT TIMESTAMPTZ 'infinity' AT TIME ZONE 'America/New_York';
+ timezone 
+----------
+ infinity
+(1 row)
+
+SELECT TIMESTAMP '-infinity' AT TIME ZONE 'America/New_York';
+ timezone  
+-----------
+ -infinity
+(1 row)
+
+-- ===== EXTRACT / date_part =====
+SELECT EXTRACT(YEAR FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+    2004
+(1 row)
+
+SELECT EXTRACT(MONTH FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+       2
+(1 row)
+
+SELECT EXTRACT(DAY FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+      29
+(1 row)
+
+SELECT EXTRACT(HOUR FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+      13
+(1 row)
+
+SELECT EXTRACT(MINUTE FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+      24
+(1 row)
+
+SELECT EXTRACT(SECOND FROM TIMESTAMP '2004-02-29 13:24:56.789');
+  extract  
+-----------
+ 56.789000
+(1 row)
+
+SELECT EXTRACT(microseconds FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract  
+----------
+ 56789000
+(1 row)
+
+SELECT EXTRACT(milliseconds FROM TIMESTAMP '2004-02-29 13:24:56.789');
+  extract  
+-----------
+ 56789.000
+(1 row)
+
+SELECT EXTRACT(epoch FROM TIMESTAMP '2004-02-29 13:24:56.789');
+      extract      
+-------------------
+ 1078061096.789000
+(1 row)
+
+SELECT EXTRACT(epoch FROM TIMESTAMPTZ '2025-01-01 00:00:00+00');
+      extract      
+-------------------
+ 1735689600.000000
+(1 row)
+
+SELECT EXTRACT(week FROM TIMESTAMP '2004-01-01 00:00:00');
+ extract 
+---------
+       1
+(1 row)
+
+SELECT EXTRACT(quarter FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+       1
+(1 row)
+
+SELECT EXTRACT(dow FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+       0
+(1 row)
+
+SELECT EXTRACT(isodow FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+       7
+(1 row)
+
+SELECT EXTRACT(doy FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+      60
+(1 row)
+
+SELECT EXTRACT(isoyear FROM TIMESTAMP '2004-01-01 00:00:00');
+ extract 
+---------
+    2004
+(1 row)
+
+SELECT EXTRACT(decade FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+     200
+(1 row)
+
+SELECT EXTRACT(century FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+      21
+(1 row)
+
+SELECT EXTRACT(millennium FROM TIMESTAMP '2004-02-29 13:24:56.789');
+ extract 
+---------
+       3
+(1 row)
+
+SELECT EXTRACT(julian FROM TIMESTAMP '2004-02-29 13:24:56.789');
+           extract            
+------------------------------
+ 2453065.55899061342592592593
+(1 row)
+
+SELECT EXTRACT(year FROM TIMESTAMP '0044-03-15 00:00:00 BC');
+ extract 
+---------
+     -44
+(1 row)
+
+SELECT EXTRACT(century FROM TIMESTAMP '0001-01-01 00:00:00 BC');
+ extract 
+---------
+      -1
+(1 row)
+
+SET TIME ZONE 'America/New_York';
+SELECT EXTRACT(timezone FROM TIMESTAMPTZ '2025-07-04 12:00:00+00');
+ extract 
+---------
+  -14400
+(1 row)
+
+SELECT EXTRACT(timezone_hour FROM TIMESTAMPTZ '2025-07-04 12:00:00+00');
+ extract 
+---------
+      -4
+(1 row)
+
+SELECT EXTRACT(timezone_minute FROM TIMESTAMPTZ '2025-07-04 12:00:00+00');
+ extract 
+---------
+       0
+(1 row)
+
+SET TIME ZONE 'Asia/Kolkata';
+SELECT EXTRACT(timezone FROM TIMESTAMPTZ '2025-07-04 12:00:00+00');
+ extract 
+---------
+   19800
+(1 row)
+
+SELECT EXTRACT(timezone_hour FROM TIMESTAMPTZ '2025-07-04 12:00:00+00');
+ extract 
+---------
+       5
+(1 row)
+
+SELECT EXTRACT(timezone_minute FROM TIMESTAMPTZ '2025-07-04 12:00:00+00');
+ extract 
+---------
+      30
+(1 row)
+
+SET TIME ZONE 'UTC';
+SELECT EXTRACT(timezone FROM TIMESTAMP '2025-01-01 00:00:00');
+ERROR:  0A000: unit "timezone" not supported for type timestamp without time zone
+SELECT EXTRACT(bogus FROM TIMESTAMP '2025-01-01 00:00:00');
+ERROR:  22023: unit "bogus" not recognized for type timestamp without time zone
+SELECT EXTRACT('epoch' FROM TIMESTAMP 'infinity');
+ extract  
+----------
+ Infinity
+(1 row)
+
+SELECT EXTRACT(day FROM TIMESTAMP 'infinity');
+ extract 
+---------
+        
+(1 row)
+
+SELECT EXTRACT(epoch FROM TIMESTAMP '-infinity');
+  extract  
+-----------
+ -Infinity
+(1 row)
+
+SELECT date_part('epoch', TIMESTAMP '2004-02-29 13:24:56.789');
+   date_part    
+----------------
+ 1078061096.789
+(1 row)
+
+SELECT date_part('second', TIMESTAMP '2004-02-29 13:24:56.789');
+ date_part 
+-----------
+    56.789
+(1 row)
+
+SELECT date_part('julian', TIMESTAMP '2004-02-29 13:24:56.789');
+     date_part      
+--------------------
+ 2453065.5589906136
+(1 row)
+
+SELECT date_part('timezone', TIMESTAMPTZ '2025-07-04 12:00:00+00');
+ date_part 
+-----------
+         0
+(1 row)
+
+SELECT date_part('epoch', TIMESTAMP 'infinity');
+ date_part 
+-----------
+  Infinity
+(1 row)
+
+-- ===== date_trunc =====
+SELECT date_trunc('week', TIMESTAMP '2004-02-29 13:24:56.789');
+        date_trunc        
+--------------------------
+ Mon Feb 23 00:00:00 2004
+(1 row)
+
+SELECT date_trunc('quarter', TIMESTAMP '2004-02-29 13:24:56.789');
+        date_trunc        
+--------------------------
+ Thu Jan 01 00:00:00 2004
+(1 row)
+
+SELECT date_trunc('decade', TIMESTAMP '2004-02-29 13:24:56.789');
+        date_trunc        
+--------------------------
+ Sat Jan 01 00:00:00 2000
+(1 row)
+
+SELECT date_trunc('century', TIMESTAMP '2004-02-29 13:24:56.789');
+        date_trunc        
+--------------------------
+ Mon Jan 01 00:00:00 2001
+(1 row)
+
+SELECT date_trunc('millennium', TIMESTAMP '2004-02-29 13:24:56.789');
+        date_trunc        
+--------------------------
+ Mon Jan 01 00:00:00 2001
+(1 row)
+
+SELECT date_trunc('hour', TIMESTAMP '2004-02-29 13:24:56.789');
+        date_trunc        
+--------------------------
+ Sun Feb 29 13:00:00 2004
+(1 row)
+
+SELECT date_trunc('milliseconds', TIMESTAMP '2004-02-29 13:24:56.789');
+          date_trunc          
+------------------------------
+ Sun Feb 29 13:24:56.789 2004
+(1 row)
+
+SET TIME ZONE 'America/New_York';
+SELECT date_trunc('day', TIMESTAMPTZ '2025-03-09 06:30:00+00');
+          date_trunc          
+------------------------------
+ Sun Mar 09 00:00:00 2025 EST
+(1 row)
+
+SELECT date_trunc('day', TIMESTAMPTZ '2025-11-02 05:30:00+00');
+          date_trunc          
+------------------------------
+ Sun Nov 02 00:00:00 2025 EDT
+(1 row)
+
+SELECT date_trunc('week', TIMESTAMPTZ '2025-03-12 00:00:00+00');
+          date_trunc          
+------------------------------
+ Mon Mar 10 00:00:00 2025 EDT
+(1 row)
+
+SELECT date_trunc('day', TIMESTAMPTZ '2025-03-09 06:30:00+00', 'Asia/Kolkata');
+          date_trunc          
+------------------------------
+ Sat Mar 08 13:30:00 2025 EST
+(1 row)
+
+SELECT date_trunc('day', TIMESTAMPTZ '2025-03-09 06:30:00+00', 'UTC');
+          date_trunc          
+------------------------------
+ Sat Mar 08 19:00:00 2025 EST
+(1 row)
+
+SELECT date_trunc('bogus', TIMESTAMP '2025-01-01 00:00:00');
+ERROR:  22023: unit "bogus" not recognized for type timestamp without time zone
+SELECT date_trunc('week', TIMESTAMP 'infinity');
+ date_trunc 
+------------
+ infinity
+(1 row)
+
+SELECT date_trunc('timezone', TIMESTAMP '2025-01-01 00:00:00');
+ERROR:  0A000: unit "timezone" not supported for type timestamp without time zone
+SET TIME ZONE 'UTC';
+-- ===== make_timestamp / make_timestamptz =====
+SELECT make_timestamp(2025, 7, 4, 12, 30, 15.5);
+       make_timestamp       
+----------------------------
+ Fri Jul 04 12:30:15.5 2025
+(1 row)
+
+SELECT make_timestamp(-44, 3, 15, 0, 0, 0);
+       make_timestamp        
+-----------------------------
+ Fri Mar 15 00:00:00 0044 BC
+(1 row)
+
+SET TIME ZONE 'America/New_York';
+SELECT make_timestamptz(2025, 7, 4, 12, 30, 15.5);
+        make_timestamptz        
+--------------------------------
+ Fri Jul 04 12:30:15.5 2025 EDT
+(1 row)
+
+SELECT make_timestamptz(2025, 3, 9, 2, 30, 0);
+       make_timestamptz       
+------------------------------
+ Sun Mar 09 03:30:00 2025 EDT
+(1 row)
+
+SELECT make_timestamptz(2025, 7, 4, 12, 30, 15.5, 'Asia/Kolkata');
+        make_timestamptz        
+--------------------------------
+ Fri Jul 04 03:00:15.5 2025 EDT
+(1 row)
+
+SELECT make_timestamptz(2025, 7, 4, 12, 30, 15.5, '+05:30');
+        make_timestamptz        
+--------------------------------
+ Fri Jul 04 03:00:15.5 2025 EDT
+(1 row)
+
+SELECT make_timestamptz(2025, 11, 2, 1, 30, 0, 'America/New_York');
+       make_timestamptz       
+------------------------------
+ Sun Nov 02 01:30:00 2025 EST
+(1 row)
+
+SELECT make_timestamptz(2025, 7, 4, 12, 30, 15.5, 'Nowhere/Zone');
+ERROR:  22023: time zone "Nowhere/Zone" not recognized
+SELECT make_timestamptz(2025, 13, 1, 0, 0, 0);
+ERROR:  22008: date field value out of range: 2025-13-01
+SET TIME ZONE 'UTC';
+-- ===== now-family (value-free predicates; wall values are nondeterministic) =====
+SELECT now() = transaction_timestamp();
+ ?column? 
+----------
+ t
+(1 row)
+
+BEGIN;
+SELECT now() = transaction_timestamp();
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT statement_timestamp() >= now();
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT clock_timestamp() >= statement_timestamp();
+ ?column? 
+----------
+ t
+(1 row)
+
+COMMIT;
+SELECT timeofday() <> '';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT CURRENT_TIMESTAMP = now();
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT EXTRACT(microseconds FROM CURRENT_TIMESTAMP(2))::bigint % 10000 = 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT LOCALTIMESTAMP = timezone('UTC', now());
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT EXTRACT(microseconds FROM LOCALTIMESTAMP(0))::bigint % 1000000 = 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+SET TIME ZONE 'America/New_York';
+SELECT LOCALTIMESTAMP = now() AT TIME ZONE 'America/New_York';
+ ?column? 
+----------
+ t
+(1 row)
+
+SET TIME ZONE 'UTC';
+-- ===== timestamptz round-trips under different session zones =====
+CREATE TABLE tz_e2e(id int, t timestamptz, ts timestamp);
+SET TIME ZONE 'America/New_York';
+INSERT INTO tz_e2e VALUES (1, '2025-07-04 12:00:00', '2025-07-04 12:00:00');
+INSERT INTO tz_e2e VALUES (2, '2025-03-09 02:30:00', '2025-03-09 02:30:00');
+INSERT INTO tz_e2e VALUES (3, '2025-11-02 01:30:00-05', '2025-11-02 01:30:00');
+SET TIME ZONE 'Asia/Kolkata';
+INSERT INTO tz_e2e VALUES (4, '2025-07-04 12:00:00', '2025-07-04 12:00:00');
+SELECT id, t, ts FROM tz_e2e ORDER BY id;
+ id |              t               |            ts            
+----+------------------------------+--------------------------
+  1 | Fri Jul 04 21:30:00 2025 IST | Fri Jul 04 12:00:00 2025
+  2 | Sun Mar 09 13:00:00 2025 IST | Sun Mar 09 02:30:00 2025
+  3 | Sun Nov 02 12:00:00 2025 IST | Sun Nov 02 01:30:00 2025
+  4 | Fri Jul 04 12:00:00 2025 IST | Fri Jul 04 12:00:00 2025
+(4 rows)
+
+SET TIME ZONE 'UTC';
+SELECT id, t, ts FROM tz_e2e ORDER BY id;
+ id |              t               |            ts            
+----+------------------------------+--------------------------
+  1 | Fri Jul 04 16:00:00 2025 UTC | Fri Jul 04 12:00:00 2025
+  2 | Sun Mar 09 07:30:00 2025 UTC | Sun Mar 09 02:30:00 2025
+  3 | Sun Nov 02 06:30:00 2025 UTC | Sun Nov 02 01:30:00 2025
+  4 | Fri Jul 04 06:30:00 2025 UTC | Fri Jul 04 12:00:00 2025
+(4 rows)
+
+SELECT id, t AT TIME ZONE 'America/New_York', ts AT TIME ZONE 'America/New_York' FROM tz_e2e ORDER BY id;
+ id |         timezone         |           timezone           
+----+--------------------------+------------------------------
+  1 | Fri Jul 04 12:00:00 2025 | Fri Jul 04 16:00:00 2025 UTC
+  2 | Sun Mar 09 03:30:00 2025 | Sun Mar 09 07:30:00 2025 UTC
+  3 | Sun Nov 02 01:30:00 2025 | Sun Nov 02 06:30:00 2025 UTC
+  4 | Fri Jul 04 02:30:00 2025 | Fri Jul 04 16:00:00 2025 UTC
+(4 rows)
+
+SELECT id, EXTRACT(epoch FROM t) FROM tz_e2e ORDER BY id;
+ id |      extract      
+----+-------------------
+  1 | 1751644800.000000
+  2 | 1741505400.000000
+  3 | 1762065000.000000
+  4 | 1751610600.000000
+(4 rows)
+
+DROP TABLE tz_e2e;
+-- ===== interval lane: tz-relevant interval surface =====
+SET TIME ZONE 'America/New_York';
+SELECT timestamptz '2025-03-08 12:00:00' + interval '1 day';
+           ?column?           
+------------------------------
+ Sun Mar 09 12:00:00 2025 EDT
+(1 row)
+
+SELECT timestamptz '2025-03-08 12:00:00' + interval '24 hours';
+           ?column?           
+------------------------------
+ Sun Mar 09 13:00:00 2025 EDT
+(1 row)
+
+SELECT timestamptz '2025-11-01 12:00:00' + interval '1 day';
+           ?column?           
+------------------------------
+ Sun Nov 02 12:00:00 2025 EST
+(1 row)
+
+SELECT timestamptz '2025-11-01 12:00:00' + interval '24 hours';
+           ?column?           
+------------------------------
+ Sun Nov 02 11:00:00 2025 EST
+(1 row)
+
+SELECT timestamptz '2025-11-02 06:30:00+00' - timestamptz '2025-11-01 06:30:00+00';
+ ?column? 
+----------
+ 1 day
+(1 row)
+
+SELECT timestamp '2025-06-01 12:00:00' AT TIME ZONE interval '-5 hours';
+           timezone           
+------------------------------
+ Sun Jun 01 13:00:00 2025 EDT
+(1 row)
+
+SET TIME ZONE INTERVAL '+05:30' HOUR TO MINUTE;
+SHOW timezone;
+    TimeZone    
+----------------
+ <+05:30>-05:30
+(1 row)
+
+SELECT '2025-01-01 00:00:00+00'::timestamptz;
+           timestamptz           
+---------------------------------
+ Wed Jan 01 05:30:00 2025 +05:30
+(1 row)
+
+SET TIME ZONE 'UTC';
+SELECT age(timestamptz '2025-03-15 10:30:00+00', timestamptz '2024-01-20 08:00:00+00');
+              age              
+-------------------------------
+ 1 year 1 mon 26 days 02:30:00
+(1 row)
+
+SELECT extract(epoch from interval '2 years 5 mons 10 days 12:30:45.678');
+     extract     
+-----------------
+ 76984245.678000
+(1 row)
+

@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/transam/parallel_seams/src/lib.rs","sloc":[4,6,9,12,15,18,21,22,25,26,29,30,33,34,37,38,41,44],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2]}}

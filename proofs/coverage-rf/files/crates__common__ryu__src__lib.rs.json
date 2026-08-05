@@ -1,0 +1,1 @@
+{"path":"crates/common/ryu/src/lib.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[7,8,9,10,12,13,15,16],"attr":[5]}}

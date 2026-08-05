@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/misc/guc_tables/src/parallel_engine.rs","sloc":[37,39,40,51,52,56,58,59,60,61,75,76,77,79,80,82,83,84,85,87,89,90,91,93],"kani":[],"fuzz":[],"regress":[37,39,40,51,52,75,76,79,82,89,93],"excluded":{"const-static":[38,57]}}

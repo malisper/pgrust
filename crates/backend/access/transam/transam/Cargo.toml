@@ -1,0 +1,31 @@
+[package]
+name = "transam"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "transam"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+elog = { path = "../../../utils/error/elog" }
+clog = { path = "../clog" }
+subtrans = { path = "../subtrans" }
+procarray = { path = "../../../storage/ipc/procarray" }
+transam_seams = { path = "../transam_seams" }
+
+[dev-dependencies]
+libc = "0.2"
+init_small = { path = "../../../utils/init/init_small" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+file_seams = { path = "../../../storage/file/file_seams" }
+sync_seams = { path = "../../../storage/sync/sync_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+xlogutils_seams = { path = "../xlogutils_seams" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+varsup_seams = { path = "../varsup_seams" }

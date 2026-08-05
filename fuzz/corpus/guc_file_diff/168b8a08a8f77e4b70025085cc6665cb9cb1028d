@@ -1,0 +1,282 @@
+aix_socket_permissions = 0777		# begin with 0 to use octal notation
+					# (change requires restart)
+#bonjour = off				# advertise server via Bonjour
+					# (change requires restart)
+#bonjour_name = ''			# defaults to the computer name
+					# (change requires restart)
+
+# - TCP settings -
+# see "man tcp" for details
+
+#tcp_keepalives_idle = 0		# TCP_KEEPIDLE, in seconds;
+					# 0 selects the system default
+#tcp_keepalives_interval = 0		# TCP_KEEPINTVL, in seconds;
+					# 0 selects the system default
+#tcp_keepalives_count = 0		# TCP_KEEPCNT;
+					# 0 selects the system default
+#tcp_user_timeout = 0			# TCP_USER_TIMEOUT, in milliseconds;
+					# 0 selects the system default
+
+#client_connection_check_interval = 0	# time between checks for client
+					# disconnection while running queries;
+					# 0 for never
+
+# - Authentication -
+
+#authentication_timeout = 1min		# 1s-600s
+#password_encryption = scram-sha-256	# scram-sha-256 or (deprecated) md5
+#scram_iterations = 4096
+#md5_password_warnings = on		# display md5 deprecation warnings?
+#oauth_validator_libraries = ''	# comma-separated list of trusted validator modules
+
+# GSSAPI using Kerberos
+#krb_server_keyfile = 'FILE:${sysconfdir}/krb5.keytab'
+#krb_caseins_users = off
+#gss_accept_delegation = off
+
+# - SSL -
+
+#ssl = off
+#ssl_ca_file = ''
+#ssl_cert_file = 'server.crt'
+#ssl_crl_file = ''
+#ssl_crl_dir = ''
+#ssl_key_file = 'server.key'
+#ssl_ciphers = 'HIGH:MEDIUM:+3DES:!aNULL'	# ~ÿÿÿallowed TLSv1.2 ciphers
+#ssl_tls13_ciphers = ''	# allowed TLSv1.3 cipher suites, blank for default
+#ssl_prefer_server_ciphers = on
+#ssl_groups = 'X25519:prime256v1'
+#ssl_min_protocol_version = 'TLSv1.2'
+#ssl_max_protocol_version = ''
+#ssl_dh_params_file = ''
+#ssl_passphrase_command = ''
+#ssl_passphrase_command_supports_reload = off
+
+
+#------------------------------------------------------------------------------
+# RESOURCE USAGE (except WAL)
+#------------------------------------------------------------------------------
+
+# - Memory -
+
+#shared_buffers = 064MB			# min 128kB
+					# (change requires restart)
+#huge_pages = try			# on, off, or try
+					# (change requires restart)
+#huge_page_size = 0			# zero for system default
+					# (change requires restart)
+#temp_buffers = 8MB			# min 800kB
+#max_prepared_transactions = 0		# zero disables the feature
+					# (change requires restart)
+# Caution: it is not advisable to set max_prepared_transactions nonzero unless
+# you actively intend to use prepared transactions.
+#work_mem = 4MB				# min 64kB
+#hash_mem_multiplier = 2.0		# 1-1000.0 multiplier on hash table work_mem
+#maintenance_work_mem = 64MB		# min 64kB
+#autovacuum_work_mem = -1		# min 64kB, he system default
+#tcp_keepalives_interval = 0		# TCP_KEEPINTVL, in seconds;
+					# 0 selects the system default
+#tcp_keepalives_count = 0		# TCP_KEEPCNT;
+					# 0 selects the system default
+#tcp_user_timeout = 0			# TCP_USER_TIMEOUT, in milliseconds;
+					# 0 selects the system default
+
+#client_connection_check_interval = 0	# time between checks for client
+					# disconnection while running queries;
+					# 0 for never
+
+# - Authentication -
+
+#authentication_timeout = 1min		# 1s-600s
+#password_encryption = scram-sha-256	# scram-sha-256 or (deprecated) md5
+#scram_iterations = 4096
+#md5_password_warnings = on		# display md5 deprecation warnings?
+#oauth_validator_libraries = ''	# comma-separated list of trusted validator modules
+
+# GSSAPI using Kerberos
+#krb_server_keyfile = 'FILE:${sysconfdir}/krb5.keytab'
+#krb_caseins_users = off
+#gss_accept_delegation = off
+
+# - SSL -
+
+#ssl = off
+#ssl_ca_file = ''
+#ssl_cert_file = 'server.crt'
+#ssl_crl_file = ''
+#ssl_crl_dir = ''
+#ssl_key_file = 'server.key'
+#ssl_ciphers = 'HIGH:MEDIUM:+3DES:!aNULL'	# ~ÿÿÿallowed TLSv1.2 ciphers
+#ssl_tls13_ciphers = ''	# allowed TLSv1.3 cipher suites, blank for default
+#ssl_prefer_server_ciphers = on
+#ssl_groups = 'X25519:prime256v1'
+#ssl_min_protocol_version = 'TLSv1.2'
+#ssl_max_protocol_version = ''
+#ssl_dh_params_file = ''
+#ssl_passphrase_command = ''
+#ssl_passphrase_command_supports_reload = off
+
+
+#------------------------------------------------------------------------------
+# RESOURCE USAGE (except WAL)
+#------------------------------------------------------------------------------
+
+# - Memory -
+
+#shared_buffers = 064MB			# min 128kB
+					# (change requires restart)
+#huge_pages = try			# on, off, or try
+					# (change requires restart)
+#huge_page_size = 0			# zero for system default
+					# (change requires restart)
+#temp_buffers = 8MB			# min 800kB
+#max_prepared_transactions = 0		# zero disables the feature
+					# (change requires restart)
+# Caution: it is not advisable to set max_prepared_transactions nonzero unless
+# you actively intend to use prepared transactions.
+#work_mem = 4MB				# min 64kB
+#hash_mem_multiplier = 2.0		# 1-1000.0 multiplier on hash table work_mem
+#maintenance_work_mem = 64MB		# min 64kB
+#autovacuum_work_mem = -1		# min 64kB, or -1 to use maintenance_work_mem
+#logical_decoding_work_mem = 64MB	# min 64kB
+#max_stack_depth = 2MB			# min 100kB
+#shared_memory_type = mmap		# the default is the first option
+					# supported by the operating system:
+					#   mmap
+					#   sysv
+					#   windows
+					# (change requires restart)
+#dynamic_shared_memory_type = posix	# the default is usually the first option
+					# supported by the operating system:
+					#   posix
+					#   sysv
+					#   windows
+					#   mmap
+					# (change requires restart)
+#min_dynamic_shared_memory = 0MB	# (change requires restart)
+#vacuum_buffer_usage_limit = 2MB	# size of vacuum and analyze buffer access strategy ring;
+					# 0 to disable vacuum buffer access strategy;
+					# range 128kB to 16GB
+
+# SLRU buffers (change requires restart)
+#commit_timestamp_buffers = 0		# memory for pg_commit_ts (0 = auto)
+#multixact_offset_buffers = 16		# memory for pg_multixact/offsets
+#multixact_member_buffers = 32		# memory for pg_multixact/members
+#notify_buffers = 16			# memory for pg_notify
+#serializable_buffers = 32		# memory for pg_serial
+#subtransaction_buffers = 0		# memory for pg_subtrans (0 = auto)
+#transaction_buffers = 0		# memory for pg_xact (0 = auto)
+
+# - Disk -
+
+#temp_file_limit = -1			# limits per-process temp file space
+					# in kilobytes, or -1 for no limit
+
+#fSTEN queue
+
+# - Kernel Resources -
+
+#max_files_per_process = 1000		# min 64
+					# (change requires restart)
+
+# - Background Writer -
+
+#bgwriter_delay = 200ms			# 10-10000ms between rounds
+#bgwriter_lru_maxpages = 100		# max buffers written/round, 0 disables
+#bgwriter_lru_multiplier = 2.0		# 0-10.0 multiplier on buffers scanned/round
+#bgwriter_flush_after = 0		# measured in pages, 0 disables
+
+# - I/O -
+
+#backend_flush_after = 0		# measured in pages, 0 disables
+#effective_io_concurrency = 16		# 1-1000;àÏ disables issuing multiple simultaneous IO requests
+#maintenance_io_concurrency = 16	# 1-1000; same as effective_io_concurrency
+#io_max_combine_limit = 128kB		# usually 1-128 blocks (depends on OS)
+					# (change requires restart)
+#io_combine_limit = 128kB		# usually 1-128 blocks (depends on OS)
+
+#io_method = worker			# worker, io_uring, sync
+					# (change requires restart)
+#io_max_concurrency = -1		# Max number of IOs that one process
+					# can execute simultaneously
+					# -1 sets basea = 'x\n\t\bd on shared_buffers
+					# (change requires restart)
+#io_workers = 3				# 1-32;
+
+# - Worker Processes -
+
+#max_worker_processes = 8		# (change requires restart)
+#max_parallel_workers_per_gather = 2	# limited by max_parallel_workers
+#max_parallel_maintenance_workers = 2	# limited by max_parallel_workers
+#max_parallel_workers = 8		# number of max_worker_processes that
+					# can be used in parallel operations
+#parallel_leader_participation = on
+
+
+#------------------------------------------------------------------------------
+# WRITE-AHEAD L					# (change requires restart)
+#max_standby_archive_delay = 30s	# max delay before canceling qnfdir}/krb5.keytab'
+#krb_caseins_users = off
+#gss_accept_delegation = off
+
+# - SSL -
+
+#ssl = off
+#ssl_ca_file = ''
+#ssl_cert_file = 'server.crt'
+#ssl_crl_file = ''
+#ssl_crl_dir = ''
+#ssl_key_file = 'server.key'
+#ssl_ciphers = 'HIGH:MEDIUM:+3DES:!aNULL'	# ~ÿÿÿallowed TLSv1.2 ciphers
+#ssl_tls13_ciphers = ''	# allowed TLSv1.3 cipher suites, blank for default
+#ssl_prefer_server_ciphers = on
+#ssl_groups = 'X25519:prime256v1'
+#ssl_min_protocol_version = 'TLSv1.2'
+#ssl_max_protocol_version = ''
+#ssl_dh_params_file = ''
+#ssl_passphrase_command = ''
+#ssl_passphrase_command_supports_reload = off
+
+
+#------------------------------------------------------------------------------
+# RESOURCE USAGE (except WAL)
+#------------------------------------------------------------------------------
+
+# - Memory -
+
+#shared_buffers = 064MB			# min 128kB
+					# (change requires restart)
+#huge_pages = try			# on, off, or try
+					# (change requires restart)
+#huge_page_size = 0			# zero for system default
+					# (change requires restart)
+#temp_buffers = 8MB			# min 800kB
+#max_prepared_transactions = 0		# zero disables the feature
+					# (change requires restart)
+# Caution: it is not advisable to set max_prepared_transactions nonzero unless
+# you actively intend to use prepared transactions.
+#work_mem = 4MB				# min 64kB
+#hash_mem_multiplier = 2.0		# 1-1000.0 multiplier on hash table work_mem
+#maintenance_work_mem = 64MB		# min 64kB
+#autovacuum_work_mem = -1		# min 64kB, he system default
+#tcp_keepalives_interval = 0		# TCP_KEEPINTVL, in seconds;
+					# 0 selects the system default
+#tcp_keepalives_count = 0		# TCP_KEEPCNT;
+					# 0 selects the system default
+#tcp_user_timeout = 0			# TCP_USER_TIMEOUT, in milliseconds;
+					# 0 selects the system default
+
+#client_connection_check_interval = 0	# time between checks for client
+					# disconnection while running queries;
+					# 0 for never
+
+# - Authentication -
+
+#authentication_timeout = 1min		# 1s-600s
+#password_encryption = scram-sha-256	# scram-sha-256 or (deprecated) md5
+#scram_iterations = 4096
+#md5_password_warnings = on		# diueries
+					# when reading WAL from archive;
+					# -1 allows indefinite delay
+#max_standby_streaming_delay = 30s	# max delay before canceling queries
+			cnd'

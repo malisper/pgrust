@@ -1,0 +1,1 @@
+{"path":"crates/backend/catalog/catalog_namespace/src/builtins.rs","sloc":[14,15,16,17,24,25,26,27,28,29,30,33,34,35,36,37,38,39,40,45],"kani":[],"fuzz":[],"regress":[14,15,16,17],"excluded":{"use-mod":[1,2,3,4,6,7,8],"macro-scaffold":[11,12,20,23],"const-table":[46,47,48,49,50,51,52]}}

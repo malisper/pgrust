@@ -1,0 +1,432 @@
+{
+ "expected": 60,
+ "ran": 0,
+ "walled": 0,
+ "failed_to_run": 60,
+ "waived": 60,
+ "kaniraw_files": 0,
+ "kaniraw_without_census_row": 0,
+ "census_closed": true,
+ "unmeasured": [
+  {
+   "family": "utf8",
+   "harness": "islegal_len1",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "islegal_len2",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "islegal_len3",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "islegal_len4",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "islegal_symlen_contract",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "islegal_symlen_out_of_contract",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "mblen_all_bytes",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "mblen_then_islegal",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_ascii_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_ascii_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_eucjp_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_eucjp_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_eucjis2004_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_eucjis2004_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_euckr_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_euckr_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_euccn_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_euccn_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_euctw_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_euctw_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_johab_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_johab_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_mule_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_mule_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_latin1_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_latin1_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_sjis_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_sjis_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_sjis2004_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_sjis2004_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_big5_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_big5_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_gbk_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_gbk_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_uhc_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_uhc_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_gb18030_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_gb18030_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_utf8_dsplen_lead1",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_utf8_dsplen_lead2",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_utf8_dsplen_lead3_lo",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_utf8_dsplen_lead3_hi",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_utf8_dsplen_lead4_lo",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_utf8_dsplen_lead4_hi",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_utf8_dsplen_lead_invalid",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "utf8_dsplen_partition_coverage",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_single_byte_band_mblen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_single_byte_band_dsplen",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_invalid_encoding_fallback",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_mbbisearch_nonspacing",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_mbbisearch_east_asian_fw",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "eq_ucs_wcwidth_full_u32",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "utf8",
+   "harness": "control_sjis_vs_big5_mblen_must_fail",
+   "verdict": "must-fail-per-commit",
+   "rc": "0",
+   "waiver": "must-fail control: contributes non-vacuity, never coverage"
+  },
+  {
+   "family": "encnames",
+   "harness": "proofs::eq_encoding_to_char_frame",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "encnames",
+   "harness": "proofs::eq_char_to_encoding_core_ascii",
+   "verdict": "wall-recorded-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "encnames",
+   "harness": "proofs::eq_char_to_encoding_core_utf8",
+   "verdict": "wall-recorded-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "encnames",
+   "harness": "proofs::spot_char_to_encoding_len63",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "encnames",
+   "harness": "proofs::spot_char_to_encoding_len64",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "encnames",
+   "harness": "proofs::witness_wrapper_non_utf8_plane",
+   "verdict": "green-per-commit",
+   "rc": "0",
+   "waiver": "proof-covered-unmeasured: per-commit suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge"
+  },
+  {
+   "family": "encnames",
+   "harness": "proofs::control_encoding_to_char_frame_shifted",
+   "verdict": "must-fail-per-commit",
+   "rc": "0",
+   "waiver": "must-fail control: contributes non-vacuity, never coverage"
+  }
+ ]
+}

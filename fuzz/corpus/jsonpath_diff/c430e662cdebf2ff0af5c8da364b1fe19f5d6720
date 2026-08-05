@@ -1,0 +1,3 @@
+$.a.a.
+\decimal(10,2) == $.b.
+\decimal(10,2) == $.b.decimal(5)

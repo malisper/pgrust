@@ -1,0 +1,69 @@
+[package]
+name = "typecmds"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+tablecmds = { path = "../tablecmds" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+datum = { path = "../../../_support/types/datum" }
+parser_small1 = { path = "../../parser/parser_small1" }
+parse_expr = { path = "../../parser/parse_expr" }
+parse_collate = { path = "../../parser/parse_collate" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
+coerce = { path = "../../parser/coerce" }
+vars = { path = "../../optimizer/util/vars" }
+outfuncs = { path = "../../nodes/outfuncs" }
+pg_type = { path = "../../catalog/pg_type" }
+commands_define = { path = "../commands_define" }
+parse_func = { path = "../../parser/parse_func" }
+pg_enum = { path = "../../catalog/pg_enum" }
+pg_range = { path = "../../catalog/pg_range" }
+pg_proc = { path = "../../catalog/pg_proc" }
+pg_cast = { path = "../../catalog/pg_cast" }
+opclasscmds = { path = "../opclasscmds" }
+indexcmds_seams = { path = "../indexcmds_seams" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+superuser = { path = "../../utils/misc/superuser" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+xact = { path = "../../access/transam/xact" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+format_type = { path = "../../utils/adt/format_type" }
+mbutils = { path = "../../utils/mb/mbutils" }
+elog = { path = "../../utils/error/elog" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+ruleutils = { path = "../../utils/adt/ruleutils" }
+readfuncs = { path = "../../nodes/readfuncs" }
+execexpr = { path = "../../executor/execexpr" }
+clauses = { path = "../../optimizer/util/clauses" }
+tableam = { path = "../../access/table/tableam" }
+exectuples = { path = "../../executor/exectuples" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+relation_seams = { path = "../../access/common/relation_seams" }
+inval = { path = "../../utils/cache/inval" }
+heaptuple = { path = "../../access/common/heaptuple" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+varlena = { path = "../../utils/adt/varlena" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+typecmds_seams = { path = "../typecmds_seams" }

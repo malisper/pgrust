@@ -1,0 +1,53 @@
+[package]
+name = "parse_clause"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_clause"
+path = "src/lib.rs"
+
+[dependencies]
+adt_json = { path = "../../utils/adt/json" }
+adt_jsonpath = { path = "../../utils/adt/jsonpath" }
+datum = { path = "../../../_support/types/datum" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+parse_utilcmd = { path = "../parse_utilcmd" }
+catalog = { path = "../../catalog/catalog" }
+table = { path = "../../access/table/table" }
+types_rel = { path = "../../../_support/types/rel" }
+coerce = { path = "../coerce" }
+elog = { path = "../../utils/error/elog" }
+format_type = { path = "../../utils/adt/format_type" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+mbutils = { path = "../../utils/mb/mbutils" }
+mcx = { path = "../../../_support/mcx" }
+analyze_seams = { path = "../analyze_seams" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+opclasscmds_seams = { path = "../../commands/opclasscmds_seams" }
+parse_clause_seams = { path = "../parse_clause_seams" }
+parse_agg = { path = "../parse_agg" }
+parse_expr = { path = "../parse_expr" }
+parse_collate = { path = "../parse_collate" }
+parse_oper = { path = "../parse_oper" }
+parse_target = { path = "../parse_target" }
+parse_relation = { path = "../parse_relation" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
+parse_func_seams = { path = "../parse_func_seams" }
+tablesample = { path = "../../access/tablesample/tablesample" }
+parser_small1 = { path = "../parser_small1" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+vars = { path = "../../optimizer/util/vars" }
+
+relation_seams = { path = "../../access/common/relation_seams" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+[dev-dependencies]
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }

@@ -1,0 +1,49 @@
+# proofs/strings-scalar runqueue — byteain pass-one + toast header
+# accessors + btvarstrequalimage (tail-triage strings/toast-hdr group).
+# PRE-BUILD LANE 2026-07-29: harnesses written + codegen-gated ONLY
+#   (cargo kani --only-codegen -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c : PASS, exit 0).
+# ZERO kani/cbmc solves have been run. Expected classes are claim-before-code
+# triage, not verdicts.
+#
+# Run from proofs/strings-scalar/, ONE harness at a time, own-process-group
+# kill on timeout. kissat for expected-green; DEFAULT solver for controls,
+# covers, and anything being decoded (kissat never terminates on failing
+# harnesses). Judge near-cap runs on CBMC-reported Verification Time under
+# multi-lane load. -Z stubbing is load-bearing on every line (mcx +
+# cached_arg_typlen + PgError stubs).
+#
+# Ledger bookkeeping (rows to update at solve time):
+#   1244 byteain (escape pass-one; \x arm fenced -> proofs/hex)
+#   1269 pg_column_size    2121 pg_column_compression
+#   6316 pg_column_toast_chunk_id    5050 btvarstrequalimage
+# Ledger wording owed on green: "value-space only; modulo static-buffer
+# allocator model + typlen/locale seam (identical both sides)".
+#
+# harness | expected | tier | command
+proofs::eq_byteain_escape_verdict         | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --solver kissat --harness proofs::eq_byteain_escape_verdict --exact    # expect: PROVED(len<=8, escape style; hex arm fenced) — pass-two stores in formula but unread; if it walls, drop to len<=6 before recording
+proofs::eq_byteain_escape_content_len4    | GREEN/wall | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --solver kissat --harness proofs::eq_byteain_escape_content_len4 --exact  # expect: ladder — result-image claim at cap 4 (derived-offset stores); wall(CNF width) is an acceptable verdict, verdict harness above still covers 1244  # REPAIRED 2026-07-29: unwind 7->10 (sym_cstring<9> fill loop = 8 iters; fleet fabricated-FAIL removed); still walls locally at 350s = the documented acceptable wall — repaired-pending-fleet
+proofs::cover_byteain_regimes             | COVERS    | control      | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --harness proofs::cover_byteain_regimes --exact                             # expect: all 4 covers SATISFIED (DEFAULT solver)
+proofs::control_byteain_len_skew          | MUST-FAIL | control      | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --harness proofs::control_byteain_len_skew --exact                          # expect: VERIFICATION FAILED w/ decodable counterexample (section-A rig non-vacuity)
+proofs::eq_pg_column_size_varlena         | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --solver kissat --harness proofs::eq_pg_column_size_varlena --exact          # expect: PROVED(all fenced 18B images) fast — pure header bit-decode
+proofs::eq_pg_column_size_cstring         | GREEN/ladder | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --solver kissat --harness proofs::eq_pg_column_size_cstring --exact      # expect: ladder — dual NUL-scan (strlen vs CStr) len<=8; derived-length law says maybe wall: then record spots(len 0/1/8) via concrete edits
+proofs::eq_pg_column_size_fixed           | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --solver kissat --harness proofs::eq_pg_column_size_fixed --exact            # expect: PROVED(typlen 1..=i16::MAX) fast
+proofs::eq_pg_column_compression_varlena  | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --solver kissat --harness proofs::eq_pg_column_compression_varlena --exact   # expect: PROVED — which-verdict + 4/5-byte literal text image
+proofs::eq_pg_column_compression_nonvarlena | GREEN   | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --solver kissat --harness proofs::eq_pg_column_compression_nonvarlena --exact # expect: PROVED (NULL plane)
+proofs::eq_pg_column_toast_chunk_id       | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --solver kissat --harness proofs::eq_pg_column_toast_chunk_id --exact        # expect: PROVED(all fenced 18B images) fast
+proofs::cover_toast_regimes               | COVERS    | control      | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --harness proofs::cover_toast_regimes --exact                               # expect: all 7 covers SATISFIED (DEFAULT solver)  # REPAIRED 2026-07-29: VARATT_EXTERNAL_GET_POINTER added verbatim to varatt_rel18.h (was missing); 7/7 covers SATISFIED locally 0.1s
+proofs::control_toast_typlen_skew         | MUST-FAIL | control      | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --harness proofs::control_toast_typlen_skew --exact                         # expect: VERIFICATION FAILED w/ counterexample (typlen seam load-bearing)  # REPAIRED 2026-07-29: concrete 3-byte image + dummy_mcx (registry retain sweep walled the symbolic plane); FAILS on the intended typlen check in 0.3s locally
+proofs::eq_btvarstrequalimage             | GREEN     | per-commit   | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --solver kissat --harness proofs::eq_btvarstrequalimage --exact              # expect: PROVED(full-u32 collid x full det seam; C/POSIX pinned true) — inline covers may cost extra kissat batches; if slow retry DEFAULT
+proofs::control_btvarstrequalimage_det_skew | MUST-FAIL | control    | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_strings_scalar.c --harness proofs::control_btvarstrequalimage_det_skew --exact               # expect: VERIFICATION FAILED (locale-det seam load-bearing)
+#
+# NOTES (claim-before-code):
+# - eq_byteain_escape_verdict compares verdict + count + image LENGTH only;
+#   pass-two derived-offset stores are still in the formula (unread). If the
+#   SAT residue walls, the scalar projection precedent (cash lane law 2)
+#   says shrink the cap, not the claim.
+# - byteain \x arm: fenced + C-side -2 trap asserted unreached. Formal hex
+#   coverage lives in proofs/hex (mcx-stubs recipe).
+# - pg_column_size cstring plane carries BOTH a C strlen and a Rust
+#   CStr::from_ptr scan — if CStr has no Kani model this becomes
+#   blocked(tool) for the plane, varlena/fixed planes stand alone.
+# - indirect/expanded toast arms: out of theorem (C traps, fence asserted).
+#   Re-open only with a pointee-modeling rig (brin pg_read16 pattern).

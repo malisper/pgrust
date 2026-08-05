@@ -1,0 +1,30 @@
+[package]
+name = "freespace"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
+xlogutils = { path = "../../../access/transam/xlogutils" }
+xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
+smgr_seams = { path = "../../smgr/smgr_seams" }
+freespace_seams = { path = "../freespace_seams" }
+xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+init_small = { path = "../../../utils/init/init_small" }
+
+[dev-dependencies]
+test_boot = { path = "../../../../_support/test_boot" }
+mcx = { path = "../../../../_support/mcx" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+heapam = { path = "../../../../backend/access/heap/heapam" }
+xact_seams = { path = "../../../../backend/access/transam/xact_seams" }
+miscinit_seams = { path = "../../../../backend/utils/init/miscinit_seams" }
+catalog_seams = { path = "../../../../backend/catalog/catalog_seams" }
+predicate_seams = { path = "../../lmgr/predicate_seams" }

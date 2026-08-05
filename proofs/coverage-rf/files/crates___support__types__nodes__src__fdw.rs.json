@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/nodes/src/fdw.rs","sloc":[24,28,29,44,45],"kani":[],"fuzz":[],"regress":[28,29],"excluded":{"use-mod":[12],"attr":[15,16,27,37,53,62],"const-static":[22],"typedef":[17,18,19,38,39,40,54,55,56,63,64,65],"impl-header":[26,43]}}

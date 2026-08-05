@@ -1,0 +1,116 @@
+# p1-pgcryptofam — contrib/pgcrypto coverage evidence of record
+# Lane p1-pgcryptofam (successor to the idle p1-pgcrypto lane, whose target was
+# never written). Oracle: verbatim PostgreSQL 18.3 contrib/pgcrypto, upstream
+# sha 62d6c7d3df, compiled -funsigned-char under fuzz/core/csrc/pgcryptofam/.
+#
+# FLOOR OF RECORD
+job	pgrust-fuzz-campaign-1785664060-1cd9-61609
+sha	f8231ca7535106f5e15d1e439f8b1c433d6b64fc
+target	pgcryptofam_diff
+execs	10209267
+execs_requested	10000000
+divergences	0
+sanitizer_artifacts	0
+crashed_early	0
+stray_artifacts_swept	0
+unclassified_stray_artifacts	0
+cov_lines	3782
+corpus_in	2306
+corpus_out	2464
+wall_s	300
+rc	0
+outcome	complete
+instance	c8g.4xlarge
+fork	14
+activeDeadlineSeconds	14400	verified on the LIVE job spec via kubectl -o jsonpath
+measured_fleet_rate	34031	execs/sec aggregate (10209267 / 300s, fork=14)
+measured_laptop_rate	6944	execs/sec (250k smoke, aarch64-apple-darwin, 0 div) — the number the deadline was sized from
+#
+# ARMS (6 fuzz arms + exhaustive-diff sweeps)
+arm0	crypt()	px_crypt dispatch table
+arm1	gen_salt()	px_gen_salt — entropy-carved planes
+arm2	armor()	pgp_armor_encode + parse_key_value_arrays
+arm3	dearmor()	pgp_armor_decode
+arm4	digest()	px_find_digest + px_md_*
+arm5	hmac()	px_find_hmac
+sweeps	to64 / bf_encode / bf_decode / atoi64 / ascii_to_bin / xdes count encode	full-domain, coverage asserts vacuity-checked
+#
+# COMPARISON PLANES
+P1	value bytes (whole output image)
+P2	error verdict (ok vs error)
+P3	errcode/sqlstate
+P4	NOTICE presence + numeric value (the crypt-sha rounds clamp)
+# message text: out of scope for comparison, captured for triage only
+#
+# INJECTION SWEEP — 4/4 CAUGHT, 0 missed, 0 bad plants (all rc=77)
+P1	pgp/armor.rs:97 CRC24_INIT 0x00b704ce->0x00b704cf	CAUGHT
+P2	crypt.rs gen_salt rounds range check -> if false	CAUGHT
+P3	lib.rs px_msg 39000 -> 22023	CAUGHT
+P4	crypt/shacrypt.rs clamp_rounds prints srounds+1	CAUGHT
+#
+# SLOC (v2, tables excluded, structural test filter) at the floor sha
+crate_total	3036
+in_scope	1401
+carved_family	1635	cipher.rs + all pgp/* except armor.rs (OpenSSL-provider-dependent oracle)
+in_scope_measured	1153
+in_scope_residual	248	classified in proofs/coverage/phase1-exceptions.tsv
+#
+# NOT COVERED BY THIS TARGET — stated, not hidden
+# pgp_armor_headers / extract_armor_headers: its only shipped entry point is a
+# MATERIALIZE-SRF wrapper whose InitMaterializedSRF(..,0) resolves its tupdesc
+# via get_call_result_type -> pg_proc, needing executor syscache/tuplestore
+# fixtures (the SRF surface every sibling lane carves). The C oracle entry
+# pg_diff_pgcryptofam_armor_headers exists and is smoke-anchored; routing a
+# pgrust side to it needs a pinned pg_proc fixture or a proof, and is owed.
+#
+# D12 (rounds >= 2^31 DoS) is NOT witnessable in-process: pre-fix pgrust ran
+# 999,999,999 rounds uninterruptibly and wedges any in-process harness BY
+# DESIGN. It needs a timeout rig (separate process + SIGKILL), which this lane
+# did not build. The clamp fix itself is unit-witnessed (766fe69d40b).
+#
+# SECOND INDEPENDENT FLOOR AT THE SAME SHA — CONFIRM x2
+# Submitted independently by the lane's oracle agent ~90s before the floor
+# above, same sha, different budget shape (fork=0 single-process vs fork=14).
+job2	pgrust-fuzz-campaign-1785663970-7f2a-61330
+sha2	f8231ca7535106f5e15d1e439f8b1c433d6b64fc
+execs2	10000000
+divergences2	0
+sanitizer_artifacts2	0
+cov_lines2	3790
+corpus_in2	2306
+corpus_out2	4089
+wall_s2	2767
+fork2	0
+rc2	0
+outcome2	complete
+#
+# CROSS-CHECK OF THE TWO FLOORS (this is what makes the equation robust):
+# the two runs cover EXACTLY the same 1153 in-scope lines — 0 lines unique to
+# either. The cov_lines delta (3790 vs 3782) is entirely OUTSIDE
+# crates/contrib/pgcrypto (the target links many crates). So the 248-line
+# residual set and the equation below are confirmed by two independent 10M
+# floors, not by a single capture.
+#   3036 = 1153 measured + 248 exception + 1635 carved, unaccounted 0
+# p1-pgcryptofam — contrib/pgcrypto phase-1 floor evidence
+# lcov of record: coverage-f8231ca7535.lcov.gz (final sha f8231ca7535106f5e15d1e439f8b1c433d6b64fc)
+key	value
+crate	contrib/pgcrypto
+lane	p1-pgcryptofam
+floor_job	pgrust-fuzz-campaign-1785663970-7f2a-61330
+floor_sha	f8231ca7535106f5e15d1e439f8b1c433d6b64fc
+execs	10000000
+stray_artifacts	0
+corpus_out	4089
+corpus_delta	1783
+cov_lines_reported	3790
+wall_s	2767
+graviton_exec_rate	3614
+laptop_exec_rate	6944
+active_deadline_s	14400
+fuzz_fork	0
+oracle	verbatim PostgreSQL 18.3 @ 62d6c7d3df (contrib/pgcrypto, -funsigned-char)
+injection_sweep	4/4 planes CAUGHT (P1 value, P2 verdict, P3 sqlstate, P4 notice), 0 missed, 0 bad plants
+sloc_v2_crate	3036
+sloc_v2_in_scope	1401
+measured_in_scope	1153
+carved_out_files	1635

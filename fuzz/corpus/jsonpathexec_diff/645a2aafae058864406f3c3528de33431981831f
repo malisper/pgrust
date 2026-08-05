@@ -1,0 +1,1 @@
+] ? (@ like_regex "a*\b" flag "")[null, 2, "a)b", "a\"b\& "^q\\b$"]

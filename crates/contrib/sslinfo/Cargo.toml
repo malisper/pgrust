@@ -1,0 +1,28 @@
+[package]
+name = "sslinfo"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sslinfo"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+adt_numeric = { path = "../../backend/utils/adt/numeric" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+init_small = { path = "../../backend/utils/init/init_small" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+wchar = { path = "../../common/wchar" }
+
+# wasm has no OpenSSL and no SSL transport at all: the tls accessors are
+# stubbed in-crate (lib.rs tls_stub) and every function answers its no-SSL
+# value, which IS the correct answer there. Pattern: be_secure/backend_status.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+be_secure_openssl = { path = "../../backend/libpq/be_secure_openssl" }

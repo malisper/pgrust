@@ -1,0 +1,4 @@
+family	harness	wall_s
+int-cmp	proofs::eq_btboolcmp	10
+int-cmp	proofs::eq_btint24cmp	1
+int-cmp	proofs::eq_btint84cmp	2

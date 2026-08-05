@@ -1,0 +1,54 @@
+# shape-id	serial-prefix-class	runtime-prefix-class
+# serial-prefix-class: none | nosort   (the serial training vector is plan-default
+#   except where the cost model picks a sort shape the product would not ship)
+# runtime-prefix-class: ser | rt | rta | mpwpg0 | default   (see pgo/README.md
+#   "engine classes"; the mix mirrors the production engine-selection posture,
+#   NOT any published per-query vector — assignment is by SHAPE CLASS)
+A1	none	ser
+A2	none	ser
+A3	none	ser
+A4	none	ser
+A5	none	rt
+A6	none	rt
+A7	none	ser
+A8	none	rt
+A9	none	default
+A10	none	mpwpg0
+A11	none	rt
+A12	none	rt
+A13	none	mpwpg0
+A14	none	mpwpg0
+A15	none	rta
+A16	none	rta
+A17	none	rta
+A18	none	rt
+A19	none	mpwpg0
+A20	none	ser
+A21	none	rt
+A22	none	default
+A23	none	default
+A24	none	rt
+A25	none	ser
+A26	none	rt
+A27	none	ser
+A28	none	rta
+A29	none	default
+A30	none	ser
+A31	none	rta
+A32	none	mpwpg0
+A33	none	rta
+A34	none	rta
+A35	none	rt
+A36	none	rt
+A37	none	rt
+A38	none	rta
+A39	none	default
+A40	none	rt
+A41	nosort	rt
+A42	nosort	rt
+A43	none	rt
+A44	none	rt
+A45	none	ser
+A46	none	rta
+A47	none	default
+A48	none	mpwpg0

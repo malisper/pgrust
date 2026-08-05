@@ -1,0 +1,55 @@
+{
+  "name": "sim-s1",
+  "connections": 4,
+  "multi_session": true,
+  "iso_mix": {
+    "read-committed": 60,
+    "repeatable-read": 30,
+    "serializable": 10
+  },
+  "statement_weights": {
+    "ddl": 14,
+    "dml": 6,
+    "query": 26,
+    "tx": 14,
+    "arm": 0,
+    "fault": 0,
+    "property": 40
+  },
+  "table_shape": {
+    "tables_min": 1,
+    "tables_max": 2,
+    "cols_min": 3,
+    "cols_max": 3,
+    "rows_max": 200
+  },
+  "arm_sets": [],
+  "property_weights": {
+    "F1-InsertSelect": 0,
+    "F2-UpdateVisibility": 0,
+    "F3-DeleteAbsence": 0,
+    "F4-ConstraintError": 0,
+    "F5-DdlEffects": 0,
+    "F6-AggConsistency": 0,
+    "F7-MemoryBaseline": 0,
+    "F8-ResourceBaseline": 0,
+    "L1-Tlp": 0,
+    "L2-NoRec": 0,
+    "X1-ArmEquivalence": 0,
+    "X2-IndexInvariance": 0,
+    "X4-StatementForm": 0,
+    "M1-ReadYourWrites": 0,
+    "C1-CursorWalk": 0,
+    "C2-HoldCursor": 0,
+    "M2-CrossSession": 0,
+    "S1-SpecConflict": 4
+  },
+  "kill_switches": [],
+  "float_lenient": false,
+  "engagement_floors": {},
+  "background_policy": {
+    "autovacuum": "off"
+  },
+  "steps_min": 30,
+  "steps_max": 40
+}

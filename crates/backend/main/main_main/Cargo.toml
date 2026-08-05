@@ -1,0 +1,43 @@
+[package]
+name = "main_main"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "main_main"
+path = "src/lib.rs"
+
+[[bin]]
+name = "postgres"
+path = "src/bin/postgres.rs"
+
+[dependencies]
+ipc = { path = "../../storage/ipc/ipc" }
+libc = "0.2"
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+elog = { path = "../../utils/error/elog" }
+init_small = { path = "../../utils/init/init_small" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+ps_status = { path = "../../utils/misc/ps_status" }
+pg_locale = { path = "../../utils/adt/pg_locale" }
+postmaster = { path = "../../postmaster/postmaster" }
+memwatchdog = { path = "../../postmaster/memwatchdog" }
+# GL-CONCMEM-1: the POOL-QOS memory governor's fallback usage probe
+# (install_qos_mem_probe) — install-only dep, mirroring memwatchdog's
+# allocator-stats install above it in bin/postgres.rs.
+runtime = { path = "../../executor/runtime" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+seams_init = { path = "../../../_support/seams_init" }
+
+# mimalloc is a C allocator; wasm32 std already defaults to dlmalloc, and
+# bin/postgres.rs cfg-outs the global-alloc + release hook there.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+mimalloc = "0.1"
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
+
+# `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
+# in product builds (law 0.1).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

@@ -1,0 +1,45 @@
+[package]
+name = "adt_jsonpath_exec"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_jsonpath_exec"
+path = "src/lib.rs"
+
+[dependencies]
+adt_bool = { path = "../bool" }
+adt_date = { path = "../adt_date" }
+adt_datetime = { path = "../adt_datetime" }
+adt_float = { path = "../float" }
+adt_formatting = { path = "../formatting" }
+adt_int = { path = "../int" }
+adt_int8 = { path = "../int8" }
+adt_json = { path = "../json" }
+adt_jsonb = { path = "../jsonb" }
+adt_jsonpath = { path = "../jsonpath" }
+adt_numeric = { path = "../numeric" }
+adt_regexp = { path = "../regexp" }
+adt_timestamp = { path = "../adt_timestamp" }
+datum = { path = "../../../../_support/types/datum" }
+format_type = { path = "../format_type" }
+funcapi = { path = "../../fmgr/funcapi" }
+mcx = { path = "../../../../_support/mcx" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+stack_depth = { path = "../../misc/stack_depth" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+varlena = { path = "../varlena" }
+
+[dev-dependencies]
+elog = { path = "../../error/elog" }
+fd = { path = "../../../storage/file/fd" }
+guc_tables = { path = "../../misc/guc_tables" }
+mbutils = { path = "../../mb/mbutils" }
+pgtz = { path = "../../../timezone/pgtz" }
+wchar = { path = "../../../../common/wchar" }
+xact_seams = { path = "../../../access/transam/xact_seams" }

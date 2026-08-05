@@ -1,0 +1,1 @@
+{"path":"crates/_support/pgrust/pg_ffi_fgram/src/parse.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1],"type-alias":[3],"const-static":[5,6,7,8,9,10]}}

@@ -1,0 +1,1 @@
+{"path":"crates/backend/optimizer/plan/planner/src/geqo/cx.rs","sloc":[11,12,13,14,15,16,17,18,19,20,22,23,24,25,28,29,30,31,32,34,35,36,37,38,41,42,43,44,45,46,51,52,53,54,58],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[4,5,6],"attr":[2]}}

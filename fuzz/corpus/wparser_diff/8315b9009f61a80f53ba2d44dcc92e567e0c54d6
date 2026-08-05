@@ -1,0 +1,7 @@
+€;
+
+ANALYZE test_tsvector;
+
+-- test basic text search behavior without indexes, then with
+
+SELECT count(*) FROM test_tsvector WHERE a @@ 

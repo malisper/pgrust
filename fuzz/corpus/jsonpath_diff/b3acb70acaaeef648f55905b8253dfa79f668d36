@@ -1,0 +1,1 @@
+$ <=(@ like_regex "\|patt@r\\\\\\\]\\\s \\0x1EEE_FFF1\\>|\\\\0x1EEE_FFF1\\>|\\Y * 2   2  %   *|\\\\0x1EEE_FFF1\\>|\\Y *  flag "isim")

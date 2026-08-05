@@ -1,0 +1,725 @@
+family	harness	outcome	wall_s	timeout_s	verdict	job
+aclcheck	proofs::eq_aclitemout_named	unmeasured-failed	70	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::cover_aclitemin_regimes	unmeasured-rss-kill	270	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+datetime-b	rem::eq_f8tstz_value_screen	unmeasured-timeout	300	300	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::cover_table_id_id_regimes	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_function_privilege_id_id	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_database_privilege_id_id	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_database_privilege_name_id	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_function_privilege_id	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_database_privilege_name	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_database_privilege_id_name	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_language_privilege_name	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_database_privilege_id	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_language_privilege_id_id	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_language_privilege_id_name	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_function_privilege_name_id	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_language_privilege_id	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_database_privilege_name_name	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_language_privilege_name_id	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_language_privilege_name_name	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_schema_privilege_id	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::spot_aclitemin_literals	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::spot_aclitemout_numeric	unmeasured-rss-kill	181	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_schema_privilege_id_id	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_schema_privilege_name	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_schema_privilege_id_name	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_schema_privilege_name_id	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_schema_privilege_name_name	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_sequence_privilege_id_id	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_sequence_privilege_id	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_table_privilege_name	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_sequence_privilege_name	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_table_privilege_id_name	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_sequence_privilege_id_name	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_sequence_privilege_name_id	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_sequence_privilege_name_name	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_table_privilege_id	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::control_int8_cash_lconv_skew	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_div_cash_by_zero	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::control_cash_out_lconv_skew	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_div_cash_grid	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_div_cash_pow2	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_div_int2_band16	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_div_flt8_grid	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_div_int4_band16	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_div_flt4_grid	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_div_int8_band16	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_div_int8_by_neg1	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_div_int8_by_zero	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len0	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len1	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len2	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len2_fd0	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len2_fd1	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len2_fd10	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len2_fd5	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len2_fdbig	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len2_fdneg	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len3	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len4	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len5	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_in_len6	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_mul_flt4_grid	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_mul_flt8_c_zero	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+brin-minmax	proofs::eq_uuid_add_value_nulls	unmeasured-green	41	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_mul_flt8_f_zero	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_mul_flt8_grid	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_mul_int2	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_mul_int4	unmeasured-failed	11	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_mul_int8	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_band1e5_len	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_fd0	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_fd1	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_fd10	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_fd5	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_fdbig	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_fdneg	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_group1	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_group6	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_neg_p0	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_neg_p1	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_neg_p2	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_neg_p3	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_neg_p4	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_neg_pdef	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::eq_has_table_privilege_name_name	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_pos_p0	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_pos_p2	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_pos_p4	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_spot_max	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_spot_min	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_spot_neg1	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_out_spot_zero	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_recv	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_recv_short	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_send	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_words_spot_groups	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_words_spot_max	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_words_spot_min	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_words_spot_neg	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_words_spot_one_cent	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_words_spot_one_dollar	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_words_spot_teens	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_cash_words_spot_zero	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_flt4_mul_cash_grid	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_flt8_mul_cash_grid	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int2_mul_cash	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int4_cash_fd0	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int4_cash_fd1	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int4_cash_fd10	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int4_cash_fd2	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int4_cash_fd3	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int4_cash_fd4	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int4_cash_fd5	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int4_cash_fd6	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int4_cash_fd7	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::probe_system_class_temp_toast	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::spot_database_temporary	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::spot_schema_usage_wgo	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::spot_table_select_wgo	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::spot_table_references	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+aclcheck	proofs::spot_table_list	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474907-0cb7-22299
+cash	proofs::eq_int4_cash_fdneg	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd10	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd9	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int4_cash_fd8	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int4_cash_fd9	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int4_cash_fdbig	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fdneg	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int4_mul_cash	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd0	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd1	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_mul_cash	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd2	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd3	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd4	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd5	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd6	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd7	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fd8	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::int_cash_fd_cells_cover	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::eq_int8_cash_fdbig	unmeasured-failed	30	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+cash	proofs::rust_panics_cash_div_min_by_neg1	unmeasured-failed	10	600	VERIFICATION:- FAILED (encountered failures other than panics, which were unexpected)	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::control_time_scale_typmod_skew	unmeasured-failed	40	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::cover_make_date_year_bands	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_interval_avg_combine_core	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_time_scale_p6	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_time_scale_typmod_neg	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::control_make_date_day_skew	unmeasured-failed	50	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_time_scale_typmod_over	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_interval_avg_accum_inv_core	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_interval_avg_deserialize_fc	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_interval_avg_serialize_fc	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_interval_sum_fc	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_timetz_part_tz	unmeasured-failed	20	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_timetz_part_tz_hour	unmeasured-failed	20	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_make_date_bc_band	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_timetz_part_tz_minute	unmeasured-failed	20	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::control_interval_avg_serialize_swap	unmeasured-failed	70	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::control_overlaps_time_swap_skew	unmeasured-failed	10	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_date_finite	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_timetz_scale_typmod_neg	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::spot_make_date	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::spot_time_scale	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::spot_timetz_part_tz_time_nonzero	unmeasured-failed	30	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::spot_timetz_scale	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::witness_interval_avg_deserialize_trailing	unmeasured-failed	30	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_date_mi	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_date_timestamp	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_datetimetz_timestamptz	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_hashdate	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_hashdate_extended	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_in_range_date_interval_noend	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_in_range_time_interval	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_interval_finite	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_interval_hash_ext_m0d0	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_interval_hash_m0d0	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_interval_time_err_plane	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_in_range_date_interval_m0d0	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_in_range_timetz_interval	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_interval_scale_typmod_neg	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_interval_hash_band	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_overlaps_time	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_time_hash_extended	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_time_interval	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_time_hash	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_datetime_timestamp	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::control_date_send_skew	unmeasured-failed	100	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_time_mi_time	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetypmodin_check	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_date_send	unmeasured-green	110	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetypmodout_neg	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetypmodout_d1	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetypmodout_d2	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetz_hash	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetypmodout_d3	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_date_recv	unmeasured-green	150	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetz_izone_cells	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetz_izone_err_planes	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetz_time	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetztypmodin_check	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetz_hash_extended	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetztypmodout_neg	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetztypmodout_d1	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::spot_interval_time	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::spot_interval_scale	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::spot_typmodout	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_time_recv_typmod_neg	unmeasured-green	150	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_time_send	unmeasured-green	190	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_interval_recv_typmod_neg	unmeasured-green	341	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetz_recv_typmod_neg	unmeasured-green	241	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_overlaps_timetz	unmeasured-green	321	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::control_var_samp_vs_c_var_pop	unmeasured-failed	10	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::eq_check_float8_array_t3	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_interval_send	unmeasured-green	361	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::eq_check_float8_array_t6	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::eq_finals_nullity_t3	unmeasured-failed	10	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::eq_finals_nullity_t6	unmeasured-failed	10	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::eq_regr_r2_horizontal	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::eq_regr_sxx	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_timetz_send	unmeasured-green	291	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::eq_regr_sxy	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::eq_regr_syy	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::grid_covar_pop	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::grid_avg	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::grid_covar_samp	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::grid_regr_avgx	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::grid_corr	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+float-agg	proofs::grid_regr_avgy	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_make_date_ad_band	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_make_date_full	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_make_timestamp_ad_band	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_make_timestamp_bc_band	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::eq_make_time_secgrid	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	proofs::spot_make_timestamp	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-b	rem::eq_interval_time_screen	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-cmp	arith_proofs::eq_interval_justify_hours	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-cmp	arith_proofs::eq_interval_justify_interval	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-cmp	arith_proofs::eq_time_mi_interval	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-cmp	arith_proofs::eq_time_pl_interval	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-cmp	arith_proofs::eq_timestamp_mi	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-cmp	arith_proofs::eq_timetz_mi_interval	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+datetime-cmp	arith_proofs::eq_timetz_pl_interval	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474912-0808-22420
+float-arith	proofs::control_dtrunc_vs_c_round	unmeasured-failed	10	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::grid_regr_slope	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::grid_stddev_pop	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::grid_stddev_samp	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::grid_var_pop	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::plane_float4_accum_first	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::plane_float8_accum_first	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::plane_float8_combine_n1zero	unmeasured-green	21	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::plane_float8_combine_n2zero	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::plane_regr_accum_first	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::plane_regr_combine_n1zero	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::plane_regr_combine_n2zero	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::probe_det_sqrt_model_determinism	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::probe_sqrt_self_determinism	unmeasured-failed	20	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::control_in_range_f8_vs_noreject	unmeasured-failed	10	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_dceil	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_dfloor	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::grid_var_samp	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_dround	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_dsign	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_dtrunc	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::grid_regr_r2	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::dsqrt_bisect_grid	unmeasured-failed	20	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::control_float8send_vs_c_float4send	unmeasured-failed	40	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_dsqrt	unmeasured-failed	40	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_in_range_float4_float8	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_distance_grid	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_float4send	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::grid_width_bucket_float8	unmeasured-green	61	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::spots_dsqrt	unmeasured-green	61	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_in_range_float8_float8	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_width_bucket_reject	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-arith	proofs::eq_float8send	unmeasured-green	90	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_diagonal_img	unmeasured-green	110	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+float-agg	proofs::grid_regr_intercept	unmeasured-green	171	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_circle_grid	unmeasured-green	160	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c6	unmeasured-green	130	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::control_box_add_vs_c_box_sub	unmeasured-failed	191	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c7	unmeasured-green	130	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c5	unmeasured-green	150	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_intersect_img	unmeasured-green	150	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c0	unmeasured-green	251	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_add_img	unmeasured-green	311	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c6	unmeasured-green	110	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c5	unmeasured-green	121	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c1	unmeasured-green	301	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c7	unmeasured-green	121	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell0	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c0	unmeasured-green	261	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell1	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell2	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell3	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell4	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell5	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c1	unmeasured-green	270	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_cr_circle_img	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell7	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell6	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_construct_point_img	unmeasured-green	90	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell8	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_boxes_bound_box_img	unmeasured-green	100	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_line_horizontal	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_line_perp_arm1	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c2	unmeasured-green	271	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_line_eq_nan_plane	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_line_perp_arm2	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_line_perp_arm3	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_line_perp_arm4	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_line_vertical	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_line_perp_grid	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_on_pl_hplane	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_on_pl_vplane	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_on_sb	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_line_eq_grid	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c2	unmeasured-green	451	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_on_ps_grid	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c4	unmeasured-green	471	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c3	unmeasured-green	492	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c4	unmeasured-green	371	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_on_sl_vplane	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_on_pl_dplane	unmeasured-green	130	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_line_construct_pp_grid	unmeasured-green	160	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_point_box_img	unmeasured-green	90	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_on_sl_hplane	unmeasured-green	110	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_circle_hslice	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c3	unmeasured-green	421	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_sub_img	unmeasured-green	301	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_distance_hslice	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_points_box_img	unmeasured-green	90	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_point_mul_grid	unmeasured-green	130	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_div_pow2plane	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_point_div_grid	unmeasured-green	181	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_grid	unmeasured-rss-kill	341	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::control_point_left_vs_ieee	unmeasured-failed	10	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_above	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_above_eq	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_area_grid	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_area_zero_plane	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_below	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_below_eq	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_point_mul_pow2plane	unmeasured-green	261	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_cn_spots	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_contain_pt	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_contain	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_contained	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_eq_grid	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_box_mul_pow2plane	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::probe_inter_sb_full	unmeasured-rss-kill	341	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::probe_line_construct_pp_vshared	unmeasured-green	341	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext::proofs_ext::eq_circle_contained_hslice	unmeasured-green	341	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext::proofs_ext::eq_lseg_lt_hslice	unmeasured-green	391	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_point_div_pow2plane	unmeasured-green	542	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext2::proofs_ext2::eq_on_sl_dplane	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext::proofs_ext::eq_circle_distance_hslice	unmeasured-green	511	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext::proofs_ext::eq_lseg_gt_hslice	unmeasured-green	542	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext3::proofs_ext3::eq_poly_same_n2	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext3::proofs_ext3::eq_poly_same_n3	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext::proofs_ext::eq_lseg_le_hslice	unmeasured-green	542	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext::proofs_ext::eq_lseg_ge_hslice	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext::proofs_ext::eq_lseg_parallel_arms	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	ext::proofs_ext::eq_lseg_perp_arms	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474916-5cd7-22796
+geo-cmp	proofs::eq_box_overabove	unmeasured-green	21	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_overleft	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_ge_grid	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_gt_zero_plane	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_left	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_lt_zero_plane	unmeasured-green	31	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_overright	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_ge_zero_plane	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_height	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_le_grid	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_le_zero_plane	unmeasured-green	41	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_overbelow	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_right	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_eq_zero_plane	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_point_above	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_gt_grid	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_point_below	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_lt_grid	unmeasured-green	51	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_point_horiz	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_width	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_point_left	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_point_right	unmeasured-green	21	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_point_vert	unmeasured-green	21	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_overlap	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_point_ne	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_point_eq	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::eq_box_same	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_box_same_nonnan	unmeasured-failed	50	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_box_consistent_nulls	unmeasured-green	61	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_box_same_nulls	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::control_gist_box_consistent_leaf_vs_internal	unmeasured-failed	70	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_box_union_n2	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_box_penalty_degenerate_y	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::probe_box_cn_full	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_circle_compress_noop	unmeasured-green	61	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_box_union_n3	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_compress_leaf	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_compress_noop	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_consistent_badgroup	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_consistent_group1	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_fetch	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_poly_compress_leaf	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_poly_compress_noop	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_distance_badstrategy	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_translate_cmptype_common	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::grid_gist_box_penalty	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_distance_leaf_axis	unmeasured-green	130	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_distance_inbox	unmeasured-green	160	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::probe_gist_box_same_nan_plane	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_circle_compress_leaf	unmeasured-green	301	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+int-cmp	proofs::eq_btboolcmp	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+int-cmp	proofs::eq_btequalimage	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+int-cmp	proofs::eq_btint24cmp	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+int-cmp	proofs::eq_btint28cmp	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+int-cmp	proofs::eq_btint42cmp	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+int-cmp	proofs::eq_btint48cmp	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+int-cmp	proofs::eq_btint82cmp	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+int-cmp	proofs::eq_btint84cmp	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+int-cmp	proofs::neg_control_btboolcmp_argswap	unmeasured-failed	10	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474920-78dc-23121
+json-escape	census_len1_plain	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+json-escape	census_len1_twochar	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+json-escape	census_len1_u04x	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_box_consistent_internal	unmeasured-green	502	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::control_ginarray_null_skew	unmeasured-failed	20	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_consistent_group0	unmeasured-green	471	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::cover_jsp_shapes_len4	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_consistent_jsonb_contains	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_consistent_jsonb_exists	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_consistent_jsonb_exists_all	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_consistent_jsonb_exists_any	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::probe_box_lt_full	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+geo-cmp	proofs::probe_box_area_full	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_consistent_jsonb_path_contains	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_box_consistent_leaf	unmeasured-timeout	603	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_box_distance_strips	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_circle_consistent	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_circle_distance_strips	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_distance_xstrip	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_point_distance_ystrip	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_poly_consistent	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::eq_gist_poly_distance_strips	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_ginarray_consistent_contained	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_ginarray_consistent_contains	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::grid_gist_box_distance_vertex	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_ginarray_consistent_equal	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_ginarray_consistent_overlap	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_ginarray_tri_contained	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::grid_gist_point_distance_vertex	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_ginarray_tri_contains	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_ginarray_tri_equal	unmeasured-green	31	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_ginarray_tri_overlap	unmeasured-green	31	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+gist-geo	proofs::probe_gist_box_penalty_full	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+int-arith	proofs::cover_recv_both_arms	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::control_extract_hash_seam_skew	unmeasured-rss-kill	452	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_extract_jsonb_arr_n1	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_nokeys	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_extract_jsonb_path_arr_n1	unmeasured-rss-kill	381	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_extract_jsonb_arr_n3	unmeasured-rss-kill	411	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_path_nokeys	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_extract_jsonb_arr_n2	unmeasured-rss-kill	431	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_extract_jsonb_obj_n1	unmeasured-rss-kill	431	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_extract_jsonb_path_str_n1	unmeasured-rss-kill	381	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_extract_jsonb_path_arr_n2	unmeasured-rss-kill	421	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_extract_jsonb_path_arr_n3	unmeasured-rss-kill	401	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_extract_jsonb_arr_n0	unmeasured-rss-kill	521	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::control_jsp_wrong_entry	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_bin_and2	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_bin_and3	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_bin_and_or	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_bin_entry	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_bin_or2	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_bin_or_and	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_bin_pred_and2	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_path_bin_and_or	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_path_tri_or_and	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_tri_and2	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_tri_and3	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_tri_and_or	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_tri_entry	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_tri_or2	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+jsonb-gin	proofs::eq_jsp_tri_or_and	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474920-78dc-23121
+network	arith_proofs::eq_inetpl_v4	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	arith_proofs::eq_inetmi_int8_v4	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	arith_proofs::eq_inetmi_int8_v6	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_cidr_out_v4_full	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	arith_proofs::eq_inetpl_v6	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::control_ntop_host_vs_show	unmeasured-failed	20	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_cidr_abbrev_v4_partial	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_cidr_abbrev_v4_zero	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_cidr_abbrev_v6_v4mapped	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_cidr_abbrev_v6_words	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_cidr_abbrev_v6_zero	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_cidr_out_v4_mask	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_cidr_out_v6_mask	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_inet_abbrev_v4	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_inet_abbrev_v6	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_inet_out_v4_full	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_inet_out_v4_mask	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_inet_out_v6_compress	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_network_host_v4	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_network_show_v4	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_network_show_v6	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_inet_out_v6_v4mapped	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+network	ntop_spot_proofs::spot_network_host_v6	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+jsonb-gin	proofs::eq_strategy_constants	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+jsonb-gin	proofs::eq_triconsistent_jsonb_contains	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+jsonb-gin	proofs::eq_triconsistent_jsonb_exists_all	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+jsonb-gin	proofs::eq_triconsistent_jsonb_exists	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+jsonb-gin	proofs::eq_triconsistent_jsonb_path_contains	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+jsonb-gin	proofs::eq_triconsistent_jsonb_exists_any	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_base_nan	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::cover_numeric_min_scale_regimes	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_err_neg_long	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_err_neg_short	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_err_ninf	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_off_pinf	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::ctl_numeric_min_scale_weight_skew	unmeasured-failed	30	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_base_ninf	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_base_pinf	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_spot_cancel	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_val_ninf	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_val_pinf	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_spot_borrow	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_numeric_min_scale_nd4	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_spot_neg_base	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_spot_carry	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_in_range_spot_zero_off_sub	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::control_dobyteatrim_short_set	unmeasured-failed	20	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_anychar_typmodout_band	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::cover_numeric_trim_scale_regimes	unmeasured-green	150	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::cover_oracle_regimes	unmeasured-rss-kill	261	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_numeric_send_snd2	unmeasured-rss-kill	311	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_lpad_latin1	unmeasured-rss-kill	60	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_lpad_err_plane	unmeasured-green	100	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_numeric_send_snd3	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_numeric_trim_scale_nd4	unmeasured-green	381	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_name_bpchar	unmeasured-rss-kill	50	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_repeat_small	unmeasured-rss-kill	40	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_repeat_err_plane	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::spot_anychar_typmodout_wide	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_rpad_latin1	unmeasured-rss-kill	60	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_numeric_send_snd4	unmeasured-rss-kill	481	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+jsonb-gin	proofs::eq_jsp_tri_pred_or2	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_rpad_err_plane	unmeasured-green	120	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-arith	proofs::eq_mul_var_nd4	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-arith	proofs::eq_mul_var_nd3	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-arith	proofs::eq_mul_var_nd2	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-arith	proofs::eq_add_var_nd4	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-arith	proofs::eq_sub_var_nd4	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::spot_fc_btrim_utf8	unmeasured-green	100	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_int8_numeric_nd5	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+numeric-probe	proofs::eq_int8_numeric_nd4	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_text_reverse_latin1	unmeasured-green	191	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_dobyteatrim_window	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_dotrim1_window	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::spot_translate_utf8	unmeasured-green	100	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_dotrim_window_latin1	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::eq_dotrim_window_utf8	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d1	unmeasured-green	231	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d0	unmeasured-green	241	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::spot_text_reverse_utf8	unmeasured-rss-kill	251	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+scalar-misc	wave5::eq_oidrecv_core_len3	unmeasured-failed	20	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+scalar-misc	wave5::eq_oidrecv_core_len8	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d10	unmeasured-green	261	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d11	unmeasured-green	251	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::control_toast_typlen_skew	unmeasured-failed	10	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d12	unmeasured-green	261	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::control_btvarstrequalimage_det_skew	unmeasured-failed	20	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d3	unmeasured-green	220	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d2	unmeasured-green	230	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::cover_byteain_regimes	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::cover_toast_regimes	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::eq_btvarstrequalimage	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d4	unmeasured-green	221	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d5	unmeasured-green	231	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d6	unmeasured-green	231	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d7	unmeasured-green	230	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::eq_pg_column_size_cstring	unmeasured-green	90	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+text-slice	wave8::control_bytea_int4_short	unmeasured-failed	20	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474924-5cfe-23356
+text-slice	wave8::cover_bytea_int_err_arms	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+text-slice	wave8::cover_byteaoverlay_regimes	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+text-slice	wave8::eq_bytea_bit_count	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::control_byteain_len_skew	unmeasured-failed	160	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474924-5cfe-23356
+text-slice	wave8::eq_bytea_int2	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+text-slice	wave8::eq_bytea_int4	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+text-slice	wave8::eq_bytea_int8	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::spot_fc_trims1	unmeasured-rss-kill	512	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d8	unmeasured-green	251	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::spot_fc_trims_text	unmeasured-rss-kill	521	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+pg_lsn	wave5::eq_pg_lsn_recv_core_d9	unmeasured-green	251	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::eq_pg_column_compression_varlena	unmeasured-rss-kill	211	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::spot_fc_byteatrims	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+text-slice	wave8::control_bytea_reverse_short	unmeasured-rss-kill	151	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::spot_pads_utf8	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::eq_byteain_escape_verdict	unmeasured-green	271	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474924-5cfe-23356
+oracle-compat	proofs::spot_translate_latin1	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::eq_pg_column_size_varlena	unmeasured-rss-kill	511	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::eq_pg_column_compression_nonvarlena	unmeasured-rss-kill	541	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::eq_byteain_escape_content_len4	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::eq_pg_column_size_fixed	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+strings-scalar	proofs::eq_pg_column_toast_chunk_id	unmeasured-rss-kill	571	600	NO-VERDICT	pgrust-kani-suite-1785474924-5cfe-23356
+text-slice	wave8::eq_bytea_larger	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_bytea_smaller	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_textout	unmeasured-green	61	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::spot_textin	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_int4_bytea	unmeasured-green	111	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_int8_bytea	unmeasured-green	111	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_int2_bytea	unmeasured-green	121	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_bytea_reverse	unmeasured-rss-kill	251	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_to_hex32	unmeasured-rss-kill	251	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_byteasend	unmeasured-rss-kill	261	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_to_oct32	unmeasured-rss-kill	231	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_to_hex64	unmeasured-rss-kill	271	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::spot_unknownout	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::spot_to_hex32	unmeasured-rss-kill	210	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_to_oct64	unmeasured-rss-kill	311	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::spot_unknownin	unmeasured-rss-kill	100	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::spot_to_hex64	unmeasured-rss-kill	250	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_textsend	unmeasured-rss-kill	402	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::spot_to_oct32	unmeasured-rss-kill	221	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_byteaoverlay_no_len	unmeasured-rss-kill	502	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_byteaoverlay	unmeasured-rss-kill	512	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::spot_to_oct64	unmeasured-rss-kill	301	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_to_bin32	unmeasured-rss-kill	572	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_hashvarlena	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_to_bin64	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::eq_hashvarlena_extended	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::spot_to_bin32	unmeasured-rss-kill	541	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::spot_unknownsend	unmeasured-rss-kill	361	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d0	unmeasured-green	391	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d10	unmeasured-green	331	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+text-slice	wave8::spot_to_bin64	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d1	unmeasured-green	422	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d11	unmeasured-green	432	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d15	unmeasured-green	301	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d12	unmeasured-green	432	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d13	unmeasured-green	431	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d16	unmeasured-green	331	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d14	unmeasured-green	371	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d20	unmeasured-rss-kill	291	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d2	unmeasured-green	432	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d17	unmeasured-green	482	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d7	unmeasured-green	331	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d3	unmeasured-green	432	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d4	unmeasured-green	432	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d18	unmeasured-green	502	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d8	unmeasured-green	331	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok16_0	unmeasured-green	291	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d5	unmeasured-green	441	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d6	unmeasured-green	442	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok17_0	unmeasured-green	321	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d19	unmeasured-green	552	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok17_1	unmeasured-green	321	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok18_0	unmeasured-green	351	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok18_1	unmeasured-green	351	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vin_len0	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::control_ovout_value_skew	unmeasured-failed	100	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_d9	unmeasured-green	441	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok18_2	unmeasured-green	351	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::control_ovin_shifted_input	unmeasured-failed	180	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vout_n0	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::cover_ovin_both_arms	unmeasured-failed	190	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok19_0	unmeasured-green	381	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok19_1	unmeasured-green	381	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok19_2	unmeasured-green	381	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok19_3	unmeasured-green	381	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok20_2	unmeasured-rss-kill	371	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovin_len0	unmeasured-failed	50	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok20_0	unmeasured-green	421	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok20_1	unmeasured-green	421	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vout_n2_band100	unmeasured-rss-kill	100	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok20_3	unmeasured-green	421	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vout_n2	unmeasured-rss-kill	171	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+uuid	wave5::eq_uuid_recv_core_ok20_4	unmeasured-green	422	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovout_n0	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovin_len1	unmeasured-failed	130	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vout_n1	unmeasured-green	241	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovout_n1	unmeasured-rss-kill	60	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovout_n2	unmeasured-rss-kill	70	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_empty	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vout_spot_mixed	unmeasured-green	241	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovin_len5	unmeasured-rss-kill	180	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vout_spot_bounds	unmeasured-green	291	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovin_len2	unmeasured-failed	231	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovout_spots	unmeasured-failed	200	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vin_len2	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vin_len1	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vin_len3	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vin_len4	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vin_len5	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_i2vin_spots	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovin_len3	unmeasured-failed	411	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_dedup	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_bad_tail	unmeasured-rss-kill	402	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_garbage	unmeasured-rss-kill	392	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovin_len4	unmeasured-failed	562	600	VERIFICATION:- FAILED	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_inner_space	unmeasured-rss-kill	401	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_missing_colon	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+jsonb-probe	proofs::eq_jsonb_int8_special	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_one_xip	unmeasured-rss-kill	381	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_neg_sign	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+jsonb-probe	proofs::eq_jsonb_int4_special	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+jsonb-probe	proofs::eq_jsonb_int2_special	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+jsonb-probe	proofs::eq_jsonb_float8_special	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+vector-io	proofs::eq_ovin_spots	unmeasured-timeout	602	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+jsonb-probe	proofs::eq_jsonb_float4_special	unmeasured-failed	10	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+jsonb-probe	proofs::eq_build_array_noargs	unmeasured-rss-kill	40	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+jsonb-probe	proofs::eq_build_object_noargs	unmeasured-rss-kill	40	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_trailing_comma	unmeasured-rss-kill	381	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_two_xips	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_unordered	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_xip_at_xmax	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_xip_below_xmin	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_xmax_lt_xmin	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+jsonb-probe	proofs::eq_path_arr_bigsub	unmeasured-rss-kill	260	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+jsonb-probe	proofs::eq_path_nested_len2	unmeasured-rss-kill	280	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_zero_xmin	unmeasured-rss-kill	380	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_zero_xmax	unmeasured-rss-kill	391	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_overflow_sat	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+xid8snap	proofs::spot_parse_u64_max	unmeasured-timeout	601	600	NO-VERDICT	pgrust-kani-suite-1785474929-50fd-23546
+jsonb-probe	proofs::eq_jsonb_int8_w4n5	unmeasured-green	361	600	VERIFICATION:- SUCCESSFUL	pgrust-kani-suite-1785474929-50fd-23546

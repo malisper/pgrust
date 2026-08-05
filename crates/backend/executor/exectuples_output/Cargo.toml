@@ -1,0 +1,29 @@
+[package]
+name = "exectuples_output"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+exectuples = { path = "../exectuples" }
+tcop_dest = { path = "../../tcop/dest" }
+varlena = { path = "../../utils/adt/varlena" }
+
+[dev-dependencies]
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+printtup = { path = "../../access/common/printtup" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_portal = { path = "../../../_support/types/portal" }

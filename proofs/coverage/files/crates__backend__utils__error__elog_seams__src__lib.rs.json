@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/error/elog_seams/src/lib.rs","sloc":[3,4,7,8,11,12],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1]}}

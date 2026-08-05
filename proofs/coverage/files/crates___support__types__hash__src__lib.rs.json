@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/hash/src/lib.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[6,7,9,10],"attr":[1,2,3,4]}}

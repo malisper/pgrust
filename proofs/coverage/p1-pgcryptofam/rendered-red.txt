@@ -1,0 +1,645 @@
+
+===== src/crypt.rs  (8 residual) =====
+     74 * DA=       9          return None;
+     75   DA=       9      }
+>>   76 * DA=    noDA      Some(
+     77 * DA=       9          [ITOA64[(input[0] & 0x3f) as usize], ITOA64[(input[1] & 0x3f) as usize]]
+     78 * DA=       9              .iter()
+   ----
+     90   DA=      25      }
+     91 * DA=      25      if count == 0 {
+>>   92 * DA=       0          count = 725;
+     93   DA=      25      }
+     94 * DA=      25      let mut out = String::from('_');
+   ----
+    118 * DA=      14  fn gensalt_blowfish(mut count: u64, input: &[u8]) -> Option<String> {
+    119 * DA=      14      if input.len() < 16 || (count != 0 && !(4..=31).contains(&count)) {
+>>  120 * DA=       0          return None;
+    121   DA=      14      }
+    122 * DA=      14      if count == 0 {
+   ----
+    121   DA=      14      }
+    122 * DA=      14      if count == 0 {
+>>  123 * DA=       0          count = 5;
+    124   DA=      14      }
+    125 * DA=      14      let raw: [u8; 16] = input[..16].try_into().ok()?;
+   ----
+    136 * DA=      15  fn gensalt_sha(magic: char, count: u64, input: &[u8]) -> Option<String> {
+    137 * DA=      15      if input.len() != PX_SHACRYPT_SALT_MAX_LEN {
+>>  138 * DA=       0          return None;
+    139   DA=      15      }
+    140 * DA=      15      let mut out = format!("${magic}$rounds={count}$");
+   ----
+    165   DA=    noDA  /// NOT range-check at all for that row — the generator's own `count` guard is
+    166   DA=    noDA  /// the only check (des accepts 0 or 25, md5 accepts 0 or 1000).
+>>  167 * DA=    noDA  static GEN_LIST: &[Generator] = &[
+    168   DA=    noDA      Generator { name: "des", gen: gensalt_traditional, input_len: 2, def_rounds: 0, min_rounds: 0, max_rounds: 0 },
+    169   DA=    noDA      Generator { name: "md5", gen: gensalt_md5, input_len: 6, def_rounds: 0, min_rounds: 0, max_rounds: 0 },
+   ----
+    206 * DA=     117      let mut rbuf = vec![0u8; g.input_len];
+    207 * DA=     117      if !pg_strong_random(&mut rbuf) {
+>>  208 * DA=       0          return Err(PXE_NO_RANDOM.to_string().into());
+    209   DA=     117      }
+    210   DA=    noDA  
+   ----
+    240   DA=    noDA  ///     reaches `{"", 0, run_crypt_des}` and is traditional-DES-hashed with the
+    241   DA=    noDA  ///     2-char salt `$2`.
+>>  242 * DA=    noDA  static PX_CRYPT_LIST: &[(&[u8], Option<CryptFn>)] = &[
+    243   DA=    noDA      (b"$2a$", Some(run_crypt_bf)),
+    244   DA=    noDA      (b"$2x$", Some(run_crypt_bf)),
+   ----
+
+===== src/crypt/bcrypt.rs  (1 residual) =====
+     38 * DA=    1584          out.push(((c2 & 0x0f) << 4) | ((c3 & 0x3c) >> 2));
+     39 * DA=    1584          if out.len() >= count {
+>>   40 * DA=       0              break;
+     41   DA=    1584          }
+     42 * DA=    1584          let c4 = atoi64(*src.get(sp)?)?;
+   ----
+
+===== src/crypt/cryptdes.rs  (14 residual) =====
+     20   DA=      32  }
+     21   DA=    noDA  
+>>   22 * DA=    noDA  const CRYPT_A64: &[u8; 64] =
+>>   23 * DA=    noDA      b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+     24   DA=    noDA  
+>>   25 * DA=    noDA  const IP: [u8; 64] = [
+     26   DA=    noDA      58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6,
+     27   DA=    noDA      64, 56, 48, 40, 32, 24, 16, 8, 57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61,
+   ----
+     29   DA=    noDA  ];
+     30   DA=    noDA  
+>>   31 * DA=    noDA  const KEY_PERM: [u8; 56] = [
+     32   DA=    noDA      57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60,
+     33   DA=    noDA      52, 44, 36, 63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29,
+   ----
+     37   DA=    noDA  const KEY_SHIFTS: [u8; 16] = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1];
+     38   DA=    noDA  
+>>   39 * DA=    noDA  const COMP_PERM: [u8; 48] = [
+     40   DA=    noDA      14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10, 23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2, 41, 52,
+     41   DA=    noDA      31, 37, 47, 55, 30, 40, 51, 45, 33, 48, 44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32,
+   ----
+     42   DA=    noDA  ];
+     43   DA=    noDA  
+>>   44 * DA=    noDA  const SBOX: [[u8; 64]; 8] = [
+     45   DA=    noDA      [
+     46   DA=    noDA          14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7, 0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12,
+   ----
+     85   DA=    noDA  ];
+     86   DA=    noDA  
+>>   87 * DA=    noDA  const PBOX: [u8; 32] = [
+     88   DA=    noDA      16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10, 2, 8, 24, 14, 32, 27, 3, 9, 19,
+     89   DA=    noDA      13, 30, 6, 22, 11, 4, 25,
+   ----
+     90   DA=    noDA  ];
+     91   DA=    noDA  
+>>   92 * DA=    noDA  const CRYPT_BITS32: [u32; 32] = [
+     93   DA=    noDA      0x80000000, 0x40000000, 0x20000000, 0x10000000, 0x08000000, 0x04000000, 0x02000000, 0x01000000,
+     94   DA=    noDA      0x00800000, 0x00400000, 0x00200000, 0x00100000, 0x00080000, 0x00040000, 0x00020000, 0x00010000,
+   ----
+    204 * DA=   35840                      let obit = inv_key_perm[inbit];
+    205 * DA=   35840                      if obit == 255 {
+>>  206 * DA=       0                          continue;
+    207   DA=   35840                      }
+    208 * DA=   35840                      let obit = obit as usize;
+   ----
+    386 * DA=     274              (&self.en_keysl, &self.en_keysr, count)
+    387   DA=    noDA          } else {
+>>  388 * DA=       0              (&self.de_keysl, &self.de_keysr, -count)
+    389   DA=    noDA          };
+    390   DA=    noDA  
+   ----
+    545 * DA=     154      st.des_setkey(&keybuf);
+    546   DA=    noDA  
+>>  547 * DA=    noDA      let count: i32;
+>>  548 * DA=    noDA      let salt: i64;
+    549 * DA=     154      let mut output: Vec<u8> = Vec::with_capacity(21);
+    550   DA=    noDA  
+   ----
+    577 * DA=     873          for &b in setting.iter().take(9) {
+    578 * DA=     873              if b == 0 {
+>>  579 * DA=       0                  break;
+    580   DA=     873              }
+    581 * DA=     873              output.push(b);
+   ----
+    591 * DA=      57              setting[1]
+    592   DA=    noDA          } else {
+>>  593 * DA=       0              setting[0]
+    594   DA=    noDA          });
+    595   DA=    noDA      }
+   ----
+
+===== src/crypt/shacrypt.rs  (22 residual) =====
+    114 * DA=       9          b if b >= 0xe0 => 3,
+    115 * DA=       1          b if b >= 0xc0 => 2,
+>>  116 * DA=       0          _ => 1,
+    117   DA=    noDA      }
+    118 * DA=      24      .min(s.len());
+   ----
+    136 * DA=     183  fn clamp_rounds(srounds: i32) -> Option<(String, i32)> {
+    137 * DA=     183      if srounds > ROUNDS_MAX {
+>>  138 * DA=       0          Some((
+>>  139 * DA=       0              format!(
+>>  140 * DA=       0                  "rounds={srounds} exceeds maximum supported value ({ROUNDS_MAX}), using {ROUNDS_MAX} instead"
+    141   DA=       0              ),
+>>  142 * DA=       0              ROUNDS_MAX,
+    143   DA=       0          ))
+    144 * DA=     183      } else if srounds < ROUNDS_MIN {
+   ----
+    181 * DA=     108              out.pop();
+    182   DA=     108          }
+>>  183 * DA=       0          _ => (),
+    184   DA=    noDA      }
+    185 * DA=     151      out
+   ----
+    222   DA=    noDA  }
+    223   DA=    noDA  
+>>  224 * DA=    noDA  const SHA256_TRANSPOSE: &[u8] = b"\x14\x0a\x00\x0b\x01\x15\x02\x16\x0c\x17\x0d\x03\x0e\x04\x18\x05\
+>>  225 * DA=    noDA        \x19\x0f\x1a\x10\x06\x11\x07\x1b\x08\x1c\x12\x1d\x13\x09\x1e\x1f";
+>>  226 * DA=    noDA  const SHA512_TRANSPOSE: &[u8] = b"\x2a\x15\x00\x01\x2b\x16\x17\x02\x2c\x2d\x18\x03\x04\x2e\x19\x1a\
+>>  227 * DA=    noDA        \x05\x2f\x30\x1b\x06\x07\x31\x1c\x1d\x08\x32\x33\x1e\x09\x0a\x34\
+>>  228 * DA=    noDA        \x1f\x20\x0b\x35\x36\x21\x0c\x0d\x37\x22\x23\x0e\x38\x39\x24\x0f\
+>>  229 * DA=    noDA        \x10\x3a\x25\x26\x11\x3b\x3c\x27\x12\x13\x3d\x28\x29\x14\x3e\x3f";
+    230   DA=    noDA  
+    231   DA=    noDA  /// crypt-sha.c steps 1-21 (Drepper's algorithm), CHECK_FOR_INTERRUPTS per
+   ----
+    359   DA=    noDA      // crypt-sha.c:137 — strlen(salt) < 3.
+    360 * DA=     266      if s.len() < 3 {
+>>  361 * DA=       0          return Err(err_22023("invalid salt".to_string()));
+    362   DA=     266      }
+    363   DA=    noDA      // crypt-sha.c:146 — magic byte enclosure.
+   ----
+    363   DA=    noDA      // crypt-sha.c:146 — magic byte enclosure.
+    364 * DA=     266      if s[0] != b'$' || s[2] != b'$' {
+>>  365 * DA=       0          return Err(CryptError::Pg(
+>>  366 * DA=       0              PgError::error("invalid format of salt".to_string())
+>>  367 * DA=       0                  .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+>>  368 * DA=       0                  .with_hint("magic byte format for shacrypt is either \"$5$\" or \"$6$\"")
+>>  369 * DA=       0                  .into(),
+    370   DA=       0          ));
+    371   DA=     266      }
+   ----
+    377 * DA=      46          b'6' => true,
+    378   DA=       0          c => {
+>>  379 * DA=       0              return Err(err_elog(&format!(
+>>  380 * DA=       0                  "unknown crypt identifier \"{}\"",
+    381   DA=       0                  // C prints the raw byte via %c.
+>>  382 * DA=       0                  c as char
+    383   DA=       0              )))
+    384   DA=    noDA          }
+   ----
+    460 * DA=     151          format!("{magic}rounds={rounds}${salt_str}${encoded}")
+    461   DA=    noDA      } else {
+>>  462 * DA=       0          format!("{magic}{salt_str}${encoded}")
+    463   DA=    noDA      })
+    464   DA=     266  }
+   ----
+
+===== src/lib.rs  (159 residual) =====
+     26 * DA=     446  fn crypt_err(e: crypt::CryptError) -> Box<PgError> {
+     27 * DA=     331      match e {
+>>   28 * DA=       0          crypt::CryptError::Unsupported(what) => PgError::error(format!("pgcrypto: {what} not yet ported"))
+>>   29 * DA=       0              .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+>>   30 * DA=       0              .into(),
+     31   DA=    noDA          // C's genuine-NULL path is pgcrypto.c:234: px_crypt returned NULL and
+     32   DA=    noDA          // pg_crypt raises 39000 (ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION)
+   ----
+     68 * DA=    1235      let mode = guc::GetConfigOption("pgcrypto.builtin_crypto_enabled", true, false)?;
+     69 * DA=    1235      if matches!(mode.as_deref(), Some("off")) {
+>>   70 * DA=       0          return Err(PgError::error("use of built-in crypto functions is disabled").into());
+     71   DA=    1235      }
+     72 * DA=    1235      Ok(())
+   ----
+    102   DA=     962  }
+    103   DA=    noDA  
+>>  104 * DA=       0  fn cipher_err(op: &str, e: cipher::CipherError) -> Box<PgError> {
+>>  105 * DA=       0      let msg = match e {
+>>  106 * DA=       0          cipher::CipherError::NoCipher(spec) => format!("Cannot use \"{spec}\": No such cipher algorithm"),
+>>  107 * DA=       0          cipher::CipherError::EncryptFailed => format!("{op} error: Encryption failed"),
+>>  108 * DA=       0          cipher::CipherError::DecryptFailed => format!("{op} error: Decryption failed"),
+    109   DA=    noDA      };
+>>  110 * DA=       0      px_err(msg)
+    111   DA=       0  }
+    112   DA=    noDA  
+   ----
+    113   DA=    noDA  macro_rules! fc_cipher {
+    114   DA=    noDA      ($fname:ident, $core:ident, $op:literal, $with_iv:literal) => {
+>>  115 * DA=       0          fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    116   DA=    noDA              // SAFETY: strict fn — bytea/bytea[/bytea] then text spec, all non-null.
+>>  117 * DA=       0              let out = if $with_iv {
+>>  118 * DA=       0                  let (data, key, iv, spec) = unsafe {
+    119   DA=    noDA                      (
+>>  120 * DA=       0                          fcinfo.arg_varlena_packed(0)?,
+>>  121 * DA=       0                          fcinfo.arg_varlena_packed(1)?,
+>>  122 * DA=       0                          fcinfo.arg_varlena_packed(2)?,
+>>  123 * DA=       0                          fcinfo.arg_varlena_packed(3)?,
+    124   DA=    noDA                      )
+    125   DA=    noDA                  };
+   ----
+    124   DA=    noDA                      )
+    125   DA=    noDA                  };
+>>  126 * DA=       0                  let spec = String::from_utf8_lossy(spec.data()).into_owned();
+>>  127 * DA=       0                  cipher::$core(&spec, key.data(), iv.data(), data.data())
+    128   DA=    noDA              } else {
+>>  129 * DA=       0                  let (data, key, spec) = unsafe {
+    130   DA=    noDA                      (
+>>  131 * DA=       0                          fcinfo.arg_varlena_packed(0)?,
+>>  132 * DA=       0                          fcinfo.arg_varlena_packed(1)?,
+>>  133 * DA=       0                          fcinfo.arg_varlena_packed(2)?,
+    134   DA=    noDA                      )
+    135   DA=    noDA                  };
+   ----
+    134   DA=    noDA                      )
+    135   DA=    noDA                  };
+>>  136 * DA=       0                  let spec = String::from_utf8_lossy(spec.data()).into_owned();
+>>  137 * DA=       0                  cipher::$core(&spec, key.data(), &[], data.data())
+    138   DA=    noDA              };
+>>  139 * DA=       0              let out = out.map_err(|e| cipher_err($op, e))?;
+>>  140 * DA=       0              bytea_result(fcinfo, &out)
+    141   DA=       0          }
+    142   DA=    noDA      };
+   ----
+    143   DA=    noDA  }
+    144   DA=    noDA  
+>>  145 * DA=    noDA  fc_cipher!(fc_pg_encrypt, encrypt, "encrypt", false);
+>>  146 * DA=    noDA  fc_cipher!(fc_pg_decrypt, decrypt, "decrypt", false);
+>>  147 * DA=    noDA  fc_cipher!(fc_pg_encrypt_iv, encrypt, "encrypt_iv", true);
+>>  148 * DA=    noDA  fc_cipher!(fc_pg_decrypt_iv, decrypt, "decrypt_iv", true);
+    149   DA=    noDA  
+>>  150 * DA=       0  fn fc_pg_random_bytes(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+>>  151 * DA=       0      let len = fcinfo.arg_i32(0);
+>>  152 * DA=       0      if !(1..=1024).contains(&len) {
+>>  153 * DA=       0          return Err(PgError::error("Length not in range")
+>>  154 * DA=       0              .with_sqlstate(ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION)
+>>  155 * DA=       0              .into());
+    156   DA=       0      }
+>>  157 * DA=       0      let mut buf = vec![0u8; len as usize];
+>>  158 * DA=       0      if !pg_strong_random::pg_strong_random(&mut buf) {
+>>  159 * DA=       0          return Err(px_err("Failed to generate random data".to_string()));
+    160   DA=       0      }
+>>  161 * DA=       0      bytea_result(fcinfo, &buf)
+    162   DA=       0  }
+    163   DA=    noDA  
+   ----
+    162   DA=       0  }
+    163   DA=    noDA  
+>>  164 * DA=       0  fn fc_pg_random_uuid(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+>>  165 * DA=       0      let uuid = adt_uuid::gen_random_uuid()?;
+>>  166 * DA=       0      types_fmgr::byref_result(fcinfo.result_mcx(), &uuid)
+    167   DA=       0  }
+    168   DA=    noDA  
+   ----
+    167   DA=       0  }
+    168   DA=    noDA  
+>>  169 * DA=       0  fn fc_pg_check_fipsmode(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+>>  170 * DA=       0      Ok(Datum::from_bool(false))
+    171   DA=       0  }
+    172   DA=    noDA  
+   ----
+    173   DA=    noDA  
+    174   DA=    noDA  #[track_caller]
+>>  175 * DA=       0  fn here(func: &'static str) -> ErrorLocation {
+    176   DA=    noDA      // pgrust is Rust: report OUR source site (call site via track_caller).
+>>  177 * DA=       0      let site = core::panic::Location::caller();
+>>  178 * DA=       0      ErrorLocation::new(site.file(), site.line() as i32, func)
+    179   DA=       0  }
+    180   DA=    noDA  
+   ----
+    179   DA=       0  }
+    180   DA=    noDA  
+>>  181 * DA=       0  fn pgp_notice(msg: &str) {
+>>  182 * DA=       0      let _ = ereport(NOTICE).errmsg(msg.to_string()).finish(here("pgp_decrypt"));
+    183   DA=       0  }
+    184   DA=    noDA  
+   ----
+    193 * DA=     222  fn px_msg(msg: &str) -> Box<PgError> {
+    194 * DA=     222      let sqlstate = if msg == PXE_NO_RANDOM_MSG {
+>>  195 * DA=       0          ERRCODE_INTERNAL_ERROR
+    196   DA=    noDA      } else {
+    197 * DA=     222          ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION
+   ----
+    204   DA=    noDA  const PXE_NO_RANDOM_MSG: &str = "could not generate a random number";
+    205   DA=    noDA  
+>>  206 * DA=       0  fn opt_arg_bytes(fcinfo: &Fcinfo, i: usize) -> PgResult<Option<Vec<u8>>> {
+>>  207 * DA=       0      if i >= fcinfo.nargs() || fcinfo.args[i].isnull {
+>>  208 * DA=       0          return Ok(None);
+    209   DA=       0      }
+    210   DA=    noDA      // SAFETY: arg present and non-null per the guard above.
+   ----
+    209   DA=       0      }
+    210   DA=    noDA      // SAFETY: arg present and non-null per the guard above.
+>>  211 * DA=       0      let img = unsafe { fcinfo.arg_varlena_packed(i)? };
+>>  212 * DA=       0      Ok(Some(img.data().to_vec()))
+    213   DA=       0  }
+    214   DA=    noDA  
+   ----
+    213   DA=       0  }
+    214   DA=    noDA  
+>>  215 * DA=       0  fn pgp_sym_encrypt(fcinfo: &mut Fcinfo, is_text: bool) -> PgResult<Datum> {
+    216   DA=    noDA      // SAFETY: strict on arg0/arg1 (data, key); arg2 (args) optional/nullable.
+>>  217 * DA=       0      let (data, key) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+>>  218 * DA=       0      let (data, key) = (data.data().to_vec(), key.data().to_vec());
+>>  219 * DA=       0      let args = opt_arg_bytes(fcinfo, 2)?;
+>>  220 * DA=       0      let out = pgp::sym_encrypt(&data, &key, args.as_deref(), is_text).map_err(|e| px_msg(&e))?;
+>>  221 * DA=       0      bytea_result(fcinfo, &out)
+    222   DA=       0  }
+    223   DA=    noDA  
+   ----
+    222   DA=       0  }
+    223   DA=    noDA  
+>>  224 * DA=       0  fn pgp_sym_decrypt(fcinfo: &mut Fcinfo, need_text: bool) -> PgResult<Datum> {
+    225   DA=    noDA      // SAFETY: strict on arg0/arg1 (data, key); arg2 (args) optional/nullable.
+>>  226 * DA=       0      let (data, key) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+>>  227 * DA=       0      let (data, key) = (data.data().to_vec(), key.data().to_vec());
+>>  228 * DA=       0      let args = opt_arg_bytes(fcinfo, 2)?;
+>>  229 * DA=       0      match pgp::sym_decrypt(&data, &key, args.as_deref(), need_text) {
+    230   DA=       0          Ok(out) => {
+>>  231 * DA=       0              for n in &out.notices {
+>>  232 * DA=       0                  pgp_notice(n);
+    233   DA=       0              }
+>>  234 * DA=       0              if need_text {
+>>  235 * DA=       0                  mbutils::pg_verifymbstr(&out.plaintext, false)?;
+    236   DA=       0              }
+>>  237 * DA=       0              bytea_result(fcinfo, &out.plaintext)
+    238   DA=    noDA          }
+    239   DA=       0          Err(e) => {
+   ----
+    238   DA=    noDA          }
+    239   DA=       0          Err(e) => {
+>>  240 * DA=       0              for n in &e.notices {
+>>  241 * DA=       0                  pgp_notice(n);
+    242   DA=       0              }
+>>  243 * DA=       0              Err(px_msg(&e.message))
+    244   DA=    noDA          }
+    245   DA=    noDA      }
+   ----
+    246   DA=       0  }
+    247   DA=    noDA  
+>>  248 * DA=       0  fn pgp_pub_encrypt(fcinfo: &mut Fcinfo, is_text: bool) -> PgResult<Datum> {
+    249   DA=    noDA      // SAFETY: strict on arg0/arg1 (data, key); arg2 (args) optional/nullable.
+>>  250 * DA=       0      let (data, key) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+>>  251 * DA=       0      let (data, key) = (data.data().to_vec(), key.data().to_vec());
+>>  252 * DA=       0      let args = opt_arg_bytes(fcinfo, 2)?;
+>>  253 * DA=       0      let out = pgp::pub_encrypt(&data, &key, args.as_deref(), is_text).map_err(|e| px_msg(&e))?;
+>>  254 * DA=       0      bytea_result(fcinfo, &out)
+    255   DA=       0  }
+    256   DA=    noDA  
+   ----
+    255   DA=       0  }
+    256   DA=    noDA  
+>>  257 * DA=       0  fn pgp_pub_decrypt(fcinfo: &mut Fcinfo, need_text: bool) -> PgResult<Datum> {
+    258   DA=    noDA      // SAFETY: strict on arg0/arg1 (msg, seckey); arg2 psw, arg3 args optional.
+>>  259 * DA=       0      let (data, key) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+>>  260 * DA=       0      let (data, key) = (data.data().to_vec(), key.data().to_vec());
+>>  261 * DA=       0      let psw = opt_arg_bytes(fcinfo, 2)?;
+>>  262 * DA=       0      let args = opt_arg_bytes(fcinfo, 3)?;
+>>  263 * DA=       0      match pgp::pub_decrypt(&data, &key, psw.as_deref(), args.as_deref(), need_text) {
+    264   DA=       0          Ok(out) => {
+>>  265 * DA=       0              for n in &out.notices {
+>>  266 * DA=       0                  pgp_notice(n);
+    267   DA=       0              }
+>>  268 * DA=       0              if need_text {
+>>  269 * DA=       0                  mbutils::pg_verifymbstr(&out.plaintext, false)?;
+    270   DA=       0              }
+>>  271 * DA=       0              bytea_result(fcinfo, &out.plaintext)
+    272   DA=    noDA          }
+    273   DA=       0          Err(e) => {
+   ----
+    272   DA=    noDA          }
+    273   DA=       0          Err(e) => {
+>>  274 * DA=       0              for n in &e.notices {
+>>  275 * DA=       0                  pgp_notice(n);
+    276   DA=       0              }
+>>  277 * DA=       0              Err(px_msg(&e.message))
+    278   DA=    noDA          }
+    279   DA=    noDA      }
+   ----
+    280   DA=       0  }
+    281   DA=    noDA  
+>>  282 * DA=       0  fn fc_pgp_sym_encrypt_text(f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+>>  283 * DA=       0      let _ = f;
+>>  284 * DA=       0      pgp_sym_encrypt(fc, true)
+    285   DA=       0  }
+>>  286 * DA=       0  fn fc_pgp_sym_encrypt_bytea(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+>>  287 * DA=       0      pgp_sym_encrypt(fc, false)
+    288   DA=       0  }
+>>  289 * DA=       0  fn fc_pgp_sym_decrypt_text(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+>>  290 * DA=       0      pgp_sym_decrypt(fc, true)
+    291   DA=       0  }
+>>  292 * DA=       0  fn fc_pgp_sym_decrypt_bytea(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+>>  293 * DA=       0      pgp_sym_decrypt(fc, false)
+    294   DA=       0  }
+>>  295 * DA=       0  fn fc_pgp_pub_encrypt_text(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+>>  296 * DA=       0      pgp_pub_encrypt(fc, true)
+    297   DA=       0  }
+>>  298 * DA=       0  fn fc_pgp_pub_encrypt_bytea(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+>>  299 * DA=       0      pgp_pub_encrypt(fc, false)
+    300   DA=       0  }
+>>  301 * DA=       0  fn fc_pgp_pub_decrypt_text(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+>>  302 * DA=       0      pgp_pub_decrypt(fc, true)
+    303   DA=       0  }
+>>  304 * DA=       0  fn fc_pgp_pub_decrypt_bytea(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+>>  305 * DA=       0      pgp_pub_decrypt(fc, false)
+    306   DA=       0  }
+    307   DA=    noDA  
+   ----
+    306   DA=       0  }
+    307   DA=    noDA  
+>>  308 * DA=       0  fn fc_pgp_key_id_w(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    309   DA=    noDA      // SAFETY: strict fn — arg0 bytea.
+>>  310 * DA=       0      let data = unsafe { fcinfo.arg_varlena_packed(0)? };
+>>  311 * DA=       0      let s = pgp::key_id(data.data()).map_err(px_msg)?;
+>>  312 * DA=       0      bytea_result(fcinfo, s.as_bytes())
+    313   DA=       0  }
+    314   DA=    noDA  
+   ----
+    323 * DA=     151          parse_key_value_arrays(scratch.mcx(), &ki, &vi)?
+    324   DA=    noDA      } else {
+>>  325 * DA=       0          (Vec::new(), Vec::new())
+    326   DA=    noDA      };
+    327 * DA=      94      let out = pgp::armor::armor_encode(&data, &keys, &values);
+   ----
+    336   DA=     370  }
+    337   DA=    noDA  
+>>  338 * DA=       0  fn fc_pgp_armor_headers(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    339   DA=    noDA      // SAFETY: strict fn — arg0 text.
+>>  340 * DA=       0      let data = unsafe { fcinfo.arg_varlena_packed(0)? }.data().to_vec();
+>>  341 * DA=       0      let headers =
+>>  342 * DA=       0          pgp::armor::extract_armor_headers(&data).map_err(|()| px_msg(pgp::armor::CORRUPT_ARMOR))?;
+>>  343 * DA=       0      let flinfo = flinfo.expect("pgp_armor_headers: resolved FmgrInfo required");
+    344   DA=    noDA      // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+>>  345 * DA=       0      let mcx = unsafe { fcinfo.result_mcx_detached() };
+>>  346 * DA=       0      let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+>>  347 * DA=       0      for (k, v) in &headers {
+>>  348 * DA=       0          let kd = types_fmgr::varlena_result(varlena::cstring_to_text(mcx, k)?);
+>>  349 * DA=       0          let vd = types_fmgr::varlena_result(varlena::cstring_to_text(mcx, v)?);
+>>  350 * DA=       0          srf.putvalues(&[kd, vd], &[false, false])?;
+    351   DA=    noDA      }
+>>  352 * DA=       0      Ok(srf.finish(fcinfo))
+    353   DA=       0  }
+    354   DA=    noDA  
+   ----
+    362 * DA=     302      let v = unsafe { fcinfo.arg_varlena_packed(i)? };
+    363 * DA=     302      if v.is_short() {
+>>  364 * DA=       0          let d = v.data();
+>>  365 * DA=       0          let total = 4 + d.len();
+>>  366 * DA=       0          let mut buf = Vec::with_capacity(total);
+>>  367 * DA=       0          buf.extend_from_slice(&types_tuple::varatt::set_varsize_4b_word(total as u32).to_ne_bytes());
+>>  368 * DA=       0          buf.extend_from_slice(d);
+>>  369 * DA=       0          Ok(buf)
+    370   DA=    noDA      } else {
+    371 * DA=     302          Ok(v.image().to_vec())
+   ----
+    408 * DA=     151      let nvdims = arrayfuncs::foundation::arr_ndim(val_image);
+    409 * DA=     151      if nkdims > 1 || nkdims != nvdims {
+>>  410 * DA=       0          return Err(armor_header_err(
+>>  411 * DA=       0              "wrong number of array subscripts",
+>>  412 * DA=       0              ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+    413   DA=       0          ));
+    414   DA=     151      }
+   ----
+    423   DA=    noDA  
+    424 * DA=     114      if key_datums.len() != val_datums.len() {
+>>  425 * DA=       0          return Err(armor_header_err(
+>>  426 * DA=       0              "mismatched array dimensions",
+>>  427 * DA=       0              ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+    428   DA=       0          ));
+    429   DA=     114      }
+   ----
+    435   DA=    noDA          // Check that the key doesn't contain anything funny.
+    436 * DA=     192          if key_nulls[i] {
+>>  437 * DA=       0              return Err(armor_header_err(
+>>  438 * DA=       0                  "null value not allowed for header key",
+>>  439 * DA=       0                  ERRCODE_NULL_VALUE_NOT_ALLOWED,
+    440   DA=       0              ));
+    441   DA=     192          }
+   ----
+    463   DA=    noDA          // And the same for the value.
+    464 * DA=     152          if val_nulls[i] {
+>>  465 * DA=       0              return Err(armor_header_err(
+>>  466 * DA=       0                  "null value not allowed for header value",
+>>  467 * DA=       0                  ERRCODE_NULL_VALUE_NOT_ALLOWED,
+    468   DA=       0              ));
+    469   DA=     152          }
+   ----
+    502 * DA=     521          "pg_armor" => fc_pg_armor,
+    503 * DA=     370          "pg_dearmor" => fc_pg_dearmor,
+>>  504 * DA=       0          "pgp_armor_headers" => fc_pgp_armor_headers,
+>>  505 * DA=       0          "pgp_key_id_w" => fc_pgp_key_id_w,
+>>  506 * DA=       0          "pgp_sym_encrypt_bytea" => fc_pgp_sym_encrypt_bytea,
+>>  507 * DA=       0          "pgp_sym_encrypt_text" => fc_pgp_sym_encrypt_text,
+>>  508 * DA=       0          "pgp_sym_decrypt_bytea" => fc_pgp_sym_decrypt_bytea,
+>>  509 * DA=       0          "pgp_sym_decrypt_text" => fc_pgp_sym_decrypt_text,
+>>  510 * DA=       0          "pgp_pub_encrypt_bytea" => fc_pgp_pub_encrypt_bytea,
+>>  511 * DA=       0          "pgp_pub_encrypt_text" => fc_pgp_pub_encrypt_text,
+>>  512 * DA=       0          "pgp_pub_decrypt_bytea" => fc_pgp_pub_decrypt_bytea,
+>>  513 * DA=       0          "pgp_pub_decrypt_text" => fc_pgp_pub_decrypt_text,
+>>  514 * DA=       0          _ => return None,
+    515   DA=    noDA      })
+    516   DA=    2186  }
+   ----
+
+===== src/pgp/armor.rs  (44 residual) =====
+      1   DA=    noDA  
+>>    2 * DA=    noDA  const BASE64: &[u8; 64] =
+>>    3 * DA=    noDA      b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      4   DA=    noDA  
+      5   DA=    noDA  const ARMOR_HEADER: &str = "-----BEGIN PGP MESSAGE-----\n";
+   ----
+    157   DA=    noDA          }
+    158   DA=    noDA      }
+>>  159 * DA=       0      None
+    160   DA=     732  }
+    161   DA=    noDA  
+   ----
+    163 * DA=     692      let sep: &[u8] = if is_end { b"-----END" } else { b"-----BEGIN" };
+    164 * DA=     692      let mut search_from = 0usize;
+>>  165 * DA=    noDA      let start;
+    166   DA=    noDA      loop {
+    167 * DA=     732          match find_str(&data[search_from..], sep) {
+   ----
+    207 * DA=     370      let (start_off, hlen) = find_header(src, false)?;
+    208 * DA=     322      if hlen == 0 {
+>>  209 * DA=       0          return Err(());
+    210   DA=     322      }
+    211 * DA=     322      let mut p = start_off + hlen;
+   ----
+    213 * DA=     322      let (end_rel, ehlen) = find_header(&src[p..], true)?;
+    214 * DA=     304      if ehlen == 0 {
+>>  215 * DA=       0          return Err(());
+    216   DA=     304      }
+    217 * DA=     304      let armor_end = p + end_rel;
+   ----
+    219 * DA=     591      while p < armor_end && src[p] != b'\n' && src[p] != b'\r' {
+    220 * DA=    3335          match src[p..armor_end].iter().position(|&b| b == b'\n') {
+>>  221 * DA=       0              None => return Err(()),
+    222 * DA=     287              Some(off) => p = p + off + 1,
+    223   DA=    noDA          }
+   ----
+    241   DA=    noDA  
+    242 * DA=     285      if crc_eq + 5 > src.len() {
+>>  243 * DA=       0          return Err(());
+    244   DA=     285      }
+    245 * DA=     285      let crc_buf = base64_decode(&src[crc_eq + 1..crc_eq + 5])?;
+   ----
+    257   DA=     370  }
+    258   DA=    noDA  
+>>  259 * DA=       0  pub fn extract_armor_headers(src: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ()> {
+>>  260 * DA=       0      let (start_off, hlen) = find_header(src, false)?;
+>>  261 * DA=       0      if hlen == 0 {
+>>  262 * DA=       0          return Err(());
+    263   DA=       0      }
+>>  264 * DA=       0      let armor_start = start_off + hlen;
+    265   DA=    noDA  
+>>  266 * DA=       0      let (end_rel, ehlen) = find_header(&src[armor_start..], true)?;
+>>  267 * DA=       0      if ehlen == 0 {
+>>  268 * DA=       0          return Err(());
+    269   DA=       0      }
+>>  270 * DA=       0      let armor_end = armor_start + end_rel;
+    271   DA=    noDA  
+>>  272 * DA=       0      let mut p = armor_start;
+>>  273 * DA=       0      while p < armor_end && src[p] != b'\n' && src[p] != b'\r' {
+>>  274 * DA=       0          match src[p..armor_end].iter().position(|&b| b == b'\n') {
+>>  275 * DA=       0              None => return Err(()),
+>>  276 * DA=       0              Some(off) => p = p + off + 1,
+    277   DA=    noDA          }
+    278   DA=    noDA      }
+   ----
+    277   DA=    noDA          }
+    278   DA=    noDA      }
+>>  279 * DA=       0      let base64_start = p;
+    280   DA=    noDA  
+>>  281 * DA=       0      let buf = &src[armor_start..base64_start];
+    282   DA=    noDA  
+>>  283 * DA=       0      let mut headers: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+>>  284 * DA=       0      let mut line_start = 0usize;
+    285   DA=    noDA      loop {
+>>  286 * DA=       0          let eol = match buf[line_start..].iter().position(|&b| b == b'\n') {
+>>  287 * DA=       0              None => break,
+>>  288 * DA=       0              Some(off) => line_start + off,
+    289   DA=    noDA          };
+>>  290 * DA=       0          let nextline = eol + 1;
+>>  291 * DA=       0          let mut line_end = eol;
+>>  292 * DA=       0          if line_end > line_start && buf[line_end - 1] == b'\r' {
+>>  293 * DA=       0              line_end -= 1;
+    294   DA=       0          }
+>>  295 * DA=       0          let line = &buf[line_start..line_end];
+>>  296 * DA=       0          let colon = find_subslice(line, b": ").ok_or(())?;
+>>  297 * DA=       0          let key = line[..colon].to_vec();
+>>  298 * DA=       0          let value = line[colon + 2..].to_vec();
+>>  299 * DA=       0          headers.push((key, value));
+>>  300 * DA=       0          line_start = nextline;
+    301   DA=    noDA      }
+>>  302 * DA=       0      Ok(headers)
+    303   DA=       0  }
+    304   DA=    noDA  
+   ----
+    303   DA=       0  }
+    304   DA=    noDA  
+>>  305 * DA=       0  fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+>>  306 * DA=       0      if needle.is_empty() || hay.len() < needle.len() {
+>>  307 * DA=       0          return None;
+    308   DA=       0      }
+>>  309 * DA=       0      hay.windows(needle.len()).position(|w| w == needle)
+    310   DA=       0  }
+   ----

@@ -1,0 +1,33 @@
+[package]
+name = "lmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lmgr"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+backend_progress_seams = { path = "../../../utils/activity/backend_progress_seams" }
+init_small = { path = "../../../utils/init/init_small" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+lmgr_proc = { path = "../lmgr_proc" }
+inval_seams = { path = "../../../utils/cache/inval_seams" }
+lmgr_seams = { path = "../lmgr_seams" }
+lock = { path = "../lock" }
+mcx = { path = "../../../../_support/mcx" }
+lock_seams = { path = "../lock_seams" }
+procarray_seams = { path = "../../ipc/procarray_seams" }
+subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+
+[dev-dependencies]
+backend_progress = { path = "../../../utils/activity/backend_progress" }
+backend_status = { path = "../../../utils/activity/backend_status" }
+ipc_seams = { path = "../../ipc/ipc_seams" }

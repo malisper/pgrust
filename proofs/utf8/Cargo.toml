@@ -1,0 +1,9 @@
+[package]
+name = "poc-utf8"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+wchar = { path = "../../crates/common/wchar" }

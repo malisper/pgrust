@@ -1,0 +1,13 @@
+# Crates in the verification-coverage report scope (see proofs/COVERAGE.md).
+# The adt crates carrying the bulk of proved ledger rows + the fuzz-overlap
+# crates (float, geo). Paths relative to the repo root.
+crates/backend/utils/adt/geo
+crates/backend/utils/adt/float
+crates/backend/utils/adt/numeric
+crates/backend/utils/adt/varlena
+crates/backend/utils/adt/network
+crates/backend/utils/adt/varbit
+crates/backend/utils/adt/jsonb
+crates/backend/utils/mb/conv
+crates/backend/utils/adt/rangetypes
+crates/backend/utils/adt/multirangetypes

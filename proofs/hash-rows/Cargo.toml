@@ -1,0 +1,27 @@
+[package]
+name = "proof_hash_rows"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_int = { path = "../../crates/backend/utils/adt/int" }
+adt_int8 = { path = "../../crates/backend/utils/adt/int8" }
+adt_float = { path = "../../crates/backend/utils/adt/float" }
+adt_scalar = { path = "../../crates/backend/utils/adt/scalar" }
+name = { path = "../../crates/backend/utils/adt/name" }
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+adt_varchar = { path = "../../crates/backend/utils/adt/varchar" }
+adt_mac = { path = "../../crates/backend/utils/adt/mac" }
+adt_mac8 = { path = "../../crates/backend/utils/adt/mac8" }
+adt_bool = { path = "../../crates/backend/utils/adt/bool" }
+adt_enum = { path = "../../crates/backend/utils/adt/adt_enum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }
+types_core = { path = "../../crates/_support/types/types_core" }
+array = { package = "types_array", path = "../../crates/_support/types/array" }
+types_error = { path = "../../crates/_support/types/types_error" }
+proof_support = { path = "../support" }
+# wave 5: pg_lsn_hash rows
+adt_pg_lsn = { path = "../../crates/backend/utils/adt/pg_lsn" }

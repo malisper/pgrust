@@ -1,0 +1,1 @@
+{"path":"crates/_support/pgsync/src/sim/spawn_door.rs","sloc":[35,36,37,45,46,54,55,56,57,58,65,66,67,68,76,77,78,89,90],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[25,26],"attr":[44,53,64,75,88],"typedef":[30,31],"impl-header":[34]}}

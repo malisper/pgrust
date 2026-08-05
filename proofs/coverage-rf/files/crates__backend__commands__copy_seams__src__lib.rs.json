@@ -1,0 +1,1 @@
+{"path":"crates/backend/commands/copy_seams/src/lib.rs","sloc":[10,11,15,16,17,18,19],"kani":[],"fuzz":[],"regress":[10,11],"excluded":{"use-mod":[1,2],"typedef":[4,5,6],"impl-header":[9]}}

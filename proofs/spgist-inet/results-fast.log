@@ -1,0 +1,6 @@
+=== eq_inet_spg_config 11:19:04 load={ 42.65 21.15 13.41 }
+   Compiling types_error v0.0.0 (/Users/malisper/dev/pgrust-fast/.wt-w2-spgist/crates/_support/types/types_error)
+=== eq_inet_spg_choose_nopfx 11:24:07 load={ 23.83 27.18 19.34 }
+=== eq_inet_spg_config 11:29:45 load={ 10.91 19.09 18.52 }
+=== eq_inet_spg_choose_nopfx 11:32:18 load={ 20.11 19.20 18.62 }
+=== eq_inet_spg_choose_famsplit 11:34:49 load={ 24.28 20.06 18.98 }

@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/fmgr/src/callctx.rs","sloc":[17,18,21,22,31,32,35,36,38],"kani":[],"fuzz":[],"regress":[17,18,21,22,31,32,35,38],"excluded":{"unsafe-only":[34],"use-mod":[1,3],"attr":[10,30],"const-static":[6],"typedef":[11,12,13],"impl-header":[16,26]}}

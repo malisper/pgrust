@@ -1,0 +1,21 @@
+[package]
+name = "execreplication"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+pg_publication = { path = "../../catalog/pg_publication" }
+commands_publicationcmds = { path = "../../commands/publicationcmds" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+relcache = { path = "../../utils/cache/relcache" }
+inval = { path = "../../utils/cache/inval" }
+execreplication_seams = { path = "../execreplication_seams" }

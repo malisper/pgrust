@@ -1,0 +1,3 @@
+) as x(ia2 int4[][]);
+
+select * from json_to_record(

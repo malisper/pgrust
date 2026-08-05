@@ -1,0 +1,26 @@
+# proofs/coverage/microbatch-portfam/summary.tsv — p1-microbatch PORTFAM
+# lane branch proofs/p1-mb-portfam; target fuzz/fuzz_targets/portfam_diff.rs
+# denominator: SLOC v2 + const data tables excluded (proofs/coverage/SLOC-RULE-V2.md,
+#   computed with proofs/coverage/sloc_rules.py — matches the census numbers exactly)
+# measured:   fuzz/coverage/portfam_diff.lcov (banked gzipped next to this file),
+#   produced by fuzz/cov-export.sh replaying the FULL committed corpus
+#   (fuzz/corpus/portfam_diff, 3072 inputs) under cargo fuzz coverage
+# exceptions: proofs/coverage/phase1-exceptions.tsv rows with author=p1-microbatch-portfam
+# EQUATION: sloc = measured + exceptions + unaccounted, unaccounted MUST be 0
+crate	sloc_v2	measured	exceptions	unaccounted	c_counterpart
+port/pg_bitutils	141	127	14	0	src/port/pg_bitutils.c + src/include/port/pg_bitutils.h
+port/crc32c	138	71	67	0	src/port/pg_crc32c_sb8.c + pg_crc32c_armv8.c + src/backend/utils/hash/pg_crc.c
+port/pgstrcasecmp	47	45	2	0	src/port/pgstrcasecmp.c
+port/pg_path	262	172	90	0	src/port/path.c (+ src/common/exec.c pieces)
+backend/access/common/bufmask	45	43	2	0	src/backend/access/common/bufmask.c
+TOTAL	633	458	175	0	-
+#
+# MEASUREMENT HOST: aarch64-apple-darwin (Apple M4 Pro), which has FEAT_CRC32 in
+# its baseline. On aarch64-unknown-linux-gnu (the fleet target) target_feature="crc"
+# is NOT baseline, so crates/port/crc32c's cfg arms FLIP: the runtime-detection
+# `choose` module becomes live (14 of the 18 crc32c/src/lib.rs exception rows) and
+# the direct arm becomes the cfg'd-out one. The fleet CONFIRM lcov therefore measures
+# a DIFFERENT residual set for that one file; those rows are marked
+# MEASUREMENT-HOST-CONDITIONAL in phase1-exceptions.tsv and retire at the fleet join.
+# Every other exception class (const-eval-only, excluded-state, locale-carve,
+# unreachable-arm, x86_64 sse42) is host-independent.

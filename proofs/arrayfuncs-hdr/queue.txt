@@ -1,0 +1,12 @@
+proofs::eq_array_upper_n1 kissat
+proofs::eq_array_upper_n6 kissat
+proofs::eq_array_cardinality_n1 kissat
+proofs::eq_array_cardinality_n6 kissat
+proofs::eq_array_ndims kissat
+proofs::eq_array_dims_nullplane kissat
+proofs::control_array_lower_reqdim_skew_must_fail default
+proofs::eq_array_length_n6 kissat
+proofs::eq_array_upper_n0 kissat
+proofs::eq_array_upper_n2 kissat
+proofs::eq_array_cardinality_n0 kissat
+proofs::eq_array_cardinality_n2 kissat

@@ -1,0 +1,22 @@
+# contrib/intarray — residual (uncovered in-scope) lines, lane p1-intarray
+# Coverage of record: local full-corpus fuzz/cov-export.sh replay of the 838
+# committed seeds at the lane tip (lcov banked beside this file, gzipped).
+# LOCAL numbers; the 10M fleet floor is QUEUED (see FLEET-QUEUE.md), not run.
+#
+# In-scope files: src/lib.rs, src/tool.rs, src/boolquery.rs.
+# CARVED (excluded state, charter + phase1-ranking census): src/gist.rs,
+# src/gistbig.rs — their C counterparts (_int_gist.c, _intbig_gist.c) are not
+# compiled by the oracle.
+#
+# EQUATION: 1058 in-scope v2-SLOC = 948 fuzz-measured (89.6%) + 110 residual
+# rows below. tool.rs is 274/274. uncov-not-listed = 0.
+#
+# columns: file:lines<TAB>class<TAB>c_counterpart<TAB>justification
+src/lib.rs:44-107	carved-gist-support	contrib/intarray/_int_gist.c, _intbig_gist.c (not compiled)	GISTENTRY/opclass-option plumbing (entry_arg, entry_result, is_plain_4b, key_image, detoasted_image, opclass_option_i32) whose ONLY callers are gist.rs/gistbig.rs, this lane's declared excluded-state carve. Same carve class as the two files themselves; converts for free when the GiST lane lands.
+src/lib.rs:176	defensive-rust-guard-no-c-counterpart	contrib/intarray/_int_bool.c:428 (boolop)	boolop's `items.is_empty() -> false` early return. C has NO equivalent guard: it computes `GETQUERY(query) + query->size - 1` and on size==0 reads items[-1] (out of bounds). The line is therefore UNREACHABLE from any C-defined input and must not be driven — driving it would compare pgrust against C undefined behavior. Kept (never delete a defensive arm for coverage arithmetic); a size==0 QUERYTYPE cannot be produced by bqarr_in and query_int has no recv, so it is also unreachable from SQL.
+src/lib.rs:483-530	carved-gin-support	contrib/intarray/_int_gin.c ginint4_queryextract (not compiled)	int4_extract_query: the gin__int_ops query-extraction core, installed on gin_int4_seams and dispatched by the GIN core's opclass enum, never by fmgr. Its C counterpart is in the charter's _int_gin.c carve, so no oracle exists in this rig. RE-OPEN CANDIDATE (flagged, cheap): _int_gin.c's queryextract/consistent are PURE functions over an image + strategy number and would vendor in the same whole-file way the other three TUs did — ~54 lines convertible for roughly an hour of work.
+src/lib.rs:532-556	carved-gin-support	contrib/intarray/_int_gin.c ginint4_consistent (not compiled)	int4_consistent: the gin__int_ops consistent core, same dispatch story and same RE-OPEN note as int4_extract_query above.
+src/boolquery.rs:187	defensive-c-parity/unreachable-arm	contrib/intarray/_int_bool.c:124-126 (`default: return ERR`)	gettoken's `_ => return (ERR, 0)` state default. `state` is only ever WAITOPERAND/WAITENDOPERAND/WAITOPERATOR (the three constants the parser assigns), so the arm is structurally unreachable on both sides; C carries the identical unreachable default.
+src/boolquery.rs:264-266	defensive-c-parity/unreachable-arm	contrib/intarray/_int_bool.c:447 (findoprnd, no guard)	findoprnd's `*pos < 0` hard error. Unreachable from the parser: operand and operator pushes pair up, so the walk consumes exactly the items it pushed. C has NO check here and would read ptr[-1]; the pgrust arm is a bounds guard over the same structurally-impossible state.
+src/boolquery.rs:291-293	defensive-c-parity/unreachable-arm	contrib/intarray/_int_bool.c:501-504 (`if (!state.num)`)	The "empty query" 22023 arm. PROVEN unreachable on BOTH sides: makepol only returns END from the WAITOPERATOR state, WAITOPERATOR is only entered after a VAL token is pushed, and the initial state is WAITOPERAND — so any input that reaches the item-count check has pushed at least one item, and every input that pushes none returns ERR first (e.g. "", " ", "(", "()" all take the syntax-error path). C's identical check is equally dead. Reachable only through the size==0 image face, which the driver DOES drive against the three C-guarded entry points (bqarr_out / gin_bool_consistent / query_has_required_values).
+src/boolquery.rs:296-303	resource-bound	contrib/intarray/_int_bool.c:506-510	The QUERYTYPEMAXITEMS 54000 arm. QUERYTYPEMAXITEMS = (0x3fffffff - 8) / 8 = 134,217,727 items; reaching it needs a query text of order 10^8 bytes, above the driver's 8 KiB cap and far above any practical fuzz input. Same bound on the C side.

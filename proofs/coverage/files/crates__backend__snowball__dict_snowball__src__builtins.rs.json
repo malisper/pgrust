@@ -1,0 +1,1 @@
+{"path":"crates/backend/snowball/dict_snowball/src/builtins.rs","sloc":[9,12,13,14,15,18,21,22,23,24,25,26,27,38],"kani":[],"fuzz":[],"regress":[9,12,13,14,15,18,21,22,23,24,25,26,27],"excluded":{"use-mod":[1,2,3,4,5,7],"const-static":[34,36],"const-table":[39,40]}}

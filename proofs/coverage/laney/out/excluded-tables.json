@@ -1,0 +1,177 @@
+{
+ "rule": "v2+no-const-tables",
+ "note": "every const-table span excluded from the denominator; reason 'const-array-heuristic' rows are the ones to review \u2014 a span swallowing real logic is a defect",
+ "total_spans": 15,
+ "total_lines": 377,
+ "by_reason": {
+  "generated-file": 0,
+  "const-array-heuristic": 15
+ },
+ "spans": [
+  {
+   "path": "crates/backend/utils/adt/adt_date/src/builtins.rs",
+   "head_line": 1160,
+   "span": [
+    1161,
+    1316
+   ],
+   "lines": 155,
+   "reason": "const-array-heuristic",
+   "head": "pub const DATE_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_timestamp/src/builtins.rs",
+   "head_line": 1360,
+   "span": [
+    1361,
+    1470
+   ],
+   "lines": 109,
+   "reason": "const-array-heuristic",
+   "head": "pub const TIMESTAMP_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/lib.rs",
+   "head_line": 51,
+   "span": [
+    52,
+    100
+   ],
+   "lines": 48,
+   "reason": "const-array-heuristic",
+   "head": "pub static config_group_names: &[&str] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/numutils/src/lib.rs",
+   "head_line": 488,
+   "span": [
+    489,
+    509
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "const POWERS_OF_TEN: [u64; 20] = ["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/lib.rs",
+   "head_line": 34,
+   "span": [
+    35,
+    49
+   ],
+   "lines": 14,
+   "reason": "const-array-heuristic",
+   "head": "pub static GucSource_Names: &[&str] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/lib.rs",
+   "head_line": 123,
+   "span": [
+    124,
+    133
+   ],
+   "lines": 8,
+   "reason": "const-array-heuristic",
+   "head": "const WAL_LEVEL_OPTIONS: &[types_guc::config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/lib.rs",
+   "head_line": 24,
+   "span": [
+    25,
+    32
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub static GucContext_Names: &[&str] = &["
+  },
+  {
+   "path": "crates/backend/utils/misc/guc_tables/src/lib.rs",
+   "head_line": 136,
+   "span": [
+    137,
+    144
+   ],
+   "lines": 6,
+   "reason": "const-array-heuristic",
+   "head": "const RECOVERY_TARGET_ACTION_OPTIONS: &[types_guc::config_enum_entry] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_timestamp/src/lib.rs",
+   "head_line": 1100,
+   "span": [
+    1101,
+    1103
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const CHAIN: [i32; 10] = ["
+  },
+  {
+   "path": "crates/backend/timezone/localtime/src/lib.rs",
+   "head_line": 167,
+   "span": [
+    168,
+    170
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const MON_LENGTHS: [[i32; MONSPERYEAR]; 2] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/calendar.rs",
+   "head_line": 1,
+   "span": [
+    2,
+    4
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static DAY_TAB: [[i32; 13]; 2] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_timestamp/src/interval.rs",
+   "head_line": 1629,
+   "span": [
+    1630,
+    1631
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const CHAIN: [i32; 8] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/calendar.rs",
+   "head_line": 6,
+   "span": [
+    7,
+    8
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static MONTHS: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/calendar.rs",
+   "head_line": 10,
+   "span": [
+    11,
+    12
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static DAYS: [&str; 7] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/numutils/src/lib.rs",
+   "head_line": 480,
+   "span": [
+    481,
+    482
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const POWERS_OF_TEN: [u32; 10] = ["
+  }
+ ]
+}

@@ -1,0 +1,32 @@
+[package]
+name = "amapi"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bloom = { path = "../../../../contrib/bloom" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_relscan = { path = "../relscan" }
+types_gist = { path = "../../../../_support/types/gist" }
+gin_vocab = { path = "../../gin/gin_vocab" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+pgvector_hnsw = { path = "../../../../contrib/pgvector_hnsw" }
+nbt_validate = { path = "../../nbtree/nbt_validate" }
+hash_validate = { path = "../../hash/hash_validate" }
+spgist_validate = { path = "../../spgist/spgist_validate" }
+brin_validate = { path = "../../brin/brin_validate" }
+gist_validate = { path = "../../gist/gist_validate" }
+gin_validate = { path = "../../gin/gin_validate" }
+cache_syscache = { path = "../../../utils/cache/cache_syscache" }
+catcache = { path = "../../../utils/cache/catcache" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+
+[dev-dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+heaptuple = { path = "../../common/heaptuple" }

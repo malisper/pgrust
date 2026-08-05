@@ -1,0 +1,37 @@
+[package]
+name = "commands_view"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+parse_expr = { path = "../../parser/parse_expr" }
+parser_analyze = { path = "../../parser/parser_analyze" }
+rewrite_define = { path = "../../rewrite/rewrite_define" }
+rewrite_handler = { path = "../../rewrite/rewrite_handler" }
+tablecmds = { path = "../tablecmds" }
+xact = { path = "../../access/transam/xact" }
+types_portal = { path = "../../../_support/types/portal" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+parse_relation = { path = "../../parser/parse_relation" }
+elog = { path = "../../utils/error/elog" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+relation_seams = { path = "../../access/common/relation_seams" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+pg_depend = { path = "../../catalog/pg_depend" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+miscinit = { path = "../../utils/init/miscinit" }
+format_type = { path = "../../utils/adt/format_type" }

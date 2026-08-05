@@ -1,0 +1,49 @@
+regexp_diff fleet campaign of record — job pgrust-fuzz-campaign-1785535304-795f-37663 @ 325985a437331a845b55e90209d3334c653a2b1f (c8g.4xlarge, fork=15, secs=6000)
+Extracted from the live pod (kubectl exec tar) because the runner's slow-unit
+triage phase (333 units x <=180s serial replay) cannot terminate inside any
+job deadline for this compile-bomb-prone target — runner defect reported in
+the lane report; campaign-stats.json therefore absent; this dir is the
+artifact bank of record. run.log.gz = full libFuzzer log.
+
+Result: 3,652,919+ execs (final line #3652919, exit 0 after 6192s of fuzzing),
+15 workers x 6192s = 25.8 CPU-hours (>24h-CPU per-family floor).
+Comparator divergences (value/verdict/errcode planes): ZERO.
+Corpus: 4372 units at exit; delta merged into fuzz/corpus/regexp_diff (5614 committed).
+
+Crash artifacts: 10, ALL attributed to regex/regex_core (engine lane p1-lanew's
+crate, out of this lane's claim; wrapper layer clean):
+ - 6x debug_assert regex_compile.rs:2821 "assertion failed: v.SEE(EOS)"
+ - 1x debug_assert regex_compile.rs:2163 "assertion failed: v.SEE(b')') || v.ISERR()"
+ - 3x ASan stack-overflow in recursive parse (rstacktoodeep() hardcoded 0 where
+   C consults stack_is_too_deep — finding #2 from the local smoke, reconfirmed)
+OOM artifacts: multi-GB engine-compile allocations (3.5-15.6 GB mallocs) on
+nested-quantifier patterns — engine memory-limit gap, same regex_core domain.
+Crash input units (raw bytes) banked alongside; repro.txt trimmed to panic lines.
+
+---- 2026-08-01 addendum (task #95 fix lane, main @ 10dd1750a6) ----
+Files renamed crash-* -> banked-crash-*: the fleet runner's stray-artifact
+sweep (#89b, run-fuzz-campaign.sh sweep_strays) globs crash-* across the
+whole fuzz tree and was re-classifying these banked evidence files as NEW
+divergences in EVERY fleet job since 2b17a6760a (identical cross-target
+REPLAY-RAIL failures in all jobs' verdicts). replay-rail.sh now guards
+against committing raw libFuzzer artifact names outside corpus/.
+Re-replay of the 10 raw units through regexp_diff at 10dd1750a6 (-s none,
+rss_limit 8192):
+  CLEAN (engine REG_ETOOBIG fix landed; carve removed from regexp_diff):
+    banked-crash-3e775e18..., banked-crash-504ca53f... (the 2163 unit),
+    banked-crash-9219f2cc..., banked-crash-abe1e958...
+  STILL CRASH (SIGSEGV, native stack overflow): banked-crash-0a8ae2db...,
+    banked-crash-20ca7595..., banked-crash-596d0334...,
+    banked-crash-69f113d1..., banked-crash-6cdded07...,
+    banked-crash-860becc6... — stack_is_too_deep() is now consulted by the
+    engine but the fuzz harness never calls set_stack_base(), so the guard
+    is unarmed (STACK_BASE_PTR==0 -> always false) and deep patterns
+    genuinely overflow. Engine/harness lane (p1-lanew) owns arming the
+    guard on BOTH sides (C oracle parity) — flagged to the coordinator.
+CLASSIFICATION of the 6 SIGSEGV units: HARNESS, not a release blocker. The
+engine consults stack_depth_core::stack_is_too_deep(), but that guard reads
+a thread-local STACK_BASE_PTR that only set_stack_base() arms — the server
+does so at backend startup (main_main / launch_backend); the fuzz harness's
+pin() does not, so the guard is inert (base==0 -> always false) and deep
+patterns hit a real native overflow. Server-side these same patterns raise
+ERRCODE_STATEMENT_TOO_COMPLEX as C does.

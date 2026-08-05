@@ -1,0 +1,59 @@
+[package]
+name = "ruleutils"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+amapi = { path = "../../../access/index/amapi" }
+arrayfuncs = { path = "../arrayfuncs" }
+cache_syscache = { path = "../../cache/cache_syscache" }
+partdesc = { path = "../../../partitioning/partdesc" }
+pg_depend = { path = "../../../catalog/pg_depend" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }
+catcache = { path = "../../cache/catcache" }
+copyfuncs = { path = "../../../nodes/copyfuncs" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+format_type = { path = "../format_type" }
+funcapi = { path = "../../fmgr/funcapi" }
+xml = { package = "adt_xml", path = "../xml" }
+indexcmds_seams = { path = "../../../commands/indexcmds_seams" }
+lsyscache = { path = "../../cache/lsyscache" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+mcx = { path = "../../../../_support/mcx" }
+parse_expr = { path = "../../../parser/parse_expr" }
+genam_seams = { path = "../../../access/index/genam_seams" }
+parse_func = { path = "../../../parser/parse_func" }
+parse_oper = { path = "../../../parser/parse_oper" }
+parser_small1 = { path = "../../../parser/parser_small1" }
+readfuncs = { path = "../../../nodes/readfuncs" }
+relcache = { path = "../../cache/relcache" }
+genam = { path = "../../../access/index/genam" }
+table = { path = "../../../access/table/table" }
+relation_seams = { path = "../../../access/common/relation_seams" }
+detoast = { path = "../../../access/common/detoast" }
+parse_relation = { path = "../../../parser/parse_relation" }
+rewrite_manip = { path = "../../../rewrite/rewrite_manip" }
+guc = { path = "../../misc/guc" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_trigger = { path = "../../../../_support/types/types_trigger" }
+typcache = { path = "../../cache/typcache" }
+vars = { path = "../../../optimizer/util/vars" }
+varlena = { path = "../varlena" }
+mbutils = { path = "../../mb/mbutils" }
+rel_vocab = { path = "../../../../_support/types/rel_vocab" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+ruleutils_seams = { path = "../ruleutils_seams" }
+partbounds = { path = "../../../partitioning/partbounds" }
+
+[dev-dependencies]
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+

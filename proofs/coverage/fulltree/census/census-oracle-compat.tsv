@@ -1,0 +1,6 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+oracle-compat	proofs::eq_anychar_typmodin	proofs::eq_anychar_typmodin	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+oracle-compat	proofs::eq_bpchar_clip_latin1	proofs::eq_bpchar_clip_latin1	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+oracle-compat	proofs::eq_bpcharlen_latin1	proofs::eq_bpcharlen_latin1	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+oracle-compat	proofs::eq_bpcharoctetlen	proofs::eq_bpcharoctetlen	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+oracle-compat	proofs::eq_varchar_clip_latin1	proofs::eq_varchar_clip_latin1	0	8	VERIFICATION:- SUCCESSFUL	RAN	1

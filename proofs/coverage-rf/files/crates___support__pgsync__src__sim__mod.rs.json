@@ -1,0 +1,1 @@
+{"path":"crates/_support/pgsync/src/sim/mod.rs","sloc":[51,52,62,63],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[35,36,37,38,39,40]}}

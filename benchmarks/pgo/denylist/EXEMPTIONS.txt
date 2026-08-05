@@ -1,0 +1,7 @@
+# Documented exemptions from pgo/lint-training-overlap.sh. Every line here is a
+# statement that IS on the denylist but is still permitted in the training
+# corpus, with the reason. The lint prints each exemption it applies, so an
+# auditor sees them; it never skips one silently. Keep this file empty unless a
+# statement is genuinely content-free.
+#
+# (empty — no exemptions are currently claimed)

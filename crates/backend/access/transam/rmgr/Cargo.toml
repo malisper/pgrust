@@ -1,0 +1,39 @@
+[package]
+name = "rmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rmgr"
+path = "src/lib.rs"
+
+[dependencies]
+origin_seams = { path = "../../../replication/origin_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+mcx = { path = "../../../../_support/mcx" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+elog = { path = "../../../utils/error/elog" }
+xlogreader_seams = { path = "../xlogreader_seams" }
+relmapper = { path = "../../../utils/cache/relmapper" }
+clog = { path = "../clog" }
+commit_ts = { path = "../commit_ts" }
+multixact = { path = "../multixact" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+storage_xlog = { path = "../../../catalog/storage_xlog" }
+logical_message = { path = "../../../replication/logical/logical_message" }
+standby = { path = "../../../storage/ipc/standby" }
+heapam_xlog = { path = "../../heap/heapam_xlog" }
+nbtree_xlog = { path = "../../nbtree/nbtree_xlog" }
+hash_xlog = { path = "../../hash/hash_xlog" }
+sequence_xlog = { path = "../../../commands/sequence_xlog" }
+brin_xlog = { path = "../../brin/brin_xlog" }
+generic_xlog = { path = "../generic_xlog" }
+xact = { path = "../xact" }
+rmgrdesc = { path = "../../rmgrdesc" }
+gin_xlog = { path = "../../gin/gin_xlog" }
+spgist_xlog = { path = "../../spgist/spgist_xlog" }
+gist_xlog = { path = "../../gist/gist_xlog" }

@@ -1,0 +1,49 @@
+[package]
+name = "bgwriter"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bgwriter"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
+types_storage = { path = "../../../_support/types/types_storage" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+auxprocess = { path = "../auxprocess" }
+bgjobs = { path = "../bgjobs" }
+auxjob = { path = "../auxjob" }
+bufmgr = { path = "../../storage/buffer/bufmgr" }
+checkpointer = { path = "../checkpointer" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+dynahash = { path = "../../utils/hash/dynahash" }
+elog = { path = "../../utils/error/elog" }
+fd = { path = "../../storage/file/fd" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+interrupt = { path = "../interrupt" }
+ipc = { path = "../../storage/ipc/ipc" }
+latch = { path = "../../storage/ipc/latch" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+miscinit = { path = "../../utils/init/miscinit" }
+postinit = { path = "../../utils/init/postinit" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+postmaster_seams = { path = "../postmaster_seams" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+types_guc = { path = "../../../_support/types/types_guc" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+resowner = { path = "../../utils/resowner/resowner" }
+smgr = { path = "../../storage/smgr/smgr" }
+standby_seams = { path = "../../storage/ipc/standby_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+libc = "0.2"

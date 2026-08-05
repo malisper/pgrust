@@ -1,0 +1,16 @@
+[package]
+name = "instrument"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+bufmgr = { path = "../../storage/buffer/bufmgr" }
+fd = { path = "../../storage/file/fd" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+# The one monotonic authority (DST P2 clock contract §0.2): the
+# INSTR_TIME_SET_CURRENT analog reads pg_clock::mono_ns. Leaf crate, no cycle.
+pg_clock = { path = "../../../port/pg_clock" }

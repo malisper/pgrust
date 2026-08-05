@@ -1,0 +1,32 @@
+{
+ "generated": "2026-08-01T22:10:15+00:00",
+ "crate": "backend/nodes/tidbitmap",
+ "lane": "p1-tidbitmap (adopted after host crash; lane continuation)",
+ "head_sha_lane_branch": "f3bfe4d9101fc09075ca1feb79ec4a69bbe559cf",
+ "code_sha_of_record": "0de6fe1320cb1b2de98732ac3a79391837d3ca19",
+ "sloc_rule": "SLOC v2 + tables excluded; DA-line grain from llvm-cov lcov export",
+ "union_inputs": [
+  {
+   "kind": "fuzz-lcov",
+   "file": "fuzz-tidbitmap_diff-local-20260801.lcov.gz",
+   "capture": "cargo +nightly-2026-07-17 fuzz coverage tidbitmap_diff over the COMMITTED final bank (1,888 inputs; merge-minimized from 3,878 local + fleet 10M snapshot [0 new features]) on aarch64-apple-darwin",
+   "result": "crates/backend/nodes/tidbitmap/src/lib.rs: 592/592 DA lines covered, 0 uncovered"
+  },
+  {
+   "kind": "exhaustive-diff",
+   "name": "tbm_calculate_entries_exhaustive (fuzz/core/src/tidbitmap_diff.rs)",
+   "domain": "full u32 maxbytes + clamp band + u64 tail spots = 4,299,161,607 compares vs verbatim C tbm_calculate_entries",
+   "run": "6.91s aarch64-apple-darwin local re-run at rebased sha (prior run 7.9s at f8af778f4b)"
+  },
+  {
+   "kind": "fleet-campaign",
+   "job": "pgrust-fuzz-campaign-1785623625-0f3b-72472 (floor of record)",
+   "sha": "0de6fe1320cb1b2de98732ac3a79391837d3ca19",
+   "verdict": "10,000,000/10,000,000 execs, 0 real divergences, 0 sanitizer artifacts, rc=0, wall 6043s; the 24 divergences_total entries are runner-defect-#89 STRAYS (regexp_diff fleet-evidence files swept into the prefix; repro logs show 'Running: .../fleet-evidence/regexp_diff-1785535304/...' executed clean in 0ms; all 12 inputs also replay clean against tidbitmap_diff locally)",
+   "predecessor": "pgrust-fuzz-campaign-1785620288-044e-15126 @ 9de31c7c1ee481768f1fc43e0550363f3781a4db: 10,000,000 execs, 0 divergences, 0 sanitizer artifacts, clean (wall 6649s)"
+  }
+ ],
+ "exceptions": "NONE \u2014 zero residual lines; the single formerly-uncovered line (private-iterate OnePage lookahead arm) was a port-added arm with no C counterpart, removed for C-parity at 9de31c7c1e (invariant TBM_ONE_PAGE => nchunks==0 now debug_assert-audited every fuzz exec)",
+ "injection_sweep": "6/6 planted defects KILLED at plane creation (bit-shift, recheck, chunk-bit, errmsg, range-iter, calc-clamp) \u2014 commit 9c56786dc6 pre-rebase",
+ "witness_pairs": "single-field-delta seeds: offset/block/recheck/chunk-boundary, both orders \u2014 commit 9c56786dc6 pre-rebase"
+}

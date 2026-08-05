@@ -1,0 +1,19 @@
+# w3-sendrecv lane runqueue: xid8snap rows 2941/5057 pg_snapshot_recv, 2942/5058 pg_snapshot_send
+sendrecv::eq_snapshot_max_nxip | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_max_nxip --exact
+sendrecv::eq_snapshot_recv_d0 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d0 --exact
+sendrecv::eq_snapshot_recv_d1 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d1 --exact
+sendrecv::eq_snapshot_recv_d2 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d2 --exact
+sendrecv::eq_snapshot_recv_d3 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d3 --exact
+sendrecv::eq_snapshot_recv_d4 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d4 --exact
+sendrecv::eq_snapshot_recv_d12 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d12 --exact
+sendrecv::eq_snapshot_recv_d19 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d19 --exact
+sendrecv::eq_snapshot_recv_d20n0 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d20n0 --exact
+sendrecv::eq_snapshot_recv_d20n1 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d20n1 --exact
+sendrecv::eq_snapshot_recv_d28n1 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d28n1 --exact
+sendrecv::eq_snapshot_recv_d36n0 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d36n0 --exact
+sendrecv::eq_snapshot_recv_d36n2 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_recv_d36n2 --exact
+sendrecv::cover_recv_family | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::cover_recv_family --exact
+sendrecv::eq_snapshot_send_n0 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_send_n0 --exact
+sendrecv::eq_snapshot_send_n1 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_send_n1 --exact
+sendrecv::eq_snapshot_send_n2 | green | release-gate | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::eq_snapshot_send_n2 --exact
+sendrecv::control_snapshot_send_skew | must-fail | control | timeout 900 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --harness sendrecv::control_snapshot_send_skew --exact

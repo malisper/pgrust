@@ -1,0 +1,24 @@
+# proofs/coverage/p1-mb-lib/summary.tsv — coverage equation for lane
+# p1-mb-lib (crate backend/lib/radixtree; target radixtree_diff).
+#
+# Capture of record: FIXED self-checking fleet capture (runner
+# ed9167b04ec1, post-covcap-fix lineage), job
+# pgrust-fuzz-campaign-1785601122-549a-76864 @
+# 6de12cb7fb49ada4b63c493ebe1adbc460d04c21 (proofs/p1-mb-lib): rc=0,
+# artifact coverage.lcov (banked here gzipped), capture-forensics.txt
+# banked alongside (1980/1980 units replayed, 16/16 clean exits).
+# Campaign: 10,026,926 execs, 0 divergences, 0 sanitizer artifacts,
+# corpus 1722 -> 1980 (committed corpus = fuzz/corpus/radixtree_diff).
+# Prior floor at be0165bd64 (pre shared-varlen arm): job
+# pgrust-fuzz-campaign-1785599585-35f3-1371, 10,039,449 execs, 0 div —
+# its lcov exposed the free_recurse leaf-free gap the CONFIRM closes.
+#
+# SLOC rule: v2 + tables excluded + strict test scope (tree-sloc.py);
+# in-scope v2 SLOC = 873 (matches phase1-ranking.tsv cell). lcov DA line
+# table = 1003 lines (instrumentation grain; includes multi-DA rows).
+# equation: lcov_da = fleet_measured + exception_rows, 0 unaccounted.
+# The 12 exception lines are the 12 p1-mb-lib rows in
+# proofs/coverage/phase1-exceptions.tsv (uncovered set identical 1:1:
+# 151,276,292,343,757,773,921,1200,1317,1523,1599,1649).
+crate	file	lcov_da_lines	fleet_measured	exception_rows	unaccounted
+backend/lib/radixtree	crates/backend/lib/radixtree/src/lib.rs	1003	991	12	0

@@ -1,0 +1,8 @@
+# Units excluded from the local full-corpus regexp_diff coverage replay: NONE.
+# The cargo-fuzz batch runner aborted (exit 71) on batch-11 of 14 — cumulative
+# RSS across the ~401-unit batch (libfuzzer malloc/rss limit; the corpus
+# contains engine compile-bomb shapes), NOT a crashing unit: all 401 batch-11
+# units were replayed individually (stdin-detached, 150s ceiling, parallel x8)
+# and every one exited rc=0 flushing a profraw. Merge inputs = 13 clean batch
+# profraws + 401 per-unit profraws (batch-11.profraw from the aborted run
+# discarded). Crashers: zero.

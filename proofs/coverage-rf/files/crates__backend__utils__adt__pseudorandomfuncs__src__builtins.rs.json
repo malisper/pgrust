@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/adt/pseudorandomfuncs/src/builtins.rs","sloc":[8,9,10,13,14,17,18,19,22,23,24,27,28,29,32,34,36,37,40,41,44,45,48],"kani":[],"fuzz":[],"regress":[8,9,10,13,14,17,18,19,22,23,24,27,28,29,32,34,36,37,40,41],"excluded":{"use-mod":[1,2,3,4,5],"const-table":[49,50,51,52,53,54]}}

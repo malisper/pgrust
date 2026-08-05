@@ -1,0 +1,22 @@
+[package]
+name = "deadlock"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "deadlock"
+path = "src/lib.rs"
+
+[dependencies]
+backend_status = { path = "../../../utils/activity/backend_status" }
+deadlock_seams = { path = "../deadlock_seams" }
+init_small = { path = "../../../utils/init/init_small" }
+lmgr_proc = { path = "../lmgr_proc" }
+lmgr_seams = { path = "../lmgr_seams" }
+lock = { path = "../lock" }
+mcx = { path = "../../../../_support/mcx" }
+pgstat = { path = "../../../utils/activity/pgstat" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }

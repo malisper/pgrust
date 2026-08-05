@@ -1,0 +1,2954 @@
+== macaddr_cmp_equiv
+Kani Rust Verifier 0.67.0 (cargo plugin)
+   Compiling version_check v0.9.5
+   Compiling zerocopy v0.8.55
+   Compiling cfg-if v1.0.4
+   Compiling once_cell v1.21.4
+   Compiling allocator-api2 v0.2.21
+   Compiling types_error v0.0.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/types_error)
+   Compiling rustc-hash v2.1.3
+   Compiling types_core v0.0.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/types_core)
+   Compiling libc v0.2.189
+   Compiling seam_core v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/seam_core)
+   Compiling rel_vocab v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/rel_vocab)
+   Compiling wchar v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/common/wchar)
+   Compiling hashfn v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/common/hashfn)
+   Compiling xact_seams v0.0.0 (/Users/malisper/dev/pgrust-fast/crates/backend/access/transam/xact_seams)
+   Compiling ahash v0.8.12
+   Compiling pg_clock v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/port/pg_clock)
+   Compiling pg_strong_random v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/port/pg_strong_random)
+   Compiling ip v0.0.0 (/Users/malisper/dev/pgrust-fast/crates/common/ip)
+   Compiling pgsync v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/pgsync)
+   Compiling types_startup v0.0.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/types_startup)
+   Compiling hashbrown v0.14.5
+   Compiling mcx v0.0.0 (/Users/malisper/dev/pgrust-fast/crates/_support/mcx)
+warning: variant `Malloc` is never constructed
+  --> /Users/malisper/dev/pgrust-fast/crates/_support/mcx/src/lib.rs:60:5
+   |
+57 | enum Backend {
+   |      ------- variant in this enum
+...
+60 |     Malloc,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `chunk_size` is never used
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/mcx/src/aset.rs:243:4
+    |
+243 | fn chunk_size(idx: usize) -> usize {
+    |    ^^^^^^^^^^
+
+warning: method `mem_allocated` is never used
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/mcx/src/aset.rs:298:19
+    |
+265 | impl AllocSet {
+    | ------------- method in this implementation
+...
+298 |     pub(crate) fn mem_allocated(&self) -> usize {
+    |                   ^^^^^^^^^^^^^
+
+   Compiling datum v0.0.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/datum)
+   Compiling stringinfo v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/stringinfo)
+   Compiling types_storage v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/types_storage)
+   Compiling types_trigger v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/types_trigger)
+   Compiling mbutils_seams v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/backend/utils/mb/mbutils_seams)
+   Compiling types_tuple v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/types_tuple)
+   Compiling detoast_seams v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/backend/access/common/detoast_seams)
+   Compiling types_hash v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/hash)
+   Compiling types_fmgr v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/fmgr)
+   Compiling pqcomm_seams v0.0.0 (/Users/malisper/dev/pgrust-fast/crates/backend/libpq/pqcomm_seams)
+   Compiling types_scan v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/types_scan)
+   Compiling types_gist v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/gist)
+   Compiling types_bloom v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/types_bloom)
+   Compiling fmgr_seams v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/backend/utils/fmgr/fmgr_seams)
+   Compiling types_nbtree v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/types_nbtree)
+   Compiling types_spgist v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist)
+warning: type `spgChooseIn` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:92:12
+   |
+92 | pub struct spgChooseIn {
+   |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseIn`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `spgChooseOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:104:10
+    |
+104 | pub enum spgChooseOut {
+    |          ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseOut`
+
+warning: type `spgPickSplitIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:127:12
+    |
+127 | pub struct spgPickSplitIn {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitIn`
+
+warning: type `spgPickSplitOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:134:12
+    |
+134 | pub struct spgPickSplitOut {
+    |            ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitOut`
+
+warning: type `spgInnerConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:157:12
+    |
+157 | pub struct spgInnerConsistentIn<'a> {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentIn`
+
+warning: type `spgInnerConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:175:12
+    |
+175 | pub struct spgInnerConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentOut`
+
+warning: type `spgLeafConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:199:12
+    |
+199 | pub struct spgLeafConsistentIn {
+    |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentIn`
+
+warning: type `spgLeafConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:212:12
+    |
+212 | pub struct spgLeafConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentOut`
+
+warning: type `spgxlogState` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:15:12
+   |
+15 | pub struct spgxlogState {
+   |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogState`
+
+warning: type `spgxlogAddLeaf` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:40:12
+   |
+40 | pub struct spgxlogAddLeaf {
+   |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddLeaf`
+
+warning: type `spgxlogMoveLeafs` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:76:12
+   |
+76 | pub struct spgxlogMoveLeafs {
+   |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogMoveLeafs`
+
+warning: type `spgxlogAddNode` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:115:12
+    |
+115 | pub struct spgxlogAddNode {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddNode`
+
+warning: type `spgxlogSplitTuple` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:154:12
+    |
+154 | pub struct spgxlogSplitTuple {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogSplitTuple`
+
+warning: type `spgxlogPickSplit` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:184:12
+    |
+184 | pub struct spgxlogPickSplit {
+    |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogPickSplit`
+
+warning: type `spgxlogVacuumLeaf` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:238:12
+    |
+238 | pub struct spgxlogVacuumLeaf {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumLeaf`
+
+warning: type `spgxlogVacuumRoot` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:271:12
+    |
+271 | pub struct spgxlogVacuumRoot {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRoot`
+
+warning: type `spgxlogVacuumRedirect` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:295:12
+    |
+295 | pub struct spgxlogVacuumRedirect {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRedirect`
+
+warning: type `spgConfigIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/lib.rs:237:12
+    |
+237 | pub struct spgConfigIn {
+    |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigIn`
+
+warning: type `spgConfigOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/lib.rs:242:12
+    |
+242 | pub struct spgConfigOut {
+    |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigOut`
+
+   Compiling types_rel v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/_support/types/rel)
+   Compiling namespace_seams v0.0.0 (/Users/malisper/dev/pgrust-fast/crates/backend/catalog/namespace_seams)
+   Compiling mbutils v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/backend/utils/mb/mbutils)
+   Compiling pqformat v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/backend/libpq/pqformat)
+   Compiling adt_mac v0.1.0 (/Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac)
+   Compiling t5_mac v0.1.0 (/private/tmp/claude-501/-Users-malisper-dev-pgrust-fast/ef403f10-7325-4e59-90ca-41f6ae52fcf7/scratchpad/poc-quickwins/t5_mac)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.18s
+Checking harness proofs::macaddr_cmp_equiv...
+CBMC 6.8.0 (cbmc-6.8.0)
+CBMC version 6.8.0 (cbmc-6.8.0) 64-bit arm64 macos
+Reading GOTO program from file /private/tmp/claude-501/-Users-malisper-dev-pgrust-fast/ef403f10-7325-4e59-90ca-41f6ae52fcf7/scratchpad/poc-quickwins/t5_mac/target/kani/aarch64-apple-darwin/debug/deps/t5_mac-e10962f14e7007ae__RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_cmp_equiv.out
+Generating GOTO Program
+Adding CPROVER library (arm64)
+Removal of function pointers and virtual functions
+Generic Property Instrumentation
+Running with 16 object bits, 48 offset bits (user-specified)
+Starting Bounded Model Checking
+Runtime Symex: 0.0175172s
+size of program expression: 929 steps
+slicing removed 412 assignments
+Generated 430 VCC(s), 30 remaining after simplification
+Runtime Postprocess Equation: 0.000105084s
+Passing problem to propositional reduction
+converting SSA
+Runtime Convert SSA: 0.000984209s
+Running propositional reduction
+Post-processing
+Runtime Post-process: 4.584e-06s
+Solving with CaDiCaL 2.0.0
+1846 variables, 3078 clauses
+SAT checker: instance is SATISFIABLE
+Runtime Solver: 0.00320154s
+Runtime decision procedure: 0.0042415s
+Running propositional reduction
+Solving with CaDiCaL 2.0.0
+1847 variables, 3079 clauses
+SAT checker: instance is SATISFIABLE
+Runtime Solver: 0.000571625s
+Runtime decision procedure: 0.000593292s
+Running propositional reduction
+Solving with CaDiCaL 2.0.0
+1848 variables, 3080 clauses
+SAT checker: instance is UNSATISFIABLE
+Runtime Solver: 0.00175025s
+Runtime decision procedure: 0.00176446s
+
+RESULTS:
+Check 1: adt_mac::MacAddr::from_bytes.assertion.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:37:16 in function adt_mac::MacAddr::from_bytes
+
+Check 2: adt_mac::MacAddr::from_bytes.assertion.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:38:16 in function adt_mac::MacAddr::from_bytes
+
+Check 3: adt_mac::MacAddr::from_bytes.assertion.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:39:16 in function adt_mac::MacAddr::from_bytes
+
+Check 4: adt_mac::MacAddr::from_bytes.assertion.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:40:16 in function adt_mac::MacAddr::from_bytes
+
+Check 5: adt_mac::MacAddr::from_bytes.assertion.5
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:41:16 in function adt_mac::MacAddr::from_bytes
+
+Check 6: adt_mac::MacAddr::from_bytes.assertion.6
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:42:16 in function adt_mac::MacAddr::from_bytes
+
+Check 7: proofs::macaddr_cmp_equiv.assertion.1
+	 - Status: SUCCESS
+	 - Description: "assertion failed: rust == c"
+	 - Location: src/lib.rs:21:9 in function proofs::macaddr_cmp_equiv
+
+Check 8: adt_mac::lobits.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:5 in function adt_mac::lobits
+
+Check 9: adt_mac::lobits.assertion.2
+	 - Status: SUCCESS
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:31 in function adt_mac::lobits
+
+Check 10: adt_mac::hibits.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:5 in function adt_mac::hibits
+
+Check 11: adt_mac::hibits.assertion.2
+	 - Status: SUCCESS
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:31 in function adt_mac::hibits
+
+Check 12: pgc_macaddr_cmp_internal.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 13: pgc_macaddr_cmp_internal.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 14: pgc_macaddr_cmp_internal.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 15: pgc_macaddr_cmp_internal.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 16: pgc_macaddr_cmp_internal.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 17: pgc_macaddr_cmp_internal.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 18: pgc_macaddr_cmp_internal.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 19: pgc_macaddr_cmp_internal.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 20: pgc_macaddr_cmp_internal.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 21: pgc_macaddr_cmp_internal.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 22: pgc_macaddr_cmp_internal.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 23: pgc_macaddr_cmp_internal.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 24: pgc_macaddr_cmp_internal.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 25: pgc_macaddr_cmp_internal.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 26: pgc_macaddr_cmp_internal.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 27: pgc_macaddr_cmp_internal.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 28: pgc_macaddr_cmp_internal.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 29: pgc_macaddr_cmp_internal.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 30: pgc_macaddr_cmp_internal.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 31: pgc_macaddr_cmp_internal.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 32: pgc_macaddr_cmp_internal.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 33: pgc_macaddr_cmp_internal.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 34: pgc_macaddr_cmp_internal.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 35: pgc_macaddr_cmp_internal.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 36: pgc_macaddr_cmp_internal.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 37: pgc_macaddr_cmp_internal.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 38: pgc_macaddr_cmp_internal.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 39: pgc_macaddr_cmp_internal.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 40: pgc_macaddr_cmp_internal.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 41: pgc_macaddr_cmp_internal.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 42: pgc_macaddr_cmp_internal.pointer_dereference.31
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 43: pgc_macaddr_cmp_internal.pointer_dereference.32
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 44: pgc_macaddr_cmp_internal.pointer_dereference.33
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 45: pgc_macaddr_cmp_internal.pointer_dereference.34
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 46: pgc_macaddr_cmp_internal.pointer_dereference.35
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 47: pgc_macaddr_cmp_internal.pointer_dereference.36
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:38 in function pgc_macaddr_cmp_internal
+
+Check 48: pgc_macaddr_cmp_internal.pointer_dereference.37
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 49: pgc_macaddr_cmp_internal.pointer_dereference.38
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 50: pgc_macaddr_cmp_internal.pointer_dereference.39
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 51: pgc_macaddr_cmp_internal.pointer_dereference.40
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 52: pgc_macaddr_cmp_internal.pointer_dereference.41
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 53: pgc_macaddr_cmp_internal.pointer_dereference.42
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 54: pgc_macaddr_cmp_internal.pointer_dereference.43
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 55: pgc_macaddr_cmp_internal.pointer_dereference.44
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 56: pgc_macaddr_cmp_internal.pointer_dereference.45
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 57: pgc_macaddr_cmp_internal.pointer_dereference.46
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 58: pgc_macaddr_cmp_internal.pointer_dereference.47
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 59: pgc_macaddr_cmp_internal.pointer_dereference.48
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 60: pgc_macaddr_cmp_internal.pointer_dereference.49
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 61: pgc_macaddr_cmp_internal.pointer_dereference.50
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 62: pgc_macaddr_cmp_internal.pointer_dereference.51
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 63: pgc_macaddr_cmp_internal.pointer_dereference.52
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 64: pgc_macaddr_cmp_internal.pointer_dereference.53
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 65: pgc_macaddr_cmp_internal.pointer_dereference.54
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 66: pgc_macaddr_cmp_internal.pointer_dereference.55
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 67: pgc_macaddr_cmp_internal.pointer_dereference.56
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 68: pgc_macaddr_cmp_internal.pointer_dereference.57
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 69: pgc_macaddr_cmp_internal.pointer_dereference.58
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 70: pgc_macaddr_cmp_internal.pointer_dereference.59
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 71: pgc_macaddr_cmp_internal.pointer_dereference.60
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 72: pgc_macaddr_cmp_internal.pointer_dereference.61
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 73: pgc_macaddr_cmp_internal.pointer_dereference.62
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 74: pgc_macaddr_cmp_internal.pointer_dereference.63
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 75: pgc_macaddr_cmp_internal.pointer_dereference.64
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 76: pgc_macaddr_cmp_internal.pointer_dereference.65
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 77: pgc_macaddr_cmp_internal.pointer_dereference.66
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 78: pgc_macaddr_cmp_internal.pointer_dereference.67
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 79: pgc_macaddr_cmp_internal.pointer_dereference.68
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 80: pgc_macaddr_cmp_internal.pointer_dereference.69
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 81: pgc_macaddr_cmp_internal.pointer_dereference.70
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 82: pgc_macaddr_cmp_internal.pointer_dereference.71
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 83: pgc_macaddr_cmp_internal.pointer_dereference.72
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:40 in function pgc_macaddr_cmp_internal
+
+Check 84: pgc_macaddr_cmp_internal.pointer_dereference.73
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 85: pgc_macaddr_cmp_internal.pointer_dereference.74
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 86: pgc_macaddr_cmp_internal.pointer_dereference.75
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 87: pgc_macaddr_cmp_internal.pointer_dereference.76
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 88: pgc_macaddr_cmp_internal.pointer_dereference.77
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 89: pgc_macaddr_cmp_internal.pointer_dereference.78
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 90: pgc_macaddr_cmp_internal.pointer_dereference.79
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 91: pgc_macaddr_cmp_internal.pointer_dereference.80
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 92: pgc_macaddr_cmp_internal.pointer_dereference.81
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 93: pgc_macaddr_cmp_internal.pointer_dereference.82
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 94: pgc_macaddr_cmp_internal.pointer_dereference.83
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 95: pgc_macaddr_cmp_internal.pointer_dereference.84
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 96: pgc_macaddr_cmp_internal.pointer_dereference.85
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 97: pgc_macaddr_cmp_internal.pointer_dereference.86
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 98: pgc_macaddr_cmp_internal.pointer_dereference.87
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 99: pgc_macaddr_cmp_internal.pointer_dereference.88
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 100: pgc_macaddr_cmp_internal.pointer_dereference.89
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 101: pgc_macaddr_cmp_internal.pointer_dereference.90
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 102: pgc_macaddr_cmp_internal.pointer_dereference.91
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 103: pgc_macaddr_cmp_internal.pointer_dereference.92
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 104: pgc_macaddr_cmp_internal.pointer_dereference.93
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 105: pgc_macaddr_cmp_internal.pointer_dereference.94
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 106: pgc_macaddr_cmp_internal.pointer_dereference.95
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 107: pgc_macaddr_cmp_internal.pointer_dereference.96
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 108: pgc_macaddr_cmp_internal.pointer_dereference.97
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 109: pgc_macaddr_cmp_internal.pointer_dereference.98
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 110: pgc_macaddr_cmp_internal.pointer_dereference.99
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 111: pgc_macaddr_cmp_internal.pointer_dereference.100
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 112: pgc_macaddr_cmp_internal.pointer_dereference.101
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 113: pgc_macaddr_cmp_internal.pointer_dereference.102
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 114: pgc_macaddr_cmp_internal.pointer_dereference.103
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 115: pgc_macaddr_cmp_internal.pointer_dereference.104
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 116: pgc_macaddr_cmp_internal.pointer_dereference.105
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 117: pgc_macaddr_cmp_internal.pointer_dereference.106
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 118: pgc_macaddr_cmp_internal.pointer_dereference.107
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 119: pgc_macaddr_cmp_internal.pointer_dereference.108
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:42 in function pgc_macaddr_cmp_internal
+
+Check 120: pgc_macaddr_cmp_internal.pointer_dereference.109
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 121: pgc_macaddr_cmp_internal.pointer_dereference.110
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 122: pgc_macaddr_cmp_internal.pointer_dereference.111
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 123: pgc_macaddr_cmp_internal.pointer_dereference.112
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 124: pgc_macaddr_cmp_internal.pointer_dereference.113
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 125: pgc_macaddr_cmp_internal.pointer_dereference.114
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 126: pgc_macaddr_cmp_internal.pointer_dereference.115
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 127: pgc_macaddr_cmp_internal.pointer_dereference.116
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 128: pgc_macaddr_cmp_internal.pointer_dereference.117
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 129: pgc_macaddr_cmp_internal.pointer_dereference.118
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 130: pgc_macaddr_cmp_internal.pointer_dereference.119
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 131: pgc_macaddr_cmp_internal.pointer_dereference.120
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 132: pgc_macaddr_cmp_internal.pointer_dereference.121
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 133: pgc_macaddr_cmp_internal.pointer_dereference.122
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 134: pgc_macaddr_cmp_internal.pointer_dereference.123
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 135: pgc_macaddr_cmp_internal.pointer_dereference.124
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 136: pgc_macaddr_cmp_internal.pointer_dereference.125
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 137: pgc_macaddr_cmp_internal.pointer_dereference.126
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 138: pgc_macaddr_cmp_internal.pointer_dereference.127
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 139: pgc_macaddr_cmp_internal.pointer_dereference.128
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 140: pgc_macaddr_cmp_internal.pointer_dereference.129
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 141: pgc_macaddr_cmp_internal.pointer_dereference.130
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 142: pgc_macaddr_cmp_internal.pointer_dereference.131
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 143: pgc_macaddr_cmp_internal.pointer_dereference.132
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 144: pgc_macaddr_cmp_internal.pointer_dereference.133
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 145: pgc_macaddr_cmp_internal.pointer_dereference.134
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 146: pgc_macaddr_cmp_internal.pointer_dereference.135
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 147: pgc_macaddr_cmp_internal.pointer_dereference.136
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 148: pgc_macaddr_cmp_internal.pointer_dereference.137
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 149: pgc_macaddr_cmp_internal.pointer_dereference.138
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 150: pgc_macaddr_cmp_internal.pointer_dereference.139
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 151: pgc_macaddr_cmp_internal.pointer_dereference.140
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 152: pgc_macaddr_cmp_internal.pointer_dereference.141
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 153: pgc_macaddr_cmp_internal.pointer_dereference.142
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 154: pgc_macaddr_cmp_internal.pointer_dereference.143
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 155: pgc_macaddr_cmp_internal.pointer_dereference.144
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:44 in function pgc_macaddr_cmp_internal
+
+Check 156: adt_mac::lobits.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:7 in function adt_mac::lobits
+
+Check 157: adt_mac::lobits.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:7 in function adt_mac::lobits
+
+Check 158: adt_mac::lobits.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:7 in function adt_mac::lobits
+
+Check 159: adt_mac::lobits.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:7 in function adt_mac::lobits
+
+Check 160: adt_mac::lobits.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:7 in function adt_mac::lobits
+
+Check 161: adt_mac::lobits.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:7 in function adt_mac::lobits
+
+Check 162: adt_mac::lobits.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:33 in function adt_mac::lobits
+
+Check 163: adt_mac::lobits.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:33 in function adt_mac::lobits
+
+Check 164: adt_mac::lobits.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:33 in function adt_mac::lobits
+
+Check 165: adt_mac::lobits.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:33 in function adt_mac::lobits
+
+Check 166: adt_mac::lobits.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:33 in function adt_mac::lobits
+
+Check 167: adt_mac::lobits.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:33 in function adt_mac::lobits
+
+Check 168: adt_mac::lobits.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:57 in function adt_mac::lobits
+
+Check 169: adt_mac::lobits.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:57 in function adt_mac::lobits
+
+Check 170: adt_mac::lobits.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:57 in function adt_mac::lobits
+
+Check 171: adt_mac::lobits.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:57 in function adt_mac::lobits
+
+Check 172: adt_mac::lobits.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:57 in function adt_mac::lobits
+
+Check 173: adt_mac::lobits.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:59:57 in function adt_mac::lobits
+
+Check 174: pgc_macaddr_cmp.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 175: pgc_macaddr_cmp.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 176: pgc_macaddr_cmp.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 177: pgc_macaddr_cmp.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 178: pgc_macaddr_cmp.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 179: pgc_macaddr_cmp.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 180: pgc_macaddr_cmp.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 181: pgc_macaddr_cmp.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 182: pgc_macaddr_cmp.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 183: pgc_macaddr_cmp.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 184: pgc_macaddr_cmp.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 185: pgc_macaddr_cmp.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 186: pgc_macaddr_cmp.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 187: pgc_macaddr_cmp.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 188: pgc_macaddr_cmp.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 189: pgc_macaddr_cmp.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 190: pgc_macaddr_cmp.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 191: pgc_macaddr_cmp.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:56 in function pgc_macaddr_cmp
+
+Check 192: pgc_macaddr_cmp.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 193: pgc_macaddr_cmp.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 194: pgc_macaddr_cmp.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 195: pgc_macaddr_cmp.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 196: pgc_macaddr_cmp.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 197: pgc_macaddr_cmp.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 198: pgc_macaddr_cmp.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 199: pgc_macaddr_cmp.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 200: pgc_macaddr_cmp.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 201: pgc_macaddr_cmp.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 202: pgc_macaddr_cmp.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 203: pgc_macaddr_cmp.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 204: pgc_macaddr_cmp.pointer_dereference.31
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 205: pgc_macaddr_cmp.pointer_dereference.32
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 206: pgc_macaddr_cmp.pointer_dereference.33
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 207: pgc_macaddr_cmp.pointer_dereference.34
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 208: pgc_macaddr_cmp.pointer_dereference.35
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 209: pgc_macaddr_cmp.pointer_dereference.36
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:57 in function pgc_macaddr_cmp
+
+Check 210: pgc_macaddr_cmp.pointer_dereference.37
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 211: pgc_macaddr_cmp.pointer_dereference.38
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 212: pgc_macaddr_cmp.pointer_dereference.39
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 213: pgc_macaddr_cmp.pointer_dereference.40
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 214: pgc_macaddr_cmp.pointer_dereference.41
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 215: pgc_macaddr_cmp.pointer_dereference.42
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 216: pgc_macaddr_cmp.pointer_dereference.43
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 217: pgc_macaddr_cmp.pointer_dereference.44
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 218: pgc_macaddr_cmp.pointer_dereference.45
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 219: pgc_macaddr_cmp.pointer_dereference.46
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 220: pgc_macaddr_cmp.pointer_dereference.47
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 221: pgc_macaddr_cmp.pointer_dereference.48
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 222: pgc_macaddr_cmp.pointer_dereference.49
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 223: pgc_macaddr_cmp.pointer_dereference.50
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 224: pgc_macaddr_cmp.pointer_dereference.51
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 225: pgc_macaddr_cmp.pointer_dereference.52
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 226: pgc_macaddr_cmp.pointer_dereference.53
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 227: pgc_macaddr_cmp.pointer_dereference.54
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:58 in function pgc_macaddr_cmp
+
+Check 228: pgc_macaddr_cmp.pointer_dereference.55
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 229: pgc_macaddr_cmp.pointer_dereference.56
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 230: pgc_macaddr_cmp.pointer_dereference.57
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 231: pgc_macaddr_cmp.pointer_dereference.58
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 232: pgc_macaddr_cmp.pointer_dereference.59
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 233: pgc_macaddr_cmp.pointer_dereference.60
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 234: pgc_macaddr_cmp.pointer_dereference.61
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 235: pgc_macaddr_cmp.pointer_dereference.62
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 236: pgc_macaddr_cmp.pointer_dereference.63
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 237: pgc_macaddr_cmp.pointer_dereference.64
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 238: pgc_macaddr_cmp.pointer_dereference.65
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 239: pgc_macaddr_cmp.pointer_dereference.66
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 240: pgc_macaddr_cmp.pointer_dereference.67
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 241: pgc_macaddr_cmp.pointer_dereference.68
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 242: pgc_macaddr_cmp.pointer_dereference.69
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 243: pgc_macaddr_cmp.pointer_dereference.70
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 244: pgc_macaddr_cmp.pointer_dereference.71
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 245: pgc_macaddr_cmp.pointer_dereference.72
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:59 in function pgc_macaddr_cmp
+
+Check 246: adt_mac::hibits.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:7 in function adt_mac::hibits
+
+Check 247: adt_mac::hibits.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:7 in function adt_mac::hibits
+
+Check 248: adt_mac::hibits.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:7 in function adt_mac::hibits
+
+Check 249: adt_mac::hibits.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:7 in function adt_mac::hibits
+
+Check 250: adt_mac::hibits.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:7 in function adt_mac::hibits
+
+Check 251: adt_mac::hibits.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:7 in function adt_mac::hibits
+
+Check 252: adt_mac::hibits.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:33 in function adt_mac::hibits
+
+Check 253: adt_mac::hibits.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:33 in function adt_mac::hibits
+
+Check 254: adt_mac::hibits.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:33 in function adt_mac::hibits
+
+Check 255: adt_mac::hibits.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:33 in function adt_mac::hibits
+
+Check 256: adt_mac::hibits.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:33 in function adt_mac::hibits
+
+Check 257: adt_mac::hibits.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:33 in function adt_mac::hibits
+
+Check 258: adt_mac::hibits.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:57 in function adt_mac::hibits
+
+Check 259: adt_mac::hibits.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:57 in function adt_mac::hibits
+
+Check 260: adt_mac::hibits.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:57 in function adt_mac::hibits
+
+Check 261: adt_mac::hibits.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:57 in function adt_mac::hibits
+
+Check 262: adt_mac::hibits.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:57 in function adt_mac::hibits
+
+Check 263: adt_mac::hibits.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:54:57 in function adt_mac::hibits
+
+Check 264: adt_mac::MacAddr::from_bytes.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:37:16 in function adt_mac::MacAddr::from_bytes
+
+Check 265: adt_mac::MacAddr::from_bytes.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:38:16 in function adt_mac::MacAddr::from_bytes
+
+Check 266: adt_mac::MacAddr::from_bytes.array_bounds.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:39:16 in function adt_mac::MacAddr::from_bytes
+
+Check 267: adt_mac::MacAddr::from_bytes.array_bounds.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:40:16 in function adt_mac::MacAddr::from_bytes
+
+Check 268: adt_mac::MacAddr::from_bytes.array_bounds.5
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:41:16 in function adt_mac::MacAddr::from_bytes
+
+Check 269: adt_mac::MacAddr::from_bytes.array_bounds.6
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:42:16 in function adt_mac::MacAddr::from_bytes
+
+
+SUMMARY:
+ ** 0 of 269 failed
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.09114025s
+
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.
+== macaddr_out_equiv
+Kani Rust Verifier 0.67.0 (cargo plugin)
+warning: variant `Malloc` is never constructed
+  --> /Users/malisper/dev/pgrust-fast/crates/_support/mcx/src/lib.rs:60:5
+   |
+57 | enum Backend {
+   |      ------- variant in this enum
+...
+60 |     Malloc,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `chunk_size` is never used
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/mcx/src/aset.rs:243:4
+    |
+243 | fn chunk_size(idx: usize) -> usize {
+    |    ^^^^^^^^^^
+
+warning: method `mem_allocated` is never used
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/mcx/src/aset.rs:298:19
+    |
+265 | impl AllocSet {
+    | ------------- method in this implementation
+...
+298 |     pub(crate) fn mem_allocated(&self) -> usize {
+    |                   ^^^^^^^^^^^^^
+
+warning: type `spgChooseIn` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:92:12
+   |
+92 | pub struct spgChooseIn {
+   |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseIn`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `spgChooseOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:104:10
+    |
+104 | pub enum spgChooseOut {
+    |          ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseOut`
+
+warning: type `spgPickSplitIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:127:12
+    |
+127 | pub struct spgPickSplitIn {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitIn`
+
+warning: type `spgPickSplitOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:134:12
+    |
+134 | pub struct spgPickSplitOut {
+    |            ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitOut`
+
+warning: type `spgInnerConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:157:12
+    |
+157 | pub struct spgInnerConsistentIn<'a> {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentIn`
+
+warning: type `spgInnerConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:175:12
+    |
+175 | pub struct spgInnerConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentOut`
+
+warning: type `spgLeafConsistentIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:199:12
+    |
+199 | pub struct spgLeafConsistentIn {
+    |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentIn`
+
+warning: type `spgLeafConsistentOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/state.rs:212:12
+    |
+212 | pub struct spgLeafConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentOut`
+
+warning: type `spgxlogState` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:15:12
+   |
+15 | pub struct spgxlogState {
+   |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogState`
+
+warning: type `spgxlogAddLeaf` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:40:12
+   |
+40 | pub struct spgxlogAddLeaf {
+   |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddLeaf`
+
+warning: type `spgxlogMoveLeafs` should have an upper camel case name
+  --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:76:12
+   |
+76 | pub struct spgxlogMoveLeafs {
+   |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogMoveLeafs`
+
+warning: type `spgxlogAddNode` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:115:12
+    |
+115 | pub struct spgxlogAddNode {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddNode`
+
+warning: type `spgxlogSplitTuple` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:154:12
+    |
+154 | pub struct spgxlogSplitTuple {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogSplitTuple`
+
+warning: type `spgxlogPickSplit` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:184:12
+    |
+184 | pub struct spgxlogPickSplit {
+    |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogPickSplit`
+
+warning: type `spgxlogVacuumLeaf` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:238:12
+    |
+238 | pub struct spgxlogVacuumLeaf {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumLeaf`
+
+warning: type `spgxlogVacuumRoot` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:271:12
+    |
+271 | pub struct spgxlogVacuumRoot {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRoot`
+
+warning: type `spgxlogVacuumRedirect` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/xlog.rs:295:12
+    |
+295 | pub struct spgxlogVacuumRedirect {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRedirect`
+
+warning: type `spgConfigIn` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/lib.rs:237:12
+    |
+237 | pub struct spgConfigIn {
+    |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigIn`
+
+warning: type `spgConfigOut` should have an upper camel case name
+   --> /Users/malisper/dev/pgrust-fast/crates/_support/types/types_spgist/src/lib.rs:242:12
+    |
+242 | pub struct spgConfigOut {
+    |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigOut`
+
+   Compiling t5_mac v0.1.0 (/private/tmp/claude-501/-Users-malisper-dev-pgrust-fast/ef403f10-7325-4e59-90ca-41f6ae52fcf7/scratchpad/poc-quickwins/t5_mac)
+warning: Found the following unsupported constructs:
+             - caller_location (1)
+             - foreign function (1)
+         
+         Verification will fail if one or more of these constructs is reachable.
+         See https://model-checking.github.io/kani/rust-feature-support.html for more details.
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s
+Checking harness proofs::macaddr_out_equiv...
+CBMC 6.8.0 (cbmc-6.8.0)
+CBMC version 6.8.0 (cbmc-6.8.0) 64-bit arm64 macos
+Reading GOTO program from file /private/tmp/claude-501/-Users-malisper-dev-pgrust-fast/ef403f10-7325-4e59-90ca-41f6ae52fcf7/scratchpad/poc-quickwins/t5_mac/target/kani/aarch64-apple-darwin/debug/deps/t5_mac-ce5996392666adb5__RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.out
+Generating GOTO Program
+Adding CPROVER library (arm64)
+Removal of function pointers and virtual functions
+Generic Property Instrumentation
+Running with 16 object bits, 48 offset bits (user-specified)
+Starting Bounded Model Checking
+Unwinding loop _RNvCsh42Wl4rtBSu_7adt_mac16macaddr_out_into.0 iteration 1 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs line 276 column 5 function adt_mac::macaddr_out_into thread 0
+Unwinding loop _RNvCsh42Wl4rtBSu_7adt_mac16macaddr_out_into.0 iteration 2 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs line 276 column 5 function adt_mac::macaddr_out_into thread 0
+Unwinding loop _RNvCsh42Wl4rtBSu_7adt_mac16macaddr_out_into.0 iteration 3 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs line 276 column 5 function adt_mac::macaddr_out_into thread 0
+Unwinding loop _RNvCsh42Wl4rtBSu_7adt_mac16macaddr_out_into.0 iteration 4 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs line 276 column 5 function adt_mac::macaddr_out_into thread 0
+Unwinding loop _RNvCsh42Wl4rtBSu_7adt_mac16macaddr_out_into.0 iteration 5 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs line 276 column 5 function adt_mac::macaddr_out_into thread 0
+Unwinding loop _RNvCsh42Wl4rtBSu_7adt_mac16macaddr_out_into.0 iteration 6 file /Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs line 276 column 5 function adt_mac::macaddr_out_into thread 0
+Unwinding loop pgc_macaddr_out.0 iteration 1 file csrc/mac_shim.c line 72 function pgc_macaddr_out thread 0
+Unwinding loop pgc_macaddr_out.0 iteration 2 file csrc/mac_shim.c line 72 function pgc_macaddr_out thread 0
+Unwinding loop pgc_macaddr_out.0 iteration 3 file csrc/mac_shim.c line 72 function pgc_macaddr_out thread 0
+Unwinding loop pgc_macaddr_out.0 iteration 4 file csrc/mac_shim.c line 72 function pgc_macaddr_out thread 0
+Unwinding loop pgc_macaddr_out.0 iteration 5 file csrc/mac_shim.c line 72 function pgc_macaddr_out thread 0
+Unwinding loop pgc_macaddr_out.0 iteration 6 file csrc/mac_shim.c line 72 function pgc_macaddr_out thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 1 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 2 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 3 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 4 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 5 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 6 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 7 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 8 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 9 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 10 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 11 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 12 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 13 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 14 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 15 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 16 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Unwinding loop _RNvNtCs52fFEudj0wc_6t5_mac6proofs17macaddr_out_equiv.0 iteration 17 file src/lib.rs line 35 column 9 function proofs::macaddr_out_equiv thread 0
+Runtime Symex: 0.154815s
+size of program expression: 7417 steps
+slicing removed 5032 assignments
+Generated 1578 VCC(s), 187 remaining after simplification
+Runtime Postprocess Equation: 0.00136175s
+Passing problem to propositional reduction
+converting SSA
+Runtime Convert SSA: 0.0100595s
+Running propositional reduction
+Post-processing
+Runtime Post-process: 5.625e-06s
+Solving with CaDiCaL 2.0.0
+22726 variables, 29641 clauses
+SAT checker: instance is SATISFIABLE
+Runtime Solver: 0.000129667s
+Runtime decision procedure: 0.010421s
+Running propositional reduction
+Solving with CaDiCaL 2.0.0
+22727 variables, 29642 clauses
+SAT checker: instance is UNSATISFIABLE
+Runtime Solver: 0.00313254s
+Runtime decision procedure: 0.00318046s
+
+RESULTS:
+Check 1: kani::mem::cbmc::same_allocation.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "Kani does not support reasoning about pointer to unallocated memory"
+	 - Location: ../../../../../../../../Users/runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::mem::cbmc::same_allocation
+
+Check 2: adt_mac::MacAddr::from_bytes.assertion.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:37:16 in function adt_mac::MacAddr::from_bytes
+
+Check 3: adt_mac::MacAddr::from_bytes.assertion.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:38:16 in function adt_mac::MacAddr::from_bytes
+
+Check 4: adt_mac::MacAddr::from_bytes.assertion.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:39:16 in function adt_mac::MacAddr::from_bytes
+
+Check 5: adt_mac::MacAddr::from_bytes.assertion.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:40:16 in function adt_mac::MacAddr::from_bytes
+
+Check 6: adt_mac::MacAddr::from_bytes.assertion.5
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:41:16 in function adt_mac::MacAddr::from_bytes
+
+Check 7: adt_mac::MacAddr::from_bytes.assertion.6
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:42:16 in function adt_mac::MacAddr::from_bytes
+
+Check 8: <u8 as std::ops::Shr<i32>>::shr.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to shift right with overflow"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/bit.rs:611:17 in function <u8 as std::ops::Shr<i32>>::shr
+
+Check 9: <usize as kani::rustc_intrinsics::ToISize>::to_isize.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../../../Users/runner/work/kani/kani/library/kani_core/src/models.rs:176:17 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 10: <usize as kani::rustc_intrinsics::ToISize>::to_isize.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset value overflows isize"
+	 - Location: ../../../../../../../../Users/runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 11: <usize as kani::rustc_intrinsics::ToISize>::to_isize.assertion.1
+	 - Status: SUCCESS
+	 - Description: "internal error: entered unreachable code"
+	 - Location: ../../../../../../../../Users/runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 12: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:80:17 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 13: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:82:9 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 14: std::ptr::NonNull::<u8>::as_ref::<'_>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:18 in function std::ptr::NonNull::<u8>::as_ref::<'_>
+
+Check 15: std::ptr::NonNull::<u8>::as_ref::<'_>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:18 in function std::ptr::NonNull::<u8>::as_ref::<'_>
+
+Check 16: std::fmt::Arguments::<'_>::from_str.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/fmt/mod.rs:820:38 in function std::fmt::Arguments::<'_>::from_str
+
+Check 17: std::panic::Location::<'_>::caller.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "caller_location is not currently supported by Kani. Please post your example at https://github.com/model-checking/kani/issues/374"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic/location.rs:147:9 in function std::panic::Location::<'_>::caller
+
+Check 18: proofs::macaddr_out_equiv.assertion.1
+	 - Status: SUCCESS
+	 - Description: "assertion failed: rlen as i32 == clen"
+	 - Location: src/lib.rs:34:9 in function proofs::macaddr_out_equiv
+
+Check 19: proofs::macaddr_out_equiv.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: src/lib.rs:35:18 in function proofs::macaddr_out_equiv
+
+Check 20: proofs::macaddr_out_equiv.assertion.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:36:24 in function proofs::macaddr_out_equiv
+
+Check 21: proofs::macaddr_out_equiv.assertion.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:36:33 in function proofs::macaddr_out_equiv
+
+Check 22: proofs::macaddr_out_equiv.assertion.4
+	 - Status: SUCCESS
+	 - Description: "assertion failed: rbuf[i] == cbuf[i]"
+	 - Location: src/lib.rs:36:13 in function proofs::macaddr_out_equiv
+
+Check 23: core::num::<impl usize>::unchecked_sub.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_sub` which would overflow"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:908:17 in function core::num::<impl usize>::unchecked_sub
+
+Check 24: core::panicking::panic_nounwind_fmt::runtime.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "call to foreign "Rust" function `_RNvCs1hStedNDpZ2_7___rustc17rust_begin_unwind` is not currently supported by Kani. Please post your example at https://github.com/model-checking/kani/issues/new/choose"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:110:17 in function core::panicking::panic_nounwind_fmt::runtime
+
+Check 25: kani::rustc_intrinsics::offset::<u8, *mut u8, usize>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset in bytes overflows isize"
+	 - Location: ../../../../../../../../Users/runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<u8, *mut u8, usize>
+
+Check 26: kani::rustc_intrinsics::offset::<u8, *mut u8, usize>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "Offset result and original pointer must point to the same allocation"
+	 - Location: ../../../../../../../../Users/runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<u8, *mut u8, usize>
+
+Check 27: adt_mac::macaddr_out_into.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:276:22 in function adt_mac::macaddr_out_into
+
+Check 28: adt_mac::macaddr_out_into.assertion.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:22 in function adt_mac::macaddr_out_into
+
+Check 29: adt_mac::macaddr_out_into.assertion.2
+	 - Status: SUCCESS
+	 - Description: "attempt to multiply with overflow"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:13 in function adt_mac::macaddr_out_into
+
+Check 30: adt_mac::macaddr_out_into.assertion.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:9 in function adt_mac::macaddr_out_into
+
+Check 31: adt_mac::macaddr_out_into.assertion.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:26 in function adt_mac::macaddr_out_into
+
+Check 32: adt_mac::macaddr_out_into.assertion.5
+	 - Status: SUCCESS
+	 - Description: "attempt to multiply with overflow"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:13 in function adt_mac::macaddr_out_into
+
+Check 33: adt_mac::macaddr_out_into.assertion.6
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:13 in function adt_mac::macaddr_out_into
+
+Check 34: adt_mac::macaddr_out_into.assertion.7
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:9 in function adt_mac::macaddr_out_into
+
+Check 35: adt_mac::macaddr_out_into.assertion.8
+	 - Status: SUCCESS
+	 - Description: "attempt to multiply with overflow"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:280:17 in function adt_mac::macaddr_out_into
+
+Check 36: adt_mac::macaddr_out_into.assertion.9
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:280:17 in function adt_mac::macaddr_out_into
+
+Check 37: adt_mac::macaddr_out_into.assertion.10
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:280:13 in function adt_mac::macaddr_out_into
+
+Check 38: <std::option::Option<&u8> as std::ops::Try>::branch.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:2666:15 in function <std::option::Option<&u8> as std::ops::Try>::branch
+
+Check 39: core::num::<impl usize>::unchecked_add.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_add` which would overflow"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:729:17 in function core::num::<impl usize>::unchecked_add
+
+Check 40: kani::rustc_intrinsics::offset::<u8, *const u8, usize>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset in bytes overflows isize"
+	 - Location: ../../../../../../../../Users/runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<u8, *const u8, usize>
+
+Check 41: kani::rustc_intrinsics::offset::<u8, *const u8, usize>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "Offset result and original pointer must point to the same allocation"
+	 - Location: ../../../../../../../../Users/runner/work/kani/kani/library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<u8, *const u8, usize>
+
+Check 42: pgc_macaddr_out.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 43: pgc_macaddr_out.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 44: pgc_macaddr_out.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 45: pgc_macaddr_out.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 46: pgc_macaddr_out.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 47: pgc_macaddr_out.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 48: pgc_macaddr_out.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 49: pgc_macaddr_out.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 50: pgc_macaddr_out.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 51: pgc_macaddr_out.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 52: pgc_macaddr_out.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 53: pgc_macaddr_out.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 54: pgc_macaddr_out.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 55: pgc_macaddr_out.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: csrc/mac_shim.c:74 in function pgc_macaddr_out
+
+Check 56: pgc_macaddr_out.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 57: pgc_macaddr_out.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 58: pgc_macaddr_out.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 59: pgc_macaddr_out.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 60: pgc_macaddr_out.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 61: pgc_macaddr_out.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 62: pgc_macaddr_out.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 63: pgc_macaddr_out.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 64: pgc_macaddr_out.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 65: pgc_macaddr_out.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 66: pgc_macaddr_out.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 67: pgc_macaddr_out.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 68: pgc_macaddr_out.array_bounds.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 69: pgc_macaddr_out.array_bounds.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: csrc/mac_shim.c:75 in function pgc_macaddr_out
+
+Check 70: pgc_macaddr_out.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:77 in function pgc_macaddr_out
+
+Check 71: pgc_macaddr_out.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:77 in function pgc_macaddr_out
+
+Check 72: pgc_macaddr_out.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:77 in function pgc_macaddr_out
+
+Check 73: pgc_macaddr_out.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:77 in function pgc_macaddr_out
+
+Check 74: pgc_macaddr_out.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:77 in function pgc_macaddr_out
+
+Check 75: pgc_macaddr_out.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:77 in function pgc_macaddr_out
+
+Check 76: pgc_macaddr_out.pointer_dereference.31
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: csrc/mac_shim.c:79 in function pgc_macaddr_out
+
+Check 77: pgc_macaddr_out.pointer_dereference.32
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: csrc/mac_shim.c:79 in function pgc_macaddr_out
+
+Check 78: pgc_macaddr_out.pointer_dereference.33
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: csrc/mac_shim.c:79 in function pgc_macaddr_out
+
+Check 79: pgc_macaddr_out.pointer_dereference.34
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: csrc/mac_shim.c:79 in function pgc_macaddr_out
+
+Check 80: pgc_macaddr_out.pointer_dereference.35
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: csrc/mac_shim.c:79 in function pgc_macaddr_out
+
+Check 81: pgc_macaddr_out.pointer_dereference.36
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: csrc/mac_shim.c:79 in function pgc_macaddr_out
+
+Check 82: <std::option::Option<&u8> as std::ops::Try>::branch.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:2666:15 in function <std::option::Option<&u8> as std::ops::Try>::branch
+
+Check 83: <std::option::Option<&u8> as std::ops::Try>::branch.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:2668:21 in function <std::option::Option<&u8> as std::ops::Try>::branch
+
+Check 84: adt_mac::macaddr_out_into.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:275:17 in function adt_mac::macaddr_out_into
+
+Check 85: adt_mac::macaddr_out_into.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:275:17 in function adt_mac::macaddr_out_into
+
+Check 86: adt_mac::macaddr_out_into.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:275:17 in function adt_mac::macaddr_out_into
+
+Check 87: adt_mac::macaddr_out_into.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:275:17 in function adt_mac::macaddr_out_into
+
+Check 88: adt_mac::macaddr_out_into.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:275:17 in function adt_mac::macaddr_out_into
+
+Check 89: adt_mac::macaddr_out_into.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:275:17 in function adt_mac::macaddr_out_into
+
+Check 90: adt_mac::macaddr_out_into.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:276:22 in function adt_mac::macaddr_out_into
+
+Check 91: adt_mac::macaddr_out_into.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:22 in function adt_mac::macaddr_out_into
+
+Check 92: adt_mac::macaddr_out_into.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:22 in function adt_mac::macaddr_out_into
+
+Check 93: adt_mac::macaddr_out_into.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:22 in function adt_mac::macaddr_out_into
+
+Check 94: adt_mac::macaddr_out_into.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:22 in function adt_mac::macaddr_out_into
+
+Check 95: adt_mac::macaddr_out_into.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:22 in function adt_mac::macaddr_out_into
+
+Check 96: adt_mac::macaddr_out_into.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:22 in function adt_mac::macaddr_out_into
+
+Check 97: adt_mac::macaddr_out_into.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:22 in function adt_mac::macaddr_out_into
+
+Check 98: adt_mac::macaddr_out_into.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:9 in function adt_mac::macaddr_out_into
+
+Check 99: adt_mac::macaddr_out_into.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:9 in function adt_mac::macaddr_out_into
+
+Check 100: adt_mac::macaddr_out_into.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:9 in function adt_mac::macaddr_out_into
+
+Check 101: adt_mac::macaddr_out_into.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:9 in function adt_mac::macaddr_out_into
+
+Check 102: adt_mac::macaddr_out_into.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:9 in function adt_mac::macaddr_out_into
+
+Check 103: adt_mac::macaddr_out_into.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:9 in function adt_mac::macaddr_out_into
+
+Check 104: adt_mac::macaddr_out_into.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:277:9 in function adt_mac::macaddr_out_into
+
+Check 105: adt_mac::macaddr_out_into.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:26 in function adt_mac::macaddr_out_into
+
+Check 106: adt_mac::macaddr_out_into.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:26 in function adt_mac::macaddr_out_into
+
+Check 107: adt_mac::macaddr_out_into.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:26 in function adt_mac::macaddr_out_into
+
+Check 108: adt_mac::macaddr_out_into.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:26 in function adt_mac::macaddr_out_into
+
+Check 109: adt_mac::macaddr_out_into.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:26 in function adt_mac::macaddr_out_into
+
+Check 110: adt_mac::macaddr_out_into.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:26 in function adt_mac::macaddr_out_into
+
+Check 111: adt_mac::macaddr_out_into.array_bounds.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:26 in function adt_mac::macaddr_out_into
+
+Check 112: adt_mac::macaddr_out_into.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:9 in function adt_mac::macaddr_out_into
+
+Check 113: adt_mac::macaddr_out_into.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:9 in function adt_mac::macaddr_out_into
+
+Check 114: adt_mac::macaddr_out_into.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:9 in function adt_mac::macaddr_out_into
+
+Check 115: adt_mac::macaddr_out_into.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:9 in function adt_mac::macaddr_out_into
+
+Check 116: adt_mac::macaddr_out_into.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:9 in function adt_mac::macaddr_out_into
+
+Check 117: adt_mac::macaddr_out_into.pointer_dereference.31
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:9 in function adt_mac::macaddr_out_into
+
+Check 118: adt_mac::macaddr_out_into.array_bounds.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:278:9 in function adt_mac::macaddr_out_into
+
+Check 119: adt_mac::macaddr_out_into.pointer_dereference.32
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:280:13 in function adt_mac::macaddr_out_into
+
+Check 120: adt_mac::macaddr_out_into.pointer_dereference.33
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:280:13 in function adt_mac::macaddr_out_into
+
+Check 121: adt_mac::macaddr_out_into.pointer_dereference.34
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:280:13 in function adt_mac::macaddr_out_into
+
+Check 122: adt_mac::macaddr_out_into.pointer_dereference.35
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:280:13 in function adt_mac::macaddr_out_into
+
+Check 123: adt_mac::macaddr_out_into.pointer_dereference.36
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:280:13 in function adt_mac::macaddr_out_into
+
+Check 124: adt_mac::macaddr_out_into.pointer_dereference.37
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:280:13 in function adt_mac::macaddr_out_into
+
+Check 125: adt_mac::macaddr_out_into.array_bounds.5
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:280:13 in function adt_mac::macaddr_out_into
+
+Check 126: <std::option::Option<(usize, &u8)> as std::ops::FromResidual<std::option::Option<std::convert::Infallible>>>::from_residual.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:2681:21 in function <std::option::Option<(usize, &u8)> as std::ops::FromResidual<std::option::Option<std::convert::Infallible>>>::from_residual
+
+Check 127: proofs::macaddr_out_equiv.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:36:24 in function proofs::macaddr_out_equiv
+
+Check 128: proofs::macaddr_out_equiv.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: src/lib.rs:36:33 in function proofs::macaddr_out_equiv
+
+Check 129: std::ptr::NonNull::<u8>::as_ref::<'_>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<u8>::as_ref::<'_>
+
+Check 130: std::ptr::NonNull::<u8>::as_ref::<'_>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<u8>::as_ref::<'_>
+
+Check 131: std::ptr::NonNull::<u8>::as_ref::<'_>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<u8>::as_ref::<'_>
+
+Check 132: std::ptr::NonNull::<u8>::as_ref::<'_>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<u8>::as_ref::<'_>
+
+Check 133: std::ptr::NonNull::<u8>::as_ref::<'_>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<u8>::as_ref::<'_>
+
+Check 134: std::ptr::NonNull::<u8>::as_ref::<'_>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:445:20 in function std::ptr::NonNull::<u8>::as_ref::<'_>
+
+Check 135: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:9 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 136: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:9 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 137: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:9 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 138: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:9 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 139: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:9 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 140: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:9 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 141: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:26 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 142: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:26 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 143: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:26 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 144: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:26 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 145: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:26 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 146: <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1692:26 in function <std::ptr::NonNull<u8> as std::cmp::PartialEq>::eq
+
+Check 147: <&u8 as std::ops::BitAnd<u8>>::bitand.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::BitAnd<u8>>::bitand
+
+Check 148: <&u8 as std::ops::BitAnd<u8>>::bitand.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::BitAnd<u8>>::bitand
+
+Check 149: <&u8 as std::ops::BitAnd<u8>>::bitand.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::BitAnd<u8>>::bitand
+
+Check 150: <&u8 as std::ops::BitAnd<u8>>::bitand.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::BitAnd<u8>>::bitand
+
+Check 151: <&u8 as std::ops::BitAnd<u8>>::bitand.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::BitAnd<u8>>::bitand
+
+Check 152: <&u8 as std::ops::BitAnd<u8>>::bitand.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::BitAnd<u8>>::bitand
+
+Check 153: <&u8 as std::ops::Shr<i32>>::shr.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::Shr<i32>>::shr
+
+Check 154: <&u8 as std::ops::Shr<i32>>::shr.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::Shr<i32>>::shr
+
+Check 155: <&u8 as std::ops::Shr<i32>>::shr.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::Shr<i32>>::shr
+
+Check 156: <&u8 as std::ops::Shr<i32>>::shr.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::Shr<i32>>::shr
+
+Check 157: <&u8 as std::ops::Shr<i32>>::shr.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::Shr<i32>>::shr
+
+Check 158: <&u8 as std::ops::Shr<i32>>::shr.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/internal_macros.rs:28:31 in function <&u8 as std::ops::Shr<i32>>::shr
+
+Check 159: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:766:23 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 160: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:766:23 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 161: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:766:23 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 162: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:766:23 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 163: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:766:23 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 164: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:766:23 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 165: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:768:13 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 166: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:768:13 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 167: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:768:13 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 168: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:768:13 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 169: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:768:13 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 170: <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/range.rs:768:13 in function <std::ops::Range<usize> as std::iter::range::RangeIteratorImpl>::spec_next
+
+Check 171: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:50 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 172: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:50 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 173: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:50 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 174: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:50 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 175: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:50 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 176: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:50 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 177: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:59 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 178: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:59 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 179: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:59 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 180: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:59 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 181: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:59 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 182: std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1903:59 in function std::cmp::impls::<impl std::cmp::PartialOrd for usize>::lt
+
+Check 183: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:80:17 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 184: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:81:17 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 185: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:81:17 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 186: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:81:17 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 187: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:81:17 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 188: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:81:17 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 189: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:81:17 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 190: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:82:9 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 191: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:82:9 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 192: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:82:9 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 193: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:82:9 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 194: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:82:9 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 195: <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/enumerate.rs:82:9 in function <std::iter::Enumerate<std::slice::Iter<'_, u8>> as std::iter::Iterator>::next
+
+Check 196: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:160:27 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 197: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:160:27 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 198: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:160:27 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 199: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:160:27 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 200: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:160:27 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 201: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:160:27 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 202: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:34 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 203: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:34 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 204: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:34 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 205: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:34 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 206: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:34 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 207: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:34 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 208: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:174:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 209: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:174:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 210: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:174:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 211: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:174:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 212: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:174:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 213: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:174:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 214: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:168:36 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 215: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:180:36 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 216: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:184:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 217: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:184:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 218: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:184:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 219: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:184:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 220: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:184:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 221: <std::slice::Iter<'_, u8> as std::iter::Iterator>::next.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../../Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:184:25 in function <std::slice::Iter<'_, u8> as std::iter::Iterator>::next
+
+Check 222: adt_mac::MacAddr::from_bytes.array_bounds.1
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:37:16 in function adt_mac::MacAddr::from_bytes
+
+Check 223: adt_mac::MacAddr::from_bytes.array_bounds.2
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:38:16 in function adt_mac::MacAddr::from_bytes
+
+Check 224: adt_mac::MacAddr::from_bytes.array_bounds.3
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:39:16 in function adt_mac::MacAddr::from_bytes
+
+Check 225: adt_mac::MacAddr::from_bytes.array_bounds.4
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:40:16 in function adt_mac::MacAddr::from_bytes
+
+Check 226: adt_mac::MacAddr::from_bytes.array_bounds.5
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:41:16 in function adt_mac::MacAddr::from_bytes
+
+Check 227: adt_mac::MacAddr::from_bytes.array_bounds.6
+	 - Status: SUCCESS
+	 - Description: "index out of bounds: the length is less than or equal to the given index"
+	 - Location: ../../../../../../../../Users/malisper/dev/pgrust-fast/crates/backend/utils/adt/mac/src/lib.rs:42:16 in function adt_mac::MacAddr::from_bytes
+
+
+SUMMARY:
+ ** 0 of 227 failed (1 unreachable)
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.43532905s
+
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.
+
+# 2026-07-28 extension: macaddr_not/and/or/trunc (REL_18_STABLE C) + negative control
+eq_macaddr_not EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.33s (kissat)
+eq_macaddr_and EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.19s (kissat)
+eq_macaddr_or EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.19s (kissat)
+eq_macaddr_trunc EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.05s (kissat)
+macaddr_cmp_equiv EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.11s (kissat, standing-gate recheck)
+macaddr_out_equiv EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.47s (kissat, standing-gate recheck)
+control_macaddr_and_vs_c_or_must_fail EXIT=1 VERIFICATION:- FAILED Verification Time: 0.52s (default solver)
+# control FAILED as designed (negative control); counterexample decoded via -Z concrete-playback:
+#   b1=[ff,ff,ff,ff,ff,ff], b2=[fe,ff,ff,ff,ff,ff] -> and[0]=0xfe vs or[0]=0xff

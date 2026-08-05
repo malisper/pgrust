@@ -1,0 +1,20 @@
+#!/bin/bash
+# Upstream lib/benchmark-common.sh bench_install + bench_start + bench_load,
+# reduced to the load phase (no query sweep, no QPS window).
+set -eu
+D="$(dirname "$0")"; . "$D/env.sh"
+"$D/install"
+"$D/start" || true
+for i in $(seq 1 300); do "$D/check" >/dev/null 2>&1 && break; sleep 1; done
+"$D/check" >/dev/null
+start_t=$(date +%s.%N)
+"$D/load"
+sync
+end_t=$(date +%s.%N)
+awk -v s="$start_t" -v e="$end_t" 'BEGIN { printf "Load time: %.3f\n", e - s }'
+"$D/check" >/dev/null || { echo "bench: ./check failed after ./load" >&2; exit 1; }
+size=$("$D/data-size")
+echo "Data size: $size"
+if ! [[ "$size" =~ ^[0-9]+$ ]] || [ "$size" -lt "${CB_SIZE_FLOOR:-5000000000}" ]; then
+  echo "bench: data-size after load is '$size' - partial load" >&2; exit 1
+fi

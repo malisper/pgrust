@@ -1,0 +1,29 @@
+# adt/int residual-line accounting — Lane J, 2026-07-31.
+# Coverage of record: proofs/coverage-lane-j/int/ (merge-coverage.py, SLOC v2,
+# const tables excluded, fuzz axis = int_diff corpus replay: local campaigns
+# 3.3M + 500k execs incl. the banked VT-whitespace divergence and LSan-repro
+# inputs; fleet 10M campaign resubmitted from 7306d300196, PENDING; kani axis
+# not yet joined for this crate).
+# 735 v2-SLOC, 517 fuzz-covered (70.34%). Residual 218 lines, every one
+# classed below. Driver/seed extensions this capture: fc_int2vectorin soft
+# plane (fc NULL arm), 16 error-arm fn seeds (div/mod MIN/-1 cells, cross-
+# width overflow arms, lcm sign fixup, in_range int8 sum overflow), and the
+# never_reached! exception-audit rail (armed every exec).
+file	lines	n	class	justification
+crates/backend/utils/adt/int/src/series.rs	18-21,26-28,30-33,40-43,45-47,49,51,53,60-62,64 (25 SLOC)	25	phase1-carve:srf	GenerateSeriesInt4 (cross-call SRF state) + generate_series_int4_rows (planner SupportRequestRows estimate); ledger 1066/1067 excluded(blocked: SRF state machine), 3994 excluded(blocked: planner node + f64 estimate). Out of phase-1 scope per claim scope_note; C counterpart int.c generate_series_step_int4 (1538) / generate_series_int4_support (1614).
+crates/backend/utils/adt/int/src/builtins.rs	357-368,370-379,386-391,394-395,397-399,401-406,408-409,412-415,418-419,421 (48 SLOC)	48	phase1-carve:srf	fc_generate_series_step_int4 (funcapi SRF frame demuxing OIDs 1066/1067) + fc_generate_series_int4_support (planner SupportRequestRows over Const args); same carve as series.rs.
+crates/backend/utils/adt/int/src/lib.rs	32,38,44,53-54,364,372-383 (18 SLOC)	18	instrument-false-red:macro-decl	#[inline] attr + fn-signature + invocation rows of overflow_fns! (32,38,44 attrs; 53-54 invocations) and cmp_ops! (364 body decl; 372-383 the 24-op invocation list). The generated fns execute on nearly every campaign case (every arith arm calls pg_*_overflow; fn ids 48-71 call every cmp op); DA credit lands on macro-body lines (which read covered in this capture), never attr/signature/invocation rows. Same class as lane-d int8-residual lib.rs 29,35,41,140 and the tree-wide fc*! false-red finding.
+crates/backend/utils/adt/int/src/builtins.rs	215-221,225-230,283-320,324-343,347-352 (77 SLOC)	77	instrument-false-red:macro-decl	Invocation-list rows of fc1!/fc1t! (215-230), fc2!/fc2t! (283-343), fc_in_range! (347-352). Every listed wrapper AND its th_ thin twin executes each campaign exec via fn_diff's wrap! plane (fn ids 1-77 exhaust the list); the generated bodies' DA is attributed to the macro definitions (132-208, covered). 347-352 additionally auto-classified auto:macro-decl by auto_exceptions.py (rig-geometry GREEN); the fc1/fc2 blocks miss the rig's geometry only because their generated code credits the shared macro body.
+crates/backend/utils/adt/int/src/builtins.rs	235-237,240-242,245-249,259-262,265-270,274-278 (26 SLOC)	26	proof-covered-unmeasured	fc_hashint4 / fc_hashint2 / fc_hashint2extended / fc_hashchar / fc_hashcharextended / fc_hashint4extended bodies. Ledger rows proved WRAPPER-LEVEL: 450 hashint4, 449 hashint2, 441 hashint2extended, 454 hashchar (portable plane + pinned zero-extend model), 446 hashcharextended, 425 hashint4extended — all proved(full-domain incl symbolic seed, wrapper-level). Skipped by int_diff by design (kernels live in the hashfn crate; C home hashfunc.c, not int.c). Lane-0B cash convention: fulltree Kani join converts to measured credit; no per-crate --coverage re-run (Michael-approved prohibition).
+crates/backend/utils/adt/int/src/lib.rs	145,286-287,308 (4 SLOC)	4	exception:defensive-oom	try_reserve-failure OOM arms in buildint2vector (145), int2vectorin (286-287), int2vectorout (308), mirroring C palloc/repalloc OOM (mcxt.c ereport ERRCODE_OUT_OF_MEMORY). EXECUTABLE exception: each arm is wrapped in types_error::never_reached! (created this lane in crates/_support/types/types_error/src/exceptions.rs per fuzzuproof-crate §d — release pass-through, panics under the audit flag the int_diff harness arms every exec). Not fuzzable without an injecting allocator; candidates for a Kani infeasibility promotion if a cheap fence appears.
+crates/backend/utils/adt/int/src/lib.rs	253-254,264,266,276-277 (6 SLOC)	6	instrument-false-red:fmt-cont	format! string-literal/argument continuation lines inside the int2vectorin error constructors (invalid-syntax 253-254/276-277, out-of-range 264/266). The enclosing error arms execute constantly in the campaign (both error classes asserted against C every exec; heads of the same expressions read covered); literal continuation rows carry no instrumented region. auto_exceptions.py recognizes the shape (auto:fmt-cont) but withholds without a line table — no line-table input was supplied to this merge.
+crates/backend/utils/adt/int/src/builtins.rs	425-426,429-436,547-548 (12 SLOC)	12	const-table-machinery	const fn srf(...) (425-426) + const fn b(...) (429-436) + const fn t(...) (547-548) builtin-row constructors: const-eval only, runtime-uncoverable; belong to the const-table exclusion class the span heuristic missed (the table interiors ARE excluded). Same class as lane-d int8-residual builtins.rs 441-448.
+crates/backend/utils/adt/int/src/builtins.rs	443,554	2	const-table-machinery	INT_BUILTINS / INT_THIN static table head rows; auto-classified auto:table-head by auto_exceptions.py (rig GREEN).
+#
+# Class totals: phase1-carve:srf 73; instrument-false-red:macro-decl 95;
+# proof-covered-unmeasured 26; const-table-machinery 14; instrument-false-red:
+# fmt-cont 6; exception:defensive-oom 4. Sum 218 = TOTAL residual. 100% of
+# in-scope v2-SLOC is fuzz-covered, carve-covered, proof-covered-unmeasured,
+# or carried by a recorded executable/measurement exception row.
+# Mutation audit: TRAILING per the done-gate — submitted at gate-close by the
+# lane coordinator; note lives in the claims row.

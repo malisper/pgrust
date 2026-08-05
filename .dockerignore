@@ -1,0 +1,34 @@
+# Keep the build context small + reproducible. The Rust build needs the source
+# tree (crates/, Cargo.toml, Cargo.lock, rust-toolchain.toml, build.rs files
+# and their crate-local data) but none of these.
+#
+# Patterns are anchored to the context root (leading `/`) so we never
+# accidentally drop a file a crate's build.rs/include_str! depends on deeper
+# in the tree (e.g. crate-local *.tsv golden fixtures).
+.git
+.claude
+/.dockerignore
+
+# Build artifacts / target dirs (regenerated in-image).
+/target
+target
+**/target
+**/target-*
+*.profraw
+
+# Non-workspace top-level trees not needed to compile the `postgres` binary
+# (verified: no workspace member and no crate build.rs/include reaches them).
+/bench
+/crash-simulator
+/dst
+/fixtures
+/fuzz
+/regress
+/wasm
+/CATALOG.tsv
+/GOAL.md
+/RENAME-MAP.md
+/fleet-results
+
+# Editor / OS cruft.
+.DS_Store

@@ -1,0 +1,67 @@
+[package]
+name = "walsender"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "walsender"
+path = "src/lib.rs"
+
+[dependencies]
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
+condition_variable = { path = "../../storage/lmgr/condition_variable" }
+guc_file = { path = "../../utils/misc/guc_file" }
+interrupt = { path = "../../postmaster/interrupt" }
+latch = { path = "../../storage/ipc/latch" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+pgstat = { path = "../../utils/activity/pgstat" }
+pqcomm = { path = "../../libpq/pqcomm" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+types_guc = { path = "../../../_support/types/types_guc" }
+xlogreader = { path = "../../access/transam/xlogreader" }
+xlogreader_seams = { path = "../../access/transam/xlogreader_seams" }
+xlogutils = { path = "../../access/transam/xlogutils" }
+datum = { path = "../../../_support/types/datum" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+elog = { path = "../../utils/error/elog" }
+exectuples_output = { path = "../../executor/exectuples_output" }
+fd = { path = "../../storage/file/fd" }
+guc_funcs = { path = "../../utils/misc/guc_funcs" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+libc = "0.2"
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+mcx = { path = "../../../_support/mcx" }
+pmsignal = { path = "../../storage/ipc/pmsignal" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+procarray = { path = "../../storage/ipc/procarray" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+repl_gram = { path = "../repl_gram" }
+resowner = { path = "../../utils/resowner/resowner" }
+slot = { path = "../slot" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+logical = { path = "../logical/logical" }
+logical_decode = { path = "../logical/logical_decode" }
+syncrep_seams = { path = "../syncrep_seams" }
+snapbuild = { path = "../logical/snapbuild" }
+tcop_dest = { path = "../../tcop/dest" }
+timeline = { path = "../../access/transam/timeline" }
+timeline_seams = { path = "../../access/transam/timeline_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+tupdesc = { path = "../../access/common/tupdesc" }
+types_core = { path = "../../../_support/types/types_core" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+varlena = { path = "../../utils/adt/varlena" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
+walsender_config = { path = "../walsender_config" }
+walsender_seams = { path = "../walsender_seams" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+xact = { path = "../../access/transam/xact" }

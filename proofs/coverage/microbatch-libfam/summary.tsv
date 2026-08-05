@@ -1,0 +1,6 @@
+crate	sloc_v2_ranking	lcov_da_lines	covered	exception_lines	unaccounted
+lib/binaryheap	88	115	113	2	0
+lib/bloomfilter	64	82	82	0	0
+lib/hyperloglog	40	48	47	1	0
+lib/integerset	284	337	333	4	0
+lib/pairingheap	123	160	159	1	0

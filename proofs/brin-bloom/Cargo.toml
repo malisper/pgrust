@@ -1,0 +1,14 @@
+[package]
+name = "proof_brin_bloom"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+brin_bloom = { path = "../../crates/backend/access/brin/brin_bloom" }
+datum = { path = "../../crates/_support/types/datum" }
+mcx = { path = "../../crates/_support/mcx" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }

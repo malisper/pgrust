@@ -1,0 +1,37 @@
+[package]
+name = "reorderbuffer"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "reorderbuffer"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../../_support/types/types_error" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_rel = { path = "../../../../_support/types/rel" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+detoast = { path = "../../../access/common/detoast" }
+snapmgr = { path = "../../../utils/time/snapmgr" }
+xact = { path = "../../../access/transam/xact" }
+transam_seams = { path = "../../../access/transam/transam_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+inval = { path = "../../../utils/cache/inval" }
+relcache = { path = "../../../utils/cache/relcache" }
+catalog = { path = "../../../catalog/catalog" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+init_small = { path = "../../../utils/init/init_small" }
+reorderbuffer_seams = { path = "../reorderbuffer_seams" }
+relfilenumbermap_seams = { path = "../../../utils/cache/relfilenumbermap_seams" }
+
+[dev-dependencies]
+tupdesc = { path = "../../../access/common/tupdesc" }

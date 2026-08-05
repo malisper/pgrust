@@ -1,0 +1,32 @@
+[package]
+name = "pgvector_hnsw_build"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgvector_hnsw_build"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../_support/mcx" }
+datum = { path = "../../_support/types/datum" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+types_rel = { path = "../../_support/types/rel" }
+types_storage = { path = "../../_support/types/types_storage" }
+types_hnsw = { path = "../../_support/types/types_hnsw" }
+types_nodes = { path = "../../_support/types/nodes" }
+bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
+bufmgr_seams = { path = "../../backend/storage/buffer/bufmgr_seams" }
+xloginsert = { path = "../../backend/access/transam/xloginsert" }
+execindexing = { path = "../../backend/executor/execindexing" }
+init_small = { path = "../../backend/utils/init/init_small" }
+elog = { path = "../../backend/utils/error/elog" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
+pgvector_hnsw = { path = "../pgvector_hnsw" }
+
+[dev-dependencies]
+pgvector = { path = "../pgvector" }

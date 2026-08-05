@@ -1,0 +1,28 @@
+[package]
+name = "indxpath"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_pathnodes = { path = "../../../../_support/types/pathnodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+costsize = { path = "../costsize" }
+equivclass = { path = "../equivclass" }
+pathnode = { path = "../../util/pathnode" }
+vars = { path = "../../util/vars" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+adt_network = { path = "../../../utils/adt/network" }
+planner_seams = { path = "../../plan/planner_seams" }
+clauses = { path = "../../util/clauses" }
+allpaths = { path = "../allpaths" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }

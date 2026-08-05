@@ -1,0 +1,1 @@
+$ ? (@ like_regex "^|^^^^^^^^^^^^^^^^^^^^^^^^&^^^^^^^^\\\\\\\fm\\\\\\\\n" flag "isim") ? (@ like_regex "|^^^^^^\\\\\n" flag "isim") ? (@ like_regex "|^^^^^^^^^^^]^^flag "isim") ? (@ *like_regex "^^^^^^^\\\\\\\\

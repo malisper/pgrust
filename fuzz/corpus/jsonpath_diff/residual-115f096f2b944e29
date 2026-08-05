@@ -1,0 +1,1 @@
+h$.a.timestamp(2) <= $.b.timestamp_tz(2)

@@ -1,0 +1,1 @@
+{"path":"crates/pl/plpgsql/src/lib.rs","sloc":[14,15],"kani":[],"fuzz":[],"regress":[14,15],"excluded":{"use-mod":[6,7,8,9,10,11,12],"attr":[4]}}

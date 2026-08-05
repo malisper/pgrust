@@ -1,0 +1,52 @@
+# crash-simulator — H1 sim-harness core (contract: harness-h1-contract.md §0 A2).
+#
+# OWN cargo workspace, deliberately NOT a member of the repo root workspace:
+# client-side deps here must never enter the product build closure (zero-cost
+# gate, builds-on-fleet law). Owner of this file: WS-RUNNER; dep additions by
+# PR of the needing WS (contract §1.1). This is the integration union of the
+# WS-GEN / WS-ORACLE / WS-RUNNER bootstraps (regex + toml from WS-ORACLE for
+# the triage.py screen ports and warts.toml; clap + postgres from WS-RUNNER).
+[package]
+name = "simharness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "simharness"
+path = "src/lib.rs"
+
+[[bin]]
+name = "simharness"
+path = "src/main.rs"
+
+[[bin]]
+# Bootstrap gen-only CLI (WS-GEN). WS-RUNNER's `simharness` binary (src/main.rs)
+# supersedes this for run/replay; this bin stays as the gen-only smoke tool.
+name = "simharness-gen"
+path = "src/bin/simharness_gen.rs"
+
+[features]
+# Contract §0 A3 run-determinism tier: under `sim`, harness-side wall-clock
+# reads are seed-derived (logical clock) so artifacts are byte-stable. The
+# engine-side sim substrate is a separate concern (report-only gate G-R3b).
+sim = []
+# H2 FaultDriver seam: compiles the SimVfsFaultDriver (fault-plan spec
+# delivery to a sim-built DUT). NO product-crate dependency — the spec types
+# are mirrors and the wire format is JSON; the DUT-side reader is the t28
+# activation step (see src/runner/faultdriver.rs module doc).
+simvfs-faults = []
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+rand_chacha = "0.3"
+sha2 = "0.10"
+regex = "1"
+toml = "0.8"
+postgres = "0.19"
+
+# Detach from any enclosing workspace (the product workspace at repo root).
+[workspace]

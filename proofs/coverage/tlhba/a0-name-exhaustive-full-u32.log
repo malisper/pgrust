@@ -1,0 +1,25 @@
+# a0 exhaustive-diff run log: TLHistoryFileName + TLHistoryFilePath
+# lane p1-tlhba, 2026-08-02; driver: fuzz/core/src/timeline_diff.rs name_exhaustive_full_u32
+# host: Darwin arm64 laptop (release build); oracle: verbatim xlog_internal.h inlines, host libc snprintf
+# tree: 4fdef9b55c50690473e5fb4bbfb6dfc6d802554f (+dict fix; name arm untouched by later D2 commit)
+# domain: FULL u32 (4,294,967,296 tli values) x {TLHistoryFileName, TLHistoryFilePath}
+# verdict: PASS, 0 divergences, wall 936.69s
+name_exhaustive: 0x00000000
+test timeline_diff::tests::name_exhaustive_full_u32 has been running for over 60 seconds
+name_exhaustive: 0x10000000
+name_exhaustive: 0x20000000
+name_exhaustive: 0x30000000
+name_exhaustive: 0x40000000
+name_exhaustive: 0x50000000
+name_exhaustive: 0x60000000
+name_exhaustive: 0x70000000
+name_exhaustive: 0x80000000
+name_exhaustive: 0x90000000
+name_exhaustive: 0xA0000000
+name_exhaustive: 0xB0000000
+name_exhaustive: 0xC0000000
+name_exhaustive: 0xD0000000
+name_exhaustive: 0xE0000000
+name_exhaustive: 0xF0000000
+test timeline_diff::tests::name_exhaustive_full_u32 ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 416 filtered out; finished in 936.69s

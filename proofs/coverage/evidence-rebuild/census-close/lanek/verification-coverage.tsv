@@ -1,0 +1,16 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/utils/adt/formatting/src/cache.rs	100	0	90	0	90
+crates/backend/utils/adt/formatting/src/case.rs	75	0	60	0	60
+crates/backend/utils/adt/formatting/src/dch.rs	529	0	498	0	498
+crates/backend/utils/adt/formatting/src/dch_entry.rs	488	0	451	0	451
+crates/backend/utils/adt/formatting/src/dch_fromchar.rs	547	0	473	0	473
+crates/backend/utils/adt/formatting/src/fmgr_builtins.rs	78	0	68	0	68
+crates/backend/utils/adt/formatting/src/fromchar.rs	276	0	247	0	247
+crates/backend/utils/adt/formatting/src/isoweek.rs	0	0	0	0	0
+crates/backend/utils/adt/formatting/src/lib.rs	2	0	0	0	0
+crates/backend/utils/adt/formatting/src/num.rs	669	0	643	0	643
+crates/backend/utils/adt/formatting/src/num_entry.rs	390	0	374	0	374
+crates/backend/utils/adt/formatting/src/parse.rs	197	0	192	0	192
+crates/backend/utils/adt/formatting/src/tables.rs	94	0	64	0	64
+CRATE:crates/backend/utils/adt/formatting	3445	0	3160	0	3160
+TOTAL	3445	0	3160	0	3160

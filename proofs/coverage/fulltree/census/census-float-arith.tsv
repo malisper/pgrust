@@ -1,0 +1,14 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+float-arith	eq_dpi	proofs::eq_dpi	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float48div_zero	proofs::eq_float48div_zero	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float4abs	proofs::eq_float4abs	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float4div_zero	proofs::eq_float4div_zero	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float4mi	proofs::eq_float4mi	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float4pl	proofs::eq_float4pl	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float4um	proofs::eq_float4um	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float4up	proofs::eq_float4up	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float84div_zero	proofs::eq_float84div_zero	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float8abs	proofs::eq_float8abs	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float8div_zero	proofs::eq_float8div_zero	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float8um	proofs::eq_float8um	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+float-arith	eq_float8up	proofs::eq_float8up	0	3	VERIFICATION:- SUCCESSFUL	RAN	1

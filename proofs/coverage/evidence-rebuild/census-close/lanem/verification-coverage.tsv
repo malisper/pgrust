@@ -1,0 +1,6 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/utils/adt/varchar/src/builtins.rs	221	0	162	0	162
+crates/backend/utils/adt/varchar/src/lib.rs	272	0	268	0	268
+crates/backend/utils/adt/varchar/src/tests.rs	0	0	0	0	0
+CRATE:crates/backend/utils/adt/varchar	493	0	430	0	430
+TOTAL	493	0	430	0	430

@@ -1,0 +1,12 @@
+src/cyrillic_and_mic.rs 41 / 74
+src/euc2004_sjis2004.rs 149 / 184
+src/euc_cn_and_mic.rs 68 / 72
+src/euc_jp_and_sjis.rs 342 / 352
+src/euc_kr_and_mic.rs 71 / 75
+src/euc_tw_and_big5.rs 229 / 235
+src/euc_tw_and_big5/big5.rs 74 / 76
+src/latin2_and_win1250.rs 70 / 86
+src/latin_and_mic.rs 16 / 23
+src/lib.rs 514 / 519
+src/utf8_procs.rs 52 / 156
+FINAL UNION: 1626 / 1852

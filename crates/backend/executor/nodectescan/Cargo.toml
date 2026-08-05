@@ -1,0 +1,20 @@
+[package]
+name = "nodectescan"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+execexpr = { path = "../execexpr" }
+execscan = { path = "../execscan" }
+executils = { path = "../executils" }
+exectuples = { path = "../exectuples" }
+init_small = { path = "../../utils/init/init_small" }
+tuplestore = { path = "../../utils/sort/tuplestore" }

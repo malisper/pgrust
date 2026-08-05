@@ -1,0 +1,1 @@
+$ ? (@ like_regex "||patt@r\\\\\\\\^^^^V.keyvalue()^^\\\\\\M\^^^^V.\^^^^V.keyvalue()^^^^^^^\\\\\\\\^^^^patt@r\\\\\\\\^^^^V.keyvalue()^^\\\\\\M\^^^^V.\^^^^V.keyvaluV.keyvalue()^^^^^^^\^^a{2,4}^^^^^^^^^^^^g "isim")

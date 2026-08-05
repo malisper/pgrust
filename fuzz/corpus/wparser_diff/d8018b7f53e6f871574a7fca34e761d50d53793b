@@ -1,0 +1,4 @@
+) O@RDER BY ndoc DESC, nentry DESC, word;
+ries and to_tsvector
+
+SELEC'T ts_lize(

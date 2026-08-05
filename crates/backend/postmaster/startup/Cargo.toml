@@ -1,0 +1,36 @@
+[package]
+name = "postmaster_startup"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postmaster_startup"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_startup = { path = "../../../_support/types/types_startup" }
+auxprocess = { path = "../auxprocess" }
+elog = { path = "../../utils/error/elog" }
+guc_file = { path = "../../utils/misc/guc_file" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+ipc = { path = "../../storage/ipc/ipc" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+standby = { path = "../../storage/ipc/standby" }
+standby_seams = { path = "../../storage/ipc/standby_seams" }
+startup_seams = { path = "../startup_seams" }
+timeout = { path = "../../utils/misc/timeout" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+xlogutils = { path = "../../access/transam/xlogutils" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+libc = "0.2"

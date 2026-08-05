@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/activity/backend_status_seams/src/lib.rs","sloc":[3,4,7,9,12,14,17,19,22,24,27,29,32,34,37,39,57,59,62,64,67,69,72,74],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1],"attr":[43,44,45],"typedef":[46,47,48,49,50,51,52,53,54]}}

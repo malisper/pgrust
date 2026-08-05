@@ -1,0 +1,25 @@
+[package]
+name = "logical_decode"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "logical_decode"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+elog = { path = "../../../utils/error/elog" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+heapam_xlog = { path = "../../../access/heap/heapam_xlog" }
+xact = { path = "../../../access/transam/xact" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }
+xlogreader = { path = "../../../access/transam/xlogreader" }
+logical = { path = "../logical" }
+reorderbuffer = { path = "../reorderbuffer" }
+snapbuild = { path = "../snapbuild" }

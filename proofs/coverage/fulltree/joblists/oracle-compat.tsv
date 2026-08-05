@@ -1,0 +1,5 @@
+oracle-compat	proofs::eq_bpcharoctetlen	
+oracle-compat	proofs::eq_bpcharlen_latin1	
+oracle-compat	proofs::eq_bpchar_clip_latin1	
+oracle-compat	proofs::eq_varchar_clip_latin1	
+oracle-compat	proofs::eq_anychar_typmodin	

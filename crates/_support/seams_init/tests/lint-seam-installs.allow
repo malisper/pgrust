@@ -1,0 +1,67 @@
+# lint-seam-installs.sh allowlist — seeded from notes/seam-audit.md (branch
+# audit/seam-installs, 2026-07-17, origin/main @ 1e74c73f6) section 2.
+#
+# Tab-separated: <slot | crate:name> <class> <reason>.
+# Classes (audit vocabulary):
+#   FIX-IN-FLIGHT  ported-not-installed with a fix on a named branch; the row
+#                  DIES when that fix merges (stale-warning will fire)
+#   INTENTIONAL    unported feature; guard/panic is a correct backstop with a
+#                  C-default fallback
+#   SKIP           guarded caller silently diverges from C (documented, or a
+#                  product decision is pending)
+#   DEAD           no reachable production caller
+#   REJECTED-GUC   panic path made unreachable by a check-time GUC rejection
+#                  (panicfix clean-error class); backstop stays loud
+#
+# Rules of the road: a NEW ported-not-installed violation is the subtrans bug
+# — never allowlist it except as FIX-IN-FLIGHT. A NEW uninstalled-referenced
+# violation means a caller was added for an unported seam: port+install, or
+# classify it here deliberately with an audit-grade reason.
+
+# --- the subtrans worked example: fix in flight, remove rows when merged ----
+startup_subtrans	FIX-IN-FLIGHT	fix/subtrans-restore-boot @ 8dc2afd0f installs the trio; audit worked example
+check_point_subtrans	FIX-IN-FLIGHT	fix/subtrans-restore-boot @ 8dc2afd0f installs the trio; audit worked example
+truncate_subtrans	FIX-IN-FLIGHT	fix/subtrans-restore-boot @ 8dc2afd0f installs the trio; audit worked example
+
+# --- F2: csvlog/jsonlog writers (seamfix lane made the panic unreachable) ---
+write_csvlog	REJECTED-GUC	check_log_destination rejects csvlog at GUC check time until the writer lands (seamfix lane); report.rs call is a loud backstop
+write_jsonlog	REJECTED-GUC	check_log_destination rejects jsonlog at GUC check time until the writer lands (seamfix lane); report.rs call is a loud backstop
+
+# --- F3: syncrep family (product decision D3 reserved for Michael) ----------
+sync_rep_wait_for_lsn	SKIP	syncrep unported; guarded ×4 (xact/twophase); non-empty synchronous_standby_names silently async — D3 decision pending
+sync_rep_update_sync_standbys_defined	SKIP	syncrep unported; checkpointer guard documents the leave-it-false no-op invariant
+sync_rep_cleanup_at_proc_exit	SKIP	syncrep unported; ProcKill guard; no waiter can exist while the wait seam is uninstalled
+
+# --- F4 ---------------------------------------------------------------------
+
+# --- F5: replication origins (consistently latched; origins unported) -------
+startup_replication_origin	INTENTIONAL	origins unported; StartupXLOG guard, C-default fallback
+check_point_replication_origin	INTENTIONAL	origins unported; CheckPointGuts guard
+replorigin_session_origin	INTENTIONAL	guarded with InvalidRepOriginId fallback (xact/wal.rs)
+replorigin_session_origin_lsn	INTENTIONAL	guarded with (0,0,0) fallback (twophase/core.rs)
+replorigin_session_origin_timestamp	INTENTIONAL	guarded with C-default fallback
+set_replorigin_session_origin_timestamp	INTENTIONAL	unreachable while the session-origin seam is uninstalled (latched)
+replorigin_session_advance	INTENTIONAL	unreachable while the session-origin seam is uninstalled (latched)
+replorigin_advance	INTENTIONAL	behind XACT_XINFO_HAS_ORIGIN, which pgrust WAL cannot set; loud backstop for foreign origin-stamped WAL
+
+# --- F6: hot standby (unported; C-parity standby_state guards) ---------------
+record_known_assigned_transaction_ids	INTENTIONAL	behind standby_state() != STANDBY_DISABLED, same branch shape as C xact_redo_commit
+expire_tree_known_assigned_transaction_ids	INTENTIONAL	behind standby_state() != STANDBY_DISABLED
+proc_array_apply_xid_assignment	INTENTIONAL	behind standby_state() >= STANDBY_INITIALIZED
+
+# --- F7 ---------------------------------------------------------------------
+
+# --- F8 ---------------------------------------------------------------------
+# pg_shared_memory_is_in_use: row REMOVED 2026-07-26 (GL-SHMSEAM-1). Its
+# "INTENTIONAL / panic backstop" classification was wrong: the seam is on the
+# migrate-from-C boot path, which every data directory a C postmaster ever held
+# reaches, and the backstop was a panic rather than a FATAL. The probe now ships
+# in crate sysv_shmem, installed by seams_init::init_all.
+
+# --- F9 ---------------------------------------------------------------------
+get_xlog_receipt_time	INTENTIONAL	hot-standby conflict path already loud for other unported pieces; decl comment says stays loud until that lane lands
+
+# --- F10-F12: DEAD (deletion candidates per audit recommendation 4) ----------
+pgaio_io_start_readv	DEAD	FileStartReadV has no production caller (re-export only); aio_uring setup is a test fixture
+lookup_pg_transform_shape	DEAD	get_transform_fromsql/tosql have no production callers
+pg_statistic_slot_shape	DEAD	get_attstatsslot has no production callers; superseded by memoized lookup_pg_statistic_slot_images

@@ -1,0 +1,11 @@
+{
+ "expected": 97,
+ "ran": 97,
+ "walled": 0,
+ "failed_to_run": 0,
+ "waived": 0,
+ "kaniraw_files": 97,
+ "kaniraw_without_census_row": 0,
+ "census_closed": true,
+ "unmeasured": []
+}

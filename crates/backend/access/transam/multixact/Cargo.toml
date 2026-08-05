@@ -1,0 +1,43 @@
+[package]
+name = "multixact"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "multixact"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+mcx = { path = "../../../../_support/mcx" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+pmsignal = { path = "../../../storage/ipc/pmsignal" }
+slru = { path = "../slru" }
+transam_seams = { path = "../transam_seams" }
+multixact_seams = { path = "../multixact_seams" }
+twophase_seams = { path = "../twophase_seams" }
+varsup_seams = { path = "../varsup_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+xlogutils_seams = { path = "../xlogutils_seams" }
+xlogreader_seams = { path = "../xlogreader_seams" }
+xact_seams = { path = "../xact_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+
+[dev-dependencies]
+libc = "0.2"
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+file_seams = { path = "../../../storage/file/file_seams" }
+sync_seams = { path = "../../../storage/sync/sync_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }

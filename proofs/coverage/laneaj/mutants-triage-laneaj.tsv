@@ -1,0 +1,22 @@
+# mutants-triage-laneaj.tsv — triage of the 35 genuinely-missed survivors from
+# trailing audit pgrust-mutants-audit-1785512601-2747-59566 @ 489d5316e9
+# (numutils 439 mutants / 5 missed; oracle_compat 736 / 30 missed).
+# Verdicts from proofs/coverage/mutkill.sh replays of the COMMITTED corpora
+# (the audit job's rail did not replay the committed fuzz corpora — three
+# survivors were already killed by them: rail-config artifact class).
+# Columns: mutant	verdict	disposition
+numutils/lib.rs:19-21 strtoint_funcname x4	FIXED	error-location (F/R funcname/filename) plane added to numutils_diff error arm; mutkill KILLED post-fix
+numutils/lib.rs:115 oct guard > -> >=	FIXED	guard-boundary seeds banked (-0x8000/-0o100000/-0b1e15 + i32/i64 kin); mutkill KILLED post-fix
+oracle_compat/lib.rs:433 ascii b0>127 -> >=	FIXED	seed laneaj-ascii-utf8-7f banked; mutkill KILLED post-fix
+oracle_compat/lib.rs:161 pad copy count - -> +	KILLED-BY-CORPUS	rail artifact; committed-corpus replay kills it
+oracle_compat/lib.rs:449 ascii maxlen>1 -> >=	KILLED-BY-CORPUS	rail artifact (LATIN1 high-byte seed also banked: laneaj-ascii-latin1-e9)
+oracle_compat/lib.rs:576 text_reverse cap + -> *	KILLED-BY-CORPUS	rail artifact; capacity is load-bearing here (raw-ptr writes + set_len), corpus kills via overflow
+oracle_compat/lib.rs:481-493 chr | -> ^ x9	ARID-EQUIVALENT	UTF8 byte assembly ORs disjoint bitmasks (0xC0|x, x<=0x1F etc.); | == ^ for all inputs; corroborated by full-i32 exhaustive sweep over original
+oracle_compat/lib.rs:96 text_result cap + -> *	ARID-EQUIVALENT	capacity hint only; PgVec appends grow (unlike 576's raw-write image)
+oracle_compat/lib.rs:137 pad s1len> -> >=	ARID-EQUIVALENT	s1len==len clamp is a no-op
+oracle_compat/lib.rs:151 pad o1< -> <=	ARID-EQUIVALENT	guard unreachable: n counts chars <= mbstrlen(string1), o1 hits len only as n hits 0
+oracle_compat/lib.rs:233 dotrim len> -> >=	ARID-EQUIVALENT	usize >=0 tautology; inner loops re-guard len>0
+oracle_compat/lib.rs:234,578 maxlen>1 -> >=	ARID-EQUIVALENT	route-equivalence: MB walker with mblen=1 computes the single-byte result
+oracle_compat/lib.rs:332 dobyteatrim || -> &&	ARID-EQUIVALENT	empty-side fast return equals loop no-op by case analysis
+oracle_compat/lib.rs:556 text_left || -> &&	ARID-EQUIVALENT	both arms produce empty-result via mbcharcliplen 0
+oracle_compat/casemap.rs:44-49 pg_case x9	OUT-OF-SCOPE	locale-provider carve of record (claim scope_note); pg_case body is not phase-1 surface

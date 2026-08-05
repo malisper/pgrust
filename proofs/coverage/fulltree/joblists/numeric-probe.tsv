@@ -1,0 +1,17 @@
+numeric-probe	proofs::eq_in_range_val_nan	
+numeric-probe	proofs::eq_in_range_err_nan	
+numeric-probe	proofs::eq_numeric_sign_nd4	
+numeric-probe	proofs::eq_numeric_scale_nd4	
+numeric-probe	proofs::eq_numeric_typmod_codec	
+numeric-probe	proofs::eq_numerictypmodin	
+numeric-probe	proofs::cover_int_numeric_bands	
+numeric-probe	proofs::eq_int8_numeric_spot_nd3_lo	
+numeric-probe	proofs::eq_int8_numeric_spot_nd3_hi	
+numeric-probe	proofs::eq_int8_numeric_spot_nd4_lo	
+numeric-probe	proofs::eq_int8_numeric_spot_nd4_hi	
+numeric-probe	proofs::eq_int8_numeric_spot_nd5_lo	
+numeric-probe	proofs::eq_int8_numeric_spot_i64_min	
+numeric-probe	proofs::eq_int8_numeric_spot_i64_max	
+numeric-probe	proofs::eq_int8_numeric_spot_trailzero	
+numeric-probe	proofs::eq_int2_sum	
+numeric-probe	proofs::eq_int4_sum	

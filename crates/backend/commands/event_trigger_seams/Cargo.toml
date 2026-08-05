@@ -1,0 +1,14 @@
+[package]
+name = "event_trigger_seams"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+pg_depend = { path = "../../catalog/pg_depend" }
+types_nodes = { path = "../../../_support/types/nodes" }

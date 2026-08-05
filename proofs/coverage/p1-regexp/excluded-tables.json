@@ -1,0 +1,89 @@
+{
+ "rule": "v2+no-const-tables",
+ "note": "every const-table span excluded from the denominator; reason 'const-array-heuristic' rows are the ones to review \u2014 a span swallowing real logic is a defect",
+ "total_spans": 7,
+ "total_lines": 438,
+ "by_reason": {
+  "generated-file": 0,
+  "const-array-heuristic": 7
+ },
+ "spans": [
+  {
+   "path": "crates/common/wchar/src/lib.rs",
+   "head_line": 1466,
+   "span": [
+    1468,
+    1645
+   ],
+   "lines": 147,
+   "reason": "const-array-heuristic",
+   "head": "pub static pg_wchar_table: [pg_wchar_tbl; _PG_LAST_ENCODING_ as usize] = ["
+  },
+  {
+   "path": "crates/backend/regex/regex_core/src/regex_locale.rs",
+   "head_line": 402,
+   "span": [
+    403,
+    498
+   ],
+   "lines": 95,
+   "reason": "const-array-heuristic",
+   "head": "const CNAMES: &[Cname] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/mbutils/src/lib.rs",
+   "head_line": 87,
+   "span": [
+    88,
+    169
+   ],
+   "lines": 81,
+   "reason": "const-array-heuristic",
+   "head": "static PG_ENCNAME: [(&str, pg_enc); 81] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/regexp/src/builtins.rs",
+   "head_line": 652,
+   "span": [
+    653,
+    705
+   ],
+   "lines": 51,
+   "reason": "const-array-heuristic",
+   "head": "pub const REGEXP_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/mb/mbutils/src/lib.rs",
+   "head_line": 37,
+   "span": [
+    38,
+    80
+   ],
+   "lines": 42,
+   "reason": "const-array-heuristic",
+   "head": "static PG_ENC2NAME: [&str; wchar::_PG_LAST_ENCODING_ as usize] = ["
+  },
+  {
+   "path": "crates/backend/regex/regex_core/src/regex_export_free_error.rs",
+   "head_line": 121,
+   "span": [
+    122,
+    142
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "static RERRS: &[Rerr] = &["
+  },
+  {
+   "path": "crates/backend/regex/regex_core/src/regex_locale.rs",
+   "head_line": 500,
+   "span": [
+    501,
+    503
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const CLASS_NAMES: [&str; NUM_CCLASSES as usize] = ["
+  }
+ ]
+}

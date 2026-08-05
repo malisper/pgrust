@@ -1,0 +1,49 @@
+[package]
+name = "parse_expr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_expr"
+path = "src/lib.rs"
+
+[dependencies]
+adt_jsonb = { path = "../../utils/adt/jsonb" }
+adt_xml = { path = "../../utils/adt/xml" }
+analyze_seams = { path = "../analyze_seams" }
+datum = { path = "../../../_support/types/datum" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+coerce = { path = "../coerce" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+init_small = { path = "../../utils/init/init_small" }
+parse_collate_seams = { path = "../parse_collate_seams" }
+parse_func_seams = { path = "../parse_func_seams" }
+elog = { path = "../../utils/error/elog" }
+format_type = { path = "../../utils/adt/format_type" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+mbutils = { path = "../../utils/mb/mbutils" }
+mcx = { path = "../../../_support/mcx" }
+nodes_core = { path = "../../nodes/nodes_core" }
+parse_agg = { path = "../parse_agg" }
+parse_func = { path = "../parse_func" }
+parse_oper = { path = "../parse_oper" }
+parse_relation = { path = "../parse_relation" }
+parse_utilcmd = { path = "../parse_utilcmd" }
+parser_small1 = { path = "../parser_small1" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+vars = { path = "../../optimizer/util/vars" }
+wchar = { path = "../../../common/wchar" }
+
+[dev-dependencies]
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }

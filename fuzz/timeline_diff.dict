@@ -1,0 +1,9 @@
+# timeline_diff dictionary (scaffolded by fuzz/scaffold.py).
+# TODO(scaffold): add multi-byte tokens the parsers compare against —
+# keywords, unit suffixes, type-name literals, format tokens — harvested
+# mechanically from the vendored regress SQL literals (gen_seeds.sh pattern)
+# plus every past divergence. CmpLog + dictionary is day-one for
+# parser-shaped targets (fuzzuproof-crate skill).
+# arm selectors
+"\x00"
+"\x01"

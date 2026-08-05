@@ -1,0 +1,1 @@
+Nstrict $[last].datetime() == $.a.datetime()

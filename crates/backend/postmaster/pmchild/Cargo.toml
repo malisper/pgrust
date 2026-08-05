@@ -1,0 +1,28 @@
+[package]
+name = "pmchild"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pmchild"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+elog = { path = "../../utils/error/elog" }
+init_small = { path = "../../utils/init/init_small" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+pmsignal = { path = "../../storage/ipc/pmsignal" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+launch_backend = { path = "../launch_backend" }
+pmchild_seams = { path = "../pmchild_seams" }
+
+[dev-dependencies]
+shmem = { path = "../../storage/ipc/shmem" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }

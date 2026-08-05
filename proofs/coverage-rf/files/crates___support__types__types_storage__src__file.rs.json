@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/types_storage/src/file.rs","sloc":[27,28,29],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2,3,5],"attr":[9,10,16,21],"type-alias":[13,34,35,36],"const-static":[38,39,41,42,44,45,46,48,49,50,52,53,55,56,57,58,60,61],"typedef":[11,17,18,22,23],"impl-header":[26]}}

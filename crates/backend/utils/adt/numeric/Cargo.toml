@@ -1,0 +1,29 @@
+[package]
+name = "adt_numeric"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_numeric"
+path = "src/lib.rs"
+
+[dependencies]
+arrayfuncs = { path = "../arrayfuncs" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+adt_float = { path = "../float" }
+datum = { path = "../../../../_support/types/datum" }
+init_small = { path = "../../init/init_small" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+funcapi_srf = { path = "../../fmgr/funcapi_srf" }
+hashfn = { path = "../../../../common/hashfn" }
+hyperloglog = { path = "../../../lib/hyperloglog" }
+pg_prng = { path = "../../../../common/pg_prng" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+mcx = { path = "../../../../_support/mcx" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }

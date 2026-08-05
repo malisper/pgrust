@@ -1,0 +1,5 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+bool	eq_bool_accum	harnesses::eq_bool_accum	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_accum_inv	harnesses::eq_bool_accum_inv	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_alltrue	harnesses::eq_bool_alltrue	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_anytrue	harnesses::eq_bool_anytrue	0	1	VERIFICATION:- SUCCESSFUL	RAN	1

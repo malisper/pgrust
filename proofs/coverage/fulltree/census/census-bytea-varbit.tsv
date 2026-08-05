@@ -1,0 +1,4 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+bytea-varbit	eq_bit_cmp	proofs::eq_bit_cmp	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-varbit	eq_esc_enc_len	proofs::eq_esc_enc_len	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+bytea-varbit	eq_pad_last	proofs::eq_pad_last	0	2	VERIFICATION:- SUCCESSFUL	RAN	1

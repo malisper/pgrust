@@ -1,0 +1,18 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+hashenc	eq_b64_enc_len	harnesses::eq_b64_enc_len	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_dec_len	harnesses::eq_b64_dec_len	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_encode_len0	harnesses::eq_b64_encode_len0	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_encode_len1	harnesses::eq_b64_encode_len1	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_encode_len2	harnesses::eq_b64_encode_len2	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_encode_len3	harnesses::eq_b64_encode_len3	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_encode_len4	harnesses::eq_b64_encode_len4	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_encode_len5	harnesses::eq_b64_encode_len5	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_encode_len6	harnesses::eq_b64_encode_len6	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_encode_len4_short	harnesses::eq_b64_encode_len4_short	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_encode_len6_short	harnesses::eq_b64_encode_len6_short	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_decode_len0	harnesses::eq_b64_decode_len0	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_decode_len1	harnesses::eq_b64_decode_len1	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_decode_len2	harnesses::eq_b64_decode_len2	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_decode_len3	harnesses::eq_b64_decode_len3	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_decode_len4	harnesses::eq_b64_decode_len4	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+hashenc	eq_b64_decode_len5	harnesses::eq_b64_decode_len5	0	6	VERIFICATION:- SUCCESSFUL	RAN	1

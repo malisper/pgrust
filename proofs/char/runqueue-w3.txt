@@ -1,0 +1,4 @@
+# w3-sendrecv lane runqueue: char rows 2434 charrecv (core tier) / 2435 charsend
+wave5::eq_charrecv_core | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c --harness wave5::eq_charrecv_core --exact
+wave5::eq_charsend | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c --harness wave5::eq_charsend --exact
+wave5::control_charsend_skew | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c --harness wave5::control_charsend_skew --exact

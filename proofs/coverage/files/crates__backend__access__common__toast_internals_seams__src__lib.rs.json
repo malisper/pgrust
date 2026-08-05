@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/common/toast_internals_seams/src/lib.rs","sloc":[11,12,15,16,17,18,19,20,21],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2]}}

@@ -1,0 +1,1 @@
+{"path":"crates/backend/parser/gram_core/src/tables.rs","sloc":[7,10,13,14,15,19,20,21,23],"kani":[],"fuzz":[],"regress":[19,20,21],"excluded":{"else-only":[22],"use-mod":[9],"attr":[18],"const-static":[2,3,4,5]}}

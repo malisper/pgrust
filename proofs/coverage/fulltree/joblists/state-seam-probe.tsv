@@ -1,0 +1,5 @@
+state-seam-probe	proofs::eq_aclitem_eq	
+state-seam-probe	proofs::eq_hash_aclitem	
+state-seam-probe	proofs::eq_hash_aclitem_extended	
+state-seam-probe	proofs::eq_aclcontains	
+state-seam-probe	proofs::eq_makeaclitem_bits	

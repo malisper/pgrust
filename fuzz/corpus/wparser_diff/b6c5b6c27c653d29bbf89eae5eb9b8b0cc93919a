@@ -1,0 +1,10 @@
+Äs token types
+SELhttps://okid
+    FROM pñ_tsOìêëôñòﬂ÷ AS tt
+RIGHT JOIig_map AS m
+    ON (tt.cfgid=d
+    FROM pg_tsOconfig ) AS tt
+Rm.mapcfg AND tt.to
+WHERE
+    tt.cfgid IS NULL OR tt.tokid IS NULct
+\ filename :abs_srcdir 

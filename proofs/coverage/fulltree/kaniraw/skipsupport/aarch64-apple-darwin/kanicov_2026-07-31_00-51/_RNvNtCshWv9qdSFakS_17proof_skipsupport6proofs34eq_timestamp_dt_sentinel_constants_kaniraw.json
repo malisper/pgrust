@@ -1,0 +1,1 @@
+{"data":{"src/lib.rs":[{"function":"proofs::CSkipSupportData::zeroed","term":{"Counter":0},"region":{"file":"src/lib.rs","start":[74,9],"end":[81,10]},"status":"COVERED"},{"function":"proofs::eq_timestamp_dt_sentinel_constants","term":{"Counter":0},"region":{"file":"src/lib.rs","start":[246,5],"end":[253,6]},"status":"COVERED"}]}}

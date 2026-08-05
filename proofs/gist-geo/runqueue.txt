@@ -1,0 +1,176 @@
+# proofs/gist-geo runqueue — GiST support procs for 2-D geo types
+# (gistproc.c family; oids 1030 2179 2578 2581 2583 2584 2585 2586 2591
+#  2592 3064 3280 3282 3288 3998 6347).
+# PRE-BUILD LANE 2026-07-29: harnesses written + codegen-gated ONLY
+#   (cargo kani --only-codegen -Z c-ffi -Z stubbing --c-lib c/pg_gist_geo.c
+#    : PASS; cargo kani list: all 35 proofs:: names verified).
+# ZERO kani/cbmc solves have been run. Expected classes below are
+# claim-before-code triage, not verdicts.
+#
+# FAMILY RULES: run from proofs/gist-geo/, ONE harness at a time under the
+# RSS watchdog (kill own process group only; sum the FULL descendant tree).
+# --no-overflow-checks on EVERY line (float law). kissat for expected-green;
+# DEFAULT solver for MUST-FAIL controls/witnesses and anything being decoded
+# (kissat never terminates on failing harnesses) — and solver choice is
+# strictly PER-HARNESS in geo families (inversions measured BOTH directions):
+# on any 30s+ kissat wall retry DEFAULT before recording. Judge near-cap runs
+# on CBMC's reported Verification Time, not wall clock (load-inflation law).
+# A flag-99 assertion failure = the fenced point_consistent groups 2/3 were
+# reached: that is a HARNESS DEFECT, never a divergence.
+# probe_gist_box_same_nan_plane is a SCREENED DIVERGENCE witness (C NaN-aware
+# float8_eq vs shipped raw f64 ==): ground-truth against real PG 18 (docker
+# postgres:18 + macOS) BEFORE recording, per the ground-truth law.
+#
+# Format: <harness> | <expected> | <tier> | <command>
+# REPAIR 2026-07-29 (decode lane): 24 rows (23 eq/grid + leaf_vs_internal
+# control) had builtin-memcmp unwind truncation at unwind(12) — image
+# compares need unwind > image bytes + 1 (BOX image = 32B); bumped to
+# unwind(34) in src/lib.rs. Locally verified: eq_gist_point_compress_noop
+# 1.6s, eq_gist_box_penalty_degenerate_y 2.5s PROVED; control now FAILS on
+# the INTENDED skew check (src/lib.rs:458), not the memcmp artifact
+# (gate-integrity restored). Remaining bumped rows = repaired-pending-fleet
+# (local spot: eq_gist_box_consistent_leaf >150s both solvers under load).
+# eq_gist_box_union_n2/n3: NOT unwind debt — REAL divergence candidate
+# (adjustBox NaN adoption: C float8_lt/gt NaN-aware vs shipped raw </> at
+# adt_geo lib.rs:166; decoded playback + native replay 2026-07-29).
+# EXPECTED FAIL until adjudicated — do not gate-count as green.
+K="timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_gist_geo.c --no-overflow-checks"
+
+# ---- gist_box_consistent (oid 2578): 12-strategy lattice wrapper-level ----
+proofs::eq_gist_box_consistent_leaf              | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_box_consistent_leaf --exact                  # expect: PROVED(full-sym boxes + full-sym strategy incl error arm) — oid 2578 leaf
+proofs::eq_gist_box_consistent_internal          | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_box_consistent_internal --exact              # expect: PROVED(same domain, rtree_internal arm) — oid 2578 internal
+proofs::eq_gist_box_consistent_nulls             | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_box_consistent_nulls --exact                 # expect: PROVED(null lattice -> false, recheck parity) — oid 2578
+proofs::control_gist_box_consistent_leaf_vs_internal | MUST-FAIL | control    | $K --harness proofs::control_gist_box_consistent_leaf_vs_internal --exact                 # expect: VERIFICATION FAILED (leaf vs internal RTLeft skew; decodable cex; a PASS = broken gate, stop the lane)
+
+# ---- gist_box_same (oid 2584): exact compare + NaN divergence screen ----
+proofs::eq_gist_box_same_nonnan                  | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_box_same_nonnan --exact                      # expect: PROVED(non-NaN plane; out-param + returned-pointer parity) — oid 2584
+proofs::eq_gist_box_same_nulls                   | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_box_same_nulls --exact                       # expect: PROVED(null lattice: both-null true / one-null false) — oid 2584
+proofs::probe_gist_box_same_nan_plane            | MUST-FAIL  | divergence-witness | $K --harness proofs::probe_gist_box_same_nan_plane --exact                          # expect: VERIFICATION FAILED — C float8_eq(NaN,NaN)=true vs shipped raw ==; ground-truth vs real PG18 then adjudicate (divergence candidate, do NOT fix-and-rerun in one breath)
+
+# ---- gist_box_penalty (oid 2581): 53-bit multiply -> probe + plane + grid ----
+proofs::probe_gist_box_penalty_full              | WALL-EXPECTED | probe     | $K --solver kissat --harness proofs::probe_gist_box_penalty_full --exact                  # expect: WALL (sym x sym 53-bit multiply in size_box; record honestly, try DEFAULT once) — oid 2581
+proofs::eq_gist_box_penalty_degenerate_y         | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_box_penalty_degenerate_y --exact             # expect: PROVED(literal-0 y plane; zero-size early returns; x fully sym) — oid 2581
+proofs::grid_gist_box_penalty                    | GREEN      | per-commit   | $K --solver kissat --harness proofs::grid_gist_box_penalty --exact                        # expect: PROVED(10x10 concrete pair grid: zero/NaN-high/NaN-low/Inf/overflow/underflow/f32-round cells; Err 22003 parity) — oid 2581
+
+# ---- gist_box_union (oid 2583): adjust_box fold, mcx image result ----
+proofs::eq_gist_box_union_n2                     | GREEN      | per-commit   | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_gist_geo.c --no-overflow-checks --solver kissat --harness proofs::eq_gist_box_union_n2 --exact   # expect: PROVED(n=2 full-sym coords; sizep=32 claim; modulo static-buffer allocator model) — oid 2583
+proofs::eq_gist_box_union_n3                     | GREEN      | per-commit   | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_gist_geo.c --no-overflow-checks --solver kissat --harness proofs::eq_gist_box_union_n3 --exact   # expect: PROVED(n=3 sibling) — oid 2583
+
+# ---- gist_point_compress (1030) / gist_point_fetch (3282) ----
+proofs::eq_gist_point_compress_leaf              | GREEN      | per-commit   | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_gist_geo.c --no-overflow-checks --solver kissat --harness proofs::eq_gist_point_compress_leaf --exact   # expect: PROVED(leaf arm: degenerate box + fresh GISTENTRY image; modulo allocator model) — oid 1030
+proofs::eq_gist_point_compress_noop              | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_point_compress_noop --exact                  # expect: PROVED(non-leaf identity, pointer-exact) — oid 1030
+proofs::eq_gist_point_fetch                      | GREEN      | per-commit   | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_gist_geo.c --no-overflow-checks --solver kissat --harness proofs::eq_gist_point_fetch --exact          # expect: PROVED(point = (high.x, high.y) + entry image; modulo allocator model) — oid 3282
+
+# ---- gist_point_consistent (oid 2179): groups 0/1 + error arm
+#      (groups 2/3 = poly/circle leaf-exact arms: FENCED, ladder follow-up;
+#       flag-99 failure = harness defect) ----
+proofs::eq_gist_point_consistent_group0          | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_point_consistent_group0 --exact              # expect: PROVED(group 0 incl RTOld remaps + leaf/internal RTSame + in-group error arm) — oid 2179
+proofs::eq_gist_point_consistent_group1          | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_point_consistent_group1 --exact              # expect: PROVED(on_pb non-fuzzy overlap, box query) — oid 2179
+proofs::eq_gist_point_consistent_badgroup        | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_point_consistent_badgroup --exact            # expect: PROVED(group>=4 error verdict parity) — oid 2179
+
+# ---- gist_point_distance (oid 3064): arm split + vertex grid (point_dt law) ----
+proofs::eq_gist_point_distance_leaf_axis         | GREEN      | release-gate | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_gist_geo.c --no-overflow-checks --solver kissat --harness proofs::eq_gist_point_distance_leaf_axis --exact   # expect: PROVED(leaf, axis-aligned slice; ONE point_dt = 43-204s law; general hypot path out of proof) — oid 3064
+proofs::eq_gist_point_distance_inbox             | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_point_distance_inbox --exact                 # expect: PROVED(in-box plane -> 0.0) — oid 3064
+proofs::eq_gist_point_distance_ystrip            | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_point_distance_ystrip --exact                # expect: PROVED(y-strip float8_mi arms + inconsistent-elog arm) — oid 3064
+proofs::eq_gist_point_distance_xstrip            | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_point_distance_xstrip --exact                # expect: PROVED(x-strip sibling) — oid 3064
+proofs::grid_gist_point_distance_vertex          | GREEN      | per-commit   | $K --solver kissat --harness proofs::grid_gist_point_distance_vertex --exact              # expect: PROVED(8-cell concrete vertex grid incl NaN pin/Inf/overflow-Err) — oid 3064
+proofs::eq_gist_point_distance_badstrategy       | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_point_distance_badstrategy --exact           # expect: PROVED(group!=0 error verdict parity) — oid 3064
+
+# ---- bbox distances: box 3998 / circle 3280 / poly 3288 ----
+proofs::eq_gist_box_distance_strips              | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_box_distance_strips --exact                  # expect: PROVED(strip+in-box arms, full-sym under fence) — oid 3998
+proofs::grid_gist_box_distance_vertex            | GREEN      | per-commit   | $K --solver kissat --harness proofs::grid_gist_box_distance_vertex --exact                # expect: PROVED(vertex grid via box wrapper) — oid 3998
+proofs::eq_gist_circle_distance_strips           | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_circle_distance_strips --exact               # expect: PROVED(strips + *recheck=true lossy claim) — oid 3280
+proofs::eq_gist_poly_distance_strips             | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_poly_distance_strips --exact                 # expect: PROVED(strips + *recheck=true lossy claim) — oid 3288
+
+# ---- gist_poly_consistent (2585) / gist_poly_compress (2586):
+#      Rust decodes a real npts=1 polygon varlena image in-theorem ----
+proofs::eq_gist_poly_consistent                  | GREEN      | per-commit   | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_gist_geo.c --no-overflow-checks --solver kissat --harness proofs::eq_gist_poly_consistent --exact       # expect: PROVED(full-sym boundbox + strategy + null lattice; recheck=true; pre-detoast 4B-u image fence) — oid 2585
+proofs::eq_gist_poly_compress_leaf               | GREEN      | per-commit   | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_gist_geo.c --no-overflow-checks --solver kissat --harness proofs::eq_gist_poly_compress_leaf --exact    # expect: PROVED(boundbox extract + entry image; modulo allocator model) — oid 2586
+proofs::eq_gist_poly_compress_noop               | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_poly_compress_noop --exact                   # expect: PROVED(non-leaf identity) — oid 2586
+
+# ---- gist_circle_consistent (2591) / gist_circle_compress (2592) ----
+proofs::eq_gist_circle_consistent                | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_circle_consistent --exact                    # expect: PROVED(full-sym circle bbox (f8 add/sub) + strategy + null lattice; Err 22003 parity) — oid 2591
+proofs::eq_gist_circle_compress_leaf             | GREEN      | per-commit   | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_gist_geo.c --no-overflow-checks --solver kissat --harness proofs::eq_gist_circle_compress_leaf --exact  # expect: PROVED(bbox + entry image + overflow Err arm; modulo allocator model) — oid 2592
+proofs::eq_gist_circle_compress_noop             | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_circle_compress_noop --exact                 # expect: PROVED(non-leaf identity) — oid 2592
+
+# ---- gist_translate_cmptype_common (oid 6347) ----
+proofs::eq_gist_translate_cmptype_common         | GREEN      | per-commit   | $K --solver kissat --harness proofs::eq_gist_translate_cmptype_common --exact             # expect: PROVED(full-i32 8-arm table, <1s) — oid 6347
+#
+# LEDGER WORDING when green (per-row, never overstate):
+#   2578: proved(full-sym boxes, full-sym strategy incl error arm, wrapper-level, recheck parity)
+#   2584: proved(non-NaN plane + null lattice) + divergence(NaN plane) per the witness verdict
+#   2581: proved(degenerate-y plane + boundary pair-grid; open-region sym x sym multiply uncovered)
+#   2583: proved(n<=3 full-sym; modulo static-buffer allocator model)
+#   1030/3282/2586/2592 leaf arms: "modulo static-buffer allocator model (allocation strategy out of scope)"
+#   2179: proved(groups 0/1 + error arm; groups 2/3 fenced -> ladder follow-up row stays open)
+#   3064/3998/3280/3288: proved(in-box/strip arms full-sym + leaf axis-slice + concrete vertex grid;
+#     general (non-axis) point_dt hypot path out of proof — model-spec gap)
+#   6347: proved(full-i32)
+# Error arms: "value-space + verdict (+ sqlstate 22003 on float arms) only;
+# message text/location out of proof" (PgError::error + std::fmt::format stubbed).
+
+# =====================================================================
+# SOLVE LANE RESULTS 2026-07-30 (local, load 15-43 SATURATED — all times
+# are CBMC-reported Verification Time; walls are load-qualified).
+# Solver key: k=kissat, d=default.
+#
+# GREEN (39):
+#   eq_gist_translate_cmptype_common 1.3s k | eq_gist_point_compress_noop 3.1s k
+#   eq_gist_poly_compress_noop 4.2s k | eq_gist_circle_compress_noop 1.7s k
+#   eq_gist_box_penalty_degenerate_y 3.9s k | grid_gist_box_penalty 18.1s k (after unwind 12->34 repair)
+#   eq_gist_box_same_full 2.9s k (FULL plane incl NaN — fence retired post-fa583f02f2)
+#   eq_gist_box_same_nulls 2.5s k | probe_gist_box_same_nan_plane 5.4s d (NOW GREEN = regression witness)
+#   eq_gist_box_union_n2 8.8s k | eq_gist_box_union_n3 15.3s k (NOW GREEN post adjust_box fix)
+#   eq_gist_point_consistent_group1 15.1s k (after 29/30 remap fence — see REPAIRS)
+#   eq_gist_point_consistent_badgroup 2.2s k
+#   eq_gbc_leaf_s1..s12 3.9-34.9s k | eq_gbc_int_s1..s12 4.5-17.8s k (NEW per-strategy cells)
+#   eq_gist_box_consistent_badstrategy 3.3s k | eq_gist_box_consistent_nulls 13.1s k
+#   eq_gpc_s1..s12 4.1-17.0s k (NEW) | eq_gist_poly_consistent_nulls 7.1s k (NEW)
+#   eq_gcc_s1 62.0s k / 122.4s d, s2 77.9s, s4 49.1s, s5 74.6s, s9 65.7s, s10 60.5s, s11 71.7s, s12 44.7s k (NEW)
+#   eq_gist_circle_consistent_nulls 6.4s k (NEW)
+#   eq_gist_point_distance_inbox 98.7s k | _ystrip 214.1s d | _xstrip 345.4s d (kissat walls both — inversion)
+#   eq_gist_point_distance_badstrategy 59.5s k
+#   eq_gist_box_distance_inbox 144.5s k | eq_gist_circle_distance_inbox 64.0s k | eq_gist_poly_distance_inbox 69.8s k (NEW per-arm)
+#   eq_gist_point_compress_leaf 4.3s k | eq_gist_point_fetch 3.5s k | eq_gist_poly_compress_leaf 6.8s k
+# MUST-FAIL CONTROL: control_gist_box_consistent_leaf_vs_internal FAILED
+#   on the INTENDED check (v == cres) 2.8s d — gate non-vacuous.
+#
+# REPAIRS (harness defects, never divergences):
+#   - eq_gist_box_same / grid+probe penalty: unwind 12->34 (missed rows of
+#     the documented image-compare repair; "unwinding assertion loop 0").
+#   - eq_gist_point_consistent_group1: fenced strategies 29/30 (RTOld
+#     remaps land in group 0 where the harness wires literal-(0,0) query
+#     to C but the box image to Rust — fabricated 13.8s FAILED).
+#
+# ADJUDICATED (former expected-FAILs, fixed at fa583f02f2 fix(geo,gist)):
+#   probe_gist_box_same_nan_plane + eq_gist_box_union_n2/n3 all VERIFY;
+#   kept as regression witnesses. No open divergences in this family.
+#
+# WALL / FLEET-BOUND (expected=unmeasured, run on the fleet tier):
+#   eq_gist_box_consistent_leaf/_internal   wall(timeout-450s k+d, load 15-25) — superseded by cells, keep as union rows
+#   eq_gist_circle_consistent / eq_gist_poly_consistent (full-sym strategy) — same; superseded by cells + nulls
+#   eq_gcc_s3 (overlap) wall(k170+d450); eq_gcc_s6/s7/s8 wall(k170) — box_ov/box_contain_box over DERIVED bbox coords
+#   eq_gist_box/circle/poly_distance_strips (combined disjunctive) wall(k160, box also d450) — superseded by per-arm
+#   eq_gist_box/circle/poly_distance_ystrip/_xstrip (NEW per-arm) — UNRUN locally (point siblings needed d 214-345s; budget)
+#   grid_gist_point_distance_vertex wall(k250 + d450, load 19-29); grid_gist_box_distance_vertex UNRUN (same shape)
+#   probe_gist_box_penalty_full — WALL-EXPECTED per cost law, UNRUN locally
+#   eq_gist_point_distance_leaf_axis — UNRUN locally (240s row; budget)
+#   eq_gist_point_consistent_group0 / eq_gist_circle_compress_leaf — k-wall, d retry in flight at lane close (see results.log tail)
+# LANE CLOSE ADDENDUM (later same day, load dropped 43->6):
+#   GREEN adds: eq_gp0_s1/s5/s10/s11/s29/s30 3.0-15.9s k; eq_gp0_s6 241.8s d
+#     (kissat walls); eq_gist_point_consistent_group0_badstrategy 7.4s k;
+#     eq_gist_point_distance_leaf_axis 65.1s k;
+#     eq_gist_box_distance_ystrip 170.9s / _xstrip 164.3s d;
+#     eq_gist_circle_distance_ystrip 154.4s / _xstrip 160.0s d;
+#     eq_gist_poly_distance_ystrip 172.7s / _xstrip 154.8s d.
+#   WALLS CONFIRMED: grid_gist_box_distance_vertex walled k450 at LOAD 6
+#     (quiet machine) — GENUINE circuit wall (4 concrete point_dt/hypot
+#     cells under one symbolic index), not load; remedy = per-cell split
+#     (8 spot harnesses) or fleet high-mem tier.  probe_gist_box_penalty_full
+#     walled k120 as the float cost law predicts (sym x sym 53-bit multiply)
+#     — recorded honestly, do not chase.
+#   STILL FLEET-BOUND: eq_gist_circle_compress_leaf (k130+d300);
+#     eq_gcc_s3/s6/s7/s8; full-sym union rows; both vertex grids;
+#     eq_gist_point_consistent_group0 full-sym row (superseded by cells).
+# FINAL LOCAL TALLY: 62 green harnesses (61 eq/grid/probe + 1 must-fail
+#   control failing on its intended check), 0 open divergences.

@@ -1,0 +1,7 @@
+;
+
+-- test extending object_keys resultset - initial resultset size is 256
+
+select count(*) from
+    (select json_object_keys(json_object(array_agg(g)))
+     from (select unnest(array[

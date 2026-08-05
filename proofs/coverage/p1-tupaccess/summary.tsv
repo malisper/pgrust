@@ -1,0 +1,46 @@
+# proofs/coverage/p1-tupaccess/summary.tsv — per-crate coverage equation for
+# lane p1-tupaccess (target tupaccess_diff), closing the REFRESH-4 evidence
+# debt (heaptuple + tupdesc were done-flipped at takeover landing d36e030c38
+# with no banked capture).
+#
+# CAPTURE PROVENANCE (LOCAL — labeled per coordinator ruling 2026-08-01):
+#   full committed corpus replay (fuzz/corpus/tupaccess_diff, 9090 inputs)
+#   under `fuzz/cov-export.sh tupaccess_diff` (cargo fuzz coverage + sysroot
+#   llvm-cov, nightly-2026-07-17), macOS/aarch64, worktree at main
+#   f758de2d2c7b4eede2559104d120578ca30173ac. Banked here as coverage.lcov.gz
+#   (249,365 DA lines tree-wide before crate filtering).
+#   The fleet capture leg is ON HOLD: main's fuzz workspace fails to LINK on
+#   GNU ld (duplicate oracle-TU symbols from the evidence landing train; fix
+#   lane in flight). Fleet attempt of record: pgrust-fuzz-campaign-
+#   1785621183-68ee-72592 @ f758de2d2c (Failed, the link breakage). Local
+#   full-corpus cov-export is the campaign-law tiebreaker capture and stays
+#   valid (CAMPAIGN-INTELLIGENCE §C / covcap-fleet README). Re-earn on fleet
+#   only if driver/corpus change (no-rerun-tax law).
+#
+# Functional verdicts of record (unchanged, fleet): 20M-exec CONFIRM GREEN
+#   pgrust-fuzz-campaign-1785605386-4f6f-80234 @ c85114471d76bf (0 div), and
+#   post-landing smoke pgrust-fuzz-campaign-1785618742-4f0c-64730 @
+#   ced7a24b88 (200k execs, 0 div).
+#
+# WIDTH-1 BYVAL CARVE (ratified Michael 2026-08-01): upper 56 bits of a
+#   width-1 byval Datum are a platform non-surface (C fetch_att char
+#   signedness; every consumer truncates via DatumGetChar). It is a
+#   comparison-plane carve in the harness (normalization in
+#   tupaccess_diff.rs + pg_tupaccess_io.c) — it maps to NO source lines in
+#   heaptuple/tupdesc, so it correctly contributes NO exception rows here;
+#   low-byte plane witnessed by the 3 committed seed-w1-highbit-* seeds.
+#
+# SLOC rule: v2 + const tables excluded (proofs/coverage/sloc_rules.py),
+#   line_table = this capture's DA set. NOTE the REFRESH-4 ranking cells
+#   (599 heaptuple / 569 tupdesc) were cut WITHOUT a line table (none
+#   existed — that was the debt); with this capture's line table the same
+#   rule yields 610 / 571 (net reinstatement of mapped lines the text rule
+#   excluded). The equations below use the line-table denominators; the
+#   next ranking refresh recuts the cells from this lcov.
+#
+# equation per crate: v2_sloc = fuzz_measured + exception_rows, 0 unaccounted.
+# Exception rows: proofs/coverage/phase1-exceptions.tsv author
+# p1-tupaccess-takeover (91 rows, all pending review).
+crate	v2_sloc(line-table)	v2_sloc(r4-cell)	fuzz_measured	exception_rows	unaccounted	exception_classes
+backend/access/common/heaptuple	610	599	564	46	0	excluded-state 4 (EOH flatten carve) + unreachable-arm 6 (natts cap 2, plan gate 1, OOM 3) + cross-crate-entry 29 (detoast seam 1, accessors 28) + defensive-c-parity 1 + instrument-unmappable 6
+backend/access/common/tupdesc	571	569	526	45	0	excluded-state 1 (catalog seam) + debug-only 9 (verify_compact_attribute) + unreachable-arm 8 + cross-crate-entry 24 (refcount API 9, GetDefault 9, by-name-attrmap wrapper 6) + instrument-unmappable 3

@@ -1,0 +1,2 @@
+::text[]); -- ok
+SELECT json_build_array(VARIADIC ARRAY[

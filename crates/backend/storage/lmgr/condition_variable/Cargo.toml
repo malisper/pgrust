@@ -1,0 +1,29 @@
+[package]
+name = "condition_variable"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "condition_variable"
+path = "src/lib.rs"
+
+[dependencies]
+pg_clock = { path = "../../../../port/pg_clock" }
+condition_variable_seams = { path = "../condition_variable_seams" }
+init_small = { path = "../../../utils/init/init_small" }
+latch = { path = "../../ipc/latch" }
+lmgr_proc = { path = "../lmgr_proc" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+s_lock_seams = { path = "../s_lock_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+
+[dev-dependencies]
+ipc_seams = { path = "../../ipc/ipc_seams" }
+lmgr_proc_seams = { path = "../lmgr_proc_seams" }
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+shmem_seams = { path = "../../ipc/shmem_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+waiteventset = { path = "../../ipc/waiteventset" }

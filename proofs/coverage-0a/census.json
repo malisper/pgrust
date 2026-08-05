@@ -1,0 +1,495 @@
+{
+ "expected": 230,
+ "ran": 161,
+ "walled": 0,
+ "failed_to_run": 69,
+ "waived": 69,
+ "kaniraw_files": 163,
+ "kaniraw_without_census_row": 0,
+ "census_closed": true,
+ "unmeasured": [
+  {
+   "family": "pg_lsn",
+   "harness": "eq_pg_lsn_in_accept_8_5",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "eq_pg_lsn_in_accept_8_6",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "eq_pg_lsn_in_accept_8_7",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "eq_pg_lsn_in_accept_8_8",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_void_send",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "scalar-misc",
+   "harness": "eq_chareq",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "scalar-misc",
+   "harness": "eq_charne",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "scalar-misc",
+   "harness": "eq_charlt",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "scalar-misc",
+   "harness": "eq_charle",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "scalar-misc",
+   "harness": "eq_chargt",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "scalar-misc",
+   "harness": "eq_charge",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "scalar-misc",
+   "harness": "eq_btcharcmp",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_in_spot_empty",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_in_spot_len1",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_in_spot_len3",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_out_spot_empty",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_out_spot_len1",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_out_spot_len3",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_out_len0",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_out_len1",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_out_len2",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_out_len3",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_out_len4",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_out_len5",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_out_len6",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_out_len7",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_out_len8",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_send_len0",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_send_len1",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_send_len2",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_send_len3",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_send_len4",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_send_len5",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_send_len6",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_send_len7",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_pg_node_tree_send_len8",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::cover_node_tree_len_partition",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_send",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_send_spot_empty",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_send_spot_len1",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_send_spot_len3",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_send_spot_tail_garbage",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_recv_len0",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_recv_len1",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_recv_len3",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_recv_len5",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pseudotypes",
+   "harness": "proofs::eq_cstring_recv_len5_cursor2",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d0",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d1",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d2",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d3",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d4",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d5",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d6",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d7",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d8",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d9",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d10",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d11",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "pg_lsn",
+   "harness": "wave5::eq_pg_lsn_recv_core_d12",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "bool",
+   "harness": "wave_sendtext::eq_boolsend",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "bool",
+   "harness": "wave_sendtext::eq_booltext_true",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "bool",
+   "harness": "wave_sendtext::eq_booltext_false",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "char",
+   "harness": "wave5::eq_charrecv_core_d0",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "char",
+   "harness": "wave5::eq_charrecv_core_d1",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "char",
+   "harness": "wave5::eq_charrecv_core_d2",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "char",
+   "harness": "wave5::eq_charrecv_core_d3",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "char",
+   "harness": "wave5::eq_charrecv_core_d4",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  },
+  {
+   "family": "char",
+   "harness": "wave5::eq_charsend",
+   "verdict": "NOT-ATTEMPTED (policy 5b2646b127)",
+   "rc": "-",
+   "waiver": "proof-covered-unmeasured (policy 5b2646b127: per-crate kanicov re-runs retired mid-capture; proved ledger row stands; full-tree pinned-sha join settles line credit)"
+  }
+ ]
+}

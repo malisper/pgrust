@@ -1,0 +1,29 @@
+[package]
+name = "mcx"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mcx"
+path = "src/lib.rs"
+
+[features]
+# std: per-thread context pools (acct blocks / child vecs / aset keepers)
+# instead of the global spin-locked ones — removes the shared-line CAS at
+# context create/destroy (global pool mutex contention at high backend
+# counts). Enabled by the server graph (init_small); no_std consumers keep
+# the global pools. Kill switch at runtime: PGRUST_MCX_POOL_STRIPE=0.
+std = []
+# aset-guard: back each chunk with an mmap'd region abutting a PROT_NONE guard
+# page so overruns fault at the offending write. Debugging only.
+aset-guard = ["dep:libc"]
+# aset-stats: count keeper-block mallocs / recycle reuses via mcx::alloc_stats().
+aset-stats = []
+
+[dependencies]
+types_error = { path = "../types/types_error" }
+libc = { version = "0.2", optional = true }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+hashbrown = { version = "0.14", default-features = false, features = ["allocator-api2", "ahash", "inline-more"] }
+rustc-hash = { version = "2", default-features = false }

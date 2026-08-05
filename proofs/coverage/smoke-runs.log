@@ -1,0 +1,196 @@
+RUN bool harnesses::eq_bool_accum rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_bool_accum_inv rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_bool_alltrue rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_bool_anytrue rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_bool_int4 rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_booleq rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_boolge rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_boolgt rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_boolle rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_boollt rc=0 wall=0s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_boolne rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_boolout rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_int4_bool rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_parse_bool_with_len_l0 rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_parse_bool_with_len_l1 rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_parse_bool_with_len_l2 rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_parse_bool_with_len_l3 rc=0 wall=5s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_parse_bool_with_len_l4 rc=0 wall=5s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_parse_bool_with_len_l5 rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN bool harnesses::eq_parse_bool_with_len_l6 rc=0 wall=7s VERIFICATION:- SUCCESSFUL
+RUN bool proofs::eq_bool_accum rc=1 wall=6s NO-VERDICT
+RUN bool proofs::eq_bool_accum_inv rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_bool_alltrue rc=1 wall=1s NO-VERDICT
+RUN bool proofs::eq_bool_anytrue rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_bool_int4 rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_booleq rc=1 wall=1s NO-VERDICT
+RUN bool proofs::eq_boolge rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_boolgt rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_boolle rc=1 wall=1s NO-VERDICT
+RUN bool proofs::eq_boollt rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_boolne rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_boolout rc=1 wall=1s NO-VERDICT
+RUN bool proofs::eq_int4_bool rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_parse_bool_with_len_l0 rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_parse_bool_with_len_l1 rc=1 wall=1s NO-VERDICT
+RUN bool proofs::eq_parse_bool_with_len_l2 rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_parse_bool_with_len_l3 rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_parse_bool_with_len_l4 rc=1 wall=1s NO-VERDICT
+RUN bool proofs::eq_parse_bool_with_len_l5 rc=1 wall=0s NO-VERDICT
+RUN bool proofs::eq_parse_bool_with_len_l6 rc=1 wall=0s NO-VERDICT
+RUN cash proofs::eq_cash_cmp rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN cash proofs::eq_cash_eq rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN cash proofs::eq_cash_ge rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN cash proofs::eq_cash_gt rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN cash proofs::eq_cash_le rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN cash proofs::eq_cash_lt rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN cash proofs::eq_cash_mi rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN cash proofs::eq_cash_ne rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN cash proofs::eq_cash_pl rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN cash proofs::eq_cashlarger rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN cash proofs::eq_cashsmaller rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_bool_int4 rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_dtof rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_dtoi2 rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_dtoi4 rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_dtoi8 rc=0 wall=9s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_ftod rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_ftoi2 rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_ftoi4 rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_ftoi8 rc=0 wall=10s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_i2tod rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_i2tof rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_i2toi4 rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_i4tod rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_i4tof rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_i4toi2 rc=0 wall=5s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_i8tod rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_i8tof rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_int28 rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_int4_bool rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_int48 rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_int82 rc=0 wall=5s VERIFICATION:- SUCCESSFUL
+RUN casts proofs::eq_int84 rc=0 wall=5s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_dpi rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float48div_zero rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float4abs rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float4div_zero rc=0 wall=7s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float4mi rc=0 wall=11s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float4pl rc=0 wall=11s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float4um rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float4up rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float84div_zero rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float8abs rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float8div_zero rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float8um rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-arith proofs::eq_float8up rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_btfloat48cmp rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_btfloat4cmp rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_btfloat84cmp rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_btfloat8cmp rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float48eq rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float48ge rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float48gt rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float48le rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float48lt rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float48ne rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float4eq rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float4ge rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float4gt rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float4larger rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float4le rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float4lt rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float4ne rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float4smaller rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float84eq rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float84ge rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float84gt rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float84le rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float84lt rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float84ne rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float8eq rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float8ge rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float8gt rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float8larger rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float8le rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float8lt rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float8ne rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN float-cmp proofs::eq_float8smaller rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_circle_area_grid rc=0 wall=17s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_circle_center_core rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_circle_contained_grid rc=0 wall=18s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_circle_diameter_full rc=0 wall=7s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_circle_distance_grid rc=0 wall=22s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_circle_radius rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_lseg_construct_core rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_lseg_horizontal rc=0 wall=7s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_lseg_parallel_grid rc=0 wall=26s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_lseg_perp_grid rc=0 wall=32s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_lseg_vertical rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext::proofs_ext::eq_point_slope_grid rc=0 wall=13s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext3::proofs_ext3::eq_poly_above rc=0 wall=11s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext3::proofs_ext3::eq_poly_below rc=0 wall=11s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext3::proofs_ext3::eq_poly_left rc=0 wall=12s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext3::proofs_ext3::eq_poly_npoints rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext3::proofs_ext3::eq_poly_overabove rc=0 wall=12s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext3::proofs_ext3::eq_poly_overbelow rc=0 wall=13s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext3::proofs_ext3::eq_poly_overleft rc=0 wall=13s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext3::proofs_ext3::eq_poly_overright rc=0 wall=13s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext3::proofs_ext3::eq_poly_right rc=0 wall=12s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext5::proofs_ext5::eq_path_distance_nullplane rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext5::proofs_ext5::eq_path_inter_n1_open rc=0 wall=7s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext5::proofs_ext5::eq_poly_contain_bboxfail rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext5::proofs_ext5::eq_poly_contained_bboxfail rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN geo-cmp ext5::proofs_ext5::eq_poly_overlap_bboxfail rc=0 wall=7s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashbool rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashboolextended rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashchar rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashcharextended rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashenum rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashenumextended rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashfloat4 rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashfloat4extended rc=0 wall=8s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashfloat8 rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashfloat8extended rc=0 wall=9s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashint2 rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashint2extended rc=0 wall=5s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashint4 rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashint4extended rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashint8 rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashint8extended rc=0 wall=21s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashoid rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::eq_hashoidextended rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::model_hashchar_unsigned_full rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN hash-rows proofs::model_hashcharextended_unsigned_full rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN hash-rows wave5::eq_hashcid rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN hash-rows wave5::eq_hashcidextended rc=0 wall=5s VERIFICATION:- SUCCESSFUL
+RUN hash-rows wave5::eq_hashtid rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN hash-rows wave5::eq_hashtidextended rc=0 wall=25s VERIFICATION:- SUCCESSFUL
+RUN hash-rows wave5::eq_hashxid rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN hash-rows wave5::eq_hashxid8 rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN hash-rows wave5::eq_hashxid8extended rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN hash-rows wave5::eq_hashxidextended rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN hash-rows wave5::eq_pg_lsn_hash rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN hash-rows wave5::eq_pg_lsn_hash_extended rc=0 wall=5s VERIFICATION:- SUCCESSFUL
+RUN misc-ops proofs::artifact_control_ultoa_dest_offset0 rc=0 wall=16s VERIFICATION:- SUCCESSFUL
+RUN misc-ops proofs::eq_booland_statefunc rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN misc-ops proofs::eq_boolor_statefunc rc=0 wall=1s VERIFICATION:- SUCCESSFUL
+RUN misc-ops proofs::eq_date_mii rc=0 wall=4s VERIFICATION:- SUCCESSFUL
+RUN misc-ops proofs::eq_date_pli rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::cover_int_numeric_bands rc=0 wall=7s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_in_range_err_nan rc=0 wall=11s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_in_range_val_nan rc=0 wall=29s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_int2_sum rc=0 wall=3s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_int4_sum rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_int8_numeric_spot_i64_max rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_int8_numeric_spot_i64_min rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_int8_numeric_spot_nd3_hi rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_int8_numeric_spot_nd3_lo rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_int8_numeric_spot_nd4_hi rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_int8_numeric_spot_nd4_lo rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_int8_numeric_spot_nd5_lo rc=0 wall=6s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_int8_numeric_spot_trailzero rc=0 wall=7s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_numeric_scale_nd4 rc=0 wall=17s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_numeric_sign_nd4 rc=0 wall=16s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_numeric_typmod_codec rc=0 wall=2s VERIFICATION:- SUCCESSFUL
+RUN numeric-probe proofs::eq_numerictypmodin rc=0 wall=5s VERIFICATION:- SUCCESSFUL

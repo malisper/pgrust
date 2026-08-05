@@ -1,0 +1,42 @@
+[package]
+name = "pg_stat_statements"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_stat_statements"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_nodes = { path = "../../_support/types/nodes" }
+types_portal = { path = "../../_support/types/portal" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+adt_numeric = { path = "../../backend/utils/adt/numeric" }
+adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
+adt_acl = { path = "../../backend/utils/adt/acl" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
+elog = { path = "../../backend/utils/error/elog" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+init_small = { path = "../../backend/utils/init/init_small" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+queryjumble = { path = "../../backend/nodes/queryjumble" }
+scan_fgram = { path = "../../backend/parser/scan_fgram" }
+parser_analyze = { path = "../../backend/parser/parser_analyze" }
+planner = { path = "../../backend/optimizer/plan/planner" }
+execmain = { path = "../../backend/executor/execmain" }
+executils = { path = "../../backend/executor/executils" }
+instrument = { path = "../../backend/executor/instrument" }
+utility = { path = "../../backend/tcop/utility" }
+parallel = { path = "../../backend/access/transam/parallel" }
+ipc = { path = "../../backend/storage/ipc/ipc" }
+rustc-hash = "2"
+exec_hooks = { path = "../exec_hooks" }

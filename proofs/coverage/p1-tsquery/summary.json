@@ -1,0 +1,211 @@
+{
+ "generated": "2026-08-01T03:48:07+00:00",
+ "head_sha": "213fabcd64f01663f6bfa4ca6205bae241fde84c",
+ "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
+ "sloc_rule_id": "v2+no-const-tables",
+ "sloc_exclusions": {
+  "use-mod": 49,
+  "macro-scaffold": 4,
+  "const-table": 22,
+  "else-only": 27,
+  "arm-head": 50,
+  "typedef": 52,
+  "impl-header": 2,
+  "loop-only": 8,
+  "attr": 9,
+  "const-static": 7
+ },
+ "line_table_inputs": [],
+ "census": {
+  "expected": 0,
+  "ran": 0,
+  "walled": 0,
+  "failed_to_run": 0,
+  "waived": 0,
+  "kaniraw_files": 0,
+  "kaniraw_without_census_row": 0,
+  "census_closed": true,
+  "unmeasured": []
+ },
+ "macro_attribution": {
+  "enabled": true,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": {
+   "files": 160,
+   "macro_defs": 320,
+   "generator_macros": 221,
+   "call_blocks": 468,
+   "decl_lines": 2293
+  }
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 0,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [
+    "fuzz/coverage/tsquery_core_diff.lcov",
+    "fuzz/coverage/tsqrw_diff.lcov"
+   ],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/tsquery_core",
+  "crates/backend/utils/adt/tsquery_rewrite"
+ ],
+ "totals": {
+  "sloc": 1397,
+  "kani": 0,
+  "fuzz": 1258,
+  "regress": 0,
+  "any": 1258,
+  "pct": {
+   "kani": 0.0,
+   "fuzz": 90.05,
+   "regress": 0.0,
+   "any": 90.05
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 34,
+   "covered_sloc_in_touched_files": 2330,
+   "sloc_of_touched_files": 7733
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "tsquery_core",
+   "path": "crates/backend/utils/adt/tsquery_core",
+   "sloc": 1198,
+   "kani": 0,
+   "fuzz": 1132,
+   "regress": 0,
+   "any": 1132,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 94.49,
+    "regress": 0.0,
+    "any": 94.49
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/tsquery_core/src/builtins.rs",
+     "sloc": 123,
+     "kani": 0,
+     "fuzz": 116,
+     "regress": 0,
+     "any": 116,
+     "detail": "files/crates__backend__utils__adt__tsquery_core__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsquery_core/src/cleanup.rs",
+     "sloc": 158,
+     "kani": 0,
+     "fuzz": 152,
+     "regress": 0,
+     "any": 152,
+     "detail": "files/crates__backend__utils__adt__tsquery_core__src__cleanup.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsquery_core/src/io.rs",
+     "sloc": 220,
+     "kani": 0,
+     "fuzz": 215,
+     "regress": 0,
+     "any": 215,
+     "detail": "files/crates__backend__utils__adt__tsquery_core__src__io.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsquery_core/src/lib.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__tsquery_core__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsquery_core/src/parse.rs",
+     "sloc": 422,
+     "kani": 0,
+     "fuzz": 398,
+     "regress": 0,
+     "any": 398,
+     "detail": "files/crates__backend__utils__adt__tsquery_core__src__parse.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsquery_core/src/qsort.rs",
+     "sloc": 92,
+     "kani": 0,
+     "fuzz": 92,
+     "regress": 0,
+     "any": 92,
+     "detail": "files/crates__backend__utils__adt__tsquery_core__src__qsort.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsquery_core/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__tsquery_core__src__tests.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsquery_core/src/util.rs",
+     "sloc": 183,
+     "kani": 0,
+     "fuzz": 159,
+     "regress": 0,
+     "any": 159,
+     "detail": "files/crates__backend__utils__adt__tsquery_core__src__util.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "tsquery_rewrite",
+   "path": "crates/backend/utils/adt/tsquery_rewrite",
+   "sloc": 199,
+   "kani": 0,
+   "fuzz": 126,
+   "regress": 0,
+   "any": 126,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 63.32,
+    "regress": 0.0,
+    "any": 63.32
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/tsquery_rewrite/src/lib.rs",
+     "sloc": 199,
+     "kani": 0,
+     "fuzz": 126,
+     "regress": 0,
+     "any": 126,
+     "detail": "files/crates__backend__utils__adt__tsquery_rewrite__src__lib.rs.json"
+    }
+   ]
+  }
+ ]
+}

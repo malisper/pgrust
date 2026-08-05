@@ -1,0 +1,1 @@
+{"path":"crates/backend/executor/exectuples/src/domain_work.rs","sloc":[36,37,38,43,44],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[28],"attr":[35],"const-static":[30,31]}}

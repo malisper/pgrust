@@ -1,0 +1,1 @@
+{"path":"crates/backend/access/transam/xlogstats/src/lib.rs","sloc":[30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,50,51,54,57,58,59,60,61,62,64,65,67,68,69,70,72,75,76,79,80,81,82,85],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[6],"attr":[3,4,13],"const-static":[8,10,11],"typedef":[14,15,16,17,21,22,23,24,25,26],"impl-header":[29]}}

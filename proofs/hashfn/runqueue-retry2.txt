@@ -1,0 +1,5 @@
+# p1-laneh RETRY-2 (2026-07-31): see arrayutils/runqueue-retry2.txt header.
+# Format: <harness> | <expected> | <tier> | <command>
+harnesses::eq_murmurhash64 | green | release-gate | timeout 3000 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_murmurhash64 --exact --solver kissat
+harnesses::murmur32_inverse_roundtrip | green | release-gate | timeout 3000 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::murmur32_inverse_roundtrip --exact --solver kissat
+harnesses::eq_string_hash_len8_huge_keysize | green | release-gate | timeout 3000 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_string_hash_len8_huge_keysize --exact --solver kissat

@@ -1,0 +1,2 @@
+€);
+insert into phrase_index_test values (to_tsvector(

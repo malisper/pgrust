@@ -1,0 +1,77 @@
+[package]
+name = "xact"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+fd = { path = "../../../storage/file/fd" }
+inval = { path = "../../../utils/cache/inval" }
+xlogutils = { path = "../xlogutils" }
+libpq_pqsignal = { path = "../../../libpq/libpq_pqsignal" }
+miscinit = { path = "../../../utils/init/miscinit" }
+resowner = { path = "../../../utils/resowner/resowner" }
+sinval = { path = "../../../storage/ipc/sinval" }
+lock = { path = "../../../storage/lmgr/lock" }
+guc = { path = "../../../utils/misc/guc" }
+portalmem = { path = "../../../utils/mmgr/portalmem" }
+relmapper = { path = "../../../utils/cache/relmapper" }
+pgstat = { path = "../../../utils/activity/pgstat" }
+bufmgr = { path = "../../../storage/buffer/bufmgr" }
+smgr = { path = "../../../storage/smgr/smgr" }
+launcher_seams = { path = "../../../replication/launcher_seams" }
+pg_prng = { path = "../../../../common/pg_prng" }
+varsup = { path = "../varsup" }
+waitevent = { path = "../../../utils/activity/waitevent" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+timeout = { path = "../../../utils/misc/timeout" }
+
+xact_seams = { path = "../xact_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+transam_seams = { path = "../transam_seams" }
+subtrans_seams = { path = "../subtrans_seams" }
+commit_ts_seams = { path = "../commit_ts_seams" }
+multixact_seams = { path = "../multixact_seams" }
+parallel_seams = { path = "../parallel_seams" }
+twophase_seams = { path = "../twophase_seams" }
+catalog_index_seams = { path = "../../../catalog/catalog_index_seams" }
+pg_enum_seams = { path = "../../../catalog/pg_enum_seams" }
+catalog_storage_seams = { path = "../../../catalog/storage_seams" }
+async_seams = { path = "../../../commands/async_seams" }
+tablecmds_seams = { path = "../../../commands/tablecmds_seams" }
+trigger_seams = { path = "../../../commands/trigger_seams" }
+be_fsstubs_seams = { path = "../../../libpq/be_fsstubs_seams" }
+origin_seams = { path = "../../../replication/origin_seams" }
+logical_seams = { path = "../../../replication/logical_seams" }
+snapbuild_seams = { path = "../../../replication/snapbuild_seams" }
+logical_worker_seams = { path = "../../../replication/logical_worker_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
+spi_seams = { path = "../../../executor/spi_seams" }
+combocid_seams = { path = "../../../utils/time/combocid_seams" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
+backend_progress_seams = { path = "../../../utils/activity/backend_progress_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+syncrep_seams = { path = "../../../replication/syncrep_seams" }
+aio_seams = { path = "../../../storage/aio/aio_seams" }
+condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
+xact_portal_seams = { path = "../xact_portal_seams" }

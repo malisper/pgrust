@@ -1,0 +1,1 @@
+{"path":"crates/backend/optimizer/util/vars/src/lib.rs","sloc":[22,23,26],"kani":[],"fuzz":[],"regress":[22,23,26],"excluded":{"use-mod":[6]}}

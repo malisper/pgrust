@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/cache/lsyscache/src/scratch.rs","sloc":[12,13,14,15,16,19,20],"kani":[],"fuzz":[],"regress":[12,13,14,15,16],"excluded":{"arm-head":[18],"use-mod":[1,2,3],"thread-local":[5,6,7]}}

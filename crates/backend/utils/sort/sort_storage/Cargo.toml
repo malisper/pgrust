@@ -1,0 +1,22 @@
+[package]
+name = "sort_storage"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+elog = { path = "../../error/elog" }
+fd = { path = "../../../storage/file/fd" }
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+
+[dev-dependencies]
+guc_tables = { path = "../../misc/guc_tables" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+aio_seams = { path = "../../../storage/aio/aio_seams" }
+waitevent_seams = { path = "../../activity/waitevent_seams" }
+pgstat_seams = { path = "../../activity/pgstat_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+resowner = { path = "../../resowner/resowner" }
+resowner_seams = { path = "../../resowner/resowner_seams" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }

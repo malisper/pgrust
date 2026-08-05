@@ -1,0 +1,90 @@
+[package]
+name = "indexcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "indexcmds"
+path = "src/lib.rs"
+
+[dependencies]
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+cmdtag = { path = "../../tcop/cmdtag" }
+event_trigger = { path = "../event_trigger" }
+reloptions = { path = "../../access/common/reloptions" }
+commands_comment = { path = "../comment" }
+coerce = { path = "../../parser/coerce" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+datum = { path = "../../../_support/types/datum" }
+elog = { path = "../../utils/error/elog" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+format_type = { path = "../../utils/adt/format_type" }
+genam = { path = "../../access/index/genam" }
+indexcmds_seams = { path = "../indexcmds_seams" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+amapi = { path = "../../access/index/amapi" }
+types_relscan = { path = "../../access/index/relscan" }
+parse_oper = { path = "../../parser/parse_oper" }
+parser_small1 = { path = "../../parser/parser_small1" }
+regproc = { package = "adt_regproc", path = "../../utils/adt/regproc" }
+mcx = { path = "../../../_support/mcx" }
+table = { path = "../../access/table/table" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_nodes = { path = "../../../_support/types/nodes" }
+catalog_index = { path = "../../catalog/catalog_index" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+execindexing = { path = "../../executor/execindexing" }
+miscinit = { path = "../../utils/init/miscinit" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+guc = { path = "../../utils/misc/guc" }
+xact = { path = "../../access/transam/xact" }
+explain = { path = "../explain" }
+tablecmds = { path = "../tablecmds" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+aclchk = { path = "../../catalog/aclchk" }
+commands_tablespace = { path = "../tablespace" }
+init_small = { path = "../../utils/init/init_small" }
+adt_acl = { path = "../../utils/adt/acl" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+lock = { path = "../../storage/lmgr/lock" }
+procarray = { path = "../../storage/ipc/procarray" }
+types_storage = { path = "../../../_support/types/types_storage" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+partcache = { path = "../../utils/cache/partcache" }
+partdesc = { path = "../../partitioning/partdesc" }
+indexam = { path = "../../access/index/indexam" }
+relcache = { path = "../../utils/cache/relcache" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+pg_depend = { path = "../../catalog/pg_depend" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+heaptuple = { path = "../../access/common/heaptuple" }
+tupdesc = { path = "../../access/common/tupdesc" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+
+clauses = { path = "../../optimizer/util/clauses" }
+vars = { path = "../../optimizer/util/vars" }
+nodes_core = { path = "../../nodes/nodes_core" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+catalog_storage = { path = "../../catalog/catalog_storage" }
+types_guc = { path = "../../../_support/types/types_guc" }
+array = { package = "types_array", path = "../../../_support/types/array" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+catalog = { path = "../../catalog/catalog" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+dbcommands_seams = { path = "../dbcommands_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+inval = { path = "../../utils/cache/inval" }
+
+pg_rusage = { path = "../../utils/misc/pg_rusage" }
+
+[dev-dependencies]

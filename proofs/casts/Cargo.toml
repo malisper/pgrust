@@ -1,0 +1,14 @@
+[package]
+name = "proof_casts"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_float = { path = "../../crates/backend/utils/adt/float" }
+adt_int = { path = "../../crates/backend/utils/adt/int" }
+adt_int8 = { path = "../../crates/backend/utils/adt/int8" }
+types_error = { path = "../../crates/_support/types/types_error" }
+datum = { path = "../../crates/_support/types/datum" }
+proof_support = { path = "../support" }

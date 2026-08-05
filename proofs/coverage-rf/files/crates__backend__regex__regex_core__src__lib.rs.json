@@ -1,0 +1,1 @@
+{"path":"crates/backend/regex/regex_core/src/lib.rs","sloc":[22,25,26,27,28],"kani":[],"fuzz":[],"regress":[22,25,26,27,28],"excluded":{"use-mod":[8,10,11,12,14,15,16,17,18,19,20,23],"attr":[1,2,3,4,5]}}

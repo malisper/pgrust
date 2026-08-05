@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/adt/formatting_seams/src/lib.rs","sloc":[8,12,13,14,15,16],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[4,5,6]}}

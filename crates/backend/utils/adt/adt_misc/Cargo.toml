@@ -1,0 +1,58 @@
+[package]
+name = "adt_misc"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+funcapi = { path = "../../fmgr/funcapi" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }
+arrayfuncs = { path = "../arrayfuncs" }
+arrayutils = { path = "../arrayutils" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+lsyscache = { path = "../../cache/lsyscache" }
+parse_utilcmd = { path = "../../../parser/parse_utilcmd" }
+adt_numeric = { path = "../numeric" }
+mbutils = { path = "../../mb/mbutils" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+genam_seams = { path = "../../../access/index/genam_seams" }
+table = { path = "../../../access/table/table" }
+dbcommands = { path = "../../../commands/dbcommands" }
+trigger_seams = { path = "../../../commands/trigger_seams" }
+init_small = { path = "../../init/init_small" }
+varlena = { path = "../varlena" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }
+xlogbackup = { path = "../../../access/transam/xlogbackup" }
+elog = { path = "../../error/elog" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+timestamp_seams = { path = "../timestamp_seams" }
+waitevent = { path = "../../activity/waitevent" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+keywords = { path = "../../../../common/keywords" }
+adt_pg_lsn = { path = "../pg_lsn" }
+xlogrecovery = { path = "../../../access/transam/xlogrecovery" }
+walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
+xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
+standby = { path = "../../../storage/ipc/standby" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+fd = { path = "../../../storage/file/fd" }
+parser_small1 = { path = "../../../parser/parser_small1" }
+ruleutils = { path = "../ruleutils" }
+format_type = { path = "../format_type" }
+miscinit = { path = "../../init/miscinit" }
+guc = { path = "../../misc/guc" }
+guc_tables = { path = "../../misc/guc_tables" }
+walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
+superuser_seams = { path = "../../misc/superuser_seams" }
+varsup = { path = "../../../access/transam/varsup" }

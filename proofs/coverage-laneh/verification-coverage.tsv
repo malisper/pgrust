@@ -1,0 +1,9 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/utils/adt/arrayutils/src/lib.rs	102	0	95	0	95
+crates/common/hashfn/src/lib.rs	164	0	163	0	163
+crates/common/pg_prng/src/lib.rs	75	0	67	0	67
+crates/common/pg_prng/src/tests.rs	0	0	0	0	0
+CRATE:crates/backend/utils/adt/arrayutils	102	0	95	0	95
+CRATE:crates/common/hashfn	164	0	163	0	163
+CRATE:crates/common/pg_prng	75	0	67	0	67
+TOTAL	341	0	325	0	325

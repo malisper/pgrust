@@ -1,0 +1,49 @@
+[package]
+name = "basebackup"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "basebackup"
+path = "src/lib.rs"
+
+[dependencies]
+pg_clock = { path = "../../../port/pg_clock" }
+libc = "0.2"
+elog = { path = "../../utils/error/elog" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }
+repl_gram = { path = "../../replication/repl_gram" }
+walsender = { path = "../../replication/walsender" }
+walsender_seams = { path = "../../replication/walsender_seams" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+ps_status = { path = "../../utils/misc/ps_status" }
+fd = { path = "../../storage/file/fd" }
+init_small = { path = "../../utils/init/init_small" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+xlogbackup = { path = "../../access/transam/xlogbackup" }
+
+# Sibling inc-5 leaf crates (delivered in parallel; converge at fabled's
+# interfaces). The root workspace wiring + these paths are reconciled at
+# integration time.
+sink = { path = "../sink" }
+backup_copy = { path = "../backup_copy" }
+backup_copy_seams = { path = "../backup_copy_seams" }
+throttle = { path = "../throttle" }
+sink_support = { path = "../sink_support" }
+manifest = { path = "../manifest" }
+
+# DestRemoteSimple result-set bridge (SendXlogRecPtrResult / SendTablespaceList).
+datum = { path = "../../../_support/types/datum" }
+fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }
+types_dest = { path = "../../../_support/types/types_dest" }
+tcop_dest = { path = "../../tcop/dest" }
+tupdesc = { path = "../../access/common/tupdesc" }
+exectuples_output = { path = "../../executor/exectuples_output" }
+varlena = { path = "../../utils/adt/varlena" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+basebackup_target = { path = "../basebackup_target" }

@@ -1,0 +1,28 @@
+[package]
+name = "init_small"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "init_small"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+# std: per-thread context pools for the whole server graph (init_small is the
+# bottom of the backend dep graph — every backend build inherits the feature).
+mcx = { path = "../../../../_support/mcx", features = ["std"] }
+guc_tables = { path = "../../misc/guc_tables" }
+init_small_seams = { path = "../init_small_seams" }
+miscinit_seams = { path = "../miscinit_seams" }
+acl_seams = { path = "../../adt/acl_seams" }
+guc_seams = { path = "../../misc/guc_seams" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_startup = { path = "../../../../_support/types/types_startup" }
+
+# `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
+# in product builds (law 0.1).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

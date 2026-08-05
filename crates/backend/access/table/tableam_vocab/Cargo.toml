@@ -1,0 +1,21 @@
+[package]
+name = "tableam_vocab"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
+syncscan_seams = { path = "../../common/syncscan_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }

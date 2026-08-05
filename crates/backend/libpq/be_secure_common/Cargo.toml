@@ -1,0 +1,24 @@
+[package]
+name = "be_secure_common"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "be_secure_common"
+path = "src/lib.rs"
+
+[dependencies]
+elog = { path = "../../utils/error/elog" }
+fd = { path = "../../storage/file/fd" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+types_error = { path = "../../../_support/types/types_error" }
+libc = "0.2"
+
+[dev-dependencies]
+aio_seams = { path = "../../storage/aio/aio_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+xact_seams = { path = "../../access/transam/xact_seams" }

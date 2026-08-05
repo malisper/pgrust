@@ -1,0 +1,16 @@
+PREFLIGHT FAIL bool/eq_bool_accum: 'proofs::eq_bool_accum' is not a harness in this crate. Candidates: harnesses::eq_bool_accum harnesses::eq_bool_accum_inv 
+PREFLIGHT FAIL bool/eq_bool_accum_inv: 'proofs::eq_bool_accum_inv' is not a harness in this crate. Candidates: harnesses::eq_bool_accum_inv 
+PREFLIGHT FAIL bool/eq_bool_alltrue: 'proofs::eq_bool_alltrue' is not a harness in this crate. Candidates: harnesses::eq_bool_alltrue 
+PREFLIGHT FAIL bool/eq_bool_anytrue: 'proofs::eq_bool_anytrue' is not a harness in this crate. Candidates: harnesses::eq_bool_anytrue 
+
+== run-kani-coverage census ==
+  jobs considered:            4
+  ran (kaniraw produced):     0
+  walled (timeout 300s):     0
+  failed to run (UNMEASURED): 4
+  no SUITE row:               0
+  census: /Users/malisper/dev/pgrust-fast/.wt-covfix/proofs/coverage/instrument-fix/census-bool-bad.tsv
+
+INCOMPLETE CAPTURE: 4 of 4 jobs produced
+  no coverage. Those are UNMEASURED, not uncovered. merge-coverage.py will
+  refuse a summary unless each is waived by name in --allow-unmeasured.

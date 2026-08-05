@@ -1,0 +1,12 @@
+# proofs/coverage/gate-remediation/lanen/network-carve.tsv
+# adt/network out-of-scope carve, adjudicated at origin/main bd0ceab3fab7
+# (p1-lanen-remediation, 2026-07-31). Universe = SLOC v2 + tables-excluded +
+# instrument line-table reinstatement (merge-coverage.py semantics, line table
+# = fuzz-network_diff lcov). Whole-crate universe 1329; carve-in-universe 57
+# (11 + 46); in-scope denominator 1272 = 1329 - 57.
+# Lane-era carve was quoted as "68 lines" under the retired pre-re-baseline
+# v1 cut (sloc_rules @29dd58eab3); ranges are UNCHANGED, only the line-count
+# basis moved. Both ranges verified to still hold at current sources.
+# columns: file<TAB>range<TAB>v2_lines_in_universe<TAB>count<TAB>justification
+crates/backend/utils/adt/network/src/builtins.rs	291-304	291,292,293,294,296,298,299,300,301,302,304	11	fc_network_subset_support (ledger oid 1173): blocked on planner SupportRequestIndexCondition node + port gap; indxpath.rs closed-set dispatch owns the C leg; fmgr arrival asserts
+crates/backend/utils/adt/network/src/builtins.rs	310-397	324,325,326,328,329,330,331,332,333,335,336,338,339,340,343,344,345,347,348,349,350,351,352,354,355,358,359,362,363,364,366,367,368,369,376,377,378,379,384,385,388,389,392,393,396,397	46	session-introspection quartet inet_client_addr/port + inet_server_addr/port (ledger oids 2196-2199) + libc netdb consts + session_addr/session_port/session_sockaddr/clean_ipv6_addr support: blocked on libc FFI (pg_getnameinfo_all) + live session state (MyProcPort); unreachable from the pure diff-fuzz plane

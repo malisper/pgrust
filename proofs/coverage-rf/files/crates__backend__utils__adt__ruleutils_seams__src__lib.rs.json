@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/adt/ruleutils_seams/src/lib.rs","sloc":[4,7,8,9,10,11,14,18,19,20,21,24,28,29,30,31],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2]}}

@@ -1,0 +1,1 @@
+{"path":"crates/contrib/seg/src/repr.rs","sloc":[25,26,27,28,29,30,31,32,36,37,38,39,40,41,42,43,44],"kani":[],"fuzz":[],"regress":[],"excluded":{"attr":[14],"const-static":[12],"typedef":[15,16,17,18,19,20,21],"impl-header":[24]}}

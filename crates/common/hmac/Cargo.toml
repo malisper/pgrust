@@ -1,0 +1,8 @@
+[package]
+name = "pg_hmac"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+pg_sha2 = { path = "../sha2" }

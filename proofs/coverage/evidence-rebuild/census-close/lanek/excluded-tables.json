@@ -1,0 +1,254 @@
+{
+ "rule": "v2+no-const-tables",
+ "note": "every const-table span excluded from the denominator; reason 'const-array-heuristic' rows are the ones to review \u2014 a span swallowing real logic is a defect",
+ "total_spans": 22,
+ "total_lines": 795,
+ "by_reason": {
+  "generated-file": 0,
+  "const-array-heuristic": 22
+ },
+ "spans": [
+  {
+   "path": "crates/common/wchar/src/lib.rs",
+   "head_line": 1466,
+   "span": [
+    1468,
+    1645
+   ],
+   "lines": 147,
+   "reason": "const-array-heuristic",
+   "head": "pub static pg_wchar_table: [pg_wchar_tbl; _PG_LAST_ENCODING_ as usize] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 629,
+   "span": [
+    630,
+    742
+   ],
+   "lines": 112,
+   "reason": "const-array-heuristic",
+   "head": "pub const DCH_KEYWORDS: &[KeyWord] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/pg_locale/src/chklocale.rs",
+   "head_line": 17,
+   "span": [
+    18,
+    128
+   ],
+   "lines": 110,
+   "reason": "const-array-heuristic",
+   "head": "const ENCODING_MATCH_LIST: &[(pg_enc, &str)] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 785,
+   "span": [
+    786,
+    880
+   ],
+   "lines": 94,
+   "reason": "const-array-heuristic",
+   "head": "pub const DCH_INDEX: [i32; KEYWORD_INDEX_SIZE] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 883,
+   "span": [
+    884,
+    978
+   ],
+   "lines": 94,
+   "reason": "const-array-heuristic",
+   "head": "pub const NUM_INDEX: [i32; KEYWORD_INDEX_SIZE] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/mbutils/src/lib.rs",
+   "head_line": 87,
+   "span": [
+    88,
+    169
+   ],
+   "lines": 81,
+   "reason": "const-array-heuristic",
+   "head": "static PG_ENCNAME: [(&str, pg_enc); 81] = ["
+  },
+  {
+   "path": "crates/backend/utils/mb/mbutils/src/lib.rs",
+   "head_line": 37,
+   "span": [
+    38,
+    80
+   ],
+   "lines": 42,
+   "reason": "const-array-heuristic",
+   "head": "static PG_ENC2NAME: [&str; wchar::_PG_LAST_ENCODING_ as usize] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 745,
+   "span": [
+    746,
+    782
+   ],
+   "lines": 36,
+   "reason": "const-array-heuristic",
+   "head": "pub const NUM_KEYWORDS: &[KeyWord] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 571,
+   "span": [
+    572,
+    614
+   ],
+   "lines": 35,
+   "reason": "const-array-heuristic",
+   "head": "pub const DCH_SUFF: &[KeySuffix] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 65,
+   "span": [
+    66,
+    78
+   ],
+   "lines": 12,
+   "reason": "const-array-heuristic",
+   "head": "pub const MONTHS_FULL: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/fmgr_builtins.rs",
+   "head_line": 144,
+   "span": [
+    145,
+    156
+   ],
+   "lines": 11,
+   "reason": "const-array-heuristic",
+   "head": "pub const FORMATTING_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 88,
+   "span": [
+    89,
+    96
+   ],
+   "lines": 7,
+   "reason": "const-array-heuristic",
+   "head": "pub const DAYS: [&str; 7] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/dch_entry.rs",
+   "head_line": 504,
+   "span": [
+    505,
+    507
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const YSUM: [[i32; 13]; 2] = ["
+  },
+  {
+   "path": "crates/backend/timezone/localtime/src/lib.rs",
+   "head_line": 167,
+   "span": [
+    168,
+    170
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const MON_LENGTHS: [[i32; MONSPERYEAR]; 2] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/calendar.rs",
+   "head_line": 1,
+   "span": [
+    2,
+    4
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "pub static DAY_TAB: [[i32; 13]; 2] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_timestamp/src/lib.rs",
+   "head_line": 1100,
+   "span": [
+    1101,
+    1103
+   ],
+   "lines": 2,
+   "reason": "const-array-heuristic",
+   "head": "const CHAIN: [i32; 10] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 83,
+   "span": [
+    84,
+    85
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub const MONTHS: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 135,
+   "span": [
+    136,
+    137
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub const RM_MONTHS_UPPER: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/formatting/src/tables.rs",
+   "head_line": 139,
+   "span": [
+    140,
+    141
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub const RM_MONTHS_LOWER: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/calendar.rs",
+   "head_line": 6,
+   "span": [
+    7,
+    8
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static MONTHS: [&str; 12] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_datetime/src/calendar.rs",
+   "head_line": 10,
+   "span": [
+    11,
+    12
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "pub static DAYS: [&str; 7] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/adt_timestamp/src/interval.rs",
+   "head_line": 1629,
+   "span": [
+    1630,
+    1631
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const CHAIN: [i32; 8] = ["
+  }
+ ]
+}

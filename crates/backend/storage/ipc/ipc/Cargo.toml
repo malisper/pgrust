@@ -1,0 +1,22 @@
+[package]
+name = "ipc"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ipc"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
+lwlock = { path = "../../lmgr/lwlock" }
+dsm_core = { path = "../dsm_core" }
+ipc_seams = { path = "../ipc_seams" }
+ipc_portal_seams = { path = "../ipc_portal_seams" }
+
+[dev-dependencies]
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }

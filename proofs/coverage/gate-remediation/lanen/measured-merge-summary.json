@@ -1,0 +1,189 @@
+{
+ "generated": "2026-07-31T23:07:55+00:00",
+ "head_sha": "bd0ceab3fab77d94af700f1d03a792c70f8abc8f",
+ "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
+ "sloc_rule_id": "v2+no-const-tables",
+ "sloc_exclusions": {
+  "else-only": 21,
+  "use-mod": 30,
+  "const-static": 16,
+  "typedef": 12,
+  "impl-header": 4,
+  "attr": 29,
+  "thread-local": 3,
+  "macro-scaffold": 16,
+  "const-table": 50,
+  "loop-only": 15
+ },
+ "line_table_inputs": [
+  "/private/tmp/claude-501/-Users-malisper-dev-pgrust-fast/2cd0edb9-da0d-4c8a-b94c-d03c38bec772/scratchpad/lanen/network_diff.rebased.lcov"
+ ],
+ "census": {
+  "expected": null,
+  "census_closed": false,
+  "kaniraw_files": 0,
+  "note": "run with --no-census-required: harnesses that failed to run are indistinguishable from covered-nothing; DO NOT PUBLISH"
+ },
+ "macro_attribution": {
+  "enabled": true,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": {
+   "files": 158,
+   "macro_defs": 320,
+   "generator_macros": 221,
+   "call_blocks": 468,
+   "decl_lines": 2293
+  }
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 0,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [
+    "/private/tmp/claude-501/-Users-malisper-dev-pgrust-fast/2cd0edb9-da0d-4c8a-b94c-d03c38bec772/scratchpad/lanen/network_diff.rebased.lcov"
+   ],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/network"
+ ],
+ "totals": {
+  "sloc": 1329,
+  "kani": 0,
+  "fuzz": 1186,
+  "regress": 0,
+  "any": 1186,
+  "pct": {
+   "kani": 0.0,
+   "fuzz": 89.24,
+   "regress": 0.0,
+   "any": 89.24
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 20,
+   "covered_sloc_in_touched_files": 1807,
+   "sloc_of_touched_files": 3919
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "network",
+   "path": "crates/backend/utils/adt/network",
+   "sloc": 1329,
+   "kani": 0,
+   "fuzz": 1186,
+   "regress": 0,
+   "any": 1186,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 89.24,
+    "regress": 0.0,
+    "any": 89.24
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/network/src/abbrev.rs",
+     "sloc": 45,
+     "kani": 0,
+     "fuzz": 37,
+     "regress": 0,
+     "any": 37,
+     "detail": "files/crates__backend__utils__adt__network__src__abbrev.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/builtins.rs",
+     "sloc": 227,
+     "kani": 0,
+     "fuzz": 131,
+     "regress": 0,
+     "any": 131,
+     "detail": "files/crates__backend__utils__adt__network__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/cidr_ntop.rs",
+     "sloc": 151,
+     "kani": 0,
+     "fuzz": 143,
+     "regress": 0,
+     "any": 143,
+     "detail": "files/crates__backend__utils__adt__network__src__cidr_ntop.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/lib.rs",
+     "sloc": 440,
+     "kani": 0,
+     "fuzz": 429,
+     "regress": 0,
+     "any": 429,
+     "detail": "files/crates__backend__utils__adt__network__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/ntop.rs",
+     "sloc": 135,
+     "kani": 0,
+     "fuzz": 125,
+     "regress": 0,
+     "any": 125,
+     "detail": "files/crates__backend__utils__adt__network__src__ntop.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/pton.rs",
+     "sloc": 331,
+     "kani": 0,
+     "fuzz": 321,
+     "regress": 0,
+     "any": 321,
+     "detail": "files/crates__backend__utils__adt__network__src__pton.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/network/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__network__src__tests.rs.json"
+    }
+   ]
+  }
+ ],
+ "auto_exceptions": {
+  "rows": 26,
+  "by_class": {
+   "auto:macro-decl": 17,
+   "auto:fmt-cont": 4,
+   "auto:table-head": 1,
+   "auto:let-decl": 4
+  },
+  "line_tables": [
+   "/private/tmp/claude-501/-Users-malisper-dev-pgrust-fast/2cd0edb9-da0d-4c8a-b94c-d03c38bec772/scratchpad/lanen/network_diff.rebased.lcov"
+  ],
+  "stats": {
+   "uncovered_lines": 143,
+   "unclassified": 116,
+   "vetoed_da_present[auto:fmt-cont]": 1
+  },
+  "note": "mechanical instrument-unmappable classification; see auto-exceptions.tsv header. auto: rows are measurement notes, never denominator changes."
+ }
+}

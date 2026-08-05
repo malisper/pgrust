@@ -1,0 +1,7 @@
+proofs::eq_json_out_len0 kissat
+proofs::eq_json_out_len1 kissat
+proofs::eq_json_out_len8 kissat
+proofs::eq_json_send_len0 kissat
+proofs::eq_json_send_len1 kissat
+proofs::eq_json_send_len8 kissat
+proofs::control_json_send_seam_skew_must_fail default

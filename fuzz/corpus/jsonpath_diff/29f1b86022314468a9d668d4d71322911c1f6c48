@@ -1,0 +1,1 @@
+$ ? (@ like_regex "pat~t@truer\\w$ ?^a\\\\\\n" flag "isim")

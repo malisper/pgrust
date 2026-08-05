@@ -1,0 +1,24 @@
+[package]
+name = "be_secure_openssl"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "be_secure_openssl"
+path = "src/lib.rs"
+
+[dependencies]
+be_secure_common = { path = "../be_secure_common" }
+elog = { path = "../../utils/error/elog" }
+fd = { path = "../../storage/file/fd" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+pg_string = { path = "../../../common/string" }
+pqcomm = { path = "../pqcomm" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+libc = "0.2"
+openssl = { version = "0.10", features = ["vendored"] }
+openssl-sys = "0.9"
+foreign-types = "0.3"

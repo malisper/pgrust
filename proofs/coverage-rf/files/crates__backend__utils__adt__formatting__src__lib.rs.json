@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/adt/formatting/src/lib.rs","sloc":[40,41],"kani":[],"fuzz":[],"regress":[40,41],"excluded":{"use-mod":[11,12,13,14,15,16,17,18,19,20,21,22,24,25,26,28,29,30,32,33,34,36,37],"attr":[1,2,3,4,5,6]}}

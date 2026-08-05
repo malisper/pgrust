@@ -1,0 +1,12 @@
+[package]
+name = "mcxt_stats"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+mcxt_seams = { path = "../mcxt_seams" }
+types_error = { path = "../../../../_support/types/types_error" }
+elog = { path = "../../error/elog" }
+init_small = { path = "../../init/init_small" }

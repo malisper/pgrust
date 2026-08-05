@@ -1,0 +1,9 @@
+network-gist	cover_strategy_partition	proofs::cover_strategy_partition
+network-gist	cover_consistent_regimes	proofs::cover_consistent_regimes
+network-gist	cover_union_regimes	proofs::cover_union_regimes
+network-gist	probe_bitncommon16	proofs::probe_bitncommon16
+network-gist	probe_union_c_vs_c	proofs::probe_union_c_vs_c
+network-gist	eq_penalty	proofs::eq_penalty
+network-gist	cover_penalty_regimes	proofs::cover_penalty_regimes
+network-gist	eq_same	proofs::eq_same
+network-gist	spec_compress_nonleaf_identity	proofs::spec_compress_nonleaf_identity

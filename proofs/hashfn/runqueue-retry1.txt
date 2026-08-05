@@ -1,0 +1,7 @@
+# p1-laneh RETRY (2026-07-31): three 900s timeouts in fleet job -21199
+# (64-bit constant-multiplication chains / huge-keysize Min fold). 1800s cap
+# under the big-memory shape.
+# Format: <harness> | <expected> | <tier> | <command>
+harnesses::eq_murmurhash64 | green | release-gate | timeout 1800 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_murmurhash64 --exact --solver kissat
+harnesses::murmur32_inverse_roundtrip | green | release-gate | timeout 1800 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::murmur32_inverse_roundtrip --exact --solver kissat
+harnesses::eq_string_hash_len8_huge_keysize | green | release-gate | timeout 1800 cargo kani -Z c-ffi --c-lib c_hashfn.c --harness harnesses::eq_string_hash_len8_huge_keysize --exact --solver kissat

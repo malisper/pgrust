@@ -1,0 +1,16 @@
+[package]
+name = "dshash"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+hashfn = { path = "../../../common/hashfn" }
+init_small = { path = "../../utils/init/init_small" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+types_error = { path = "../../../_support/types/types_error" }
+
+[dev-dependencies]
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }

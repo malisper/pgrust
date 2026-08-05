@@ -1,0 +1,44 @@
+[package]
+name = "relcache"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+fd = { path = "../../../storage/file/fd" }
+libc = "0.2"
+types_relscan = { path = "../../../access/index/relscan" }
+types_trigger = { path = "../../../../_support/types/types_trigger" }
+mcx = { path = "../../../../_support/mcx" }
+jit_deform = { path = "../../../../_support/jit_deform" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+elog = { path = "../../error/elog" }
+init_small = { path = "../../init/init_small" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+smgr = { path = "../../../storage/smgr/smgr" }
+snapmgr = { path = "../../time/snapmgr" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+readfuncs = { path = "../../../nodes/readfuncs" }
+relcache_seams = { path = "../relcache_seams" }
+parallel_seams = { path = "../../../access/transam/parallel_seams" }
+catalog_storage_seams = { path = "../../../catalog/storage_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+inval_seams = { path = "../inval_seams" }
+relcache_build_seams = { path = "../relcache_build_seams" }
+relmapper_seams = { path = "../relmapper_seams" }
+syscache_seams = { path = "../syscache_seams" }
+tableam_vocab = { path = "../../../access/table/tableam_vocab" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+
+[dev-dependencies]
+catalog_seams = { path = "../../../catalog/catalog_seams" }

@@ -1,0 +1,33 @@
+[package]
+name = "pg_db_role_setting"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_db_role_setting"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_rel = { path = "../../../_support/types/rel" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+genam = { path = "../../access/index/genam" }
+table = { path = "../../access/table/table" }
+catalog_indexing = { path = "../catalog_indexing" }
+pg_db_role_setting_seams = { path = "../pg_db_role_setting_seams" }
+types_nodes = { path = "../../../_support/types/nodes" }
+elog = { path = "../../utils/error/elog" }
+guc = { path = "../../utils/misc/guc" }
+guc_funcs = { path = "../../utils/misc/guc_funcs" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+detoast = { path = "../../access/common/detoast" }
+varlena = { path = "../../utils/adt/varlena" }
+heaptuple = { path = "../../access/common/heaptuple" }

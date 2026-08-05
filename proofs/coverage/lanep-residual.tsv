@@ -1,0 +1,32 @@
+# p1-lanep out-of-scope carve + residual ledger (adt/scalar + adt/xid8funcs),
+# laned int8-residual.tsv precedent. These line ranges leave the phase-1
+# denominator by CARVE (named class), not by exception row. SLOC v2 line
+# numbers at branch proofs/p1-lanep (post-merge 553f061752 tree).
+# columns: file<TAB>lines<TAB>class<TAB>why
+crates/backend/utils/adt/scalar/src/currtid.rs	20-275 (all 177 sloc)	carve:state	catalog/snapshot/ACL/relcache seams (currtid_internal + currtid_for_view); ledger 1294 excluded(state)
+crates/backend/utils/adt/scalar/src/lib.rs	77-91	carve:state	xid_age/mxid_age read xact-seam stable latest xid (GetStableLatestTransactionId)
+crates/backend/utils/adt/scalar/src/builtins.rs	66-77	carve:state	fc_xid_age/fc_mxid_age wrappers of the carved cores
+crates/backend/utils/adt/scalar/src/builtins.rs	465-476	carve:state	fc_currtid_byreloid/byrelname wrappers (currtid carve)
+crates/backend/utils/adt/scalar/src/builtins.rs	108-111,159-162,216-219,354-359	carve:recv-abi	fc_oidrecv/fc_xidrecv/fc_xid8recv/fc_tidrecv — pointer-datum recv ABI (ledger 2418/2440/2442/2438/5082 excluded precedent)
+crates/backend/utils/adt/xid8funcs/src/lib.rs	317-416	carve:state	pg_current_xact_id(_if_assigned)/pg_current_snapshot/pg_xact_status — live-xact/procarray/clog seams (ledger 2943/2944/3348/3360/5059-5061/5066 excluded)
+crates/backend/utils/adt/xid8funcs/src/builtins.rs	61-82,131-141,145-161	carve:state	fc_pg_current_* / fc_pg_xact_status / fc_pg_export_snapshot wrappers
+crates/backend/utils/adt/xid8funcs/src/builtins.rs	106-127	carve:srf	fc_pg_snapshot_xip SRF protocol (ledger 2947/5064 excluded(engine: SRF))
+# MEASUREMENT NOTES (executed/proof-covered lines the fuzz instrument leaves
+# unmapped or that pend the fulltree Kani join — NOT exceptions, NOT carves):
+crates/backend/utils/adt/scalar/src/builtins.rs	16-21,34-35,240-245,381-386,557-561	note:macro-unmapped	cmp-op macro invocation groups; expansions ARE dispatched (all ops driven, fleet 2x10.0M) — known instrument-unmapped macro class
+crates/backend/utils/adt/scalar/src/lib.rs	20,28-30	note:macro-unmapped	oid_cmp_ops macro def/invocation lines; all six ops dispatched
+crates/backend/utils/adt/scalar/src/builtins.rs	564-571,576	note:const-machinery	const fn b + SCALAR_BUILTINS table head (fmgrtab const machinery class, adt_ascii 140/141/144 precedent)
+crates/backend/utils/adt/xid8funcs/src/builtins.rs	166	note:const-machinery	XID8FUNCS_BUILTINS table head
+crates/backend/utils/adt/xid8funcs/src/lib.rs	183	note:fmt-literal	multiline format! literal inside bad_format_err (fc*!/format! false-UNCOVERED class); arm exercised by every bad-format fuzz input
+crates/backend/utils/adt/xid8funcs/src/lib.rs	81-91	note:proof-covered-unmeasured	full_xid_from_allowable_at proved full-domain (proofs/scalar-datum eq_fxid_from_allowable_at); fulltree Kani join converts
+crates/backend/utils/adt/scalar/src/datum_ops.rs	20-113,116-131 (get_size/copy/transfer/is_equal/estimate paths)	note:proof-covered-unmeasured	16 fleet-green scalar-datum harnesses (suite job -51300); fulltree join converts; serialize/restore lines ride the fuzz route (datum arms, round-3)
+crates/backend/utils/adt/scalar/src/datum_ops.rs	87-91,113,156,184-185,201-202,206-209	carve:eoh-state	EXPANDED-OBJECT (EOH) arms: flatten/transfer machinery is session/expanded-object state, fenced out of BOTH the proof family (trap stubs asserted-unfired) and the fuzz input plane (generated datums never carry VARTAG_EXPANDED_*); phase-1 out-of-scope class
+# DOCUMENTED FENCES (datum_ops differential target header + proofs/scalar-datum README):
+# (a) typlen=-1 with NULL pointer excluded from copy/estimate/serialize input
+#     planes — C derefs the pointer in the expanded-header probe BEFORE any
+#     NULL check; the port faithfully matches (both-sides crash arm, not a
+#     comparable verdict plane).
+# (b) datum_restore on corrupt/undefined images: pgrust release-asserts where
+#     C's Assert compiles out and memcpy's garbage — the known
+#     hardening-deviation class (debug-assert-masking law: deviation is
+#     DOCUMENTED, deliberately not ported to garbage-copy parity).

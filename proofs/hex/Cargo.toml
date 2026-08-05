@@ -1,0 +1,13 @@
+[package]
+name = "t6_hex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+mcx = { path = "../../crates/_support/mcx" }
+mbutils_seams = { path = "../../crates/backend/utils/mb/mbutils_seams" }
+types_error = { path = "../../crates/_support/types/types_error" }
+proof_support = { path = "../support", features = ["mcx-stubs"] }
+
+[workspace]

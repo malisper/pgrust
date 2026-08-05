@@ -1,0 +1,5 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+bool	eq_bool_accum	proofs::eq_bool_accum	-	0	NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_accum harnesses::eq_bool_accum_inv	FAILED-TO-RUN	0
+bool	eq_bool_accum_inv	proofs::eq_bool_accum_inv	-	0	NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_accum_inv	FAILED-TO-RUN	0
+bool	eq_bool_alltrue	proofs::eq_bool_alltrue	-	0	NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_alltrue	FAILED-TO-RUN	0
+bool	eq_bool_anytrue	proofs::eq_bool_anytrue	-	0	NAME-UNRESOLVED did-you-mean:harnesses::eq_bool_anytrue	FAILED-TO-RUN	0

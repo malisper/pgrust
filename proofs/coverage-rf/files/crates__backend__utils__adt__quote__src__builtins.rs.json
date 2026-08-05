@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/adt/quote/src/builtins.rs","sloc":[8,10,11,12,15,17,18,19,22,23,24,25,28,29,32,33,37],"kani":[],"fuzz":[],"regress":[8,10,11,12,15,17,18,19,22,23,24,25,28,29],"excluded":{"use-mod":[1,2,3,4,5],"const-table":[38,39,40]}}

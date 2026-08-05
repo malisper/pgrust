@@ -1,0 +1,38 @@
+# json_diff dictionary (scaffolded by fuzz/scaffold.py).
+# TODO(scaffold): add multi-byte tokens the parsers compare against —
+# keywords, unit suffixes, type-name literals, format tokens — harvested
+# mechanically from the vendored regress SQL literals (gen_seeds.sh pattern)
+# plus every past divergence. CmpLog + dictionary is day-one for
+# parser-shaped targets (fuzzuproof-crate skill).
+# arm selectors
+"\x00"
+"\x01"
+"\x02"
+"\x03"
+"\x04"
+"\x05"
+"\x06"
+"\x07"
+"\x08"
+"\x09"
+"\x0a"
+"\x0b"
+"\x0c"
+"\x0d"
+# json tokens
+"true"
+"false"
+"null"
+"\\u"
+"\\ud83d"
+"\\ude00"
+"\\u0000"
+"\\uDBFF"
+"\\uDC00"
+"e+10"
+"E-05"
+"{\"a\":"
+"[1,2,3]"
+"\" : \""
+", "
+"...\x22"

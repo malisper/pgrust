@@ -1,0 +1,4 @@
+);
+
+-- check parsing of URLs
+SELECT * from ts_debug(

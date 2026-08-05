@@ -1,0 +1,71 @@
+[package]
+name = "commands_cluster"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_scan = { path = "../../../_support/types/types_scan" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+heaptuple = { path = "../../access/common/heaptuple" }
+reloptions = { path = "../../access/common/reloptions" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+catalog = { path = "../../catalog/catalog" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_toasting = { path = "../../catalog/catalog_toasting" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+relcache = { path = "../../utils/cache/relcache" }
+procarray = { path = "../../storage/ipc/procarray" }
+multixact = { path = "../../access/transam/multixact" }
+xact = { path = "../../access/transam/xact" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+cluster_seams = { path = "../cluster_seams" }
+commands_vacuum = { path = "../vacuum" }
+explain = { path = "../explain" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_index = { path = "../../catalog/catalog_index" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+indexam = { path = "../../access/index/indexam" }
+nbtree = { path = "../../access/nbtree/nbtree" }
+execindexing = { path = "../../executor/execindexing" }
+tableam = { path = "../../access/table/tableam" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+tuplesort = { path = "../../utils/sort/tuplesort" }
+rewriteheap = { path = "../../access/heap/rewriteheap" }
+heaptoast = { path = "../../access/heap/heaptoast" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+heapam_visibility = { path = "../../access/heap/heapam_visibility" }
+bufmgr = { path = "../../storage/buffer/bufmgr" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+planner = { path = "../../optimizer/plan/planner" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+miscinit = { path = "../../utils/init/miscinit" }
+elog = { path = "../../utils/error/elog" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+exectuples = { path = "../../executor/exectuples" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+init_small = { path = "../../utils/init/init_small" }
+guc = { path = "../../utils/misc/guc" }
+inval = { path = "../../utils/cache/inval" }
+relmapper = { path = "../../utils/cache/relmapper" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+pg_rusage = { path = "../../utils/misc/pg_rusage" }

@@ -1,0 +1,8 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+aclcheck	proofs::control_catalog_owner_noskew	proofs::control_catalog_owner_noskew	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+aclcheck	proofs::control_membership_noskew	proofs::control_membership_noskew	0	59	VERIFICATION:- SUCCESSFUL	RAN	1
+aclcheck	proofs::diag_c_probe_strip	proofs::diag_c_probe_strip	0	12	VERIFICATION:- SUCCESSFUL	RAN	1
+aclcheck	proofs::diag_seam_visibility	proofs::diag_seam_visibility	0	35	VERIFICATION:- SUCCESSFUL	RAN	1
+aclcheck	proofs::eq_aclinsert	proofs::eq_aclinsert	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+aclcheck	proofs::eq_aclremove	proofs::eq_aclremove	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+aclcheck	proofs::spot_acldefault_sql_bad_char	proofs::spot_acldefault_sql_bad_char	0	123	VERIFICATION:- SUCCESSFUL	RAN	1

@@ -1,0 +1,13 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+name-ascii	eq_btnamecmp_cap16	proofs::eq_btnamecmp_cap16	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_btnamecmp_full64	proofs::eq_btnamecmp_full64	0	23	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_name_text_payload	proofs::eq_name_text_payload	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_nameeq_full64	proofs::eq_nameeq_full64	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_namege_full64	proofs::eq_namege_full64	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_namegt_full64	proofs::eq_namegt_full64	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_namein_sym_len_le_71	proofs::eq_namein_sym_len_le_71	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_namele_full64	proofs::eq_namele_full64	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_namelt_full64	proofs::eq_namelt_full64	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_namene_full64	proofs::eq_namene_full64	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_text_name_sym_len_le_71	proofs::eq_text_name_sym_len_le_71	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+name-ascii	eq_to_ascii_latin1	proofs::eq_to_ascii_latin1	0	8	VERIFICATION:- SUCCESSFUL	RAN	1

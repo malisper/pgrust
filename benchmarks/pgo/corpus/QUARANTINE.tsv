@@ -1,0 +1,10 @@
+# Shape classes held OUT of the emitted training vectors, and why.
+# Format: <shape-id><TAB><reason>
+#
+# A quarantined statement STAYS in corpus/analytics-hits.sql — it is still
+# linted, still documented, still reproducible. It is only excluded from the
+# text a profile run executes, and gen-corpus.sh prints a loud line naming
+# every exclusion so it cannot become invisible. Empty file = nothing excluded.
+#
+# Quarantine is for statements the ENGINE cannot currently survive, never for
+# statements that are inconvenient. Each line must name a defect to close.

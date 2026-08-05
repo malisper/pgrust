@@ -1,0 +1,18 @@
+# fmt_dch_diff dictionary: every DCH keyword + suffixes + separators
+# (DCH_keywords table, formatting.c @ 62d6c7d3df) + regress literal shapes.
+"A.D." "A.M." "AD" "AM" "B.C." "BC" "CC" "DAY" "DDD" "DD" "DY" "Day"
+"Dy" "D" "FX" "HH24" "HH12" "HH" "IDDD" "ID" "IW" "IYYY" "IYY" "IY" "I"
+"J" "MI" "MM" "MONTH" "MON" "MS" "Month" "Mon" "OF" "P.M." "PM" "Q" "RM"
+"SSSS" "SS" "TZH" "TZM" "TZ" "US" "WW" "W" "Y,YYY" "YYYY" "YYY" "YY" "Y"
+"a.d." "a.m." "ad" "am" "b.c." "bc" "cc" "day" "ddd" "dd" "dy" "d" "fx"
+"hh24" "hh12" "hh" "iddd" "id" "iw" "iyyy" "iyy" "iy" "i" "j" "mi" "mm"
+"month" "mon" "ms" "of" "p.m." "pm" "q" "rm" "ssss" "ss" "sssss" "tzh"
+"tzm" "tz" "us" "ww" "w" "y,yyy" "yyyy" "yyy" "yy" "y"
+# prefixes / suffixes
+"FM" "fm" "TM" "tm" "TH" "th" "SP"
+# literal/escape machinery
+"\"" "\\" "\"quoted literal\""
+# separators and datetime input shapes
+"-" "/" ":" "." "," " " "+05:30" "-08" "2000-01-01" "23:59:59.999999"
+"4713" "BC" "infinity" "-infinity" "gmt" "GMT" "est" "294276"
+"4294969320,024" "0000" "00000000" "9999999999"

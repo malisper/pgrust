@@ -1,0 +1,148 @@
+{
+ "generated": "2026-07-31T23:56:50+00:00",
+ "head_sha": "7d2f558204b1dfa8bf977dd9707b91f17d5fb282",
+ "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
+ "sloc_rule_id": "v2+no-const-tables",
+ "sloc_exclusions": {
+  "else-only": 66,
+  "loop-only": 3,
+  "unsafe-only": 2,
+  "arm-head": 23,
+  "use-mod": 67,
+  "attr": 73,
+  "const-static": 15,
+  "typedef": 34,
+  "impl-header": 3,
+  "thread-local": 6,
+  "macro-scaffold": 20,
+  "const-table": 112,
+  "arrow-only": 3,
+  "type-alias": 1
+ },
+ "line_table_inputs": [
+  "fuzz/coverage/timestamp_diff.lcov"
+ ],
+ "census": {
+  "expected": null,
+  "census_closed": false,
+  "kaniraw_files": 0,
+  "note": "run with --no-census-required: harnesses that failed to run are indistinguishable from covered-nothing; DO NOT PUBLISH"
+ },
+ "macro_attribution": {
+  "enabled": true,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": {
+   "files": 155,
+   "macro_defs": 320,
+   "generator_macros": 221,
+   "call_blocks": 468,
+   "decl_lines": 2293
+  }
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 0,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [
+    "fuzz/coverage/timestamp_diff.lcov"
+   ],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/adt_timestamp"
+ ],
+ "totals": {
+  "sloc": 3140,
+  "kani": 0,
+  "fuzz": 2141,
+  "regress": 0,
+  "any": 2141,
+  "pct": {
+   "kani": 0.0,
+   "fuzz": 68.18,
+   "regress": 0.0,
+   "any": 68.18
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 55,
+   "covered_sloc_in_touched_files": 7318,
+   "sloc_of_touched_files": 16992
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "adt_timestamp",
+   "path": "crates/backend/utils/adt/adt_timestamp",
+   "sloc": 3140,
+   "kani": 0,
+   "fuzz": 2141,
+   "regress": 0,
+   "any": 2141,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 68.18,
+    "regress": 0.0,
+    "any": 68.18
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/adt_timestamp/src/builtins.rs",
+     "sloc": 869,
+     "kani": 0,
+     "fuzz": 371,
+     "regress": 0,
+     "any": 371,
+     "detail": "files/crates__backend__utils__adt__adt_timestamp__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/adt_timestamp/src/interval.rs",
+     "sloc": 1199,
+     "kani": 0,
+     "fuzz": 1000,
+     "regress": 0,
+     "any": 1000,
+     "detail": "files/crates__backend__utils__adt__adt_timestamp__src__interval.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/adt_timestamp/src/lib.rs",
+     "sloc": 1072,
+     "kani": 0,
+     "fuzz": 770,
+     "regress": 0,
+     "any": 770,
+     "detail": "files/crates__backend__utils__adt__adt_timestamp__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/adt_timestamp/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__adt_timestamp__src__tests.rs.json"
+    }
+   ]
+  }
+ ]
+}

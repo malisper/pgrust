@@ -1,0 +1,325 @@
+556	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+557	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+558	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+559	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+560	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+561	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+562	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+563	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+564	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+565	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+566	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+567	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+568	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+569	class mismatch - deliberate unreachable panic stub filed as platform-other not a platform arm
+7369	kani-measured in fulltree capture, convert per fulltree-join rule
+7370	kani-measured in fulltree capture, convert per fulltree-join rule
+7371	kani-measured in fulltree capture, convert per fulltree-join rule
+7372	kani-measured in fulltree capture, convert per fulltree-join rule
+7373	kani-measured in fulltree capture, convert per fulltree-join rule
+7374	kani-measured in fulltree capture, convert per fulltree-join rule
+8297	measured double-count - fuzz
+8298	measured double-count - fuzz
+8299	measured double-count - fuzz
+8300	measured double-count - fuzz
+8337	FLAGGED fuzz-measured double-count: line 112 is hashtext_nondeterministic fn signature, a dispatch gate executed on the deterministic fuzz-covered path (3 fuzz lcov artifacts), not the nondeterministic arm
+8338	FLAGGED fuzz-measured double-count: line 113 (collid param) same dispatch-gate signature, fuzz-executed under deterministic collations
+8339	FLAGGED fuzz-measured double-count: line 114 (data param) same dispatch-gate signature, fuzz-executed under deterministic collations
+8340	FLAGGED fuzz-measured double-count: line 115 (seed param) same dispatch-gate signature, fuzz-executed under deterministic collations
+8341	FLAGGED fuzz-measured double-count: line 116 (return type) same dispatch-gate signature, fuzz-executed under deterministic collations
+8342	FLAGGED fuzz-measured double-count: line 119 OidIsValid check runs on every hashtext call including the deterministic fuzz-covered path
+8343	FLAGGED fuzz-measured double-count: line 120 invalid-collid error return, fuzz-measured per lcov artifacts
+8344	FLAGGED fuzz-measured double-count: line 122 collation_is_c_known_pub check runs on every call, taken on the deterministic fuzz-covered path
+8345	FLAGGED fuzz-measured double-count: line 123 Ok(None) return is the deterministic C-collation exit, fuzz-executed
+8414	kani-measured in fulltree capture, convert per fulltree-join rule
+8435	FLAGGED line drift: line 714 is the empty-needle early return of text_position_next, reachable regardless of encoding, not the is_multibyte_char_in_char refpoint-retry construct the justification describes
+8956	FLAGGED-c-citation-mismatch: row says no C counterpart check but vendored rangetypes.c:2793-2796 carries the identical elog cannot store a toast pointer inside a range - the detoast_bound_packed fence argument itself looks sound but the C description is wrong
+9004	FLAGGED-line-drift: ops.rs:334 is the UnionResult::New construction line of range_union_internal, not the Input1/Input2 empty short-circuits - those are lines 316/319 and are runtime-reachable anyway via fc_range_merge builtins.rs:361 with an empty operand
+9023	FLAGGED-fence-does-not-hold: multirange_intersect_internal has a second live caller fc_multirange_intersect_agg_transfn at builtins.rs:327 with no empty pre-check, so lib.rs:834 executes at runtime for range_intersect_agg over any empty multirange input - the row itself admits this caller and waves it off as an out-of-scope carve, which is not a structural fence
+9200	FLAGGED-line drift: io.rs:114 is uniqueentry dedup (res += 1) which is input-reachable; the justified post-gettoken soft-error backstop now sits at io.rs:97-101 (error_occurred return)
+9204	non-v2 off-denominator
+9205	non-v2 off-denominator
+9206	non-v2 off-denominator
+9207	non-v2 off-denominator
+9208	FLAGGED-line drift: justified at-end arm (returns 1) is parser.rs:90; line 92 is the reachable pg_mblen call taken on every non-at-end mblen
+9209	non-v2 off-denominator
+9210	non-v2 off-denominator
+9213	FLAGGED-line-drift: parser.rs:166 is return Ok(Next::Tok) - the reachable normal token-end line - while the empty-word syntax_error the justification describes sits at line 164
+9214	FLAGGED-line-drift: parser.rs:171 is if self.oprisdelim - a reachable dispatch line - while the empty-word syntax_error the justification describes sits at line 169
+9220	FLAGGED-C counterpart carries no equivalent check: ts_type.h is a header domain contract and C reads QueryItem.type via unchecked struct pun (nearest C guard is the consumer elog default arms already ledgered separately)
+9236	non-v2 off-denominator
+9243	non-v2 off-denominator
+9349	FLAGGED-input-dependent-not-structural: the slen > i32::MAX/100 arm at pglz lib.rs:322 fires for any compress input over about 21.4MB, trivially constructible via large toast values - the justification is a fuzz-cap infeasibility argument, not const-decided or structurally unreachable
+9350	FLAGGED-input-dependent-not-structural: same arm as 9349 - reachable with any pglz input over about 21.4MB
+9351	FLAGGED-input-dependent-not-structural: too_large fires whenever encode/decode resultlen exceeds MaxAllocSize, reachable with inputs over about 512MiB - a genuine user-facing ereport path in C, gated only by fuzz input caps
+9352	FLAGGED-input-dependent-not-structural: body line of too_large - same reachability as 9351
+9353	FLAGGED-input-dependent-not-structural: body line of too_large - same reachability as 9351
+9354	FLAGGED-input-dependent-not-structural: body line of too_large - same reachability as 9351
+9355	FLAGGED-input-dependent-not-structural: binary_encode too_large call site at lib.rs:86 - reachable with a bytea over about 512MiB hex-encoded
+9356	FLAGGED-input-dependent-not-structural: binary_decode too_large call site at lib.rs:104 - reachable with a text input decoding past MaxAllocSize
+9467	measured double-count - kani
+9617	FLAGGED misclassified: line 334 is const fn b, the generic non-SRF builtin-table constructor serving all int8 builtins, not the generate_series SRF or support construct
+9618	FLAGGED misclassified: line 335 FmgrBuiltin literal open of const fn b, not the SRF construct
+9619	FLAGGED misclassified: line 336 foid field of const fn b body, not the SRF construct
+9620	FLAGGED misclassified: line 337 name field of const fn b body, not the SRF construct
+9621	FLAGGED misclassified: line 338 nargs field of const fn b body, not the SRF construct
+9622	FLAGGED misclassified: line 339 strict field of const fn b body, not the SRF construct
+9623	FLAGGED misclassified: line 340 retset false field of const fn b body, marking non-SRF rows, not the SRF construct
+9624	FLAGGED misclassified: line 341 func field of const fn b body, not the SRF construct
+9625	FLAGGED line drift: line 346 is the INT8_BUILTINS table declaration head, the srf(1068) row the justification names is line 347, off by one
+9630	measured double-count - kani
+9631	measured double-count - kani
+9654	recv fcinfo wrapper (fc_bits_recv/fc_bit_recv/fc_varbit_recv) not executed by any proof - the varbit-rows recv harness calls adt_varbit::bits_recv core directly so only 903-926 are proof-covered
+9655	recv fcinfo wrapper (fc_bits_recv/fc_bit_recv/fc_varbit_recv) not executed by any proof - the varbit-rows recv harness calls adt_varbit::bits_recv core directly so only 903-926 are proof-covered
+9656	recv fcinfo wrapper (fc_bits_recv/fc_bit_recv/fc_varbit_recv) not executed by any proof - the varbit-rows recv harness calls adt_varbit::bits_recv core directly so only 903-926 are proof-covered
+9657	recv fcinfo wrapper (fc_bits_recv/fc_bit_recv/fc_varbit_recv) not executed by any proof - the varbit-rows recv harness calls adt_varbit::bits_recv core directly so only 903-926 are proof-covered
+9658	recv fcinfo wrapper (fc_bits_recv/fc_bit_recv/fc_varbit_recv) not executed by any proof - the varbit-rows recv harness calls adt_varbit::bits_recv core directly so only 903-926 are proof-covered
+9659	recv fcinfo wrapper (fc_bits_recv/fc_bit_recv/fc_varbit_recv) not executed by any proof - the varbit-rows recv harness calls adt_varbit::bits_recv core directly so only 903-926 are proof-covered
+9660	recv fcinfo wrapper (fc_bits_recv/fc_bit_recv/fc_varbit_recv) not executed by any proof - the varbit-rows recv harness calls adt_varbit::bits_recv core directly so only 903-926 are proof-covered
+9661	recv fcinfo wrapper (fc_bits_recv/fc_bit_recv/fc_varbit_recv) not executed by any proof - the varbit-rows recv harness calls adt_varbit::bits_recv core directly so only 903-926 are proof-covered
+9662	recv fcinfo wrapper (fc_bits_recv/fc_bit_recv/fc_varbit_recv) not executed by any proof - the varbit-rows recv harness calls adt_varbit::bits_recv core directly so only 903-926 are proof-covered
+9673	fc_varbit_send wrapper not executed by any proof - the send harness calls only adt_varbit::fc_bit_send despite the ledger claiming varbit_send proved at the shipped fc wrapper
+9674	fc_varbit_send wrapper not executed by any proof - the send harness calls only adt_varbit::fc_bit_send despite the ledger claiming varbit_send proved at the shipped fc wrapper
+9675	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9676	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9677	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9678	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9679	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9680	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9681	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9682	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9683	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9684	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9685	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9686	line is in fcinfo wrapper or cstring[] typmod-array parse (arg_typmod_array/fc_bit_typmodin/fc_bittypmodin) not the proved anybit_typmodin core at 213-235 - harness eq_anybit_typmodin calls the i32-slice core directly and ledger status calls the cstring[] parse tested-tier
+9687	line is fc_bit_typmodout body not typmodin - cited ledger rows are bittypmodin/varbittypmodin while bittypmodout 2920 and varbittypmodout 2921 are status excluded(blocked format-machinery) so no proof covers this line
+9688	line is fc_bit_typmodout body not typmodin - cited ledger rows are bittypmodin/varbittypmodin while bittypmodout 2920 and varbittypmodout 2921 are status excluded(blocked format-machinery) so no proof covers this line
+9689	line is fc_bit_typmodout body not typmodin - cited ledger rows are bittypmodin/varbittypmodin while bittypmodout 2920 and varbittypmodout 2921 are status excluded(blocked format-machinery) so no proof covers this line
+9690	line is fc_bit_typmodout body not typmodin - cited ledger rows are bittypmodin/varbittypmodin while bittypmodout 2920 and varbittypmodout 2921 are status excluded(blocked format-machinery) so no proof covers this line
+9691	line is fc_bit_typmodout body not typmodin - cited ledger rows are bittypmodin/varbittypmodin while bittypmodout 2920 and varbittypmodout 2921 are status excluded(blocked format-machinery) so no proof covers this line
+9692	line is fc_bit_typmodout body not typmodin - cited ledger rows are bittypmodin/varbittypmodin while bittypmodout 2920 and varbittypmodout 2921 are status excluded(blocked format-machinery) so no proof covers this line
+9838	measured double-count - kani
+9839	measured double-count - kani
+9840	measured double-count - kani
+9841	measured double-count - kani
+9842	measured double-count - kani
+9843	measured double-count - kani
+9844	non-v2 off-denominator
+9845	non-v2 off-denominator
+9846	measured double-count - kani plus class drift fn-signature line not macro-decl
+9847	measured double-count - kani plus class drift fn-signature line not macro-decl
+9848	measured double-count - kani plus class drift fn-signature line not macro-decl
+9849	measured double-count - kani plus class drift fn-signature line not macro-decl
+9850	measured double-count - kani plus class drift fn-signature line not macro-decl
+9851	measured double-count - kani plus class drift fn-signature line not macro-decl
+9852	measured double-count - kani
+9853	measured double-count - kani
+9854	measured double-count - kani
+9857	measured double-count - kani
+9858	measured double-count - kani
+9859	measured double-count - kani
+9861	measured double-count - kani
+9893	measured double-count - kani
+9894	measured double-count - kani
+9895	measured double-count - kani
+9896	measured double-count - kani
+9897	measured double-count - kani
+9898	measured double-count - kani
+9899	measured double-count - kani
+9900	measured double-count - kani
+9901	measured double-count - kani
+9902	measured double-count - kani
+9923	measured double-count - kani
+9924	measured double-count - kani
+9925	measured double-count - kani
+9926	measured double-count - kani
+9927	measured double-count - kani
+9928	measured double-count - kani
+9929	kani-measured in fulltree capture, convert per fulltree-join rule
+9930	kani-measured in fulltree capture, convert per fulltree-join rule
+9931	kani-measured in fulltree capture, convert per fulltree-join rule
+9932	kani-measured in fulltree capture, convert per fulltree-join rule
+9933	kani-measured in fulltree capture, convert per fulltree-join rule
+9934	kani-measured in fulltree capture, convert per fulltree-join rule
+9935	kani-measured in fulltree capture, convert per fulltree-join rule
+9936	kani-measured in fulltree capture, convert per fulltree-join rule
+9937	kani-measured in fulltree capture, convert per fulltree-join rule
+9938	kani-measured in fulltree capture, convert per fulltree-join rule
+9939	kani-measured in fulltree capture, convert per fulltree-join rule
+9940	kani-measured in fulltree capture, convert per fulltree-join rule
+9941	kani-measured in fulltree capture, convert per fulltree-join rule
+9942	kani-measured in fulltree capture, convert per fulltree-join rule
+9943	kani-measured in fulltree capture, convert per fulltree-join rule
+9944	kani-measured in fulltree capture, convert per fulltree-join rule
+9945	kani-measured in fulltree capture, convert per fulltree-join rule
+9946	kani-measured in fulltree capture, convert per fulltree-join rule
+9947	kani-measured in fulltree capture, convert per fulltree-join rule
+9948	kani-measured in fulltree capture, convert per fulltree-join rule
+9949	kani-measured in fulltree capture, convert per fulltree-join rule
+9950	kani-measured in fulltree capture, convert per fulltree-join rule
+9951	kani-measured in fulltree capture, convert per fulltree-join rule
+9952	kani-measured in fulltree capture, convert per fulltree-join rule
+9953	kani-measured in fulltree capture, convert per fulltree-join rule
+9954	kani-measured in fulltree capture, convert per fulltree-join rule
+9955	FLAGGED-non-v2 off-denominator: line 145 is a brace-only line (close of the try_reserve arm) and the claimed types_error::never_reached! wrapper does not exist anywhere in this checkout
+9956	FLAGGED-stale mechanism: claimed types_error::never_reached! wrapper (exceptions.rs) absent from tree - line 286 is a plain question-mark unwind edge of buildint2vector and the in-loop OOM arm the row describes is at 280-282
+9957	FLAGGED-non-v2 off-denominator: line 287 is a brace-only function-closing line and the claimed never_reached! wrapper does not exist in this checkout
+9958	FLAGGED-line drift: line 308 is the space-separator branch (if i != 0) inside the output loop and is input-reachable with 2+ elements; the int2vectorout OOM arm is at 299-301 and the claimed never_reached! wrapper is absent
+9960	non-v2 off-denominator
+9962	non-v2 off-denominator
+9964	non-v2 off-denominator
+9979	measured double-count - kani
+9983	FLAGGED-no C-side check: C fmgr never tests flinfo (a missing flinfo would be a straight deref) so there is no equivalent C defensive check to mirror and the c_counterpart column is empty
+9984	FLAGGED-no C-side check: C fmgr never tests flinfo (a missing flinfo would be a straight deref) so there is no equivalent C defensive check to mirror and the c_counterpart column is empty
+10054	kani-measured in fulltree capture, convert per fulltree-join rule
+10055	kani-measured in fulltree capture, convert per fulltree-join rule
+10056	measured double-count - kani
+10057	kani-measured in fulltree capture, convert per fulltree-join rule
+10058	measured double-count - kani
+10059	kani-measured in fulltree capture, convert per fulltree-join rule
+10062	kani-measured in fulltree capture, convert per fulltree-join rule
+10063	kani-measured in fulltree capture, convert per fulltree-join rule
+10064	kani-measured in fulltree capture, convert per fulltree-join rule
+10065	kani-measured in fulltree capture, convert per fulltree-join rule
+10066	kani-measured in fulltree capture, convert per fulltree-join rule
+10067	kani-measured in fulltree capture, convert per fulltree-join rule
+10090	kani-measured in fulltree capture, convert per fulltree-join rule
+10091	kani-measured in fulltree capture, convert per fulltree-join rule
+10092	measured double-count - kani
+10093	measured double-count - kani
+10094	kani-measured in fulltree capture, convert per fulltree-join rule
+10095	kani-measured in fulltree capture, convert per fulltree-join rule
+10096	measured double-count - kani
+10097	kani-measured in fulltree capture, convert per fulltree-join rule
+10098	kani-measured in fulltree capture, convert per fulltree-join rule
+10099	measured double-count - kani
+10100	measured double-count - kani
+10101	kani-measured in fulltree capture, convert per fulltree-join rule
+10102	kani-measured in fulltree capture, convert per fulltree-join rule
+10103	measured double-count - kani
+10104	kani-measured in fulltree capture, convert per fulltree-join rule
+10105	kani-measured in fulltree capture, convert per fulltree-join rule
+10106	measured double-count - kani
+10107	measured double-count - kani
+10108	kani-measured in fulltree capture, convert per fulltree-join rule
+10109	kani-measured in fulltree capture, convert per fulltree-join rule
+10110	measured double-count - kani
+10111	kani-measured in fulltree capture, convert per fulltree-join rule
+10112	kani-measured in fulltree capture, convert per fulltree-join rule
+10113	measured double-count - kani
+10114	measured double-count - kani
+10115	kani-measured in fulltree capture, convert per fulltree-join rule
+10116	kani-measured in fulltree capture, convert per fulltree-join rule
+10117	measured double-count - kani
+10118	kani-measured in fulltree capture, convert per fulltree-join rule
+10119	kani-measured in fulltree capture, convert per fulltree-join rule
+10120	measured double-count - kani
+10121	kani-measured in fulltree capture, convert per fulltree-join rule
+10122	measured double-count - kani
+10123	kani-measured in fulltree capture, convert per fulltree-join rule
+10134	kani-measured in fulltree capture, convert per fulltree-join rule
+10135	kani-measured in fulltree capture, convert per fulltree-join rule
+10136	kani-measured in fulltree capture, convert per fulltree-join rule
+10137	kani-measured in fulltree capture, convert per fulltree-join rule
+10138	kani-measured in fulltree capture, convert per fulltree-join rule
+10139	kani-measured in fulltree capture, convert per fulltree-join rule
+10144	kani-measured in fulltree capture, convert per fulltree-join rule
+10145	kani-measured in fulltree capture, convert per fulltree-join rule
+10146	measured double-count - kani
+10147	kani-measured in fulltree capture, convert per fulltree-join rule
+10148	measured double-count - kani
+10149	kani-measured in fulltree capture, convert per fulltree-join rule
+10164	kani-measured in fulltree capture, convert per fulltree-join rule
+10165	kani-measured in fulltree capture, convert per fulltree-join rule
+10166	kani-measured in fulltree capture, convert per fulltree-join rule
+10167	kani-measured in fulltree capture, convert per fulltree-join rule
+10168	kani-measured in fulltree capture, convert per fulltree-join rule
+10169	kani-measured in fulltree capture, convert per fulltree-join rule
+10170	kani-measured in fulltree capture, convert per fulltree-join rule
+10171	kani-measured in fulltree capture, convert per fulltree-join rule
+10172	kani-measured in fulltree capture, convert per fulltree-join rule
+10173	kani-measured in fulltree capture, convert per fulltree-join rule
+10179	cited ledger row not proved - status wall + tested only (no proved component, proof-covered class unsupported)
+10180	cited ledger row not proved - status wall + tested only (no proved component, proof-covered class unsupported)
+10181	cited ledger row not proved - status wall + tested only (no proved component, proof-covered class unsupported)
+10182	cited ledger row not proved - status wall + tested only (no proved component, proof-covered class unsupported)
+10183	cites datetime-cmp cells but fc_interval_ cmp cells live only in proofs/interval-cmp (wrong proof family named)
+10184	cites datetime-cmp cells but fc_interval_ cmp cells live only in proofs/interval-cmp (wrong proof family named)
+10186	cites datetime-cmp cells but fc_interval_ cmp cells live only in proofs/interval-cmp (wrong proof family named)
+10188	cites datetime-cmp cells but fc_interval_ cmp cells live only in proofs/interval-cmp (wrong proof family named)
+10201	kani-measured in fulltree capture, convert per fulltree-join rule
+10202	kani-measured in fulltree capture, convert per fulltree-join rule
+10203	kani-measured in fulltree capture, convert per fulltree-join rule
+10204	kani-measured in fulltree capture, convert per fulltree-join rule
+10205	kani-measured in fulltree capture, convert per fulltree-join rule
+10206	kani-measured in fulltree capture, convert per fulltree-join rule
+10207	kani-measured in fulltree capture, convert per fulltree-join rule
+10208	kani-measured in fulltree capture, convert per fulltree-join rule
+10209	kani-measured in fulltree capture, convert per fulltree-join rule
+10220	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10221	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10222	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10223	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10224	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10225	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10232	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10233	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10234	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10235	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10236	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10237	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10270	kani-measured in fulltree capture, convert per fulltree-join rule
+10271	kani-measured in fulltree capture, convert per fulltree-join rule
+10272	kani-measured in fulltree capture, convert per fulltree-join rule
+10273	kani-measured in fulltree capture, convert per fulltree-join rule
+10274	kani-measured in fulltree capture, convert per fulltree-join rule
+10275	kani-measured in fulltree capture, convert per fulltree-join rule
+10276	kani-measured in fulltree capture, convert per fulltree-join rule
+10277	kani-measured in fulltree capture, convert per fulltree-join rule
+10278	kani-measured in fulltree capture, convert per fulltree-join rule
+10279	kani-measured in fulltree capture, convert per fulltree-join rule
+10280	kani-measured in fulltree capture, convert per fulltree-join rule
+10281	kani-measured in fulltree capture, convert per fulltree-join rule
+10302	kani-measured in fulltree capture, convert per fulltree-join rule
+10303	kani-measured in fulltree capture, convert per fulltree-join rule
+10304	kani-measured in fulltree capture, convert per fulltree-join rule
+10305	kani-measured in fulltree capture, convert per fulltree-join rule
+10306	kani-measured in fulltree capture, convert per fulltree-join rule
+10307	kani-measured in fulltree capture, convert per fulltree-join rule
+10308	kani-measured in fulltree capture, convert per fulltree-join rule
+10309	kani-measured in fulltree capture, convert per fulltree-join rule
+10310	kani-measured in fulltree capture, convert per fulltree-join rule
+10311	kani-measured in fulltree capture, convert per fulltree-join rule
+10312	kani-measured in fulltree capture, convert per fulltree-join rule
+10313	kani-measured in fulltree capture, convert per fulltree-join rule
+10314	kani-measured in fulltree capture, convert per fulltree-join rule
+10315	kani-measured in fulltree capture, convert per fulltree-join rule
+10316	kani-measured in fulltree capture, convert per fulltree-join rule
+10317	kani-measured in fulltree capture, convert per fulltree-join rule
+10318	kani-measured in fulltree capture, convert per fulltree-join rule
+10319	kani-measured in fulltree capture, convert per fulltree-join rule
+10320	kani-measured in fulltree capture, convert per fulltree-join rule
+10321	kani-measured in fulltree capture, convert per fulltree-join rule
+10324	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10325	cited ledger row not proved - status wall + proved(spots) only, justification omits the wall
+10393	kani-measured in fulltree capture, convert per fulltree-join rule
+10398	kani-measured in fulltree capture, convert per fulltree-join rule
+10436	kani-measured in fulltree capture, convert per fulltree-join rule
+10437	kani-measured in fulltree capture, convert per fulltree-join rule
+10438	kani-measured in fulltree capture, convert per fulltree-join rule
+10439	kani-measured in fulltree capture, convert per fulltree-join rule
+10441	kani-measured in fulltree capture, convert per fulltree-join rule
+10442	kani-measured in fulltree capture, convert per fulltree-join rule
+10501	kani-measured in fulltree capture, convert per fulltree-join rule
+10502	kani-measured in fulltree capture, convert per fulltree-join rule
+10509	kani-measured in fulltree capture, convert per fulltree-join rule
+10510	kani-measured in fulltree capture, convert per fulltree-join rule
+10527	non-v2 off-denominator
+10531	non-v2 off-denominator
+10615	non-v2 off-denominator
+11764	malformed row - stray column-header pasted as data
+11766	measured double-count - kani
+11767	measured double-count - kani
+11815	measured double-count - kani
+11816	measured double-count - kani
+11817	measured double-count - kani

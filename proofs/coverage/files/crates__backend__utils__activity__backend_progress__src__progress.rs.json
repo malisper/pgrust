@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/activity/backend_progress/src/progress.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"const-static":[4,5,6,7,8,9,10,11,12,13,14,16,17,18,19,20,21,23,24,25,26,27,28,29,30,31,33,34,35,36,37,39,40,41,42,43,44,45,47,48,50,51,52,53]}}

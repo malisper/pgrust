@@ -1,0 +1,1 @@
+{"path":"crates/backend/executor/runtime/src/clock.rs","sloc":[20,21,26,27,32,33,44,45,48,49,54,55,60,61],"kani":[],"fuzz":[],"regress":[20,21,32,33],"excluded":{"use-mod":[5],"typedef":[15,16,39,40],"impl-header":[19,25,31,43,53,59],"trait-header":[7],"fn-decl":[9]}}

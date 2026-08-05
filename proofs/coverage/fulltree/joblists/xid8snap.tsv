@@ -1,0 +1,6 @@
+xid8snap	proofs::eq_full_xid_from_allowable_at	
+xid8snap	proofs::eq_snapview_layout	
+xid8snap	proofs::eq_strtou64_len6	
+xid8snap	proofs::cover_bsearch_case_split	
+xid8snap	proofs::eq_parse_snapshot_len0	
+xid8snap	proofs::cover_parse_case_split	

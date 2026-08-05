@@ -1,0 +1,29 @@
+# proofs/coverage/microbatch-tzfam/summary.tsv — per-crate coverage equation
+# for lane p1-mb-tzfam (target tzfam_diff, selector arms per crate). Oracle:
+# verbatim vendored PostgreSQL 18.3 (Stamp-18.3, upstream 62d6c7d3df) in
+# fuzz/core/csrc/pg_tzfam_io.c (assembled by scratchpad/assemble_tzfam.sh).
+#
+# Capture of record (local, macOS arm64, 2026-08-01): full committed corpus
+# (fuzz/corpus/tzfam_diff, 1870+ inputs) replayed under cargo fuzz coverage;
+# lcov banked here (tzfam_diff.lcov.gz). Local campaign volume: 8.45M execs
+# at the final harness (4.07M + 4.38M rounds) + ~2M during bring-up, 0
+# divergences, 0 panics. Fleet 10M CONFIRM = coordinator follow-up.
+# a0 evidence: tests::ts_locale_bytes_exhaustive (full 256-byte domain x
+# {t_isalpha,t_isalnum,byte_isspace} + full 256x256 t_iseq, asserted count)
+# and tests::strftime_all_specs (all 255 specifier bytes) — both inside the
+# fuzz arms, so their lines are fuzz-measured (a0 column = 0 by
+# construction, strength recorded in phase1-routes.tsv evidence).
+# Divergence record: interior-NUL tz-file lines — C fgets/strlen truncates
+# at the NUL, pgrust tokenizes raw bytes (nul_probe::tzparser_interior_nul_split,
+# ignored documentation test); arm-1 fixtures are NUL-free (domain carve in
+# the driver header); classified pgrust-bug (bug-compat gap, admin-authored
+# text config domain), match-or-fix decision with the coordinator.
+#
+# equation per crate: v2_sloc = fuzz_measured + a0 + exception_rows, 0 unaccounted.
+# SLOC rule: v2 + tables excluded (sloc_rules.py denominator, line_table = lcov DA set).
+crate	file	v2_sloc	fuzz_measured	a0	exception_rows	unaccounted	residual_lines
+backend/timezone/strftime	crates/backend/timezone/strftime/src/lib.rs	221	214	0	7	0	13+16+31 (const name-table heads) + 106 (label-loop header) + 125 (%c warn-All arm, dead in C too) + 168 (let w;) + 214 (%W expr continuation)
+backend/utils/misc/tzparser	crates/backend/utils/misc/tzparser/src/lib.rs	213	183	0	30	0	76-79 (missing-abbrev arm, dead in C too) + 16 format!-literal lines in measured error arms + 152/278 (OOM defensive) + 214-225 (share-path env fallbacks, excluded-state)
+backend/tsearch/ts_locale	crates/backend/tsearch/ts_locale/src/public.rs	123	107	0	16	0	55 (empty guard) + 62-71 (locale wide path, census carve) + 111-117 (share-path env fallbacks) + 140 (format! literal) + 168 (cross-encoding conversion arm, server-env)
+backend/tsearch/ts_locale	crates/backend/tsearch/ts_locale/src/dict_api.rs	18	18	0	0	0	-
+backend/tsearch/ts_locale	crates/backend/tsearch/ts_locale/src/lib.rs	0	0	0	0	0	mod/use decls only (v2 structural)

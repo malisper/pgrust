@@ -1,0 +1,2 @@
+
+merge-coverage: REFUSING to write a summary — 4 census error(s). Unmeasured harnesses would be reported as uncovered code, which is a silent, confident undercount. No summary.json, no percentages.

@@ -1,0 +1,1 @@
+{"path":"crates/backend/storage/lmgr/lmgr_proc/src/globals.rs","sloc":[8,9,10,11,15,16,17,20,21,22,29,30,31,32,33,34,35,36],"kani":[],"fuzz":[],"regress":[16,17,21,22],"excluded":{"arm-head":[6],"use-mod":[1],"macro-scaffold":[5,7,24,28]}}

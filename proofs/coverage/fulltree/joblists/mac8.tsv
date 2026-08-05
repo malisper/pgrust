@@ -1,0 +1,24 @@
+mac8	eq_macaddr8_out	proofs::eq_macaddr8_out
+mac8	eq_macaddr8_cmp	proofs::eq_macaddr8_cmp
+mac8	eq_macaddr8_lt	
+mac8	eq_macaddr8_le	
+mac8	eq_macaddr8_eq	
+mac8	eq_macaddr8_ge	
+mac8	eq_macaddr8_gt	
+mac8	eq_macaddr8_ne	
+mac8	eq_macaddr8_in_sym_len_0_12	
+mac8	sym_in_band_coverage	proofs::sym_in_band_coverage
+mac8	wit_in_colon64	
+mac8	wit_in_dash64	
+mac8	wit_in_dot64	
+mac8	wit_in_bare64	
+mac8	wit_in_colon48	
+mac8	wit_in_bare48	
+mac8	wit_in_ws64	
+mac8	eq_macaddr8_not	proofs::eq_macaddr8_not
+mac8	eq_macaddr8_and	proofs::eq_macaddr8_and
+mac8	eq_macaddr8_or	proofs::eq_macaddr8_or
+mac8	eq_macaddr8_trunc	proofs::eq_macaddr8_trunc
+mac8	eq_macaddr8_set7bit	proofs::eq_macaddr8_set7bit
+mac8	eq_macaddrtomacaddr8	proofs::eq_macaddrtomacaddr8
+mac8	eq_macaddr8tomacaddr	proofs::eq_macaddr8tomacaddr

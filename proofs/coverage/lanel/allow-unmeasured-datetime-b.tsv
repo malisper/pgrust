@@ -1,0 +1,64 @@
+# family<TAB>harness<TAB>reason — p1-lanel runs NO per-crate kanicov
+# re-run (standing campaign rule), so NO harness emits a kaniraw here.
+# Every row below is UNMEASURED-but-VERIFIED: the verdict comes from the
+# fleet kani-suite runs, and the proof-covered lines are carried as
+# exception rows, never as measured coverage.
+datetime-b	hlp::eq_dtk_m_shiftdom	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_interval_mask_shiftdom	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_is_valid_julian_full	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_isleap_full	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_j2day_full	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_date2j_full	wall-recorded: 601s>600s cap under cadical, CBMC per-property refinement phase (NOT symex); genuine wall, re-audited 2026-07-31
+datetime-b	hlp::eq_j2date_full	wall-recorded: 601s>600s cap under cadical, CBMC per-property refinement phase (NOT symex); genuine wall, re-audited 2026-07-31
+datetime-b	hlp::eq_j2date_spots	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_dt2time_full	wall-recorded: 601s>600s cap under cadical, CBMC per-property refinement phase (NOT symex); genuine wall, re-audited 2026-07-31
+datetime-b	hlp::eq_dt2time_spots	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_overflows_full	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_isoweek2j_ad_band	wall-recorded: 601s>600s cap under cadical, CBMC per-property refinement phase (NOT symex); genuine wall, re-audited 2026-07-31
+datetime-b	hlp::eq_isoweek2j_bc_band	wall-recorded: 601s>600s cap under cadical, CBMC per-property refinement phase (NOT symex); genuine wall, re-audited 2026-07-31
+datetime-b	hlp::panicfree_date2j_full	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::panicfree_j2date_full	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::panicfree_dt2time_full	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::panicfree_isoweek2j_full	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::control_panicfree_isoweek2j_checked_sub	must-fail negative control: contributes non-vacuity evidence, never coverage; asserts its intended check fails
+datetime-b	hlp::eq_date2isoweek_spots	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_date2isoyear_spots	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_date2isoyearday_spots	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_date2isoweek_mday_face	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_isoweek2date_spots	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_isoweekdate2date_wday_band	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_datebsearch_date_cells	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_datebsearch_delta_cells	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_decode_special_cells	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_decode_units_cells	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::check_date_token_tables_concrete	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::check_date_token_table_one_concrete	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_float_time_overflows_intfields	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_float_time_overflows_sec_cells	proof-covered-unmeasured: fleet kani-suite GREEN; no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::control_hlp_j2day_skew	must-fail negative control: contributes non-vacuity evidence, never coverage; asserts its intended check fails
+datetime-b	hlp::control_hlp_float_time_overflows_sec_skew	must-fail negative control: contributes non-vacuity evidence, never coverage; asserts its intended check fails
+datetime-b	hlp::eq_time_pm_iv_day	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 41s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_daym1	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 31s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_days_only	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 31s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_eod_negone	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 31s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_eod_one	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_i64max	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_i64max_eod	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_months_only	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_negday	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_negone	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_noon_day	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_notfinite_max	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 20s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_notfinite_min	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 20s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_one	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_twoday	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_time_pm_iv_zero	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_timetz_pm_iv_day	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_timetz_pm_iv_eod	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_timetz_pm_iv_i64max	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_timetz_pm_iv_negday	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_timetz_pm_iv_negone	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_timetz_pm_iv_notfinite	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 20s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_timetz_pm_iv_one	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::eq_timetz_pm_iv_zero	proof-covered-unmeasured: fleet kani-suite GREEN (pgrust-kani-suite-1785508360-23da-32595, wall 10s); no local kanicov re-run (standing campaign rule) so no kaniraw exists to merge
+datetime-b	hlp::control_time_pl_interval_no_wrap	must-fail negative control: contributes non-vacuity evidence, never coverage; asserts its intended check fails

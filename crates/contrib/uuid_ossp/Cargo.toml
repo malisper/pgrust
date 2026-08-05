@@ -1,0 +1,20 @@
+[package]
+name = "uuid_ossp"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "uuid_ossp"
+path = "src/lib.rs"
+
+[dependencies]
+pg_clock = { path = "../../port/pg_clock" }
+datum = { path = "../../_support/types/datum" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+adt_uuid = { path = "../../backend/utils/adt/uuid" }
+pg_md5 = { path = "../../common/md5" }
+pg_sha1 = { path = "../../common/sha1" }
+pg_strong_random = { path = "../../port/pg_strong_random" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }

@@ -1,0 +1,11 @@
+pg_lsn	eq_pg_lsn_out	
+pg_lsn	drift_pg_lsn_out_master_format	
+pg_lsn	eq_pg_lsn_cmp	
+pg_lsn	eq_pg_lsn_eq	
+pg_lsn	eq_pg_lsn_ne	
+pg_lsn	eq_pg_lsn_lt	
+pg_lsn	eq_pg_lsn_gt	
+pg_lsn	eq_pg_lsn_le	
+pg_lsn	eq_pg_lsn_ge	
+pg_lsn	eq_pg_lsn_larger	
+pg_lsn	eq_pg_lsn_smaller	

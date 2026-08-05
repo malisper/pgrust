@@ -1,0 +1,1 @@
+{"path":"crates/port/pg_clock/src/sim.rs","sloc":[34,36,37,38,39,40,41,42,43,50,51,54,55,59,60,70,71,76,77,78,79,83,87,88,89],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[20,21,23,24,25],"attr":[65,69],"const-static":[27,35],"typedef":[29,30,31,66],"impl-header":[68,75]}}

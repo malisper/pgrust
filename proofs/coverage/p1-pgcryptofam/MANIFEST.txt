@@ -1,0 +1,13 @@
+===== FLEET JOB MANIFEST =====
+
+description:
+  p1-pgcryptofam: pgcryptofam_diff 10M floor, attempt 3 @f8231ca7535 = the EXACT sha the 4/4 injection sweep ran at (2306-seed corpus, +758 over attempt 2; code byte-identical to attempt 2). [LONG-JOB: measured 6944 exec/s => 10M needs ~1440s; 14400s is ~10x headroom so a Graviton per-core derate cannot truncate the floor. Attempt 1 died build-failed on c_char signedness; attempt 2 superseded to align submit sha with sweep sha.]
+
+job_name: pgrust-fuzz-campaign-1785663970-7f2a-61330
+job_type: fuzz-campaign
+git_ref: f8231ca7535106f5e15d1e439f8b1c433d6b64fc
+repo_url: https://github.com/Pager-Free/pgrust-fast.git
+build_kind: fast
+sha: f8231ca75351
+started_utc: 2026-08-02T09:48:17Z
+hostname: pgrust-fuzz-campaign-1785663970-7f2a-61330-588pj

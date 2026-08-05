@@ -1,0 +1,12 @@
+[package]
+name = "execreplication_seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seam_core = { path = "../../../_support/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }

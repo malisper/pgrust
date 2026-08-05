@@ -1,0 +1,40 @@
+# proofs/uuid — WAVE 5 run queue (pre-built 2026-07-28, compile-gated via
+# cargo kani --only-codegen; zero solves run).  Execute from proofs/uuid/.
+# Format: <harness> | <expected> | <tier> | <command>
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+# NOTE: the uuid_hash/uuid_hash_extended/uuid_extract_* harnesses were
+# ALREADY WRITTEN in an earlier pass but never run (ledger rows 2963/3412/
+# 6342/6343 still untriaged) — they are queued here too.
+
+# ---- wave-5 rows already harnessed earlier (hash + extract) ----
+proofs::eq_uuid_hash | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --c-lib ../hash/pg_hashfn.c --solver kissat --harness proofs::eq_uuid_hash --exact
+proofs::eq_uuid_hash_extended | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --c-lib ../hash/pg_hashfn.c --solver kissat --harness proofs::eq_uuid_hash_extended --exact
+proofs::eq_uuid_extract_version | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --harness proofs::eq_uuid_extract_version --exact
+proofs::eq_uuid_extract_timestamp | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --harness proofs::eq_uuid_extract_timestamp --exact
+
+# ---- wave-5 new (module wave5) ----
+wave5::eq_uuid_recv_core | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --harness wave5::eq_uuid_recv_core --exact
+wave5::cover_uuid_recv_both_arms | green | per-commit | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --harness wave5::cover_uuid_recv_both_arms --exact   # was: GREEN(covers)
+wave5::eq_uuid_send | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --harness wave5::eq_uuid_send --exact
+wave5::eq_generate_uuidv7 | green | per-commit | timeout 60 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --harness wave5::eq_generate_uuidv7 --exact
+wave5::control_generate_uuidv7_rng_skew | must-fail | control | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --harness wave5::control_generate_uuidv7_rng_skew --exact
+
+# Row bookkeeping:
+#   eq_uuid_recv_core -> 2961 uuid_recv (core-level, direct StringInfo;
+#     fc datum plumbing out of proof — int-arith recv-wall precedent)
+#   eq_uuid_send -> 2962 uuid_send (wrapper-level, modulo static-buffer
+#     allocator model)
+#   eq_uuid_hash -> 2963; eq_uuid_hash_extended -> 3412
+#   eq_uuid_extract_timestamp -> 6342; eq_uuid_extract_version -> 6343
+#   eq_generate_uuidv7 -> core behind 6429 uuidv7 / 6430 uuidv7_interval:
+#     record those rows excluded(state:clock) with note "pure assembly core
+#     proved (modulo RNG-seam model, sub_ms<1e6 contract fence, macOS
+#     10-bit SUBMS arm; Linux 12-bit arm needs a linux-host rerun)"
+# SKIPPED: 3432/6428 gen_random_uuid (pure PRNG output — nothing beyond
+#   the seam to prove; excluded(state:rng)).

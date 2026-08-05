@@ -1,0 +1,1 @@
+{"path":"crates/backend/replication/walsender/src/wakeup.rs","sloc":[9,10,11,12,14,15],"kani":[],"fuzz":[],"regress":[9,10,11,12,14,15],"excluded":{"use-mod":[5],"attr":[3]}}

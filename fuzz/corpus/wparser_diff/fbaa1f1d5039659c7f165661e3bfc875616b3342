@@ -1,0 +1,4 @@
+);
+
+--Check if more than one fragments are displayed
+SELECT ts_headline(

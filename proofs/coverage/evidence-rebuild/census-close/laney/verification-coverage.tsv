@@ -1,0 +1,7 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/utils/adt/adt_timestamp/src/builtins.rs	869	0	371	0	371
+crates/backend/utils/adt/adt_timestamp/src/interval.rs	1199	0	994	0	994
+crates/backend/utils/adt/adt_timestamp/src/lib.rs	1072	0	743	0	743
+crates/backend/utils/adt/adt_timestamp/src/tests.rs	0	0	0	0	0
+CRATE:crates/backend/utils/adt/adt_timestamp	3140	0	2108	0	2108
+TOTAL	3140	0	2108	0	2108

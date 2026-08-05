@@ -1,0 +1,51 @@
+[package]
+name = "standby"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+injection_point = { path = "../../../utils/misc/injection_point" }
+adt_timestamp = { path = "../../../utils/adt/adt_timestamp" }
+bufmgr = { path = "../../buffer/bufmgr" }
+elog = { path = "../../../utils/error/elog" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+init_small = { path = "../../../utils/init/init_small" }
+inval = { path = "../../../utils/cache/inval" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+lock = { path = "../../lmgr/lock" }
+lwlock = { path = "../../lmgr/lwlock" }
+mcx = { path = "../../../../_support/mcx" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+procarray = { path = "../procarray" }
+ps_status = { path = "../../../utils/misc/ps_status" }
+sinval = { path = "../sinval" }
+slot = { path = "../../../replication/slot" }
+standby_seams = { path = "../standby_seams" }
+timeout = { path = "../../../utils/misc/timeout" }
+transam = { path = "../../../access/transam/transam" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+varsup = { path = "../../../access/transam/varsup" }
+waitevent = { path = "../../../utils/activity/waitevent" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+xloginsert = { path = "../../../access/transam/xloginsert" }
+xlogreader_seams = { path = "../../../access/transam/xlogreader_seams" }
+xlogrecovery_seams = { path = "../../../access/transam/xlogrecovery_seams" }
+xlogutils = { path = "../../../access/transam/xlogutils" }
+
+[dev-dependencies]
+aio_seams = { path = "../../aio/aio_seams" }
+origin_seams = { path = "../../../replication/origin_seams" }
+controldata_utils = { path = "../../../../common/controldata_utils" }
+fd = { path = "../../file/fd" }
+rmgrdesc = { path = "../../../access/rmgrdesc" }
+shmem = { path = "../shmem" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+xlogreader = { path = "../../../access/transam/xlogreader" }

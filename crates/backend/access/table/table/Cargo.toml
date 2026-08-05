@@ -1,0 +1,18 @@
+[package]
+name = "table"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+rel_vocab = { path = "../../../../_support/types/rel_vocab" }
+relation_seams = { path = "../../common/relation_seams" }
+pg_class_seams = { path = "../../../catalog/pg_class_seams" }
+table_seams = { path = "../table_seams" }
+
+[dev-dependencies]
+types_tuple = { path = "../../../../_support/types/types_tuple" }

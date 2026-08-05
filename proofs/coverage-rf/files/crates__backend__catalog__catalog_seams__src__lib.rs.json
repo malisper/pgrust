@@ -1,0 +1,1 @@
+{"path":"crates/backend/catalog/catalog_seams/src/lib.rs","sloc":[4,5,8,9,12,13,16,17,20,26,27,28,29,32,33,34,35,36,37,38],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2]}}

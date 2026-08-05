@@ -1,0 +1,700 @@
+# cargo-fuzz (libFuzzer) wrapper for pgrust-fast byte-level decoders.
+#
+#   Run (needs a nightly toolchain — libFuzzer/sanitizers are nightly-only;
+#   the repo's pinned stable 1.96.0 cannot build these targets):
+#     cargo +nightly fuzz run wal_record    -- -max_total_time=300
+#     cargo +nightly fuzz run wire_pqformat -- -max_total_time=300
+#
+# The decode-driving logic lives in ./core (crate `decoder_fuzz`), which builds
+# and unit-tests on stable; these targets are thin libFuzzer shells over it.
+#
+# Differential targets (2026-07-30 lane): float_in_diff / float_out_diff /
+# geo_diff run shipped Rust against verbatim vendored REL_18 PostgreSQL C
+# (core/csrc/, compiled by core/build.rs) in-process, comparing value +
+# error + errcode exactly; a libFuzzer crash artifact = a C/Rust divergence
+# reproducer. First campaign (macOS host oracle): float_in 31.6M cases,
+# float_out 23.7M, geo 24.7M — one REAL divergence found and confirmed vs
+# docker postgres:18 (open-path on_ppath overflow, see
+# core/src/diff.rs tests::on_ppath_overflow_divergence_witness and the
+# carve comments in diff.rs; float I/O: zero divergences).
+[package]
+name = "pgrust-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Sole workspace root for the fuzz tooling (detached from the repo-root
+# workspace so nightly-only deps never touch the stable build). `core` is the
+# stable-buildable decode-driver library; the crates it path-depends on resolve
+# their own workspace inheritance against the repo root.
+[workspace]
+members = ["core"]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+decoder_fuzz = { path = "core" }
+
+[[bin]]
+name = "wal_record"
+path = "fuzz_targets/wal_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_pqformat"
+path = "fuzz_targets/wire_pqformat.rs"
+test = false
+doc = false
+bench = false
+
+# Differential targets: shipped Rust vs vendored PostgreSQL C oracle
+# (proofs-ledger excluded(wall) rows). Any comparator mismatch panics, so a
+# libFuzzer "crash" artifact here is a C/Rust DIVERGENCE reproducer.
+[[bin]]
+name = "float_in_diff"
+path = "fuzz_targets/float_in_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "float_out_diff"
+path = "fuzz_targets/float_out_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "geo_diff"
+path = "fuzz_targets/geo_diff.rs"
+test = false
+doc = false
+bench = false
+
+# libm math family (2026-07-30 lane): the 38 blocked(libm)/blocked(seam:
+# libm-oracle) ledger rows. Both sides call the REAL platform libm — the
+# thing a Kani seam would have defined away. First campaign (macOS host
+# oracle): float_math 34.7M coverage-guided + 280M sampler cases (10M per
+# unary fn via core/examples/float_math_sample.rs), float_math2 33.8M
+# coverage-guided + 30M sampler. One divergence candidate found and
+# adjudicated as an ORACLE COMPILER ARTIFACT (clang -ffp-contract=on fmsub
+# fusion in the degree-trig scaling expressions; real PG 18.4 aarch64
+# docker returns a third value again — glibc acos ulp drift), carved by
+# pinning -ffp-contract=off in core/build.rs; see diff.rs
+# tests::dasind_fp_contraction_witness. Zero wrapper-logic divergences.
+# char/bool differential targets (phase-1 100%-coverage campaign,
+# proofs/p1-lane0a): cores + fc_* fmgr wrappers vs vendored 18.3 C.
+[[bin]]
+name = "char_diff"
+path = "fuzz_targets/char_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bool_diff"
+path = "fuzz_targets/bool_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "float_math_diff"
+path = "fuzz_targets/float_math_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "float_math2_diff"
+path = "fuzz_targets/float_math2_diff.rs"
+test = false
+doc = false
+bench = false
+
+# float.c remainder (p1-lanead, 2026-07-31): rounding/sqrt/degrees unary
+# family + extra_float_digits<=0 output arm (pg_strfromd) + recv/send wire
+# images. One selector byte routes all arms.
+[[bin]]
+name = "float_misc_diff"
+path = "fuzz_targets/float_misc_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pseudotypes_diff"
+path = "fuzz_targets/pseudotypes_diff.rs"
+test = false
+doc = false
+bench = false
+
+# hashenc family (p1-lanee, 2026-07-30): base64 + md5 + sha1 + sha2(hmac) +
+# scram + to_ascii + crc32 differential vs verbatim vendored 18.3 C
+# (core/csrc/hashenc/). One selector byte routes all siblings.
+[[bin]]
+name = "hashenc_diff"
+path = "fuzz_targets/hashenc_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cryptofam_diff"
+path = "fuzz_targets/cryptofam_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pg_lsn_diff"
+path = "fuzz_targets/pg_lsn_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tablesfam_diff"
+path = "fuzz_targets/tablesfam_diff.rs"
+test = false
+doc = false
+bench = false
+
+# pg_lsn_diff (Lane-0A p1 campaign, 2026-07-30): composite pg_lsn family
+# target — in/out/roundtrip/cmp-family/recv/send + the four DigitBuf-blocked
+# arithmetic rows (pg_lsn_mi/pli/mii, numeric_pg_lsn) run against verbatim
+# vendored 18.3 numeric.c (set_var_from_str -> add_var/sub_var ->
+# numericvar_to_uint64 / make_result, csrc/pg_lsn_oracle.c). First campaign
+# (macOS host, C-side sancov ON): 10.3M logged execs (0.3M + 3M + 7M legs)
+# + ~20M more in an unlogged 900 s leg, cov 1548 edges, ZERO divergences;
+# one crash artifact triaged = oracle-arena undersizing (fixed, not a
+# divergence). fc_* fmgr wrappers driven via LocalFcinfo for builtins.rs
+# line coverage. Carves in core/src/lsn_diff.rs module doc.
+# encode_diff: scaffolded by fuzz/scaffold.py — see README-TODO-encode_diff.md.
+[[bin]]
+name = "encode_diff"
+path = "fuzz_targets/encode_diff.rs"
+test = false
+doc = false
+bench = false
+
+# datetime_io_diff: scaffolded by fuzz/scaffold.py — see README-TODO-datetime_io_diff.md.
+[[bin]]
+name = "datetime_io_diff"
+path = "fuzz_targets/datetime_io_diff.rs"
+test = false
+doc = false
+bench = false
+
+# Lane-0B differential targets (100%-coverage campaign, proofs/p1-lane0b):
+# uuid_diff / mac_diff (mac+mac8) / name_diff / cash_diff — shipped Rust vs
+# vendored PostgreSQL 18.3 C (Stamp-18.3, upstream sha 62d6c7d3df).
+[[bin]]
+name = "uuid_diff"
+path = "fuzz_targets/uuid_diff.rs"
+# pg_prng_diff: scaffolded by fuzz/scaffold.py — see README-TODO-pg_prng_diff.md.
+[[bin]]
+name = "pg_prng_diff"
+path = "fuzz_targets/pg_prng_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interval_engine_diff"
+path = "fuzz_targets/interval_engine_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "strfam_diff"
+path = "fuzz_targets/strfam_diff.rs"
+# arrayutils_diff: scaffolded by fuzz/scaffold.py — see README-TODO-arrayutils_diff.md.
+[[bin]]
+name = "arrayutils_diff"
+path = "fuzz_targets/arrayutils_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "datetime_engine_diff"
+path = "fuzz_targets/datetime_engine_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mac_diff"
+path = "fuzz_targets/mac_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "datetime_convert_diff"
+path = "fuzz_targets/datetime_convert_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "name_diff"
+path = "fuzz_targets/name_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cash_diff"
+path = "fuzz_targets/cash_diff.rs"
+test = false
+doc = false
+bench = false
+
+# enc_tables_diff (p1-laneg encoding+tables batch, 2026-07-30): common/base64
+# + adt/adt_ascii + common/keywords vs vendored 18.3 C (csrc/pg_enc_tables.c,
+# postgres-src 62d6c7d3df). Value/dst-image + verdict + errcode-class planes;
+# see the target header in core/src/enc_tables.rs for the two documented
+# wrapper plumbing planes.
+[[bin]]
+name = "enc_tables_diff"
+path = "fuzz_targets/enc_tables_diff.rs"
+test = false
+doc = false
+bench = false
+
+# vltext_diff: scaffolded by fuzz/scaffold.py — see README-TODO-vltext_diff.md.
+[[bin]]
+name = "vltext_diff"
+path = "fuzz_targets/vltext_diff.rs"
+test = false
+doc = false
+bench = false
+
+# quote_diff: scaffolded by fuzz/scaffold.py — see README-TODO-quote_diff.md.
+[[bin]]
+name = "quote_diff"
+path = "fuzz_targets/quote_diff.rs"
+test = false
+doc = false
+bench = false
+
+# scalarxid_diff: scaffolded by fuzz/scaffold.py — see README-TODO-scalarxid_diff.md.
+[[bin]]
+name = "scalarxid_diff"
+path = "fuzz_targets/scalarxid_diff.rs"
+test = false
+doc = false
+bench = false
+
+# vlbytea_diff: scaffolded by fuzz/scaffold.py — see README-TODO-vlbytea_diff.md.
+[[bin]]
+name = "vlbytea_diff"
+path = "fuzz_targets/vlbytea_diff.rs"
+test = false
+doc = false
+bench = false
+
+# fmt_dch_diff: scaffolded by fuzz/scaffold.py — see README-TODO-fmt_dch_diff.md.
+[[bin]]
+name = "fmt_dch_diff"
+path = "fuzz_targets/fmt_dch_diff.rs"
+test = false
+doc = false
+bench = false
+
+# fmt_num_diff: scaffolded by fuzz/scaffold.py — see README-TODO-fmt_num_diff.md.
+[[bin]]
+name = "fmt_num_diff"
+path = "fuzz_targets/fmt_num_diff.rs"
+test = false
+doc = false
+bench = false
+
+# vlmisc_diff: scaffolded by fuzz/scaffold.py — see README-TODO-vlmisc_diff.md.
+[[bin]]
+name = "vlmisc_diff"
+path = "fuzz_targets/vlmisc_diff.rs"
+test = false
+doc = false
+bench = false
+
+# geo_io_diff: geo text-I/O family differential (p1-laner).
+[[bin]]
+name = "geo_io_diff"
+path = "fuzz_targets/geo_io_diff.rs"
+test = false
+doc = false
+bench = false
+
+# json_diff: scaffolded by fuzz/scaffold.py — see README-TODO-json_diff.md.
+[[bin]]
+name = "json_diff"
+path = "fuzz_targets/json_diff.rs"
+# arrayfuncs_diff: scaffolded by fuzz/scaffold.py — see README-TODO-arrayfuncs_diff.md.
+[[bin]]
+name = "arrayfuncs_diff"
+path = "fuzz_targets/arrayfuncs_diff.rs"
+# mbconv_diff: encoding-conversion family differential (p1-lanez).
+[[bin]]
+name = "mbconv_diff"
+path = "fuzz_targets/mbconv_diff.rs"
+# numutils_diff (p1-laneaj adt/numutils): pg_strtoint16/32/64(_safe) +
+# uint32in_subr/uint64in_subr + pg_ultoa_n/pg_ulltoa_n/pg_ltoa/pg_lltoa/
+# pg_itoa/pg_ultostr(_zeropad) vs vendored 18.3 C (csrc/pg_numutils.c,
+# postgres-src 62d6c7d3df). Value/bytes + verdict + errcode planes; see the
+# target header in core/src/numutils_diff.rs for the documented carves.
+[[bin]]
+name = "numutils_diff"
+path = "fuzz_targets/numutils_diff.rs"
+# oraclefam_diff: scaffolded by fuzz/scaffold.py — see README-TODO-oraclefam_diff.md.
+[[bin]]
+name = "oraclefam_diff"
+path = "fuzz_targets/oraclefam_diff.rs"
+# wcharfam_diff: common/wchar + mb/mbutils differential (p1-laneah).
+[[bin]]
+name = "wcharfam_diff"
+path = "fuzz_targets/wcharfam_diff.rs"
+# rowtypes_diff: scaffolded by fuzz/scaffold.py — see README-TODO-rowtypes_diff.md.
+[[bin]]
+name = "rowtypes_diff"
+path = "fuzz_targets/rowtypes_diff.rs"
+test = false
+doc = false
+bench = false
+
+# tupaccess_diff: heaptuple/tupdesc/attmap/tupconvert vs vendored 18.3 C
+# (csrc/pg_tupaccess_io.c); see core/src/tupaccess_diff.rs header.
+[[bin]]
+name = "tupaccess_diff"
+path = "fuzz_targets/tupaccess_diff.rs"
+test = false
+doc = false
+bench = false
+
+# jsonbio_diff: scaffolded by fuzz/scaffold.py — see README-TODO-jsonbio_diff.md.
+[[bin]]
+name = "jsonbio_diff"
+path = "fuzz_targets/jsonbio_diff.rs"
+# like_diff: scaffolded by fuzz/scaffold.py — see README-TODO-like_diff.md.
+[[bin]]
+name = "like_diff"
+path = "fuzz_targets/like_diff.rs"
+test = false
+doc = false
+bench = false
+
+# array_userfuncs_diff: scaffolded by fuzz/scaffold.py — see README-TODO-array_userfuncs_diff.md.
+[[bin]]
+name = "array_userfuncs_diff"
+path = "fuzz_targets/array_userfuncs_diff.rs"
+# jsonbops_diff: two-doc ops/mutate/getfield sibling of jsonbio_diff (p1-lanev).
+[[bin]]
+name = "jsonbops_diff"
+path = "fuzz_targets/jsonbops_diff.rs"
+# hashfn_diff: scaffolded by fuzz/scaffold.py — see README-TODO-hashfn_diff.md.
+[[bin]]
+name = "hashfn_diff"
+path = "fuzz_targets/hashfn_diff.rs"
+# timestamp_diff: scaffolded by fuzz/scaffold.py — see README-TODO-timestamp_diff.md.
+[[bin]]
+name = "timestamp_diff"
+path = "fuzz_targets/timestamp_diff.rs"
+# jsonpath_diff: scaffolded by fuzz/scaffold.py — see README-TODO-jsonpath_diff.md.
+[[bin]]
+name = "jsonpath_diff"
+path = "fuzz_targets/jsonpath_diff.rs"
+# rangetypes_diff: scaffolded by fuzz/scaffold.py — see README-TODO-rangetypes_diff.md.
+[[bin]]
+name = "rangetypes_diff"
+path = "fuzz_targets/rangetypes_diff.rs"
+test = false
+doc = false
+bench = false
+
+# jsonpathexec_diff (p1-laneaa, adt/jsonpath_exec): see README-TODO-jsonpathexec_diff.md.
+[[bin]]
+name = "jsonpathexec_diff"
+path = "fuzz_targets/jsonpathexec_diff.rs"
+# multirangetypes_diff: scaffolded by fuzz/scaffold.py — see README-TODO-multirangetypes_diff.md.
+[[bin]]
+name = "multirangetypes_diff"
+path = "fuzz_targets/multirangetypes_diff.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "numeric_io_diff"
+path = "fuzz_targets/numeric_io_diff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "numeric_ops_diff"
+path = "fuzz_targets/numeric_ops_diff.rs"
+test = false
+doc = false
+
+# datetime_closeout_diff: p1-lanel2 closeout — adt_date extract_date /
+# time_part_common(retnumeric) / timetz_part_common vs vendored 18.3 C
+# (csrc/pg_datetime_closeout.c, laney's numeric arg-capture plane) + the
+# owed adt_date builtins.rs fc-wrapper plane (recv/in-soft/out/conversions/
+# cmp families/typmod/in_range) wrapper-vs-core.
+[[bin]]
+name = "datetime_closeout_diff"
+path = "fuzz_targets/datetime_closeout_diff.rs"
+# regexp_diff: scaffolded by fuzz/scaffold.py — see README-TODO-regexp_diff.md.
+[[bin]]
+name = "regexp_diff"
+path = "fuzz_targets/regexp_diff.rs"
+test = false
+doc = false
+bench = false
+
+# regex_diff (p1-regexcore): Spencer ENGINE differential (regex_core vs
+# verbatim 18.3 engine copy under core/csrc/regexfam/vendor/).
+[[bin]]
+name = "regex_diff"
+path = "fuzz_targets/regex_diff.rs"
+test = false
+doc = false
+bench = false
+
+# libfam_diff: scaffolded by fuzz/scaffold.py — see README-TODO-libfam_diff.md.
+[[bin]]
+name = "libfam_diff"
+path = "fuzz_targets/libfam_diff.rs"
+test = false
+doc = false
+bench = false
+
+# radixtree_diff (p1-mb-lib): backend/lib/radixtree op-driver.
+[[bin]]
+name = "radixtree_diff"
+path = "fuzz_targets/radixtree_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "miscfam_diff"
+path = "fuzz_targets/miscfam_diff.rs"
+test = false
+doc = false
+# portfam_diff: scaffolded by fuzz/scaffold.py — see README-TODO-portfam_diff.md.
+[[bin]]
+name = "portfam_diff"
+path = "fuzz_targets/portfam_diff.rs"
+# tzfam_diff (p1-mb-tzfam): strftime + tzparser + ts_locale family.
+[[bin]]
+name = "tzfam_diff"
+path = "fuzz_targets/tzfam_diff.rs"
+[[bin]]
+name = "netfam_diff"
+path = "fuzz_targets/netfam_diff.rs"
+test = false
+doc = false
+bench = false
+# contribb_diff (p1-mb-contribb): contrib/seg + contrib/cube family.
+[[bin]]
+name = "contribb_diff"
+path = "fuzz_targets/contribb_diff.rs"
+# wparser_diff (p1-mb-contribc): tsearch/wparser_def tokenizer.
+[[bin]]
+name = "wparser_diff"
+path = "fuzz_targets/wparser_diff.rs"
+test = false
+doc = false
+bench = false
+# spellfam_diff (p1-spell): tsearch/spell dictionary loader + normalizer.
+[[bin]]
+name = "spellfam_diff"
+path = "fuzz_targets/spellfam_diff.rs"
+test = false
+doc = false
+bench = false
+# hstore_diff (p1-mb-contribc): contrib/hstore family.
+[[bin]]
+name = "hstore_diff"
+path = "fuzz_targets/hstore_diff.rs"
+# contriba_diff (p1-mb-contriba): contrib fuzzystrmatch + isn family.
+[[bin]]
+name = "contriba_diff"
+path = "fuzz_targets/contriba_diff.rs"
+test = false
+doc = false
+bench = false
+
+# define_diff: scaffolded by fuzz/scaffold.py — see README-TODO-define_diff.md.
+[[bin]]
+name = "define_diff"
+path = "fuzz_targets/define_diff.rs"
+test = false
+doc = false
+bench = false
+
+# nodesfam_diff (p1-nodes): the node-walker family — readfuncs/outfuncs/
+# copyfuncs over ONE shared node-universe fixture (round-trip self-oracle +
+# C differential). Corpus: fuzz/corpus/nodesfam_diff (per-label validated
+# seeds + boundary seeds).
+[[bin]]
+name = "nodesfam_diff"
+path = "fuzz_targets/nodesfam_diff.rs"
+test = false
+doc = false
+bench = false
+
+# tsvector_core_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsvector_core_diff.md.
+[[bin]]
+name = "tsvector_core_diff"
+path = "fuzz_targets/tsvector_core_diff.rs"
+test = false
+doc = false
+bench = false
+
+# tsrank_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsrank_diff.md.
+[[bin]]
+name = "tsrank_diff"
+path = "fuzz_targets/tsrank_diff.rs"
+test = false
+doc = false
+bench = false
+
+# int_diff: scaffolded by fuzz/scaffold.py — see README-TODO-int_diff.md.
+[[bin]]
+name = "int_diff"
+path = "fuzz_targets/int_diff.rs"
+test = false
+doc = false
+bench = false
+
+# network_diff: scaffolded by fuzz/scaffold.py — see README-TODO-network_diff.md.
+[[bin]]
+name = "network_diff"
+path = "fuzz_targets/network_diff.rs"
+test = false
+doc = false
+bench = false
+
+# pgcryptofam_diff (p1-pgcryptofam): contrib/pgcrypto crypt()/gen_salt()/armor
+# family vs the verbatim 18.3 C oracle (fuzz/core/csrc/pgcryptofam/).
+[[bin]]
+name = "pgcryptofam_diff"
+path = "fuzz_targets/pgcryptofam_diff.rs"
+# guc_file_diff: scaffolded by fuzz/scaffold.py — see README-TODO-guc_file_diff.md.
+[[bin]]
+name = "guc_file_diff"
+path = "fuzz_targets/guc_file_diff.rs"
+test = false
+doc = false
+bench = false
+
+# timeline_diff: scaffolded by fuzz/scaffold.py — see README-TODO-timeline_diff.md.
+[[bin]]
+name = "timeline_diff"
+path = "fuzz_targets/timeline_diff.rs"
+test = false
+doc = false
+bench = false
+
+# spgquad_diff: scaffolded by fuzz/scaffold.py — see README-TODO-spgquad_diff.md.
+[[bin]]
+name = "spgquad_diff"
+path = "fuzz_targets/spgquad_diff.rs"
+# tsm_system_rows_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsm_system_rows_diff.md.
+[[bin]]
+name = "tsm_system_rows_diff"
+path = "fuzz_targets/tsm_system_rows_diff.rs"
+test = false
+doc = false
+bench = false
+
+# guc_units_diff: scaffolded by fuzz/scaffold.py — see README-TODO-guc_units_diff.md.
+[[bin]]
+name = "guc_units_diff"
+path = "fuzz_targets/guc_units_diff.rs"
+# tablesample_diff (p1-wavea): backend/access/tablesample BERNOULLI/SYSTEM.
+[[bin]]
+name = "tablesample_diff"
+path = "fuzz_targets/tablesample_diff.rs"
+test = false
+doc = false
+bench = false
+
+# spgbox_diff: scaffolded by fuzz/scaffold.py — see README-TODO-spgbox_diff.md.
+[[bin]]
+name = "spgbox_diff"
+path = "fuzz_targets/spgbox_diff.rs"
+# tsm_system_time_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsm_system_time_diff.md.
+[[bin]]
+name = "tsm_system_time_diff"
+path = "fuzz_targets/tsm_system_time_diff.rs"
+test = false
+doc = false
+bench = false
+
+# crypt_be_diff (p1-wavea): backend/libpq/crypt vs verbatim crypt.c oracle.
+[[bin]]
+name = "crypt_be_diff"
+path = "fuzz_targets/crypt_be_diff.rs"
+test = false
+doc = false
+bench = false
+
+# instrument_diff (p1-wavea): backend/executor/instrument vs verbatim
+# instrument.c oracle.
+[[bin]]
+name = "instrument_diff"
+path = "fuzz_targets/instrument_diff.rs"
+test = false
+doc = false
+bench = false
+
+# tsquery_core_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsquery_core_diff.md.
+[[bin]]
+name = "tsquery_core_diff"
+path = "fuzz_targets/tsquery_core_diff.rs"
+test = false
+doc = false
+bench = false
+
+# tsqrw_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsqrw_diff.md
+# (p1-lanef handoff, taken over by p1-laneaf, rewritten by task #135
+# final/laneaf-indexproxy).
+[[bin]]
+name = "tsqrw_diff"
+path = "fuzz_targets/tsqrw_diff.rs"
+test = false
+doc = false
+bench = false
+
+# ltree_diff (p1-ltree-t74): contrib/ltree ltree/lquery/ltxtquery IO + operators
+# vs the verbatim 18.3 C oracle (fuzz/core/csrc/ltreefam/).
+[[bin]]
+name = "ltree_diff"
+path = "fuzz_targets/ltree_diff.rs"
+test = false
+doc = false
+bench = false
+
+# trgm_diff: scaffolded by fuzz/scaffold.py — see README-TODO-trgm_diff.md.
+[[bin]]
+name = "trgm_diff"
+path = "fuzz_targets/trgm_diff.rs"
+test = false
+doc = false
+bench = false
+
+# snapio_diff: scaffolded by fuzz/scaffold.py — see README-TODO-snapio_diff.md.
+[[bin]]
+name = "snapio_diff"
+path = "fuzz_targets/snapio_diff.rs"
+test = false
+doc = false
+bench = false

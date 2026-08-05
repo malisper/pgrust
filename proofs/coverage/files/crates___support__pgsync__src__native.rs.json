@@ -1,0 +1,1 @@
+{"path":"crates/_support/pgsync/src/native.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[5,6,7,8,11,12,18,19]}}

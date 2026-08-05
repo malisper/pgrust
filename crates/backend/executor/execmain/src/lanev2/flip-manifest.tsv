@@ -1,0 +1,75 @@
+# lane-v2 flip manifest — WS-P flip machinery (docs/design/flip-ladder.md §4).
+# Schema v1. One data row per DEFAULT-FLIPPED ShapeClass:
+#   class <TAB> allowed_reasons
+#     class           = stats.rs ShapeClass::name() (the lane vocabulary)
+#     allowed_reasons = comma-list of RefuseReason::name() values that stay
+#                       LEGAL for the class after its flip (the dynamic gates:
+#                       epq, instrumented, ...; backward retired, B11); "-" = none.
+#
+# A flip commit adds its row here AND in the compiled-in ASSERT_MANIFEST
+# (lanev2/census.rs) AND reseeds the class's lane-gates floors — all in the
+# SAME commit, both gate profiles (the WS-P floors law; the census.rs
+# `manifest_mirror_in_sync` unit pins this file to the compiled manifest).
+#
+# Layer-A assert mode (PGRUST_LANE_V2_ASSERT_COVERED=1, dualexec/e2e channels
+# only) raises `volcano-unreachable:` (PgError XX000) when a class listed
+# here refuses with a reason outside its allowed_reasons list.
+#
+# Wave-4 rows (flip-ladder §3 rungs 1-3; the binding wave-4 flip manifest):
+#   FLIP-1 rowmode  — projectset + 16 of the 17 row-mode tail delegation
+#                     classes (dynamic host-template gates; projectset keeps
+#                     its structural child refuse + the permanent
+#                     explicit-OFF wholesale refuse; the six T3-hostable
+#                     shapes keep env-off, the per-shape SCANS_T3 force-off
+#                     spelling).
+#                     G2 OMISSIONS, BY DESIGN (ledgered,
+#                     notes/se-wave4-tierA.md): subqueryscan — the 17th tail
+#                     class — flips with rung 1 (tail e2e asserts its ON-arm
+#                     ownership; local floor ratcheted 4 -> 29000) but gets
+#                     NO row: it is a MIXED-HOST class — the pre-existing
+#                     master-knob (PGRUST_LANE_V2) wave-4 glue also ticks
+#                     SubqueryScan refusals with open-ended child-derived
+#                     reasons (scan_child_fusible), so any closed
+#                     allowed_reasons list would false-raise in assert mode;
+#                     its row lands with the master-knob flip, when that
+#                     reason set closes. `result` gets no row because it is
+#                     master-knob-gated, not ROWMODE-gated — genuinely not a
+#                     flipped class this wave.
+#   FLIP-2 mergejoin — pure delegation, dynamic gates only
+#   FLIP-3 windowagg — W1 dynamic gates + the W1 structural refuses (the
+#                     sticky-batch lane owns only its admitted family)
+class	allowed_reasons
+projectset	epq,instrumented,scroll-mark,child-not-lane-owned,srf-set-expansion
+functionscan	epq,instrumented,scroll-mark,env-off
+tablefuncscan	epq,instrumented,scroll-mark,env-off
+valuesscan	epq,instrumented,scroll-mark
+samplescan	epq,instrumented,scroll-mark,env-off
+tidscan	epq,instrumented,scroll-mark,env-off
+tidrangescan	epq,instrumented,scroll-mark,env-off
+namedtuplestorescan	epq,instrumented,scroll-mark,env-off
+material	epq,instrumented,scroll-mark
+ctescan	epq,instrumented,scroll-mark
+recursiveunion	epq,instrumented,scroll-mark
+worktablescan	epq,instrumented,scroll-mark
+memoize	epq,instrumented,scroll-mark
+setop	epq,instrumented,scroll-mark
+mergeappend	epq,instrumented,scroll-mark
+unique	epq,instrumented,scroll-mark
+lockrows	epq,instrumented,scroll-mark
+mergejoin	epq,instrumented
+windowagg	epq,instrumented,child-not-lane-owned,shape-qual-proj
+#
+# ----- wave-7 TIER-B B1 per-shape flips (se/wave7-flips-b1b2) -----
+# FLIP scans-t3 boarded as ONE COMMIT PER SHAPE (wave-7 contract §2; the
+# all-six-classes scope CONFIRMED by the wave-4 integrator,
+# notes/se-wave4-flips.md). ONE-ROW-PER-CLASS law (tierB review finding 2):
+# each shape's B1 allowed list (epq,instrumented,env-off) is a
+# subset of its FLIP-1 merged row above — B1 RIDES the existing row, no new
+# data rows. One comment line lands per per-shape flip commit; a per-shape
+# revert removes its line.
+# wave-7 B1 1/6: functionscan source form default-ON (rides merged row)
+# wave-7 B1 2/6: tablefuncscan source form default-ON (rides merged row)
+# wave-7 B1 3/6: samplescan source form default-ON (rides merged row)
+# wave-7 B1 4/6: tidscan source form default-ON (rides merged row)
+# wave-7 B1 5/6: namedtuplestorescan source form default-ON (rides merged row)
+# wave-7 B1 6/6: tidrangescan source form default-ON (rides merged row) — ladder COMPLETE

@@ -1,0 +1,94 @@
+[package]
+name = "fmgr_core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fmgr_core"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../fmgr_seams" }
+adt_bool = { path = "../../adt/bool" }
+adt_domains = { path = "../../adt/domains" }
+arrayfuncs = { path = "../../adt/arrayfuncs" }
+array_userfuncs = { path = "../../adt/array_userfuncs" }
+adt_scalar = { path = "../../adt/scalar" }
+sequence_seams = { path = "../../../commands/sequence_seams" }
+extension_seams = { path = "../../../commands/extension_seams" }
+foreigncmds_seams = { path = "../../../commands/foreigncmds_seams" }
+adt_regproc = { path = "../../adt/regproc" }
+adt_cash = { path = "../../adt/cash" }
+adt_char = { path = "../../adt/char" }
+adt_date = { path = "../../adt/adt_date" }
+adt_timestamp = { path = "../../adt/adt_timestamp" }
+adt_encode = { path = "../../adt/encode" }
+adt_enum = { path = "../../adt/adt_enum" }
+adt_float = { path = "../../adt/float" }
+adt_formatting = { path = "../../adt/formatting" }
+adt_int = { path = "../../adt/int" }
+adt_int8 = { path = "../../adt/int8" }
+adt_json = { path = "../../adt/json" }
+adt_jsonb = { path = "../../adt/jsonb" }
+adt_jsonpath = { path = "../../adt/jsonpath" }
+adt_jsonpath_exec = { path = "../../adt/jsonpath_exec" }
+adt_mac = { path = "../../adt/mac" }
+adt_mac8 = { path = "../../adt/mac8" }
+adt_pg_lsn = { path = "../../adt/pg_lsn" }
+adt_xml = { path = "../../adt/xml" }
+xid8funcs = { path = "../../adt/xid8funcs" }
+dbsize = { path = "../../adt/dbsize" }
+adt_uuid = { path = "../../adt/uuid" }
+adt_tsvector_core = { path = "../../adt/tsvector_core" }
+adt_tsquery_core = { path = "../../adt/tsquery_core" }
+adt_tsrank = { path = "../../adt/tsrank" }
+wparser_def = { path = "../../../tsearch/wparser_def" }
+ts_parse = { path = "../../../tsearch/ts_parse" }
+tsearch_dict = { path = "../../../tsearch/dict" }
+tsearch_spell = { path = "../../../tsearch/spell" }
+to_tsany = { path = "../../../tsearch/to_tsany" }
+dict_snowball = { path = "../../../snowball/dict_snowball" }
+ts_cache = { path = "../../cache/ts_cache" }
+adt_varbit = { path = "../../adt/varbit" }
+adt_network = { path = "../../adt/network" }
+adt_rangetypes = { path = "../../adt/rangetypes" }
+adt_multirangetypes = { path = "../../adt/multirangetypes" }
+adt_numeric = { path = "../../adt/numeric" }
+adt_like = { path = "../../adt/like" }
+adt_regexp = { path = "../../adt/regexp" }
+hbafuncs = { path = "../../adt/hbafuncs" }
+adt_oracle_compat = { path = "../../adt/oracle_compat" }
+adt_pseudotypes = { path = "../../adt/pseudotypes" }
+adt_quote = { path = "../../adt/quote" }
+adt_varchar = { path = "../../adt/varchar" }
+pgstatfuncs = { path = "../../adt/pgstatfuncs" }
+portalmem = { path = "../../mmgr/portalmem" }
+name = { path = "../../adt/name" }
+nbt_compare = { path = "../../../access/nbtree/compare" }
+varlena = { path = "../../adt/varlena" }
+commands_async = { path = "../../../commands/commands_async" }
+adt_windowfuncs = { path = "../../adt/windowfuncs" }
+cryptohashfuncs = { path = "../../adt/cryptohashfuncs" }
+adt_ascii = { path = "../../adt/adt_ascii" }
+adt_amutils = { path = "../../adt/adt_amutils" }
+adt_mcxtfuncs = { path = "../../adt/mcxtfuncs" }
+waitfuncs = { path = "../../adt/waitfuncs" }
+signalfuncs = { path = "../../../storage/ipc/signalfuncs" }
+lockfuncs = { path = "../../adt/lockfuncs" }
+pseudorandomfuncs = { path = "../../adt/pseudorandomfuncs" }
+trigfuncs = { path = "../../adt/trigfuncs" }
+conv = { path = "../../mb/conv" }
+mcx = { path = "../../../../_support/mcx" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+guc_seams = { path = "../../misc/guc_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+dfmgr = { path = "../dfmgr" }
+
+[dev-dependencies]
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }

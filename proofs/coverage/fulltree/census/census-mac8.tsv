@@ -1,0 +1,25 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+mac8	eq_macaddr8_and	proofs::eq_macaddr8_and	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_cmp	proofs::eq_macaddr8_cmp	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_eq	proofs::eq_macaddr8_eq	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_ge	proofs::eq_macaddr8_ge	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_gt	proofs::eq_macaddr8_gt	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_in_sym_len_0_12	proofs::eq_macaddr8_in_sym_len_0_12	0	13	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_le	proofs::eq_macaddr8_le	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_lt	proofs::eq_macaddr8_lt	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_ne	proofs::eq_macaddr8_ne	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_not	proofs::eq_macaddr8_not	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_or	proofs::eq_macaddr8_or	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_out	proofs::eq_macaddr8_out	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_set7bit	proofs::eq_macaddr8_set7bit	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8_trunc	proofs::eq_macaddr8_trunc	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddr8tomacaddr	proofs::eq_macaddr8tomacaddr	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	eq_macaddrtomacaddr8	proofs::eq_macaddrtomacaddr8	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	sym_in_band_coverage	proofs::sym_in_band_coverage	0	0	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	wit_in_bare48	proofs::wit_in_bare48	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	wit_in_bare64	proofs::wit_in_bare64	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	wit_in_colon48	proofs::wit_in_colon48	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	wit_in_colon64	proofs::wit_in_colon64	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	wit_in_dash64	proofs::wit_in_dash64	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	wit_in_dot64	proofs::wit_in_dot64	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+mac8	wit_in_ws64	proofs::wit_in_ws64	0	2	VERIFICATION:- SUCCESSFUL	RAN	1

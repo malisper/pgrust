@@ -1,0 +1,19 @@
+[package]
+name = "regexp_alt"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+memchr = { version = "2", default-features = false }
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+regex_spencer = { path = "../../../../_support/types/regex", package = "regex" }
+guc_tables = { path = "../../misc/guc_tables" }
+mbutils = { path = "../../mb/mbutils" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+wchar = { path = "../../../../common/wchar" }
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"

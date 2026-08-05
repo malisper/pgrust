@@ -1,0 +1,32 @@
+[package]
+name = "lockcmds"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lockcmds"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_storage = { path = "../../../_support/types/types_storage" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+aclchk = { path = "../../catalog/aclchk" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+adt_acl = { path = "../../utils/adt/acl" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+xact = { path = "../../access/transam/xact" }
+table = { path = "../../access/table/table" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+rewrite_handler = { path = "../../rewrite/rewrite_handler" }

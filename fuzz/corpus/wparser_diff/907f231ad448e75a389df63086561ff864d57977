@@ -1,0 +1,12 @@
+€s token types
+SELECT * FROM
+  ( SELECT oid AS cfgid, (ts_token_type(cfgparser JOIN pg_ts_config_map AS m
+    ON (tt.cfgid=m.mapcd IS NULL;
+
+-- Load some test data
+CREATE TABLE test_tsvector(
+	t text,
+	a tsvector
+);
+
+\set filename :abs_srcdir 

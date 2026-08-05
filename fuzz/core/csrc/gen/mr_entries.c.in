@@ -1,0 +1,459 @@
+/* ========== fuzz-facing driver entries (NOT Postgres code) ========== */
+
+/*
+ * Same contract as the range oracle's entries: PG_DIFF_ENTER() resets the
+ * arena, clears the errcode and arms the longjmp landing pad; return 0 = ok,
+ * >0 = errcode class, -1 = caller buffer too small (harness bug, never a
+ * divergence). PG_DIFF_ENTER / pg_rt_call / pg_rt_copy_range come from the
+ * included pg_rangetypes_io.c.
+ */
+
+static Oid
+pg_mr_typ_oid(int typ)
+{
+	switch (typ)
+	{
+		case 0:
+			return INT4MULTIRANGEOID;
+		case 1:
+			return INT8MULTIRANGEOID;
+		default:
+			return NUMMULTIRANGEOID;
+	}
+}
+
+/* the RANGE type oid that pairs with each pinned multirange */
+static Oid
+pg_mr_range_oid(int typ)
+{
+	switch (typ)
+	{
+		case 0:
+			return INT4RANGEOID;
+		case 1:
+			return INT8RANGEOID;
+		default:
+			return NUMRANGEOID;
+	}
+}
+
+static int
+pg_mr_copy(Datum d, unsigned char *out, int *outlen, int outcap)
+{
+	MultirangeType *mr = DatumGetMultirangeTypeP(d);
+	int			n = (int) VARSIZE(mr);
+
+	if (n > outcap)
+		return -1;
+	memcpy(out, mr, n);
+	*outlen = n;
+	return 0;
+}
+
+/* one fmgr call whose flinfo carries fn_rettype (the constructors and every
+ * function that calls multirange_get_typcache on a rettype read it) */
+static Datum
+pg_mr_call(PGFunction fn, Oid rettype, int nargs, const Datum *args,
+		   const bool *nulls, bool *isnull_out)
+{
+	return pg_rt_call(fn, rettype, nargs, args, nulls, isnull_out);
+}
+
+int
+pg_diff_mr_in(int typ, const char *str,
+			  unsigned char *out, int *outlen, int outcap)
+{
+	Datum		args[3];
+	Datum		d;
+
+	PG_DIFF_ENTER();
+	args[0] = CStringGetDatum(str);
+	args[1] = ObjectIdGetDatum(pg_mr_typ_oid(typ));
+	args[2] = Int32GetDatum(-1);
+	d = pg_mr_call(multirange_in, InvalidOid, 3, args, NULL, NULL);
+	return pg_mr_copy(d, out, outlen, outcap);
+}
+
+int
+pg_diff_mr_out(const unsigned char *img, char *out, int *outlen, int outcap)
+{
+	Datum		args[1];
+	Datum		d;
+	int			n;
+
+	PG_DIFF_ENTER();
+	args[0] = PointerGetDatum(img);
+	d = pg_mr_call(multirange_out, InvalidOid, 1, args, NULL, NULL);
+	n = (int) strlen(DatumGetCString(d));
+	if (n + 1 > outcap)
+		return -1;
+	memcpy(out, DatumGetCString(d), n + 1);
+	*outlen = n;
+	return 0;
+}
+
+int
+pg_diff_mr_recv(int typ, const unsigned char *wire, int wirelen,
+				unsigned char *out, int *outlen, int outcap)
+{
+	StringInfoData buf;
+	Datum		args[3];
+	Datum		d;
+
+	PG_DIFF_ENTER();
+	initStringInfo(&buf);
+	appendBinaryStringInfo(&buf, wire, wirelen);
+	buf.cursor = 0;
+	args[0] = PointerGetDatum(&buf);
+	args[1] = ObjectIdGetDatum(pg_mr_typ_oid(typ));
+	args[2] = Int32GetDatum(-1);
+	d = pg_mr_call(multirange_recv, InvalidOid, 3, args, NULL, NULL);
+	return pg_mr_copy(d, out, outlen, outcap);
+}
+
+int
+pg_diff_mr_send(const unsigned char *img,
+				unsigned char *out, int *outlen, int outcap)
+{
+	Datum		args[1];
+	Datum		d;
+	bytea	   *b;
+	int			n;
+
+	PG_DIFF_ENTER();
+	args[0] = PointerGetDatum(img);
+	d = pg_mr_call(multirange_send, InvalidOid, 1, args, NULL, NULL);
+	b = DatumGetByteaP(d);
+	n = (int) (VARSIZE(b) - VARHDRSZ);
+	if (n > outcap)
+		return -1;
+	memcpy(out, VARDATA(b), n);
+	*outlen = n;
+	return 0;
+}
+
+/*
+ * Constructors. nargs 0 -> multirange_constructor0; 1 with a RANGE image ->
+ * constructor1; 1 with an ARRAY image -> constructor2 (arr != NULL).
+ */
+int
+pg_diff_mr_ctor(int typ, int nargs, const unsigned char *rng,
+				const unsigned char *arr, int argnull,
+				unsigned char *out, int *outlen, int outcap)
+{
+	Datum		args[1];
+	bool		nulls[1];
+	Datum		d;
+	Oid			rettype = pg_mr_typ_oid(typ);
+
+	PG_DIFF_ENTER();
+	if (nargs == 0)
+	{
+		d = pg_mr_call(multirange_constructor0, rettype, 0, NULL, NULL, NULL);
+		return pg_mr_copy(d, out, outlen, outcap);
+	}
+	nulls[0] = (argnull != 0);
+	if (arr != NULL)
+	{
+		args[0] = PointerGetDatum(arr);
+		d = pg_mr_call(multirange_constructor2, rettype, 1, args, nulls, NULL);
+	}
+	else
+	{
+		args[0] = PointerGetDatum(rng);
+		d = pg_mr_call(multirange_constructor1, rettype, 1, args, nulls, NULL);
+	}
+	return pg_mr_copy(d, out, outlen, outcap);
+}
+
+/*
+ * Accessors over one multirange image: lower / upper (element datums, byval
+ * copied as 8 bytes, byref as the varlena image) + the five bool accessors
+ * in bools[]: isempty, lower_inc, upper_inc, lower_inf, upper_inf.
+ */
+int
+pg_diff_mr_accessors(int typ, const unsigned char *img,
+					 unsigned char *lower_out, int *lower_len, int *lower_null,
+					 unsigned char *upper_out, int *upper_len, int *upper_null,
+					 unsigned char *bools /* [5] */, int outcap)
+{
+	Datum		args[1];
+	Datum		d;
+	bool		isnull;
+	TypeCacheEntry *tc;
+	int			i;
+	struct
+	{
+		PGFunction	fn;
+		unsigned char *out;
+		int		   *len;
+		int		   *nul;
+	}			acc[2];
+	static const PGFunction boolfns[5] = {
+		multirange_empty, multirange_lower_inc, multirange_upper_inc,
+		multirange_lower_inf, multirange_upper_inf
+	};
+
+	PG_DIFF_ENTER();
+
+	/*
+	 * The element type comes from the PINNED instantiation the caller names,
+	 * never from the image: reading it out of the image would make the mock's
+	 * totality depend on attacker bytes (the pg_diff_range_accessors NULL-deref
+	 * class). multirange_get_typcache below still validates the oid C-side.
+	 */
+	tc = pg_mr_lookup(pg_mr_typ_oid(typ))->rngtype;
+
+	args[0] = PointerGetDatum(img);
+	acc[0].fn = multirange_lower;
+	acc[0].out = lower_out;
+	acc[0].len = lower_len;
+	acc[0].nul = lower_null;
+	acc[1].fn = multirange_upper;
+	acc[1].out = upper_out;
+	acc[1].len = upper_len;
+	acc[1].nul = upper_null;
+	for (i = 0; i < 2; i++)
+	{
+		d = pg_mr_call(acc[i].fn, InvalidOid, 1, args, NULL, &isnull);
+		*acc[i].nul = isnull;
+		*acc[i].len = 0;
+		if (!isnull)
+		{
+			if (tc->rngelemtype->typbyval)
+			{
+				int64		v = (int64) d;
+
+				if (8 > outcap)
+					return -1;
+				memcpy(acc[i].out, &v, 8);
+				*acc[i].len = 8;
+			}
+			else
+			{
+				/*
+				 * Copy the byref datum EXACTLY as the accessor returned it —
+				 * never through PG_DETOAST_DATUM. multirange_lower/upper return
+				 * `lower.val`, a pointer INTO the multirange image, and a
+				 * numeric bound stored there is PACKED SHORT (1-byte header).
+				 * Detoasting here would expand it to the 4-byte form and report
+				 * a divergence against the shipped code, which also returns the
+				 * packed pointer: a harness artifact, not a behavior difference.
+				 */
+				const void *p = (const void *) DatumGetPointer(d);
+				int			n = (int) VARSIZE_ANY(p);
+
+				if (n > outcap)
+					return -1;
+				memcpy(acc[i].out, p, n);
+				*acc[i].len = n;
+			}
+		}
+	}
+	for (i = 0; i < 5; i++)
+	{
+		d = pg_mr_call(boolfns[i], InvalidOid, 1, args, NULL, &isnull);
+		bools[i] = (unsigned char) (DatumGetBool(d) ? 1 : 0);
+	}
+	return 0;
+}
+
+/* multirange x multirange operator bundle; res[] one slot per op, in the
+ * SAME order the Rust driver drives its fc_ wrappers. */
+int
+pg_diff_mr_ops(const unsigned char *img1, const unsigned char *img2,
+			   int *res /* [15] */)
+{
+	Datum		args[2];
+	int			i;
+	static const PGFunction fns[15] = {
+		multirange_eq, multirange_ne, multirange_lt, multirange_le,
+		multirange_ge, multirange_gt, multirange_cmp,
+		multirange_overlaps_multirange,
+		multirange_contains_multirange, multirange_contained_by_multirange,
+		multirange_adjacent_multirange,
+		multirange_before_multirange, multirange_after_multirange,
+		multirange_overleft_multirange, multirange_overright_multirange
+	};
+
+	PG_DIFF_ENTER();
+	args[0] = PointerGetDatum(img1);
+	args[1] = PointerGetDatum(img2);
+	for (i = 0; i < 15; i++)
+	{
+		Datum		d = pg_mr_call(fns[i], InvalidOid, 2, args, NULL, NULL);
+
+		/* op 6 is multirange_cmp (int32); the rest are bool */
+		res[i] = (i == 6) ? DatumGetInt32(d) : (DatumGetBool(d) ? 1 : 0);
+	}
+	return 0;
+}
+
+/* range x multirange and multirange x range forms. res[] slots:
+ *  0 range_overlaps_multirange      1 multirange_overlaps_range
+ *  2 multirange_contains_range      3 range_contains_multirange
+ *  4 range_contained_by_multirange  5 multirange_contained_by_range
+ *  6 range_adjacent_multirange      7 multirange_adjacent_range
+ *  8 range_before_multirange        9 multirange_before_range
+ * 10 range_after_multirange        11 multirange_after_range
+ * 12 range_overleft_multirange     13 multirange_overleft_range
+ * 14 range_overright_multirange    15 multirange_overright_range
+ */
+int
+pg_diff_mr_range_ops(const unsigned char *rimg, const unsigned char *mimg,
+					 int *res /* [16] */)
+{
+	Datum		rm[2];			/* (range, multirange) */
+	Datum		mr_[2];			/* (multirange, range) */
+	int			i;
+
+	/*
+	 * Arg order follows the NAME, verbatim from multirangetypes.c: a
+	 * range_*_multirange entry reads (range, multirange), a multirange_*_range
+	 * entry reads (multirange, range). `mr_first` records that per row so no
+	 * row can silently get its operands swapped.
+	 */
+	static const struct
+	{
+		PGFunction	fn;
+		bool		mr_first;
+	}			ops[16] = {
+		{range_overlaps_multirange, false}, {multirange_overlaps_range, true},
+		{multirange_contains_range, true}, {range_contains_multirange, false},
+		{range_contained_by_multirange, false}, {multirange_contained_by_range, true},
+		{range_adjacent_multirange, false}, {multirange_adjacent_range, true},
+		{range_before_multirange, false}, {multirange_before_range, true},
+		{range_after_multirange, false}, {multirange_after_range, true},
+		{range_overleft_multirange, false}, {multirange_overleft_range, true},
+		{range_overright_multirange, false}, {multirange_overright_range, true}
+	};
+
+	PG_DIFF_ENTER();
+	rm[0] = PointerGetDatum(rimg);
+	rm[1] = PointerGetDatum(mimg);
+	mr_[0] = PointerGetDatum(mimg);
+	mr_[1] = PointerGetDatum(rimg);
+	for (i = 0; i < 16; i++)
+	{
+		Datum		d = pg_mr_call(ops[i].fn, InvalidOid, 2,
+								   ops[i].mr_first ? mr_ : rm, NULL, NULL);
+
+		res[i] = DatumGetBool(d) ? 1 : 0;
+	}
+	return 0;
+}
+
+/* multirange_contains_elem / elem_contained_by_multirange. byval elements
+ * ride `v`; byref (numeric) elements ride `numptr`. */
+int
+pg_diff_mr_elem(const unsigned char *img, int64 v, const unsigned char *numptr,
+				int *contains, int *contained)
+{
+	Datum		a[2];
+	Datum		b[2];
+	Datum		elem;
+	Datum		d;
+
+	PG_DIFF_ENTER();
+	elem = (numptr != NULL) ? PointerGetDatum(numptr) : (Datum) v;
+	a[0] = PointerGetDatum(img);
+	a[1] = elem;
+	d = pg_mr_call(multirange_contains_elem, InvalidOid, 2, a, NULL, NULL);
+	*contains = DatumGetBool(d) ? 1 : 0;
+	b[0] = elem;
+	b[1] = PointerGetDatum(img);
+	d = pg_mr_call(elem_contained_by_multirange, InvalidOid, 2, b, NULL, NULL);
+	*contained = DatumGetBool(d) ? 1 : 0;
+	return 0;
+}
+
+/* set ops: 0 union, 1 minus, 2 intersect */
+int
+pg_diff_mr_setop(int which, const unsigned char *img1, const unsigned char *img2,
+				 unsigned char *out, int *outlen, int outcap)
+{
+	Datum		args[2];
+	Datum		d;
+	PGFunction	fn;
+
+	PG_DIFF_ENTER();
+	fn = (which == 0) ? multirange_union :
+		(which == 1) ? multirange_minus : multirange_intersect;
+	args[0] = PointerGetDatum(img1);
+	args[1] = PointerGetDatum(img2);
+	d = pg_mr_call(fn, InvalidOid, 2, args, NULL, NULL);
+	return pg_mr_copy(d, out, outlen, outcap);
+}
+
+int
+pg_diff_mr_hash(const unsigned char *img, uint32 *h, uint64 seed, uint64 *he)
+{
+	Datum		args[2];
+	Datum		d;
+
+	PG_DIFF_ENTER();
+	args[0] = PointerGetDatum(img);
+	d = pg_mr_call(hash_multirange, InvalidOid, 1, args, NULL, NULL);
+	*h = DatumGetUInt32(d);
+	args[1] = (Datum) seed;
+	d = pg_mr_call(hash_multirange_extended, InvalidOid, 2, args, NULL, NULL);
+	*he = (uint64) d;
+	return 0;
+}
+
+/* range_merge(multirange) -> the union RANGE (oid 4228) */
+int
+pg_diff_mr_merge(const unsigned char *img,
+				 unsigned char *out, int *outlen, int outcap)
+{
+	Datum		args[1];
+	Datum		d;
+
+	PG_DIFF_ENTER();
+	args[0] = PointerGetDatum(img);
+	d = pg_mr_call(range_merge_from_multirange, InvalidOid, 1, args, NULL, NULL);
+	return pg_rt_copy_range(d, out, outlen, outcap);
+}
+
+/*
+ * Internal-API arm: the support functions the fmgr entries do not reach
+ * directly — multirange_get_range(i) and multirange_get_union_range, plus the
+ * count/is-empty header reads. Exercises multirange_get_bounds_offset and the
+ * item-offset/length stride walk on non-trivial images.
+ */
+int
+pg_diff_mr_internals(int typ, const unsigned char *img, int i,
+					 unsigned int *count, int *is_empty,
+					 unsigned char *range_out, int *range_len,
+					 unsigned char *union_out, int *union_len, int outcap)
+{
+	TypeCacheEntry *rangetyp;
+	MultirangeType *mr;
+	RangeType  *r;
+	int			n;
+
+	PG_DIFF_ENTER();
+	rangetyp = pg_mr_lookup(pg_mr_typ_oid(typ))->rngtype;
+	mr = (MultirangeType *) img;
+	*count = mr->rangeCount;
+	*is_empty = MultirangeIsEmpty(mr) ? 1 : 0;
+	*range_len = 0;
+	*union_len = 0;
+	if (mr->rangeCount == 0)
+		return 0;
+
+	r = multirange_get_range(rangetyp, mr, i % (int) mr->rangeCount);
+	n = (int) VARSIZE(r);
+	if (n > outcap)
+		return -1;
+	memcpy(range_out, r, n);
+	*range_len = n;
+
+	r = multirange_get_union_range(rangetyp, mr);
+	n = (int) VARSIZE(r);
+	if (n > outcap)
+		return -1;
+	memcpy(union_out, r, n);
+	*union_len = n;
+	return 0;
+}

@@ -1,0 +1,1 @@
+{"path":"crates/port/pg_strong_random/src/sim.rs","sloc":[25,26,38,39,42,43,44,45,52,53,54,55,57,64,65,66,67,68,69,77,78,79,80,81,87,88,89,90],"kani":[],"fuzz":[],"regress":[],"excluded":{"else-only":[56],"use-mod":[16,17,19],"attr":[86],"const-static":[34,36],"typedef":[22],"impl-header":[24,85]}}

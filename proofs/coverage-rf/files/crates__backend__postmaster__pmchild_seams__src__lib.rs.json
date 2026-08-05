@@ -1,0 +1,1 @@
+{"path":"crates/backend/postmaster/pmchild_seams/src/lib.rs","sloc":[12,14,17,20,23,25,28,30,33,35,38,40,43,45,48,51,54,56],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2],"type-alias":[10]}}

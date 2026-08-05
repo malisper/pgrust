@@ -1,0 +1,8 @@
+#!/bin/bash
+set -eu
+. "$(dirname "$0")/env.sh"
+env RUST_MIN_STACK=33554432 RUST_BACKTRACE=1 \
+  PGRUST_TZDIR="$PGTZDIR" PGRUST_PGSHAREDIR="$PGSHARE" \
+  $CB_SERVER_ENV \
+  "$CB_BIN" -D "$CB_DD" -k "$CB_SOCK" -p 5432 -c listen_addresses='' \
+  >>"$CB_DD/server.log" 2>&1 &

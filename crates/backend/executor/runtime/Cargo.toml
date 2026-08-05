@@ -1,0 +1,68 @@
+[package]
+name = "runtime"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "runtime"
+path = "src/lib.rs"
+
+# MERGE NOTE (m0-integration): lane B shipped this crate dependency-free with
+# a cfg(m0_harvest_lifecycle) lifecycle shim; the M0 merge swapped in lane A's
+# real lifecycle.rs (design-donor extraction of the qualified scan-task
+# lifecycle), which carries the error/interrupt seams below. The scheduler
+# core stays loom-modelable: everything the models drive synchronizes through
+# src/sync.rs; the heavy binder re-export (`parallel`) is cfg(not(loom)) so
+# the loom build cone stays small.
+[dependencies]
+# THE single lock library (permit-s1): src/sync.rs is a facade over it.
+pgsync = { path = "../../../_support/pgsync" }
+pg_clock = { path = "../../../port/pg_clock" }
+types_error = { path = "../../../_support/types/types_error" }
+init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+
+[target.'cfg(not(loom))'.dependencies]
+# The query-task binder re-export (pinned M0 interface QueryTaskGuard) and
+# the Waiter the CompletionWaiter parks on (§2.5 submit-and-park re-homed
+# onto lane C's primitive) are production-only: loom models drive the
+# lifecycle directly and observe completion via try_wait, and the waiter
+# crate's global slot surface is itself cfg(not(loom)).
+parallel = { path = "../../access/transam/parallel" }
+# runtime_enabled() reads the registered `pgrust.runtime` GUC's backing cell
+# (t34-config: ONE authority for the runtime master switch; PGRUST_RUNTIME
+# seeds the cell at boot). Cell-only dep — no registry/store machinery.
+guc_tables = { path = "../../utils/misc/guc_tables" }
+waiter = { path = "../../storage/ipc/waiter" }
+# §2.9 uring duties of the worker loop (src/io.rs): ring lifecycle +
+# boundary-reap calls, and the io_permit_release/reacquire (IoGuard) seam
+# impls. Seam-only dep: aio_uring installs; absent = guarded no-ops.
+aio_seams = { path = "../../storage/aio/aio_seams" }
+
+# Loom is cfg-gated, not feature-gated, so release binaries can never link
+# it: build the models with
+#   RUSTFLAGS="--cfg loom" cargo test -p runtime --test loom --release
+# Post-pgsync note: sync-TYPE selection lives in pgsync, but this row is
+# still LOAD-BEARING FOR src/: rg.rs keeps its pre-existing cfg(loom) wait()
+# polyfill (loom::thread::yield_now; outside the s1 §2.4 migration scope).
+# tests/loom.rs model Builders also use it; the loom-breadth reconciliation
+# migrates the fenced models (tests/loom.rs is fenced).
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+# The donor lifecycle loom model (lifecycle.rs mod tests) drives loom atomics
+# explicitly and runs under PLAIN `cargo test -p runtime` (the waiter crate
+# set this dual-declaration precedent). Dev-deps never reach release builds.
+[dev-dependencies]
+loom = "0.7"
+# permit-s4: the bitmapheap phase-mirror loom model drives the waiter Slot
+# core directly (dev-dep = codegen-inert, the loom-breadth inc-2 ruling).
+waiter = { path = "../../storage/ipc/waiter" }
+# latch-loom: types_relscan became loom-buildable (the latch conversion), so
+# the relscan seize model now constructs the REAL BTParallelScanShared
+# (dev-dep = codegen-inert, same ruling).
+types_relscan = { path = "../../access/index/relscan" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

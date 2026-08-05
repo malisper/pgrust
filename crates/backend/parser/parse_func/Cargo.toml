@@ -1,0 +1,38 @@
+[package]
+name = "parse_func"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_func"
+path = "src/lib.rs"
+
+[dependencies]
+parse_func_seams = { path = "../parse_func_seams" }
+readfuncs = { path = "../../nodes/readfuncs" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+coerce = { path = "../coerce" }
+elog = { path = "../../utils/error/elog" }
+format_type = { path = "../../utils/adt/format_type" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+parse_utilcmd = { path = "../parse_utilcmd" }
+parse_relation = { path = "../parse_relation" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+mbutils = { path = "../../utils/mb/mbutils" }
+mcx = { path = "../../../_support/mcx" }
+nodes_core = { path = "../../nodes/nodes_core" }
+parse_agg = { path = "../parse_agg" }
+parser_small1 = { path = "../parser_small1" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+
+[dev-dependencies]
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+datum = { path = "../../../_support/types/datum" }
+parse_target = { path = "../parse_target" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

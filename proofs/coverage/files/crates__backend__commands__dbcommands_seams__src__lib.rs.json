@@ -1,0 +1,1 @@
+{"path":"crates/backend/commands/dbcommands_seams/src/lib.rs","sloc":[4,7,10,12,13,14,15,16,19,23],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2]}}

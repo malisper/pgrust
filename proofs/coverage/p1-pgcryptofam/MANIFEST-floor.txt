@@ -1,0 +1,13 @@
+===== FLEET JOB MANIFEST =====
+
+description:
+  p1-pgcryptofam: pgcryptofam_diff 10M floor (crypt/gen_salt/armor/dearmor/armor_headers/digest/hmac vs verbatim 18.3); deadline 14400 sized from MEASURED 6944 exec/s laptop smoke (250k, 0 div); injection sweep 4/4 planes CAUGHT
+
+job_name: pgrust-fuzz-campaign-1785664060-1cd9-61609
+job_type: fuzz-campaign
+git_ref: f8231ca7535106f5e15d1e439f8b1c433d6b64fc
+repo_url: https://github.com/Pager-Free/pgrust-fast.git
+build_kind: fast
+sha: f8231ca75351
+started_utc: 2026-08-02T09:49:49Z
+hostname: pgrust-fuzz-campaign-1785664060-1cd9-61609-272kf

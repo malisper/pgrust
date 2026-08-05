@@ -1,0 +1,4 @@
+‚);
+
+-- parens are ignored, too
+select websh_to_tsquery(

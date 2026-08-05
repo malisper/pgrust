@@ -1,0 +1,65 @@
+# proofs/coverage/microbatch-contriba/summary.tsv — per-crate coverage
+# equation for lane p1-mb-contriba (target contriba_diff, seven selector
+# arms over two contrib crates). Oracle: verbatim vendored PostgreSQL 18.3
+# (Stamp-18.3, upstream 62d6c7d3df) in fuzz/core/csrc/pg_contribafam_io.c
+# (+ csrc/contribafam/ headers), assembled by
+# scratchpad/assemble_contribafam.sh.
+#
+# Capture of record (local, macOS arm64, 2026-08-01): full committed corpus
+# (fuzz/corpus/contriba_diff) replayed under cargo fuzz coverage; lcov
+# banked here (contriba_diff.lcov.gz). Local campaign volume: 23.8M execs
+# across two rounds (8.34M + 7.81M libFuzzer + 7.69M replay/ASAN leg), all
+# under AddressSanitizer (cargo-fuzz default), 0 divergences, 0 panics, 0
+# sanitizer reports. Fleet 10M CONFIRM = coordinator follow-up.
+#
+# Injection sweep AT CREATION (gate item): 7 planted defects across the
+# value plane (soundex table, metaphone B-arm, isn checkdig, dmetaphone
+# truncate, daitch start-node soundex, levenshtein sub cost) and the
+# sqlstate plane (isn eaninvalid 22P02 -> 22003); 7/7 killed. Three needed
+# stronger seeds (interior-vowel soundex word, a 4-phoneme dmetaphone word,
+# a 1-letter daitch word) — those seeds are committed.
+#
+# SHARED-TEST-BINARY ISOLATION (found + fixed 2026-08-01): the isn.weak fc
+# plane needs a bootstrapped GUC store, whose seams (guc_tables/elog/guc)
+# sibling lanes install UNGUARDED inside their own Once. Installing them from
+# this driver poisoned datetime_io_diff::init_env's Once and failed eleven
+# datetime tests. The bootstrap is now gated to cfg!(fuzzing) — the dedicated
+# contriba_diff binary, which is exactly the binary this coverage capture
+# replays, so the plane stays fully measured (builtins.rs residual = 1 line).
+# The standalone witness test is `guc_env_works` (#[ignore]d for the same
+# reason; run with `-- --ignored`).
+#
+# Soft-error plane witness (gate item): the C oracle's ereturn shim bumps
+# pg_ca_soft_fired, and arm 5 asserts the counter fired exactly when the
+# Rust side saved a soft error — the plane can never compare Rust to Rust.
+#
+# equation per crate: v2_sloc = fuzz_measured + a0 + exception_rows, 0 unaccounted.
+# SLOC rule: v2 + tables excluded (sloc_rules.py denominator, line_table = lcov DA set).
+crate	file	v2_sloc	fuzz_measured	a0	exception_rows	unaccounted	residual_lines
+contrib/fuzzystrmatch	crates/contrib/fuzzystrmatch/src/lib.rs	279	275	0	4	0	78 (METAPHONE_CODES table head, const-eval-only) + 404/428/438 (cstring_to_text OOM `?` closers, defensive-c-parity)
+contrib/fuzzystrmatch	crates/contrib/fuzzystrmatch/src/dmetaphone.rs	382	377	0	5	0	25 (safe-slice bounds guard, unreachable under the 5-space pad) + 71/72/126/259 (macro body + call-arg lines, instrument-unmappable)
+contrib/fuzzystrmatch	crates/contrib/fuzzystrmatch/src/daitch_mokotoff.rs	264	249	0	15	0	16-17 (ascii-upper table, const-eval-only) + 263/313/353/406 (palloc `?` closers) + 287/294 (zero-code sentinel, dead under exact-length Rust tables) + 383 (pg_server_to_any converted arm, UTF8-pinned) + 167/312/402-405 (call-arg lines)
+contrib/fuzzystrmatch	crates/contrib/fuzzystrmatch/src/dm_table.rs	80	0	0	80	0	all 80 = static coding-chart heads (const-eval-only; content value-compared every arm-4 exec against the perl-generated C header)
+contrib/isn	crates/contrib/isn/src/lib.rs	438	417	0	21	0	215-216 (ISMN 'M' pre-charge, dead in C too) + 389/510/526/609/662/679-684 (C-parity defensive guards, each proved unreachable) + 47/257/300/306/456/476/488/561/680/692 (table head, decl, errmsg literals)
+contrib/isn	crates/contrib/isn/src/builtins.rs	86	85	0	1	0	111 (SetConfigOption error `?` closer; C discards the return with (void))
+contrib/isn	crates/contrib/isn/src/tables.rs	10	0	0	10	0	all 10 = static range/index table heads (const-eval-only; content compared against the verbatim vendored EAN13/ISBN/ISMN/ISSN/UPC headers)
+# CONTRIBUTED (not a claimed crate of this lane): fuzzystrmatch's levenshtein
+# core lives in the varlena crate; arm 2 drives all four SQL wrappers through
+# it against both verbatim levenshtein.c expansions, so the file is measured
+# here and its residual carried as this lane's exception rows.
+backend/utils/adt/varlena (contributed)	crates/backend/utils/adt/varlena/src/levenshtein.rs	148	145	0	3	0	90 (stop_column clamp, PROVED unreachable — see the exception row) + 23/137 (errmsg literal, bare decl)
+#
+# MUTATION AUDIT (trailing, non-blocking per the campaign convention):
+# `cargo mutants -p fuzzystrmatch -p isn` running locally at nice 19, log at
+# /tmp/mutants_contriba.log. Its MISSED verdicts are against the crates' own
+# thin in-crate tests, NOT this target's corpus — survivors are triaged with
+# proofs/coverage/mutkill.sh against the committed differential corpus.
+# Spot-checks completed 2026-08-01 (3 representative survivors, one per arm
+# family):
+#   KILLED   fuzzystrmatch/src/lib.rs:43  `i < instr.len()` -> `>`   (arm 0)
+#   KILLED   fuzzystrmatch/src/lib.rs:93  `& 1 != 0` -> `& 1 == 0`   (arms 1/3)
+#   SURVIVED daitch_mokotoff.rs:72        `c < 0x60` -> `c <= 0x60`  (arm 4)
+#     => EQUIVALENT MUTANT, not a hole: at c == 0x60 the identity branch
+#        returns 0x60 and the table branch returns
+#        ISO8859_1_TO_ASCII_UPPER[0], which is also 0x60 ('`'). Both paths
+#        produce the same byte, so no input can witness the change.

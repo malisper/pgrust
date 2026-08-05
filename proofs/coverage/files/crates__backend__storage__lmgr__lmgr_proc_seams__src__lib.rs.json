@@ -1,0 +1,1 @@
+{"path":"crates/backend/storage/lmgr/lmgr_proc_seams/src/lib.rs","sloc":[18,19,22,23,26,27,30,31,34,35,38,39,42,43,46,47,50,53],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1],"attr":[4,5,11,12],"typedef":[6,7,8,13,14,15]}}

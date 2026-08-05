@@ -1,0 +1,39 @@
+[package]
+name = "tableam"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+smgr = { path = "../../../storage/smgr/smgr" }
+procarray = { path = "../../../storage/ipc/procarray" }
+multixact = { path = "../../transam/multixact" }
+catalog_storage = { path = "../../../catalog/catalog_storage" }
+xact = { path = "../../transam/xact" }
+xact_seams = { path = "../../transam/xact_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+elog_seams = { path = "../../../utils/error/elog_seams" }
+exectuples = { path = "../../../executor/exectuples" }
+tableam_vocab = { path = "../tableam_vocab" }
+pgrcolumnar = { path = "../../pgrcolumnar" }
+heapam = { path = "../../heap/heapam" }
+format_type = { path = "../../../utils/adt/format_type" }
+heapam_handler = { path = "../../heap/heapam_handler" }
+heapam_visibility_seams = { path = "../../heap/heapam_visibility_seams" }
+tidbitmap = { path = "../../../nodes/tidbitmap" }
+snapmgr = { path = "../../../utils/time/snapmgr" }
+init_small = { path = "../../../utils/init/init_small" }
+tableam_seams = { path = "../tableam_seams" }

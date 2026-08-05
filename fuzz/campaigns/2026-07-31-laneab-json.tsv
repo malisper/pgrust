@@ -1,0 +1,5 @@
+# Fleet fuzz-campaign record — p1-laneab adt/json done-gate
+# columns: target status execs corpus_in corpus_out divergences cov_lines wall_s job sha
+json_diff	run	10000000	83	1888	0	2529	475	pgrust-fuzz-campaign-1785508521-0065-90755	ff70d8f172edeac4d5eb3e1712aead77e349504e
+json_diff	run	10000000	3275	5683	0	2569	478	pgrust-fuzz-campaign-1785509922-6e9e-70975	c4f6a5c323c335654a7755b8b6d89be564c61b9f
+# plus a0 exhaustive unicode-escape sweep: 67,174,400 cases PASS (see 2026-07-31-laneab-exhaustive-unicode.md)

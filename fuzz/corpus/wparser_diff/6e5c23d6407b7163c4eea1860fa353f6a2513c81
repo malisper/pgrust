@@ -1,0 +1,4 @@
+‚);
+
+--Fragments when there all query words are not in the document
+SELECT ts_headline(

@@ -1,0 +1,15 @@
+{
+  "crate": "crates/common/unicode_category",
+  "remediation": "phase1-gate-audit-2026-07-31 finding 8 (live double count)",
+  "basis_sha": "bd0ceab3fab77d94af700f1d03a792c70f8abc8f",
+  "capture_provenance": "local full-corpus cov-export of tablesfam_diff (cov-resweep 2026-07-31, .wt-covresweep/fuzz/coverage/tablesfam_diff.lcov, verified line-set-identical to the lanef fleet capture of record per proofs/coverage/cov-resweep/README.md on proofs/cov-resweep @ a594887353); crate sources bit-identical eff70bb262..bd0ceab3fa",
+  "evidence": "fuzz-tablesfam_diff-bd0ceab3fa.lcov.gz (SF blocks trimmed to common/unicode_category + common/keywords)",
+  "equation": {
+    "denominator_v2_sloc": 91,
+    "measured_fuzz": 90,
+    "excepted": 1,
+    "recorded_residual": 0,
+    "uncovered_minus_excepted": 0
+  },
+  "what_moved": "90 p1-laneg proof-covered-unmeasured ledger rows DELETED from proofs/coverage/phase1-exceptions.tsv: every one of their 90 lines is measured-covered by the tablesfam_diff capture of record (raw lcov covers 125 lib.rs lines including all 90), so they were a line-level double count (181 accounted vs 91 denominator). The single genuinely-unmeasured in-scope line, lib.rs:7 (include! of the build-generated table module), now carries the one exception row (instrument-unmappable). The laneg full-u32 Kani proof family (proofs/unicode-cat, 22 green harnesses) remains the proof of record per the claims-file duplication ledger; it no longer double-books coverage lines."
+}

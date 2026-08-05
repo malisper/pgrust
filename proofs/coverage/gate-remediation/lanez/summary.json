@@ -1,0 +1,50 @@
+{
+ "crate": "mb/conv (crates/backend/utils/mb/conv)",
+ "lane": "p1-lanez",
+ "remediation": "p1-lanez-remediation 2026-07-31",
+ "basis_sha": "bd0ceab3fab77d94af700f1d03a792c70f8abc8f",
+ "denominator_rule": "tree-sloc.py --sloc-rule v2 --exclude-const-tables --strict-test-scope; scope = src/**/*.rs MINUS src/maps/* (generated conversion tables, data-excluded per denominator ruling) MINUS src/tests.rs (test scope)",
+ "denominator": 1852,
+ "measured_union": 1626,
+ "union_inputs": [
+  {
+   "name": "legA-corpus-replay",
+   "recipe": "fuzz/cov-export.sh mbconv_diff over the COMMITTED corpus fuzz/corpus/mbconv_diff (9350 files, last corpus commit eda58edf10d87da93204f063e92c5749acacd119)",
+   "full_lcov_sha256": "d69da255ca4fb97b5870039a1696b08c8915280b6eeca451730ab82f533d6956",
+   "trimmed_to_crate": "proofs/coverage/gate-remediation/lanez/legA-corpus-replay.mbconv-trim.lcov.gz",
+   "trimmed_content_sha256": "fb0f0a4a6b5e9806ee5abd88e6379e846126a764deb997b20e76e4a0a3b47ab4",
+   "da_lines_full": 216972
+  },
+  {
+   "name": "legB-exhaustive-sampled",
+   "recipe": "decoder_fuzz mbconv_diff::tests::exhaustive_sampled_for_coverage (#[ignore] coverage-capture helper), RUSTFLAGS=-Cinstrument-coverage cargo +nightly-2026-07-17 test --release -p decoder_fuzz",
+   "full_lcov_sha256": "940cb6389fca5ccc9394520d7f1ae00e40e69199b21a96a8f5ee0f8300cbbefd",
+   "trimmed_to_crate": "proofs/coverage/gate-remediation/lanez/legB-exhaustive-sampled.mbconv-trim.lcov.gz",
+   "trimmed_content_sha256": "915bacbe094f5b5b568ddb2a4ce18b626ff34cefadab5bccecc12cb6f5adfa29",
+   "da_lines_full": 215500
+  },
+  {
+   "name": "legC-test-rails",
+   "recipe": "decoder_fuzz mbconv_diff:: non-ignored rails (smoke_all_pairs, corpus_replay, exhaustive_k1_k2_all_pairs, bad_args_all_pairs, utf_engines_invalid_encoding, quoted_append_lattice) PLUS mbconv_diff::tests::exhaustive_combined_second_codepoint (--ignored), same recipe as legB",
+   "full_lcov_sha256": "38bb95dde9d434a44666c356af8811cc092bf10e1c53bbc5ae9543ae06849bf1",
+   "trimmed_to_crate": "proofs/coverage/gate-remediation/lanez/legC-test-rails.mbconv-trim.lcov.gz",
+   "trimmed_content_sha256": "23e743c5c56f33d9c6c41b27c9c2d752122a82371cf7e58f898ae5078c9610a6",
+   "da_lines_full": 215500
+  }
+ ],
+ "union_rule": "line covered iff DA>0 for the line in ANY leg, intersected with the denominator line set; NO macro-attribution credit applied (fuzz-only legs); see gate-equation.py herein",
+ "hand_exception_rows": 33,
+ "auto_measurement_note_rows": 114,
+ "recorded_instrument_unmapped_rows": 79,
+ "equation": "1852 = 1626 measured + 33 hand-excepted (defensive-c-parity/unreachable-arm, pre-existing, re-verified) + 114 auto instrument-unmappable (auto-exceptions.tsv herein) + 79 hand instrument-unmappable rows (phase1-exceptions.tsv, lane p1-lanez-remediation); uncovered-minus-excepted-minus-recorded = 0",
+ "prior_claim": {
+  "denominator": 2060,
+  "measured": 2014,
+  "note": "claims-row 2014 vs banked final-union.txt 2007 contradiction NOT reconciled \u2014 superseded; the 2060 universe used instrument-line-table reinstatement and is retired; 13 of 46 prior exception rows sat on lone-brace lines outside the v2 universe and were deleted"
+ },
+ "real_gaps_closed": "21 mappable-but-unexecuted lines (bad-args ? branches at 10 wrapper call sites; UtfToLocal/LocalToUtf invalid-encoding arms lib.rs 207-210/231/329; combined-map hit lib.rs 283-285) are covered by legC rails \u2014 no source or corpus change needed",
+ "toolchain": {
+  "cargo_fuzz": "nightly-2026-07-17-aarch64-apple-darwin (cov-export.sh recipe)",
+  "llvm_tools": "nightly-2026-07-17 sysroot llvm-profdata/llvm-cov"
+ }
+}

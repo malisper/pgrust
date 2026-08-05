@@ -1,0 +1,20 @@
+[package]
+name = "guc_tables"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "guc_tables"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+guc_seams = { path = "../guc_seams" }
+
+# `pgrust_sim` mirrors vfs's declaration (contract §1.2): non-default cfg set
+# only by the sim harness's RUSTFLAGS; gates the "clone" file_copy_method
+# entry to the platforms whose kernel clone_file can reach.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

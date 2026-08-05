@@ -1,0 +1,49 @@
+[package]
+name = "heapam_visibility"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+tableam = { path = "../../table/tableam" }
+xact = { path = "../../transam/xact" }
+procarray = { path = "../../../storage/ipc/procarray" }
+snapmgr = { path = "../../../utils/time/snapmgr" }
+heapam = { path = "../heapam" }
+bufmgr = { path = "../../../storage/buffer/bufmgr" }
+reorderbuffer = { path = "../../../replication/logical/reorderbuffer" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+heapam_visibility_seams = { path = "../heapam_visibility_seams" }
+transam_seams = { path = "../../transam/transam_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+multixact_seams = { path = "../../transam/multixact_seams" }
+combocid_seams = { path = "../../../utils/time/combocid_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+mcx = { path = "../../../../_support/mcx" }
+
+[dev-dependencies]
+init_small = { path = "../../../utils/init/init_small" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+xact_seams = { path = "../../transam/xact_seams" }
+subtrans_seams = { path = "../../transam/subtrans_seams" }
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+deadlock_seams = { path = "../../../storage/lmgr/deadlock_seams" }
+pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
+syncrep_seams = { path = "../../../replication/syncrep_seams" }
+condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
+autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+varsup = { path = "../../transam/varsup" }

@@ -1,0 +1,1 @@
+{"path":"crates/_support/types/types_storage/src/fileset.rs","sloc":[],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2],"attr":[6,7,17,18],"const-static":[4,25],"typedef":[8,9,10,11,12,19,20,21,22]}}

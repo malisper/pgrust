@@ -1,0 +1,28 @@
+[package]
+name = "syncrep"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "syncrep"
+path = "src/lib.rs"
+
+[dependencies]
+pgsync = { path = "../../../_support/pgsync" }
+elog = { path = "../../utils/error/elog" }
+guc = { path = "../../utils/misc/guc" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+latch = { path = "../../storage/ipc/latch" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+syncrep_seams = { path = "../syncrep_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+walsender = { path = "../walsender" }
+walsender_config = { path = "../walsender_config" }

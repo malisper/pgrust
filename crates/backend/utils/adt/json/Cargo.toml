@@ -1,0 +1,38 @@
+[package]
+name = "adt_json"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_json"
+path = "src/lib.rs"
+
+[dependencies]
+adt_date = { path = "../adt_date" }
+adt_datetime = { path = "../adt_datetime" }
+adt_timestamp = { path = "../adt_timestamp" }
+arrayfuncs = { path = "../arrayfuncs" }
+datum = { path = "../../../../_support/types/datum" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+funcapi = { path = "../../fmgr/funcapi" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+lsyscache = { path = "../../cache/lsyscache" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+mcx = { path = "../../../../_support/mcx" }
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+varlena = { path = "../varlena" }
+wchar = { path = "../../../../common/wchar" }
+pg_string = { path = "../../../../common/string" }
+mbutils = { path = "../../mb/mbutils" }
+stack_depth = { path = "../../misc/stack_depth" }
+
+[dev-dependencies]
+syscache_seams = { path = "../../cache/syscache_seams" }

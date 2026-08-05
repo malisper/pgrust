@@ -1,0 +1,11 @@
+jsonb-probe	proofs::eq_gin_compare_jsonb	
+jsonb-probe	proofs::eq_path_empty_arr	
+jsonb-probe	proofs::eq_path_empty_scalar	
+jsonb-probe	proofs::eq_path_scalar_root_len1	
+jsonb-probe	proofs::witness_path_vt_subscript	
+jsonb-probe	proofs::eq_jsonb_numeric_window_n0	
+jsonb-probe	proofs::eq_jsonb_numeric_window_n1	
+jsonb-probe	proofs::eq_jsonb_numeric_window_n2	
+jsonb-probe	proofs::eq_jsonb_cast_scalar_kinds	
+jsonb-probe	proofs::eq_jsonb_cast_err_array_n2	
+jsonb-probe	proofs::eq_jsonb_cast_err_object_n1	

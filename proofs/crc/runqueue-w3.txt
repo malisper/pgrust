@@ -1,0 +1,24 @@
+# w3-sendrecv lane runqueue: crc rows 6364 crc32_bytea / 6365 crc32c_bytea (fc-tier; sb8 sw kernel)
+proofs::eq_crc32_len0 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32_len0 --exact
+proofs::eq_crc32_len1 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32_len1 --exact
+proofs::eq_crc32_len2 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32_len2 --exact
+proofs::eq_crc32_len3 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32_len3 --exact
+proofs::eq_crc32_len4 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32_len4 --exact
+proofs::eq_crc32_len5 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32_len5 --exact
+proofs::eq_crc32_len6 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32_len6 --exact
+proofs::eq_crc32_len7 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32_len7 --exact
+proofs::eq_crc32_len8 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32_len8 --exact
+proofs::eq_crc32_short_hdr_len5 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32_short_hdr_len5 --exact
+proofs::eq_crc32c_len0 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_len0 --exact
+proofs::eq_crc32c_len1 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_len1 --exact
+proofs::eq_crc32c_len2 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_len2 --exact
+proofs::eq_crc32c_len3 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_len3 --exact
+proofs::eq_crc32c_len4 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_len4 --exact
+proofs::eq_crc32c_len5 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_len5 --exact
+proofs::eq_crc32c_len6 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_len6 --exact
+proofs::eq_crc32c_len7 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_len7 --exact
+proofs::eq_crc32c_len8 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_len8 --exact
+proofs::eq_crc32c_short_hdr_len5 | green | per-commit | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_short_hdr_len5 --exact
+proofs::eq_crc32c_sb8_kernel_len16_aligned | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_sb8_kernel_len16_aligned --exact
+proofs::eq_crc32c_sb8_kernel_len13_off1 | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_sb8_kernel_len13_off1 --exact
+proofs::control_crc32_skewed_byte | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::control_crc32_skewed_byte --exact

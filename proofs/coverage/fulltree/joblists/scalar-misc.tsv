@@ -1,0 +1,53 @@
+scalar-misc	eq_chareq	
+scalar-misc	eq_charne	
+scalar-misc	eq_charlt	
+scalar-misc	eq_charle	
+scalar-misc	eq_chargt	
+scalar-misc	eq_charge	
+scalar-misc	eq_btcharcmp	proofs::eq_btcharcmp
+scalar-misc	eq_tideq	
+scalar-misc	eq_tidne	
+scalar-misc	eq_tidlt	
+scalar-misc	eq_tidle	
+scalar-misc	eq_tidgt	
+scalar-misc	eq_tidge	
+scalar-misc	eq_bttidcmp	
+scalar-misc	eq_xideq	
+scalar-misc	eq_xidneq	
+scalar-misc	eq_xid8eq	
+scalar-misc	eq_xid8ne	
+scalar-misc	eq_xid8lt	
+scalar-misc	eq_xid8gt	
+scalar-misc	eq_xid8le	
+scalar-misc	eq_xid8ge	
+scalar-misc	eq_xid8cmp	
+scalar-misc	eq_tidlarger	
+scalar-misc	eq_tidsmaller	
+scalar-misc	eq_xid8_larger	proofs::eq_xid8_larger
+scalar-misc	eq_xid8_smaller	proofs::eq_xid8_smaller
+scalar-misc	eq_xid8toxid	proofs::eq_xid8toxid
+scalar-misc	eq_btoidvectorcmp	
+scalar-misc	eq_oidvectoreq	
+scalar-misc	eq_oidvectorne	
+scalar-misc	eq_oidvectorlt	
+scalar-misc	eq_oidvectorle	
+scalar-misc	eq_oidvectorge	
+scalar-misc	eq_oidvectorgt	
+scalar-misc	wave5::eq_cideq	
+scalar-misc	wave5::eq_xid_age	
+scalar-misc	wave5::eq_mxid_age	
+scalar-misc	wave5::eq_xidout_r1_lt1e4	
+scalar-misc	wave5::eq_xidout_d5	
+scalar-misc	wave5::eq_xidout_d6	
+scalar-misc	wave5::eq_xidout_spots	
+scalar-misc	wave5::cover_xidout_split	
+scalar-misc	wave5::eq_cidout_r1_lt1e4	
+scalar-misc	wave5::eq_cidout_d5	
+scalar-misc	wave5::eq_cidout_d6	
+scalar-misc	wave5::eq_cidout_spots	
+scalar-misc	wave5::cover_cidout_split	
+scalar-misc	xid8snap::eq_full_xid_from_allowable_at	
+scalar-misc	xid8snap::eq_pg_snapshot_xmin	
+scalar-misc	xid8snap::eq_pg_snapshot_xmax	
+scalar-misc	xid8snap::eq_pg_visible_in_snapshot_linear	
+scalar-misc	xid8snap::eq_strtou64_cap8	

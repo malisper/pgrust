@@ -1,0 +1,23 @@
+[package]
+name = "adt_network"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+hashfn = { path = "../../../../common/hashfn" }
+hyperloglog = { path = "../../../lib/hyperloglog" }
+mcx = { path = "../../../../_support/mcx" }
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+ip = { path = "../../../../common/ip" }
+init_small = { path = "../../init/init_small" }
+libc = "0.2"
+
+[dev-dependencies]
+types_startup = { path = "../../../../_support/types/types_startup" }

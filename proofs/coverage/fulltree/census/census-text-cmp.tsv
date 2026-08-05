@@ -1,0 +1,10 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+text-cmp	eq_bttextcmp	proofs::eq_bttextcmp	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+text-cmp	eq_text_ge	proofs::eq_text_ge	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+text-cmp	eq_text_gt	proofs::eq_text_gt	0	13	VERIFICATION:- SUCCESSFUL	RAN	1
+text-cmp	eq_text_larger	proofs::eq_text_larger	0	11	VERIFICATION:- SUCCESSFUL	RAN	1
+text-cmp	eq_text_le	proofs::eq_text_le	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+text-cmp	eq_text_lt	proofs::eq_text_lt	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+text-cmp	eq_text_smaller	proofs::eq_text_smaller	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+text-cmp	eq_texteq	proofs::eq_texteq	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+text-cmp	eq_textne	proofs::eq_textne	0	4	VERIFICATION:- SUCCESSFUL	RAN	1

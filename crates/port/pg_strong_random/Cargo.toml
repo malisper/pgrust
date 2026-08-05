@@ -1,0 +1,15 @@
+[package]
+name = "pg_strong_random"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "0.2"
+
+# `pgrust_sim` is the non-default cfg selecting SimEntropy (DST P2 contract
+# law 0.1, the P1 Vfs mechanism verbatim). It is set exclusively by the sim
+# harness's RUSTFLAGS — never in .cargo/config, any product profile, or
+# fleet submit envs.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

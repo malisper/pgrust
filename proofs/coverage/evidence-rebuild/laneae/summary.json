@@ -1,0 +1,276 @@
+{
+ "generated": "2026-07-31T23:06:54+00:00",
+ "head_sha": "16eda6ece72e05a5af589de8845860cebef04c53",
+ "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
+ "sloc_rule_id": "v2+no-const-tables",
+ "sloc_exclusions": {
+  "else-only": 42,
+  "use-mod": 72,
+  "const-table": 32,
+  "loop-only": 8,
+  "attr": 40,
+  "const-static": 37,
+  "arrow-only": 1,
+  "arm-head": 35,
+  "typedef": 75,
+  "impl-header": 8,
+  "macro-scaffold": 4,
+  "type-alias": 3
+ },
+ "line_table_inputs": [],
+ "census": {
+  "expected": 0,
+  "ran": 0,
+  "walled": 0,
+  "failed_to_run": 0,
+  "waived": 0,
+  "kaniraw_files": 0,
+  "kaniraw_without_census_row": 0,
+  "census_closed": true,
+  "unmeasured": []
+ },
+ "macro_attribution": {
+  "enabled": true,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": {
+   "files": 167,
+   "macro_defs": 320,
+   "generator_macros": 221,
+   "call_blocks": 468,
+   "decl_lines": 2293
+  }
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 0,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [
+    "/Users/malisper/dev/pgrust-fast/.wt-p1-laneae/fuzz/coverage/tsvector_core_diff.lcov",
+    "/Users/malisper/dev/pgrust-fast/.wt-p1-laneae/fuzz/coverage/tsrank_diff.lcov"
+   ],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/tsvector_core",
+  "crates/backend/utils/adt/tsrank"
+ ],
+ "totals": {
+  "sloc": 2022,
+  "kani": 0,
+  "fuzz": 1802,
+  "regress": 0,
+  "any": 1802,
+  "pct": {
+   "kani": 0.0,
+   "fuzz": 89.12,
+   "regress": 0.0,
+   "any": 89.12
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 31,
+   "covered_sloc_in_touched_files": 2958,
+   "sloc_of_touched_files": 7170
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "tsrank",
+   "path": "crates/backend/utils/adt/tsrank",
+   "sloc": 530,
+   "kani": 0,
+   "fuzz": 520,
+   "regress": 0,
+   "any": 520,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 98.11,
+    "regress": 0.0,
+    "any": 98.11
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/tsrank/src/builtins.rs",
+     "sloc": 86,
+     "kani": 0,
+     "fuzz": 83,
+     "regress": 0,
+     "any": 83,
+     "detail": "files/crates__backend__utils__adt__tsrank__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsrank/src/lib.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__tsrank__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsrank/src/qsort.rs",
+     "sloc": 91,
+     "kani": 0,
+     "fuzz": 91,
+     "regress": 0,
+     "any": 91,
+     "detail": "files/crates__backend__utils__adt__tsrank__src__qsort.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsrank/src/rank.rs",
+     "sloc": 163,
+     "kani": 0,
+     "fuzz": 162,
+     "regress": 0,
+     "any": 162,
+     "detail": "files/crates__backend__utils__adt__tsrank__src__rank.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsrank/src/rank_cd.rs",
+     "sloc": 190,
+     "kani": 0,
+     "fuzz": 184,
+     "regress": 0,
+     "any": 184,
+     "detail": "files/crates__backend__utils__adt__tsrank__src__rank_cd.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsrank/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__tsrank__src__tests.rs.json"
+    }
+   ]
+  },
+  {
+   "name": "tsvector_core",
+   "path": "crates/backend/utils/adt/tsvector_core",
+   "sloc": 1492,
+   "kani": 0,
+   "fuzz": 1282,
+   "regress": 0,
+   "any": 1282,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 85.92,
+    "regress": 0.0,
+    "any": 85.92
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/tsvector_core/src/builtins.rs",
+     "sloc": 287,
+     "kani": 0,
+     "fuzz": 209,
+     "regress": 0,
+     "any": 209,
+     "detail": "files/crates__backend__utils__adt__tsvector_core__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsvector_core/src/execute.rs",
+     "sloc": 293,
+     "kani": 0,
+     "fuzz": 197,
+     "regress": 0,
+     "any": 197,
+     "detail": "files/crates__backend__utils__adt__tsvector_core__src__execute.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsvector_core/src/io.rs",
+     "sloc": 212,
+     "kani": 0,
+     "fuzz": 209,
+     "regress": 0,
+     "any": 209,
+     "detail": "files/crates__backend__utils__adt__tsvector_core__src__io.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsvector_core/src/layout.rs",
+     "sloc": 110,
+     "kani": 0,
+     "fuzz": 107,
+     "regress": 0,
+     "any": 107,
+     "detail": "files/crates__backend__utils__adt__tsvector_core__src__layout.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsvector_core/src/lib.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__tsvector_core__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsvector_core/src/op.rs",
+     "sloc": 299,
+     "kani": 0,
+     "fuzz": 287,
+     "regress": 0,
+     "any": 287,
+     "detail": "files/crates__backend__utils__adt__tsvector_core__src__op.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsvector_core/src/parser.rs",
+     "sloc": 156,
+     "kani": 0,
+     "fuzz": 143,
+     "regress": 0,
+     "any": 143,
+     "detail": "files/crates__backend__utils__adt__tsvector_core__src__parser.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsvector_core/src/qsort.rs",
+     "sloc": 91,
+     "kani": 0,
+     "fuzz": 91,
+     "regress": 0,
+     "any": 91,
+     "detail": "files/crates__backend__utils__adt__tsvector_core__src__qsort.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsvector_core/src/query.rs",
+     "sloc": 44,
+     "kani": 0,
+     "fuzz": 39,
+     "regress": 0,
+     "any": 39,
+     "detail": "files/crates__backend__utils__adt__tsvector_core__src__query.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/tsvector_core/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__tsvector_core__src__tests.rs.json"
+    }
+   ]
+  }
+ ]
+}

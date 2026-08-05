@@ -1,0 +1,32 @@
+# proofs/hash-rows — WAVE 5 run queue (pre-built 2026-07-28, compile-gated
+# via cargo kani --only-codegen; zero solves run).  Execute from
+# proofs/hash-rows/.  These compose on the PROVED hash_bytes kernels; the
+# fixed-len-6 tid rows and the u32/u64 fold rows are the cheap classes
+# measured for this family (0.2-5s idle).
+# Format: <harness> | <expected> | <tier> | <command>
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+
+wave5::eq_hashtid | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --harness wave5::eq_hashtid --exact
+wave5::eq_hashtidextended | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --harness wave5::eq_hashtidextended --exact
+wave5::control_hashtid_len_skew | must-fail | control | timeout 60 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --harness wave5::control_hashtid_len_skew --exact
+wave5::eq_hashxid | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --harness wave5::eq_hashxid --exact
+wave5::eq_hashxidextended | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --harness wave5::eq_hashxidextended --exact
+wave5::eq_hashcid | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --harness wave5::eq_hashcid --exact
+wave5::eq_hashcidextended | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --harness wave5::eq_hashcidextended --exact
+wave5::eq_hashxid8 | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --harness wave5::eq_hashxid8 --exact
+wave5::eq_hashxid8extended | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --harness wave5::eq_hashxid8extended --exact
+wave5::eq_pg_lsn_hash | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --harness wave5::eq_pg_lsn_hash --exact
+wave5::eq_pg_lsn_hash_extended | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --harness wave5::eq_pg_lsn_hash_extended --exact
+
+# Row bookkeeping:
+#   eq_hashtid -> 2233; eq_hashtidextended -> 2234
+#   eq_hashxid -> 6419; eq_hashxidextended -> 6420
+#   eq_hashxid8 -> 6421; eq_hashxid8extended -> 6422
+#   eq_hashcid -> 6423; eq_hashcidextended -> 6424
+#   eq_pg_lsn_hash -> 3252; eq_pg_lsn_hash_extended -> 3413

@@ -1,0 +1,25 @@
+[package]
+name = "pqformat"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pqformat"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+pqcomm_seams = { path = "../pqcomm_seams" }
+mbutils = { path = "../../utils/mb/mbutils" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+
+[dev-dependencies]
+wchar = { path = "../../../common/wchar" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }

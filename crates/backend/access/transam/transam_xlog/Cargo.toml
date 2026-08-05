@@ -1,0 +1,78 @@
+[package]
+name = "transam_xlog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "transam_xlog"
+path = "src/lib.rs"
+
+[dependencies]
+injection_point = { path = "../../../utils/misc/injection_point" }
+pg_clock = { path = "../../../../port/pg_clock" }
+s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+elog = { path = "../../../utils/error/elog" }
+crc32c = { path = "../../../../port/crc32c" }
+controldata_utils = { path = "../../../../common/controldata_utils" }
+fd = { path = "../../../storage/file/fd" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+latch = { path = "../../../storage/ipc/latch" }
+procarray = { path = "../../../storage/ipc/procarray" }
+init_small = { path = "../../../utils/init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
+walsender_seams = { path = "../../../replication/walsender_seams" }
+clog = { path = "../clog" }
+relmapper = { path = "../../../utils/cache/relmapper" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+xlogutils = { path = "../xlogutils" }
+xlogreader_seams = { path = "../xlogreader_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+xlogbackup = { path = "../xlogbackup" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
+xlogarchive_seams = { path = "../xlogarchive_seams" }
+timeline_seams = { path = "../timeline_seams" }
+subtrans_seams = { path = "../subtrans_seams" }
+commit_ts_seams = { path = "../commit_ts_seams" }
+multixact_seams = { path = "../multixact_seams" }
+twophase_seams = { path = "../twophase_seams" }
+varsup = { path = "../varsup" }
+varsup_seams = { path = "../varsup_seams" }
+xact_seams = { path = "../xact_seams" }
+sync_seams = { path = "../../../storage/sync/sync_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+origin_seams = { path = "../../../replication/origin_seams" }
+slot_seams = { path = "../../../replication/slot_seams" }
+reorderbuffer_seams = { path = "../../../replication/logical/reorderbuffer_seams" }
+snapbuild_seams = { path = "../../../replication/snapbuild_seams" }
+rewriteheap_seams = { path = "../../../access/heap/rewriteheap_seams" }
+pgstat = { path = "../../../utils/activity/pgstat" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+startup_seams = { path = "../../../postmaster/startup_seams" }
+libc = "0.2"
+
+[dev-dependencies]
+shmem = { path = "../../../storage/ipc/shmem" }
+aio_seams = { path = "../../../storage/aio/aio_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }

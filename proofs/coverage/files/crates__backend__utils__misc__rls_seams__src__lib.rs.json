@@ -1,0 +1,1 @@
+{"path":"crates/backend/utils/misc/rls_seams/src/lib.rs","sloc":[12,13],"kani":[],"fuzz":[],"regress":[],"excluded":{"use-mod":[1,2],"attr":[4,5],"typedef":[6,7,8,9]}}
