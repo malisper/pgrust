@@ -1148,6 +1148,20 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     }
     let desc = planstate.exec_get_result_type(plan)?;
 
+    // No params, either kind (the sibling arms' gate): the funnel's producers
+    // — launched gang workers and the leader-producer alike — execute the
+    // plan with NO extern-param plumbing, so an engaged PARAM_EXTERN qual
+    // (the generic-plan prepared-statement point lookup) fails compile-time
+    // param lookup instead of returning rows; PARAM_EXEC values live only in
+    // the leader's EState. Fail closed — the probe's `has_params` is the
+    // CALLER's to answer (query_task_policy_probe doctrine), and this is it.
+    if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
+        return Ok(false);
+    }
+    if pstmt_ref.paramExecTypes.iter().next().is_some() {
+        return Ok(false);
+    }
+
     // Binder policy: a shape the query-task binder would refuse must not launch.
     let policy = parallel::query_task_policy_probe();
     if policy.has_params || policy.temp_state || policy.serializable {

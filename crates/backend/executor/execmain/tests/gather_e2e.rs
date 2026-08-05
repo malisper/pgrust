@@ -1196,6 +1196,41 @@ fn funnel_qual_div_err(mcx: ::mcx::Mcx<'_>, k: i32) -> NodeList<'_> {
     NodeList::make1(mcx, ge).unwrap()
 }
 
+/// `Var(a) = Param($paramid)` int4 qual (opno 96 / int4eq proc 65) with a
+/// PARAM_EXTERN param — the generic-plan prepared-statement point lookup
+/// (what PgJDBC's named server-side statements execute after the plancache
+/// flips to a generic plan).
+fn funnel_qual_eq_extern_param(mcx: ::mcx::Mcx<'_>, paramid: i32) -> NodeList<'_> {
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let param = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::Param {
+            paramkind: ::types_nodes::primnodes::ParamKind::PARAM_EXTERN,
+            paramid,
+            paramtype: INT4OID,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let op = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::OpExpr {
+            opno: 96,
+            opfuncid: 65, // pg_proc int4eq
+            opresulttype: BOOLOID,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, var, param).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    NodeList::make1(mcx, op).unwrap()
+}
+
 /// Bare (non-parallel-aware) SeqScan pstmt: `SELECT a FROM rel [WHERE qual]`.
 /// parallel_safe so the funnel gate admits it; NOT parallel_aware — each
 /// funnel worker positions its own scan over claimed morsel block ranges
@@ -1245,6 +1280,39 @@ fn funnel_seqscan_pstmt_frag<'m>(
     pstmt.commandType = CmdType::CMD_SELECT;
     pstmt.canSetTag = true;
     pstmt.planTree = Some(scan);
+    seqscan_tables(mcx, relid, &mut pstmt);
+    pstmt.seal_ref()
+}
+
+/// `funnel_seqscan_pstmt` with `paramExecTypes` marked (a PARAM_EXEC-bearing
+/// plan — subplan/initplan output params live only in the leader's EState):
+/// the funnel's param gate must refuse the marker even with no bound externs.
+fn funnel_seqscan_pstmt_exec_marked<'m>(
+    mcx: ::mcx::Mcx<'m>,
+    relid: u32,
+    qual: Option<NodeList<'m>>,
+    plan_rows: f64,
+) -> &'m PlannedStmt<'m> {
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("a"), false).unwrap();
+    let mut plan = Plan {
+        targetlist: NodeList::make1(mcx, tle).unwrap(),
+        plan_node_id: 0,
+        parallel_safe: true,
+        plan_rows,
+        ..Default::default()
+    };
+    if let Some(q) = qual {
+        plan.qual = q;
+    }
+    let scan =
+        Node::mk(mcx, SeqScan { scan: Scan { plan, scanrelid: 1 }, cb_scan_cols: None }).unwrap();
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(scan);
+    pstmt.paramExecTypes = ::types_nodes::list::OidList::make1(mcx, INT4OID).unwrap();
     seqscan_tables(mcx, relid, &mut pstmt);
     pstmt.seal_ref()
 }
@@ -1318,6 +1386,18 @@ fn funnel_run_pstmt(
     count: u64,
     poller: bool,
 ) -> PgResult<(u64, Vec<i32>)> {
+    funnel_run_pstmt_params(pstmt, tag, count, poller, ParamListHandle::NULL)
+}
+
+/// [`funnel_run_pstmt`] with bound extern params (the extended-protocol
+/// Bind shape the param-refusal witnesses drive).
+fn funnel_run_pstmt_params(
+    pstmt: &'static PlannedStmt<'static>,
+    tag: &'static str,
+    count: u64,
+    poller: bool,
+    params: ParamListHandle,
+) -> PgResult<(u64, Vec<i32>)> {
     begin_xact();
     let qd = execmain_seams::create_query_desc::call(
         pstmt,
@@ -1325,7 +1405,7 @@ fn funnel_run_pstmt(
         Some(snapmgr::GetActiveSnapshot()),
         None,
         CommandDest::None,
-        ParamListHandle::NULL,
+        params,
         QueryEnvHandle::NULL,
         0,
     )
@@ -1732,4 +1812,98 @@ fn funnel_band_boundary_tracks_true_fraction_across_dop() {
         values.sort_unstable();
         assert_eq!(values, expected, "{tag}: rows must be byte-correct");
     }
+}
+
+// PARAM refusal (the TPC-C PAYMENT generic-plan shape): a prepared bare-SeqScan
+// point lookup — `SELECT a WHERE a = $1` with a PARAM_EXTERN qual and a bound
+// param list — passes every other gate (in-band estimate, complete drain,
+// enough granules) but must REFUSE to the serial loop: the funnel's producers
+// execute the plan with no extern-param plumbing, so an engaged run fails
+// "no value found for parameter 1" instead of returning the row. Same for a
+// PARAM_EXEC-marked plan (leader-EState-only values). The control leg pins
+// that the identical unparameterized shape still ENGAGES — the refusals are
+// attributable to the params alone, never to a funnel that stopped engaging.
+#[test]
+fn funnel_refuses_param_plans_to_serial() {
+    if !funnel_armed() {
+        eprintln!("SKIP: funnel_refuses_param_plans_to_serial (PGRUST_RUNTIME_ROW_FUNNEL unset)");
+        return;
+    }
+    let _s = serial();
+    let _w = Watchdog::arm(240, "funnel_refuses_param_plans_to_serial");
+    setup();
+    heapfix::install();
+    funnel_runtime_boot();
+
+    // 600 pages x 100 rows = 60000, ANALYZED — the smoke test's scan scale
+    // (pod-class sizing for the engaged control leg; see the band-boundary
+    // test's doom-band note).
+    const RELID: u32 = 93007;
+    let pages: Vec<Vec<i32>> =
+        (0..600).map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect()).collect();
+    let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
+    heapfix::register_table(RELID, &page_refs);
+
+    // Leg 1 — PARAM_EXTERN point lookup with the param BOUND (Bind-message
+    // shape): refuse to serial, and the serial loop must resolve the param —
+    // exactly one row, the bound key. plan_rows 1/60000 is deep in-band, so
+    // an unfixed gate ENGAGES here and the run errors ("no value found for
+    // parameter 1") instead of returning the row. No poller: a refuse leg
+    // registers no workers (band-boundary test doctrine).
+    let (e0, c0) = execmain::funnel_engagements();
+    let mcx = leaked_mcx();
+    let pstmt_ext =
+        funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_eq_extern_param(mcx, 1)), 1.0);
+    let bound = [::types_portal::params::ParamExternData {
+        value: Datum::from_i32(55_500),
+        isnull: false,
+        pflags: ::types_portal::params::PARAM_FLAG_CONST,
+        ptype: INT4OID,
+    }];
+    // SAFETY: `bound` outlives the run; freed right after.
+    let ph = unsafe { ::types_portal::params::register(&bound) };
+    let (processed, values) =
+        funnel_run_pstmt_params(pstmt_ext, "select a where a=$1 (extern param)", 0, false, ph)
+            .unwrap();
+    ::types_portal::params::free(ph);
+    let (e1, c1) = execmain::funnel_engagements();
+    assert_eq!(
+        (e1, c1),
+        (e0, c0),
+        "a bound-extern-param run must NOT engage the funnel"
+    );
+    assert_eq!(processed, 1, "the point lookup must return its row, not ERROR");
+    assert_eq!(values, vec![55_500]);
+
+    // Leg 2 — PARAM_EXEC-marked plan (const qual, paramExecTypes non-nil):
+    // refuse to serial on the marker alone.
+    let mcx = leaked_mcx();
+    let pstmt_exec =
+        funnel_seqscan_pstmt_exec_marked(mcx, RELID, Some(funnel_qual_gt(mcx, 55_000)), 5000.0);
+    let expected: Vec<i32> = (55_001..=60_000).collect();
+    let (processed, mut values) =
+        funnel_run_pstmt(pstmt_exec, "select a where a>55000 (exec-param marked)", 0, false)
+            .unwrap();
+    let (e2, c2) = execmain::funnel_engagements();
+    assert_eq!(
+        (e2, c2),
+        (e1, c1),
+        "a PARAM_EXEC-marked plan must NOT engage the funnel"
+    );
+    assert_eq!(processed, expected.len() as u64);
+    values.sort_unstable();
+    assert_eq!(values, expected, "serial fallback rows must be byte-correct");
+
+    // Leg 3 — control: the identical unparameterized shape ENGAGES (the
+    // refusals above are not vacuous).
+    let mcx = leaked_mcx();
+    let pstmt_ctl = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 55_000)), 5000.0);
+    let (processed_ctl, mut values_ctl) =
+        funnel_run_pstmt(pstmt_ctl, "select a where a>55000 (control)", 0, true).unwrap();
+    let (e3, c3) = execmain::funnel_engagements();
+    assert_eq!(e3, e2 + 1, "the control leg must engage the funnel");
+    assert_eq!(c3, c2 + 1, "the control leg must complete through the funnel");
+    assert_eq!(processed_ctl, expected.len() as u64);
+    values_ctl.sort_unstable();
+    assert_eq!(values_ctl, expected);
 }
