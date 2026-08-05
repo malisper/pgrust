@@ -1444,3 +1444,39 @@ fn p_new_redirects_to_extend_buffered_rel() {
 
     DropRelationAllLocalBuffers(rloc(rel)).unwrap();
 }
+
+// Issue #56: a failed checkpoint-scratch reserve must surface as ERROR
+// (53200) through BufferSync's PgResult — the checkpointer's recovery loop
+// absorbs that and retries — never as a thread-killing panic (which the
+// postmaster escalates to a cluster-wide crash-restart). These allocations
+// happen outside any critical section, so C's path here is elog(ERROR).
+#[test]
+fn buffer_sync_scratch_oom_is_error_not_panic() {
+    let _g = setup();
+    // Fault injection: ceiling the fresh per-thread scratch context below
+    // the CkptSortItem reserve; the mcx limit fails try_reserve exactly as
+    // real allocator refusal would.
+    crate::write::CKPT_SCRATCH_TEST_LIMIT.store(64, Ordering::Relaxed);
+    let res = BufferSync(0);
+    crate::write::CKPT_SCRATCH_TEST_LIMIT.store(0, Ordering::Relaxed);
+    let err = res.expect_err("capped scratch context must fail the reserve");
+    assert_eq!(err.sqlstate, types_error::ERRCODE_OUT_OF_MEMORY);
+    assert_eq!(err.message, "out of memory");
+    assert!(
+        err.detail.as_deref().unwrap_or_default().contains("checkpoint scratch"),
+        "mcx OOM detail names the failing context: {:?}",
+        err.detail
+    );
+
+    // Checkpointer-restart analog: a fresh thread (fresh scratch, no
+    // ceiling) runs the same checkpoint path to completion.
+    std::thread::spawn(|| {
+        globals::SetNBuffers(TEST_NBUFFERS);
+        globals::SetMaxBackends(test_max_backends());
+        become_backend();
+        BufferSync(0)
+    })
+    .join()
+    .expect("no panic")
+    .expect("BufferSync succeeds once memory is available");
+}

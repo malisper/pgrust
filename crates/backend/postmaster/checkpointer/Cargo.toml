@@ -51,3 +51,6 @@ transam_xlog = { path = "../../access/transam/transam_xlog" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
 libc = "0.2"
+
+[dev-dependencies]
+shmem_seams = { path = "../../storage/ipc/shmem_seams" }

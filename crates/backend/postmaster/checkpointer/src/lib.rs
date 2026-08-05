@@ -77,6 +77,13 @@ thread_local! {
 // design may run the handler off-thread, hence a process atomic.
 static SHUTDOWN_XLOG_PENDING: AtomicBool = AtomicBool::new(false);
 
+// Fault-injection seam: a nonzero ceiling is applied to the (per-thread,
+// created-once) absorb scratch context so the reserve in AbsorbSyncRequests
+// fails deterministically without a real OOM.
+#[cfg(test)]
+pub(crate) static ABSORB_SCRATCH_TEST_LIMIT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub fn CheckPointTimeout() -> i32 {
     CHECK_POINT_TIMEOUT.get()
 }
@@ -845,8 +852,16 @@ pub fn AbsorbSyncRequests() -> PgResult<()> {
     ABSORB_SCRATCH.with(|cell| -> PgResult<()> {
         let mut slot = cell.borrow_mut();
         let buf = slot.get_or_insert_with(|| {
-            let cx: &'static mcx::MemoryContext =
-                mcx::session_root("AbsorbSyncRequests scratch");
+            #[allow(unused_mut)]
+            let mut ctx = mcx::MemoryContext::new("AbsorbSyncRequests scratch");
+            #[cfg(test)]
+            {
+                let limit = ABSORB_SCRATCH_TEST_LIMIT.load(Relaxed);
+                if limit != 0 {
+                    ctx = ctx.with_limit(limit);
+                }
+            }
+            let cx: &'static mcx::MemoryContext = mcx::session_root_from(ctx);
             // LIFO: empty the droppy TLS slot before its context is freed.
             mcx::register_session_cleanup(Box::new(|| {
                 ABSORB_SCRATCH.with(|c| drop(c.borrow_mut().take()));
@@ -854,9 +869,13 @@ pub fn AbsorbSyncRequests() -> PgResult<()> {
             mcx::PgVec::new_in(cx.mcx())
         });
         buf.clear();
-        if buf.try_reserve(n.max(0) as usize).is_err() {
-            panic!("out of memory absorbing fsync requests");
-        }
+        // As in C, the allocation happens BEFORE the critical section below,
+        // so failure is ERROR 53200: the main loop's sigsetjmp analog absorbs
+        // it, and abort_cleanup's LWLockReleaseAll drops the comm lock.
+        let n_reqs = n.max(0) as usize;
+        let alloc = *buf.allocator();
+        buf.try_reserve(n_reqs)
+            .map_err(|_| alloc.oom(n_reqs * core::mem::size_of::<CheckpointerRequest>()))?;
         buf.extend((0..n).map(|i| cp.requests[i as usize].get()));
 
         g::StartCriticalSection();

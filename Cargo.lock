@@ -3239,6 +3239,7 @@ dependencies = [
  "procsignal_seams",
  "resowner",
  "s_lock_seams",
+ "shmem_seams",
  "smgr",
  "sync",
  "sync_seams",

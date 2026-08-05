@@ -514,6 +514,13 @@ thread_local! {
     static CKPT_SCRATCH: RefCell<Option<CkptScratch>> = const { RefCell::new(None) };
 }
 
+// Fault-injection seam: a nonzero ceiling is applied to the (per-thread,
+// created-once) scratch context so the reserves below fail deterministically
+// without a real OOM.
+#[cfg(test)]
+pub(crate) static CKPT_SCRATCH_TEST_LIMIT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 fn barrier_check() -> PgResult<()> {
     if globals::ProcSignalBarrierPending() {
         procsignal_seams::process_proc_signal_barrier::call()?;
@@ -530,8 +537,16 @@ pub fn BufferSync(flags: i32) -> PgResult<()> {
     CKPT_SCRATCH.with(|cell| -> PgResult<()> {
         let mut slot = cell.borrow_mut();
         let scratch = slot.get_or_insert_with(|| {
-            let cx: &'static mcx::MemoryContext =
-                mcx::session_root("checkpoint scratch");
+            #[allow(unused_mut)]
+            let mut ctx = mcx::MemoryContext::new("checkpoint scratch");
+            #[cfg(test)]
+            {
+                let limit = CKPT_SCRATCH_TEST_LIMIT.load(Ordering::Relaxed);
+                if limit != 0 {
+                    ctx = ctx.with_limit(limit);
+                }
+            }
+            let cx: &'static mcx::MemoryContext = mcx::session_root_from(ctx);
             // LIFO: empty the droppy TLS slot before its context is freed.
             mcx::register_session_cleanup(Box::new(|| {
                 CKPT_SCRATCH.with(|c| drop(c.borrow_mut().take()));
@@ -544,13 +559,16 @@ pub fn BufferSync(flags: i32) -> PgResult<()> {
 
         let nbuffers = globals::NBuffers();
         scratch.items.clear();
-        if scratch
+        // CkptBufferIds analog. Not inside a critical section (CheckPointGuts
+        // runs between CreateCheckPoint's crit sections), so allocation
+        // failure is ERROR 53200 — the checkpointer's recovery loop absorbs
+        // it and retries, as C's sigsetjmp block does for palloc failure.
+        let n_items = nbuffers.max(0) as usize;
+        let alloc = *scratch.items.allocator();
+        scratch
             .items
-            .try_reserve(nbuffers.max(0) as usize)
-            .is_err()
-        {
-            panic!("out of memory allocating CkptBufferIds");
-        }
+            .try_reserve(n_items)
+            .map_err(|_| alloc.oom(n_items * size_of::<CkptSortItem>()))?;
 
         for buf_id in 0..nbuffers {
             let desc = GetBufferDescriptor(buf_id);
@@ -590,9 +608,10 @@ pub fn BufferSync(flags: i32) -> PgResult<()> {
                 .map(|s| s.tsId != item.tsId)
                 .unwrap_or(true);
             if need_new {
-                if scratch.per_ts.try_reserve(1).is_err() {
-                    panic!("out of memory allocating per-tablespace checkpoint status");
-                }
+                scratch
+                    .per_ts
+                    .try_reserve(1)
+                    .map_err(|_| alloc.oom(size_of::<CkptTsStatus>()))?;
                 scratch.per_ts.push(CkptTsStatus {
                     tsId: item.tsId,
                     index: i as i32,

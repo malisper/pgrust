@@ -1,5 +1,15 @@
 use super::*;
 
+// Shmem is a set-once process global and the tests below mutate it:
+// init through one gate and serialize the mutators.
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn shmem_for_tests() -> &'static CheckpointerShmemStruct {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| CheckpointerShmemInit(64));
+    shmem()
+}
+
 #[test]
 fn comm_lock_offset_is_checkpointer_comm() {
     assert_eq!(
@@ -94,8 +104,8 @@ fn abort_cleanup_escalates_leaked_crit_section() {
 
 #[test]
 fn crash_reset_restores_boot_image() {
-    CheckpointerShmemInit(64);
-    let cp = shmem();
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cp = shmem_for_tests();
     spin_acquire(&cp.ckpt_lck);
     cp.checkpointer_pid.store(77, Relaxed);
     cp.ckpt_started.store(3, Relaxed);
@@ -115,4 +125,50 @@ fn crash_reset_restores_boot_image() {
     assert_eq!(cp.ckpt_flags.load(Relaxed), 0);
     assert_eq!(cp.num_requests.get(), 0);
     assert!(!SHUTDOWN_XLOG_PENDING.load(Relaxed));
+}
+
+// Issue #56 sibling site: AbsorbSyncRequests' scratch reserve fails BEFORE
+// the critical section (as C pallocs before START_CRIT_SECTION), so it must
+// surface as ERROR 53200 through the PgResult — food for the main loop's
+// sigsetjmp analog — with the comm lock left for abort_cleanup's
+// LWLockReleaseAll, never as a thread-killing panic.
+#[test]
+fn absorb_oom_is_error_and_lock_release_recovers() {
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cp = shmem_for_tests();
+    static LWLOCKS: std::sync::Once = std::sync::Once::new();
+    LWLOCKS.call_once(|| {
+        shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).expect("mul_size overflow")));
+        shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).expect("add_size overflow")));
+        shmem_seams::shmem_alloc::set(|size| {
+            Ok(Box::leak(vec![0u8; size].into_boxed_slice()).as_mut_ptr())
+        });
+        lwlock::CreateLWLocks(false).unwrap();
+    });
+
+    let prev_type = miscinit::GetMyBackendType();
+    miscinit::SetMyBackendType(types_core::BackendType::Checkpointer);
+    cp.num_requests.set(4);
+
+    ABSORB_SCRATCH_TEST_LIMIT.store(1, Relaxed);
+    let res = AbsorbSyncRequests();
+    ABSORB_SCRATCH_TEST_LIMIT.store(0, Relaxed);
+    cp.num_requests.set(0);
+
+    let err = res.expect_err("capped absorb scratch must fail the reserve");
+    assert_eq!(err.sqlstate, types_error::ERRCODE_OUT_OF_MEMORY);
+    assert_eq!(err.message, "out of memory");
+
+    // The ERROR escapes with the comm lock held, exactly like C's elog(ERROR)
+    // there; the recovery loop's abort_cleanup releases it wholesale.
+    assert!(lwlock::LWLockHeldByMe(checkpointer_comm_lock()));
+    lwlock::LWLockReleaseAll().unwrap();
+    assert!(!lwlock::LWLockHeldByMe(checkpointer_comm_lock()));
+
+    // The path is retryable once the lock is back: the (empty) queue drains
+    // to completion on the very scratch vec that just failed.
+    AbsorbSyncRequests().expect("retry after recovery succeeds");
+    assert!(!lwlock::LWLockHeldByMe(checkpointer_comm_lock()));
+
+    miscinit::SetMyBackendType(prev_type);
 }
