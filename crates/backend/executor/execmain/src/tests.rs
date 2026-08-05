@@ -396,15 +396,21 @@ fn select1_via_seams_returns_one_row() {
 // Bind of a parked prepared statement, whether it's a fresh ExecutorStart or
 // a rearm-driven reuse — otherwise a future pgss undercounts extended-query
 // reuse. tap_executor_start is process-global and install-once, so this is
-// the crate's only test touching it; counting is filtered to this test's own
-// QueryDescHandle so it stays correct under the test harness's parallelism
-// (every other test's executor_start calls also fire the tap once installed).
+// the crate's only test touching it. The COUNT lives in a thread-local:
+// query-desc handles are small per-test sequence numbers, so the handle
+// filter alone is near-vacuous under the harness's parallelism — a sibling
+// test's desc routinely carries the same number (CI flake 2026-08-05,
+// count 2 != 1). Every executor call this test makes runs on the test's
+// own thread, so sibling taps land in sibling storage by construction; the
+// handle filter stays as defense against same-thread helper calls.
 static REARM_TAP_TARGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static REARM_TAP_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static REARM_TAP_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 fn count_start(h: ::types_portal::QueryDescHandle) {
     if h.0 == REARM_TAP_TARGET.load(std::sync::atomic::Ordering::Relaxed) {
-        REARM_TAP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        REARM_TAP_COUNT.with(|c| c.set(c.get() + 1));
     }
 }
 
@@ -431,7 +437,7 @@ fn tap_executor_start_counts_start_and_parked_rearm_reuse() {
 
     // Fresh start: one Bind's worth of execution.
     execmain_seams::executor_start::call(qd, EXEC_FLAG_SKIP_TRIGGERS).unwrap();
-    assert_eq!(REARM_TAP_COUNT.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(REARM_TAP_COUNT.with(std::cell::Cell::get), 1);
 
     let mut dest = DestReceiver::DoNothing;
     execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap();
@@ -448,7 +454,7 @@ fn tap_executor_start_counts_start_and_parked_rearm_reuse() {
         let reused =
             execmain_seams::executor_rearm::call(qd, None, ParamListHandle::NULL).unwrap();
         assert!(reused, "rearm {n} should reuse the parked executor");
-        assert_eq!(REARM_TAP_COUNT.load(std::sync::atomic::Ordering::Relaxed), n);
+        assert_eq!(REARM_TAP_COUNT.with(std::cell::Cell::get), n);
     }
 }
 
