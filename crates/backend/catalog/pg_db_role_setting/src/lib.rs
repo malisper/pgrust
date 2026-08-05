@@ -217,6 +217,117 @@ pub fn DropSetting<'mcx>(mcx: Mcx<'mcx>, databaseid: Oid, roleid: Oid) -> PgResu
     relsetting.close(RowExclusiveLock)
 }
 
+// ---------------------------------------------------------------------------
+// pgrust-only additive entry (NOT in pg_db_role_setting.c) — the ephemeral-db
+// janitor's clone-fidelity copy (docs/design/test-views.md D3 "clone-fidelity
+// extras" / M4 addendum; the dropdb_skip_checkpoint additive-entry precedent).
+// Stock CREATE DATABASE keeps C's behavior — a template's pg_db_role_setting
+// rows are NOT copied by a vanilla template clone; the janitor calls this in
+// its mint transaction, immediately after createdb, so ONLY minted ephemeral
+// databases inherit the template's `ALTER DATABASE ... SET` (setrole = 0) and
+// `ALTER ROLE ... IN DATABASE ... SET` (setrole = <role>) state. The copies
+// are ordinary rows afterwards: dropdb's DropSetting sweep removes them with
+// the clone, and DROP ROLE's sweep removes the role-specific ones.
+// ---------------------------------------------------------------------------
+
+/// One scanned pg_db_role_setting row image — the decode half of
+/// `copy_database_settings`; the pure planning half is
+/// `plan_setting_copies`.
+pub struct ScannedSetting {
+    /// setrole: InvalidOid on database-wide (`ALTER DATABASE ... SET`) rows.
+    pub setrole: Oid,
+    /// setconfig "name=value" entries; None when the column is NULL.
+    pub setconfig: Option<Vec<String>>,
+}
+
+/// The pure planning half of `copy_database_settings`, extracted for unit
+/// coverage: which scanned template rows produce a copied tuple, and with
+/// what content. Rows with a NULL or empty setconfig produce nothing —
+/// AlterSetting deletes a tuple rather than persist an emptied array
+/// (GUCArrayDelete/GUCArrayReset return None), so those shapes are
+/// out-of-contract transients and copying them would mint junk catalog
+/// rows. Entry text and order pass through verbatim (precedence inside a
+/// setconfig array is positional); setrole passes through unchanged
+/// (role-specific rows stay role-specific on the clone).
+pub fn plan_setting_copies(rows: Vec<ScannedSetting>) -> Vec<(Oid, Vec<String>)> {
+    rows.into_iter()
+        .filter_map(|r| match r.setconfig {
+            Some(entries) if !entries.is_empty() => Some((r.setrole, entries)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Copy every pg_db_role_setting row keyed on `src_dbid` onto `dst_dbid`.
+/// Two phases — scan-and-collect, then insert — so the insert loop never
+/// runs under the open scan. Caller contract: an open transaction, and
+/// `dst_dbid` is a freshly created database (it can have no existing rows;
+/// the (setdatabase, setrole) unique index would refuse duplicates). The
+/// relation lock is held to commit (the AlterSetting NoLock convention).
+/// Returns the number of rows copied.
+pub fn copy_database_settings(mcx: Mcx<'_>, src_dbid: Oid, dst_dbid: Oid) -> PgResult<usize> {
+    let rel = table::table_open(mcx, DbRoleSettingRelationId, RowExclusiveLock)?;
+
+    let keys = [oid_key(Anum_pg_db_role_setting_setdatabase, src_dbid)];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &rel,
+        DbRoleSettingDatidRolidIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let mut scanned = Vec::new();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY: pg_db_role_setting row under its relation's descriptor;
+        // setrole is a fixed never-null column.
+        let role_d = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                Anum_pg_db_role_setting_setrole,
+                rel.descr(),
+                &mut isnull,
+            )
+        };
+        debug_assert!(!isnull);
+        let setrole = role_d.as_oid();
+        let mut isnull = false;
+        // SAFETY: same row under the same descriptor.
+        let d = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                Anum_pg_db_role_setting_setconfig,
+                rel.descr(),
+                &mut isnull,
+            )
+        };
+        let setconfig = if isnull {
+            None
+        } else {
+            Some(setconfig_entries(mcx, d)?)
+        };
+        scanned.push(ScannedSetting { setrole, setconfig });
+    }
+    genam::systable_endscan(mcx, scan)?;
+
+    let plan = plan_setting_copies(scanned);
+    for (setrole, entries) in &plan {
+        let img = entries_to_text_array(mcx, entries)?;
+        let values = [
+            Datum::from_oid(dst_dbid),
+            Datum::from_oid(*setrole),
+            Datum::from_usize(img.as_ptr() as usize),
+        ];
+        let nulls = [false; Natts_pg_db_role_setting];
+        let mut newtuple = heaptuple::heap_form_tuple(mcx, rel.descr(), &values, &nulls)?;
+        catalog_indexing::CatalogTupleInsert(mcx, &rel, &mut newtuple)?;
+    }
+
+    rel.close(types_rel::NoLock)?;
+    Ok(plan.len())
+}
+
 fn oid_key(attno: i32, oid: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno as AttrNumber;
@@ -276,4 +387,51 @@ pub fn ApplySetting(
     }
     genam::systable_endscan(mcx, scan)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The M4 copy's planning slice: NULL and empty setconfig rows are
+    /// skipped; surviving rows keep their setrole and their entry text and
+    /// order verbatim.
+    #[test]
+    fn plan_setting_copies_filters_and_preserves() {
+        let rows = vec![
+            // Database-wide row: survives, setrole InvalidOid preserved.
+            ScannedSetting {
+                setrole: InvalidOid,
+                setconfig: Some(vec!["work_mem=61MB".into(), "work_mem=62MB".into()]),
+            },
+            // NULL setconfig: out-of-contract transient, skipped.
+            ScannedSetting {
+                setrole: InvalidOid,
+                setconfig: None,
+            },
+            // Empty array: AlterSetting would have deleted it, skipped.
+            ScannedSetting {
+                setrole: 42,
+                setconfig: Some(vec![]),
+            },
+            // Role-specific row: survives with its role.
+            ScannedSetting {
+                setrole: 42,
+                setconfig: Some(vec!["statement_timeout=7s".into()]),
+            },
+        ];
+        let plan = plan_setting_copies(rows);
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].0, InvalidOid);
+        // Positional precedence preserved: duplicates stay in order.
+        assert_eq!(plan[0].1, vec!["work_mem=61MB", "work_mem=62MB"]);
+        assert_eq!(plan[1].0, 42);
+        assert_eq!(plan[1].1, vec!["statement_timeout=7s"]);
+    }
+
+    /// No template rows -> no copies (the common template shape).
+    #[test]
+    fn plan_setting_copies_empty() {
+        assert!(plan_setting_copies(Vec::new()).is_empty());
+    }
 }

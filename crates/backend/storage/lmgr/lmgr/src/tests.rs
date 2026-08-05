@@ -11,8 +11,8 @@ use types_rel::{
 };
 use types_storage::lock::{
     LockAcquireResult, DEFAULT_LOCKMETHOD, LOCKACQUIRE_ALREADY_CLEAR, LOCKACQUIRE_ALREADY_HELD,
-    LOCKACQUIRE_NOT_AVAIL, LOCKACQUIRE_OK, LOCKTAG, LOCKTAG_OBJECT, LOCKTAG_RELATION,
-    LOCKTAG_TRANSACTION, LOCKTAG_TUPLE, USER_LOCKMETHOD, XLTW_Oper,
+    LOCKACQUIRE_NOT_AVAIL, LOCKACQUIRE_OK, LOCKTAG, LOCKTAG_OBJECT, LOCKTAG_PAGE,
+    LOCKTAG_RELATION, LOCKTAG_TRANSACTION, LOCKTAG_TUPLE, USER_LOCKMETHOD, XLTW_Oper,
 };
 use types_tuple::{ItemPointerData, NameData, TupleDescData};
 
@@ -517,6 +517,33 @@ fn tuple_lock_tag_splits_item_pointer() {
     );
 }
 
+// The pending-list cleanup interlock contract (ginfast.c ginInsertCleanup):
+// LockPage waits (dont_wait=false), ConditionalLockPage tries without
+// blocking (dont_wait=true) and reports NOT_AVAIL as false so the caller can
+// back off instead of racing a concurrent cleanup.
+#[test]
+fn page_lock_cycle_and_conditional_backoff() {
+    install();
+    let ctx = mcx::MemoryContext::new("t");
+    let rel = make_rel(ctx.mcx(), PLAIN_REL);
+    LockPage(&rel, 0, ExclusiveLock).unwrap();
+    UnlockPage(&rel, 0, ExclusiveLock).unwrap();
+    queue_acquire(&[Ok(LOCKACQUIRE_NOT_AVAIL)]);
+    assert!(!ConditionalLockPage(&rel, 0, ExclusiveLock).unwrap());
+    assert!(ConditionalLockPage(&rel, 0, ExclusiveLock).unwrap());
+    let tag = LOCKTAG::page(DB, PLAIN_REL, 0);
+    assert_eq!(tag_fields(tag).4, LOCKTAG_PAGE as u8);
+    assert_eq!(
+        take_events(),
+        vec![
+            Ev::Acquire(tag, ExclusiveLock, false, false, true, false),
+            Ev::Release(tag, ExclusiveLock, false),
+            Ev::Acquire(tag, ExclusiveLock, false, true, true, false),
+            Ev::Acquire(tag, ExclusiveLock, false, true, true, false),
+        ]
+    );
+}
+
 #[test]
 fn relation_init_lock_info_matches_c() {
     install();
@@ -559,7 +586,8 @@ fn speculative_insertion_lock_cycle() {
 
 // ---- WaitForLockersMultiple progress reporting (lmgr.c:936-969) ----
 
-fn progress_beentry() -> &'static backend_status::PgBackendStatus {
+fn progress_beentry(
+) -> (&'static backend_status::PgBackendStatus, std::sync::MutexGuard<'static, ()>) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         init_small::globals::SetMaxBackends(8);
@@ -568,11 +596,16 @@ fn progress_beentry() -> &'static backend_status::PgBackendStatus {
         backend_progress::init_seams();
         backend_status::BackendStatusShmemInit().unwrap();
     });
-    // One fixed slot: this is the only lmgr test binding a beentry.
+    // One fixed slot shared by every test that binds a beentry: the re-bind
+    // resets st_progress_param, so concurrent binders scribble over each
+    // other's progress view. The guard serializes them for the test's
+    // lifetime (held by the caller).
+    static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = SLOT.lock().unwrap_or_else(|e| e.into_inner());
     init_small::globals::SetMyProcNumber(3);
     backend_status::pgstat_beinit().unwrap();
     backend_status::set_pgstat_track_activities_backing(true);
-    backend_status::MyBEEntry().expect("pgstat_beinit bound a beentry")
+    (backend_status::MyBEEntry().expect("pgstat_beinit bound a beentry"), guard)
 }
 
 fn vxid(procno: types_core::ProcNumber, lxid: u32) -> types_core::VirtualTransactionId {
@@ -586,7 +619,7 @@ fn wait_for_lockers_progress_protocol() {
     };
 
     install();
-    let be = progress_beentry();
+    let (be, _slot_guard) = progress_beentry();
     let param = |i: usize| be.st_progress_param[i].get();
 
     let mc = mcx::MemoryContext::new("waitfor-test");
@@ -655,7 +688,7 @@ fn wait_for_lockers_no_progress_and_empty_tags() {
     use backend_progress::progress::PROGRESS_WAITFOR_TOTAL;
 
     install();
-    let be = progress_beentry();
+    let (be, _slot_guard) = progress_beentry();
 
     // Empty locktag list: C returns before any progress update.
     backend_progress::pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, 7);

@@ -125,6 +125,10 @@ pub static show_random_seed: GucShowHook = GucSlot::new("show_random_seed");
 // pgrust-only (no C symbol): computed SHOW for pgrust.resource_counters —
 // the simharness F8 resource-baseline hook channel; owner = the fd crate.
 pub static show_resource_counters: GucShowHook = GucSlot::new("show_resource_counters");
+// pgrust-only (docs/design/test-views.md D2): list-syntax validation for the
+// mint-roles allowlist; impl in the janitor crate, installed by
+// janitor::init_seams.
+pub static check_pgrust_ephemeral_db_mint_roles: GucStringCheckHook = GucSlot::new("check_pgrust_ephemeral_db_mint_roles");
 pub static show_role: GucShowHook = GucSlot::new("show_role");
 pub static show_tcp_keepalives_count: GucShowHook = GucSlot::new("show_tcp_keepalives_count");
 pub static show_tcp_keepalives_idle: GucShowHook = GucSlot::new("show_tcp_keepalives_idle");

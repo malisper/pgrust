@@ -96,6 +96,11 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     (log_min_duration_statement_cell, i32, log_min_duration_statement, set_log_min_duration_statement, -1),
     (log_statement_cell, i32, log_statement, set_log_statement, 0),
     (compute_query_id_cell, i32, compute_query_id, set_compute_query_id, 2),
+    // C: int default_toast_compression (toast_compression.c). PGC_USERSET
+    // enum; the heaptoast invalid-attcompression fallback reads this slot
+    // (toast_internals.c:59), so the product MUST install it — the reader
+    // landed with only a test-local install (the gate-blindness class).
+    (default_toast_compression_cell, i32, default_toast_compression, set_default_toast_compression, crate::consts::TOAST_PGLZ_COMPRESSION),
     (phony_random_seed_cell, f64, phony_random_seed, set_phony_random_seed, (0.0) as f64),
     (log_statement_sample_rate_cell, f64, log_statement_sample_rate, set_log_statement_sample_rate, (1.0) as f64),
     (log_xact_sample_rate_cell, f64, log_xact_sample_rate, set_log_xact_sample_rate, (0.0) as f64),
@@ -232,6 +237,68 @@ int_var!(
     pgrust_memory_watchdog_limit,
     set_pgrust_memory_watchdog_limit,
     0
+);
+// pgrust-only (docs/design/test-views.md D1): the ephemeral-database
+// janitor. Both are process-global cells per this file's header law —
+// prefix is PGC_POSTMASTER, grace PGC_SIGHUP (the janitor thread runs the
+// reload idiom and reads the cell each tick). Grace is stored in seconds
+// (GUC_UNIT_S row in tables.rs).
+string_var!(
+    CELL_pgrust_ephemeral_db_prefix,
+    pgrust_ephemeral_db_prefix,
+    set_pgrust_ephemeral_db_prefix,
+    Some("")
+);
+int_var!(
+    I_pgrust_ephemeral_db_grace,
+    pgrust_ephemeral_db_grace,
+    set_pgrust_ephemeral_db_grace,
+    15
+);
+// D2 mint-on-connect posture (docs/design/test-views.md): all PGC_SIGHUP,
+// read at mint time on the connecting backend's thread (which processed the
+// config at startup) and by the janitor after its reload idiom.
+string_var!(
+    CELL_pgrust_ephemeral_db_mint_roles,
+    pgrust_ephemeral_db_mint_roles,
+    set_pgrust_ephemeral_db_mint_roles,
+    Some("")
+);
+int_var!(
+    I_pgrust_ephemeral_db_max_per_role,
+    pgrust_ephemeral_db_max_per_role,
+    set_pgrust_ephemeral_db_max_per_role,
+    0
+);
+string_var!(
+    CELL_pgrust_ephemeral_db_default_template,
+    pgrust_ephemeral_db_default_template,
+    set_pgrust_ephemeral_db_default_template,
+    Some("")
+);
+// D3 warm pool (docs/design/test-views.md warm-pool addendum): PGC_SIGHUP,
+// read by the janitor each tick after its reload idiom.
+int_var!(
+    I_pgrust_ephemeral_db_pool_size,
+    pgrust_ephemeral_db_pool_size,
+    set_pgrust_ephemeral_db_pool_size,
+    0
+);
+// Mint-strategy pick (test-views.md mint-strategy addendum): PGC_SIGHUP,
+// read by the janitor at each strategy pick.
+int_var!(
+    I_pgrust_ephemeral_db_wal_log_threshold,
+    pgrust_ephemeral_db_wal_log_threshold,
+    set_pgrust_ephemeral_db_wal_log_threshold,
+    -1
+);
+// Post-mint prewarm (test-views.md prewarm addendum): PGC_SIGHUP, read by
+// the janitor at each touch enqueue/dispatch.
+bool_var!(
+    B_pgrust_ephemeral_db_prewarm,
+    pgrust_ephemeral_db_prewarm,
+    set_pgrust_ephemeral_db_prewarm,
+    true
 );
 bool_var!(
     B_integer_datetimes,

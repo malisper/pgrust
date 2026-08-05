@@ -384,6 +384,14 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     launcher_seams::apply_launcher_register::call();
 
+    // pgrust-only (docs/design/test-views.md D1): the ephemeral-database
+    // janitor's static registration, gated inside on a non-empty
+    // pgrust.ephemeral_db_prefix. Same seam point as the launcher: after
+    // config load, strictly before BackgroundWorkerShmemInit below.
+    if janitor_seams::janitor_register::is_installed() {
+        janitor_seams::janitor_register::call();
+    }
+
     miscinit_seams::process_shared_preload_libraries::call()?;
     miscinit_seams::process_preload_contrib::call()?;
 

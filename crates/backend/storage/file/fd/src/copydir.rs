@@ -5,9 +5,12 @@ use crate::desc::{CloseTransientFile, OpenTransientFile, TransientFileRawFd};
 use crate::sync::{fsync_fname, pg_flush_data};
 use crate::vfd::{cpath, get_errno, loc, set_errno, MakePGDirectory};
 
-const FILE_COPY_METHOD_COPY: i32 = 0;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const FILE_COPY_METHOD_CLONE: i32 = 1;
+// FileCopyMethod (storage/copydir.h) — one C enum. guc_tables' consts carry
+// their own copy of the values; pin the two together at compile time so the
+// GUC-assigned value and this dispatch can never drift apart.
+pub use ::types_storage::{FILE_COPY_METHOD_CLONE, FILE_COPY_METHOD_COPY};
+const _: () = assert!(FILE_COPY_METHOD_COPY == ::guc_tables::consts::FILE_COPY_METHOD_COPY);
+const _: () = assert!(FILE_COPY_METHOD_CLONE == ::guc_tables::consts::FILE_COPY_METHOD_CLONE);
 
 const COPY_BUF_SIZE: usize = 8 * 8192;
 #[cfg(target_os = "macos")]
@@ -55,17 +58,11 @@ pub fn copydir(fromdir: &str, todir: &str, recurse: bool) -> PgResult<()> {
                 copydir(&fromfile, &tofile, true)?;
             }
         } else if md.is_file() {
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if crate::vfd::file_copy_method() == FILE_COPY_METHOD_CLONE {
                 clone_file(&fromfile, &tofile)?;
             } else {
                 copy_file(&fromfile, &tofile)?;
             }
-            // Other targets omit "clone" from file_copy_method's GUC options
-            // (as a C build without HAVE_COPYFILE/HAVE_COPY_FILE_RANGE does),
-            // so copy is the only reachable method.
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            copy_file(&fromfile, &tofile)?;
         }
     }
 
@@ -187,29 +184,30 @@ pub fn copy_file(fromfile: &str, tofile: &str) -> PgResult<()> {
     Ok(())
 }
 
-// clone_file (copydir.c:236): macOS takes the HAVE_COPYFILE+COPYFILE_CLONE_FORCE
-// arm, Linux the HAVE_COPY_FILE_RANGE arm; C compile-gates other platforms out
-// of the "clone" GUC option and pgrust ships the same pruned option list.
-#[cfg(target_os = "macos")]
-pub fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
-    // copyfile.h: not in the libc crate; COPYFILE_CLONE_FORCE = 1<<25.
-    const COPYFILE_CLONE_FORCE: u32 = 1 << 25;
-    unsafe extern "C" {
-        // copyfile(3): state is copyfile_state_t (opaque pointer), NULL here.
-        fn copyfile(
-            from: *const libc::c_char,
-            to: *const libc::c_char,
-            state: *mut libc::c_void,
-            flags: u32,
-        ) -> libc::c_int;
-    }
-    // SAFETY: both paths are NUL-terminated CStrings alive across the call.
+// clone_file (copydir.c), pg_unreachable() arm: sim fds are foreign to the
+// kernel syscalls the live arms make, so "clone" is gated out of
+// file_copy_method's GUC options under pgrust_sim (guc_tables) — no accepted
+// setting reaches here.
+#[cfg(pgrust_sim)]
+fn clone_file(_fromfile: &str, _tofile: &str) -> PgResult<()> {
+    panic!("clone_file unreachable: file_copy_method=clone is not an accepted setting under pgrust_sim");
+}
+
+// clone_file (copydir.c), HAVE_COPYFILE arm: clone or fail, never a silent
+// fallback byte-copy. The two live arms below cover both product targets;
+// any other non-sim target is a compile error here where C's #else arm is
+// pg_unreachable().
+#[cfg(all(not(pgrust_sim), target_os = "macos"))]
+fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
+    let from = cpath(fromfile);
+    let to = cpath(tofile);
+    // SAFETY: copyfile(3) on two NUL-terminated paths; NULL clone state.
     let rc = unsafe {
-        copyfile(
-            cpath(fromfile).as_ptr(),
-            cpath(tofile).as_ptr(),
+        libc::copyfile(
+            from.as_ptr(),
+            to.as_ptr(),
             std::ptr::null_mut(),
-            COPYFILE_CLONE_FORCE,
+            libc::COPYFILE_CLONE_FORCE,
         )
     };
     if rc < 0 {
@@ -225,8 +223,9 @@ pub fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-pub fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
+// clone_file (copydir.c), HAVE_COPY_FILE_RANGE arm.
+#[cfg(all(not(pgrust_sim), target_os = "linux"))]
+fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
     let srcfd = OpenTransientFile(fromfile, libc::O_RDONLY)?;
     if srcfd < 0 {
         return Err(ereport(ERROR)
@@ -255,8 +254,8 @@ pub fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
         // Don't copy too much at once, so we can check for interrupts from
         // time to time if it falls back to a slow copy.
         postgres_seams::check_for_interrupts::call()?;
-        // SAFETY: fds are open transient files; NULL offsets advance both
-        // file positions kernel-side.
+        // SAFETY: copy_file_range(2) on two live transient kernel fds; NULL
+        // offsets advance both file positions.
         let nbytes = unsafe {
             libc::copy_file_range(
                 src_raw,

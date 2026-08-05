@@ -131,18 +131,108 @@ pub fn check_encoding_locale_matches(
     Ok(())
 }
 
+/// One per-tablespace directory copy a FILE_COPY create owes: the exact
+/// (srcpath, dstpath, srctablespace, dsttablespace) tuple the
+/// CreateDatabaseUsingFileCopy loop derives per pg_tablespace row with
+/// template content. Owned Strings on purpose: the janitor's deferred-copy
+/// batch carries these across per-member memory contexts.
+pub struct FileCopyDir {
+    pub srcpath: String,
+    pub dstpath: String,
+    pub src_tablespace: Oid,
+    pub dst_tablespace: Oid,
+}
+
+/// The deferred half of `createdb_deferred_file_copy`: the created
+/// database's oid plus every directory copy (and matching
+/// XLOG_DBASE_CREATE_FILE_COPY record) the caller now owes before commit.
+pub struct DeferredFileCopy {
+    pub db_oid: Oid,
+    pub src_dboid: Oid,
+    pub dirs: Vec<FileCopyDir>,
+}
+
+/// The XLOG_DBASE_CREATE_FILE_COPY record for ONE copied per-tablespace
+/// directory (the record half of the CreateDatabaseUsingFileCopy loop,
+/// shared with the janitor's deferred-copy WAL phase). MUST be called on
+/// the backend thread that owns the transaction, strictly AFTER the
+/// directory copy it describes completed (record-implies-copy-complete).
+pub fn log_file_copy_record(
+    dst_dboid: Oid,
+    dst_tablespace: Oid,
+    src_dboid: Oid,
+    src_tablespace: Oid,
+) -> PgResult<()> {
+    let mut xlrec = [0u8; 16];
+    xlrec[0..4].copy_from_slice(&dst_dboid.to_ne_bytes());
+    xlrec[4..8].copy_from_slice(&dst_tablespace.to_ne_bytes());
+    xlrec[8..12].copy_from_slice(&src_dboid.to_ne_bytes());
+    xlrec[12..16].copy_from_slice(&src_tablespace.to_ne_bytes());
+    xloginsert::insert_record(
+        types_core::primitive::RmgrIds::RM_DBASE_ID as u8,
+        XLOG_DBASE_CREATE_FILE_COPY | xloginsert::XLR_SPECIAL_REL_UPDATE,
+        0,
+        &[&xlrec],
+        &[],
+    )?;
+    Ok(())
+}
+
+/// The enumeration half of the CreateDatabaseUsingFileCopy loop (janitor
+/// deferred-copy support): the same pg_tablespace scan and the same
+/// per-row srcpath-has-content filter, yielding the copy list WITHOUT
+/// copying. Kept separate from CreateDatabaseUsingFileCopy on purpose —
+/// the C-shaped path keeps its exact copy-inside-the-scan interleaving.
+fn enumerate_file_copy_dirs(
+    mcx: Mcx<'_>,
+    src_dboid: Oid,
+    dst_dboid: Oid,
+    src_tsid: Oid,
+    dst_tsid: Oid,
+) -> PgResult<Vec<FileCopyDir>> {
+    let mut dirs = Vec::new();
+    let rel = table::table_open(mcx, TableSpaceRelationId, AccessShareLock)?;
+    let mut scan = genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY: pg_tablespace row; attno 1 is the oid column.
+        let srctablespace =
+            unsafe { types_tuple::heap_getattr(tup, 1, rel.descr(), &mut isnull) }.as_oid();
+        if srctablespace == GLOBALTABLESPACE_OID {
+            continue;
+        }
+        let srcpath = relpath::GetDatabasePath(mcx, src_dboid, srctablespace)?;
+        match std::fs::metadata(srcpath.as_str()) {
+            Ok(md) if md.is_dir() && !fd::directory_is_empty(srcpath.as_str())? => {}
+            _ => continue,
+        }
+        let dsttablespace = if srctablespace == src_tsid { dst_tsid } else { srctablespace };
+        let dstpath = relpath::GetDatabasePath(mcx, dst_dboid, dsttablespace)?;
+        dirs.push(FileCopyDir {
+            srcpath: srcpath.as_str().to_owned(),
+            dstpath: dstpath.as_str().to_owned(),
+            src_tablespace: srctablespace,
+            dst_tablespace: dsttablespace,
+        });
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(AccessShareLock)?;
+    Ok(dirs)
+}
+
 fn CreateDatabaseUsingFileCopy(
     mcx: Mcx<'_>,
     src_dboid: Oid,
     dst_dboid: Oid,
     src_tsid: Oid,
     dst_tsid: Oid,
+    request_checkpoints: bool,
 ) -> PgResult<()> {
     use transam_xlog::{
         CHECKPOINT_FLUSH_ALL, CHECKPOINT_FORCE, CHECKPOINT_IMMEDIATE, CHECKPOINT_WAIT,
     };
 
-    if !init_small::globals::IsBinaryUpgrade() {
+    if request_checkpoints && !init_small::globals::IsBinaryUpgrade() {
         checkpointer::RequestCheckpoint(
             CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_FLUSH_ALL,
         )?;
@@ -170,27 +260,29 @@ fn CreateDatabaseUsingFileCopy(
 
         fd::copydir(srcpath.as_str(), dstpath.as_str(), false)?;
 
-        let mut xlrec = [0u8; 16];
-        xlrec[0..4].copy_from_slice(&dst_dboid.to_ne_bytes());
-        xlrec[4..8].copy_from_slice(&dsttablespace.to_ne_bytes());
-        xlrec[8..12].copy_from_slice(&src_dboid.to_ne_bytes());
-        xlrec[12..16].copy_from_slice(&srctablespace.to_ne_bytes());
-        xloginsert::insert_record(
-            types_core::primitive::RmgrIds::RM_DBASE_ID as u8,
-            XLOG_DBASE_CREATE_FILE_COPY | xloginsert::XLR_SPECIAL_REL_UPDATE,
-            0,
-            &[&xlrec],
-            &[],
-        )?;
+        log_file_copy_record(dst_dboid, dsttablespace, src_dboid, srctablespace)?;
     }
     genam::systable_endscan(mcx, scan)?;
     rel.close(AccessShareLock)?;
 
     // Checkpoint before commit so committed FILE_COPY creates never need
     // ordinary crash-recovery replay (dbcommands.c's #1/#2 scenarios).
-    if !init_small::globals::IsBinaryUpgrade() {
+    if request_checkpoints && !init_small::globals::IsBinaryUpgrade() {
         checkpointer::RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT)?;
     }
+    Ok(())
+}
+
+/// The wal_log arm of createdb_failure_cleanup, callable AFTER the failed
+/// transaction is gone (janitor batch-abort cleanup): a wal_log copy runs
+/// through shared buffers, so an aborted-batch member's dirty dst-database
+/// buffers MUST be dropped (and its pending fsync requests forgotten)
+/// BEFORE its datadir is rmtree'd — a checkpointer write into a removed
+/// directory otherwise hard-errors. The lock releases of the in-transaction
+/// cleanup are deliberately absent: the aborting transaction released them.
+pub fn forget_walog_database(dst_dboid: Oid) -> PgResult<()> {
+    bufmgr::DropDatabaseBuffers(dst_dboid)?;
+    smgr::ForgetDatabaseSyncRequests(dst_dboid)?;
     Ok(())
 }
 
@@ -209,7 +301,140 @@ fn createdb_failure_cleanup(
     crate::remove_dbtablespaces(mcx, dst_dboid)
 }
 
+/// How createdb_guts runs the copy half.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CreatedbCopyMode {
+    /// C-shaped: copy inline, with FILE_COPY's checkpoint pair.
+    Inline,
+    /// Batched-mint entry: copy inline, both FILE_COPY checkpoints elided
+    /// (the caller brackets its batch with one pair).
+    InlineSkipCheckpoints,
+    /// Deferred-copy entry (parallel batch copy): catalog work only; the
+    /// caller owes the directory copies + WAL records + checkpoint pair.
+    /// FILE_COPY strategy required.
+    Deferred,
+}
+
 pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid> {
+    Ok(createdb_guts(mcx, stmt, CreatedbCopyMode::Inline)?.0)
+}
+
+/// pgrust-only additive entry (docs/design/test-views.md, "Batched-minting
+/// addendum"; the `dropdb_skip_checkpoint` precedent — the second
+/// sanctioned extension of this C-parity crate): `createdb` minus BOTH of
+/// FILE_COPY's per-create `RequestCheckpoint`s, for the ephemeral-db
+/// janitor's batched mints. The janitor brackets a whole batch with ONE
+/// checkpoint pair inside a single transaction: the FLUSH_ALL pre-checkpoint
+/// before the first copy, this entry once per batch member, the plain
+/// post-checkpoint after the LAST copy, THEN the commit.
+///
+/// Why hoisting the pair out of the loop is safe — C's rationale for each
+/// request (dbcommands.c CreateDatabaseUsingFileCopy) discharges per batch:
+///
+/// 1. Pre-copy FLUSH_ALL ("Force a checkpoint before starting the copy of
+///    the source database... including private buffers of unlogged
+///    relations, so the copy sees every committed page on disk"): one
+///    batch-level FLUSH_ALL covers every member because nothing dirties a
+///    template's per-database files between it and the copies — the batch
+///    transaction itself writes only shared catalogs (pg_database,
+///    pg_shdepend, pg_db_role_setting: global tablespace, never inside the
+///    directories copydir copies; the STRATEGY-PICK probe reads template
+///    pg_class buffers and can dirty them via hint bits, which the janitor
+///    prices separately — a probing pick invalidates the flush mark and
+///    re-pays the member's FLUSH_ALL, mint.rs member_fires_pre), a batch
+///    member's freshly copied database goes through the filesystem rather
+///    than shared buffers, and each member's own `CountOtherDBBackends`
+///    still refuses an occupied source immediately before its copy — in
+///    Deferred mode (createdb_deferred_file_copy) the catalog-time check
+///    no longer sits adjacent to the copy, so the janitor RE-RUNS it per
+///    unique source at the top of the copy phase (run_deferred_copies),
+///    restoring the adjacency at batch grain. A backend that connects to a source and
+///    dirties it AFTER that check is C's own documented FILE_COPY residual
+///    (the "source database must remain idle" caveat); the batch widens
+///    that window from one copy to one batch, it does not add a state.
+///    NOTE the check's honest limit: `CountOtherDBBackends` cannot see a
+///    writer that already DISCONNECTED — a connect-dirty-disconnect
+///    entirely inside the widened window passes every member's check while
+///    its unflushed pages sit in shared buffers. The janitor caller
+///    therefore restricts batch members to templates with
+///    datallowconn = false (verified at preflight AND re-checked inside
+///    the batch transaction), making the widened window unreachable by
+///    ordinary connections; connectable templates mint on the serial path,
+///    whose window is stock C's own one-copy-wide residual.
+/// 2. Post-copy checkpoint before commit ("committed FILE_COPY creates
+///    never need ordinary crash-recovery replay", the #1/#2 scenarios): the
+///    invariant is per-member "commit implies a checkpoint ran after this
+///    member's copy". One post-checkpoint after the last copy, INSIDE the
+///    single transaction that carries every member, precedes the one commit
+///    that makes any member visible — so it holds for all of them. A crash
+///    before the commit aborts every member (scenario-free); a crash after
+///    it finds every copy checkpointed.
+/// 3. `IsBinaryUpgrade` skips both requests in stock createdb; this entry
+///    is janitor-only and never runs in binary upgrade, so the flag gating
+///    stays inside the guts unchanged.
+///
+/// Everything else — option parsing, privilege checks, template occupancy,
+/// catalog insert, WAL FILE_COPY records, failure cleanup, ForceSyncCommit —
+/// is the shared guts, byte-identical; the C-shaped `createdb` entry above
+/// passes `request_checkpoints = true` and keeps its exact behavior. The
+/// flag is a no-op under STRATEGY wal_log (that path has no checkpoint
+/// sites). Callers of this entry MUST bracket their batch:
+/// `RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE |
+/// CHECKPOINT_WAIT | CHECKPOINT_FLUSH_ALL)` before the first call and
+/// `RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE |
+/// CHECKPOINT_WAIT)` after the last, before committing the transaction.
+pub fn createdb_skip_checkpoints<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CreatedbStmt<'mcx>,
+) -> PgResult<Oid> {
+    Ok(createdb_guts(mcx, stmt, CreatedbCopyMode::InlineSkipCheckpoints)?.0)
+}
+
+/// pgrust-only additive entry (test-views.md mint-strategy addendum; the
+/// third sanctioned extension of this C-parity crate, extending the
+/// `createdb_skip_checkpoints` precedent): `createdb_skip_checkpoints`
+/// with the FILE_COPY directory copies and their WAL records DEFERRED to
+/// the caller, so the ephemeral-db janitor can fan a whole batch's copies
+/// across worker threads while every catalog mutation, WAL insertion, and
+/// checkpoint stays on the backend thread that owns the transaction.
+///
+/// Contract (violations break FILE_COPY's crash invariant):
+/// - STRATEGY must be file_copy (wal_log has nothing to defer; refused).
+/// - The caller MUST re-run `CountOtherDBBackends` per unique source
+///   immediately before the deferred copies (aborting the batch if
+///   occupied): this entry's own catalog-time check no longer guards
+///   "immediately before its copy" — a whole batch of catalog work (and
+///   any checkpoint stall) sits in between, where an attaching
+///   anti-wraparound autovacuum worker would survive to write-race the
+///   copy (safety-discharge item 1 above records the widening and the
+///   restored guard).
+/// - The caller MUST, before committing the transaction: copy every
+///   returned dir (srcpath -> dstpath, the fd::copydir shape: top-level
+///   regular files, honoring file_copy_method, fsync settings, AND the
+///   fsync/create-mode semantics — pg_fsync routing and
+///   pg_file_create_mode, not stdlib defaults), then
+///   insert one `log_file_copy_record` per dir ON THIS THREAD strictly
+///   after that dir's copy completed, then bracket exactly like
+///   `createdb_skip_checkpoints`' batch contract (FLUSH_ALL pre-checkpoint
+///   before the first copy of the batch, plain post-checkpoint after the
+///   last, both before the commit).
+/// - On any copy failure the caller must abort the transaction and remove
+///   the orphaned datadirs (the janitor's `cleanup_orphaned_datadirs`
+///   shape: rmtree + XLOG_DBASE_DROP + XLogFlush).
+pub fn createdb_deferred_file_copy<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CreatedbStmt<'mcx>,
+) -> PgResult<DeferredFileCopy> {
+    let (oid, deferred) = createdb_guts(mcx, stmt, CreatedbCopyMode::Deferred)?;
+    let _ = oid;
+    Ok(deferred.expect("Deferred mode always yields the copy list"))
+}
+
+fn createdb_guts<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CreatedbStmt<'mcx>,
+    copy_mode: CreatedbCopyMode,
+) -> PgResult<(Oid, Option<DeferredFileCopy>)> {
     let dbname = stmt.dbname.unwrap_or("");
 
     let mut tablespacename_el: Option<&DefElem> = None;
@@ -458,6 +683,17 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
                 .into_error()
                 .into());
         }
+    }
+    if copy_mode == CreatedbCopyMode::Deferred && dbstrategy != CreateDBStrategy::FileCopy {
+        // Janitor-only entry misuse, not a user-reachable state: wal_log has
+        // no deferrable copy phase.
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_INTERNAL_ERROR)
+            .errmsg(
+                "createdb_deferred_file_copy requires STRATEGY file_copy".to_string(),
+            )
+            .into_error()
+            .into());
     }
 
     if encoding < 0 {
@@ -915,32 +1151,46 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
         lmgr::LockSharedObject(DATABASE_RELATION_ID, dboid, 0, AccessShareLock)?;
     }
 
-    let copy = match dbstrategy {
-        CreateDBStrategy::WalLog => crate::walcopy::CreateDatabaseUsingWalLog(
+    let copy = match (dbstrategy, copy_mode) {
+        (CreateDBStrategy::WalLog, _) => crate::walcopy::CreateDatabaseUsingWalLog(
             mcx,
             src_dboid,
             dboid,
             src_deftablespace,
             dst_deftablespace,
-        ),
-        CreateDBStrategy::FileCopy => CreateDatabaseUsingFileCopy(
+        )
+        .map(|()| None),
+        (CreateDBStrategy::FileCopy, CreatedbCopyMode::Deferred) => enumerate_file_copy_dirs(
             mcx,
             src_dboid,
             dboid,
             src_deftablespace,
             dst_deftablespace,
-        ),
+        )
+        .map(|dirs| Some(DeferredFileCopy { db_oid: dboid, src_dboid, dirs })),
+        (CreateDBStrategy::FileCopy, mode) => CreateDatabaseUsingFileCopy(
+            mcx,
+            src_dboid,
+            dboid,
+            src_deftablespace,
+            dst_deftablespace,
+            mode == CreatedbCopyMode::Inline,
+        )
+        .map(|()| None),
     };
-    if let Err(e) = copy {
-        let _ = createdb_failure_cleanup(mcx, src_dboid, dboid, dbstrategy);
-        return Err(e);
-    }
+    let deferred = match copy {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = createdb_failure_cleanup(mcx, src_dboid, dboid, dbstrategy);
+            return Err(e);
+        }
+    };
 
     pg_database_rel.close(types_storage::lock::NoLock)?;
 
     xact::ForceSyncCommit();
 
-    Ok(dboid)
+    Ok((dboid, deferred))
 }
 
 #[cfg(test)]
