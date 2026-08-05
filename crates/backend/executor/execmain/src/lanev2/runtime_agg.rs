@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ::executils::EStateData;
 use ::nodeagg::sink::{
     sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_null_only_run,
-    sink_partition_remainder, sink_remainder_null_block, sink_remainder_spill_bucket,
+    sink_remainder_null_block, sink_remainder_spill_bucket,
     sink_resolve_combines, sink_route_records, sink_run_from_bucket_table, sink_run_from_spill,
     sink_run_spill_bucket, sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge,
     sink_topn_merge_fragments,

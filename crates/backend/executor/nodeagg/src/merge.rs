@@ -1821,7 +1821,7 @@ fn replay_raw_rows<'mcx>(
         return Ok(());
     }
     let mcx = estate.es_query_cxt;
-    let mut m = node.merge.take().expect("replay under an engaged merge");
+    let m = node.merge.take().expect("replay under an engaged merge");
     let key_len =
         m.par.as_ref().expect("raw handoff implies a parallel-qualified merge").atts[0].attlen;
     let key_attno = node

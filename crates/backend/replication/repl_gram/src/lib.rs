@@ -22,7 +22,9 @@ mod tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplicationKind {
+    #[allow(non_camel_case_types)] // C-parity name
     REPLICATION_KIND_PHYSICAL,
+    #[allow(non_camel_case_types)] // C-parity name
     REPLICATION_KIND_LOGICAL,
 }
 

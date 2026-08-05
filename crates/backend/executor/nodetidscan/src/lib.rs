@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use ::execexpr::{exec_eval_expr, exec_init_expr, exec_init_qual, EvalSlots, ExprState};
+use ::execexpr::{exec_eval_expr, exec_init_expr, EvalSlots, ExprState};
 use ::execscan::{exec_scan, exec_scan_rescan, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox, PgVec};

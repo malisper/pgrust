@@ -1,14 +1,14 @@
 //! blutils.c: BloomState, signValue, BloomFormTuple, page/buffer helpers.
 
 use bufmgr::{
-    ConditionalLockBuffer, LockBuffer, ReleaseBuffer, UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE,
+    ConditionalLockBuffer, LockBuffer, ReleaseBuffer, UnlockReleaseBuffer,
     BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
 use datum::Datum;
 use generic_xlog::{GenericXLogFinish, GenericXLogStart};
 use mcx::Mcx;
 use types_bloom::*;
-use types_core::{BlockNumber, Buffer, ForkNumber, BLCKSZ};
+use types_core::{Buffer, ForkNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_rel::Relation;
 

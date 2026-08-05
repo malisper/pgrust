@@ -89,6 +89,7 @@ fn key_buf(name: &str) -> [u8; NAMEDATALEN] {
     key
 }
 
+#[allow(non_snake_case)] // C-parity name
 pub fn WaitEventCustomShmemSize() -> usize {
     dynahash::hash_estimate_size(WAIT_EVENT_CUSTOM_HASH_MAX_SIZE as i64, size_of::<EntryByInfo>())
         + dynahash::hash_estimate_size(
@@ -97,6 +98,7 @@ pub fn WaitEventCustomShmemSize() -> usize {
         )
 }
 
+#[allow(non_snake_case)] // C-parity name
 pub fn WaitEventCustomShmemInit() -> PgResult<()> {
     if CUSTOM.get().is_some() {
         return Ok(());
@@ -135,6 +137,7 @@ pub fn WaitEventCustomShmemInit() -> PgResult<()> {
 }
 
 // Crash-cycle reset to the post-ShmemInit boot image.
+#[allow(non_snake_case)] // C-parity name
 pub fn WaitEventCustomShmemResetAfterCrash() {
     let Some(t) = CUSTOM.get() else { return };
     // SAFETY: crash choreography — children dead, postmaster thread only;
@@ -147,10 +150,12 @@ pub fn WaitEventCustomShmemResetAfterCrash() {
     t.counter.mutex.unlock();
 }
 
+#[allow(non_snake_case)] // C-parity name
 pub fn WaitEventExtensionNew(wait_event_name: &str) -> PgResult<u32> {
     WaitEventCustomNew(crate::PG_WAIT_EXTENSION, wait_event_name)
 }
 
+#[allow(non_snake_case)] // C-parity name
 pub fn WaitEventInjectionPointNew(wait_event_name: &str) -> PgResult<u32> {
     WaitEventCustomNew(crate::PG_WAIT_INJECTIONPOINT, wait_event_name)
 }
@@ -170,6 +175,7 @@ fn check_same_class(existing: u32, class_id: u32, name: &str) -> PgResult<u32> {
     Ok(existing)
 }
 
+#[allow(non_snake_case)] // C-parity name
 pub fn WaitEventCustomNew(class_id: u32, wait_event_name: &str) -> PgResult<u32> {
     if wait_event_name.len() >= NAMEDATALEN {
         elog(
@@ -243,6 +249,7 @@ pub fn WaitEventCustomNew(class_id: u32, wait_event_name: &str) -> PgResult<u32>
     Ok(wait_event_info)
 }
 
+#[allow(non_snake_case)] // C-parity name
 pub fn GetWaitEventCustomIdentifier(wait_event_info: u32) -> &'static str {
     if wait_event_info == PG_WAIT_EXTENSION {
         return "Extension";
@@ -275,6 +282,7 @@ fn trim_name(name: &'static [u8; NAMEDATALEN]) -> &'static str {
 }
 
 // C returns a palloc'd char**; a Vec is the cold-path equivalent.
+#[allow(non_snake_case)] // C-parity name
 pub fn GetWaitEventCustomNames(class_id: u32) -> Vec<String> {
     let tables = shared();
     LWLockAcquire(main_lock(WAIT_EVENT_CUSTOM_LOCK), LW_SHARED, g::MyProcNumber())

@@ -307,6 +307,7 @@ struct SimpleExpr {
     param_buf: Box<[ParamExternData]>,
     // Owns every allocation `state` points into; declared last so it drops
     // after `state` (C: the state dies with simple_eval_estate's context).
+    #[allow(dead_code)] // never read: held for ownership + drop order only
     ctx: Ctx,
 }
 
@@ -998,6 +999,7 @@ impl<'a> Estate<'a> {
     }
 
     // exec_get_datum_type_info REC arm: the declared rectypeid, typmod -1.
+    #[allow(dead_code)] // ported helper; see rec_param_type_mod (PR48 composite-coercion lane)
     fn rec_param_type(&self, recno: Dno) -> Oid {
         self.rec_meta(recno).rectypeid
     }

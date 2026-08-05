@@ -16,7 +16,7 @@ use crate::io::cached_multirange_io_data;
 use crate::{
     cached_multirange_info, leak_image, make_multirange, multirange_count,
     multirange_deserialize, multirange_get_bounds, multirange_get_range, multirange_is_empty,
-    multirange_type_oid, multirange_types_do_not_match, MultirangeInfo,
+    multirange_type_oid, MultirangeInfo,
 };
 
 // PG_GETARG_MULTIRANGE_P: same detoast contract as ranges.
@@ -436,7 +436,7 @@ pub fn fc_multirange_agg_transfn(
     if !fcinfo.argisnull(1) {
         let mcx = fcinfo.result_mcx();
         let mr = arg_multirange(fcinfo, 1, mcx)?;
-        let mut accum = |d: Datum| -> PgResult<()> {
+        let accum = |d: Datum| -> PgResult<()> {
             // SAFETY: stp is the aggcontext-owned state; plain-data move in/out.
             unsafe {
                 let st = stp.read();

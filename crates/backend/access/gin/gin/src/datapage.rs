@@ -14,7 +14,7 @@ use ::xloginsert_seams::{XLogRegBuf, REGBUF_WILL_INIT};
 use crate::btree::{Frame, GinBt, GinPlace, GinStack};
 use crate::postinglist::{
     ginCompressPostingList, ginMergeItemPointers, ginPostingListDecodeAllSegments, seg_first,
-    seg_nbytes, seg_size,
+    seg_size,
 };
 use crate::util::{gin_init_page_bytes, GinNewBuffer};
 use crate::{

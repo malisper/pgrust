@@ -166,7 +166,7 @@ fn transformAssignedExprInternal<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     expr: Node<'mcx>,
-    exprKind: ParseExprKind,
+    _exprKind: ParseExprKind,
     colname: Option<&str>,
     attrno: i32,
     indirection: &NodeList<'mcx>,

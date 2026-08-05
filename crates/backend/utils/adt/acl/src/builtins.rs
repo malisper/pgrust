@@ -2,7 +2,7 @@ use datum::Datum;
 use types_core::{Oid, BOOLOID, OIDOID, RECORDOID, TEXTOID};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_TABLE};
 use types_fmgr::{
-    byref_result, cstring_result, varlena_result, FmgrBuiltin, FmgrInfo,
+    byref_result, varlena_result, FmgrBuiltin, FmgrInfo,
     FunctionCallInfoBaseData as Fcinfo, PGFunction, ACLITEM_LEN,
 };
 

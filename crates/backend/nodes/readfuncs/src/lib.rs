@@ -9,7 +9,7 @@ use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
-use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
+use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::jointype::JoinType;
 use types_nodes::nodes_enums::{CmdType, LimitOption};
 use types_nodes::parsenodes::{
@@ -19,7 +19,7 @@ use types_nodes::parsenodes::{
 };
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CaseTestExpr, CaseWhen,
-    CoalesceExpr, CoerceViaIO, CoercionForm, Const, FieldSelect, FieldStore, FromExpr, FuncExpr,
+    CoalesceExpr, CoercionForm, Const, FieldSelect, FieldStore, FromExpr, FuncExpr,
     JoinExpr, MergeAction,
     MergeMatchKind, MinMaxExpr, MinMaxOp, NamedArgExpr, NextValueExpr, NullTest, NullTestType,
     OpExpr, OverridingKind, Param, ParamKind, RangeTblRef, CollateExpr, RelabelType,

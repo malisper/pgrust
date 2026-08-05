@@ -12,7 +12,7 @@ use ::adt_jsonpath_exec::JsonPathVariable;
 use ::adt_xml::xmltable::XmlTableContext;
 use ::datum::{Datum, NullableDatum};
 use ::execexpr::{
-    exec_eval_expr, exec_init_expr, exec_init_expr_with_case_test, exec_init_qual, EvalSlots,
+    exec_eval_expr, exec_init_expr, exec_init_expr_with_case_test, EvalSlots,
     ExprState,
 };
 use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};

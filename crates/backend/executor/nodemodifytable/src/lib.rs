@@ -10,7 +10,7 @@
 use std::rc::Rc;
 
 use datum::Datum;
-use execexpr::{exec_build_projection_info, EvalSlots, ExprState};
+use execexpr::{EvalSlots, ExprState};
 use executils::{EStateData, ExecSlotId};
 use mcx::PgBox;
 use tableam_vocab::{
@@ -935,7 +935,7 @@ fn init_result_rel<'mcx>(
                     .expect("result relation opened");
                 (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
             };
-            let mut mk_slot = |estate: &mut EStateData<'mcx>| {
+            let mk_slot = |estate: &mut EStateData<'mcx>| {
                 let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc.clone()));
                 let id = ExecSlotId(estate.es_tupleTable.len() as u32);
                 estate.es_tupleTable.push(slot);
@@ -7264,7 +7264,7 @@ fn exec_leaf_conflict_update<'mcx>(
             router, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_partition_check,
             rels, root, cur, ..
         } = &mut *mt;
-        let root_rti = root.as_ref().map_or(rels[0].rti, |rr| rr.rti);
+        let _root_rti = root.as_ref().map_or(rels[0].rti, |rr| rr.rti);
         let rel = router.as_ref().expect("routed").leaf_rel(idx);
         let EStateData {
             es_tupleTable,

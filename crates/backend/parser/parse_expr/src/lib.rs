@@ -782,7 +782,7 @@ fn transformArrayExpr<'mcx>(
     mut element_type: types_core::Oid,
     typmod: i32,
 ) -> PgResult<Node<'mcx>> {
-    use types_core::{InvalidOid, OidIsValid, INT2VECTOROID, OIDVECTOROID};
+    use types_core::{OidIsValid, INT2VECTOROID, OIDVECTOROID};
 
     let mut newelems: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
     let mut multidims = false;

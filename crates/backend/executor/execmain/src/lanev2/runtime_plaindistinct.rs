@@ -82,6 +82,7 @@ struct RuntimePlainDistinctShared {
     /// SE-T2AGG CAR A: the SELECT-DISTINCT sub-arm (emit the merged VALUES;
     /// the worker key staging may sit at an arbitrary scan column —
     /// `spec.att`). False = the historical count(DISTINCT) arm, untouched.
+    #[allow(dead_code)] // ported field; wired in a later lane
     sd_values: bool,
     /// GL-LOWDIST-1: this engagement's combine takes the size-asymmetric
     /// low-width path (knob ON and resolved dop within the band bound —

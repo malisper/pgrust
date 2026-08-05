@@ -48,3 +48,6 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 types_guc = { path = "../../../_support/types/types_guc" }
 guc_file = { path = "../../utils/misc/guc_file" }
 datum = { path = "../../../_support/types/datum" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

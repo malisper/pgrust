@@ -3773,16 +3773,22 @@ fn get_variable_range<'mcx>(
     Ok(range)
 }
 
+#[allow(dead_code)] // C-parity: patternsel prefix machinery, wired in a later lane
 const TEXTOID: u32 = 25;
+#[allow(dead_code)] // C-parity: patternsel prefix machinery, wired in a later lane
 const NAMEOID: u32 = 19;
+#[allow(dead_code)] // C-parity: patternsel prefix machinery, wired in a later lane
 const BPCHAROID: u32 = 1042;
 const BYTEAOID: u32 = 17;
+#[allow(dead_code)] // C-parity: patternsel prefix machinery, wired in a later lane
 const BOOLEAN_EQ_OP: Oid = 91;
 pub const DEFAULT_MATCH_SEL: f64 = 0.005;
 
+#[allow(dead_code)] // C-parity: patternsel prefix machinery, wired in a later lane
 const PARTIAL_WILDCARD_SEL: f64 = 2.0;
 
 
+#[allow(dead_code)] // C-parity: patternsel prefix machinery, wired in a later lane
 struct PrefixConst {
     consttype: Oid,
     constvalue: Datum,
@@ -3907,7 +3913,7 @@ pub fn scalararraysel<'mcx>(
     let is_inequality = oprsel == F_NEQSEL || oprsel == F_NEQJOINSEL;
 
     let left_id = run.intern_expr(leftop);
-    let mut elem_sel = |run: &mut PlannerRun<'mcx>,
+    let elem_sel = |run: &mut PlannerRun<'mcx>,
                         value: Datum,
                         isnull: bool,
                         elmlen: i16,
@@ -4213,7 +4219,7 @@ fn generic_restriction_selectivity<'mcx>(
 
         let stats_usable =
             vardata.stats.is_some() && statistic_proc_security_check(&vardata, opcode)?;
-        let (mut mcvsel, mut mcvsum) = (0.0f64, 0.0f64);
+        let (mut mcvsel, mcvsum) = (0.0f64, 0.0f64);
         if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0).filter(|_| stats_usable) {
             // Torn-slot pairing rule (see mcv_selectivity): only values
             // paired with a frequency count.

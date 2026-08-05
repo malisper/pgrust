@@ -654,6 +654,7 @@ pub(crate) fn make_opclause<'mcx>(
 // leg. Returns the generated indexqual expressions, or None.
 // NONDETERMINISTIC (like_support.c): non-collatable comparisons, e.g. for
 // bytea, are always deterministic.
+#[allow(dead_code)] // ported C like_support helper; wired in a later lane
 fn nondeterministic_coll(coll: types_core::Oid) -> PgResult<bool> {
     Ok(coll != types_core::InvalidOid && !lsyscache::get_collation_isdeterministic(coll)?)
 }

@@ -3,7 +3,7 @@
 use core::cell::RefCell;
 use core::mem::ManuallyDrop;
 
-use ::mcx::{slice_in, vec_append_bytes, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
+use ::mcx::{slice_in, vec_append_bytes, vec_with_capacity_in, Mcx, PgVec};
 use ::regex::{
     RegMatch, RegcompResult, RegexCompiled, RegexecResult, RegprefixResult, REG_ADVANCED,
     REG_EXPANDED, REG_EXTENDED, REG_ICASE, REG_NEWLINE, REG_NLANCH, REG_NLSTOP, REG_NOSUB,

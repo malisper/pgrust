@@ -266,7 +266,7 @@ pub(crate) fn init_grouping_sets<'mcx>(
         }
     }
     let mut phases: PgVec<'mcx, PerPhaseData<'mcx>> = droppy_vec(mcx, numphases)?;
-    for (phaseidx, &aggnode) in sorted_nodes.iter().enumerate() {
+    for (_phaseidx, &aggnode) in sorted_nodes.iter().enumerate() {
         let sortnode = if core::ptr::eq(aggnode, node) {
             None
         } else {

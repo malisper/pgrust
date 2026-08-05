@@ -1066,7 +1066,7 @@ fn AlterPublicationOptions<'mcx>(
     repl_values.resize(natts, Datum::null());
     repl_isnull.resize(natts, false);
     repl.resize(natts, false);
-    let mut set = |repl_values: &mut PgVec<'_, Datum>, repl: &mut PgVec<'_, bool>, anum: i32, v: Datum| {
+    let set = |repl_values: &mut PgVec<'_, Datum>, repl: &mut PgVec<'_, bool>, anum: i32, v: Datum| {
         repl_values[(anum - 1) as usize] = v;
         repl[(anum - 1) as usize] = true;
     };

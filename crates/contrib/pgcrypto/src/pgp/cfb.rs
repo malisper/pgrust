@@ -40,6 +40,7 @@ impl PgpCfb {
         })
     }
 
+    #[allow(dead_code)] // C-parity: pgp_cfb_* surface kept complete
     pub fn block_size(&self) -> usize {
         self.block_size
     }

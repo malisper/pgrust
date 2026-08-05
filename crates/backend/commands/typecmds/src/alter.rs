@@ -15,7 +15,7 @@ use types_nodes::parsenodes::{AlterDomainStmt, ObjectType, RenameStmt};
 use types_nodes::rawnodes::{Constraint, ConstrType, TypeName};
 use types_nodes::{Node, NodeList, NodeTag};
 use types_rel::{
-    AccessShareLock, NoLock, Relation, RowExclusiveLock, ShareLock, LOCKMODE, RELKIND_MATVIEW,
+    AccessShareLock, Relation, RowExclusiveLock, ShareLock, LOCKMODE, RELKIND_MATVIEW,
     RELKIND_RELATION,
 };
 

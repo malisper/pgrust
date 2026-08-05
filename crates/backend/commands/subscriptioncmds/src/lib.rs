@@ -11,7 +11,7 @@ mod origin;
 
 
 use datum::Datum;
-use mcx::{Mcx, PgString, PgVec};
+use mcx::{Mcx, PgVec};
 use types_core::catalog::DATABASE_RELATION_ID;
 use types_core::fmgr::NAMEDATALEN;
 use types_core::primitive::XLogRecPtr;
@@ -837,7 +837,7 @@ pub fn UpdateTwoPhaseState(mcx: Mcx<'_>, suboid: Oid, new_state: u8) -> PgResult
     };
 
     let mut values = [Datum::null(); Natts_pg_subscription];
-    let mut nulls = [false; Natts_pg_subscription];
+    let nulls = [false; Natts_pg_subscription];
     let mut replaces = [false; Natts_pg_subscription];
     values[(Anum_pg_subscription_subtwophasestate - 1) as usize] =
         Datum::from_char(new_state as i8);

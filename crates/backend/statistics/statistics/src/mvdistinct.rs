@@ -3,7 +3,7 @@ use types_core::AttrNumber;
 use types_error::{PgError, PgResult};
 
 use crate::sortitem::SortItem;
-use crate::{build_mss, build_sorted_items, StatsBuildData};
+use crate::{build_mss, StatsBuildData};
 
 pub const STATS_NDISTINCT_MAGIC: u32 = 0xA352BFA4;
 pub const STATS_NDISTINCT_TYPE_BASIC: u32 = 1;

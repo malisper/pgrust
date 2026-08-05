@@ -353,7 +353,7 @@ fn create_cached_plan_flags(
     let mcx = ctx_mcx(source_ctx);
     let qs = mcx::slice_borrow_in(mcx, query_string.as_bytes())?;
     let query_string: &'static str = core::str::from_utf8(qs).expect("query_string is UTF-8");
-    let mut bail = |e| {
+    let bail = |e| {
         reclaim_ctx(query_ctx);
         reclaim_ctx(source_ctx);
         e

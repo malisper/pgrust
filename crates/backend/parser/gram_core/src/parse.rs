@@ -249,7 +249,7 @@ impl<'mcx> Parser<'mcx> {
     // ereports (longjmp), so error labels collapse to returning Err.
     #[inline(never)]
     pub(crate) fn yyparse(&mut self) -> PgResult<()> {
-        let mcx = self.mcx;
+        let _mcx = self.mcx;
         // C's yyssa/yyvsa/yylsa: no arena traffic until deep nesting.
         let mut vs_buf: [mem::MaybeUninit<YYSTYPE<'mcx>>; YYINITDEPTH] =
             [const { mem::MaybeUninit::uninit() }; YYINITDEPTH];

@@ -16,7 +16,7 @@ mod print;
 mod proto;
 
 use std::collections::HashMap;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 
 use lexer::{ScanItem, ScanState};
 use print::PrintOptions;

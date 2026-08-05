@@ -21,7 +21,6 @@ use ::types_spgist::*;
 use ::types_tuple::itemptr::{ItemPointerData, ItemPointerGetBlockNumber, ItemPointerIsValid};
 
 use crate::utils::*;
-use crate::utils::ItupExt as _;
 
 const K: usize = INDEX_MAX_KEYS as usize;
 const MaxOffsetNumber: u16 = (::types_core::BLCKSZ / 4) as u16;

@@ -240,7 +240,7 @@ fn fc_gist_box_same(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     // and GiST would keep re-splitting instead of recognizing the key.
     // Same NaN-comparator class as adjust_box (proofs/gist-geo).
     let r = match (b1, b2) {
-        (Some(b1), (Some(b2))) => {
+        (Some(b1), Some(b2)) => {
             ::adt_float::float8_eq(b1.low.x, b2.low.x)
                 && ::adt_float::float8_eq(b1.low.y, b2.low.y)
                 && ::adt_float::float8_eq(b1.high.x, b2.high.x)

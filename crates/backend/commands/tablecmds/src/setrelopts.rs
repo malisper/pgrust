@@ -3,7 +3,7 @@
 
 use datum::Datum;
 use mcx::Mcx;
-use types_core::{InvalidOid, Oid, RELATION_RELATION_ID};
+use types_core::{InvalidOid, RELATION_RELATION_ID};
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use types_nodes::parsenodes::AlterTableType;
 use types_nodes::NodeList;

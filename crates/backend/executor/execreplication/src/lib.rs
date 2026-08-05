@@ -5,7 +5,7 @@ use core::mem::ManuallyDrop;
 
 use commands_publicationcmds::{pub_contains_invalid_column, pub_rf_contains_invalid_column};
 use datum::Datum;
-use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
+use mcx::{Mcx, PgHashMap, PgVec};
 use pg_publication::{
     is_publishable_relation, GetAllTablesPublications, GetPublication, GetRelationPublications,
     GetSchemaPublications, PublicationActions,

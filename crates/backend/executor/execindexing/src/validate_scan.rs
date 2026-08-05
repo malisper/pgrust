@@ -14,6 +14,7 @@ use tuplesort::{Tuplesort, TUPLESORT_NONE};
 
 use crate::{index_predicate_passes, FormIndexDatum, IndexInfo};
 
+#[allow(non_upper_case_globals)] // C-parity name
 const Int8LessOperator: ::types_core::Oid = 412;
 
 pub struct ValidateIndexState {

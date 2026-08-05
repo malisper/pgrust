@@ -1,8 +1,7 @@
-use mcx::{box_new_in, vec_from_elem_in, Mcx, PgVec};
+use mcx::{Mcx, PgVec};
 use types_nodes::parsenodes::RTEKind;
 use types_pathnodes::{
-    Bitmapset, PathTarget, PlannerInfo, PtId, RangeTblEntryId, RelId, RelOptInfo, Relids,
-    UpperRelationKind, RELOPT_BASEREL, RELOPT_UPPER_REL,
+    PlannerInfo, RangeTblEntryId, RelId, RelOptInfo, Relids, RELOPT_BASEREL,
 };
 
 pub use types_pathnodes::relids::*;

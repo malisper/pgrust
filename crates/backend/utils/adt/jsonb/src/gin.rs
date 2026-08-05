@@ -12,11 +12,17 @@ use gin_vocab::{JspGinOp, JSP_GIN_AND, JSP_GIN_ENTRY, JSP_GIN_OR};
 use mcx::{Mcx, PgVec};
 use types_error::PgResult;
 
+#[allow(non_upper_case_globals)] // C-parity name
 pub const JsonbContainsStrategyNumber: u16 = 7;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const JsonbExistsStrategyNumber: u16 = 9;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const JsonbExistsAnyStrategyNumber: u16 = 10;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const JsonbExistsAllStrategyNumber: u16 = 11;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const JsonbJsonpathExistsStrategyNumber: u16 = 15;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const JsonbJsonpathPredicateStrategyNumber: u16 = 16;
 
 const JGINFLAG_KEY: u8 = 0x01;
@@ -595,6 +601,7 @@ pub fn gin_extract_jsonb_query<'m>(
     let mut search_mode = GIN_SEARCH_MODE_DEFAULT;
     let mut ops: PgVec<'m, JspGinOp> = mcx::vec_new_in(mcx);
     let entries = match strategy {
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbContainsStrategyNumber => {
             let entries = gin_extract_jsonb(mcx, &query_image[4..])?;
             if entries.is_empty() {
@@ -602,12 +609,15 @@ pub fn gin_extract_jsonb_query<'m>(
             }
             entries
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbExistsStrategyNumber => {
             let mut entries: PgVec<'m, Datum> = mcx::vec_with_capacity_in(mcx, 1)?;
             entries.push(make_text_key(mcx, JGINFLAG_KEY, &query_image[4..])?);
             entries
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbExistsAnyStrategyNumber => extract_text_array_keys(mcx, query_image)?,
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbExistsAllStrategyNumber => {
             let entries = extract_text_array_keys(mcx, query_image)?;
             if entries.is_empty() {
@@ -615,6 +625,7 @@ pub fn gin_extract_jsonb_query<'m>(
             }
             entries
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbJsonpathExistsStrategyNumber | JsonbJsonpathPredicateStrategyNumber => {
             let (entries, jsp_ops) = extract_jsp_query(mcx, &query_image[4..], strategy, false)?;
             if entries.is_empty() {
@@ -637,6 +648,7 @@ pub fn gin_extract_jsonb_query_path<'m>(
     let mut search_mode = GIN_SEARCH_MODE_DEFAULT;
     let mut ops: PgVec<'m, JspGinOp> = mcx::vec_new_in(mcx);
     let entries = match strategy {
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbContainsStrategyNumber => {
             let entries = gin_extract_jsonb_path(mcx, &query_image[4..])?;
             if entries.is_empty() {
@@ -644,6 +656,7 @@ pub fn gin_extract_jsonb_query_path<'m>(
             }
             entries
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbJsonpathExistsStrategyNumber | JsonbJsonpathPredicateStrategyNumber => {
             let (entries, jsp_ops) = extract_jsp_query(mcx, &query_image[4..], strategy, true)?;
             if entries.is_empty() {
@@ -666,18 +679,22 @@ pub fn gin_consistent_jsonb(
     jsp_ops: &[JspGinOp],
 ) -> bool {
     match strategy {
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbContainsStrategyNumber => {
             *recheck = true;
             check[..nkeys].iter().all(|&c| c != 0)
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbExistsStrategyNumber | JsonbExistsAnyStrategyNumber => {
             *recheck = true;
             true
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbExistsAllStrategyNumber => {
             *recheck = true;
             check[..nkeys].iter().all(|&c| c != 0)
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbJsonpathExistsStrategyNumber | JsonbJsonpathPredicateStrategyNumber => {
             *recheck = true;
             if nkeys > 0 {
@@ -699,6 +716,7 @@ pub fn gin_triconsistent_jsonb(
     jsp_ops: &[JspGinOp],
 ) -> i8 {
     match strategy {
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbContainsStrategyNumber | JsonbExistsAllStrategyNumber => {
             for &c in &check[..nkeys] {
                 if c == GIN_FALSE {
@@ -707,6 +725,7 @@ pub fn gin_triconsistent_jsonb(
             }
             GIN_MAYBE
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbExistsStrategyNumber | JsonbExistsAnyStrategyNumber => {
             for &c in &check[..nkeys] {
                 if c == GIN_TRUE || c == GIN_MAYBE {
@@ -715,6 +734,7 @@ pub fn gin_triconsistent_jsonb(
             }
             GIN_FALSE
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbJsonpathExistsStrategyNumber | JsonbJsonpathPredicateStrategyNumber => {
             if nkeys > 0 {
                 debug_assert!(!jsp_ops.is_empty());
@@ -741,12 +761,14 @@ pub fn gin_consistent_jsonb_path(
     jsp_ops: &[JspGinOp],
 ) -> bool {
     match strategy {
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbContainsStrategyNumber => {
             // Hash entries are lossy in structure and collisions; always
             // recheck, but missing keys are a certain miss.
             *recheck = true;
             check[..nkeys].iter().all(|&c| c != 0)
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbJsonpathExistsStrategyNumber | JsonbJsonpathPredicateStrategyNumber => {
             *recheck = true;
             if nkeys > 0 {
@@ -768,6 +790,7 @@ pub fn gin_triconsistent_jsonb_path(
     jsp_ops: &[JspGinOp],
 ) -> i8 {
     match strategy {
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbContainsStrategyNumber => {
             for &c in &check[..nkeys] {
                 if c == GIN_FALSE {
@@ -776,6 +799,7 @@ pub fn gin_triconsistent_jsonb_path(
             }
             GIN_MAYBE
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         JsonbJsonpathExistsStrategyNumber | JsonbJsonpathPredicateStrategyNumber => {
             if nkeys > 0 {
                 debug_assert!(!jsp_ops.is_empty());

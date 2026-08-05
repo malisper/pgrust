@@ -417,9 +417,13 @@ pub fn AlterCollation<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &types_nodes::parsenodes::AlterCollationStmt<'mcx>,
 ) -> PgResult<Oid> {
+    #[allow(non_upper_case_globals)] // C-parity name
     const Anum_pg_collation_collprovider: i32 = 5;
+    #[allow(non_upper_case_globals)] // C-parity name
     const Anum_pg_collation_collcollate: i32 = 8;
+    #[allow(non_upper_case_globals)] // C-parity name
     const Anum_pg_collation_colllocale: i32 = 10;
+    #[allow(non_upper_case_globals)] // C-parity name
     const Anum_pg_collation_collversion: i32 = 12;
 
     let rel = table::table_open(mcx, COLLATION_RELATION_ID, types_rel::RowExclusiveLock)?;

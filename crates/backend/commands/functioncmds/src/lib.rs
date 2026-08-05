@@ -918,7 +918,7 @@ fn interpret_sql_body<'mcx>(
     // C indexes the all-parameter name list by input-parameter position.
     let argnames = &inParameterNames[..parameterTypes.len()];
 
-    let mut transform = |stmt: Node<'mcx>| -> PgResult<types_nodes::parsenodes::Query<'mcx>> {
+    let transform = |stmt: Node<'mcx>| -> PgResult<types_nodes::parsenodes::Query<'mcx>> {
         let q = analyze_seams::transform_stmt_sql_fn::call(
             mcx,
             stmt,

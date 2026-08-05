@@ -854,7 +854,7 @@ impl AdmissionLedger {
         let n_std = n - n_util;
         let mut charged: u64 = 0;
         let mut widened = 0u32;
-        let mut tier = |inner: &LedgerInner,
+        let tier = |inner: &LedgerInner,
                         class: LedgerClass,
                         count: u32,
                         tier_budget: u32,

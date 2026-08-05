@@ -25,7 +25,7 @@ use ::types_tuple::TupleDescData;
 use ::datum as Datum_crate;
 use Datum_crate::Datum;
 
-use crate::procnode::{exec_proc_node, with_eval_slots, with_eval_slots_outer, PlanStateNode};
+use crate::procnode::{exec_proc_node, with_eval_slots_outer, PlanStateNode};
 
 pub(crate) struct SubPlanState<'mcx> {
     sub_link_type: SubLinkType,
@@ -1440,7 +1440,7 @@ fn hash_slot_lhs<'mcx>(
     estate: &mut EStateData<'mcx>,
     lhs_slot: ExecSlotId,
 ) -> PgResult<u32> {
-    let mcx = estate.es_query_cxt;
+    let _mcx = estate.es_query_cxt;
     let ncols = h.key_col_idx.len();
     let slot = estate.slot_mut(lhs_slot);
     exectuples::slot_getsomeattrs(slot, ncols as i32);

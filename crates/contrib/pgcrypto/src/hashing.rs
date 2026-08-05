@@ -4,6 +4,7 @@
 // C's px_find_digest name -> (digest_len, hmac block_size).
 struct HashAlgo {
     which: Which,
+    #[allow(dead_code)] // C-parity: px_digest tuple kept complete
     digest_len: usize,
     block_size: usize,
 }

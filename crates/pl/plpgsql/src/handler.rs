@@ -229,10 +229,15 @@ struct ProcInfo {
     readonly: bool,
 }
 
+#[allow(dead_code)] // C-parity: pg_proc argmode set kept complete
 const PROARGMODE_IN: i8 = b'i' as i8;
+#[allow(dead_code)] // C-parity: pg_proc argmode set kept complete
 const PROARGMODE_OUT: i8 = b'o' as i8;
+#[allow(dead_code)] // C-parity: pg_proc argmode set kept complete
 const PROARGMODE_INOUT: i8 = b'b' as i8;
+#[allow(dead_code)] // C-parity: pg_proc argmode set kept complete
 const PROARGMODE_VARIADIC: i8 = b'v' as i8;
+#[allow(dead_code)] // C-parity: pg_proc argmode set kept complete
 const PROARGMODE_TABLE: i8 = b't' as i8;
 const PROKIND_FUNCTION: i8 = b'f' as i8;
 const PROKIND_PROCEDURE: i8 = b'p' as i8;

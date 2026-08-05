@@ -281,7 +281,7 @@ pub fn fc_tsquery_rewrite_query(
             break;
         }
 
-        let mut step = |tree: &mut Option<QtNode<'_>>| -> PgResult<()> {
+        let step = |tree: &mut Option<QtNode<'_>>| -> PgResult<()> {
             spi::tuptable_with(h, |t| -> PgResult<()> {
                 for tup in t.vals.iter() {
                     if tree.is_none() {

@@ -640,7 +640,7 @@ fn engage_passthrough_inner(
     let funnel_body = Arc::clone(funnel);
 
     let body = (move |mut_submitted: &mut Option<runtime::RgHandle>,
-                      mut emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>|
+                      emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>|
           -> PgResult<PassthroughEngageOutcome> {
         parallel::InitializeParallelDSM(pcxt)?;
         if parallel::nworkers(pcxt) <= 0 {

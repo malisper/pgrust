@@ -27,8 +27,11 @@ const F_SCALARGTSEL: u32 = 104;
 const F_SCALARLESEL: u32 = 336;
 const F_SCALARGESEL: u32 = 337;
 
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_data_stxdndistinct: i32 = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_data_stxddependencies: i32 = 4;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_data_stxdmcv: i32 = 5;
 
 fn clamp_probability(p: f64) -> f64 {

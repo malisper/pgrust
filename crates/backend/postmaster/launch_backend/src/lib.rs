@@ -644,7 +644,7 @@ pub fn postmaster_child_launch(
     }
 
     let kind = &CHILD_PROCESS_KINDS[child_type as usize];
-    let main_fn: ChildMainFn = match kind.main_fn {
+    let _main_fn: ChildMainFn = match kind.main_fn {
         Main::Ported(f) => f,
         Main::Unported(what) => {
             panic!("postmaster_child_launch: {} unported (child kind \"{}\")", what, kind.name)

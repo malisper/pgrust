@@ -1176,6 +1176,7 @@ fn extractkey_topn_max_groups() -> f64 {
 /// factored pure for the conversion-car lanes): ON iff the value is exactly `1`
 /// or `on`; every other spelling — unset, `0`, `off`, typos — fails safe to
 /// OFF (today's behaviour, byte-identical plan time).
+#[allow(dead_code)] // suppress-lane knob probe kept for the knob census
 fn knob_spelling_armed(v: Option<&str>) -> bool {
     matches!(v, Some("1") | Some("on"))
 }
@@ -3938,6 +3939,7 @@ fn nlidx_min_driver_pages() -> f64 {
 /// Gather-NL (below it Gather-NL wins and stands — the band). Size
 /// economics are the inline polarity guards above (driver/probe shaped,
 /// two-sided — FloorGuard's single rows/pages slots cannot carry them).
+#[allow(dead_code)] // suppress-lane guard kept for the knob census
 fn nlidx_guard() -> FloorGuard {
     FloorGuard { min_dop: 8, ..NO_GUARD }
 }
@@ -6556,6 +6558,7 @@ fn finish_multikey_text(
 /// `0`, `off`, typos) fails safe to OFF. Since t36 flips2 this covers ONLY
 /// CAR B (STRMINMAX, KEEP-GATED per its letter); the flipped CARs A + C
 /// ride `tier2_car_kill_spelling_on`.
+#[allow(dead_code)] // suppress-lane knob probe kept for the knob census
 fn tier2_car_spelling_on(v: Option<&str>) -> bool {
     matches!(v, Some("1") | Some("on"))
 }

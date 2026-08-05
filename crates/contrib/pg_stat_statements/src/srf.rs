@@ -132,11 +132,11 @@ fn pg_stat_statements_internal(
     for (key, entry) in shared.hash.iter() {
         let mut values: Vec<Datum> = Vec::with_capacity(natts as usize);
         let mut nulls: Vec<bool> = Vec::with_capacity(natts as usize);
-        let mut push = |values: &mut Vec<Datum>, nulls: &mut Vec<bool>, d: Datum| {
+        let push = |values: &mut Vec<Datum>, nulls: &mut Vec<bool>, d: Datum| {
             values.push(d);
             nulls.push(false);
         };
-        let mut push_null = |values: &mut Vec<Datum>, nulls: &mut Vec<bool>| {
+        let push_null = |values: &mut Vec<Datum>, nulls: &mut Vec<bool>| {
             values.push(Datum::null());
             nulls.push(true);
         };

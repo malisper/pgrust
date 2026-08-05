@@ -566,7 +566,7 @@ fn find_simplified_clause<'mcx>(
     range_const: Datum,
     elem_expr: ::types_nodes::Node<'mcx>,
 ) -> PgResult<Option<::types_nodes::Node<'mcx>>> {
-    use ::types_nodes::NodeTag;
+    
 
     // DatumGetRangeTypeP: detoast into the request's (planner) context so
     // by-ref bound datums outlive the rewritten clause.
@@ -661,7 +661,9 @@ fn build_bound_expr<'mcx>(
 ) -> PgResult<Option<::types_nodes::Node<'mcx>>> {
     use ::lsyscache::{BTGreaterStrategyNumber, BTLessStrategyNumber};
     // stratnum.h members lsyscache doesn't carry yet.
+    #[allow(non_upper_case_globals)] // C-parity name
     const BTLessEqualStrategyNumber: i16 = 2;
+    #[allow(non_upper_case_globals)] // C-parity name
     const BTGreaterEqualStrategyNumber: i16 = 4;
     let elem_type = elem_entry.type_id;
     let strategy = if is_lower_bound {

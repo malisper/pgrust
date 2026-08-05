@@ -10,7 +10,7 @@ extern crate alloc;
 
 use alloc::rc::Rc;
 
-use ::execexpr::{exec_build_projection_info, exec_project, exec_qual, EvalSlots, ExprState};
+use ::execexpr::{exec_qual, EvalSlots, ExprState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{Mcx, PgBox};
 use ::tableam::TableScanDesc;

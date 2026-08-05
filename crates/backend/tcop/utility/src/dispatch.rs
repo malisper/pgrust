@@ -22,7 +22,7 @@ use crate::consts::{
     CMDTAG_ROLLBACK, COMMAND_IS_STRICTLY_READ_ONLY, COMMAND_OK_IN_PARALLEL_MODE,
     COMMAND_OK_IN_READ_ONLY_TXN, COMMAND_OK_IN_RECOVERY,
 };
-use crate::{handler_gap, handler_unsupported};
+use crate::handler_unsupported;
 
 // pg_authid.dat oid 4544.
 const ROLE_PG_CHECKPOINT: ::types_core::Oid = 4544;
@@ -112,8 +112,8 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     dest: &'d mut DestReceiver<'mcx>,
     qc: Option<&'q mut QueryCompletion>,
 ) -> PgResult<()> {
-    let is_top_level = context == PROCESS_UTILITY_TOPLEVEL;
-    let is_atomic_context = !(context == PROCESS_UTILITY_TOPLEVEL
+    let _is_top_level = context == PROCESS_UTILITY_TOPLEVEL;
+    let _is_atomic_context = !(context == PROCESS_UTILITY_TOPLEVEL
         || context == PROCESS_UTILITY_QUERY_NONATOMIC)
         || xact::IsTransactionBlock();
 

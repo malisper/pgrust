@@ -13,7 +13,7 @@ use ::types_gist::{
     GIST_ROOT_BLKNO,
 };
 use ::types_rel::Relation;
-use ::types_storage::bufpage::{PageMut, PageTemp, SizeOfPageHeaderData};
+use ::types_storage::bufpage::{PageMut, PageTemp};
 use ::types_tuple::itemptr::ItemPointerData;
 
 use crate::split::{gistSplitByKey, GistSplitVector};

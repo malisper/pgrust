@@ -8,11 +8,10 @@ mod like;
 pub use like::{expandTableLikeClause, generateClonedIndexStmt};
 
 use mcx::{Mcx, PgString};
-use types_core::{InvalidOid, Oid, INT2OID, INT4OID, INT8OID, NAMEDATALEN};
+use types_core::{InvalidOid, Oid, INT2OID, INT4OID, INT8OID};
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
-    ERRCODE_UNDEFINED_SCHEMA, ERROR,
+    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use types_nodes::rawnodes::{
     ColumnDef, Constraint, ConstrType, CreateSeqStmt, CreateStmt, IndexElem, IndexStmt, SortByDir,
@@ -1141,7 +1140,6 @@ fn transformColumnDefinition<'mcx>(
     }
 
     let mut need_notnull = false;
-    let mut disallow_noinherit_notnull = false;
     if is_serial_oid != InvalidOid {
         let (snamespace, sname) = generateSerialExtraStmts(
             mcx,
@@ -1191,7 +1189,6 @@ fn transformColumnDefinition<'mcx>(
                 .expect("ColumnDef")?;
         }
         need_notnull = true;
-        disallow_noinherit_notnull = true;
     }
 
     // SERIAL implies a not-null that must not be NO INHERIT; PRIMARY KEY and
@@ -2732,11 +2729,17 @@ fn transform_existing_index_constraint<'mcx>(
     Ok((index.seal(), nnconstraints))
 }
 
+#[allow(non_upper_case_globals)] // C-parity name
 const IndexRelidIndexId: Oid = 2679;
+#[allow(non_upper_case_globals)] // C-parity name
 const AttributeRelidNumIndexId: Oid = 2659;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_index_indcollation: usize = 17;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_index_indclass: usize = 18;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_index_indoption: usize = 19;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_attribute_attoptions: usize = 23;
 
 fn catalog_oid_key(attno: usize, oid: Oid) -> types_scan::scankey::ScanKeyData {
@@ -2762,7 +2765,7 @@ fn pg_index_vectors<'mcx>(
     let tup = genam::systable_getnext(mcx, &mut scan)?
         .unwrap_or_else(|| panic!("cache lookup failed for index {indexoid}"));
     let desc = pg_index.descr();
-    let mut vector_image = |attnum: usize| {
+    let vector_image = |attnum: usize| {
         let mut isnull = false;
         // SAFETY: fixed NOT NULL pg_index vector columns under its descriptor.
         let d = unsafe { types_tuple::heap_getattr(tup, attnum as i32, desc, &mut isnull) };
@@ -3494,8 +3497,6 @@ fn alter_undefined_column(colname: &str, relname: &str) -> Box<PgError> {
 }
 
 #[track_caller]
-#[cold]
-#[inline(never)]
 #[cold]
 #[inline(never)]
 fn cursor_at(mut e: Box<PgError>, src: Option<&[u8]>, location: i32) -> Box<PgError> {

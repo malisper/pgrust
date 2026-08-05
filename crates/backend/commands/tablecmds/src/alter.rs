@@ -48,6 +48,7 @@ const Anum_pg_attribute_attcompression: usize = 11;
 pub(crate) const Anum_pg_attribute_attnotnull: usize = 12;
 const Anum_pg_attribute_attislocal: usize = 18;
 const Anum_pg_attribute_attinhcount: usize = 19;
+#[allow(dead_code)] // C-parity: pg_attribute column set kept complete
 const Anum_pg_attribute_atthasmissing: usize = 14;
 const Anum_pg_attribute_attidentity: usize = 15;
 const Anum_pg_attribute_attgenerated: usize = 16;

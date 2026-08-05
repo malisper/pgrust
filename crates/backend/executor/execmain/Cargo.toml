@@ -222,3 +222,6 @@ transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 # probe on the fake result relation.
 execreplication_seams = { path = "../execreplication_seams" }
 lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

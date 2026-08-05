@@ -89,7 +89,8 @@ fn write_list_page(
 ) -> PgResult<usize> {
     GinInitBuffer(buffer, GIN_LIST);
 
-    let mut size = 0usize;
+    // C writeListPage keeps `size` only for a size Assert not carried here.
+    let mut _size = 0usize;
     {
         // SAFETY: pin + exclusive lock held (GinNewBuffer).
         let mut page = unsafe { page_mut(buffer) };
@@ -101,7 +102,7 @@ fn write_list_page(
             if page.add_item(bytes, off, 0).is_none() {
                 panic!("failed to add item to index page in \"{}\"", rel.name());
             }
-            size += this_size;
+            _size += this_size;
             off += 1;
         }
         let mut opaque = page_opaque(&page.as_ref());
@@ -706,7 +707,7 @@ pub fn ginInsertCleanup<'s>(
             }
 
             // SAFETY: pin + share lock held.
-            blkno = { page_opaque(&unsafe { page_ref(buffer) }).rightlink };
+            blkno = page_opaque(&unsafe { page_ref(buffer) }).rightlink;
             bm::lock_buffer::call(buffer, GIN_UNLOCK)?;
             bm::release_buffer::call(buffer)?;
 

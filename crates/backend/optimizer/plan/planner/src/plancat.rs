@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 
 use mcx::{vec_from_elem_in, PgVec};
-use types_core::{BlockNumber, Oid, BTREE_AM_OID};
+use types_core::{BlockNumber, Oid};
 use types_error::PgResult;
 use types_pathnodes::{IndexOptInfo, NodeId, RelId};
 use types_rel::{NoLock, Relation, RELKIND_RELATION};

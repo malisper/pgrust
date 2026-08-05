@@ -11,7 +11,7 @@ use std::rc::Rc;
 use ::adt_rangetypes::{
     att_align_nominal, fetch_att, make_range, range_cmp_bounds, range_deserialize,
     range_get_flags, range_has_lbound, range_has_ubound, range_is_empty, ops as range_ops,
-    ElemInfo, RangeBound, RangeInfo, RANGE_EMPTY, RANGE_LB_INC, RANGE_LB_INF, RANGE_UB_INC,
+    RangeBound, RangeInfo, RANGE_EMPTY, RANGE_LB_INC, RANGE_LB_INF, RANGE_UB_INC,
     RANGE_UB_INF,
 };
 use ::datum::Datum;

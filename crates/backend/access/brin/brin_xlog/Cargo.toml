@@ -14,3 +14,6 @@ brin_pageops = { path = "../brin_pageops" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 xlogreader_seams = { path = "../../transam/xlogreader_seams" }
 xlogutils = { path = "../../transam/xlogutils" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(pgrust_sim)"] }

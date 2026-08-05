@@ -37,6 +37,7 @@ impl<'a> PktReader<'a> {
         PktReader { data, pos: 0 }
     }
 
+    #[allow(dead_code)] // C-parity: PktReader surface kept complete
     pub fn eof(&self) -> bool {
         self.pos >= self.data.len()
     }

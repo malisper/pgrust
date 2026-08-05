@@ -1,7 +1,7 @@
 use ::adt_tsvector_core::execute::{ts_execute, ExecPhraseData, Ternary, TS_EXEC_EMPTY};
 use ::adt_tsvector_core::layout::*;
 use ::adt_tsvector_core::query::{Item, TsQueryRef};
-use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 
 use crate::rank::{cnt_length, find_wordentry, DEFAULT_WEIGHTS, NUM_WEIGHTS};

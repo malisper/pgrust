@@ -378,7 +378,7 @@ impl<'mcx> PlannerRun<'mcx> {
         outer: &mut crate::Relids<'mcx>,
         root: &PlannerInfo<'mcx>,
     ) {
-        let mut add = |outer: &mut crate::Relids<'mcx>, id: i32| {
+        let add = |outer: &mut crate::Relids<'mcx>, id: i32| {
             *outer = crate::relids::relids_union(
                 mcx,
                 outer,
@@ -411,7 +411,7 @@ impl<'mcx> PlannerRun<'mcx> {
         let mcx = self.mcx;
         let mut outer: crate::Relids<'mcx> = crate::relids::relids_empty();
         let scan = |outer: &mut crate::Relids<'mcx>, root: &PlannerInfo<'mcx>| {
-            let mut add = |outer: &mut crate::Relids<'mcx>, id: i32| {
+            let add = |outer: &mut crate::Relids<'mcx>, id: i32| {
                 *outer = crate::relids::relids_union(
                     mcx,
                     outer,

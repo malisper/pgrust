@@ -8,7 +8,6 @@ use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED
 use types_nodes::rawnodes::{PartitionElem, PartitionSpec, PartitionStrategy};
 use types_rel::{Relation, RowExclusiveLock};
 
-use crate::unported;
 use types_nodes::{Node, NodeList};
 
 pub(crate) struct PartKeyInfo<'mcx> {

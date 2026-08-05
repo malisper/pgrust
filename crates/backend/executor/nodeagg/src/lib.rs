@@ -16,8 +16,8 @@ use std::rc::Rc;
 use ::datum::{Datum, NullableDatum};
 use ::types_fmgr::{AggStateNode, FmNodePtr, FmgrInfo, LocalFcinfo};
 use ::execexpr::{
-    exec_build_agg_projection_info_subplans, exec_build_agg_qual_subplans, exec_build_agg_trans,
-    exec_build_agg_trans_hashed, exec_eval_expr, exec_project, exec_qual, AggBind,
+    exec_build_agg_projection_info_subplans, exec_build_agg_qual_subplans, exec_eval_expr,
+    exec_project, exec_qual, AggBind,
     AggOrderedSpec, AggPerGroup, AggTransSpec, EvalSlots, ExprState,
 };
 use ::tuplesort::{Tuplesort, TUPLESORT_NONE};

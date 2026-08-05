@@ -1636,7 +1636,7 @@ fn eval_scalar_array_op(
         return Ok((Datum::null(), true));
     }
 
-    let mut result = !use_or;
+    let result = !use_or;
     let mut resultnull = false;
     let bitmap_off = ::arrayfuncs::foundation::arr_nullbitmap_off(img);
     let mut off = ::arrayfuncs::foundation::arr_data_offset(img);
@@ -3583,7 +3583,6 @@ fn eval_row_compare_final(cmptype: i32, cmpresult: i32) -> bool {
 // #[inline(always)] keeps run_program's codegen identical to the previous
 // inline form (the interpreter is instruction-count-gated).
 
-#[inline(always)]
 // NULLIF: null-or-unequal keeps arg0; strict equality only when both
 // non-null (C ExecEvalFuncExpr + NULLIF special case semantics, shared by
 // run_program and the JIT single-step tier).

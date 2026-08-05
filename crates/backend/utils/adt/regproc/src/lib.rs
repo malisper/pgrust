@@ -302,6 +302,7 @@ fn funcname_candidates<'mcx>(
     // never a schema error.
     let ns_filter = match schemaname {
         Some(name) => match lookup_explicit_namespace(name, true)? {
+            #[allow(non_upper_case_globals)] // C-parity name
             InvalidOid => return Ok((raw, Vec::new())),
             id => Some(id),
         },

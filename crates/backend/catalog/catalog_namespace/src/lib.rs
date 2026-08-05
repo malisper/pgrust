@@ -15,7 +15,7 @@
 use std::cell::{Cell, RefCell};
 use std::mem::ManuallyDrop;
 
-use mcx::{Mcx, MemoryContext, PgVec};
+use mcx::{Mcx, PgVec};
 use types_core::{
     InvalidOid, InvalidSubTransactionId, Oid, ProcNumber, SubTransactionId, INVALID_PROC_NUMBER,
 };

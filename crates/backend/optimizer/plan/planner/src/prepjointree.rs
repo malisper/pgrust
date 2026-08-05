@@ -2539,7 +2539,7 @@ fn replace_vars_in_query_value<'mcx>(
     };
     newq.targetList = rep_list(&newq.targetList, &mut changed)?;
     newq.returningList = rep_list(&newq.returningList, &mut changed)?;
-    let mut rep_opt = |n: Option<Node<'mcx>>, changed: &mut bool| -> PgResult<Option<Node<'mcx>>> {
+    let rep_opt = |n: Option<Node<'mcx>>, changed: &mut bool| -> PgResult<Option<Node<'mcx>>> {
         match n {
             None => Ok(None),
             Some(x) => match replace_var_expr_su(mcx, x, varno, tlist, lateral, ph, su)? {
@@ -4143,6 +4143,7 @@ mod tests {
 // bare source) with a join between the target and the source. WHEN NOT
 // MATCHED BY SOURCE is the loud arm: it needs the outer-target join with
 // source-var nulling marks and the executor's join-condition recheck.
+#[allow(non_snake_case)] // C-parity name
 pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
     use types_nodes::jointype::JoinType;
     use types_nodes::nodes_enums::CmdType;

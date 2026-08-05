@@ -39,14 +39,23 @@ use pg_depend::{
 pub const POLICY_RELATION_ID: Oid = 3256;
 const POLICY_OID_INDEX_ID: Oid = 3257;
 const POLICY_POLRELID_POLNAME_INDEX_ID: Oid = 3258;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_policy_oid: i32 = 1;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_policy_polname: i32 = 2;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_policy_polrelid: i32 = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_policy_polcmd: i32 = 4;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_policy_polpermissive: i32 = 5;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_policy_polroles: i32 = 6;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_policy_polqual: i32 = 7;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_policy_polwithcheck: i32 = 8;
+#[allow(non_upper_case_globals)] // C-parity name
 const Natts_pg_policy: usize = 8;
 
 const ACL_SELECT_CHR: u8 = b'r';

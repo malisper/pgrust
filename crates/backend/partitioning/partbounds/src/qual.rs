@@ -30,13 +30,19 @@ use crate::{
     PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
 };
 
+#[allow(non_upper_case_globals)] // C-parity name
 const BTLessStrategyNumber: i16 = 1;
+#[allow(non_upper_case_globals)] // C-parity name
 const BTLessEqualStrategyNumber: i16 = 2;
+#[allow(non_upper_case_globals)] // C-parity name
 const BTEqualStrategyNumber: i16 = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 const BTGreaterEqualStrategyNumber: i16 = 4;
+#[allow(non_upper_case_globals)] // C-parity name
 const BTGreaterStrategyNumber: i16 = 5;
 
 const RELOID: i32 = cache_syscache::cacheinfo::RELOID;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_class_relpartbound: i32 = 34;
 pub const F_SATISFIES_HASH_PARTITION: Oid = 5028;
 

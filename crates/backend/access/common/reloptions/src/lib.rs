@@ -36,6 +36,7 @@ use ::types_rel::{
 
 use ::types_rel::{AccessExclusiveLock, NoLock, ShareUpdateExclusiveLock};
 
+#[allow(non_camel_case_types)] // C-parity name
 pub type relopt_kind = u32;
 pub const RELOPT_KIND_HEAP: relopt_kind = 1 << 0;
 pub const RELOPT_KIND_TOAST: relopt_kind = 1 << 1;

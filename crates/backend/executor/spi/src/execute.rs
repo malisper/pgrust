@@ -9,7 +9,7 @@ use types_nodes::plannodes::PlannedStmt;
 use types_nodes::NodeTag;
 use types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
 use types_portal::{
-    ParamListHandle, QueryCompletion, QueryDescHandle, QueryEnvHandle, CMDTAG_SELECT,
+    ParamListHandle, QueryCompletion, QueryDescHandle, CMDTAG_SELECT,
     CURSOR_OPT_PARALLEL_OK,
 };
 use types_scan::sdir::ForwardScanDirection;

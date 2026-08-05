@@ -1,4 +1,4 @@
-use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::ts_locale::dict_api::{def_get_boolean, DictInitData, LexizeResult};
 use ::ts_locale::{lowerstr, readstoplist, searchstoplist, StopList, TsLexeme};
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};

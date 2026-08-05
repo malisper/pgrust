@@ -13,7 +13,9 @@ use crate::execparallel::{
 };
 use crate::procnode::{exec_proc_node, with_eval_slots, PlanStateBase, PlanStateNode};
 
+#[allow(dead_code)] // C-parity: WaitLatch flag set kept complete
 const WL_LATCH_SET: u32 = types_storage::waiteventset::WL_LATCH_SET;
+#[allow(dead_code)] // C-parity: WaitLatch flag set kept complete
 const WL_EXIT_ON_PM_DEATH: u32 = types_storage::waiteventset::WL_EXIT_ON_PM_DEATH;
 pub(crate) const WAIT_EVENT_EXECUTE_GATHER: u32 = 0x0800_0000 + 13;
 
@@ -421,6 +423,7 @@ fn gather_readnext(
     }
 }
 
+#[allow(dead_code)] // ported C gather_readnext wait arm; wired in a later lane
 pub(crate) fn wait_on_my_latch(wait_event: u32) -> PgResult<()> {
     let latch = init_small::globals::MyLatch().expect("gather leader without MyLatch");
     ::parallel::gtrace("l.wait.begin");

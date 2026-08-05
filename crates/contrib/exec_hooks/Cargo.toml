@@ -13,3 +13,6 @@ pgsync = { path = "../../_support/pgsync" }
 seam_core = { path = "../../_support/seam_core" }
 execmain = { path = "../../backend/executor/execmain" }
 types_portal = { path = "../../_support/types/portal" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

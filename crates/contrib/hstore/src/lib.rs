@@ -93,7 +93,7 @@ pub(crate) fn ret_null(fcinfo: &mut Fcinfo) -> Datum {
     Datum::null()
 }
 
-pub(crate) fn ret_array(fcinfo: &Fcinfo, img: mcx::PgVec<'_, u8>) -> Datum {
+pub(crate) fn ret_array(_fcinfo: &Fcinfo, img: mcx::PgVec<'_, u8>) -> Datum {
     let d = Datum::from_usize(img.as_ptr() as usize);
     core::mem::forget(img);
     d

@@ -12,7 +12,6 @@ use ::types_rel::{RdAmCacheGin, RdAmCacheGinCol, Relation};
 use ::types_tuple::itemptr::ItemPointerData;
 
 use crate::btree::{ginFindLeafPage, ginInsertValue};
-use crate::bulk::BuildAccumulator;
 use crate::datapage::{createPostingTree, ginInsertItemPointers};
 use crate::entrypage::{
     gin_get_posting_tree, gin_is_posting_tree, gin_set_posting_tree, ginReadTuple, EntryBtree,

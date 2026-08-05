@@ -14,7 +14,7 @@ use crate::execparallel::{
     self, exec_init_parallel_plan, exec_parallel_cleanup, exec_parallel_create_readers,
     exec_parallel_finish, exec_parallel_reinitialize, ParallelExecutorInfo,
 };
-use crate::nodegather::{leader_participation, wait_on_my_latch, WAIT_EVENT_EXECUTE_GATHER};
+use crate::nodegather::leader_participation;
 use crate::procnode::{exec_proc_node, with_eval_slots, PlanStateBase, PlanStateNode};
 
 const MAX_TUPLE_STORE: usize = 10;

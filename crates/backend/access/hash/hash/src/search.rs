@@ -383,8 +383,8 @@ fn _hash_load_qualified_items(
         while offnum <= maxoff {
             debug_assert!(offnum >= 1);
             let id = page.item_id(offnum);
-            // SAFETY: bounded offset of the locked page.
-            let itup = unsafe { page.item_raw(id) }.0;
+            // Bounded offset of the locked page.
+            let itup = page.item_raw(id).0;
             // SAFETY: live on-page tuple.
             let (t_info, hashkey, tid) = unsafe {
                 (nbtree::itup::t_info(itup), _hash_get_indextuple_hashkey(itup), nbtree::itup::t_tid(itup))
@@ -419,8 +419,8 @@ fn _hash_load_qualified_items(
         while offnum >= 1 {
             debug_assert!(offnum <= maxoff);
             let id = page.item_id(offnum);
-            // SAFETY: bounded offset of the locked page.
-            let itup = unsafe { page.item_raw(id) }.0;
+            // Bounded offset of the locked page.
+            let itup = page.item_raw(id).0;
             // SAFETY: live on-page tuple.
             let (t_info, hashkey, tid) = unsafe {
                 (nbtree::itup::t_info(itup), _hash_get_indextuple_hashkey(itup), nbtree::itup::t_tid(itup))

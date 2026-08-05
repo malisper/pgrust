@@ -149,6 +149,7 @@ pub struct DrTqueue {
 
 /// `CreateTupleQueueDestReceiver` (tqueue.c) — per-tuple copy path (fail-open
 /// fallback; anything that can't batch, e.g. a future cross-process queue).
+#[allow(non_snake_case)] // C-parity name
 pub fn tqueue_create_DR(queue: ShmMqHandle) -> DrTqueue {
     DrTqueue {
         queue: Some(queue),
@@ -161,6 +162,7 @@ pub fn tqueue_create_DR(queue: ShmMqHandle) -> DrTqueue {
 
 /// Batched variant: tuples accumulate into ledger chunks; the ring carries
 /// chunk indices.
+#[allow(non_snake_case)] // C-parity name
 pub fn tqueue_create_DR_batched(queue: ShmMqHandle, ledger: Arc<ChunkLedger>) -> DrTqueue {
     DrTqueue {
         queue: Some(queue),

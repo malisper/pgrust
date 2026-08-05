@@ -3,7 +3,6 @@
 // never ends it — only its private read pointer moves.
 #![allow(non_snake_case)]
 
-use ::execexpr::exec_init_qual;
 use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::Mcx;

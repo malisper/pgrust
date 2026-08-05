@@ -1325,13 +1325,21 @@ pub fn RemoveRoleFromObjectACL<'mcx>(
     exec_grant_stmt_oids(mcx, &mut istmt)
 }
 
+#[allow(non_upper_case_globals)] // C-parity name
 const InitPrivsRelationId: Oid = 3394;
+#[allow(non_upper_case_globals)] // C-parity name
 const InitPrivsObjIndexId: Oid = 3395;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_init_privs_objoid: types_core::AttrNumber = 1;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_init_privs_classoid: types_core::AttrNumber = 2;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_init_privs_objsubid: types_core::AttrNumber = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_init_privs_privtype: types_core::AttrNumber = 4;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_init_privs_initprivs: types_core::AttrNumber = 5;
+#[allow(non_upper_case_globals)] // C-parity name
 const Natts_pg_init_privs: usize = 5;
 pub(crate) const INITPRIVS_EXTENSION: i8 = b'e' as i8;
 

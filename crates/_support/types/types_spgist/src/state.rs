@@ -89,6 +89,7 @@ impl SpGistState<'_> {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgChooseIn {
     pub datum: Datum,
     pub leafDatum: Datum,
@@ -101,6 +102,7 @@ pub struct spgChooseIn {
 }
 
 #[derive(Clone, Copy)]
+#[allow(non_camel_case_types)] // C-parity name
 pub enum spgChooseOut {
     None,
     MatchNode {
@@ -124,6 +126,7 @@ pub enum spgChooseOut {
 }
 
 #[derive(Clone, Copy)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgPickSplitIn {
     pub nTuples: i32,
     pub datums: *const Datum,
@@ -131,6 +134,7 @@ pub struct spgPickSplitIn {
 }
 
 #[derive(Clone, Copy)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgPickSplitOut {
     pub hasPrefix: bool,
     pub prefixDatum: Datum,
@@ -154,6 +158,7 @@ impl Default for spgPickSplitOut {
 }
 
 #[derive(Clone, Copy)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgInnerConsistentIn<'a> {
     pub scankeys: *const ScanKeyData,
     pub orderbys: *const ScanKeyData,
@@ -172,6 +177,7 @@ pub struct spgInnerConsistentIn<'a> {
 }
 
 #[derive(Clone, Copy)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgInnerConsistentOut {
     pub nNodes: i32,
     pub nodeNumbers: *const i32,
@@ -196,6 +202,7 @@ impl Default for spgInnerConsistentOut {
 }
 
 #[derive(Clone, Copy)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgLeafConsistentIn {
     pub scankeys: *const ScanKeyData,
     pub orderbys: *const ScanKeyData,
@@ -209,6 +216,7 @@ pub struct spgLeafConsistentIn {
 }
 
 #[derive(Clone, Copy)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgLeafConsistentOut {
     pub leafValue: Datum,
     pub recheck: bool,

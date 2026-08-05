@@ -127,7 +127,7 @@ pub fn AlterSetting<'mcx>(
             Some(entries) => {
                 let a = entries_to_text_array(mcx, entries)?;
                 let mut values = [Datum::null(); Natts_pg_db_role_setting];
-                let mut isnull = [false; Natts_pg_db_role_setting];
+                let isnull = [false; Natts_pg_db_role_setting];
                 let mut replace = [false; Natts_pg_db_role_setting];
                 values[Anum_pg_db_role_setting_setconfig as usize - 1] =
                     Datum::from_usize(a.as_ptr() as usize);

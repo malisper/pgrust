@@ -7,7 +7,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
-use types_rel::{NoLock, Relation, RowExclusiveLock, LOCKMODE};
+use types_rel::{NoLock, RowExclusiveLock, LOCKMODE};
 
 use crate::alter::oid_scankey;
 

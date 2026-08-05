@@ -569,8 +569,8 @@ fn read_array_str<'mcx>(
 fn copy_byref_datum(mcx: Mcx<'_>, d: Datum, typlen: i32) -> PgResult<Datum> {
     let p = d.as_usize() as *const u8;
     let size = match typlen {
-        -1 => unsafe { varsize_any(p) },
-        // SAFETY (both arms): d is a live by-ref datum of its declared layout.
+        -1 => varsize_any(p),
+        // SAFETY: d is a live by-ref datum of its declared layout.
         -2 => unsafe { CStr::from_ptr(p.cast()) }.to_bytes_with_nul().len(),
         n if n > 0 => n as usize,
         other => panic!("copy_byref_datum: unexpected typlen {other}"),

@@ -17,7 +17,7 @@ use types_core::{
     CommandId, InvalidOid, Oid, ProcNumber, SubTransactionId, TimestampTz, XLogRecPtr,
 };
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ErrorLocation, PgError, PgResult, ERRCODE_ADMIN_SHUTDOWN,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
 };
 use types_storage::RelFileLocator;

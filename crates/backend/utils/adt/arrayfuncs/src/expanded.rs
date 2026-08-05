@@ -141,7 +141,7 @@ fn install(eah: Box<ExpandedArrayHeader>, parentcontext: &MemoryContext) -> Datu
     unsafe {
         eoh_init_header(&raw mut (*p).hdr, &EA_METHODS, &raw const (*p).ctx);
         // SAFETY: sole release of p; nothing dereferences it after the parent resets.
-        parentcontext.register_reset_callback(move || unsafe { drop(Box::from_raw(p)) });
+        parentcontext.register_reset_callback(move || drop(Box::from_raw(p)));
         eohp_get_rw_datum(&raw const (*p).hdr)
     }
 }
@@ -248,8 +248,8 @@ fn att_addlength_datum(cur: usize, typlen: i16, typbyval: bool, value: Datum) ->
         cur + typlen as usize
     } else if typlen == -1 {
         debug_assert!(!typbyval);
-        // SAFETY: by-ref varlena datum points at a live image.
-        cur + unsafe { varsize_any(value.as_usize() as *const u8) }
+        // The by-ref varlena datum points at a live image.
+        cur + varsize_any(value.as_usize() as *const u8)
     } else {
         debug_assert_eq!(typlen, -2);
         // SAFETY: cstring datum points at a live NUL-terminated string.

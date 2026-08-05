@@ -100,6 +100,7 @@ pub fn RangeVarCallbackMaintainsTable(
 
 #[cold]
 #[inline(never)]
+#[allow(dead_code)] // stub reporter for not-yet-ported ALTER TABLE arms
 pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: tablecmds {what}")
 }

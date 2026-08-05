@@ -124,7 +124,7 @@ pub fn RenameDatabase(mcx: Mcx<'_>, oldname: &str, newname: &str) -> PgResult<Oi
     datname.namestrcpy(newname);
     let natts = Natts_pg_database;
     let mut values = vec![Datum::null(); natts];
-    let mut isnull = vec![false; natts];
+    let isnull = vec![false; natts];
     let mut replace = vec![false; natts];
     values[Anum_pg_database_datname as usize - 1] =
         Datum::from_usize(datname.data.as_ptr() as usize);
@@ -346,7 +346,7 @@ fn movedb_body(
 
     let natts = Natts_pg_database;
     let mut values = vec![Datum::null(); natts];
-    let mut isnull = vec![false; natts];
+    let isnull = vec![false; natts];
     let mut replace = vec![false; natts];
     values[Anum_pg_database_dattablespace as usize - 1] = Datum::from_oid(dst_tblspcoid);
     replace[Anum_pg_database_dattablespace as usize - 1] = true;
@@ -503,7 +503,7 @@ pub fn AlterDatabase<'mcx>(
 
     let natts = Natts_pg_database;
     let mut values = vec![Datum::null(); natts];
-    let mut isnull = vec![false; natts];
+    let isnull = vec![false; natts];
     let mut replace = vec![false; natts];
     if distemplate.is_some() {
         values[Anum_pg_database_datistemplate as usize - 1] = Datum::from_bool(dbistemplate);
@@ -595,7 +595,7 @@ pub fn AlterDatabaseRefreshColl<'mcx>(
             let version_text = varlena::cstring_to_text(mcx, new.as_bytes())?;
             let natts = Natts_pg_database;
             let mut values = vec![Datum::null(); natts];
-            let mut isnull = vec![false; natts];
+            let isnull = vec![false; natts];
             let mut replace = vec![false; natts];
             values[Anum_pg_database_datcollversion as usize - 1] =
                 Datum::from_usize(version_text.as_bytes().as_ptr() as usize);
@@ -693,7 +693,7 @@ pub fn AlterDatabaseOwner(mcx: Mcx<'_>, dbname: &str, new_owner_id: Oid) -> PgRe
 
         let natts = Natts_pg_database;
         let mut values = vec![Datum::null(); natts];
-        let mut isnull = vec![false; natts];
+        let isnull = vec![false; natts];
         let mut replace = vec![false; natts];
         replace[Anum_pg_database_datdba as usize - 1] = true;
         values[Anum_pg_database_datdba as usize - 1] = Datum::from_oid(new_owner_id);

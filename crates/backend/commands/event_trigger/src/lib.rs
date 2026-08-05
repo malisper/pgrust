@@ -353,7 +353,7 @@ fn reset_database_has_login_event_triggers(mcx: Mcx<'_>) -> PgResult<()> {
     if hasloginevt {
         let natts = descr.natts as usize;
         let mut values = vec![datum::Datum::null(); natts];
-        let mut nulls = vec![false; natts];
+        let nulls = vec![false; natts];
         let mut replace = vec![false; natts];
         values[pg_database::Anum_pg_database_dathasloginevt as usize - 1] =
             datum::Datum::from_bool(false);

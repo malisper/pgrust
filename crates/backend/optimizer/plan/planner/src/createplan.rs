@@ -2880,7 +2880,7 @@ fn create_windowagg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> P
 
     let wc = wc_node.as_window_clause().expect("WindowClause");
     let subplan_tlist = &subplan.as_plan().expect("plan node").targetlist;
-    let mut cols = |clause: &NodeList<'mcx>| -> PgResult<(
+    let cols = |clause: &NodeList<'mcx>| -> PgResult<(
         &'mcx [i16],
         &'mcx [types_core::Oid],
         &'mcx [types_core::Oid],

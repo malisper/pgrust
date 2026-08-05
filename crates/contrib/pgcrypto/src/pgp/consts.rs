@@ -18,10 +18,12 @@ pub const PGP_PKT_USER_ID: i32 = 13;
 pub const PGP_PKT_PUBLIC_SUBKEY: i32 = 14;
 pub const PGP_PKT_USER_ATTR: i32 = 17;
 pub const PGP_PKT_SYMENC_DATA_MDC: i32 = 18;
+#[allow(dead_code)] // C-parity: pgp.h constant set kept complete
 pub const PGP_PKT_MDC: i32 = 19;
 pub const PGP_PKT_PRIV_61: i32 = 61;
 pub const PGP_PKT_SIGNATURE: i32 = 2;
 
+#[allow(dead_code)] // C-parity: pgp.h constant set kept complete
 pub const PGP_SYM_PLAIN: i32 = 0;
 pub const PGP_SYM_DES3: i32 = 2;
 pub const PGP_SYM_CAST5: i32 = 3;
@@ -43,6 +45,7 @@ pub const PGP_COMPR_ZLIB: i32 = 2;
 pub const PGP_COMPR_BZIP2: i32 = 3;
 
 pub const PGP_MAX_KEY: usize = 32;
+#[allow(dead_code)] // C-parity: pgp.h constant set kept complete
 pub const PGP_MAX_BLOCK: usize = 16;
 
 pub const MDC_DIGEST_LEN: usize = 20;

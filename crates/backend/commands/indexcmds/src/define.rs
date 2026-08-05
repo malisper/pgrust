@@ -4,7 +4,7 @@
 // exclusion/WITHOUT OVERLAPS, index detach.
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, INDEXRELID};
 use catalog_index::{
-    IndexCreateExtra, BTREE_AM_OID,
+    IndexCreateExtra,
     INDEX_CREATE_ADD_CONSTRAINT, INDEX_CREATE_IS_PRIMARY,
 };
 use datum::Datum;
@@ -857,7 +857,7 @@ pub fn DefineIndex<'mcx>(
         }
     }
     if !indexInfo.ii_Expressions.is_nil() || !indexInfo.ii_Predicate.is_nil() {
-        let mut check = |list: &types_nodes::NodeList<'mcx>| -> PgResult<()> {
+        let check = |list: &types_nodes::NodeList<'mcx>| -> PgResult<()> {
             for e in list.iter() {
                 for v in vars::pull_var_clause(mcx, e, 0)?.iter() {
                     if v.as_var().expect("pull_var_clause").varattno < 0 {

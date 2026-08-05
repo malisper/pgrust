@@ -8,7 +8,6 @@
 // reset, unlink).
 
 use core::mem::size_of;
-use std::io::{Read, Write};
 
 use elog::elog;
 use types_error::{PgResult, LOG};

@@ -38,12 +38,18 @@ fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
+#[allow(non_upper_case_globals)] // C-parity name
 const InvalidXLogRecPtr: XLogRecPtr = 0;
+#[allow(non_upper_case_globals)] // C-parity name
 const InvalidTransactionId: TransactionId = 0;
+#[allow(non_upper_case_globals)] // C-parity name
 const InvalidOid: Oid = types_core::InvalidOid;
+#[allow(non_upper_case_globals)] // C-parity name
 const InvalidPid: i32 = 0;
 
+#[allow(non_upper_case_globals)] // C-parity name
 const DatabaseRelationId: Oid = 1262;
+#[allow(non_upper_case_globals)] // C-parity name
 const AccessShareLock: i32 = 1;
 
 // RS_INVAL_NONE (slot.h); the slot crate models invalidation as i32/u8 codes.

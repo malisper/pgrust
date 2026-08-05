@@ -124,7 +124,7 @@ fn set_database_invalid(
     let desc = pgdbrel.descr();
     let natts = desc.natts as usize;
     let mut values = vec![Datum::null(); natts];
-    let mut isnull = vec![false; natts];
+    let isnull = vec![false; natts];
     let mut replace = vec![false; natts];
     values[Anum_pg_database_datconnlimit as usize - 1] = Datum::from_i32(DATCONNLIMIT_INVALID_DB);
     replace[Anum_pg_database_datconnlimit as usize - 1] = true;

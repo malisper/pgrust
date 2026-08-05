@@ -13,8 +13,8 @@ use ::types_tuple::itemptr::InvalidOffsetNumber;
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_FORCE_IMAGE, REGBUF_STANDARD};
 
 use crate::{
-    check_for_interrupts, page_bytes, page_mut, page_opaque, page_ref, relation_needs_wal,
-    unported, util::gin_init_page_bytes, util::GinNewBuffer, write_opaque, GinPageIsData,
+    check_for_interrupts, page_mut, page_opaque, page_ref, relation_needs_wal,
+    util::gin_init_page_bytes, util::GinNewBuffer, write_opaque, GinPageIsData,
     GinPageIsIncompleteSplit, GinPageIsLeaf, GinPageRightMost, GIN_EXCLUSIVE, GIN_SHARE,
     GIN_UNLOCK, RM_GIN,
 };

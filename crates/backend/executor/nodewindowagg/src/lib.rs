@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use ::datum::{Datum, NullableDatum};
 use ::execexpr::{
-    exec_build_agg_trans, exec_build_grouping_equal, exec_build_window_projection_info,
+    exec_build_grouping_equal,
     exec_eval_expr, exec_init_expr, exec_init_qual, exec_project, exec_qual, expr_type, AggBind,
     AggPerGroup, AggTransSpec, EvalSlots, ExprState, WinBind,
 };

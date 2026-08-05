@@ -54,3 +54,6 @@ miscinit = { path = "../../../utils/init/miscinit" }
 
 [dev-dependencies]
 pglz = { path = "../../../../common/pglz" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(pgrust_sim)"] }

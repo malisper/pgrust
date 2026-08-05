@@ -1824,7 +1824,7 @@ fn ri_KeysEqual(
             let scratch = mcx::MemoryContext::new("ri-keys-cmp");
             let (mut newvalue, mut oldvalue) = (newvalue, oldvalue);
             if castfunc != InvalidOid {
-                let mut cast = |v: Datum| -> PgResult<Datum> {
+                let cast = |v: Datum| -> PgResult<Datum> {
                     let mut finfo = fmgr_seams::fmgr_info::call(castfunc)?;
                     let mut fcinfo = types_fmgr::LocalFcinfo::<3>::fresh(InvalidOid);
                     // SAFETY: scratch outlives this call.

@@ -14,13 +14,12 @@ use ::types_rel::Relation;
 use ::types_spgist::state::{spgChooseIn, spgChooseOut, spgPickSplitIn, spgPickSplitOut, SpGistState};
 use ::types_spgist::xlog::*;
 use ::types_spgist::*;
-use ::types_storage::bufpage::{MaxIndexTuplesPerPage, PageMut};
+use ::types_storage::bufpage::PageMut;
 use ::types_tuple::itemptr::{ItemPointerData, ItemPointerIsValid};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
 use crate::utils::*;
 pub use ::types_spgist::{spgPageIndexMultiDelete, spgUpdateNodeLink};
-use crate::utils::ItupExt as _;
 
 const K: usize = INDEX_MAX_KEYS as usize;
 pub const RM_SPGIST_ID: u8 = ::types_core::RmgrIds::RM_SPGIST_ID as u8;

@@ -6,7 +6,7 @@ use types_nodes::plannodes::PlannedStmt;
 use types_nodes::NodeTag;
 
 use crate::consts::*;
-use crate::{loc, payload_gap};
+use crate::loc;
 
 pub fn CommandIsReadOnly(pstmt: &PlannedStmt<'_>) -> bool {
     match pstmt.commandType {

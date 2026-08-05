@@ -6,12 +6,12 @@ use ::datum::Datum;
 use ::mcx::{Mcx, PgVec};
 use ::nbtree::itup::{index_form_tuple, index_getattr, maxalign, ItupBuf};
 use ::types_core::{
-    AttrNumber, BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, OffsetNumber, Oid,
+    AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, OffsetNumber, Oid,
     XLogRecPtr, BLCKSZ, RELPERSISTENCE_TEMP,
 };
 use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};
 use ::types_gist::{
-    page_opaque, page_opaque_update, GISTPageOpaqueData, GistEntryVector, GistPageIsDeleted,
+    GISTPageOpaqueData, GistEntryVector, GistPageIsDeleted,
     GISTENTRY, GIST_PAGE_ID, GiSTPageSize, TUPLE_IS_INVALID, TUPLE_IS_VALID,
 };
 use ::types_rel::Relation;

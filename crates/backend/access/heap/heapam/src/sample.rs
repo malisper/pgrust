@@ -9,7 +9,7 @@ use crate::{
 use ::bufmgr_seams::BufferPin;
 use ::mcx::Mcx;
 use ::tableam_vocab::{SampleScanDriver, SO_ALLOW_PAGEMODE, SO_ALLOW_SYNC};
-use ::types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber};
+use ::types_core::{InvalidBlockNumber, OffsetNumber};
 use ::types_error::PgResult;
 use ::types_slot::SlotData;
 use ::types_tuple::{HeapTupleData, ItemPointerData};

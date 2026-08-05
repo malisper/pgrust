@@ -867,6 +867,7 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         PublicationRelationId => {
             let Some(tuple) = SearchSysCache1(
                 cache_syscache::cacheinfo::PUBLICATIONOID,
@@ -886,6 +887,7 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         SubscriptionRelationId => {
             let Some(tuple) = SearchSysCache1(
                 cache_syscache::cacheinfo::SUBSCRIPTIONOID,
@@ -943,6 +945,7 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         ConversionRelationId_own => {
             let Some(tuple) = SearchSysCache1(
                 cache_syscache::cacheinfo::CONVOID,
@@ -962,6 +965,7 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         LanguageRelationId_own => {
             let Some(tuple) = SearchSysCache1(
                 cache_syscache::cacheinfo::LANGOID,
@@ -1013,6 +1017,7 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         OperatorRelationId => {
             let Some(tuple) = SearchSysCache1(
                 cache_syscache::cacheinfo::OPEROID,
@@ -1032,48 +1037,57 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         CollationRelationId_own => {
             syscache_owner(cache_syscache::cacheinfo::COLLOID, 4, objectid, "collation")?
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         OperatorClassRelationId_own => {
             syscache_owner(cache_syscache::cacheinfo::CLAOID, 5, objectid, "operator class")?
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         OperatorFamilyRelationId_own => syscache_owner(
             cache_syscache::cacheinfo::OPFAMILYOID,
             5,
             objectid,
             "operator family",
         )?,
+        #[allow(non_upper_case_globals)] // C-parity name
         StatisticExtRelationId_own => syscache_owner(
             cache_syscache::cacheinfo::STATEXTOID,
             5,
             objectid,
             "statistics object",
         )?,
+        #[allow(non_upper_case_globals)] // C-parity name
         TSDictionaryRelationId_own => syscache_owner(
             cache_syscache::cacheinfo::TSDICTOID,
             4,
             objectid,
             "text search dictionary",
         )?,
+        #[allow(non_upper_case_globals)] // C-parity name
         TSConfigRelationId_own => syscache_owner(
             cache_syscache::cacheinfo::TSCONFIGOID,
             4,
             objectid,
             "text search configuration",
         )?,
+        #[allow(non_upper_case_globals)] // C-parity name
         FOREIGN_DATA_WRAPPER_RELATION_ID_own => syscache_owner(
             FOREIGNDATAWRAPPEROID,
             ANUM_PG_FOREIGN_DATA_WRAPPER_FDWOWNER,
             objectid,
             "foreign-data wrapper",
         )?,
+        #[allow(non_upper_case_globals)] // C-parity name
         FOREIGN_SERVER_RELATION_ID_own => syscache_owner(
             FOREIGNSERVEROID,
             ANUM_PG_FOREIGN_SERVER_SRVOWNER,
             objectid,
             "foreign server",
         )?,
+        #[allow(non_upper_case_globals)] // C-parity name
         EventTriggerRelationId_own => syscache_owner(
             cache_syscache::cacheinfo::EVENTTRIGGEROID,
             4,
@@ -1103,21 +1117,35 @@ fn syscache_owner(cacheid: i32, attnum: i32, objectid: Oid, what: &str) -> PgRes
 }
 
 
+#[allow(non_upper_case_globals)] // C-parity name
 const ConversionRelationId_own: Oid = 2607;
+#[allow(non_upper_case_globals)] // C-parity name
 const LanguageRelationId_own: Oid = 2612;
+#[allow(non_upper_case_globals)] // C-parity name
 const CollationRelationId_own: Oid = 3456;
+#[allow(non_upper_case_globals)] // C-parity name
 const OperatorClassRelationId_own: Oid = 2616;
+#[allow(non_upper_case_globals)] // C-parity name
 const OperatorFamilyRelationId_own: Oid = 2753;
+#[allow(non_upper_case_globals)] // C-parity name
 const StatisticExtRelationId_own: Oid = 3381;
+#[allow(non_upper_case_globals)] // C-parity name
 const TSDictionaryRelationId_own: Oid = 3600;
+#[allow(non_upper_case_globals)] // C-parity name
 const TSConfigRelationId_own: Oid = 3602;
+#[allow(non_upper_case_globals)] // C-parity name
 const FOREIGN_DATA_WRAPPER_RELATION_ID_own: Oid = 2328;
+#[allow(non_upper_case_globals)] // C-parity name
 const FOREIGN_SERVER_RELATION_ID_own: Oid = 1417;
+#[allow(non_upper_case_globals)] // C-parity name
 const EventTriggerRelationId_own: Oid = 3466;
 const ANUM_PG_EXTENSION_EXTOWNER: i32 = 3;
 const ANUM_PG_CONVERSION_CONOWNER: i32 = 4;
+#[allow(non_upper_case_globals)] // C-parity name
 const PublicationRelationId: Oid = 6104;
+#[allow(non_upper_case_globals)] // C-parity name
 const SubscriptionRelationId: Oid = 6100;
+#[allow(non_upper_case_globals)] // C-parity name
 const OperatorRelationId: Oid = 2617;
 const ANUM_PG_PUBLICATION_PUBOWNER: i32 = 3;
 const ANUM_PG_SUBSCRIPTION_SUBOWNER: i32 = 5;

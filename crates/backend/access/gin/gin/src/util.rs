@@ -9,7 +9,6 @@ use ::types_core::{Buffer, ForkNumber, InvalidBlockNumber, InvalidOid, OffsetNum
 use ::types_error::PgResult;
 use ::types_rel::Relation;
 use ::types_storage::bufpage::PageMut;
-use ::types_storage::ReadBufferMode;
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
 use crate::{

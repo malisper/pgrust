@@ -463,7 +463,7 @@ fn AlterForeignDataWrapperOwner_internal<'mcx>(
 
     if old_owner != new_owner_id {
         let mut repl_val = [Datum::null(); Natts_pg_foreign_data_wrapper];
-        let mut repl_null = [false; Natts_pg_foreign_data_wrapper];
+        let repl_null = [false; Natts_pg_foreign_data_wrapper];
         let mut repl_repl = [false; Natts_pg_foreign_data_wrapper];
         repl_val[Anum_pg_foreign_data_wrapper_fdwowner as usize - 1] =
             Datum::from_oid(new_owner_id);
@@ -606,7 +606,7 @@ fn AlterForeignServerOwner_internal<'mcx>(
         }
 
         let mut repl_val = [Datum::null(); Natts_pg_foreign_server];
-        let mut repl_null = [false; Natts_pg_foreign_server];
+        let repl_null = [false; Natts_pg_foreign_server];
         let mut repl_repl = [false; Natts_pg_foreign_server];
         repl_val[Anum_pg_foreign_server_srvowner as usize - 1] = Datum::from_oid(new_owner_id);
         repl_repl[Anum_pg_foreign_server_srvowner as usize - 1] = true;

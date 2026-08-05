@@ -58,3 +58,6 @@ timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 origin_seams = { path = "../../../replication/origin_seams" }
 aio_seams = { path = "../../../storage/aio/aio_seams" }
 xact_seams = { path = "../../transam/xact_seams" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(pgrust_sim)"] }

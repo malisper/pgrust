@@ -10,7 +10,7 @@
 //! this path staying alive). Call sites never see a world cfg — pgsync is
 //! the only cfg site.
 
-pub(crate) use pgsync::{atomic, lock, Condvar, Mutex, MutexGuard, Once, OnceLock, ParkLot};
+pub(crate) use pgsync::{atomic, lock, Condvar, Mutex, Once, OnceLock, ParkLot};
 // Re-exported pub from lib.rs (`pub use sync::{IoGuard, Semaphore}`), so the
 // facade rows must themselves be pub (E0365 otherwise).
 pub use pgsync::{IoGuard, Semaphore};

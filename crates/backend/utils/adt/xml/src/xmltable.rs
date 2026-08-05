@@ -286,13 +286,11 @@ unsafe fn value_from_xpathobj(
         let hdr = &*(xpathobj as *const xmlXPathObjectHdr);
         let take_xmlchar = |p: *mut u8| -> Vec<u8> {
             // SAFETY: p is a fresh NUL-terminated libxml string (or null).
-            unsafe {
-                let v = libxml::xmlchar_to_vec(p);
-                if !p.is_null() {
-                    x.xmlFree(p as *mut core::ffi::c_void);
-                }
-                v
+            let v = libxml::xmlchar_to_vec(p);
+            if !p.is_null() {
+                x.xmlFree(p as *mut core::ffi::c_void);
             }
+            v
         };
         match hdr.type_ {
             XPATH_NODESET => {

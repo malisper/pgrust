@@ -20,13 +20,21 @@ use crate::queue;
 const CONSTRAINT_PARENT_INDEX_ID: Oid = 2579;
 const TRIGGER_CONSTRAINT_INDEX_ID: Oid = 2699;
 
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_constraint_oid: i32 = 1;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_constraint_conname: AttrNumber = 2;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_constraint_connamespace: AttrNumber = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_constraint_condeferrable: i32 = 5;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_constraint_conparentid: AttrNumber = 12;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_oid: i32 = 1;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgconstraint: AttrNumber = 11;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgdeferrable: i32 = 12;
 
 #[track_caller]

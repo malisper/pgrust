@@ -20,6 +20,7 @@ const ITOA64: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn
 
 #[derive(Debug)]
 pub enum CryptError {
+    #[allow(dead_code)] // C-parity error taxonomy; no ported path raises it yet
     Unsupported(&'static str),
     Message(String),
     // A raised interrupt (query cancel / die) surfaced by CHECK_FOR_INTERRUPTS

@@ -450,7 +450,7 @@ pub fn UpdateTwoPhaseState<'mcx>(mcx: Mcx<'mcx>, suboid: Oid, new_state: u8) -> 
     };
 
     let mut values = [Datum::null(); Natts_pg_subscription];
-    let mut nulls = [false; Natts_pg_subscription];
+    let nulls = [false; Natts_pg_subscription];
     let mut replaces = [false; Natts_pg_subscription];
     values[(Anum_pg_subscription_subtwophasestate - 1) as usize] =
         Datum::from_char(new_state as i8);
@@ -517,7 +517,7 @@ pub fn ClearSubscriptionSkipLsn<'mcx>(
         };
 
         let mut values = [Datum::null(); Natts_pg_subscription];
-        let mut nulls = [false; Natts_pg_subscription];
+        let nulls = [false; Natts_pg_subscription];
         let mut replaces = [false; Natts_pg_subscription];
         values[(Anum_pg_subscription_subskiplsn - 1) as usize] =
             Datum::from_u64(InvalidXLogRecPtr);

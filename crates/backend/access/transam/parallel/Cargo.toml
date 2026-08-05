@@ -109,3 +109,6 @@ commit_ts_seams = { path = "../commit_ts_seams" }
 backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 backend_progress_seams = { path = "../../../utils/activity/backend_progress_seams" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

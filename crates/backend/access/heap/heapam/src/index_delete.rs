@@ -5,7 +5,7 @@
 
 use ::bufmgr_seams::{BufferPin, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 use ::mcx::Mcx;
-use ::tableam_vocab::{TM_IndexDelete, TM_IndexDeleteOp, TM_IndexStatus};
+use ::tableam_vocab::{TM_IndexDelete, TM_IndexDeleteOp};
 use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
 use ::types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber, TransactionId};
 use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};

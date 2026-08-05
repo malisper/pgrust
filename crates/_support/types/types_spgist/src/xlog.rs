@@ -12,6 +12,7 @@ pub const XLOG_SPGIST_VACUUM_ROOT: u8 = 0x70;
 pub const XLOG_SPGIST_VACUUM_REDIRECT: u8 = 0x80;
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgxlogState {
     pub redirectXid: TransactionId,
     pub isBuild: bool,
@@ -37,6 +38,7 @@ fn u16_at(b: &[u8], off: usize) -> u16 {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgxlogAddLeaf {
     pub newPage: bool,
     pub storesNulls: bool,
@@ -73,6 +75,7 @@ impl spgxlogAddLeaf {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgxlogMoveLeafs {
     pub nMoves: u16,
     pub newPage: bool,
@@ -112,6 +115,7 @@ impl spgxlogMoveLeafs {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgxlogAddNode {
     pub offnum: OffsetNumber,
     pub offnumNew: OffsetNumber,
@@ -151,6 +155,7 @@ impl spgxlogAddNode {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgxlogSplitTuple {
     pub offnumPrefix: OffsetNumber,
     pub offnumPostfix: OffsetNumber,
@@ -181,6 +186,7 @@ impl spgxlogSplitTuple {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgxlogPickSplit {
     pub isRootSplit: bool,
     pub nDelete: u16,
@@ -235,6 +241,7 @@ impl spgxlogPickSplit {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgxlogVacuumLeaf {
     pub nDead: u16,
     pub nPlaceholder: u16,
@@ -268,6 +275,7 @@ impl spgxlogVacuumLeaf {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgxlogVacuumRoot {
     pub nDelete: u16,
     pub stateSrc: spgxlogState,
@@ -292,6 +300,7 @@ impl spgxlogVacuumRoot {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgxlogVacuumRedirect {
     pub nToPlaceholder: u16,
     pub firstPlaceholder: OffsetNumber,

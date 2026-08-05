@@ -22,9 +22,13 @@ use crate::catalog::{
     TRIGGER_OID_INDEX_ID, TRIGGER_RELATION_ID, TRIGGER_RELID_NAME_INDEX_ID,
 };
 
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_oid: i32 = 1;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgrelid: i32 = 2;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgparentid: i32 = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgname: i32 = 4;
 
 #[track_caller]
@@ -405,8 +409,11 @@ fn renametrig_partition<'mcx>(
     Ok(())
 }
 
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgtype: i32 = 6;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgenabled: i32 = 7;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgisinternal: i32 = 8;
 
 // EnableDisableTrigger (trigger.c): tgname None = all triggers; tgparent

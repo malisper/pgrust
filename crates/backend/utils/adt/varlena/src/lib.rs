@@ -20,7 +20,6 @@ pub mod unicode;
 #[cfg(test)]
 mod tests;
 
-use core::cmp::Ordering;
 
 use datum::{Bytea, Varlena};
 use mcx::{Mcx, PgVec};

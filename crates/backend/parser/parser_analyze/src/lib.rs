@@ -2711,13 +2711,12 @@ fn mark_query_for_locking<'mcx>(
                         applyLockingClause(mcx, q, rti, strength, wait_policy, true)?;
                         let perminfo =
                             parse_relation::getRTEPermissionInfo(&q.rteperminfos, rte)?;
-                        // SAFETY: parser-owned tree; no derived refs live.
-                        unsafe {
-                            perminfo.with_mut::<types_nodes::RTEPermissionInfo, _>(|p| {
+                        // Parser-owned tree; no derived refs live.
+                        perminfo
+                            .with_mut::<types_nodes::RTEPermissionInfo, _>(|p| {
                                 p.requiredPerms |= ACL_SELECT_FOR_UPDATE
                             })
-                        }
-                        .expect("RTEPermissionInfo");
+                            .expect("RTEPermissionInfo");
                     }
                     RTEKind::RTE_SUBQUERY => {
                         applyLockingClause(mcx, q, rti, strength, wait_policy, true)?;

@@ -4776,6 +4776,7 @@ fn fix_join_expr_mutator<'mcx>(
 // Vars of rels other than ignore_rel (PlaceHolderVars stay matchable;
 // has_non_vars is never set, matching the search functions' Var/PHV-only
 // matching here).
+#[allow(dead_code)] // ported C setrefs helper; wired in a later lane
 fn build_other_vars_tlist<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     tlist: &NodeList<'mcx>,

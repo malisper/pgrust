@@ -585,7 +585,7 @@ fn rewriteTargetListIU<'mcx>(
                 .map_or(0, |v| v.varattno),
             _ => 0,
         };
-        let mut values_col_is_default_only =
+        let values_col_is_default_only =
             |default_only_cols: &mut Option<PgVec<'mcx, bool>>| -> PgResult<bool> {
                 if values_attrno == 0 {
                     return Ok(false);

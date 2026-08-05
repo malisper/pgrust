@@ -563,8 +563,8 @@ pub fn database_to_xml(nulls: bool, tableforest: bool, targetns: &str) -> PgResu
 }
 
 fn database_to_xmlschema_internal(
-    nulls: bool,
-    tableforest: bool,
+    _nulls: bool,
+    _tableforest: bool,
     targetns: &str,
 ) -> PgResult<String> {
     let mut result = String::new();

@@ -17,6 +17,7 @@ use types_rel::{Relation, RELKIND_PARTITIONED_TABLE};
 use partbounds::PartitionBoundInfoData;
 
 const RELOID: i32 = cache_syscache::cacheinfo::RELOID;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_class_relpartbound: i32 = 34;
 
 pub struct PartitionDescData {

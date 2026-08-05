@@ -1561,7 +1561,7 @@ fn AddRoleMems<'mcx>(
 
     for (memberRole, &memberid) in memberSpecs.iter().zip(memberIds) {
         let mut new_record = [Datum::null(); Natts_pg_auth_members];
-        let mut new_record_nulls = [false; Natts_pg_auth_members];
+        let new_record_nulls = [false; Natts_pg_auth_members];
         let mut new_record_repl = [false; Natts_pg_auth_members];
 
         new_record[(Anum_pg_auth_members_roleid - 1) as usize] = Datum::from_oid(roleid);

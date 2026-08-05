@@ -50,7 +50,7 @@ use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::primnodes::{CoercionContext, XmlExpr, XmlExprOp, XmlOptionType};
 use types_nodes::rawnodes::{RangeTableFunc, RangeTableFuncCol, RangeTableSample};
 use types_nodes::rawnodes::{
-    AlterTSConfigType, AlterTSConfigurationStmt, AlterTSDictionaryStmt, CompositeTypeStmt,
+    AlterTSConfigType, AlterTSConfigurationStmt, AlterTSDictionaryStmt,
     AlterEnumStmt, AlterTypeStmt, ColumnDef, Constraint, ConstrType, ConstraintsSetStmt,
     CreateEnumStmt,
     CreateRangeStmt, CreateSeqStmt, CreateStmt, CreateTableAsStmt, CreateTrigStmt, IndexElem,

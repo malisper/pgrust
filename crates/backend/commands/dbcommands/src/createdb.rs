@@ -17,7 +17,9 @@ use types_nodes::parsenodes::{CreatedbStmt, DefElem};
 use types_nodes::NodeTag;
 use types_storage::lock::{AccessShareLock, RowExclusiveLock, ShareLock};
 use types_tuple::NameData;
-use wchar::{PG_SQL_ASCII, PG_UTF8};
+use wchar::PG_SQL_ASCII;
+#[cfg(test)]
+use wchar::PG_UTF8;
 
 // wasm32: no LC_* names in the wasi libc crate; musl numbering (the
 // pg_locale wasm arm's convention).

@@ -39,11 +39,17 @@ const CONSTRAINT_TRIGGER: u8 = b't';
 const PRS2_OLD_VARNO: i32 = 1;
 const PRS2_NEW_VARNO: i32 = 2;
 
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_oid: AttrNumber = 1;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgparentid: i32 = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgisinternal: i32 = 8;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_trigger_tgconstraint: i32 = 11;
+#[allow(non_upper_case_globals)] // C-parity name
 const Natts_pg_trigger: usize = 19;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_class_relhastriggers: usize = 22;
 
 pub struct InternalTriggerArgs<'a> {
@@ -1107,6 +1113,7 @@ pub fn TriggerSetParentTrigger<'mcx>(
     parent_trig_id: Oid,
     child_table_id: Oid,
 ) -> PgResult<()> {
+    #[allow(non_upper_case_globals)] // C-parity name
     const TriggerOidIndexId: Oid = 2702;
     let trig_rel = table::table_open(mcx, TRIGGER_RELATION_ID, RowExclusiveLock)?;
     let keys = [scan_key(Anum_pg_trigger_oid, F_OIDEQ, Datum::from_oid(child_trig_id))];

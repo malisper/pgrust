@@ -1144,6 +1144,7 @@ fn examine_attribute<'mcx>(
     // Closed-set typanalyze dispatch (rule 4): std, array 3816, range 3916,
     // multirange 4242, tsvector 3688; anything else is an unported analyze lane.
     let ok = match typanalyze {
+        #[allow(non_upper_case_globals)] // C-parity name
         InvalidOid => std_typanalyze(&mut stats)?,
         3816 => array_typanalyze::setup(&mut stats)?,
         3688 => ts_typanalyze::setup(&mut stats)?,
@@ -1217,6 +1218,7 @@ fn examine_expression<'mcx>(
         statypalign: [ty.typalign as u8; STATISTIC_NUM_SLOTS],
     };
     let ok = match typanalyze {
+        #[allow(non_upper_case_globals)] // C-parity name
         InvalidOid => std_typanalyze(&mut stats)?,
         3816 => array_typanalyze::setup(&mut stats)?,
         3688 => ts_typanalyze::setup(&mut stats)?,
@@ -1462,7 +1464,7 @@ fn acquire_sample_rows<'mcx>(
     let mut scan = tableam::table_beginscan_analyze(mcx, onerel)?;
     let mut slot = tableam::table_slot_create(mcx, onerel)?;
 
-    let mut next_buffer = |bs: &mut sampling::BlockSamplerData| -> PgResult<types_core::Buffer> {
+    let next_buffer = |bs: &mut sampling::BlockSamplerData| -> PgResult<types_core::Buffer> {
         if !bs.has_more() {
             return Ok(types_core::InvalidBuffer);
         }
@@ -1626,7 +1628,7 @@ fn pgrcolumnar_acquire_sample_rows<'mcx>(
 
     pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_TOTAL, rgs.len() as i64);
 
-    let mut fetch = |scan: &mut tableam::TableScanDesc<'mcx>,
+    let fetch = |scan: &mut tableam::TableScanDesc<'mcx>,
                      slot: &mut SlotData<'mcx>,
                      rg: u32,
                      row: u32|

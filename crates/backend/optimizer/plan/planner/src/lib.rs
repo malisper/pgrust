@@ -68,7 +68,6 @@ use types_nodes::parsenodes::Query;
 use types_nodes::plannodes::PlannedStmt;
 use types_nodes::Node;
 use types_portal::{ParamListHandle, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_PARALLEL_OK};
-use types_pathnodes::PtId;
 
 use crate::createplan::create_plan;
 use crate::pathnode::get_cheapest_fractional_path;

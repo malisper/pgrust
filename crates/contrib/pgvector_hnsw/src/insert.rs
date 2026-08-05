@@ -5,7 +5,7 @@ use bufmgr::{
 };
 use datum::Datum;
 use generic_xlog::{GenericXLogAbort, GenericXLogFinish, GenericXLogStart, GenericXLogState};
-use mcx::{Mcx, PgBox, PgFxHashMap, PgVec};
+use mcx::{Mcx, PgBox, PgVec};
 use types_core::{BlockNumber, Buffer, ForkNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_hnsw::*;

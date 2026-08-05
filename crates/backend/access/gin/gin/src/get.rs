@@ -6,7 +6,7 @@ use ::bufmgr_seams as bm;
 use ::datum::Datum;
 use ::gin_vocab::*;
 use ::mcx::{Mcx, MemoryContext, PgVec};
-use ::tidbitmap::{TbmPrivateIterator, TIDBitmap, TBM_MAX_TUPLES_PER_PAGE};
+use ::tidbitmap::TIDBitmap;
 use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, InvalidBuffer, OffsetNumber};
 use ::types_error::PgResult;
 use ::types_rel::Relation;
@@ -26,7 +26,7 @@ use crate::logic::{bool_consistent, tri_consistent};
 use crate::scan::{ginFreeScanKeys, ginNewScanKey, non_gin_opaque};
 use crate::util::ginCompareEntries;
 use crate::{
-    check_for_interrupts, meta_of, page_bytes, page_opaque, page_ref, unported, GinPageIsData,
+    check_for_interrupts, meta_of, page_bytes, page_opaque, page_ref,
     GinPageIsLeaf, GinPageRightMost, GIN_SHARE, GIN_UNLOCK,
 };
 

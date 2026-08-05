@@ -7,7 +7,7 @@
 use datum::Datum;
 use mcx::Mcx;
 use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
-use types_core::{AttrNumber, InvalidOid, Oid, RegProcedure, RELATION_RELATION_ID};
+use types_core::{AttrNumber, InvalidOid, Oid, RegProcedure};
 use types_error::{
     PgError, PgResult, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };

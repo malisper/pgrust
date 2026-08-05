@@ -39,7 +39,7 @@
 //! leader memory stays budget-bounded and spilled sets replay through the
 //! existing spilled-set machinery at finalize.
 
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
 use ::datum::Datum;
 use ::executils::{EStateData, EcxtId, ExecSlotId};

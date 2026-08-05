@@ -252,7 +252,7 @@ pub(crate) fn ginNewScanKey(
         )?;
         let crate::opclass::ExtractedQuery {
             entries: query_values,
-            search_mode: mut search_mode,
+            mut search_mode,
             jsp_ops,
             partial_match,
             map_item_operand,

@@ -63,7 +63,7 @@ mod write_funnel; // W0 funnel-into-writer admission (parallel-writes design §4
 pub(crate) use runtime_passthrough::try_passthrough_funnel;
 pub use runtime_passthrough::funnel_engagements;
 pub(crate) use stmt_task::{try_stmt_task, InlineRun as StmtInlineRun, StmtTaskVerdict};
-pub use stmt_task::{stmt_task_engagements, stmt_task_inline_count};
+pub use stmt_task::stmt_task_engagements;
 pub use write_funnel::ctas_funnel_engagements;
 mod rowmode;
 mod rowmode_tail;
@@ -81,7 +81,6 @@ pub(crate) use stats::{
 pub(crate) use census::{census_armed, record_execution as census_record};
 pub(crate) use dml::try_own_modify_table;
 pub(crate) use indexsource::try_own_agg_over_index_only_source;
-pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
 pub(crate) use rowmode::merge_join_pull_verdict;
 pub(crate) use rowmode::try_own_project_set;
@@ -5736,6 +5735,7 @@ struct MkFreezeSnap {
     /// The Intern component's text payload per entry (empty when the shape
     /// has no Intern component — word-keyed shapes).
     texts: Vec<Vec<u8>>,
+    #[allow(dead_code)] // ported field; wired in a later lane
     has_intern: bool,
     /// Per-epoch dict code -> member mask (the code_ids identity discipline,
     /// retargeted to the text bytes — intern-table resets do NOT invalidate
@@ -6977,7 +6977,7 @@ pub fn try_own_sort<'mcx>(
     // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
     ::postgres_seams::check_for_interrupts::call()?;
 
-    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused: _, .. } = s;
     if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
         // Feed-time refuse (agg-over-join multi-batch spill), before any
         // sort-side effect: the Volcano fallback resumes byte-identically.
@@ -14157,7 +14157,7 @@ pub fn try_own_limit<'mcx>(
             // (the tuplesort bound set by the prologue makes it top-N,
             // exactly as C's bounded sort under Limit).
             ::postgres_seams::check_for_interrupts::call()?;
-            let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
+            let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused: _, .. } = s;
             if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
                 // Agg-over-join multi-batch spill refuse, before any lane
                 // tuple or sort-side effect: exec_limit over the per-tuple

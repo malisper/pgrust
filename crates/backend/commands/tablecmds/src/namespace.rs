@@ -7,7 +7,7 @@ use types_core::{InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, NOTICE,
 };
-use types_nodes::parsenodes::{AlterObjectSchemaStmt, ObjectType};
+use types_nodes::parsenodes::AlterObjectSchemaStmt;
 use types_rel::{AccessExclusiveLock, InplaceUpdateTupleLock, NoLock, Relation, RowExclusiveLock, LOCKMODE};
 
 use crate::alter::{oid_scankey, AlterRelationStmtKind, AlterTableLookupRangeVar, NamespaceRelationId};

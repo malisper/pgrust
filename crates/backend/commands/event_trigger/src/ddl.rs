@@ -5,7 +5,7 @@ use cache_evtcache::{
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use pg_depend::{DependencyType, ObjectAddress};
-use types_core::{CommandTag, InvalidOid, Oid, OidIsValid, NAMEDATALEN, TEXTOID};
+use types_core::{CommandTag, Oid, OidIsValid, NAMEDATALEN, TEXTOID};
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,

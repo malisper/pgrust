@@ -36,3 +36,6 @@ libc = "0.2"
 
 [dev-dependencies]
 lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

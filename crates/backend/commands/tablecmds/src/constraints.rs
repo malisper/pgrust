@@ -36,6 +36,7 @@ pub(crate) fn eq_key(
 
 pub(crate) struct CookedCon<'mcx> {
     pub contype: ConstrType,
+    #[allow(dead_code)] // ported field; consumers land with later constraint lanes
     pub conoid: Oid,
     pub name: &'mcx str,
     pub attnum: AttrNumber,

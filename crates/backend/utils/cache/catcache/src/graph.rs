@@ -307,7 +307,7 @@ pub(crate) fn remove_cl(st: &mut CatCacheState<'_>, cache_id: i32, slot: u32) {
     cache.cc_nlist -= 1;
 }
 
-/// `CatCacheInvalidate(SysCache[cacheId], hashValue)`.
+// `CatCacheInvalidate(SysCache[cacheId], hashValue)`.
 // Bumped on every path that can change what a syscache probe returns;
 // downstream decode-once memos (cache_syscache shape carriers) key on it.
 thread_local! {

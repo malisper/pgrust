@@ -9,7 +9,7 @@ use core::mem::ManuallyDrop;
 use std::rc::Rc;
 
 use datum::Datum;
-use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
+use mcx::{Mcx, PgHashMap, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR};
 use types_fmgr::{FmgrInfo, LocalFcinfo};
@@ -25,12 +25,19 @@ const CLAOID: i32 = cache_syscache::cacheinfo::CLAOID;
 const BTORDER_PROC: i16 = 1;
 const HASHEXTENDED_PROC: i16 = 2;
 
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_partitioned_table_partstrat: i32 = 2;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_partitioned_table_partnatts: i32 = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_partitioned_table_partdefid: i32 = 4;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_partitioned_table_partattrs: i32 = 5;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_partitioned_table_partclass: i32 = 6;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_partitioned_table_partcollation: i32 = 7;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_partitioned_table_partexprs: i32 = 8;
 
 pub struct PartitionKeyData {

@@ -850,7 +850,7 @@ fn add_merge_junk_vars<'mcx>(
 
 fn add_row_identity_columns<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &PlannerRun<'mcx>,
+    _run: &PlannerRun<'mcx>,
     tlist: &NodeList<'mcx>,
     result_relation: i32,
     rel: &types_rel::Relation<'mcx>,

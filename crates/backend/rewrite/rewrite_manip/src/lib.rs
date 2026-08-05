@@ -380,7 +380,7 @@ pub fn OffsetVarNodes<'mcx>(
                     .expect("rowMarks holds RowMarkClause");
             }
         }
-        use nodes_core::NodeWalker as _;
+        
         nodes_core::query_tree_walker(node.as_query().expect("Query"), &mut w, 0)?;
     } else {
         use nodes_core::NodeWalker as _;
@@ -581,7 +581,7 @@ pub fn ChangeVarNodes<'mcx>(
                 .expect("rowMarks holds RowMarkClause");
             }
         }
-        use nodes_core::NodeWalker as _;
+        
         nodes_core::query_tree_walker(node.as_query().expect("Query"), &mut w, 0)?;
     } else {
         use nodes_core::NodeWalker as _;
@@ -642,7 +642,7 @@ pub fn ChangeVarNodesExtendedSJEQueryRef<'mcx>(
         .expect("rowMarks holds RowMarkClause");
     }
     let mut w = ChangeVars { mcx, rt_index, new_index, sublevels_up: 0, skip_rangetblref: true };
-    use nodes_core::NodeWalker as _;
+    
     nodes_core::query_tree_walker(q, &mut w, 0)?;
     Ok(())
 }

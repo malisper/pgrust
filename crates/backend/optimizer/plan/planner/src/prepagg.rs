@@ -10,6 +10,7 @@ use types_pathnodes::{AggClauseCosts, AggInfo, AggSplit, AggTransInfo};
 use crate::costsize::{cost_qual_eval_node, expr_type_typmod};
 use crate::run::PlannerRun;
 
+#[allow(dead_code)] // C-parity: kept with the ported constant set
 const INT8OID: u32 = 20;
 const INTERNALOID: u32 = 2281;
 const RECORDOID: u32 = 2249;

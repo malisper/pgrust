@@ -163,3 +163,6 @@ nbtree_xlog = { path = "../../nbtree/nbtree_xlog" }
 pruneheap = { path = "../../heap/pruneheap" }
 arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
 execindexing = { path = "../../../executor/execindexing" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

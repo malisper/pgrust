@@ -385,6 +385,7 @@ fn array_iter_ltxtq(la: &[u8], query: &[u8]) -> PgResult<Option<Vec<u8>>> {
 
 macro_rules! fc_array_bool {
     ($($fname:ident: ($iter:ident, swapped=$swapped:literal $(, risparent=$ris:literal)?);)*) => {$(
+        #[allow(non_snake_case)] // C-parity names
         fn $fname(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let (x, y) = cmp_args(fcinfo)?;
             let (la, query) = if $swapped { (y, x) } else { (x, y) };
@@ -408,6 +409,7 @@ fc_array_bool! {
 
 macro_rules! fc_array_extract {
     ($($fname:ident: ($iter:ident $(, risparent=$ris:literal)?);)*) => {$(
+        #[allow(non_snake_case)] // C-parity names
         fn $fname(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let (la, query) = cmp_args(fcinfo)?;
             match $iter(&la, &query $(, $ris)?)? {
@@ -436,16 +438,19 @@ fn lt_q_arr_core(tree_arr: &[u8], query_arr: &[u8]) -> PgResult<bool> {
     Ok(false)
 }
 
+#[allow(non_snake_case)] // C-parity name
 fn fc__lt_q_regex(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (tree_arr, query_arr) = cmp_args(fcinfo)?;
     Ok(Datum::from_bool(lt_q_arr_core(&tree_arr, &query_arr)?))
 }
 
+#[allow(non_snake_case)] // C-parity name
 fn fc__lt_q_rregex(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (query_arr, tree_arr) = cmp_args(fcinfo)?;
     Ok(Datum::from_bool(lt_q_arr_core(&tree_arr, &query_arr)?))
 }
 
+#[allow(non_snake_case)] // C-parity name
 fn fc__lca(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let la = unsafe { arg_image(fcinfo, 0)? };
     let arr = array::LtreeArray::parse(&la);
@@ -654,6 +659,7 @@ fn fc_ltree_gist_options(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
 
 // --- gist__ltree_ops ------------------------------------------------------
 
+#[allow(non_snake_case)] // C-parity name
 fn fc__ltree_compress(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let siglen = get_siglen(&f, gist::LTREE_ASIGLEN_DEFAULT);
     // SAFETY: gist fmgr protocol.
@@ -675,6 +681,7 @@ fn fc__ltree_compress(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     }
 }
 
+#[allow(non_snake_case)] // C-parity name
 fn fc__ltree_same(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let siglen = get_siglen(&f, gist::LTREE_ASIGLEN_DEFAULT);
     let a = key_image(fcinfo.arg(0));
@@ -685,6 +692,7 @@ fn fc__ltree_same(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Dat
     Ok(fcinfo.arg(2))
 }
 
+#[allow(non_snake_case)] // C-parity name
 fn fc__ltree_union(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let siglen = get_siglen(&f, gist::LTREE_ASIGLEN_DEFAULT);
     let (_, entries) = entryvec_images(fcinfo);
@@ -695,6 +703,7 @@ fn fc__ltree_union(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     ret_image(fcinfo, &img)
 }
 
+#[allow(non_snake_case)] // C-parity name
 fn fc__ltree_penalty(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let siglen = get_siglen(&f, gist::LTREE_ASIGLEN_DEFAULT);
     // SAFETY: gist fmgr protocol.
@@ -706,11 +715,13 @@ fn fc__ltree_penalty(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     Ok(fcinfo.arg(2))
 }
 
+#[allow(non_snake_case)] // C-parity name
 fn fc__ltree_picksplit(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let siglen = get_siglen(&f, gist::LTREE_ASIGLEN_DEFAULT);
     picksplit_common(fcinfo, |entries| gist::array_picksplit(entries, siglen))
 }
 
+#[allow(non_snake_case)] // C-parity name
 fn fc__ltree_consistent(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let siglen = get_siglen(&f, gist::LTREE_ASIGLEN_DEFAULT);
     // SAFETY: gist fmgr protocol.
@@ -726,6 +737,7 @@ fn fc__ltree_consistent(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 }
 
 #[cold]
+#[allow(non_snake_case)] // C-parity name
 fn fc__ltree_gist_options(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: index_opclass_options passes &mut LocalRelopts as arg 0.
     let relopts = unsafe { &mut *(fcinfo.arg(0).as_usize() as *mut reloptions::LocalRelopts) };

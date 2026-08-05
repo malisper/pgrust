@@ -14,7 +14,6 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicPtr, Ordering::Relaxed};
 use std::sync::Mutex;
 

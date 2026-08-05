@@ -152,7 +152,7 @@ pub fn brin_inclusion_consistent(
     let unionval = column.bv_values[INCLUSION_UNION];
     let colloid = key.sk_collation;
 
-    let mut call = |strategynum: u16| -> PgResult<bool> {
+    let call = |strategynum: u16| -> PgResult<bool> {
         let mut finfo = inclusion_get_strategy_procinfo(bdesc, attno, subtype, strategynum)?;
         Ok(fmgr_core::function_call2_coll_in(&mut finfo, colloid, mcx, unionval, query)?
             .as_bool())

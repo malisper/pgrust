@@ -5,8 +5,10 @@ use libc::{c_char, c_int, c_long, c_ulong, c_void};
 use openssl_sys as ossl;
 
 // Opaque; openssl-sys does not declare it.
+#[allow(non_camel_case_types)] // C-parity name
 pub enum X509_NAME_ENTRY {}
 // Opaque; only passed between the libcrypto calls below.
+#[allow(non_camel_case_types)] // C-parity name
 pub enum X509_EXTENSION {}
 
 extern "C" {

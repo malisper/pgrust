@@ -23,13 +23,21 @@ use crate::grant::{
 };
 use crate::with_acl_datum;
 
+#[allow(non_upper_case_globals)] // C-parity name
 pub const DefaultAclRelationId: Oid = 826;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const DefaultAclOidIndexId: Oid = 828;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_default_acl_oid: AttrNumber = 1;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_default_acl_defaclrole: AttrNumber = 2;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_default_acl_defaclnamespace: AttrNumber = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_default_acl_defaclobjtype: AttrNumber = 4;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_default_acl_defaclacl: AttrNumber = 5;
+#[allow(non_upper_case_globals)] // C-parity name
 const Natts_pg_default_acl: usize = 5;
 
 const DEFACLOBJ_RELATION: u8 = b'r';
@@ -409,7 +417,7 @@ fn SetDefaultACL<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'_>) -> PgResu
         }
     } else {
         let mut values = [Datum::null(); Natts_pg_default_acl];
-        let mut nulls = [false; Natts_pg_default_acl];
+        let nulls = [false; Natts_pg_default_acl];
         let mut replaces = [false; Natts_pg_default_acl];
         let acl_img = acl_image(mcx, &new_acl)?;
         let defacl_oid;

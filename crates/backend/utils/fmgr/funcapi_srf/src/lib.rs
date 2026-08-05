@@ -1,7 +1,7 @@
 use std::any::Any;
 
 use datum::Datum;
-use fmgr::{ExprDoneCond, FmgrInfo, FunctionCallInfoBaseData, SetFunctionReturnMode};
+use fmgr::{ExprDoneCond, FmgrInfo, FunctionCallInfoBaseData};
 use nodes::NodeTag;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 
@@ -41,6 +41,7 @@ fn resultinfo_is_rsinfo(fcinfo: &FunctionCallInfoBaseData) -> bool {
     }
 }
 
+#[allow(non_snake_case)] // C-parity name
 pub fn init_MultiFuncCall<'a>(
     flinfo: &'a mut FmgrInfo,
     fcinfo: &FunctionCallInfoBaseData,
@@ -61,12 +62,14 @@ pub fn init_MultiFuncCall<'a>(
     Ok(flinfo.fn_extra_mut::<FuncCallContext>().unwrap())
 }
 
+#[allow(non_snake_case)] // C-parity name
 pub fn per_MultiFuncCall(flinfo: &mut FmgrInfo) -> &mut FuncCallContext {
     flinfo
         .fn_extra_mut::<FuncCallContext>()
         .expect("per_MultiFuncCall: no FuncCallContext on fn_extra")
 }
 
+#[allow(non_snake_case)] // C-parity name
 pub fn end_MultiFuncCall(flinfo: &mut FmgrInfo) {
     flinfo.fn_extra = None;
 }

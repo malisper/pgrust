@@ -9,7 +9,7 @@ use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
 use types_fmgr::{function_call1_coll_in, input_function_call, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use types_tuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
 
-use crate::repr::{build_hstore, find_key, unique_pairs, HstoreView, Pair};
+use crate::repr::{build_hstore, find_key, unique_pairs, Pair};
 use crate::{check_key_len, check_val_len, ret_null};
 
 const RECORDOID: Oid = 2249;

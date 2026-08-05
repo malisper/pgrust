@@ -725,7 +725,7 @@ fn unlink_external_pid_file_cb(_code: i32, _arg: usize) {
 }
 
 fn CreateOptsFile(argv: &[String]) -> bool {
-    use std::io::Write;
+    
     let fullprogname = String::from_utf8_lossy(
         &init_small::globals::my_exec_path()
             .iter()

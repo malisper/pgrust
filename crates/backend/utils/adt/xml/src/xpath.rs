@@ -39,12 +39,10 @@ pub(crate) unsafe fn node_to_xmltype(cur: *mut xmlNode) -> PgResult<Vec<u8>> {
             let bytes = (x.xmlNodeDump)(buf, core::ptr::null_mut(), cur_copy, 0, 0);
             let free_copy = || {
                 // SAFETY: cur_copy is the live copy freed exactly once.
-                unsafe {
-                    if is_doc {
-                        (x.xmlFreeDoc)(cur_copy as *mut libxml::xmlDoc);
-                    } else {
-                        (x.xmlFreeNode)(cur_copy);
-                    }
+                if is_doc {
+                    (x.xmlFreeDoc)(cur_copy as *mut libxml::xmlDoc);
+                } else {
+                    (x.xmlFreeNode)(cur_copy);
                 }
             };
             if bytes == -1 {
@@ -226,19 +224,17 @@ pub fn xpath_internal(
                        xpathcomp: *mut libxml::xmlXPathCompExpr,
                        xpathctx: *mut libxml::xmlXPathContext| {
             // SAFETY: each pointer is live (or null-checked) and freed once.
-            unsafe {
-                if !xpathobj.is_null() {
-                    (x.xmlXPathFreeObject)(xpathobj);
-                }
-                if !xpathcomp.is_null() {
-                    (x.xmlXPathFreeCompExpr)(xpathcomp);
-                }
-                if !xpathctx.is_null() {
-                    (x.xmlXPathFreeContext)(xpathctx);
-                }
-                (x.xmlFreeDoc)(doc);
-                (x.xmlFreeParserCtxt)(ctxt);
+            if !xpathobj.is_null() {
+                (x.xmlXPathFreeObject)(xpathobj);
             }
+            if !xpathcomp.is_null() {
+                (x.xmlXPathFreeCompExpr)(xpathcomp);
+            }
+            if !xpathctx.is_null() {
+                (x.xmlXPathFreeContext)(xpathctx);
+            }
+            (x.xmlFreeDoc)(doc);
+            (x.xmlFreeParserCtxt)(ctxt);
         };
 
         let xpathctx = (x.xmlXPathNewContext)(doc);

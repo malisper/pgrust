@@ -18,8 +18,11 @@ use types_nodes::NodeList;
 use types_rel::{NoLock, Relation, RowExclusiveLock};
 use types_tuple::{HeapTupleData, NameData, TupleDescData};
 
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_namespace_nspname: i32 = 2;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_namespace_nspowner: i32 = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_namespace_nspacl: i32 = 4;
 
 // check_can_set_role (acl.c).

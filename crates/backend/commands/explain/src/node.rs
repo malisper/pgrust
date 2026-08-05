@@ -330,7 +330,7 @@ fn collect_node_subplans<'mcx>(
 ) -> PgResult<PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>> {
     let plan = plan_of(node);
     let mut out: PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>> = PgVec::new_in(mcx);
-    let mut walk_list = |out: &mut PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
+    let walk_list = |out: &mut PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
                          list: &NodeList<'mcx>| {
         for n in list {
             collect_subplans_expr(n, out);
@@ -2552,7 +2552,7 @@ fn show_window_def<'mcx>(
     // show_window_keys: key columns refer to the child's tlist, deparsed in
     // the child's context with the WindowAgg pushed onto the ancestors.
     let pushed = Ancestors { entry: AncestorEntry::Plan(node), parent: ancestors };
-    let mut keys = |buf: &mut PgString<'mcx>,
+    let keys = |buf: &mut PgString<'mcx>,
                     es: &mut ExplainState<'mcx>,
                     idx: &[i16]|
      -> PgResult<()> {

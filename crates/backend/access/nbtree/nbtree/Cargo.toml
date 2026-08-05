@@ -85,3 +85,6 @@ autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
 lock_seams = { path = "../../../storage/lmgr/lock_seams" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 xact_seams = { path = "../../transam/xact_seams" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

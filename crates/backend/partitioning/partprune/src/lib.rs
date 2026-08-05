@@ -11,14 +11,23 @@ use types_nodes::Bitmapset;
 
 pub const PARTITION_MAX_KEYS: usize = 32;
 
+#[allow(non_upper_case_globals)] // C-parity name
 pub const InvalidStrategy: u16 = 0;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const BTLessStrategyNumber: u16 = 1;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const BTLessEqualStrategyNumber: u16 = 2;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const BTEqualStrategyNumber: u16 = 3;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const BTGreaterEqualStrategyNumber: u16 = 4;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const BTGreaterStrategyNumber: u16 = 5;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const BTMaxStrategyNumber: usize = 5;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const HTEqualStrategyNumber: u16 = 1;
+#[allow(non_upper_case_globals)] // C-parity name
 pub const HTMaxStrategyNumber: usize = 1;
 
 pub const KIND_MINVALUE: i8 = -1;
@@ -303,6 +312,7 @@ pub fn get_matching_list_bounds<'mcx, B: BoundInfo>(
 
     let mut inclusive = false;
     match opstrategy {
+        #[allow(non_upper_case_globals)] // C-parity name
         BTEqualStrategyNumber => {
             let off = list_bsearch(boundinfo, &mut is_equal, &mut cmp);
             if off >= 0 && is_equal {
@@ -313,6 +323,7 @@ pub fn get_matching_list_bounds<'mcx, B: BoundInfo>(
             }
             return Ok(result);
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         BTGreaterEqualStrategyNumber | BTGreaterStrategyNumber => {
             if opstrategy == BTGreaterEqualStrategyNumber {
                 inclusive = true;
@@ -330,6 +341,7 @@ pub fn get_matching_list_bounds<'mcx, B: BoundInfo>(
             }
             minoff = off;
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         BTLessEqualStrategyNumber | BTLessStrategyNumber => {
             if opstrategy == BTLessEqualStrategyNumber {
                 inclusive = true;
@@ -393,6 +405,7 @@ pub fn get_matching_range_bounds<'mcx, B: BoundInfo>(
     let mut is_equal = false;
     let mut inclusive = false;
     match opstrategy {
+        #[allow(non_upper_case_globals)] // C-parity name
         BTEqualStrategyNumber => {
             let mut off = range_datum_bsearch(boundinfo, nvalues, &mut is_equal, cmp);
             if off >= 0 && is_equal {
@@ -426,6 +439,7 @@ pub fn get_matching_range_bounds<'mcx, B: BoundInfo>(
             }
             return Ok(result);
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         BTGreaterEqualStrategyNumber | BTGreaterStrategyNumber => {
             if opstrategy == BTGreaterEqualStrategyNumber {
                 inclusive = true;
@@ -446,6 +460,7 @@ pub fn get_matching_range_bounds<'mcx, B: BoundInfo>(
                 minoff = off + 1;
             }
         }
+        #[allow(non_upper_case_globals)] // C-parity name
         BTLessEqualStrategyNumber | BTLessStrategyNumber => {
             if opstrategy == BTLessEqualStrategyNumber {
                 inclusive = true;

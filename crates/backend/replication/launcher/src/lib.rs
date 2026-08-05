@@ -28,7 +28,9 @@ use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT}
 mod tests;
 
 const SRC: &str = "src/backend/replication/logical/launcher.c";
+#[allow(non_upper_case_globals)] // C-parity name
 const InvalidPid: pid_t = -1;
+#[allow(non_upper_case_globals)] // C-parity name
 const InvalidXLogRecPtr: XLogRecPtr = 0;
 
 // DEFAULT_NAPTIME_PER_CYCLE (launcher.c:52), ms.

@@ -75,9 +75,13 @@ pub enum BgWorkerStartTime {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BgwHandleStatus {
+    #[allow(non_camel_case_types)] // C-parity name
     BGWH_STARTED,
+    #[allow(non_camel_case_types)] // C-parity name
     BGWH_NOT_YET_STARTED,
+    #[allow(non_camel_case_types)] // C-parity name
     BGWH_STOPPED,
+    #[allow(non_camel_case_types)] // C-parity name
     BGWH_POSTMASTER_DIED,
 }
 

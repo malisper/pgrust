@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use self::cache_ids::{TSCONFIGMAP, TSCONFIGOID, TSDICTOID, TSPARSEROID, TSTEMPLATEOID};
 use datum::Datum;
-use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgHashMap, PgVec};
+use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
 use ts_locale::dict_api::DictInitData;
 use ts_locale::DictSubState;
 use types_core::{InvalidOid, Oid};

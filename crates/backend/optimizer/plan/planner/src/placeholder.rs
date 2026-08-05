@@ -9,7 +9,7 @@ use types_pathnodes::{PhInfoId, PlaceHolderInfo, RelId, Relids};
 
 use crate::relnode::{
     find_base_rel, relids_copy, relids_difference, relids_intersect, relids_is_empty,
-    relids_is_member, relids_is_subset, relids_members, relids_singleton, relids_singleton_member,
+    relids_is_member, relids_is_subset, relids_members, relids_singleton_member,
     relids_union,
 };
 use crate::run::PlannerRun;

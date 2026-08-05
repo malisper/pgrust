@@ -10,7 +10,7 @@ use types_core::instrument::{instr_time, BufferUsage, WalUsage};
 use types_error::LOG;
 
 use crate::{
-    gucs, nesting_level, Counters, PgssEntry, PgssGlobalStats, PgssHashKey, PgssShared,
+    gucs, nesting_level, Counters, PgssEntry, PgssHashKey, PgssShared,
     ASSUMED_LENGTH_INIT, PGSS, PGSS_DUMP_FILE, PGSS_EXEC, PGSS_FILE_HEADER, PGSS_NUMKIND,
     PGSS_PG_MAJOR_VERSION, PGSS_PLAN, STICKY_DECREASE_FACTOR, USAGE_DEALLOC_PERCENT,
     USAGE_DECREASE_FACTOR, USAGE_EXEC, USAGE_INIT,

@@ -2357,7 +2357,7 @@ fn init_scalar_array_op<'mcx>(
     let mut flinfo = fmgr_core::fmgr_info(opfuncid)?;
     flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
     let strict = flinfo.fn_strict;
-    let mut frame = FuncFrame::new_in(mcx, flinfo, 2, saop.inputcollid)?;
+    let frame = FuncFrame::new_in(mcx, flinfo, 2, saop.inputcollid)?;
 
     let frame_ix = state.frames.len() as u32;
     if let Some(con) = scalararg.as_const() {
@@ -5969,7 +5969,7 @@ fn decode_saop_const_array(
 fn collect_suffix_calls(state: &ExprState<'_>, steps: &[Step]) -> LaneSuffix {
     let mut oids = alloc::vec::Vec::new();
     // SAFETY (all arms): frame-owned mcx-boxed FmgrInfo, read-only here.
-    let mut push_flinfo =
+    let push_flinfo =
         |oids: &mut alloc::vec::Vec<Oid>, fl: NonNull<FmgrInfo>| oids.push(unsafe { fl.as_ref() }.fn_oid);
     for s in steps {
         match s {

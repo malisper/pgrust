@@ -7,19 +7,18 @@ use mcx::PgVec;
 use types_error::PgResult;
 use types_nodes::NodeTag;
 use types_pathnodes::{
-    HashPath, JoinPath, MaterialPath, MergePath, MergeScanSelCache, NestPath, Path,
     PathId, PathKey, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
 };
 
 use crate::gucs;
 use crate::pathkeys::{
-    build_join_pathkeys, compare_pathkeys, find_mergeclauses_for_outer_pathkeys,
+    build_join_pathkeys, find_mergeclauses_for_outer_pathkeys,
     get_cheapest_path_for_pathkeys, make_inner_pathkeys_for_merge, pathkeys_contained_in,
     pathkeys_count_contained_in, select_outer_pathkeys_for_merge,
-    trim_mergeclauses_for_inner_pathkeys, update_mergeclause_eclasses, PathKeysComparison,
+    trim_mergeclauses_for_inner_pathkeys, update_mergeclause_eclasses,
 };
 use crate::costsize::{
-    initial_cost_hashjoin, initial_cost_mergejoin, initial_cost_nestloop, JoinCostWorkspace,
+    initial_cost_hashjoin, initial_cost_mergejoin, initial_cost_nestloop,
 };
 use crate::pathnode::{
     add_partial_path, add_partial_path_precheck, add_path_precheck, compare_path_costs,

@@ -615,7 +615,7 @@ fn ginbulkdelete_guts<'mcx>(
         let res_page = ginVacuumEntryPage(scratch.mcx(), &mut gvs, buffer, &mut roots)?;
 
         // SAFETY: pin + exclusive lock held.
-        blkno = { page_opaque(&unsafe { page_ref(buffer) }).rightlink };
+        blkno = page_opaque(&unsafe { page_ref(buffer) }).rightlink;
 
         if let Some(tmp) = res_page {
             {

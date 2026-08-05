@@ -8,7 +8,7 @@
 use core::ptr::NonNull;
 use std::rc::Rc;
 
-use ::execexpr::{exec_build_hash32_from_exprs, EvalSlots, ExprState};
+use ::execexpr::{exec_build_hash32_from_exprs, ExprState};
 use ::executils::{AuxCxtId, EStateData, EcxtId, ExecSlotId};
 use ::fd::buffile::BufFile;
 use ::heaptuple::MinimalFormPlan;

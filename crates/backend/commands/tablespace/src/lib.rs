@@ -777,7 +777,7 @@ pub fn RenameTableSpace(mcx: Mcx<'_>, oldname: &str, newname: &str) -> PgResult<
     let mut newname_nd = NameData::default();
     newname_nd.namestrcpy(newname);
     let mut values = [Datum::null(); Natts_pg_tablespace];
-    let mut nullsv = [false; Natts_pg_tablespace];
+    let nullsv = [false; Natts_pg_tablespace];
     let mut replace = [false; Natts_pg_tablespace];
     values[Anum_pg_tablespace_spcname - 1] =
         Datum::from_usize(newname_nd.data.as_ptr() as usize);
@@ -946,7 +946,7 @@ pub fn AlterTableSpaceOwner(mcx: Mcx<'_>, name: &str, new_owner_id: Oid) -> PgRe
         }
 
         let mut values = [Datum::null(); Natts_pg_tablespace];
-        let mut nullsv = [false; Natts_pg_tablespace];
+        let nullsv = [false; Natts_pg_tablespace];
         let mut replace = [false; Natts_pg_tablespace];
         values[Anum_pg_tablespace_spcowner - 1] = Datum::from_oid(new_owner_id);
         replace[Anum_pg_tablespace_spcowner - 1] = true;

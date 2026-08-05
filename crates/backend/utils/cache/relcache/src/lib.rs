@@ -21,7 +21,7 @@ use core::cell::RefCell;
 use core::mem::ManuallyDrop;
 use std::rc::{Rc, Weak};
 
-use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
+use mcx::{Mcx, PgHashMap, PgVec};
 use types_core::Oid;
 use types_rel::RelationData;
 

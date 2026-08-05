@@ -234,11 +234,13 @@ pub struct SpGistTypeDesc {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgConfigIn {
     pub attType: ::types_core::Oid,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(non_camel_case_types)] // C-parity name
 pub struct spgConfigOut {
     pub prefixType: ::types_core::Oid,
     pub labelType: ::types_core::Oid,

@@ -8,7 +8,7 @@ use types_dest::CommandDest;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_CURSOR_DEFINITION};
 use types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
 use types_portal::{
-    FetchDirection, ParamListHandle, Portal, QueryEnvHandle, StmtListHandle,
+    FetchDirection, ParamListHandle, Portal, StmtListHandle,
     CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
 };
 

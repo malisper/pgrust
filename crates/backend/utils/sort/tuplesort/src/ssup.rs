@@ -2,7 +2,7 @@ use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use ::types_fmgr::{direct_function_call2_coll_in, PGFunction};
+use ::types_fmgr::PGFunction;
 use ::lsyscache::COMPARE_GT;
 use ::types_nbtree::{BTORDER_PROC, BTSORTSUPPORT_PROC};
 

@@ -35,6 +35,7 @@ const TriggerRelationId: Oid = 2620;
 const TriggerRelidNameIndexId: Oid = 2701;
 const DependRelationId: Oid = 2608;
 const DependDependerIndexId: Oid = 2673;
+#[allow(dead_code)] // C-parity: pg_constraint contype set kept complete
 const CONSTRAINT_FOREIGN: u8 = pg_constraint::CONSTRAINT_FOREIGN;
 const CONSTRAINT_CHECK: u8 = pg_constraint::CONSTRAINT_CHECK;
 const CONSTRAINT_NOTNULL: u8 = pg_constraint::CONSTRAINT_NOTNULL;
@@ -575,6 +576,7 @@ struct ConRow<'mcx> {
     coninhcount: i16,
     nn_attno: AttrNumber,
     conbin: Option<mcx::PgString<'mcx>>,
+    #[allow(dead_code)] // ported field; consumers land with later ATTACH lanes
     tid: types_tuple::ItemPointerData,
 }
 

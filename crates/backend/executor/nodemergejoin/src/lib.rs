@@ -168,7 +168,7 @@ pub fn exec_init_merge_join<'mcx>(
     {
         return Err(non_mergeable_join_cond(node.join.jointype));
     }
-    let mut null_slot = |desc: &Rc<TupleDescData<'static>>, estate: &mut EStateData<'mcx>| {
+    let null_slot = |desc: &Rc<TupleDescData<'static>>, estate: &mut EStateData<'mcx>| {
         let slot_id =
             estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
         exectuples::exec_store_all_null_tuple(

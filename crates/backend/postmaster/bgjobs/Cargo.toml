@@ -19,3 +19,6 @@ waiter = { path = "../../storage/ipc/waiter" }
 
 [dev-dependencies]
 latch = { path = "../../storage/ipc/latch" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

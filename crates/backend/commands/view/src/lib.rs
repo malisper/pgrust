@@ -206,7 +206,7 @@ fn DefineVirtualRelation<'mcx>(
     };
     let lockmode =
         if stmt.replace { types_rel::AccessExclusiveLock } else { types_rel::NoLock };
-    let (namespace_id, view_oid, _relpersistence) =
+    let (_namespace_id, view_oid, _relpersistence) =
         catalog_namespace::RangeVarGetAndCheckCreationNamespace(
             mcx,
             &creation_rv,

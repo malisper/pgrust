@@ -1,7 +1,6 @@
 use mcx::alloc_leak_in;
 use types_error::PgResult;
 use types_nodes::list::NodeList;
-use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{Query, RTEKind, WithCheckOption};
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::JoinDomain;

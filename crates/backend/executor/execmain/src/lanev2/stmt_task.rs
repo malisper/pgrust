@@ -391,6 +391,7 @@ fn yield_sweeper() {
 static STMT_YIELDS: AtomicU64 = AtomicU64::new(0);
 
 /// Yields performed by the quantum governor (diagnostics/witnesses).
+#[allow(dead_code)] // stmt-task lane (default OFF) telemetry
 pub fn stmt_task_yield_count() -> u64 {
     STMT_YIELDS.load(Ordering::SeqCst)
 }
@@ -638,6 +639,7 @@ pub fn stmt_task_engagements() -> (u64, u64, u64) {
 
 /// GL-STMTTASK-2: statements executed on the INLINE fast path (a subset of
 /// engaged) — tests/diagnostics.
+#[allow(dead_code)] // stmt-task lane (default OFF) telemetry
 pub fn stmt_task_inline_count() -> u64 {
     STMT_INLINE.load(Ordering::SeqCst)
 }

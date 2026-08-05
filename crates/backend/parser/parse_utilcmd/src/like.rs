@@ -33,9 +33,13 @@ const ACL_SELECT: u64 = 1 << 1;
 const INDOPTION_DESC: i16 = 1 << 0;
 const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
 const CONSTRAINT_RELATION_ID: Oid = 2606;
+#[allow(non_upper_case_globals)] // C-parity name
 const StatisticExtRelationId: Oid = 3381;
+#[allow(non_upper_case_globals)] // C-parity name
 const StatisticExtOidIndexId: Oid = 3380;
+#[allow(non_upper_case_globals)] // C-parity name
 const IndexRelidIndexId: Oid = 2679;
+#[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_index_indclass: i32 = 18;
 
 const EXPAND_OPTIONS: u32 = CREATE_TABLE_LIKE_DEFAULTS
@@ -882,7 +886,9 @@ fn untransform_rel_options<'mcx>(
 fn index_reloptions_defelems<'mcx>(mcx: Mcx<'mcx>, index_id: Oid) -> PgResult<NodeList<'mcx>> {
     use datum::Datum;
     use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    #[allow(non_upper_case_globals)] // C-parity name
     const ClassOidIndexId: Oid = 2662;
+    #[allow(non_upper_case_globals)] // C-parity name
     const Anum_pg_class_reloptions: i32 = 33;
     let mut key = ScanKeyData::empty();
     key.sk_attno = 1;
@@ -1035,8 +1041,11 @@ fn generateClonedExtStatsStmt<'mcx>(
     use datum::Datum;
     use types_nodes::rawnodes::{CreateStatsStmt, StatsElem};
     use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    #[allow(non_upper_case_globals)] // C-parity name
     const Anum_pg_statistic_ext_stxkeys: i32 = 6;
+    #[allow(non_upper_case_globals)] // C-parity name
     const Anum_pg_statistic_ext_stxkind: i32 = 8;
+    #[allow(non_upper_case_globals)] // C-parity name
     const Anum_pg_statistic_ext_stxexprs: i32 = 9;
     const CHAROID: Oid = 18;
     const INT2OID: Oid = 21;

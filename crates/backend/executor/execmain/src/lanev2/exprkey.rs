@@ -2321,6 +2321,7 @@ pub(super) enum SinkXkKind {
     /// Packed multi-key over the projected scan (ts-extract class) — the compact
     /// Multi arm packs it; `dict_input_att` names the TextRaw component's
     /// tlist attno when one exists (the intern/canonical-bytes lane).
+    #[allow(dead_code)] // ported field; wired in a later lane
     Multi { dict_input_att: Option<u16> },
     /// GL-DICTDRAIN-1: the Dict key class through the 1-Intern compact
     /// spec (the C2 single-text shape) — the dicteval memo derives the key

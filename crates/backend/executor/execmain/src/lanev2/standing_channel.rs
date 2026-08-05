@@ -258,7 +258,7 @@ fn wait_engaged(
             parallel::standing::close_and_await(&entry);
             return Err(e);
         }
-        let claimed = entry.claimed();
+        let _claimed = entry.claimed();
         let started = leader.started.load(Ordering::SeqCst);
         let refused = entry.refused() + leader.refused.load(Ordering::SeqCst);
         // Nobody will participate: every ticket-holder refused pre-bind or

@@ -145,7 +145,7 @@ pub fn brin_doupdate(
 
     brinRevmapExtend(idxrel, revmap, heapBlk)?;
 
-    let mut newbuf: Buffer;
+    let newbuf: Buffer;
     let mut newblk: BlockNumber = InvalidBlockNumber;
     let extended: bool;
     if !samepage {

@@ -26,3 +26,6 @@ types_error = { path = "../../../_support/types/types_error" }
 types_storage = { path = "../../../_support/types/types_storage" }
 walsender = { path = "../walsender" }
 walsender_config = { path = "../walsender_config" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

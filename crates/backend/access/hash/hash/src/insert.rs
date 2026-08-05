@@ -10,7 +10,7 @@ use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD};
 
 use crate::ovfl::_hash_addovflpage;
 use crate::page::{
-    page_get_free_space_for_multiple_tuples, page_mut, page_opaque, page_ref, with_meta,
+    page_mut, page_opaque, page_ref,
     with_meta_mut, _hash_dropbuf, _hash_expandtable, _hash_finish_split, _hash_getbuf,
     _hash_getbucketbuf_from_hashkey, _hash_relbuf, with_cached_metap,
 };

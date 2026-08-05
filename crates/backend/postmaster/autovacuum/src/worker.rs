@@ -35,11 +35,12 @@ use crate::shmem::{
     self, AVW_BRIN_SUMMARIZE_RANGE, AV_REBALANCE, AV_STORAGE_PARAM_COST_DELAY,
     AV_STORAGE_PARAM_COST_LIMIT, MY_WORKER_INFO, NUM_WORKITEMS,
 };
-use crate::{autovacuum_anl_scale, autovacuum_anl_thresh, autovacuum_multixact_freeze_max_age,
+use crate::{autovacuum_anl_scale, autovacuum_anl_thresh,
     autovacuum_vac_ins_scale, autovacuum_vac_ins_thresh, autovacuum_vac_max_thresh,
     autovacuum_vac_scale, autovacuum_vac_thresh, AutoVacuumingActive, Log_autovacuum_min_duration,
 };
 
+#[allow(non_upper_case_globals)] // C-parity name
 const StatisticRelationId: Oid = 2619;
 const PERFORM_DELETION_INTERNAL: i32 = 0x0001;
 const PERFORM_DELETION_QUIETLY: i32 = 0x0004;
@@ -324,6 +325,7 @@ fn fetch_av_class_row(mcx: Mcx<'_>, relid: Oid) -> PgResult<Option<AvClassRow>> 
     key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
         .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
     key.sk_argument = datum::Datum::from_oid(relid);
+    #[allow(non_upper_case_globals)] // C-parity name
     const ClassOidIndexId: Oid = 2662;
     let mut scan = genam::systable_beginscan(mcx, &rd, ClassOidIndexId, true, None, &[key])?;
     let row = match genam::systable_getnext(mcx, &mut scan)? {

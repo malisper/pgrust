@@ -3,7 +3,7 @@
 use core::cell::RefCell;
 use core::mem::ManuallyDrop;
 
-use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
+use mcx::{Mcx, PgHashMap, PgVec};
 use types_core::{InvalidOid, Oid, BOOLOID};
 use types_error::PgResult;
 use types_nodes::equal::equal;

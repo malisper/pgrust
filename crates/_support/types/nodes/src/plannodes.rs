@@ -894,11 +894,17 @@ pub struct LockRows<'mcx> {
 #[repr(u32)]
 pub enum RowMarkType {
     #[default]
+    #[allow(non_camel_case_types)] // C-parity name
     ROW_MARK_EXCLUSIVE = 0,
+    #[allow(non_camel_case_types)] // C-parity name
     ROW_MARK_NOKEYEXCLUSIVE = 1,
+    #[allow(non_camel_case_types)] // C-parity name
     ROW_MARK_SHARE = 2,
+    #[allow(non_camel_case_types)] // C-parity name
     ROW_MARK_KEYSHARE = 3,
+    #[allow(non_camel_case_types)] // C-parity name
     ROW_MARK_REFERENCE = 4,
+    #[allow(non_camel_case_types)] // C-parity name
     ROW_MARK_COPY = 5,
 }
 

@@ -48,21 +48,29 @@ const MAX_MULTIBYTE_CHAR_LEN: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XmlOptionType {
+    #[allow(non_camel_case_types)] // C-parity name
     XMLOPTION_DOCUMENT = 0,
+    #[allow(non_camel_case_types)] // C-parity name
     XMLOPTION_CONTENT = 1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XmlBinaryType {
+    #[allow(non_camel_case_types)] // C-parity name
     XMLBINARY_BASE64 = 0,
+    #[allow(non_camel_case_types)] // C-parity name
     XMLBINARY_HEX = 1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XmlStandaloneType {
+    #[allow(non_camel_case_types)] // C-parity name
     XML_STANDALONE_YES = 0,
+    #[allow(non_camel_case_types)] // C-parity name
     XML_STANDALONE_NO = 1,
+    #[allow(non_camel_case_types)] // C-parity name
     XML_STANDALONE_NO_VALUE = 2,
+    #[allow(non_camel_case_types)] // C-parity name
     XML_STANDALONE_OMITTED = 3,
 }
 

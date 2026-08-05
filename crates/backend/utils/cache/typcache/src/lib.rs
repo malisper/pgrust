@@ -16,7 +16,7 @@ use lsyscache::{
     BTLessStrategyNumber, HTEqualStrategyNumber, HASH_AM_OID, TYPTYPE_COMPOSITE, TYPTYPE_DOMAIN,
     TYPTYPE_MULTIRANGE, TYPTYPE_RANGE,
 };
-use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
+use mcx::{Mcx, PgHashMap, PgVec};
 use syscache_seams::PgTypeTypcacheShape;
 use types_core::{InvalidOid, Oid, BTREE_AM_OID};
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT};
