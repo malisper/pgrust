@@ -1,5 +1,5 @@
 use core::cell::Cell;
-use std::sync::{Mutex, MutexGuard};
+use pgsync::{Mutex, MutexGuard};
 
 use init_small::globals::SetMyDatabaseId;
 use mcx::MemoryContext;
@@ -24,8 +24,8 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[must_use]
 fn setup() -> MutexGuard<'static, ()> {
-    let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    static ONCE: std::sync::Once = std::sync::Once::new();
+    let guard = pgsync::lock(&TEST_LOCK);
+    static ONCE: pgsync::Once = pgsync::Once::new();
     ONCE.call_once(|| {
         timestamp_seams::get_current_timestamp::set(|| NOW.with(|c| c.get()));
         xact_seams::get_current_transaction_nest_level::set(|| NEST_LEVEL.with(|c| c.get()));
@@ -620,7 +620,7 @@ fn seams_are_wired() {
 }
 
 fn setup_function_seams() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
+    static ONCE: pgsync::Once = pgsync::Once::new();
     ONCE.call_once(|| {
         inval_seams::accept_invalidation_messages::set(|| Ok(()));
         syscache_seams::search_syscache_exists_procoid::set(|oid| Ok(oid != 66_666));
@@ -953,6 +953,70 @@ fn subscription_create_rollback_drops_entry() {
     xact::AtEOXact_PgStat(false, false);
     crate::pgstat_clear_snapshot();
     assert!(crate::pgstat_fetch_stat_subscription(9002).is_none());
+}
+
+// Issue #55: backends are threads in one process; a panic while a pgstat
+// guard is held is caught at launch_backend's crash boundary and the process
+// survives, so mutex poison would otherwise leak across the in-process
+// crash-restart. Both crash recovery (pgstat_discard_stats ->
+// pgstat_reset_after_failure) and ordinary accessors must tolerate it.
+#[test]
+fn poisoned_mutexes_survive_discard_and_accessors() {
+    let _lock = setup();
+    let dir = statsfile_dir("pgstat-poison-test");
+    crate::set_pgstat_fetch_consistency(crate::PGSTAT_FETCH_CONSISTENCY_NONE);
+
+    // Seed a shared entry, then poison SHARED_STATS under its guard.
+    relation::pgstat_count_heap_insert(8101, false, 2);
+    xact::AtEOXact_PgStat(true, false);
+    pending::pgstat_flush_pending_entries(false);
+    let key = relation::relation_key(8101, false);
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::shmem::update_relation_entry(key, |_| panic!("backend crash under guard"))
+    }));
+    assert!(crashed.is_err());
+    assert!(crate::shmem::shared_stats_is_poisoned());
+    crate::archiver::poison_shared_for_test();
+    crate::bgwriter::poison_shared_for_test();
+    crate::checkpointer::poison_shared_for_test();
+    crate::io::poison_shared_for_test();
+    crate::slru::poison_shared_for_test();
+    crate::wal::poison_shared_for_test();
+
+    // Benign reads must not panic even before recovery runs.
+    assert!(relation::pgstat_fetch_stat_tabentry_ext(false, 8101).is_some());
+
+    // Crash recovery's discard path must not panic, must clear entries, and
+    // must clear the poison flag (fresh-world guarantee).
+    crate::file::pgstat_discard_stats().unwrap();
+    assert!(!crate::shmem::shared_stats_is_poisoned());
+    crate::pgstat_clear_snapshot();
+    assert!(relation::pgstat_fetch_stat_tabentry_ext(false, 8101).is_none());
+    assert!(crate::bgwriter::pgstat_fetch_stat_bgwriter().stat_reset_timestamp > 0);
+    assert!(crate::io::pgstat_fetch_stat_io().stat_reset_timestamp > 0);
+
+    // Representative write + read paths work after the "restart".
+    relation::pgstat_count_heap_insert(8101, false, 3);
+    xact::AtEOXact_PgStat(true, false);
+    pending::pgstat_flush_pending_entries(false);
+    let t = relation::pgstat_fetch_stat_tabentry_ext(false, 8101).unwrap();
+    assert_eq!(t.tuples_inserted, 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// A panic in the statsfile-write closure (e.g. missing replslot name) must
+// not poison the store: export_entries snapshots, then serializes unlocked.
+#[test]
+fn statsfile_serialization_panic_does_not_poison_store() {
+    let _lock = setup();
+    relation::pgstat_count_heap_insert(8102, false, 1);
+    xact::AtEOXact_PgStat(true, false);
+    pending::pgstat_flush_pending_entries(false);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::shmem::export_entries(|_, _| panic!("serialization failure"))
+    }));
+    assert!(r.is_err());
+    assert!(!crate::shmem::shared_stats_is_poisoned());
 }
 
 #[test]

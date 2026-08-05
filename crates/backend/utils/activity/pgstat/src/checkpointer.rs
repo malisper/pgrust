@@ -2,7 +2,7 @@
 // (pgstat_report_checkpointer) and reset.
 
 use core::cell::{Cell, RefCell};
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use types_core::TimestampTz;
 
@@ -85,7 +85,7 @@ pub fn pgstat_report_checkpointer() {
         if *pending == PgStat_CheckpointerStats::default() {
             return;
         }
-        let mut shared = SHARED_CHECKPOINTER.lock().unwrap();
+        let mut shared = pgsync::lock(&SHARED_CHECKPOINTER);
         shared.num_timed += pending.num_timed;
         shared.num_requested += pending.num_requested;
         shared.num_performed += pending.num_performed;
@@ -119,7 +119,7 @@ pub(crate) fn pgstat_checkpointer_snapshot_build() {
 }
 
 pub(crate) fn pgstat_checkpointer_snapshot_cb() {
-    let shared = *SHARED_CHECKPOINTER.lock().unwrap();
+    let shared = *pgsync::lock(&SHARED_CHECKPOINTER);
     SNAPSHOT_CHECKPOINTER.with(|s| s.set(Some(shared)));
 }
 
@@ -127,16 +127,23 @@ pub(crate) fn pgstat_checkpointer_snapshot_clear() {
     SNAPSHOT_CHECKPOINTER.with(|s| s.set(None));
 }
 
+#[cfg(test)]
+pub(crate) fn poison_shared_for_test() {
+    crate::poison_for_test(&SHARED_CHECKPOINTER);
+}
+
 pub(crate) fn pgstat_checkpointer_reset_all_cb(ts: TimestampTz) {
-    let mut shared = SHARED_CHECKPOINTER.lock().unwrap();
+    // On the crash-recovery reset path; see shmem::clear_all_entries.
+    SHARED_CHECKPOINTER.clear_poison();
+    let mut shared = pgsync::lock(&SHARED_CHECKPOINTER);
     *shared = PgStat_CheckpointerStats::default();
     shared.stat_reset_timestamp = ts;
 }
 
 pub(crate) fn import_checkpointer_stats(v: PgStat_CheckpointerStats) {
-    *SHARED_CHECKPOINTER.lock().unwrap() = v;
+    *pgsync::lock(&SHARED_CHECKPOINTER) = v;
 }
 
 pub(crate) fn export_checkpointer_stats() -> PgStat_CheckpointerStats {
-    *SHARED_CHECKPOINTER.lock().unwrap()
+    *pgsync::lock(&SHARED_CHECKPOINTER)
 }

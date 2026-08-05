@@ -2,7 +2,7 @@
 // shared table, tracked-combination predicates.
 
 use core::cell::RefCell;
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use types_core::{BackendType, TimestampTz, BACKEND_NUM_TYPES};
 pub use types_storage::buf::IOContext;
@@ -270,7 +270,7 @@ pub(crate) fn pgstat_io_snapshot_build() {
 }
 
 pub(crate) fn pgstat_io_snapshot_cb() {
-    let shared = *SHARED_IO.lock().unwrap();
+    let shared = *pgsync::lock(&SHARED_IO);
     SNAPSHOT_IO.with(|s| *s.borrow_mut() = Some(shared));
 }
 
@@ -288,7 +288,7 @@ pub(crate) fn pgstat_io_flush_cb(_nowait: bool) -> bool {
     }
     let bktype = miscinit::GetMyBackendType() as usize;
     with_pending_block(|blk| {
-        let mut shared = SHARED_IO.lock().unwrap();
+        let mut shared = pgsync::lock(&SHARED_IO);
         let dst = &mut shared.stats[bktype];
         let pending = &mut blk.io;
         for o in 0..IOOBJECT_NUM_TYPES {
@@ -307,15 +307,22 @@ pub(crate) fn pgstat_io_flush_cb(_nowait: bool) -> bool {
 }
 
 pub(crate) fn import_io_stats(v: PgStat_IO) {
-    *SHARED_IO.lock().unwrap() = v;
+    *pgsync::lock(&SHARED_IO) = v;
 }
 
 pub(crate) fn export_io_stats() -> PgStat_IO {
-    *SHARED_IO.lock().unwrap()
+    *pgsync::lock(&SHARED_IO)
+}
+
+#[cfg(test)]
+pub(crate) fn poison_shared_for_test() {
+    crate::poison_for_test(&SHARED_IO);
 }
 
 pub(crate) fn pgstat_io_reset_all_cb(ts: TimestampTz) {
-    let mut shared = SHARED_IO.lock().unwrap();
+    // On the crash-recovery reset path; see shmem::clear_all_entries.
+    SHARED_IO.clear_poison();
+    let mut shared = pgsync::lock(&SHARED_IO);
     *shared = IO_STATS_ZERO;
     shared.stat_reset_timestamp = ts;
 }

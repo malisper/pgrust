@@ -3,7 +3,7 @@
 // thread-local array here.
 
 use core::cell::{Cell, RefCell};
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use types_core::TimestampTz;
 
@@ -129,7 +129,7 @@ pub(crate) fn pgstat_slru_flush_cb(_nowait: bool) -> bool {
     }
     PENDING_SLRU_STATS.with(|s| {
         let mut pending = s.borrow_mut();
-        let mut shared = SHARED_SLRU.lock().unwrap();
+        let mut shared = pgsync::lock(&SHARED_SLRU);
         for (dst, src) in shared.iter_mut().zip(pending.iter()) {
             dst.blocks_zeroed += src.blocks_zeroed;
             dst.blocks_hit += src.blocks_hit;
@@ -164,7 +164,7 @@ pub(crate) fn pgstat_slru_snapshot_build() {
 }
 
 pub(crate) fn pgstat_slru_snapshot_cb() {
-    let shared = *SHARED_SLRU.lock().unwrap();
+    let shared = *pgsync::lock(&SHARED_SLRU);
     SNAPSHOT_SLRU.with(|s| s.set(Some(shared)));
 }
 
@@ -173,7 +173,7 @@ pub(crate) fn pgstat_slru_snapshot_clear() {
 }
 
 fn pgstat_reset_slru_counter_internal(index: usize, ts: TimestampTz) {
-    let mut shared = SHARED_SLRU.lock().unwrap();
+    let mut shared = pgsync::lock(&SHARED_SLRU);
     shared[index] = PgStat_SLRUStats::default();
     shared[index].stat_reset_timestamp = ts;
 }
@@ -183,8 +183,15 @@ pub fn pgstat_reset_slru(name: &str) {
     pgstat_reset_slru_counter_internal(pgstat_get_slru_index(name) as usize, ts);
 }
 
+#[cfg(test)]
+pub(crate) fn poison_shared_for_test() {
+    crate::poison_for_test(&SHARED_SLRU);
+}
+
 pub(crate) fn pgstat_slru_reset_all_cb(ts: TimestampTz) {
-    let mut shared = SHARED_SLRU.lock().unwrap();
+    // On the crash-recovery reset path; see shmem::clear_all_entries.
+    SHARED_SLRU.clear_poison();
+    let mut shared = pgsync::lock(&SHARED_SLRU);
     for e in shared.iter_mut() {
         *e = PgStat_SLRUStats::default();
         e.stat_reset_timestamp = ts;
@@ -192,11 +199,11 @@ pub(crate) fn pgstat_slru_reset_all_cb(ts: TimestampTz) {
 }
 
 pub(crate) fn import_slru_stats(v: [PgStat_SLRUStats; SLRU_NUM_ELEMENTS]) {
-    *SHARED_SLRU.lock().unwrap() = v;
+    *pgsync::lock(&SHARED_SLRU) = v;
 }
 
 pub(crate) fn export_slru_stats() -> [PgStat_SLRUStats; SLRU_NUM_ELEMENTS] {
-    *SHARED_SLRU.lock().unwrap()
+    *pgsync::lock(&SHARED_SLRU)
 }
 
 pub fn pgstat_slru_pending(slru_idx: usize) -> PgStat_SLRUStats {

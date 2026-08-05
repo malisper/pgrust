@@ -12,6 +12,7 @@ path = "src/lib.rs"
 hashbrown = { version = "0.14", default-features = false, features = ["allocator-api2", "ahash", "inline-more"] }
 rustc-hash = { version = "2", default-features = false }
 mcx = { path = "../../../../_support/mcx" }
+pgsync = { path = "../../../../_support/pgsync" }
 backend_status_seams = { path = "../backend_status_seams" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 types_core = { path = "../../../../_support/types/types_core" }

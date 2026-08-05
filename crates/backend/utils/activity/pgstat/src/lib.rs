@@ -45,10 +45,30 @@ pub use subscription::pgstat_fetch_stat_subscription;
 
 pub type PgStat_Counter = i64;
 
+// The six process-global stats mutexes acquire through pgsync::lock, the
+// poison-tolerant lock. Backends are threads: a panic while a guard is held
+// is caught at launch_backend's crash boundary and the process survives, so
+// poison would otherwise outlive the in-process crash-restart — and
+// pgstat_reset_after_failure, the path that re-establishes C's fresh-world
+// guarantee, is itself a locker. Tolerating poison is safe here: all guarded
+// state is plain counters with no cross-field invariants; a torn update is
+// within C's lossy-stats contract and the crash cycle discards stats anyway.
+
+// Models a backend crash: panic while holding the guard, caught at a thread
+// boundary (launch_backend's catch_unwind), leaving the static poisoned.
+#[cfg(test)]
+pub(crate) fn poison_for_test<T>(m: &'static pgsync::Mutex<T>) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = pgsync::lock(m);
+        panic!("poison for test");
+    }));
+    assert!(m.is_poisoned());
+}
+
 // INSTR_TIME_SET_CURRENT: monotonic ns; only same-thread diffs are used.
 // +1 keeps 0 free as the "timing disabled" sentinel.
 pub(crate) fn now_ns() -> i64 {
-    use std::sync::OnceLock;
+    use pgsync::OnceLock;
     use std::time::Instant;
     static ANCHOR: OnceLock<Instant> = OnceLock::new();
     let anchor = *ANCHOR.get_or_init(Instant::now);

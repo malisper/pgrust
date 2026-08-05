@@ -2,7 +2,7 @@
 // here yet, so the report half (pgstat_report_archiver) has no caller.
 
 use core::cell::Cell;
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use types_core::TimestampTz;
 
@@ -49,7 +49,7 @@ thread_local! {
 
 pub fn pgstat_report_archiver(xlog: &str, failed: bool) {
     let now = timestamp_seams::get_current_timestamp::call();
-    let mut guard = SHARED_ARCHIVER.lock().unwrap();
+    let mut guard = pgsync::lock(&SHARED_ARCHIVER);
     let shared = &mut *guard;
     let (dst, count, ts) = if failed {
         (&mut shared.last_failed_wal, &mut shared.failed_count, &mut shared.last_failed_timestamp)
@@ -86,7 +86,7 @@ pub(crate) fn pgstat_archiver_snapshot_build() {
 }
 
 pub(crate) fn pgstat_archiver_snapshot_cb() {
-    let shared = *SHARED_ARCHIVER.lock().unwrap();
+    let shared = *pgsync::lock(&SHARED_ARCHIVER);
     SNAPSHOT_ARCHIVER.with(|s| s.set(Some(shared)));
 }
 
@@ -94,16 +94,23 @@ pub(crate) fn pgstat_archiver_snapshot_clear() {
     SNAPSHOT_ARCHIVER.with(|s| s.set(None));
 }
 
+#[cfg(test)]
+pub(crate) fn poison_shared_for_test() {
+    crate::poison_for_test(&SHARED_ARCHIVER);
+}
+
 pub(crate) fn pgstat_archiver_reset_all_cb(ts: TimestampTz) {
-    let mut shared = SHARED_ARCHIVER.lock().unwrap();
+    // On the crash-recovery reset path; see shmem::clear_all_entries.
+    SHARED_ARCHIVER.clear_poison();
+    let mut shared = pgsync::lock(&SHARED_ARCHIVER);
     *shared = ARCHIVER_ZERO;
     shared.stat_reset_timestamp = ts;
 }
 
 pub(crate) fn import_archiver_stats(v: PgStat_ArchiverStats) {
-    *SHARED_ARCHIVER.lock().unwrap() = v;
+    *pgsync::lock(&SHARED_ARCHIVER) = v;
 }
 
 pub(crate) fn export_archiver_stats() -> PgStat_ArchiverStats {
-    *SHARED_ARCHIVER.lock().unwrap()
+    *pgsync::lock(&SHARED_ARCHIVER)
 }

@@ -2,7 +2,7 @@
 // applied to the shared struct by pgstat_report_bgwriter.
 
 use core::cell::{Cell, RefCell};
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use types_core::TimestampTz;
 
@@ -45,7 +45,7 @@ pub fn pgstat_report_bgwriter() {
         if *pending == PgStat_BgWriterStats::default() {
             return;
         }
-        let mut shared = SHARED_BGWRITER.lock().unwrap();
+        let mut shared = pgsync::lock(&SHARED_BGWRITER);
         shared.buf_written_clean += pending.buf_written_clean;
         shared.maxwritten_clean += pending.maxwritten_clean;
         shared.buf_alloc += pending.buf_alloc;
@@ -72,7 +72,7 @@ pub(crate) fn pgstat_bgwriter_snapshot_build() {
 }
 
 pub(crate) fn pgstat_bgwriter_snapshot_cb() {
-    let shared = *SHARED_BGWRITER.lock().unwrap();
+    let shared = *pgsync::lock(&SHARED_BGWRITER);
     SNAPSHOT_BGWRITER.with(|s| s.set(Some(shared)));
 }
 
@@ -80,16 +80,23 @@ pub(crate) fn pgstat_bgwriter_snapshot_clear() {
     SNAPSHOT_BGWRITER.with(|s| s.set(None));
 }
 
+#[cfg(test)]
+pub(crate) fn poison_shared_for_test() {
+    crate::poison_for_test(&SHARED_BGWRITER);
+}
+
 pub(crate) fn pgstat_bgwriter_reset_all_cb(ts: TimestampTz) {
-    let mut shared = SHARED_BGWRITER.lock().unwrap();
+    // On the crash-recovery reset path; see shmem::clear_all_entries.
+    SHARED_BGWRITER.clear_poison();
+    let mut shared = pgsync::lock(&SHARED_BGWRITER);
     *shared = PgStat_BgWriterStats::default();
     shared.stat_reset_timestamp = ts;
 }
 
 pub(crate) fn import_bgwriter_stats(v: PgStat_BgWriterStats) {
-    *SHARED_BGWRITER.lock().unwrap() = v;
+    *pgsync::lock(&SHARED_BGWRITER) = v;
 }
 
 pub(crate) fn export_bgwriter_stats() -> PgStat_BgWriterStats {
-    *SHARED_BGWRITER.lock().unwrap()
+    *pgsync::lock(&SHARED_BGWRITER)
 }

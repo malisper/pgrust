@@ -159,6 +159,10 @@ impl<T: ?Sized> Mutex<T> {
         self.inner.is_poisoned()
     }
 
+    pub fn clear_poison(&self) {
+        self.inner.clear_poison()
+    }
+
     pub fn get_mut(&mut self) -> LockResult<&mut T> {
         self.inner.get_mut()
     }

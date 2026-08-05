@@ -2,7 +2,7 @@
 // xlog insert path, read through transam_xlog_seams) against the last flush.
 
 use core::cell::Cell;
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use types_core::instrument::WalUsage;
 use types_core::TimestampTz;
@@ -77,7 +77,7 @@ pub(crate) fn pgstat_wal_snapshot_build() {
 }
 
 pub(crate) fn pgstat_wal_snapshot_cb() {
-    let shared = *SHARED_WAL.lock().unwrap();
+    let shared = *pgsync::lock(&SHARED_WAL);
     SNAPSHOT_WAL.with(|s| s.set(Some(shared)));
 }
 
@@ -98,7 +98,7 @@ pub(crate) fn pgstat_wal_flush_cb(_nowait: bool) -> bool {
     }
     let prev = PREV_WAL_USAGE.with(|c| c.get());
     {
-        let mut shared = SHARED_WAL.lock().unwrap();
+        let mut shared = pgsync::lock(&SHARED_WAL);
         let w = &mut shared.wal_counters;
         w.wal_records += usage.wal_records - prev.wal_records;
         w.wal_fpi += usage.wal_fpi - prev.wal_fpi;
@@ -115,16 +115,23 @@ pub(crate) fn pgstat_wal_init_backend_cb() {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn poison_shared_for_test() {
+    crate::poison_for_test(&SHARED_WAL);
+}
+
 pub(crate) fn pgstat_wal_reset_all_cb(ts: TimestampTz) {
-    let mut shared = SHARED_WAL.lock().unwrap();
+    // On the crash-recovery reset path; see shmem::clear_all_entries.
+    SHARED_WAL.clear_poison();
+    let mut shared = pgsync::lock(&SHARED_WAL);
     *shared = PgStat_WalStats::default();
     shared.stat_reset_timestamp = ts;
 }
 
 pub(crate) fn import_wal_stats(v: PgStat_WalStats) {
-    *SHARED_WAL.lock().unwrap() = v;
+    *pgsync::lock(&SHARED_WAL) = v;
 }
 
 pub(crate) fn export_wal_stats() -> PgStat_WalStats {
-    *SHARED_WAL.lock().unwrap()
+    *pgsync::lock(&SHARED_WAL)
 }

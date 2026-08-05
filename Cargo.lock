@@ -12759,6 +12759,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "pgstat_seams",
+ "pgsync",
  "rustc-hash",
  "slot_seams",
  "syscache_seams",

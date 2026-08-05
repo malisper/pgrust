@@ -761,14 +761,6 @@ rawsync	crates/backend/test_regress/src/lib.rs	2
 rawsync	crates/backend/timezone/pgtz/src/lib.rs	1
 rawsync	crates/backend/tsearch/ts_locale/src/public.rs	1
 rawsync	crates/backend/utils/activity/backend_status/src/lib.rs	1
-rawsync	crates/backend/utils/activity/pgstat/src/archiver.rs	1
-rawsync	crates/backend/utils/activity/pgstat/src/bgwriter.rs	1
-rawsync	crates/backend/utils/activity/pgstat/src/checkpointer.rs	1
-rawsync	crates/backend/utils/activity/pgstat/src/io.rs	1
-rawsync	crates/backend/utils/activity/pgstat/src/lib.rs	1
-rawsync	crates/backend/utils/activity/pgstat/src/shmem.rs	1
-rawsync	crates/backend/utils/activity/pgstat/src/slru.rs	1
-rawsync	crates/backend/utils/activity/pgstat/src/wal.rs	1
 rawsync	crates/backend/utils/activity/waitevent/src/custom.rs	1
 rawsync	crates/backend/utils/adt/adt_date/src/builtins.rs	1
 rawsync	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	1
