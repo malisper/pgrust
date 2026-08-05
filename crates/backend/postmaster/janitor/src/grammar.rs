@@ -24,12 +24,12 @@
 //!   retry would re-miss. Refusing input-side keeps the stock FATAL.
 //! - The FIRST `__` splits template from token; both sides must be
 //!   non-empty. A rest with no `__` (or one where a side would be empty,
-//!   e.g. `tv___x` or `tv_tpl__`) is the bare form. Consequences,
+//!   e.g. `tdb___x` or `tdb_tpl__`) is the bare form. Consequences,
 //!   documented deliberately: a bare token contains `__` only via that
-//!   empty-side fallback (`tv___x` -> bare `__x`, `tv_tpl__` -> bare
+//!   empty-side fallback (`tdb___x` -> bare `__x`, `tdb_tpl__` -> bare
 //!   `tpl__`), never otherwise; and because the FIRST `__` always wins the
 //!   split, a template whose OWN name contains `__` is unreachable by the
-//!   grammar (`tv_my__tpl__x` selects template `my`, token `tpl__x` —
+//!   grammar (`tdb_my__tpl__x` selects template `my`, token `tpl__x` —
 //!   never a template named `my__tpl`), so grace overrides set for such a
 //!   template can never match a clone.
 //! - The empty prefix means the feature is off: nothing matches, even
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn template_form_splits_at_first_double_underscore() {
         assert_eq!(
-            parse_mint_name("tv_", "tv_tpl_abc__w1"),
+            parse_mint_name("tdb_", "tdb_tpl_abc__w1"),
             Some(MintShape::Template {
                 template: "tpl_abc",
                 token: "w1"
@@ -109,7 +109,7 @@ mod tests {
         );
         // FIRST __ wins; the remainder (underscores included) is the token.
         assert_eq!(
-            parse_mint_name("tv_", "tv_a__b__c"),
+            parse_mint_name("tdb_", "tdb_a__b__c"),
             Some(MintShape::Template {
                 template: "a",
                 token: "b__c"
@@ -120,12 +120,12 @@ mod tests {
     #[test]
     fn bare_form_takes_the_whole_rest() {
         assert_eq!(
-            parse_mint_name("tv_", "tv_w1"),
+            parse_mint_name("tdb_", "tdb_w1"),
             Some(MintShape::Bare { token: "w1" })
         );
         // Single underscores never trigger the template form.
         assert_eq!(
-            parse_mint_name("tv_", "tv_a_b_c"),
+            parse_mint_name("tdb_", "tdb_a_b_c"),
             Some(MintShape::Bare { token: "a_b_c" })
         );
     }
@@ -135,12 +135,12 @@ mod tests {
         // Empty template side: the ("", "x") split is refused, so the whole
         // rest becomes the bare token.
         assert_eq!(
-            parse_mint_name("tv_", "tv___x"),
+            parse_mint_name("tdb_", "tdb___x"),
             Some(MintShape::Bare { token: "__x" })
         );
         // Empty token side (`tpl__` + ""): refused as template, bare form.
         assert_eq!(
-            parse_mint_name("tv_", "tv_tpl__"),
+            parse_mint_name("tdb_", "tdb_tpl__"),
             Some(MintShape::Bare { token: "tpl__" })
         );
     }
@@ -151,81 +151,81 @@ mod tests {
         // "my__tpl" can never be selected — its would-be clone resolves to
         // template "my". Consequences (module doc + M3 addendum item 2):
         // mint_one will look up a template named "my" (likely
-        // does-not-exist), reap-side grace attributes tv_my__tpl__x to any
+        // does-not-exist), reap-side grace attributes tdb_my__tpl__x to any
         // "my" override, and pgrust_set_template_grace('my__tpl', ...)
         // can never match a clone.
         assert_eq!(
-            parse_mint_name("tv_", "tv_my__tpl__x"),
+            parse_mint_name("tdb_", "tdb_my__tpl__x"),
             Some(MintShape::Template {
                 template: "my",
                 token: "tpl__x"
             })
         );
-        assert_eq!(template_of("tv_", "tv_my__tpl__x"), Some("my"));
+        assert_eq!(template_of("tdb_", "tdb_my__tpl__x"), Some("my"));
     }
 
     #[test]
     fn spare_namespace_is_reserved() {
         // `<prefix>spare_<digits>` never mints (deleting the reservation in
         // parse_mint_name fails this): the warm pool owns that namespace.
-        assert_eq!(parse_mint_name("tv_", "tv_spare_1"), None);
-        assert_eq!(parse_mint_name("tv_", "tv_spare_007"), None);
+        assert_eq!(parse_mint_name("tdb_", "tdb_spare_1"), None);
+        assert_eq!(parse_mint_name("tdb_", "tdb_spare_007"), None);
         assert_eq!(
-            parse_mint_name("tv_", "tv_spare_18446744073709551615"),
+            parse_mint_name("tdb_", "tdb_spare_18446744073709551615"),
             None
         );
         // Exact shape only: non-digit tails, a bare `spare_` (empty seq),
         // and template-form names keep their stock meaning.
         assert_eq!(
-            parse_mint_name("tv_", "tv_spare_x"),
+            parse_mint_name("tdb_", "tdb_spare_x"),
             Some(MintShape::Bare { token: "spare_x" })
         );
         assert_eq!(
-            parse_mint_name("tv_", "tv_spare_"),
+            parse_mint_name("tdb_", "tdb_spare_"),
             Some(MintShape::Bare { token: "spare_" })
         );
         assert_eq!(
-            parse_mint_name("tv_", "tv_spare_1a"),
+            parse_mint_name("tdb_", "tdb_spare_1a"),
             Some(MintShape::Bare { token: "spare_1a" })
         );
         assert_eq!(
-            parse_mint_name("tv_", "tv_spare__x"),
+            parse_mint_name("tdb_", "tdb_spare__x"),
             Some(MintShape::Template {
                 template: "spare",
                 token: "x"
             })
         );
         // Reserved names also attribute to no template.
-        assert_eq!(template_of("tv_", "tv_spare_1"), None);
+        assert_eq!(template_of("tdb_", "tdb_spare_1"), None);
     }
 
     #[test]
     fn prefix_scoping_is_exact_and_empty_prefix_is_off() {
-        assert_eq!(parse_mint_name("tv_", "tx_w1"), None);
-        assert_eq!(parse_mint_name("tv_", "tv_"), None); // empty token
-        assert_eq!(parse_mint_name("tv_", "tv"), None);
+        assert_eq!(parse_mint_name("tdb_", "tx_w1"), None);
+        assert_eq!(parse_mint_name("tdb_", "tdb_"), None); // empty token
+        assert_eq!(parse_mint_name("tdb_", "tv"), None);
         // Feature off: nothing matches (every string starts with "").
-        assert_eq!(parse_mint_name("", "tv_w1"), None);
+        assert_eq!(parse_mint_name("", "tdb_w1"), None);
     }
 
     #[test]
     fn whole_name_byte_limit_is_enforced() {
-        let ok = format!("tv_{}", "a".repeat(MAX_NAME_BYTES - 3));
+        let ok = format!("tdb_{}", "a".repeat(MAX_NAME_BYTES - 4));
         assert_eq!(ok.len(), MAX_NAME_BYTES);
-        assert!(parse_mint_name("tv_", &ok).is_some());
-        let long = format!("tv_{}", "a".repeat(MAX_NAME_BYTES - 2));
+        assert!(parse_mint_name("tdb_", &ok).is_some());
+        let long = format!("tdb_{}", "a".repeat(MAX_NAME_BYTES - 3));
         assert_eq!(long.len(), MAX_NAME_BYTES + 1);
-        assert_eq!(parse_mint_name("tv_", &long), None);
+        assert_eq!(parse_mint_name("tdb_", &long), None);
         // The limit is BYTES, not chars.
-        let wide = format!("tv_{}", "é".repeat(31)); // 3 + 62 = 65 bytes
-        assert_eq!(parse_mint_name("tv_", &wide), None);
+        let wide = format!("tdb_{}", "é".repeat(31)); // 4 + 62 = 66 bytes
+        assert_eq!(parse_mint_name("tdb_", &wide), None);
     }
 
     #[test]
     fn template_of_attributes_only_the_template_form() {
-        assert_eq!(template_of("tv_", "tv_tpl_a__x"), Some("tpl_a"));
-        assert_eq!(template_of("tv_", "tv_bare"), None);
-        assert_eq!(template_of("tv_", "other"), None);
-        assert_eq!(template_of("", "tv_tpl_a__x"), None);
+        assert_eq!(template_of("tdb_", "tdb_tpl_a__x"), Some("tpl_a"));
+        assert_eq!(template_of("tdb_", "tdb_bare"), None);
+        assert_eq!(template_of("tdb_", "other"), None);
+        assert_eq!(template_of("", "tdb_tpl_a__x"), None);
     }
 }

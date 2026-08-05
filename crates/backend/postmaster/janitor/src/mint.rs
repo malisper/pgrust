@@ -236,12 +236,19 @@ pub fn mint_on_connect(dbname: &str) -> PgResult<bool> {
 /// list matches nothing (the check hook refuses new ones; a pre-existing
 /// bad value must fail closed).
 ///
-/// `$createdb` is RESERVED: split_identifier_string strips quotes before
-/// returning entries, so a quoted `"$createdb"` is indistinguishable here
-/// and still selects the sentinel — a role literally named `$createdb`
-/// (creatable only via quoting) can never be allowlisted by name. This
-/// deliberately diverges from pg_hba's quoting-demotes-keywords
-/// convention; documented on the GUC's long_desc.
+/// `$createdb` and `*` are RESERVED: split_identifier_string strips quotes
+/// before returning entries, so a quoted `"$createdb"` / `"*"` is
+/// indistinguishable here and still selects the sentinel — roles literally
+/// named `$createdb` or `*` (creatable only via quoting) can never be
+/// allowlisted by name. This deliberately diverges from pg_hba's
+/// quoting-demotes-keywords convention; documented on the GUC's long_desc.
+///
+/// `*` = ANY role may mint (user ruling 2026-08-05: `--profile test`
+/// declares a disposable test server, where mint gating is friction
+/// without protection — the profile sets this). The fail-closed default
+/// (`''` = minting off) is unchanged for servers that arm the janitor
+/// WITHOUT the profile (durable dev/preview boxes), where the allowlist
+/// keeps its purpose.
 fn role_qualifies(mcx: Mcx<'_>, roles_guc: &str, role_name: &str) -> PgResult<bool> {
     let Some(entries) =
         varlena::split_identifier_string(mcx, roles_guc, b',', mbutils::GetDatabaseEncoding())?
@@ -249,6 +256,9 @@ fn role_qualifies(mcx: Mcx<'_>, roles_guc: &str, role_name: &str) -> PgResult<bo
         return Ok(false);
     };
     for entry in &entries {
+        if entry == "*" {
+            return Ok(true);
+        }
         if entry == "$createdb" {
             if dbcommands::have_createdb_privilege()? {
                 return Ok(true);
@@ -1583,8 +1593,9 @@ pub(crate) fn mint_one(p: &registry::PendingEnsure) -> PgResult<Option<Oid>> {
 }
 
 /// One string-valued DefElem (the gram_core actions.rs construction
-/// precedent), shared by the createdb and ALTER DATABASE stmt builders.
-fn def<'mcx>(mcx: Mcx<'mcx>, defname: &'static str, value: &str) -> PgResult<Node<'mcx>> {
+/// precedent), shared by the createdb and ALTER DATABASE stmt builders
+/// (seal.rs builds its IS_TEMPLATE/ALLOW_CONNECTIONS flip from it too).
+pub(crate) fn def<'mcx>(mcx: Mcx<'mcx>, defname: &'static str, value: &str) -> PgResult<Node<'mcx>> {
     Node::mk(
         mcx,
         DefElem {
@@ -1648,7 +1659,7 @@ pub(crate) fn build_alterdb_allowconn_stmt<'mcx>(
 }
 
 /// Copy a str into the context (the parse_utilcmd::like str_in shape).
-fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
+pub(crate) fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len())?;
     mcx::vec_append_bytes(&mut v, s.as_bytes())?;
     Ok(core::str::from_utf8(v.leak()).expect("was UTF-8"))
@@ -1688,6 +1699,15 @@ mod tests {
         assert!(!q("\"Alice\"", "alice"));
         // Non-members refuse.
         assert!(!q("alice, bob", "mallory"));
+        // The allow-all sentinel admits ANY role (the --profile test
+        // posture), alone or among names; quoting does not demote it
+        // (reserved-by-grammar, the $createdb convention).
+        assert!(q("*", "mallory"));
+        assert!(q("alice, *", "mallory"));
+        assert!(q("\"*\"", "mallory"));
+        // A literal asterisk is not a wildcard pattern: only the exact
+        // one-char entry is the sentinel.
+        assert!(!q("a*", "mallory"));
         // Empty and malformed lists match nothing (fail closed).
         assert!(!q("", "alice"));
         assert!(!q("alice,,bob", "alice"));

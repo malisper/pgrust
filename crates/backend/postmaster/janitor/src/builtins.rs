@@ -32,6 +32,7 @@ pub const PGRUST_PIN_DATABASE_FOID: Oid = 9001;
 pub const PGRUST_UNPIN_DATABASE_FOID: Oid = 9002;
 pub const PGRUST_JANITOR_UNPAUSE_FOID: Oid = 9003;
 pub const PGRUST_SET_TEMPLATE_GRACE_FOID: Oid = 9004;
+pub const PGRUST_SEAL_TEMPLATE_FOID: Oid = 9005;
 
 /// Decode the text arg of a STRICT single-arg builtin into an owned name.
 fn text_arg0(fcinfo: &mut Fcinfo) -> PgResult<String> {
@@ -218,6 +219,46 @@ pub fn fc_pgrust_set_template_grace(
     )?))
 }
 
+/// pgrust_seal_template(text) -> void: janitor-executed one-call sealing —
+/// VACUUM (FREEZE, ANALYZE) inside the target through an internal session,
+/// then IS_TEMPLATE true ALLOW_CONNECTIONS false, in the manual recipe's
+/// exact order (seal.rs owns the choreography and the why-the-janitor
+/// rationale). Callable from ANY database. Privilege: owner of the TARGET
+/// database or superuser (the pgrust_set_template_grace style). The
+/// backend-side already-a-template check gives callers the cheap ERROR;
+/// the janitor re-validates under its own serialization (mutations of the
+/// target's lifecycle all serialize in its loop).
+pub fn fc_pgrust_seal_template(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let name = text_arg0(fcinfo)?;
+    let datname = {
+        let mcx = fcinfo.result_mcx();
+        let Some(db) = pg_database::get_database_tuple_by_name(mcx, &name)? else {
+            return Err(crate::seal::seal_target_missing_error(&name));
+        };
+        if !aclchk::object_ownercheck(DATABASE_RELATION_ID, db.oid, miscinit::GetUserId())? {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+                .errmsg(format!(
+                    "must be owner of database {name} or superuser to call pgrust_seal_template"
+                ))
+                .into_error()
+                .into());
+        }
+        if db.datistemplate {
+            return Err(crate::seal::already_template_error(&name));
+        }
+        // Resolved catalog datname (the owner_or_superuser_check rationale:
+        // the scan key truncates, the seal keys must not).
+        db.datname.as_str().to_owned()
+    };
+    crate::seal::request_seal(&datname)?;
+    // RETURNS void (the fc_pg_sleep convention).
+    Ok(Datum::null())
+}
+
 /// The extra-builtin table seams_init appends to EXTRA_BUILTINS.
 pub static JANITOR_BUILTINS: &[FmgrBuiltin] = &[
     FmgrBuiltin {
@@ -251,6 +292,14 @@ pub static JANITOR_BUILTINS: &[FmgrBuiltin] = &[
         strict: true,
         retset: false,
         func: fc_pgrust_set_template_grace,
+    },
+    FmgrBuiltin {
+        foid: PGRUST_SEAL_TEMPLATE_FOID,
+        name: "pgrust_seal_template",
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: fc_pgrust_seal_template,
     },
 ];
 
