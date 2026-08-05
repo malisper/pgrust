@@ -1215,8 +1215,15 @@ fn slab_child_context_reports_in_parent_subtree() {
 fn global_footprint_tracks_context_block_bytes() {
     const BIG: usize = 32 * 1024 * 1024;
     const NOISE: usize = 8 * 1024 * 1024;
-    let base = global_footprint::bytes();
-    {
+    // The NOISE allowance covers small concurrent churn but not GB-scale
+    // transients from sibling tests (a 2GB spike between the two samples
+    // failed this on CI, 2026-08-04). A retry loop keeps full detection
+    // power: a genuine accounting leak elevates the footprint PERMANENTLY,
+    // failing every attempt, while concurrent spikes are transient and
+    // independent across attempts.
+    let mut probe_ok = false;
+    for attempt in 0..5 {
+        let base = global_footprint::bytes();
         let ctx = MemoryContext::new("footprint-probe");
         // Dedicated (over chunk limit) allocation: counted at exact size.
         let v: PgVec<'_, u8> = vec_with_capacity_in(ctx.mcx(), BIG).unwrap();
@@ -1226,31 +1233,52 @@ fn global_footprint_tracks_context_block_bytes() {
         // two samples of the process-global counter too (the lower bound
         // without the allowance was a latent flake — adjudicated by the
         // logdec lane, GL-CONCMEM-1 pays it in passing).
-        assert!(
-            held + NOISE >= base + BIG,
-            "global footprint {held} did not grow by the dedicated {BIG} over base {base}"
-        );
+        let grew = held + NOISE >= base + BIG;
         drop(ctx);
         let after = global_footprint::bytes();
-        assert!(
-            after + NOISE >= base && after <= held.saturating_sub(BIG) + NOISE,
-            "global footprint {after} did not return toward base {base} (held {held})"
-        );
-    }
-    // Bump family balances too: create, spill past the keeper, drop.
-    let base2 = global_footprint::bytes();
-    {
-        let mut ctx = MemoryContext::new_bump("footprint-bump-probe");
-        for _ in 0..4000 {
-            let _ = box_new_in(ctx.mcx(), [0u8; 4096]);
+        let returned = after + NOISE >= base && after <= held.saturating_sub(BIG) + NOISE;
+        if grew && returned {
+            probe_ok = true;
+            break;
         }
-        assert!(global_footprint::bytes() + NOISE >= base2 + 4000 * 4096);
-        ctx.reset();
+        std::eprintln!(
+            "footprint probe attempt {attempt}: base {base} held {held} after {after} \
+             (grew={grew} returned={returned}) — concurrent transient, retrying"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let after2 = global_footprint::bytes();
     assert!(
-        after2 <= base2 + NOISE,
-        "bump-family bytes not released: after {after2} base {base2}"
+        probe_ok,
+        "global footprint never balanced across 5 context lifecycles — accounting leak"
+    );
+    // Bump family balances too: create, spill past the keeper, drop.
+    // Same retry discipline as above (a leak fails all attempts).
+    let mut bump_ok = false;
+    for attempt in 0..5 {
+        let base2 = global_footprint::bytes();
+        let grew2;
+        {
+            let mut ctx = MemoryContext::new_bump("footprint-bump-probe");
+            for _ in 0..4000 {
+                let _ = box_new_in(ctx.mcx(), [0u8; 4096]);
+            }
+            grew2 = global_footprint::bytes() + NOISE >= base2 + 4000 * 4096;
+            ctx.reset();
+        }
+        let after2 = global_footprint::bytes();
+        if grew2 && after2 <= base2 + NOISE {
+            bump_ok = true;
+            break;
+        }
+        std::eprintln!(
+            "bump probe attempt {attempt}: base {base2} after {after2} (grew={grew2}) \
+             — concurrent transient, retrying"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        bump_ok,
+        "bump-family bytes never balanced across 5 lifecycles — accounting leak"
     );
 }
 
