@@ -342,6 +342,15 @@ fn broadcast(cv: CheckpointerCv) {
 }
 
 fn abort_cleanup(err: &PgError) {
+    // C parity guard: errstart promotes any error raised inside a critical
+    // section to PANIC, so C's sigsetjmp recovery block can never catch one.
+    // Value-built errors (into_error) bypass that promotion; recovering here
+    // would silently drop whatever the leaked section protected (e.g.
+    // drained-but-unremembered fsync requests), so crash-and-restart instead.
+    if g::CritSectionCount() > 0 {
+        elog::emit_error_report_for(err);
+        panic!("error escaped a critical section in the checkpointer");
+    }
     g::SetInterruptHoldoffCount(0);
     g::SetCritSectionCount(0);
     g::HoldInterrupts();
@@ -852,14 +861,34 @@ pub fn AbsorbSyncRequests() -> PgResult<()> {
 
         g::StartCriticalSection();
         cp.num_requests.set(0);
-        LWLockRelease(checkpointer_comm_lock())?;
-
-        for req in buf.iter() {
-            sync::RememberSyncRequest(&req.ftag, req.req_type)?;
-        }
+        // Once the shared queue is cleared, `buf` holds the only copy of the
+        // drained requests: C PANICs on any failure past this point ("the
+        // system cannot run safely if we are unable to fsync what we have
+        // been told to fsync").  errstart's crit-section ERROR->PANIC
+        // promotion does not cover value-built errors (into_error), so no
+        // `?` here — map every Err to a crash-and-restart by hand.
+        LWLockRelease(checkpointer_comm_lock()).unwrap_or_else(|e| {
+            panic!("could not release CheckpointerCommLock after clearing fsync request queue: {e}")
+        });
+        remember_absorbed_requests(buf, |ftag, req_type| {
+            sync::RememberSyncRequest(ftag, req_type)
+        });
         g::EndCriticalSection();
         Ok(())
     })
+}
+
+// The post-clear absorb phase: the shared queue is already empty, so a
+// remember failure would lose the fsync obligation forever.  Matching C's
+// PANIC, the only safe exit from a failure here is crash-and-restart.
+fn remember_absorbed_requests(
+    buf: &[CheckpointerRequest],
+    remember: impl Fn(&FileTag, SyncRequestType) -> PgResult<()>,
+) {
+    for req in buf {
+        remember(&req.ftag, req.req_type)
+            .unwrap_or_else(|e| panic!("could not absorb fsync request: {e}"));
+    }
 }
 
 fn UpdateSharedMemoryConfig() -> PgResult<()> {
