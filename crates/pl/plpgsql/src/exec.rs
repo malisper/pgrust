@@ -1002,10 +1002,15 @@ impl<'a> Estate<'a> {
         self.rec_meta(recno).rectypeid
     }
 
-    // C exec_get_datum_type_info REC arm: a RECORD-declared rec with a value
-    // reports the value's registered rowtype (erh->er_typeid/er_typmod);
-    // assign_record_type_typmod dedups by shape, so this matches the header
-    // rec_as_composite_datum stamps at eval.
+    // C plpgsql_exec_get_datum_type_info REC arm (pl_exec.c:5541-5562): a
+    // RECORD-declared rec with an expanded record reports the value's own
+    // rowtype (erh->er_typeid) — for a trigger's NEW/OLD, bound from the
+    // relation's tupdesc, that is the relation's named composite type. The
+    // typmod is -1 in every arm ("do NOT return the mutable typmod of a
+    // RECORD variable"). A rec without a value (C erh == NULL) reports the
+    // declared type. The anonymous-record arm keeps reporting the blessed
+    // typmod, which the header stamped by rec_as_composite_datum matches;
+    // assign_record_type_typmod dedups by shape so it is stable.
     fn rec_param_type_mod(&mut self, recno: Dno) -> PgResult<(Oid, i32)> {
         let rectypeid = self.rec_meta(recno).rectypeid;
         if rectypeid != RECORDOID {
@@ -1014,11 +1019,17 @@ impl<'a> Estate<'a> {
         let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] else {
             return Ok((RECORDOID, -1));
         };
+        let src = rv.src_desc.clone().expect("RecValue carries its source tupdesc");
+        if src.tdtypeid != RECORDOID {
+            // C: erh->er_typeid (named composite), typmod -1. C reports this
+            // for an EMPTY expanded record too — the trigger path builds
+            // erh for both NEW and OLD before either holds a tuple.
+            return Ok((src.tdtypeid, -1));
+        }
         if rv.empty {
             return Ok((RECORDOID, -1));
         }
-        let src = rv.src_desc.clone().expect("RecValue carries its source tupdesc");
-        if src.tdtypeid == RECORDOID && src.tdtypmod >= 0 {
+        if src.tdtypmod >= 0 {
             return Ok((RECORDOID, src.tdtypmod));
         }
         let mcx = self.eval_ctx.mcx();
@@ -1051,12 +1062,16 @@ impl<'a> Estate<'a> {
         if rectypeid != RECORDOID {
             td.tdtypeid = rectypeid;
             td.tdtypmod = -1;
-        } else {
-            td.tdtypeid = RECORDOID;
+        } else if td.tdtypeid == RECORDOID {
             if td.tdtypmod < 0 {
                 typcache::assign_record_type_typmod(&mut td)?;
             }
         }
+        // else: the source tupdesc already carries the value's real rowtype
+        // (C exec_eval_datum REC arm, pl_exec.c:5364-5375: a RECORD-declared
+        // rec reports erh->er_typeid/er_typmod, the named composite for a
+        // trigger's NEW/OLD); stamping RECORD over it made every
+        // composite-typed call site reject the value.
         let tup = heaptuple::heap_form_tuple(mcx, &td, &values, &nulls)?;
         let img = tup.header_ptr();
         core::mem::forget(tup);
@@ -1150,8 +1165,13 @@ impl<'a> Estate<'a> {
             PlDatum::Var(_) => Ok(self.get_var(dno)),
             PlDatum::Rec(r) => {
                 if let Some(planned) = planned {
-                    // C exec_eval_datum's REC arm reports rec->rectypeid.
-                    let current = self.rec_meta(r.dno).rectypeid;
+                    // plpgsql_param_eval_generic's safety check compares the
+                    // type exec_eval_datum reports (pl_exec.c:6836-6843): the
+                    // DECLARED type only for a non-RECORD rec; a
+                    // RECORD-declared rec holding a value reports the value's
+                    // own rowtype (erh->er_typeid) — the same type plan
+                    // preparation resolved via rec_param_type_mod.
+                    let (current, _) = self.rec_param_type_mod(r.dno)?;
                     if current != planned {
                         return Err(param_type_mismatch(dno, current, planned));
                     }
