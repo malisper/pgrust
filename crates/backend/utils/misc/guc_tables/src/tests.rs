@@ -212,6 +212,35 @@ fn installed_variable_accessors_read_and_write_the_owner_storage() {
 }
 
 #[test]
+fn default_toast_compression_is_installed_by_the_product_boot() {
+    // Gate-blindness regression (main-red adjudication 2026-08-04):
+    // heaptoast's toast_compress_datum falls back to this slot for an
+    // invalid attcompression (heaptoast internals.rs — C
+    // toast_internals.c:59), so it is read on EVERY default-compression
+    // TOAST compress of a real server. Drift commit 0eb4c6c1fd1 landed
+    // that reader with only heaptoast's own test-local install; every
+    // TOAST insert on mains 882239cc94/dc5c2ba5ed died with the
+    // slots.rs used-before-install panic (regress leg ERRORs + the
+    // cbstore-lane-e2e backend panics). init_seams() — the product boot
+    // path — must install it; reverting the install_if_absent in
+    // install_guc_tables_owned_vars() must turn this test red
+    // (mutation-witnessed 2026-08-05: revert reproduced the exact CI cluster
+    // panic signature locally).
+    crate::init_seams();
+    assert!(
+        vars::default_toast_compression.installed(),
+        "product boot (init_seams) must install default_toast_compression — \
+         a test-only install leaves every real-server TOAST compress panicking"
+    );
+    // Boot value is pglz (C toast_compression.c boot default) and the
+    // accessors must round-trip through the session backing cell.
+    assert_eq!(vars::default_toast_compression.read(), crate::consts::TOAST_PGLZ_COMPRESSION);
+    vars::default_toast_compression.write(crate::consts::TOAST_LZ4_COMPRESSION);
+    assert_eq!(vars::default_toast_compression.read(), crate::consts::TOAST_LZ4_COMPRESSION);
+    vars::default_toast_compression.write(crate::consts::TOAST_PGLZ_COMPRESSION);
+}
+
+#[test]
 #[should_panic(expected = "check_bonjour used before its owning unit installed it")]
 fn uninstalled_hook_slot_panics_loudly() {
     let _ = hooks::check_bonjour.get();
