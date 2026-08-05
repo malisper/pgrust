@@ -243,6 +243,8 @@ struct AvClassRow {
     relisshared: bool,
     relpersistence: u8,
     relkind: u8,
+    // C-parity av_relation pg_class image; read when the vacuum-AM dispatch arm wires.
+    #[allow(dead_code)]
     relam: Oid,
     relfrozenxid: TransactionId,
     relminmxid: MultiXactId,
@@ -1107,12 +1109,6 @@ pub fn AutoVacuumRequestWork(av_type: i32, relation_id: Oid, blkno: types_core::
         return true;
     }
     false
-}
-
-#[cold]
-#[inline(never)]
-fn unported(unit: &str) -> ! {
-    panic!("unported callee reached from autovacuum.c: {unit}");
 }
 
 #[cold]

@@ -33,12 +33,6 @@ fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported callee reached from test_decoding.c: {what}")
-}
-
 struct TestDecodingData {
     include_xids: bool,
     include_timestamp: bool,

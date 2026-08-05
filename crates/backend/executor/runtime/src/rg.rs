@@ -460,6 +460,8 @@ impl ResourceGroup {
         (ready, deferred)
     }
 
+    // Runtime observability surface; consumers (monitoring/EXPLAIN) not wired yet.
+    #[allow(dead_code)]
     pub fn query_id(&self) -> u64 {
         self.query_id
     }
@@ -468,6 +470,8 @@ impl ResourceGroup {
         self.handle.generation()
     }
 
+    // Runtime observability surface; consumers (monitoring/EXPLAIN) not wired yet.
+    #[allow(dead_code)]
     pub fn stats(&self) -> crate::stats::RgStatsSnapshot {
         self.stats.snapshot()
     }

@@ -214,6 +214,9 @@ pub fn OpclassIsVisibleExt(opcid: Oid) -> PgResult<Option<bool>> {
 }
 
 
+// C StatisticsObjIsVisible; callers (ruleutils/objectaddress arms) not yet ported
+// (unported-census 2026-08-05 lane 3).
+#[allow(dead_code)]
 pub fn StatisticsObjIsVisible(stxid: Oid) -> PgResult<bool> {
     StatisticsObjIsVisibleExt(stxid)?.ok_or_else(|| lookup_failed("statistics object", stxid))
 }

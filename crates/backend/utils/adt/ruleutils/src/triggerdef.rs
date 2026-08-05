@@ -54,6 +54,8 @@ struct PgTriggerRow {
     tgconstraint: Oid,
     tgdeferrable: bool,
     tginitdeferred: bool,
+    // C-parity pg_trigger image; deparse derives the count from tgargs.len().
+    #[allow(dead_code)]
     tgnargs: i16,
     tgattr: Vec<i16>,
     tgargs: Vec<String>,

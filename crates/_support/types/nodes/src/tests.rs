@@ -1109,7 +1109,7 @@ fn select1_plan_shape_and_setrefs_mutation() {
 fn parse_node_tag_round_trips() {
     use crate::parsenodes::{Query, RTEPermissionInfo, RangeTblEntry};
     use crate::primnodes::{
-        Alias, FromExpr, FuncExpr, OpExpr, Param, RangeVar, Var,
+        Alias, FuncExpr, OpExpr, Param, RangeVar, Var,
     };
     use crate::rawnodes::{SelectStmt, ValUnion};
     let ctx = MemoryContext::new_bump("t");

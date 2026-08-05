@@ -18,7 +18,8 @@ pub const NUMERIC_ABBREV_NINF: i64 = i64::MAX;
 const SHORT_PAYLOAD_MAX: usize = 126;
 
 #[repr(align(8))]
-struct AlignBuf([u8; 128]);
+// Payload is written and read through raw pointers only; the field exists as an alignment carrier.
+struct AlignBuf(#[allow(dead_code)] [u8; 128]);
 
 // C's nss->buf / DatumGetNumeric palloc: realign a packed image so digits()
 // reads whole i16s; the payload bytes themselves are format-identical.

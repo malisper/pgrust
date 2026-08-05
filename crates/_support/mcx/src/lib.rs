@@ -61,6 +61,8 @@ pub type PgFxHashMap<'mcx, K, V> = hashbrown::HashMap<K, V, rustc_hash::FxBuildH
 enum Backend {
     // UnsafeCell, not RefCell: palloc's hot path pays no borrow flag (see aset_mut).
     Aset(core::cell::UnsafeCell<aset::AllocSet>),
+    // C-parity backend (mcxt.c malloc-wrapper contexts); no constructor wired yet.
+    #[allow(dead_code)]
     Malloc,
     Bump(core::cell::UnsafeCell<bump::BumpArena>),
     // Bump + drop list: leaked owned values run their destructor once at reset.

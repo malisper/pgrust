@@ -1368,6 +1368,8 @@ fn mutate_onconflict_inplace<'mcx>(
 }
 
 // None = unchanged (mutator convention).
+// Mutator plumbing for remaining ReplaceVars arms (unported-census 2026-08-05 port program).
+#[allow(dead_code)]
 fn rv_mutate_opt<'mcx>(
     node: Option<Node<'mcx>>,
     ctx: &mut ReplaceVarsCtx<'_, 'mcx>,
@@ -1378,6 +1380,8 @@ fn rv_mutate_opt<'mcx>(
     }
 }
 
+// Mutator plumbing for remaining ReplaceVars arms (unported-census 2026-08-05 port program).
+#[allow(dead_code)]
 fn rv_mutate_list<'mcx>(
     list: &NodeList<'mcx>,
     ctx: &mut ReplaceVarsCtx<'_, 'mcx>,

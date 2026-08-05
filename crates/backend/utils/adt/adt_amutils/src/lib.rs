@@ -90,6 +90,8 @@ struct AmFlags {
     has_amgettuple: bool,
     has_amcanreturn: bool,
     has_amproperty: bool,
+    // C-parity amroutine flag row; read when the ambuildphasename property arm wires.
+    #[allow(dead_code)]
     has_ambuildphasename: bool,
 }
 

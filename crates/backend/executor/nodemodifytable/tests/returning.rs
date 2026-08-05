@@ -17,10 +17,9 @@ use transam_xlog::control_file::{
 };
 use transam_xlog::{XLogRecPtrToBytePos, DB_IN_PRODUCTION, RECOVERY_STATE_DONE};
 use types_core::{
-    BackendType, BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, Oid, TimeLineID,
-    XLogRecPtr, XLogSegNo, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+    BackendType, BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, Oid,
+    XLogRecPtr, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
 };
-use types_error::PgResult;
 use types_nodes::nodes_enums::CmdType;
 use types_rel::{
     FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData, LOCKMODE,

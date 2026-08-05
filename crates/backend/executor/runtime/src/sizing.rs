@@ -127,11 +127,15 @@ impl SizerShared {
         SizerShared { inner: Mutex::new(SizerInner { phase: Phase::Startup, tput: 0.0 }) }
     }
 
+    // Runtime observability surface; consumers (monitoring/EXPLAIN) not wired yet.
+    #[allow(dead_code)]
     pub fn phase(&self) -> Phase {
         lock(&self.inner).phase
     }
 
     /// Throughput estimate (granules/ns); 0.0 while still in Startup.
+    // Runtime observability surface; consumers (monitoring/EXPLAIN) not wired yet.
+    #[allow(dead_code)]
     pub fn throughput(&self) -> f64 {
         lock(&self.inner).tput
     }

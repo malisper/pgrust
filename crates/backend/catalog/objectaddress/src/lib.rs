@@ -1481,6 +1481,8 @@ fn syscache_oid_field(cacheid: i32, objid: Oid, attnum: i32) -> PgResult<Oid> {
 }
 
 // has_createrole_privilege (aclchk.c).
+// Awaits remaining get_object_address ownership arms (unported-census 2026-08-05 lane 3).
+#[allow(dead_code)]
 fn has_createrole_privilege(roleid: Oid) -> PgResult<bool> {
     if superuser::superuser_arg(roleid)? {
         return Ok(true);
@@ -1506,6 +1508,8 @@ fn has_createrole_privilege(roleid: Oid) -> PgResult<bool> {
 
 #[track_caller]
 #[cold]
+// Awaits remaining get_object_address ownership arms (unported-census 2026-08-05 lane 3).
+#[allow(dead_code)]
 fn permission_denied(attr_detail: String) -> Box<PgError> {
     Box::new(
         PgError::new(ERROR, "permission denied")

@@ -20,6 +20,8 @@ const PqMsg_FunctionCallResponse: u8 = b'V';
 const PROKIND_FUNCTION: i8 = b'f' as i8;
 
 struct FpInfo {
+    // C-parity fp_info field (fastpath.c); kept with the row image.
+    #[allow(dead_code)]
     funcid: Oid,
     flinfo: FmgrInfo,
     namespace: Oid,

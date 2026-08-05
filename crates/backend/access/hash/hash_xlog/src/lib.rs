@@ -45,6 +45,8 @@ unsafe fn page_mut<'p>(buffer: Buffer) -> PageMut<'p> {
     unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buffer)) }
 }
 
+// Read-only twin of page_mut for redo arms that only inspect the page; awaits those arms.
+#[allow(dead_code)]
 unsafe fn page_ref<'p>(buffer: Buffer) -> PageRef<'p> {
     unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buffer)) }
 }

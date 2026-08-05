@@ -120,6 +120,8 @@ pub(crate) struct VacAttrStats<'mcx> {
     attrcollid: Oid,
     typlen: i16,
     typbyval: bool,
+    // C-parity VacAttrStats field (attrtype->typalign); kept with the row image.
+    #[allow(dead_code)]
     typalign: u8,
     compute: ComputeStats,
     extra: StdAnalyzeData,

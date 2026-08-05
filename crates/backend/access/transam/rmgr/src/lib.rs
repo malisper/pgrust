@@ -125,7 +125,6 @@ fn replorigin_redo(record: &mut XLogReaderState) -> PgResult<()> {
 unported_mask! {
     heap_mask => "backend-access-heap-heapam-xlog";
     btree_mask => "backend-access-nbtree-nbtxlog";
-    gin_mask => "backend-access-gin-xlog";
     seq_mask => "backend-commands-sequence";
     brin_mask => "backend-access-brin-xlog";
 }

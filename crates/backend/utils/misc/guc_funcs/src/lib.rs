@@ -37,12 +37,6 @@ mod tests;
 // ROLE_PG_READ_ALL_SETTINGS (pg_authid.dat).
 const ROLE_PG_READ_ALL_SETTINGS: Oid = 3374;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("guc_funcs.c arm not ported: {what}");
-}
-
 fn suset_or_userset() -> PgResult<GucContext> {
     Ok(if superuser::superuser()? { PGC_SUSET } else { PGC_USERSET })
 }

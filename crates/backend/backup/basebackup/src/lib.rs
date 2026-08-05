@@ -39,8 +39,6 @@ use sink::{
 use xlogbackup::TablespaceInfo;
 use walsender::WalSndState;
 
-const SRCFILE: &str = "src/backend/backup/basebackup.c";
-
 #[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
     // pgrust is Rust: report OUR source site (call site via track_caller).

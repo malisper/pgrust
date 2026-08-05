@@ -517,6 +517,8 @@ struct PgIndexRow {
     indcollation: Vec<Oid>,
     indclass: Vec<Oid>,
     indoption: Vec<i16>,
+    // C-parity index-def image; deparse reads indexprs_src presence instead.
+    #[allow(dead_code)]
     has_exprs: bool,
     indexprs_src: Option<String>,
     indpred: Option<String>,

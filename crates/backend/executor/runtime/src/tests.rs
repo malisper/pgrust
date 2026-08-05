@@ -4445,10 +4445,6 @@ mod bound_gate {
         assert!(!crate::session_residue(), "hint cleared by the gate");
     }
 
-    /// POOL-QOS: the interactive-demand ledger's lifecycle — a fresh bound
-    /// submission charges its width at publish; the slot release at RG
-    /// completion flushes the unmet remainder (leak-free pairing).
-    #[test]
     /// POOL-QOS memory governor (GL-CONCMEM-1): the bar spelling is
     /// unit-pinned — `0`/`off` DISARM (Some(0)), a positive integer arms at
     /// that many KB, anything else falls through to the auto (cgroup) arm.

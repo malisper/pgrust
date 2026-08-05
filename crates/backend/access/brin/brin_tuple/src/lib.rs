@@ -26,12 +26,6 @@ const fn bitmaplen(natts: usize) -> usize {
     (natts + 7) / 8
 }
 
-fn alloc_bytes<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<&'mcx [u8]> {
-    let mut v: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, bytes.len())?;
-    vec_append_bytes(&mut v, bytes)?;
-    Ok(v.leak())
-}
-
 pub use ::adt_scalar::datum_ops::datum_copy;
 
 // SAFETY: p is a live non-external varlena.

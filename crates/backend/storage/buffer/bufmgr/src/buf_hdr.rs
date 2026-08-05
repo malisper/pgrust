@@ -81,6 +81,8 @@ impl BufferDesc {
     }
 
     /// Read under the header lock; armed == a uring read is (or was) in flight.
+    // io_uring read lane helper; wiring lands with the uring completion arms.
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn io_wref_armed(&self) -> bool {
         // SAFETY: header lock held per contract above.
@@ -152,6 +154,8 @@ fn pool_descs() -> *const BufferDescPadded {
     p
 }
 
+// Pool-state probe kept for boot/shutdown diagnostics; no consumer wired yet.
+#[allow(dead_code)]
 pub fn buffer_pool_initialized() -> bool {
     !POOL.descs.load(Ordering::Relaxed).is_null()
 }

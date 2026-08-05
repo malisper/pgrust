@@ -317,12 +317,6 @@ fn err_not_owned(kind: &'static ResourceOwnerDesc, value: Datum, owner: &str) ->
     )))
 }
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported callee reached from resowner.c: {what}")
-}
-
 fn hash_resource_elem(value: Datum, kind: &'static ResourceOwnerDesc) -> u32 {
     let kind_id = core::ptr::from_ref(kind) as usize as u64;
     hash_combine64(murmurhash64(value.as_usize() as u64), kind_id) as u32

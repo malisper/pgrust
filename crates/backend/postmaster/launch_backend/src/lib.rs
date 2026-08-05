@@ -31,6 +31,8 @@ type ChildMainFn = fn(&StartupData) -> !;
 
 enum Main {
     Ported(ChildMainFn),
+    // C-parity table vocabulary: rows re-enter Unported when child kinds are added pre-port.
+    #[allow(dead_code)]
     Unported(&'static str), // real C main_fn, owning unit not yet ported
     None,                   // NULL in the C table
 }
@@ -38,6 +40,8 @@ enum Main {
 struct ChildProcessKind {
     name: &'static str,
     main_fn: Main,
+    // C-parity child_process_kinds column; reader wires with shmem-attach dispatch.
+    #[allow(dead_code)]
     shmem_attach: bool,
 }
 
@@ -896,6 +900,8 @@ pub mod wpool {
     }
 
     struct Standby {
+        // Lifecycle bookkeeping (standby child pid); kept for diagnostics, no reader yet.
+        #[allow(dead_code)]
         pid: pid_t,
         tx: SyncSender<StandbyTask>,
         // Database the retained caches are pinned to; InvalidOid = fresh

@@ -171,6 +171,8 @@ impl TierCov {
     const fn intree(tier: Tier, guard: GuardTier, coll: CollGate) -> TierCov {
         TierCov { tier, avail: Avail::InTree, guard, coll }
     }
+    // Table vocabulary: rows re-enter Avail::Pending whenever a lane stages off-main.
+    #[allow(dead_code)]
     const fn pending(tier: Tier, branch: &'static str, guard: GuardTier, coll: CollGate) -> TierCov {
         TierCov { tier, avail: Avail::Pending { branch }, guard, coll }
     }

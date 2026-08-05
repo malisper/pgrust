@@ -305,6 +305,8 @@ impl Shared {
 /// notices through the completion waiter on its next pass (bounded by the
 /// park cadence), which is the crash/shutdown leg's drain path.
 struct CycleWork {
+    // Owner handle: keeps the dispatcher's Shared alive for the cycle body.
+    #[allow(dead_code)]
     shared: Arc<Shared>,
     job: Arc<dyn BgJob>,
     reason: CycleReason,

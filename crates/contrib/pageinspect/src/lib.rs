@@ -194,6 +194,8 @@ impl ItemIdView {
     pub(crate) fn has_storage(&self) -> bool {
         self.len != 0
     }
+    // C-parity ItemId predicate set (itemid.h); kept with its siblings.
+    #[allow(dead_code)]
     pub(crate) fn is_normal(&self) -> bool {
         self.flags == LP_NORMAL as u8
     }

@@ -16,8 +16,6 @@ pub const CollationOidIndexId: Oid = 3085;
 pub const Anum_pg_collation_oid: types_core::AttrNumber = 1;
 pub const Natts_pg_collation: usize = 12;
 
-const SRC: &str = "src/backend/catalog/pg_collation.c";
-
 #[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
     // pgrust is Rust: report OUR source site (call site via track_caller).

@@ -274,10 +274,6 @@ pub fn ltree_compress(leafkey: bool, key_image: &[u8], key_is_null: bool) -> PgR
     Ok(None)
 }
 
-pub fn ltree_decompress() -> Option<Vec<u8>> {
-    None
-}
-
 pub fn ltree_same(a_image: &[u8], b_image: &[u8], siglen: usize) -> PgResult<bool> {
     let a = decode_key(a_image, siglen)?;
     let b = decode_key(b_image, siglen)?;

@@ -25,12 +25,6 @@ pub use ondisk::{
     SnapBuildOnDisk, PG_LOGICAL_SNAPSHOTS_DIR, SNAPBUILD_MAGIC, SNAPBUILD_VERSION,
 };
 
-#[cold]
-#[inline(never)]
-pub(crate) fn unported(what: &str) -> ! {
-    panic!("unported callee reached from snapbuild.c: {what}")
-}
-
 #[track_caller]
 pub(crate) fn loc(func: &'static str) -> ErrorLocation {
     // pgrust is Rust: report where in OUR source this was raised.

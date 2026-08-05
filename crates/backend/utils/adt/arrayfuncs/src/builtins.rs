@@ -511,9 +511,6 @@ const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmg
     FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
 }
 
-const HASH_RECORD_OID: Oid = 6192;
-const HASH_RECORD_EXTENDED_OID: Oid = 6193;
-
 
 // C array_cat (array_userfuncs.c), hosted with the array machinery it
 // consumes; catalog unit backend-utils-adt-array-user.

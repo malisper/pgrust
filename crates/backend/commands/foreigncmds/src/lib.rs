@@ -38,12 +38,6 @@ const TEXTARRAYOID: Oid = 1009;
 const OIDOID: Oid = 26;
 const ACL_ID_PUBLIC: Oid = 0;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: foreigncmds {what}")
-}
-
 fn err(
     sqlstate: types_error::SqlState,
     msg: String,

@@ -36,12 +36,6 @@ pub struct IndexBuildResult {
     pub index_tuples: f64,
 }
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: nbtsort {what}")
-}
-
 struct BTPageState<'mcx> {
     buf: BulkWriteBuffer,
     blkno: BlockNumber,

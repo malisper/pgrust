@@ -37,6 +37,8 @@ fn loc(func: &'static str) -> ErrorLocation {
 struct DecodingOutputState {
     srf: *mut MaterializedSRF<'static>,
     mcx: Mcx<'static>,
+    // C-parity DecodingOutputState field; read when binary output-plugin options wire.
+    #[allow(dead_code)]
     binary_output: bool,
     returned_rows: i64,
 }

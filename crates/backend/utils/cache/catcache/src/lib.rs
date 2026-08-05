@@ -273,6 +273,8 @@ fn eq_stored_bytes_outlined(
 }
 
 /// `CatalogCacheCompareTuple`.
+// C-parity reference form; the search fast path inlines it (unported-census 2026-08-05 port program).
+#[allow(dead_code)]
 #[inline]
 pub(crate) fn compare_tuple(
     kinds: &[CCFastKind; 4],

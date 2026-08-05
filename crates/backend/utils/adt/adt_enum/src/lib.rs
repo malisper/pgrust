@@ -264,7 +264,6 @@ fn enum_contains_no_values(enumtypoid: Oid) -> PgResult<Box<PgError>> {
 mod tests {
     use super::*;
     use mcx::MemoryContext;
-    use types_core::catalog::INT4OID;
     use types_nodes::Node;
 
     fn dummy(

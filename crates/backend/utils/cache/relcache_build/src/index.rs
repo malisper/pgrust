@@ -18,8 +18,6 @@ use crate::{int2vector_values, oid_key, oidvector_values, req};
 const INDEX_INDRELID_INDEX_ID: Oid = 2678;
 const OID_BTREE_OPS_OID: Oid = 1981;
 const INT2_BTREE_OPS_OID: Oid = 1979;
-const BTREE_AM_OID: Oid = 403;
-const HASH_AM_OID: Oid = 405;
 const BRIN_AM_OID: Oid = 3580;
 const SPGIST_AM_OID: Oid = 4000;
 const GIST_AM_OID: Oid = 783;

@@ -29,8 +29,6 @@ use slot::{
 };
 use walreceiver::client::{self, ExecStatus, PgConn};
 
-const SRCFILE: &str = "src/backend/replication/logical/slotsync.c";
-
 #[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
     // pgrust is Rust: report OUR source site (call site via track_caller).

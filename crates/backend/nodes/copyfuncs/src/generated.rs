@@ -1366,6 +1366,9 @@ fn mk_ref<'d, T: NodeVariant<'d>>(mcx: Mcx<'d>, v: T) -> PgResult<&'d T> {
     Ok(Node::mk(mcx, v)?.as_variant::<T>().expect("fresh node tag"))
 }
 
+// Only instantiated when a ref-typed field's inner type is not a Node variant;
+// the current node set has none, so it may be dead in any given generation.
+#[allow(dead_code)]
 fn alloc_ref<'d, T>(mcx: Mcx<'d>, v: T) -> PgResult<&'d T> {
     Ok(leak_in(alloc_in(mcx, v)?))
 }

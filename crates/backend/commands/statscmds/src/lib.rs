@@ -77,11 +77,6 @@ fn err(code: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(code))
 }
 
-#[cold]
-fn unported(what: &str) -> ! {
-    panic!("statscmds.c: {what}")
-}
-
 fn eq_key(attno: usize, func: RegProcedure, arg: Datum) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno as AttrNumber;

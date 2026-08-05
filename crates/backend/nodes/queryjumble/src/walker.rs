@@ -6,7 +6,7 @@
 
 use types_core::catalog::FirstGenbkiObjectId;
 use types_error::PgResult;
-use types_nodes::list::{IntList, NodeList, OidList, OptNodeList, XidList};
+use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
 use types_nodes::parsenodes as q;
 use types_nodes::primnodes as p;
 use types_nodes::rawnodes as r;
@@ -47,11 +47,6 @@ impl<'mcx> JumbleState<'mcx> {
 
     #[inline]
     fn f_i32(&mut self, v: i32) {
-        self.append(&v.to_ne_bytes());
-    }
-
-    #[inline]
-    fn f_u64(&mut self, v: u64) {
         self.append(&v.to_ne_bytes());
     }
 
@@ -135,17 +130,6 @@ fn oid_list(js: J<'_, '_>, l: &OidList<'_>) {
         return;
     }
     js.tag(NodeTag::T_OidList);
-    for v in l.iter() {
-        js.f_u32(v);
-    }
-}
-
-fn xid_list(js: J<'_, '_>, l: &XidList<'_>) {
-    if l.is_nil() {
-        js.append_null();
-        return;
-    }
-    js.tag(NodeTag::T_XidList);
     for v in l.iter() {
         js.f_u32(v);
     }

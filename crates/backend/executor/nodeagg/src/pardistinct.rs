@@ -387,6 +387,8 @@ enum KeySrc<'a> {
     Staged(&'a [u8], &'a [(u32, u32)]),
     /// A (possibly foreign) table's `(key words, arena)`: bytes component
     /// words carry packed spans over the arena (merge / spill replay).
+    // KeySrc vocabulary; constructor wires with the merge/spill-replay leg.
+    #[allow(dead_code)]
     Table(&'a [i64], &'a [u8]),
 }
 
@@ -1530,6 +1532,8 @@ pub struct PdHandedTable {
     set_null: Vec<bool>,
     /// Plain shape: per set, PD_ELEM_PARTS+1 absolute starts into
     /// set_ints/set_spans (laid consecutively per set).
+    // Written by the plain-shape builder; reader wires with the plain-shape merge leg.
+    #[allow(dead_code)]
     elem_parts: Vec<u32>,
     parts: Option<PdPartition>,
     /// LIVE form only (empty = flat): set `si`'s live `DistinctSet`, in

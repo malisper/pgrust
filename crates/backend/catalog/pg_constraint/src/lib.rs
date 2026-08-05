@@ -1791,6 +1791,7 @@ mod tests {
 pub fn init_seams() {
     syscache_seams::pg_constraint_primary_key_attnos::set(get_primary_key_attnos);
 }
+#[cfg(test)]
 mod truncation_tests {
     static SETUP: std::sync::Once = std::sync::Once::new();
 

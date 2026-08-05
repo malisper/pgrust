@@ -66,6 +66,8 @@ pub(crate) struct CollectedCommand {
     pub in_extension: bool,
     pub tag: CommandTag,
     pub address: ObjectAddress,
+    // C-parity CollectedCommand field; read when pg_event_trigger_ddl_commands wires.
+    #[allow(dead_code)]
     pub secondary_object: ObjectAddress,
     pub data: CollectedCommandData,
 }

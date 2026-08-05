@@ -280,6 +280,8 @@ fn idx_and_chunk(size: usize) -> (usize, usize) {
     }
 }
 
+// C-parity inverse of size_class (aset.c GetChunkSizeFromFreeListIdx); awaits chunk-space consumers.
+#[allow(dead_code)]
 #[inline]
 fn chunk_size(idx: usize) -> usize {
     1usize << (idx as u32 + ALLOC_MINBITS)
@@ -337,6 +339,8 @@ impl AllocSet {
         }
     }
 
+    // C-parity accessor (MemoryContextMemAllocated); awaits memory-accounting consumers.
+    #[allow(dead_code)]
     pub(crate) fn mem_allocated(&self) -> usize {
         self.mem_allocated
     }

@@ -6,7 +6,7 @@ use ::datum::Datum;
 use ::mcx::{Mcx, PgVec};
 use ::nbtree::itup::{index_form_tuple, index_getattr, maxalign, ItupBuf};
 use ::types_core::{
-    AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, OffsetNumber, Oid,
+    AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, OffsetNumber,
     XLogRecPtr, BLCKSZ, RELPERSISTENCE_TEMP,
 };
 use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};
@@ -22,7 +22,6 @@ use crate::state::GistState;
 
 pub(crate) const FirstOffsetNumber: OffsetNumber = 1;
 pub(crate) const InvalidOffsetNumber: OffsetNumber = 0;
-const InvalidOid: Oid = 0;
 const SIZEOF_ITEM_ID_DATA: usize = 4;
 
 pub type ITup = *const u8;

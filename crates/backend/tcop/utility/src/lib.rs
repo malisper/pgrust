@@ -45,12 +45,6 @@ pub(crate) fn payload_gap(func: &str, node: &str) -> ! {
     panic!("{func} (utility.c): {node} payload not in types_nodes (grammar lane)")
 }
 
-#[cold]
-#[inline(never)]
-pub(crate) fn handler_gap(what: &str) -> ! {
-    panic!("standard_ProcessUtility (utility.c): {what} not ported")
-}
-
 // Clean 0A000 for unported-feature utility lanes: user-reachable statement
 // shapes whose handler isn't ported must raise, not panic (utility dispatch
 // is unwind-safe here; the connection survives and later statements work).

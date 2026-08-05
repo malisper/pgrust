@@ -10,7 +10,6 @@ use ::adt_rangetypes::{ops as rops, range_deserialize, RangeBound, RangeInfo};
 use ::datum::Datum;
 use ::lsyscache::IOFuncSelector;
 use ::mcx::{Mcx, MemoryContext, PgVec};
-use ::typcache::lookup_type_cache;
 use ::types_core::{InvalidOid, Oid, BTREE_AM_OID};
 use ::types_error::{PgError, PgResult};
 use ::types_fmgr::FmgrInfo;

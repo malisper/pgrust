@@ -389,6 +389,8 @@ struct MergeRun {
     // tuples). `raw_pre` present ⇒ `pre` absent and retrieval takes the raw
     // leg; the classic fields still cover mixed classic sources (merged
     // INTO raw_pre at consume).
+    // Owner handle: keeps the handed raw tables (bucket-buffer owners) alive for the raw leg.
+    #[allow(dead_code)]
     raw_tables: Vec<HandedRawTable>,
     raw_pre: Option<Vec<::lanetable::LaneAggTable>>,
     // The single grouping key's attlen for datum synthesis (raw leg only).

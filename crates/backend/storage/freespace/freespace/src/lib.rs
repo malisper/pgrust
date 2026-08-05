@@ -554,6 +554,8 @@ fn invalid_fsm_request_size(needed: Size) -> Box<PgError> {
 #[inline(never)]
 // RelationNeedsWAL (rel.h) / XLogHintBitIsNeeded (xlog.h); uninstalled
 // slots read as boot defaults (bufmgr precedent).
+// Ported ahead of the FSM WAL/hint-bit arms (unported-census 2026-08-05 port program).
+#[allow(dead_code)]
 fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
     let xlog_is_needed = guc_tables::vars::wal_level.installed()
         && guc_tables::vars::wal_level.read() >= 1;
@@ -564,14 +566,12 @@ fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
                     == types_core::InvalidSubTransactionId))
 }
 
+// Ported ahead of the FSM hint-bit dirtying arm (unported-census 2026-08-05 port program).
+#[allow(dead_code)]
 fn xlog_hint_bit_is_needed() -> bool {
     (guc_tables::vars::wal_log_hints.installed() && guc_tables::vars::wal_log_hints.read())
         || (transam_xlog_seams::data_checksums_enabled::is_installed()
             && transam_xlog_seams::data_checksums_enabled::call())
-}
-
-fn unported(unit: &'static str) -> ! {
-    panic!("unported callee reached from freespace.c: {unit}");
 }
 
 pub fn init_seams() {

@@ -33,12 +33,6 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("commands/variable.c hook arm not ported: {what}");
-}
-
 fn initializing_parallel_worker() -> bool {
     parallel_seams::initializing_parallel_worker::is_installed()
         && parallel_seams::initializing_parallel_worker::call()

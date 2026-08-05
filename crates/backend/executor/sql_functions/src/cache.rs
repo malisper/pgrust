@@ -136,6 +136,8 @@ struct ProcRow<'mcx> {
     proname: PgString<'mcx>,
     prosrc: PgString<'mcx>,
     prosqlbody: Option<PgString<'mcx>>,
+    // C-parity pg_proc row image; read when argument-type arms wire.
+    #[allow(dead_code)]
     argtypes: PgVec<'mcx, Oid>,
     argnames: PgVec<'mcx, PgString<'mcx>>,
     provolatile: i8,

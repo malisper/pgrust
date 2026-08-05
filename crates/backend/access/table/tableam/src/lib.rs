@@ -181,12 +181,10 @@ fn cb_refused(what: &'static str) -> ! {
     panic!("cbstore does not support {what} (unreachable without indexes/DML)")
 }
 
-// heapam_handler.c's heapam_methods: read lane bound directly onto heapam /
-// heapam_handler; the rest panic until their units land.
+// heapam_handler.c's heapam_methods, bound directly onto heapam /
+// heapam_handler.
 mod heap {
     use super::*;
-
-    const DML_UNIT: &str = "backend-access-heap-heapam (phase 2 DML)";
 
     pub(super) fn slot_callbacks(_rel: &Relation<'_>) -> TupleSlotKind {
         TupleSlotKind::BufferHeapTuple

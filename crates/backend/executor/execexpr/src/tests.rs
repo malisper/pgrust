@@ -3362,7 +3362,7 @@ fn exec_type_set_col_names_skips_empty_and_dropped() {
 
 #[test]
 fn multiexpr_subplan_compiles_to_setup_steps_and_dummy_const() {
-    use ::types_nodes::primnodes::{ParamKind, SubLinkType, SubPlan};
+    use ::types_nodes::primnodes::{SubLinkType, SubPlan};
     use ::types_portal::params::ParamExecData;
     use core::ptr::NonNull;
 

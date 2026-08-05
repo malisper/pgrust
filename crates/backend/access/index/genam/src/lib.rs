@@ -718,9 +718,3 @@ fn too_many_overwrite_tries() -> Box<PgError> {
 fn non_heap_sysscan_slot() -> ! {
     panic!("systable slot is not heap/buffer-backed (C Assert(!shouldFree))")
 }
-
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: {what}")
-}

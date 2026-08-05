@@ -90,6 +90,8 @@ impl TaskSetRt {
         &self.rg.tasksets[self.index].work
     }
 
+    // Runtime observability surface; consumers (monitoring/EXPLAIN) not wired yet.
+    #[allow(dead_code)]
     pub(crate) fn generation(&self) -> Generation {
         self.rg.generation()
     }

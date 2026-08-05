@@ -95,8 +95,6 @@ pub(crate) use dml::{dml_set_for_tests, DML_OWNED_FOR_TESTS, DML_SHAPE_REFUSED_F
 #[cfg(test)]
 pub(crate) use express::{express_set_for_tests, EXPRESS_OFF, EXPRESS_OWNED_FOR_TESTS, EXPRESS_POINT, EXPRESS_STRUCTURED};
 #[cfg(test)]
-pub(crate) use indexsource::{indexsource_set_for_tests, INDEXSOURCE_OWNED_FOR_TESTS};
-#[cfg(test)]
 pub(crate) use rowmode::{mergejoin_set_for_tests, rowmode_set_for_tests, ROWMODE_MJ_OWNED_FOR_TESTS, ROWMODE_OWNED_FOR_TESTS};
 #[cfg(test)]
 pub(crate) use rowmode_tail::tail_owned_probe_for_tests;
@@ -15300,8 +15298,6 @@ pub(crate) mod epq;
 // touches no existing code line (the WS-AA wave-7 EOF-append precedent —
 // the wave-7 WS-AA EOF region above is preserved byte-verbatim).
 pub(crate) use indexsource::try_own_agg_over_index_source;
-#[cfg(test)]
-pub(crate) use indexsource::{agg_indexfeed_set_for_tests, AGG_INDEXFEED_OWNED_FOR_TESTS};
 // --- end WS-AE (wave-8) ---
 // ============================================================================
 // ===== WAVE-9 SHARED EOF REGION (contract §7) — sub-regions in AG, AH, AI,
@@ -15484,8 +15480,6 @@ pub(crate) use lane_mergejoin::{
 // mirror) is lanev2-private.
 mod agg_bitmap;
 pub(crate) use agg_bitmap::try_own_agg_over_bitmap_feed;
-#[cfg(test)]
-pub(crate) use agg_bitmap::{agg_bitmap_set_for_tests, AGG_BITMAP_OWNED_FOR_TESTS};
 // --- end SE-AGGBITMAP -----------------------------------------------------------
 // --- MJSORT (the "merge join after sort" runtime car, m5-coverage row
 // merge-join-parallel; PGRUST_RUNTIME_MJSORT, default OFF): the arm rides

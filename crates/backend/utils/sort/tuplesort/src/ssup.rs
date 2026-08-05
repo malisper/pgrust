@@ -343,6 +343,8 @@ unsafe fn detoast_payload<R>(p: *const u8, f: impl FnOnce(&[u8]) -> R) -> R {
 
 /// `ApplySortComparator` (sortsupport.h); `cmp` is passed separately so each
 /// qsort specialization instantiates with a constant comparator, as C does.
+// No-shim ApplySortComparator pair (sortsupport.h); qsort specializations needing no mcx instantiate these.
+#[allow(dead_code)]
 #[inline(always)]
 pub fn apply_sort_comparator_as(
     cmp: SortComparator,
@@ -376,6 +378,8 @@ pub fn apply_sort_comparator_as(
     }
 }
 
+// No-shim ApplySortComparator pair (sortsupport.h); see apply_sort_comparator_as.
+#[allow(dead_code)]
 #[inline(always)]
 pub fn apply_sort_comparator(
     datum1: Datum,

@@ -66,6 +66,8 @@ pub(crate) fn unported_phase2(what: &str) -> ! {
 /// `header` must be a SK_ROW_HEADER key whose subsidiary array (built by
 /// ExecIndexBuildScanKeys) outlives the scan; the caller must not hold
 /// another live reference to the array.
+// Awaits the row-compare preprocess/mark wiring (unported-census 2026-08-05 port program).
+#[allow(dead_code)]
 pub(crate) unsafe fn row_compare_members_mut<'a>(
     header: &ScanKeyData,
 ) -> &'a mut [ScanKeyData] {

@@ -984,6 +984,8 @@ pub fn getObjectIdentity(
 }
 
 // getRelationIdentity (objectaddress.c): always schema-qualified.
+// Awaits remaining getObjectIdentityParts arms (unported-census 2026-08-05 lane 3).
+#[allow(dead_code)]
 fn getRelationIdentity(relid: Oid, missing_ok: bool) -> PgResult<Option<String>> {
     let Some(relname) = syscache_seams::pg_class_relname::call(relid)? else {
         if !missing_ok {

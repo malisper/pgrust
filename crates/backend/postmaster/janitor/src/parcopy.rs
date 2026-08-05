@@ -69,6 +69,8 @@ pub(crate) struct CopyDirJob {
 /// Copy-phase telemetry for the batch witness line.
 #[derive(Debug)]
 pub(crate) struct CopyStats {
+    // Witness-line telemetry; emitted via the Debug impl.
+    #[allow(dead_code)]
     pub dirs: usize,
     pub files: usize,
     pub threads: usize,

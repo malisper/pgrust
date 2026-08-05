@@ -367,6 +367,8 @@ pub(crate) fn query_depth() -> i32 {
     QUERY_DEPTH.with(|c| c.get())
 }
 
+// C afterTriggers.firing_counter accessor; wires with the after-trigger firing arms.
+#[allow(dead_code)]
 pub(crate) fn firing_counter() -> CommandId {
     FIRING_COUNTER.with(|c| c.get())
 }

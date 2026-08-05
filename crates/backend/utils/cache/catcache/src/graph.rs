@@ -42,15 +42,6 @@ impl<'mcx> CatCache<'mcx> {
         }
     }
 
-        #[inline]
-    pub(crate) fn ct_move_head(&mut self, bucket: usize, slot: u32) {
-        if self.cc_bucket[bucket] == slot {
-            return;
-        }
-        self.ct_unlink(bucket, slot);
-        self.ct_push_head(bucket, slot);
-    }
-
     /// Hit-path `dlist_move_head`, inline and unchecked like C's.
     ///
     /// # Safety
