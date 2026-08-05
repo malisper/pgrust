@@ -880,7 +880,13 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      counted only because the census counter is textual. Non-session
     //      on the substance: per-thread fuzz-harness scratch, no session
     //      identity, nothing an envelope could capture or restore.
-    assert_eq!(count_tree(crates), 555, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 556, re-pinned at the testdb-land merge (test-mode stack):
+    //   +1 storage/file/fd/src/tests.rs — INTERRUPT_CHECKS: cfg(test)
+    //      per-thread CHECK_FOR_INTERRUPTS counter letting the copydir tests
+    //      witness which copy engine ran (copy_file checks per 64KiB chunk,
+    //      clone_file per 1MiB chunk). Non-session: per-test scratch on the
+    //      test's own thread, compiled out of every product build.
+    assert_eq!(count_tree(crates), 556, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

@@ -113,7 +113,7 @@ fs	crates/backend/commands/copy/src/parallel.rs	2	DST-REVIEW(t46 compose, night/
 fs	crates/backend/commands/copy/src/to.rs	3
 # --- crates/backend/commands/dbcommands (11 sites) ---
 fs	crates/backend/commands/dbcommands/src/alterdb.rs	2
-fs	crates/backend/commands/dbcommands/src/createdb.rs	2
+fs	crates/backend/commands/dbcommands/src/createdb.rs	3	DST-REVIEW(testdb-land): +1 = std::fs::metadata existence probe in the batch-mint deferred-file-copy split (createdb_deferred_file_copy skips vanished source dirs the same way the C copydir path would ENOENT) — same class as the crate's pre-existing raw fs rows; P1 Vfs choke routing rides the crate-wide migration
 fs	crates/backend/commands/dbcommands/src/lib.rs	6
 fs	crates/backend/commands/dbcommands/src/walcopy.rs	1
 # --- crates/backend/commands/extension (7 sites) ---
@@ -144,6 +144,20 @@ fs	crates/backend/libpq/pqcomm_stdio/src/lib.rs	2	DST-REVIEW(p4-simnet): transpo
 
 # --- crates/backend/libpq/fdnb (2 sites) ---
 fs	crates/backend/libpq/fdnb/src/lib.rs	2	DST-REVIEW(p4-simnet): the SHARED noblock-emulation layer under fd-based transport providers (ledger N1/N2 fixes live here) — libc read/write behind the s2.4 seam, same standing as the pqcomm_stdio/be_secure provider rows; sim-net is buffer-backed and never executes these
+# --- crates/backend/postmaster/janitor (22 sites, all parcopy.rs) ---
+# parcopy.rs is the mint batch's parallel directory copy: short-lived worker
+# threads doing raw path syscalls BY DESIGN (docs/design/test-views.md Shape C
+# addendum) — workers must hold no fd/VFD state and never ereport off-thread,
+# so the fd/Vfs choke is deliberately not used here. The janitor thread joins
+# the gang before the mint transaction proceeds (join-bounded-after-wake: the
+# workers' exit needs no run token — pure syscall loops over a snapshotted
+# file list). Time sites are throughput telemetry on the copy log line.
+blocking	crates/backend/postmaster/janitor/src/parcopy.rs	1	DST-REVIEW(testdb-land): 2ms poll sleep on the janitor thread while workers run — keeps CHECK_FOR_INTERRUPTS responsive during the copy; bounded by worker completion (workers are token-free syscall loops)
+fs	crates/backend/postmaster/janitor/src/parcopy.rs	14	DST-REVIEW(testdb-land): raw open/read/write/copy_file_range/copyfile/mkdir/fsync-family syscalls on worker threads per the no-VFD-off-thread design above
+join	crates/backend/postmaster/janitor/src/parcopy.rs	1	DST-REVIEW(testdb-land): gang join at end of batch copy; workers are token-free syscall loops (join-bounded-after-wake per P3 row-14 ledger terms)
+rawsync	crates/backend/postmaster/janitor/src/parcopy.rs	1	DST-REVIEW(testdb-land): worker error-slot mutex local to the gang; pgsync import owed when the crate joins a sim world (janitor is product-only, never compiled under pgrust_sim)
+scope	crates/backend/postmaster/janitor/src/parcopy.rs	1	DST-REVIEW(testdb-land): std::thread::scope for the copy gang; sim_scope_spawn routing rides P3 wave 3 (dst-p3-scheduler.md #3 row 15)
+time	crates/backend/postmaster/janitor/src/parcopy.rs	4	DST-REVIEW(testdb-land): wall/mono reads feeding the copy-throughput log line only — no control flow depends on them
 # --- crates/backend/postmaster/launch_backend (4 sites) ---
 fs	crates/backend/postmaster/launch_backend/src/lib.rs	4	DST-REVIEW(night/fdlimit GL-FDLIMIT-1): +3 = report_startup_failure_to_client's raw-socket refusal (fcntl F_GETFL/F_SETFL + close) — the child-thread twin of postmaster.c's report_fork_failure_to_client, MOVED here from serverloop.rs (that row is deleted, net zero for the category): a connection whose child thread never came up is answered and closed on the accepted fd itself, with no session, no buffers and no transport provider to route through. Base 1 = the pre-existing client-socket close at child-thread exit
 # --- crates/backend/postmaster/pgarch (4 sites) ---
