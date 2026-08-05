@@ -4,7 +4,7 @@ use ::mcx::{Mcx, PgVec};
 use ::ts_locale::dict_api::{DictInitData, LexizeResult};
 use ::ts_locale::{lowerstr, readstoplist, searchstoplist, StopList, TsLexeme};
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_OBJECT};
-use ::wchar::{pg_enc, PG_LATIN1, PG_SQL_ASCII, PG_UTF8};
+use ::wchar::{pg_enc, PG_KOI8R, PG_LATIN1, PG_LATIN2, PG_SQL_ASCII, PG_UTF8};
 
 use crate::api::SN_set_current;
 use crate::types::SN_env;
@@ -16,59 +16,71 @@ struct StemmerModule {
     stem: unsafe fn(*mut SN_env) -> c_int,
 }
 
-static STEMMER_MODULES: [StemmerModule; 3] = [
-    StemmerModule {
-        name: "english",
-        enc: PG_LATIN1,
-        create: crate::stemmers::stem_iso_8859_1_english::english_ISO_8859_1_create_env,
-        stem: crate::stemmers::stem_iso_8859_1_english::english_ISO_8859_1_stem,
-    },
-    StemmerModule {
-        name: "english",
-        enc: PG_UTF8,
-        create: crate::stemmers::stem_utf8_english::english_UTF_8_create_env,
-        stem: crate::stemmers::stem_utf8_english::english_UTF_8_stem,
-    },
-    StemmerModule {
-        name: "english",
-        enc: PG_SQL_ASCII,
-        create: crate::stemmers::stem_iso_8859_1_english::english_ISO_8859_1_create_env,
-        stem: crate::stemmers::stem_iso_8859_1_english::english_ISO_8859_1_stem,
-    },
-];
+macro_rules! sm {
+    ($name:literal, $enc:expr, $module:ident, $create:ident, $stem:ident) => {
+        StemmerModule {
+            name: $name,
+            enc: $enc,
+            create: crate::stemmers::$module::$create,
+            stem: crate::stemmers::$module::$stem,
+        }
+    };
+}
 
-// dict_snowball.c stemmer_modules languages whose automatons are unported;
-// requesting one is a loud gap, not C's "no stemmer available" error.
-static UNPORTED_LANGS: &[&str] = &[
-    "arabic",
-    "armenian",
-    "basque",
-    "catalan",
-    "danish",
-    "dutch",
-    "estonian",
-    "finnish",
-    "french",
-    "german",
-    "greek",
-    "hindi",
-    "hungarian",
-    "indonesian",
-    "irish",
-    "italian",
-    "lithuanian",
-    "nepali",
-    "norwegian",
-    "porter",
-    "portuguese",
-    "romanian",
-    "russian",
-    "serbian",
-    "spanish",
-    "swedish",
-    "tamil",
-    "turkish",
-    "yiddish",
+// The full dict_snowball.c stemmer_modules table (PostgreSQL 18.3), in the
+// same order: single-byte encodings first, then UTF-8, then the SQL_ASCII
+// english fallback.
+#[rustfmt::skip]
+static STEMMER_MODULES: [StemmerModule; 49] = [
+    sm!("basque", PG_LATIN1, stem_iso_8859_1_basque, basque_ISO_8859_1_create_env, basque_ISO_8859_1_stem),
+    sm!("catalan", PG_LATIN1, stem_iso_8859_1_catalan, catalan_ISO_8859_1_create_env, catalan_ISO_8859_1_stem),
+    sm!("danish", PG_LATIN1, stem_iso_8859_1_danish, danish_ISO_8859_1_create_env, danish_ISO_8859_1_stem),
+    sm!("dutch", PG_LATIN1, stem_iso_8859_1_dutch, dutch_ISO_8859_1_create_env, dutch_ISO_8859_1_stem),
+    sm!("english", PG_LATIN1, stem_iso_8859_1_english, english_ISO_8859_1_create_env, english_ISO_8859_1_stem),
+    sm!("finnish", PG_LATIN1, stem_iso_8859_1_finnish, finnish_ISO_8859_1_create_env, finnish_ISO_8859_1_stem),
+    sm!("french", PG_LATIN1, stem_iso_8859_1_french, french_ISO_8859_1_create_env, french_ISO_8859_1_stem),
+    sm!("german", PG_LATIN1, stem_iso_8859_1_german, german_ISO_8859_1_create_env, german_ISO_8859_1_stem),
+    sm!("indonesian", PG_LATIN1, stem_iso_8859_1_indonesian, indonesian_ISO_8859_1_create_env, indonesian_ISO_8859_1_stem),
+    sm!("irish", PG_LATIN1, stem_iso_8859_1_irish, irish_ISO_8859_1_create_env, irish_ISO_8859_1_stem),
+    sm!("italian", PG_LATIN1, stem_iso_8859_1_italian, italian_ISO_8859_1_create_env, italian_ISO_8859_1_stem),
+    sm!("norwegian", PG_LATIN1, stem_iso_8859_1_norwegian, norwegian_ISO_8859_1_create_env, norwegian_ISO_8859_1_stem),
+    sm!("porter", PG_LATIN1, stem_iso_8859_1_porter, porter_ISO_8859_1_create_env, porter_ISO_8859_1_stem),
+    sm!("portuguese", PG_LATIN1, stem_iso_8859_1_portuguese, portuguese_ISO_8859_1_create_env, portuguese_ISO_8859_1_stem),
+    sm!("spanish", PG_LATIN1, stem_iso_8859_1_spanish, spanish_ISO_8859_1_create_env, spanish_ISO_8859_1_stem),
+    sm!("swedish", PG_LATIN1, stem_iso_8859_1_swedish, swedish_ISO_8859_1_create_env, swedish_ISO_8859_1_stem),
+    sm!("hungarian", PG_LATIN2, stem_iso_8859_2_hungarian, hungarian_ISO_8859_2_create_env, hungarian_ISO_8859_2_stem),
+    sm!("russian", PG_KOI8R, stem_koi8_r_russian, russian_KOI8_R_create_env, russian_KOI8_R_stem),
+    sm!("arabic", PG_UTF8, stem_utf8_arabic, arabic_UTF_8_create_env, arabic_UTF_8_stem),
+    sm!("armenian", PG_UTF8, stem_utf8_armenian, armenian_UTF_8_create_env, armenian_UTF_8_stem),
+    sm!("basque", PG_UTF8, stem_utf8_basque, basque_UTF_8_create_env, basque_UTF_8_stem),
+    sm!("catalan", PG_UTF8, stem_utf8_catalan, catalan_UTF_8_create_env, catalan_UTF_8_stem),
+    sm!("danish", PG_UTF8, stem_utf8_danish, danish_UTF_8_create_env, danish_UTF_8_stem),
+    sm!("dutch", PG_UTF8, stem_utf8_dutch, dutch_UTF_8_create_env, dutch_UTF_8_stem),
+    sm!("english", PG_UTF8, stem_utf8_english, english_UTF_8_create_env, english_UTF_8_stem),
+    sm!("estonian", PG_UTF8, stem_utf8_estonian, estonian_UTF_8_create_env, estonian_UTF_8_stem),
+    sm!("finnish", PG_UTF8, stem_utf8_finnish, finnish_UTF_8_create_env, finnish_UTF_8_stem),
+    sm!("french", PG_UTF8, stem_utf8_french, french_UTF_8_create_env, french_UTF_8_stem),
+    sm!("german", PG_UTF8, stem_utf8_german, german_UTF_8_create_env, german_UTF_8_stem),
+    sm!("greek", PG_UTF8, stem_utf8_greek, greek_UTF_8_create_env, greek_UTF_8_stem),
+    sm!("hindi", PG_UTF8, stem_utf8_hindi, hindi_UTF_8_create_env, hindi_UTF_8_stem),
+    sm!("hungarian", PG_UTF8, stem_utf8_hungarian, hungarian_UTF_8_create_env, hungarian_UTF_8_stem),
+    sm!("indonesian", PG_UTF8, stem_utf8_indonesian, indonesian_UTF_8_create_env, indonesian_UTF_8_stem),
+    sm!("irish", PG_UTF8, stem_utf8_irish, irish_UTF_8_create_env, irish_UTF_8_stem),
+    sm!("italian", PG_UTF8, stem_utf8_italian, italian_UTF_8_create_env, italian_UTF_8_stem),
+    sm!("lithuanian", PG_UTF8, stem_utf8_lithuanian, lithuanian_UTF_8_create_env, lithuanian_UTF_8_stem),
+    sm!("nepali", PG_UTF8, stem_utf8_nepali, nepali_UTF_8_create_env, nepali_UTF_8_stem),
+    sm!("norwegian", PG_UTF8, stem_utf8_norwegian, norwegian_UTF_8_create_env, norwegian_UTF_8_stem),
+    sm!("porter", PG_UTF8, stem_utf8_porter, porter_UTF_8_create_env, porter_UTF_8_stem),
+    sm!("portuguese", PG_UTF8, stem_utf8_portuguese, portuguese_UTF_8_create_env, portuguese_UTF_8_stem),
+    sm!("romanian", PG_UTF8, stem_utf8_romanian, romanian_UTF_8_create_env, romanian_UTF_8_stem),
+    sm!("russian", PG_UTF8, stem_utf8_russian, russian_UTF_8_create_env, russian_UTF_8_stem),
+    sm!("serbian", PG_UTF8, stem_utf8_serbian, serbian_UTF_8_create_env, serbian_UTF_8_stem),
+    sm!("spanish", PG_UTF8, stem_utf8_spanish, spanish_UTF_8_create_env, spanish_UTF_8_stem),
+    sm!("swedish", PG_UTF8, stem_utf8_swedish, swedish_UTF_8_create_env, swedish_UTF_8_stem),
+    sm!("tamil", PG_UTF8, stem_utf8_tamil, tamil_UTF_8_create_env, tamil_UTF_8_stem),
+    sm!("turkish", PG_UTF8, stem_utf8_turkish, turkish_UTF_8_create_env, turkish_UTF_8_stem),
+    sm!("yiddish", PG_UTF8, stem_utf8_yiddish, yiddish_UTF_8_create_env, yiddish_UTF_8_stem),
+    sm!("english", PG_SQL_ASCII, stem_iso_8859_1_english, english_ISO_8859_1_create_env, english_ISO_8859_1_stem),
 ];
 
 pub struct DictSnowball {
@@ -106,15 +118,6 @@ fn locate_stem_module(lang: &[u8]) -> PgResult<Located> {
             let z = unsafe { (m.create)() };
             return Ok(Located { z, stem: m.stem, needrecode: true });
         }
-    }
-    if UNPORTED_LANGS
-        .iter()
-        .any(|l| eq_strcasecmp(l, lang))
-    {
-        panic!(
-            "dict_snowball: stemmer \"{}\" unported (tsearch-lane: english only)",
-            String::from_utf8_lossy(lang)
-        );
     }
     Err(PgError::error(format!(
         "no Snowball stemmer available for language \"{}\" and encoding \"{}\"",
