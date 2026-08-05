@@ -561,8 +561,10 @@ mod tests {
     // as a macro for the file).
     #[test]
     fn conf_sync() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../conf/test.conf");
-        let text = std::fs::read_to_string(path).expect("conf/test.conf must exist");
+        // include_str! (not fs::read): the file lives INSIDE this crate so any
+        // tree slice that carries the code carries the file (release cuts
+        // stripped top-level conf/ and broke the fs::read form, 2026-08-04).
+        let text = include_str!("../conf/test.conf");
         let mut file_settings: Vec<(String, String)> = Vec::new();
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
