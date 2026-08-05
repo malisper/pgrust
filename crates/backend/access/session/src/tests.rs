@@ -886,7 +886,13 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      witness which copy engine ran (copy_file checks per 64KiB chunk,
     //      clone_file per 1MiB chunk). Non-session: per-test scratch on the
     //      test's own thread, compiled out of every product build.
-    assert_eq!(count_tree(crates), 556, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 557, re-pinned at the execmain tap-counter flake fix (lanegates-main-red):
+    //   +1 executor/execmain/src/tests.rs — REARM_TAP_COUNT: cfg(test)
+    //      per-thread executor-start tap count (the process-global counter
+    //      raced parallel sibling tests whose query-desc handles carry the
+    //      same small sequence numbers). Non-session: per-test scratch on
+    //      the test's own thread, compiled out of every product build.
+    assert_eq!(count_tree(crates), 557, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
