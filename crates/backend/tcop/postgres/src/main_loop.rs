@@ -233,6 +233,12 @@ pub(crate) fn error_recovery(
 
     /* error_context_stack = NULL: the ambient callback chain is Err-carried. */
 
+    // An Err escaping a still-open critical section is a hand-built PgError
+    // that bypassed errstart's ERROR->PANIC promotion; recovering here would
+    // e.g. abort a transaction whose commit record is already in WAL (issue
+    // #58). Give it C's PANIC treatment before the counter reset below.
+    elog::panic_on_crit_section_escape(err);
+
     // C's elog.c ERROR path resets the holdoff counters before longjmp; here
     // the catching frame does it (an unbalanced HOLD_INTERRUPTS on the unwind
     // path would otherwise leak forever).

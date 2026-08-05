@@ -5110,6 +5110,7 @@ dependencies = [
  "elog_seams",
  "error_small_seams",
  "guc_tables",
+ "init_small",
  "init_small_seams",
  "ipc_seams",
  "libc",

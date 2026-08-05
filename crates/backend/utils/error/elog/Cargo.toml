@@ -16,6 +16,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_dest = { path = "../../../../_support/types/types_dest" }
 elog_seams = { path = "../elog_seams" }
 error_small_seams = { path = "../error_small_seams" }
+init_small = { path = "../../init/init_small" }
 init_small_seams = { path = "../../init/init_small_seams" }
 pgstat_seams = { path = "../../activity/pgstat_seams" }
 syslogger_seams = { path = "../../../postmaster/syslogger_seams" }

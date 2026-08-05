@@ -107,8 +107,6 @@ pub fn set_syslog_split_messages(value: bool) {
     SYSLOG_SPLIT_MESSAGES.with(|c| c.set(value));
 }
 
-// `CritSectionCount` (miscadmin.h; owned by the crit-section machinery).
-thread_local! { static CRIT_SECTION_COUNT: Cell<u32> = const { Cell::new(0) }; }
 // `ExitOnAnyError` (globals.c; initdb sets it).
 thread_local! { static EXIT_ON_ANY_ERROR: Cell<bool> = const { Cell::new(false) }; }
 // `proc_exit_inprogress` (storage/ipc/ipc.c).
@@ -126,13 +124,17 @@ thread_local! { static FRONTEND_PROTOCOL: Cell<u32> = const { Cell::new(0) }; }
 // `OutputFileName` (globals.c); empty = none.
 thread_local! { static OUTPUT_FILE_NAME: RefCell<Option<String>> = const { RefCell::new(None) }; }
 
+// `CritSectionCount` (miscadmin.h): the single cell is init_small's — the one
+// START/END_CRIT_SECTION bump — so errstart's ERROR->PANIC promotion sees real
+// critical-section entry. A duplicate cell here was never incremented by
+// anything, leaving the promotion dead code tree-wide (issue #58).
 #[inline]
 pub fn crit_section_count() -> u32 {
-    CRIT_SECTION_COUNT.with(Cell::get)
+    init_small::globals::CritSectionCount()
 }
 
 pub fn set_crit_section_count(count: u32) {
-    CRIT_SECTION_COUNT.with(|c| c.set(count));
+    init_small::globals::SetCritSectionCount(count);
 }
 
 #[inline]

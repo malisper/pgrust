@@ -706,3 +706,63 @@ fn err_sendbytes_passes_raw_high_bytes() {
     let e = ::types_error::PgError::error_raw_message(b"unrecognized weight: \0".to_vec());
     assert_eq!(e.message(), "unrecognized weight: ");
 }
+
+// Issue #58: the critical-section ERROR->PANIC promotion (errstart) must read
+// the counter START_CRIT_SECTION actually bumps — init_small's — not a
+// duplicate elog-side cell that nothing increments. Real code, not
+// debug_assert: these bars must hold in release builds.
+#[test]
+fn errstart_promotes_error_to_panic_inside_critical_section() {
+    let _guard = lock();
+    reset_guc();
+
+    init_small::globals::StartCriticalSection();
+    assert_eq!(config::crit_section_count(), 1);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(errstart(ERROR, None));
+        errmsg("simulated failure inside a critical section").unwrap();
+        let _ = errfinish(None, 0, None);
+    }));
+    init_small::globals::SetCritSectionCount(0);
+
+    let payload = result.expect_err("ERROR inside a critical section must escalate to PANIC");
+    assert!(payload.is::<::types_error::PanicExitThread>());
+}
+
+// Control for the promotion: the identical ereport outside a critical
+// section stays a catchable ERROR.
+#[test]
+fn error_outside_critical_section_stays_catchable() {
+    let _guard = lock();
+    reset_guc();
+
+    assert_eq!(config::crit_section_count(), 0);
+    assert!(errstart(ERROR, None));
+    errmsg("simulated failure outside a critical section").unwrap();
+    let err = errfinish(None, 0, None).unwrap_err();
+    assert_eq!(err.level, ERROR);
+    assert!(error_stack_clean());
+}
+
+// Issue #58, catch-boundary arm: hand-built PgError values (xloginsert's
+// oversized-record errors, XLogFlush's "not satisfied") never pass through
+// errstart, so the frame that would recover must apply the promotion itself.
+#[test]
+fn hand_built_error_escaping_critical_section_panics_at_catch_boundary() {
+    let _guard = lock();
+    reset_guc();
+
+    let err = PgError::new(ERROR, "xlog flush request 0/1234 is not satisfied");
+
+    init_small::globals::StartCriticalSection();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        panic_on_crit_section_escape(&err);
+    }));
+    init_small::globals::SetCritSectionCount(0);
+    assert!(result
+        .expect_err("escaped Err with the critical section open must panic")
+        .is::<::types_error::PanicExitThread>());
+
+    // Control: with no critical section open the same error is recoverable.
+    panic_on_crit_section_escape(&err);
+}

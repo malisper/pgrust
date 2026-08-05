@@ -34,6 +34,16 @@ fn RecordTransactionCommit(xp: XsPtr) -> PgResult<TransactionId> {
             core::mem::ManuallyDrop::new(MemoryContext::new("RecordTransactionCommit"))
         });
         let out = RecordTransactionCommitGuts(xp, scratch.mcx());
+        // An Err escaping the commit critical section (still open: the guts
+        // skip END_CRIT_SECTION on the error path) must be C's PANIC, never a
+        // recoverable abort — after XactLogCommitRecord the commit record is
+        // already in WAL, and abort-after-commit for one xid is a WAL state C
+        // forbids (phantom commit on crash replay; issue #58). Guarded here,
+        // not just at the tcop catch boundary, so non-tcop callers get the
+        // same contract.
+        if let Err(err) = &out {
+            elog::panic_on_crit_section_escape(err);
+        }
         // The empty commit allocates nothing (C has no scratch on this path
         // at all): reset only if something was charged since the last reset.
         if scratch.peak() != 0 {
@@ -262,6 +272,12 @@ fn record_transaction_abort_guts(
         Ok(())
     })();
 
+    // Same contract as the commit path (issue #58): an ERROR inside the abort
+    // critical section is C's PANIC, never a recoverable Err. Checked before
+    // EndCriticalSection so the guard sees the section still open.
+    if let Err(err) = &result {
+        elog::panic_on_crit_section_escape(err);
+    }
     init_small::globals::EndCriticalSection();
     result?;
 

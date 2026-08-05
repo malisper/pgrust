@@ -381,6 +381,29 @@ pub fn emit_error_report_for(error: &PgError) {
     }
 }
 
+/// Catch-boundary arm of C's critical-section contract (miscadmin.h): any
+/// ERROR raised between START_CRIT_SECTION and END_CRIT_SECTION must be a
+/// PANIC. `errstart` enforces that for ereport-path errors; hand-built
+/// `PgError` values never pass through `errstart`, so every frame that
+/// converts an escaped `Err` back into recoverable session state must call
+/// this BEFORE it resets CritSectionCount. Recovering instead lets the xact
+/// commit path append an abort record after an already-inserted commit
+/// record for the same xid — a WAL state C forbids (phantom commit on crash
+/// replay; issue #58).
+#[cold]
+#[inline(never)]
+pub fn panic_on_crit_section_escape(error: &PgError) {
+    if config::crit_section_count() == 0 {
+        return;
+    }
+    let mut promoted = error.clone();
+    promoted.level = PANIC;
+    emit_error_report_for(&promoted);
+    flush_all();
+    // C abort(): the catchable crash class, as in errfinish's PANIC arm.
+    std::panic::panic_any(types_error::PanicExitThread);
+}
+
 // Current-frame mutators (errcode, errmsg, errdetail, ...). Each returns
 // Err("errstart was not called") with no report in flight (CHECK_STACK_DEPTH).
 

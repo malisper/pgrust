@@ -77,7 +77,6 @@ pub fn reset_exit_state_for_retained_park() {
     elog::config::set_proc_exit_inprogress(false);
     init_small::globals::SetInterruptHoldoffCount(0);
     init_small::globals::SetCritSectionCount(0);
-    elog::config::set_crit_section_count(0);
     elog::reset_statement_suppressed();
 }
 
@@ -181,7 +180,6 @@ fn commit_to_exit() {
     init_small::globals::SetQueryCancelPending(false);
     init_small::globals::SetInterruptHoldoffCount(1);
     init_small::globals::SetCritSectionCount(0);
-    elog::config::set_crit_section_count(0);
 
     elog::clear_emit_context_callbacks();
     elog::suppress_statement();

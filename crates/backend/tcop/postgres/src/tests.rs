@@ -375,3 +375,33 @@ fn log_sampling_leaves_log_min_duration_statement_intact() {
     let (code, _) = simple_query::check_log_duration_impl(false, 10, &g, || panic!("no draw"));
     assert_eq!(code, 2);
 }
+
+// Issue #58: an Err reaching error_recovery with the critical section still
+// open (a hand-built PgError that bypassed errstart's ERROR->PANIC promotion,
+// e.g. XLogFlush failing after the commit record is already in WAL) must
+// crash-and-restart, not settle back into the main loop. The guard sits
+// before every recovery step, so no seams are needed to reach it.
+#[test]
+fn error_recovery_escalates_instead_of_recovering_inside_critical_section() {
+    use init_small::globals as g;
+
+    let err = types_error::PgError::new(
+        types_error::ERROR,
+        "xlog flush request 0/1234 is not satisfied",
+    );
+    let mut state = main_loop::LoopState {
+        send_ready_for_query: true,
+        idle_in_transaction_timeout_enabled: false,
+        idle_session_timeout_enabled: false,
+    };
+
+    g::SetCritSectionCount(1);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = main_loop::error_recovery(&err, &mut state, true);
+    }));
+    g::SetCritSectionCount(0);
+
+    assert!(result
+        .expect_err("error_recovery must not recover with a critical section open")
+        .is::<types_error::PanicExitThread>());
+}

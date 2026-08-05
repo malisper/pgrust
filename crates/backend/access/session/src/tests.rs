@@ -892,7 +892,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      raced parallel sibling tests whose query-desc handles carry the
     //      same small sequence numbers). Non-session: per-test scratch on
     //      the test's own thread, compiled out of every product build.
-    assert_eq!(count_tree(crates), 557, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 556, re-pinned at the issue #58 crit-section counter unification:
+    //   -1 utils/error/elog/src/config.rs — CRIT_SECTION_COUNT: duplicate
+    //      per-thread cell DELETED; elog now reads init_small's counter (the
+    //      one START/END_CRIT_SECTION actually bump), making errstart's
+    //      ERROR->PANIC promotion live. Session coverage unchanged: the
+    //      surviving cell was already in SESSION_ENVELOPE_MANIFEST
+    //      (init_small/globals.rs CRIT_SECTION_COUNT).
+    assert_eq!(count_tree(crates), 556, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
