@@ -3592,6 +3592,7 @@ pub fn final_cost_hashjoin(
     let virtualbuckets = numbuckets as f64 * numbatches as f64;
 
     // A unique-ified inner is assumed perfectly hashable (C's UniquePath arm).
+    #[allow(unused_assignments)] // Rust-structural: C declares uninitialized (costsize.c:4294); the by-value seam made this initializer dead
     let mut innerbucketsize = 1.0f64;
     let mut innermcvfreq = 1.0f64;
     let inner_relids = run.root.rel(inner_parent).relids.clone();

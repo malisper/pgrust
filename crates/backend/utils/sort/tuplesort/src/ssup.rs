@@ -93,6 +93,7 @@ pub enum SortComparator {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(unpredictable_function_pointer_comparisons)] // derived Eq compares fn_addr on purpose: trampoline identity check
 pub struct ShimCmp {
     pub fn_addr: PGFunction,
     pub fn_oid: Oid,

@@ -139,6 +139,7 @@ fn fc_spg_text_choose(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     let level = input.level as usize;
 
     let mut common_len = 0usize;
+    #[allow(unused_assignments)] // C-parity dead initializer (spgtextproc.c:194)
     let mut node_char: i16 = 0;
 
     if input.hasPrefix {

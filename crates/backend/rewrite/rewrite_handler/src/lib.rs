@@ -158,6 +158,7 @@ fn RewriteQuery<'mcx>(
     }
     let num_ctes_processed = cte_len;
 
+    #[allow(unused_assignments)] // Rust-structural: hoisted from C's block scope (rewriteHandler.c:3996); always assigned before the block's read
     let mut product_count = 0usize;
     let mut has_update = false;
     if event != CmdType::CMD_SELECT && event != CmdType::CMD_UTILITY {

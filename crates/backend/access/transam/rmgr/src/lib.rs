@@ -84,6 +84,7 @@ pub const fn RmgrIdIsValid(rmid: i32) -> bool {
     RmgrIdIsBuiltin(rmid) || RmgrIdIsCustom(rmid)
 }
 
+#[allow(unused_macros)] // stub scaffolding for not-yet-ported redo callbacks
 macro_rules! unported_redo {
     ($($name:ident => $unit:literal;)+) => {$(
         #[cold]

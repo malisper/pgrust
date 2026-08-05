@@ -1790,6 +1790,7 @@ impl PayloadSink<'_, '_> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(unused_assignments)] // dead trailing advance in payload_field!'s last expansion: ptr matches C (xlogreader.c:1963); remaining is the Rust re-validation counter
 fn decode_record<'mcx>(
     mcx: Mcx<'mcx>,
     decode_buffer: &mut PgVec<'mcx, u8>,

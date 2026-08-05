@@ -271,6 +271,7 @@ fn _hash_readpage(
     ctx.so.currPos.currPage = bm::buffer_get_block_number::call(buf);
 
     if dir == ForwardScanDirection {
+        #[allow(unused_assignments)] // C-parity dead initializer (hashsearch.c:469)
         let mut prev_blkno = InvalidBlockNumber;
         loop {
             // SAFETY: lock held on buf across the page read.

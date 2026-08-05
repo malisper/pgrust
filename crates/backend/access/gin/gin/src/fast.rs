@@ -648,6 +648,7 @@ pub fn ginInsertCleanup<'s>(
     let mut ka: (Vec<Datum>, Vec<GinNullCategory>) =
         (Vec::with_capacity(128), Vec::with_capacity(128));
     let mut cleanup_finish = false;
+    #[allow(unused_assignments)] // C-parity dead initializer (ginfast.c:797)
     let mut fsm_vac = false;
 
     loop {

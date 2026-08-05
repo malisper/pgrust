@@ -188,6 +188,7 @@ fn flatten_item(
     check_stack_depth()?;
 
     let pos = buf.len() as i32 - JSONPATH_HDRSZ as i32;
+    #[allow(unused_assignments)] // Rust-structural: definite-init boilerplate (C: jsonpath.c:245 declares uninitialized; every arm assigns)
     let mut chld: i32 = 0;
     let mut arg_nesting_level = 0i32;
 

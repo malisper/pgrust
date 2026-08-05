@@ -934,6 +934,7 @@ mod emit {
         e.ldr_x(0, CTX, CTX_ENV);
         e.movz_w(1, ix & 0xFFFF);
         debug_assert!(ix <= 0xFFFF);
+        #[allow(function_casts_as_integer)] // fn address emitted as a call literal; cast is intentional
         e.ldr_lit(8, super::jitq_step as usize as u64);
         e.blr(8);
         e.tbnz_sign(0, Target::NegSentinel);
@@ -967,6 +968,7 @@ mod emit {
         e.ldr_lit(2, fcinfo);
         e.ldr_lit(3, out);
         e.movz_x(4, ctl);
+        #[allow(function_casts_as_integer)] // fn address emitted as a call literal; cast is intentional
         e.ldr_lit(8, super::jitq_call as usize as u64);
         e.blr(8);
         e.tbnz_sign(0, Target::ExitErr);

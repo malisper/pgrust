@@ -1315,6 +1315,7 @@ fn build_subplan<'mcx>(
         per_call_cost: 0.0,
     };
 
+    #[allow(unused_assignments)] // Rust-structural: definite-init boilerplate (C: subselect.c:327 declares uninitialized; every branch assigns)
     let mut is_init_plan = false;
     let mut result: Option<Node<'mcx>> = None;
     if splan.parParam.is_nil() && sub_link_type == SubLinkType::EXISTS_SUBLINK {

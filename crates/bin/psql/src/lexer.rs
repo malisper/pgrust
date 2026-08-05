@@ -94,6 +94,7 @@ impl ScanState {
 
     /// Feed one input line (no trailing newline). Returns the extracted
     /// complete items in order. Variable interpolation uses `vars`.
+    #[allow(unused_assignments)] // Rust-structural: push! sets appended_sep in both arms for uniformity; the pre-flush instance is dead by construction (no psqlscan.l counterpart)
     pub fn scan_line(&mut self, line: &str, vars: &HashMap<String, String>) -> Vec<ScanItem> {
         let mut out = Vec::new();
         let chars: Vec<char> = line.chars().collect();

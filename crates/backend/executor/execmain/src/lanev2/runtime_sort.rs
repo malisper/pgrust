@@ -537,6 +537,7 @@ pub(super) enum TopnLocal {
     Wide(TopnWideHeap),
     /// GL-TOPNHEAP-1 direct feed: single-key entries carrying the captured
     /// output row (adopt = pure copy).
+    #[allow(private_interfaces)] // visibility is deliberate API shape; widening is a design decision deferred
     Direct(BoundedTopnHeap<PayEntry>),
     Full(FullLocal),
 }
@@ -561,6 +562,7 @@ pub(super) enum TopnSealed {
     Narrow(Vec<TopnEntry>),
     Wide(Vec<WideEntry>),
     /// GL-TOPNHEAP-1 direct feed: sealed payload-carrying run.
+    #[allow(private_interfaces)] // visibility is deliberate API shape; widening is a design decision deferred
     Direct(Vec<PayEntry>),
     /// Sealed full-sort run (sorted entries + fixed-up buf) — Arc so the
     /// finalize publish clones pointers, never row data.

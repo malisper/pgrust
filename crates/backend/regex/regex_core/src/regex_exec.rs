@@ -969,6 +969,7 @@ fn shortest(
     }
     css = m as usize;
     d.ssets[css].lastseen = Pos::at(cp);
+    #[allow(unused_assignments)] // Rust-structural: C's live pre-loop store (rege_dfa.c:280) is expressed through scan_shortest's return
     let mut ss: Option<usize> = Some(css);
 
     // Same bounds-check fold as longest(); per-char loop in the kernel.

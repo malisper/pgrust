@@ -43,6 +43,7 @@ pub fn init_seams() {
 /// an unported dependency at resolution time instead of deep inside an
 /// operation (e.g. a GiST page split long after CREATE INDEX succeeded).
 pub fn fmgr_info_not_ported_name(flinfo: &FmgrInfo) -> Option<&'static str> {
+    #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
     if flinfo.fn_addr as usize == builtin_not_ported as usize
         && late_builtin(flinfo.fn_oid).is_none()
     {
@@ -238,6 +239,7 @@ static EXTRA_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUs
 pub fn install_extra_builtins(tables: &'static [&'static [FmgrBuiltin]]) {
     for t in tables {
         for b in *t {
+            #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
             let live = fmgr_isbuiltin(b.foid)
                 .is_some_and(|x| x.func as usize != builtin_not_ported as usize);
             assert!(!live, "extra builtin {} collides with a live row", b.foid);
@@ -271,6 +273,7 @@ fn extra_builtin(id: Oid) -> Option<&'static FmgrBuiltin> {
 #[inline]
 pub fn fmgr_isbuiltin(id: Oid) -> Option<&'static FmgrBuiltin> {
     match FMGR_BUILTIN_OID_INDEX.lookup(&FMGR_BUILTINS, id) {
+        #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
         Some(b) if b.func as usize == builtin_not_ported as usize => {
             extra_builtin(id).or(Some(b))
         }
@@ -343,6 +346,7 @@ pub fn fmgr_internal_function(proname: &str) -> Oid {
 /// flinfo-less invocations (sortsupport shims) don't dead-end in the stub.
 #[inline]
 pub fn fmgr_info_from_builtin_into(fbp: &FmgrBuiltin, function_id: Oid, finfo: &mut FmgrInfo) {
+    #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
     let fbp = if fbp.func as usize == builtin_not_ported as usize {
         late_builtin(function_id).unwrap_or(fbp)
     } else {
@@ -480,6 +484,7 @@ fn fmgr_info_pg_proc(
                 // A user-created internal-language fn (new oid) must resolve
                 // through the canonical entry's oid; the stub's late lookup
                 // keys on flinfo.fn_oid, which is the new oid.
+                #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
                 Some(fbp) if fbp.func as usize == builtin_not_ported as usize => {
                     late_builtin(fbp.foid).map_or(fbp.func, |b| b.func)
                 }

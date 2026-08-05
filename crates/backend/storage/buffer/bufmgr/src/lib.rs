@@ -274,6 +274,7 @@ pub fn RelationGetNumberOfBlocksInFork(
     smgr_seams::rel_smgr_nblocks::call(rel, forknum)
 }
 
+#[allow(unused_macros)] // stub scaffolding for not-yet-ported bufmgr.c callees
 macro_rules! unported {
     ($(fn $name:ident($($ty:ty),*) -> $ret:ty, $cfn:literal;)+) => {
         $(pub fn $name($(_: $ty),*) -> $ret {

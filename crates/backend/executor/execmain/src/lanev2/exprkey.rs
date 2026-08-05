@@ -2412,6 +2412,7 @@ impl ExprKeyState {
     /// over the plan's StrMin/StrMax lanes through the base-column map);
     /// every other kind keeps an empty memo (their sink plans carry no str
     /// transitions — the vguard belts).
+    #[allow(private_interfaces)] // visibility is deliberate API shape; widening is a design decision deferred
     pub(super) fn take_sink_mm(&mut self, agg: &::nodeagg::AggStateData<'_>) -> MmState {
         if !self.sink_mm_armed {
             self.sink_mm_armed = true;
@@ -2437,6 +2438,7 @@ impl ExprKeyState {
     }
 
     /// Return the memo after the drain call (see [`Self::take_sink_mm`]).
+    #[allow(private_interfaces)] // visibility is deliberate API shape; widening is a design decision deferred
     pub(super) fn put_sink_mm(&mut self, mm: MmState) {
         self.sink_mm = mm;
     }

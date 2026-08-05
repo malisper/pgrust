@@ -185,6 +185,7 @@ fn process_syncing_tables_for_sync(
 }
 
 // process_syncing_tables_for_apply (tablesync.c:459).
+#[allow(unused_assignments)] // Rust-structural: defensive started_tx = false between commit and restart (C tablesync.c:578-587 has no intermediate clear); hoisted
 fn process_syncing_tables_for_apply(mcx: Mcx<'static>, current_lsn: XLogRecPtr) -> PgResult<()> {
     debug_assert!(!xact::IsTransactionState());
     let subid = my_sub(|s| s.oid);

@@ -701,6 +701,7 @@ impl XLogReaderRoutine for SummarizerPageRead {
     }
 }
 
+#[allow(unused_assignments)] // C-parity dead stores: summary_end_lsn init + end-of-WAL branch (walsummarizer.c:915, 998); hoisted
 fn SummarizeWAL(
     tli: TimeLineID,
     start_lsn: XLogRecPtr,

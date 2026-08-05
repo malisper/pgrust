@@ -411,6 +411,7 @@ pub fn gistplacetopage<'mcx>(
 }
 
 /// gistdoinsert. Assumes a short-lived `mcx` (reset by the caller per tuple).
+#[allow(unused_assignments)] // C-parity dead store: xlocked = true (gist.c:849); hoisted — assignment stmts take no attrs
 pub fn gistdoinsert<'mcx>(
     mcx: Mcx<'mcx>,
     r: &Relation<'_>,

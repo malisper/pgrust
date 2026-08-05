@@ -542,6 +542,7 @@ pub fn array_set_slice<'mcx>(
     let src_data_off = arr_data_offset(src_array);
     let mut newhasnulls = bitmap_off.is_some() || src_bitmap_off.is_some();
     let mut addedbefore = 0i32;
+    #[allow(unused_assignments)] // C-parity dead store (arrayfuncs.c:2922)
     let mut addedafter = 0i32;
 
     if ndim == 1 {

@@ -3536,13 +3536,17 @@ unsafe fn str_advance_coded(
     mut sa: Option<&mut StrStateArena>,
 ) -> PgResult<()> {
     // Copy/replace through the table-owned store when armed (str_advance's
-    // dispatch, hoisted so every arm below shares it).
+    // dispatch, hoisted so every arm below shares it). Some expansion sites
+    // sit inside an outer unsafe block, making these inner blocks redundant
+    // there; the allow keeps the blocks, which the non-unsafe sites need.
     macro_rules! sa_replace {
         () => {
             match sa.as_deref_mut() {
                 // SAFETY: forwarded caller contract.
+                #[allow(unused_unsafe)]
                 Some(a) => unsafe { a.replace(pg.trans_value, d) },
                 // SAFETY: forwarded caller contract.
+                #[allow(unused_unsafe)]
                 None => unsafe {
                     ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)?
                 },

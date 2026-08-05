@@ -975,6 +975,7 @@ pub fn make_inner_pathkeys_for_merge<'mcx>(
     Ok(pathkeys)
 }
 
+#[allow(unused_assignments)] // C-parity dead store: matched_pathkey = false (pathkeys.c:2007); hoisted — assignment stmts take no attrs
 pub fn trim_mergeclauses_for_inner_pathkeys<'mcx>(
     run: &PlannerRun<'mcx>,
     mergeclauses: &[types_pathnodes::RinfoId],

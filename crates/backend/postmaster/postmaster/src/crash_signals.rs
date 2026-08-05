@@ -18,6 +18,7 @@ static mut PREV_ACTIONS: [MaybeUninit<libc::sigaction>; 4] =
     [const { MaybeUninit::uninit() }; 4];
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+#[allow(function_casts_as_integer)] // libc sa_sigaction is usize; handler-address cast is intentional
 pub fn install_crash_signal_reporter() {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return;
