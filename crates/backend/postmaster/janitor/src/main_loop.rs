@@ -1,8 +1,17 @@
-//! The janitor's background-worker body: connect, adoption guard, startup
-//! sweep, then the ~500ms reap loop. ALL lifecycle mutations serialize
-//! through this loop — a design invariant D2's mint path relies on.
+//! The janitor's background-worker body: connect, startup sweep, then the
+//! ~500ms reap loop. ALL lifecycle mutations serialize through this loop —
+//! a design invariant D2's mint path relies on.
+//!
+//! THE PREFIX IS THE CONTRACT (ruling 2026-08-05): arming the janitor with
+//! `pgrust.ephemeral_db_prefix` hands it the whole matching namespace. The
+//! startup sweep unconditionally drops EVERY prefix-matching non-template
+//! database — pre-existing or leftover alike (templates are exempt via
+//! IS_TEMPLATE, as always) — with an informative log line naming what was
+//! dropped. There is no adoption guard, no PAUSED state, no marker file,
+//! and no provenance tracking: a database named under the prefix is
+//! ephemeral by definition.
 
-use elog::{elog as log_report, ereport};
+use elog::elog as log_report;
 use init_small::globals as g;
 use procsignal::ThreadSignalHandler::Simple;
 use types_core::Oid;
@@ -10,9 +19,8 @@ use types_error::{PgResult, ERRCODE_ADMIN_SHUTDOWN, FATAL, LOG, WARNING};
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
 use crate::dbscan::{scan_prefix_rows, DbRow};
-use crate::marker::{self, Guard};
 use crate::reap::{reap_candidate, StreakTracker};
-use crate::{grammar, maint, mint, pool, prewarm, registry, seal};
+use crate::{maint, mint, pool, prewarm, registry, seal};
 
 /// Poll cadence (spec: "~500ms").
 const TICK_MS: i64 = 500;
@@ -99,12 +107,17 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
         ),
     );
 
-    // First iteration (spec item 3: the earliest a DB-connected worker can
-    // run — between server start and this point a client may reconnect to a
-    // leaked database; it then falls back to normal grace-based reaping):
-    // adoption guard, then either the paused state or the startup sweep
-    // (scheduled via the deferred-sweep request, run by the first tick).
-    startup_guard_and_sweep(&prefix)?;
+    // Startup sweep (spec item 3), scheduled via the deferred-sweep request
+    // and run by the first tick so its failures are contained and RETRIED
+    // by the loop instead of disabling the janitor. Unconditional — THE
+    // PREFIX IS THE CONTRACT (module doc): every prefix-matching
+    // non-template database is dropped, pre-existing or leftover alike.
+    // (Between server start and the first tick a client may reconnect to a
+    // leftover; it then blocks the drop via dropdb's own occupancy check
+    // and falls back to normal grace-based reaping. Pins do not survive
+    // restart; any pin present by sweep time was taken in that reconnect
+    // window and is honored — sweep_pass re-reads the pin table.)
+    registry::request_sweep();
 
     let mut streaks = StreakTracker::new();
     let mut maint_state = maint::MaintState::new();
@@ -134,24 +147,9 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
             }
         }
 
-        // Paused (adoption guard): no sweep, no reaping, and D2 mint
-        // Ensures are rejected against registry::is_paused(). Keep ticking
-        // so SIGHUP/shutdown stay responsive. The drain matters: Ensures
-        // posted between set_janitor_proc (above) and the guard's pause
-        // decision would otherwise wait out their full timeout — the
-        // backend post path refuses NEW ones, this rejects the window's
-        // stragglers (both halves are required; neither alone closes the
-        // race).
-        if registry::is_paused() {
-            mint::reject_pending_paused();
-            continue;
-        }
-
-        // Deferred startup sweep, requested by pgrust_janitor_unpause()
-        // after it durably wrote the marker, or by the adoption guard on a
-        // normal (marker-acknowledged) start. A contained failure re-arms
-        // the request: "unpause runs the deferred sweep" must not silently
-        // downgrade to grace-based reaping because one pass failed.
+        // Deferred startup sweep (requested at janitor start above). A
+        // contained failure re-arms the request: the startup sweep must not
+        // silently downgrade to grace-based reaping because one pass failed.
         if registry::take_sweep_request() {
             let _ = log_report(
                 LOG,
@@ -186,8 +184,7 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
         // (waiters outrank refill, and handed-out slots are visible to the
         // deficit count), before reap enumeration (new spares are
         // registered/shielded before the pass that would otherwise see them
-        // as zero-connection candidates). The paused branch above skips it
-        // for free.
+        // as zero-connection candidates).
         if let Err(e) = pool::replenish_pass(&prefix) {
             contain(e, "warm-pool replenish pass")?;
         }
@@ -208,8 +205,7 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
         }
 
         // Shared-catalog maintenance (maint.rs), AFTER the reap pass so
-        // this tick's drops count toward the churn trigger. Paused ticks
-        // never reach it (the paused branch above).
+        // this tick's drops count toward the churn trigger.
         if let Err(e) = maint::maintenance_pass(&mut maint_state) {
             contain(e, "shared-catalog maintenance")?;
         }
@@ -277,71 +273,6 @@ fn list_prefix_databases_all_oids(prefix: &str) -> PgResult<(Vec<DbRow>, Vec<Oid
     let rows = crate::dbscan::scan_prefix_rows_collect(prefix, Some(&mut all_oids))?;
     xact::CommitTransactionCommand()?;
     Ok((rows, all_oids))
-}
-
-/// The adoption guard (spec item 4), run once before the first tick.
-fn startup_guard_and_sweep(prefix: &str) -> PgResult<()> {
-    let rows = list_prefix_databases(prefix)?;
-    match marker::decode(marker::read()?.as_deref(), prefix) {
-        Guard::Acknowledged => {
-            // Normal (re)start: leftover ephemerals are disposable across
-            // restarts — sweep them (spec item 3). The sweep is scheduled
-            // through the deferred-sweep mechanism and runs on the first
-            // tick: its failures are then contained and RETRIED by the loop
-            // instead of disabling the janitor (containment symmetry — the
-            // guard decision itself, marker I/O and this enumeration, still
-            // propagates: the guard must never be silently defeated). Pins
-            // do not survive restart; any pin present by the time the sweep
-            // runs was taken in the reconnect window and is honored
-            // (sweep_pass re-reads both the catalog and the pin table).
-            registry::request_sweep();
-        }
-        Guard::Unacknowledged { recorded } => {
-            let survivors: Vec<&DbRow> = rows.iter().filter(|d| !d.istemplate).collect();
-            if survivors.is_empty() {
-                // Nothing the sweep would touch: adopt the prefix now so
-                // the next restart is a normal one.
-                marker::write(prefix)?;
-                let _ = log_report(
-                    LOG,
-                    format!(
-                        "pgrust ephemeral-db janitor: prefix \"{prefix}\" adopted (no existing \
-                         non-template databases match); marker \"{}\" written",
-                        marker::MARKER_FILE
-                    ),
-                );
-            } else {
-                registry::set_paused(true);
-                let names: Vec<&str> = survivors.iter().map(|d| d.name.as_str()).collect();
-                let recorded_desc = match recorded {
-                    Some(p) => format!("records prefix \"{p}\""),
-                    None => "is absent".to_string(),
-                };
-                // Loud by design: this is the `prefix = 'prod'` foot-gun
-                // guard. ereport(WARNING) so it stands out in the log.
-                let _ = ereport(WARNING)
-                    .errmsg(format!(
-                        "pgrust ephemeral-db janitor: PAUSED — {} database(s) match prefix \
-                         \"{prefix}\" but the adoption-guard marker {recorded_desc}: {}",
-                        names.len(),
-                        names.join(", ")
-                    ))
-                    .errdetail(
-                        "No startup sweep and no reaping will run while paused; \
-                         mint requests are rejected."
-                            .to_string(),
-                    )
-                    .errhint(
-                        "Run SELECT pgrust_janitor_unpause(); (superuser) to acknowledge the \
-                         prefix, write the marker, and run the deferred startup sweep — or \
-                         restart with a different pgrust.ephemeral_db_prefix."
-                            .to_string(),
-                    )
-                    .finish(loc("startup_guard_and_sweep"));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Startup sweep (spec item 3): the reap predicate minus the grace clause.
@@ -416,15 +347,10 @@ fn reap_pass(prefix: &str, streaks: &mut StreakTracker) -> PgResult<()> {
             continue;
         }
         seen.push(d.oid);
-        // Per-template grace (spec D2: a clone of template A reaps on A's
-        // override, not the default). Attribution is by NAME GRAMMAR alone
-        // (grammar::template_of): bare tokens carry no template segment and
-        // reap on the default grace.
-        let grace_secs = grammar::template_of(prefix, &d.name)
-            .and_then(registry::template_grace_override)
-            .map(|s| s.max(0) as u64)
-            .unwrap_or(default_grace_secs);
-        let grace_ns = grace_secs * 1_000_000_000;
+        // One GLOBAL grace (pgrust.ephemeral_db_grace): the per-template
+        // override surface was deleted with pgrust_set_template_grace
+        // (ruling 2026-08-05 — pin a database, or raise the global grace).
+        let grace_ns = default_grace_secs * 1_000_000_000;
         // Procarray ground truth — never refcounts (spec item 2). NOTE:
         // CountDBBackends does not count prepared xacts, so a database
         // holding only a prepared transaction accrues a streak; its drop
@@ -590,14 +516,6 @@ fn dropdb_this_victim(oid: Oid, name: &str) -> PgResult<bool> {
     let dropped = dbcommands::dropdb_skip_checkpoint(cx.mcx(), name, true, false, Some(oid))?;
     xact::CommitTransactionCommand()?;
     Ok(dropped)
-}
-
-fn loc(func: &'static str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new(
-        "crates/backend/postmaster/janitor/src/main_loop.rs",
-        0,
-        func,
-    )
 }
 
 #[cfg(test)]

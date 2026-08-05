@@ -458,11 +458,10 @@ pub fn init_all_with_transport(transport: Transport) {
         // coverage view SRF (execmain lanev2/coverage.rs; created on demand
         // by scripts/lane-coverage-view.sql — no catalog delta by default).
         execmain::LANEV2_BUILTINS,
-        // pgrust-native (reserved-range oids 9001-9004): the ephemeral-db
-        // janitor's pin/unpin/unpause/set-template-grace surface (created on
-        // demand by scripts/testmode/janitor-functions.sql — no catalog
-        // delta by default; the test-server recipe installs them into
-        // templates).
+        // pgrust-native (reserved-range oids 9001/9002/9005): the
+        // ephemeral-db janitor's pin/unpin/seal surface — TRUE builtins
+        // whose pg_proc rows janitor::bootstrap backfills into every
+        // database on first connection (no install script).
         janitor::JANITOR_BUILTINS,
     ];
     fmgr_core::install_extra_builtins(&EXTRA_BUILTINS);

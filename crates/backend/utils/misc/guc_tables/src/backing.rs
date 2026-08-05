@@ -270,12 +270,6 @@ int_var!(
     set_pgrust_ephemeral_db_max_per_role,
     0
 );
-string_var!(
-    CELL_pgrust_ephemeral_db_default_template,
-    pgrust_ephemeral_db_default_template,
-    set_pgrust_ephemeral_db_default_template,
-    Some("")
-);
 // D3 warm pool (docs/design/test-views.md warm-pool addendum): PGC_SIGHUP,
 // read by the janitor each tick after its reload idiom.
 int_var!(

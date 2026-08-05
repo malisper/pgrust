@@ -100,19 +100,6 @@ pub(crate) fn request_seal(datname: &str) -> PgResult<()> {
             )
             .into_error()
             .into()),
-        PostSeal::JanitorPaused => Err(ereport(ERROR)
-            .errcode(ERRCODE_CANNOT_CONNECT_NOW)
-            .errmsg(format!(
-                "cannot seal database \"{datname}\": the pgrust ephemeral-db janitor is paused \
-                 by the adoption guard"
-            ))
-            .errhint(
-                "Run SELECT pgrust_janitor_unpause(); (superuser) to acknowledge the \
-                 configured prefix."
-                    .to_string(),
-            )
-            .into_error()
-            .into()),
         PostSeal::TableFull => Err(ereport(ERROR)
             .errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
             .errmsg(format!(
@@ -175,7 +162,7 @@ fn wait_for_seal(datname: &str, gen: u64, procno: ProcNumber) -> PgResult<()> {
             SealStatus::InProgress => {}
         }
 
-        if !registry::janitor_present() || registry::is_paused() {
+        if !registry::janitor_present() {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_CANNOT_CONNECT_NOW)
                 .errmsg(format!(

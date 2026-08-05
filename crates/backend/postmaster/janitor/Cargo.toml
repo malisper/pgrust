@@ -17,6 +17,10 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"]
 aclchk = { path = "../../catalog/aclchk" }
 adt_acl = { path = "../../utils/adt/acl" }
 bgworker = { path = "../bgworker" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+heaptuple = { path = "../../access/common/heaptuple" }
+pg_proc = { path = "../../catalog/pg_proc" }
 checkpointer = { path = "../checkpointer" }
 commands_vacuum = { path = "../../commands/vacuum" }
 datum = { path = "../../../_support/types/datum" }

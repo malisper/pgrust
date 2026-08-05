@@ -13,14 +13,14 @@
 //!   deferral safety analysis pointer).
 //! - **Startup sweep**: the first loop iteration drops every prefix-matching
 //!   non-template (and unpinned — pins are restart-lossy, so only pins taken
-//!   in the start-to-first-iteration reconnect window exist) database.
-//! - **Adoption guard**: the opt-in is durable — marker.rs records the
-//!   acknowledged prefix in PGDATA; absent/different marker + surviving
-//!   matches ⇒ the janitor starts PAUSED (no sweep, no reap, loud log) until
-//!   `pgrust_janitor_unpause()`.
-//! - **Pin/unpin/unpause**: builtins.rs, reserved-oid `LANGUAGE internal`
-//!   builtins (the `pgrust_lane_coverage` precedent); pin state is
-//!   process-global memory only (registry.rs), lost on restart BY DESIGN.
+//!   in the start-to-first-iteration reconnect window exist) database,
+//!   UNCONDITIONALLY. THE PREFIX IS THE CONTRACT (ruling 2026-08-05):
+//!   arming the janitor hands it the whole matching namespace — there is no
+//!   adoption guard, no PAUSED state, and no marker file.
+//! - **Pin/unpin/seal**: builtins.rs, reserved-oid `LANGUAGE internal`
+//!   builtins whose pg_proc rows every database carries (bootstrap.rs
+//!   backfills them — no install step); pin state is process-global memory
+//!   only (registry.rs), lost on restart BY DESIGN.
 //!
 //! Containment contract: the loop catches every `PgResult` error from its
 //! own work (drop failures included) and keeps running; an unrecoverable
@@ -43,12 +43,12 @@
 //! wal_log strategy pick).
 #![allow(non_snake_case)]
 
+pub mod bootstrap;
 pub mod builtins;
 mod dbscan;
 pub mod grammar;
 mod main_loop;
 mod maint;
-pub mod marker;
 pub mod mint;
 mod prewarm;
 // The parallel batch-copy helper is LIVE-ONLY: its workers issue raw
@@ -98,14 +98,6 @@ pub fn ephemeral_db_mint_roles() -> String {
 /// `pgrust.ephemeral_db_max_per_role` (PGC_SIGHUP, default 0 = unlimited).
 pub fn ephemeral_db_max_per_role() -> i32 {
     guc_tables::vars::pgrust_ephemeral_db_max_per_role.read()
-}
-
-/// `pgrust.ephemeral_db_default_template` (PGC_SIGHUP, default `''` = bare
-/// tokens refuse to mint).
-pub fn ephemeral_db_default_template() -> String {
-    guc_tables::vars::pgrust_ephemeral_db_default_template
-        .read()
-        .unwrap_or_default()
 }
 
 /// `pgrust.ephemeral_db_pool_size` (PGC_SIGHUP, default 0 = warm pool off).
@@ -173,6 +165,10 @@ pub fn init_seams() {
     // D2 mint-on-connect: the InitPostgres lookup-miss hook (uninstalled =
     // stock behavior; the postinit guard checks is_installed()).
     janitor_seams::ephemeral_db_mint_on_connect::set(mint::mint_on_connect);
+    // Bootstrap-builtin backfill: PostgresMain calls through the seam after
+    // InitPostgres so the three janitor builtins exist in every database a
+    // session can reach — no install step (bootstrap.rs).
+    janitor_seams::builtin_backfill::set(bootstrap::backfill_builtin_rows);
     guc_tables::hooks::check_pgrust_ephemeral_db_mint_roles
         .install(mint::check_ephemeral_db_mint_roles);
 }

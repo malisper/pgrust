@@ -152,6 +152,7 @@ fs	crates/backend/libpq/fdnb/src/lib.rs	2	DST-REVIEW(p4-simnet): the SHARED nobl
 # the gang before the mint transaction proceeds (join-bounded-after-wake: the
 # workers' exit needs no run token — pure syscall loops over a snapshotted
 # file list). Time sites are throughput telemetry on the copy log line.
+env	crates/backend/postmaster/janitor/src/registry.rs	1	DST-REVIEW(testmode-drawer2): PGRUST_EPHEMERAL_DB_MAX_SPARES — rig-only override of the warm-pool global spare ceiling (janitor-mint-races phase R needs the cap-binding round-robin regime without minting thousands of spares); process-constant env read once, process_global-cached, clamped to MAX_SPARES; knobs-registry routing (s2.5) chartered to the DST program
 blocking	crates/backend/postmaster/janitor/src/parcopy.rs	1	DST-REVIEW(testdb-land): 2ms poll sleep on the janitor thread while workers run — keeps CHECK_FOR_INTERRUPTS responsive during the copy; bounded by worker completion (workers are token-free syscall loops)
 fs	crates/backend/postmaster/janitor/src/parcopy.rs	14	DST-REVIEW(testdb-land): raw open/read/write/copy_file_range/copyfile/mkdir/fsync-family syscalls on worker threads per the no-VFD-off-thread design above
 join	crates/backend/postmaster/janitor/src/parcopy.rs	1	DST-REVIEW(testdb-land): gang join at end of batch copy; workers are token-free syscall loops (join-bounded-after-wake per P3 row-14 ledger terms)

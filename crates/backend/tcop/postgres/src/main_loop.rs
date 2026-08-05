@@ -786,6 +786,22 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
         walsender_seams::init_wal_sender::call();
     }
 
+    // pgrust-only builtin backfill (janitor::bootstrap through the seam):
+    // the first client connection to a database inserts the three janitor
+    // builtins' pg_proc rows; every later connection is one set probe.
+    // CONTAINED: a failed backfill logs and the session proceeds — the
+    // functions are QoS surface, never a connect gate.
+    if !am_walsender && janitor_seams::builtin_backfill::is_installed() {
+        if let Err(e) = janitor_seams::builtin_backfill::call() {
+            let _ = ereport(LOG)
+                .errmsg(format!(
+                    "pgrust: builtin function backfill failed (continuing): {}",
+                    e.message()
+                ))
+                .finish(loc(0, "postgres_main_inner"));
+        }
+    }
+
     if elog::config::where_to_send_output() == CommandDest::Remote {
         let key = init_small::globals::MyCancelKey();
         let len = init_small::globals::MyCancelKeyLength() as usize;
