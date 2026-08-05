@@ -70,6 +70,101 @@ fn typrow(
 static SEAMS: Once = Once::new();
 
 thread_local! {
+    // Distinguishes cold loads from warm hits in the tupdesc tests.
+    static REL_OPEN_COUNT: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+
+// relation_open mock for COMPOSITE_REL: a relkind-'c' relation with columns
+// (a int4, b int4) and reltype = COMPOSITE_OID, as relcache would serve it.
+fn fake_relation_open(
+    mcx: mcx::Mcx<'_>,
+    oid: Oid,
+    _lockmode: types_rel::LOCKMODE,
+) -> PgResult<types_rel::Relation<'_>> {
+    use std::cell::Cell;
+    assert_eq!(oid, COMPOSITE_REL, "typcache only opens the composite's typrelid");
+    REL_OPEN_COUNT.with(|c| c.set(c.get() + 1));
+    let mut attrs = Vec::new();
+    for (i, nm) in ["a", "b"].iter().enumerate() {
+        let mut a = types_tuple::FormData_pg_attribute::default();
+        a.attname = name(nm);
+        a.atttypid = INT4OID;
+        a.attnum = i as i16 + 1;
+        a.attlen = 4;
+        a.attbyval = true;
+        a.attalign = b'i' as i8;
+        a.atttypmod = -1;
+        attrs.push(a);
+    }
+    let mut td = tupdesc::CreateTupleDesc(mcx, &attrs)?;
+    td.tdtypeid = COMPOSITE_OID;
+    td.tdtypmod = -1;
+    let mut relname = NameData::default();
+    relname.namestrcpy("comp");
+    let rd_rel = types_rel::FormData_pg_class {
+        relname,
+        relnamespace: 2200,
+        reltype: COMPOSITE_OID,
+        relowner: 10,
+        relam: 0,
+        relfilenode: 0,
+        reltablespace: 0,
+        relpages: 0,
+        reltuples: -1.0,
+        relallvisible: 0,
+        reltoastrelid: 0,
+        relhasindex: false,
+        relisshared: false,
+        relpersistence: types_core::RELPERSISTENCE_PERMANENT,
+        relkind: types_rel::RELKIND_COMPOSITE_TYPE,
+        relhassubclass: false,
+        relrowsecurity: false,
+        relispopulated: true,
+        relreplident: types_rel::REPLICA_IDENTITY_DEFAULT,
+        relispartition: false,
+        relfrozenxid: 3,
+        relminmxid: 1,
+    };
+    let data = types_rel::RelationData {
+        rd_locator: Default::default(),
+        rd_smgr: Default::default(),
+        rd_id: oid,
+        rd_backend: types_core::INVALID_PROC_NUMBER,
+        rd_islocaltemp: false,
+        rd_isvalid: Cell::new(true),
+        rd_createSubid: Cell::new(0),
+        rd_newRelfilelocatorSubid: Cell::new(0),
+        rd_firstRelfilelocatorSubid: Cell::new(0),
+        rd_droppedSubid: Cell::new(0),
+        rd_lockInfo: types_rel::LockInfoData {
+            lockRelId: types_rel::LockRelId { relId: oid, dbId: 5 },
+        },
+        rd_rel,
+        rd_att: Rc::new(td),
+        rd_index: None,
+        rd_opcintype: mcx::PgVec::new_in(mcx),
+        rd_opfamily: mcx::PgVec::new_in(mcx),
+        rd_indoption: mcx::PgVec::new_in(mcx),
+        rd_indcollation: mcx::PgVec::new_in(mcx),
+        rd_options: None,
+        pgstat_enabled: Cell::new(false),
+        pgstat_link: Cell::new((0, core::ptr::null_mut())),
+        rd_amcache: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
+        rd_support: mcx::PgVec::new_in(mcx),
+        rd_supportinfo: Default::default(),
+        rd_opcoptions: Default::default(),
+        rd_indexlist: Default::default(),
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
+    };
+    Ok(types_rel::Relation::open(data, None))
+}
+
+thread_local! {
     static ENUM_MEMBERS: core::cell::RefCell<Vec<(Oid, f32)>> =
         const { core::cell::RefCell::new(Vec::new()) };
 }
@@ -79,6 +174,7 @@ fn install() {
         use syscache_seams as s;
         fmgr_core::init_seams();
         clauses::init_seams();
+        relation_seams::relation_open::set(fake_relation_open);
         pg_enum_seams::scan_enum_members::set(|mcx, typid| {
             assert_eq!(typid, ENUM_OID);
             let mut out = mcx::PgVec::new_in(mcx);
@@ -441,11 +537,123 @@ fn composite_entry_maintains_rel_map() {
     with_state(|st| assert_eq!(st.rel_id_to_type_id.get(&COMPOSITE_REL), None));
 }
 
+// C: lookup_type_cache(TYPECACHE_TUPDESC) -> load_typcache_tupdesc. One
+// relation_open per cold load; warm hits serve the cached descriptor.
 #[test]
-#[should_panic(expected = "composite TUPDESC lane not ported")]
-fn composite_tupdesc_lane_is_loud() {
+fn composite_tupdesc_loads_and_caches() {
     install();
-    let _ = lookup_type_cache(COMPOSITE_OID, TYPECACHE_TUPDESC);
+    REL_OPEN_COUNT.with(|c| c.set(0));
+    let e = lookup_type_cache(COMPOSITE_OID, TYPECACHE_TUPDESC).unwrap();
+    let td = e.tupdesc().expect("composite tupdesc loaded");
+    assert_eq!(td.natts, 2);
+    assert_eq!(td.tdtypeid, COMPOSITE_OID);
+    assert_eq!(td.tdtypmod, -1);
+    assert_eq!(td.attr(0).atttypid, INT4OID);
+    let id = e.tupdesc_identifier();
+    assert_ne!(id, 0);
+    assert_eq!(REL_OPEN_COUNT.with(|c| c.get()), 1);
+
+    // Warm hit: no reopen, same pinned descriptor, same identifier.
+    let e2 = lookup_type_cache(COMPOSITE_OID, TYPECACHE_TUPDESC).unwrap();
+    assert!(Rc::ptr_eq(&e, &e2));
+    assert!(Rc::ptr_eq(&td, &e2.tupdesc().unwrap()));
+    assert_eq!(e2.tupdesc_identifier(), id);
+    assert_eq!(REL_OPEN_COUNT.with(|c| c.get()), 1);
+
+    // The rel->type reverse map is maintained (RelIdToTypeIdCacheHash).
+    with_state(|st| assert_eq!(st.rel_id_to_type_id.get(&COMPOSITE_REL), Some(&COMPOSITE_OID)));
+
+    // Non-composite typtypes: C's arm is a no-op, tupDesc stays NULL.
+    let i = lookup_type_cache(INT4OID, TYPECACHE_TUPDESC).unwrap();
+    assert!(i.tupdesc().is_none());
+}
+
+// C: TypeCacheRelCallback -> InvalidateCompositeTypeCacheEntry. The relcache
+// inval drops the cached tupdesc and identifier; outstanding pins (Rc clones,
+// C's tdrefcount) keep the old descriptor alive; the next lookup reloads a
+// fresh descriptor under a NEW identifier.
+#[test]
+fn relcache_inval_resets_composite_tupdesc() {
+    install();
+    REL_OPEN_COUNT.with(|c| c.set(0));
+    let e = lookup_type_cache(COMPOSITE_OID, TYPECACHE_TUPDESC).unwrap();
+    let held = e.tupdesc().unwrap();
+    let old_id = e.tupdesc_identifier();
+
+    invalidate::TypeCacheRelCallback(Datum::from_oid(InvalidOid), COMPOSITE_REL);
+    assert!(e.tupdesc().is_none());
+    assert_eq!(e.tupdesc_identifier(), 0);
+    // The held pin still reads the old descriptor (C's tdrefcount survival).
+    assert_eq!(held.natts, 2);
+    // pg_type data is still cached, so the rel map entry stays (C's
+    // delete_rel_type_cache_if_needed keeps it while any info remains).
+    with_state(|st| assert_eq!(st.rel_id_to_type_id.get(&COMPOSITE_REL), Some(&COMPOSITE_OID)));
+
+    let e2 = lookup_type_cache(COMPOSITE_OID, TYPECACHE_TUPDESC).unwrap();
+    assert!(Rc::ptr_eq(&e, &e2));
+    let fresh = e2.tupdesc().unwrap();
+    assert!(!Rc::ptr_eq(&held, &fresh));
+    assert_ne!(e2.tupdesc_identifier(), 0);
+    assert_ne!(e2.tupdesc_identifier(), old_id);
+    assert_eq!(REL_OPEN_COUNT.with(|c| c.get()), 2);
+
+    // Whole-relcache flush (relid == InvalidOid) resets composites too.
+    invalidate::TypeCacheRelCallback(Datum::from_oid(InvalidOid), InvalidOid);
+    assert!(e2.tupdesc().is_none());
+}
+
+// C: lookup_rowtype_tupdesc_copy routes named composites through the typcache
+// entry (lookup_rowtype_tupdesc_internal), not a fresh relation_open per call.
+#[test]
+fn rowtype_tupdesc_copy_serves_from_cache() {
+    install();
+    REL_OPEN_COUNT.with(|c| c.set(0));
+    let mcx_holder = ::mcx::MemoryContext::new("rowtype-copy-test");
+    let d1 = lookup_rowtype_tupdesc_copy(mcx_holder.mcx(), COMPOSITE_OID, -1).unwrap();
+    let d2 = lookup_rowtype_tupdesc_copy(mcx_holder.mcx(), COMPOSITE_OID, -1).unwrap();
+    assert_eq!(d1.natts, 2);
+    assert_eq!(d2.natts, 2);
+    assert_eq!(d1.tdtypeid, COMPOSITE_OID);
+    assert_eq!(d1.tdtypmod, -1);
+    assert_eq!(REL_OPEN_COUNT.with(|c| c.get()), 1);
+
+    // C: tupDesc == NULL -> ereport(ERRCODE_WRONG_OBJECT_TYPE, "type %s is
+    // not composite").
+    let err = lookup_rowtype_tupdesc_copy(mcx_holder.mcx(), INT4OID, -1).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
+    assert!(err.message().contains("is not composite"));
+}
+
+// C: assign_record_type_identifier reads the entry's stable
+// tupDesc_identifier for named composites; a relcache inval on the underlying
+// relation retires it.
+#[test]
+fn record_type_identifier_stable_until_inval() {
+    install();
+    let id1 = assign_record_type_identifier(COMPOSITE_OID, -1).unwrap();
+    let id2 = assign_record_type_identifier(COMPOSITE_OID, -1).unwrap();
+    assert_ne!(id1, 0);
+    assert_eq!(id1, id2);
+    invalidate::TypeCacheRelCallback(Datum::from_oid(InvalidOid), COMPOSITE_REL);
+    let id3 = assign_record_type_identifier(COMPOSITE_OID, -1).unwrap();
+    assert_ne!(id3, id1);
+    // Non-composite: C ereports "type %s is not composite".
+    let err = assign_record_type_identifier(INT4OID, -1).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
+}
+
+// C: cache_record_field_properties composite arm walks the cached tupdesc;
+// all-int4 fields support equality/compare/hashing/extended hashing.
+#[test]
+fn composite_field_properties_from_tupdesc() {
+    install();
+    let e = lookup_type_cache(COMPOSITE_OID, 0).unwrap();
+    assert!(record_fields_have(&e, TCFLAGS_HAVE_FIELD_EQUALITY).unwrap());
+    assert!(record_fields_have(&e, TCFLAGS_HAVE_FIELD_COMPARE).unwrap());
+    assert!(record_fields_have(&e, TCFLAGS_HAVE_FIELD_HASHING).unwrap());
+    assert!(record_fields_have(&e, TCFLAGS_HAVE_FIELD_EXTENDED_HASHING).unwrap());
+    // The walk loaded the tupdesc as a side effect, exactly like C.
+    assert!(e.tupdesc().is_some());
 }
 
 #[test]

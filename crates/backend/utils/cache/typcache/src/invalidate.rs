@@ -19,8 +19,9 @@ pub(crate) fn insert_rel_type_cache_if_needed(
         return;
     }
     debug_assert!(e.typrelid() != InvalidOid);
-    // C's third disjunct is `tupDesc != NULL`; that lane is unported.
-    if e.flags_raw() & (TCFLAGS_HAVE_PG_TYPE_DATA | TCFLAGS_OPERATOR_FLAGS) != 0 {
+    if e.flags_raw() & (TCFLAGS_HAVE_PG_TYPE_DATA | TCFLAGS_OPERATOR_FLAGS) != 0
+        || e.tupdesc_is_some()
+    {
         rel_map.insert(e.typrelid(), e.type_id);
     }
 }
@@ -33,14 +34,33 @@ fn delete_rel_type_cache_if_needed(
         return;
     }
     debug_assert!(e.typrelid() != InvalidOid);
-    if e.flags_raw() & (TCFLAGS_HAVE_PG_TYPE_DATA | TCFLAGS_OPERATOR_FLAGS) == 0 {
+    if e.flags_raw() & (TCFLAGS_HAVE_PG_TYPE_DATA | TCFLAGS_OPERATOR_FLAGS) == 0
+        && !e.tupdesc_is_some()
+    {
         rel_map.remove(&e.typrelid());
     }
 }
 
-// C's InvalidateCompositeTypeCacheEntry resets the entry's tupDesc; the
-// composite TUPDESC lane is unported, so there is nothing stored to reset.
-fn invalidate_composite_entry(_e: &Rc<TypeCacheEntry>) {}
+// C's InvalidateCompositeTypeCacheEntry: drop the cached tupdesc (our Rc pin
+// is the tdrefcount; outstanding caller clones keep the old descriptor
+// alive), mark tupDesc_identifier stale, and reset the operator flags.
+fn invalidate_composite_entry(
+    rel_map: &mut PgHashMap<'static, Oid, Oid>,
+    e: &Rc<TypeCacheEntry>,
+) {
+    debug_assert!(e.typtype() == TYPTYPE_COMPOSITE && e.typrelid() != InvalidOid);
+    let had_tupdesc_or_opclass =
+        e.tupdesc_is_some() || e.flags_raw() & TCFLAGS_OPERATOR_FLAGS != 0;
+    e.clear_tupdesc();
+    // Reset equality/comparison/hashing validity information.
+    e.clear_flags(TCFLAGS_OPERATOR_FLAGS);
+    e.set_ready(compute_ready(e));
+    // C: delete_rel_type_cache_if_needed() only if we actually cleared
+    // something.
+    if had_tupdesc_or_opclass {
+        delete_rel_type_cache_if_needed(rel_map, e);
+    }
+}
 
 pub(crate) fn TypeCacheRelCallback(_arg: Datum, relid: Oid) {
     with_state(|st| {
@@ -51,7 +71,8 @@ pub(crate) fn TypeCacheRelCallback(_arg: Datum, relid: Oid) {
                 if let Some(e) = type_cache.get(&typid) {
                     debug_assert_eq!(e.typtype(), TYPTYPE_COMPOSITE);
                     debug_assert_eq!(relid, e.typrelid());
-                    invalidate_composite_entry(e);
+                    let e = Rc::clone(e);
+                    invalidate_composite_entry(rel_id_to_type_id, &e);
                 }
             }
             let mut t = *first_domain_type_entry;
@@ -66,7 +87,7 @@ pub(crate) fn TypeCacheRelCallback(_arg: Datum, relid: Oid) {
         } else {
             for e in type_cache.values() {
                 if e.typtype() == TYPTYPE_COMPOSITE {
-                    invalidate_composite_entry(e);
+                    invalidate_composite_entry(rel_id_to_type_id, e);
                 } else if e.typtype() == TYPTYPE_DOMAIN
                     && e.flags_raw() & TCFLAGS_DOMAIN_BASE_IS_COMPOSITE != 0
                 {

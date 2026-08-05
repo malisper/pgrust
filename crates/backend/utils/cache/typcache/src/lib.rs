@@ -143,6 +143,13 @@ pub struct TypeCacheEntry {
     rng_canonical_finfo: RefCell<FmgrInfo>,
     rng_subdiff_finfo: RefCell<FmgrInfo>,
     rngtype: RefCell<Option<Rc<TypeCacheEntry>>>,
+    // C's `tupDesc`/`tupDesc_identifier` (composite types only). The cached
+    // descriptor is an owned copy of the relcache descriptor (constraints
+    // included, as C shares the relcache descriptor itself); the Rc strong
+    // count plays C's non-resowner `tdrefcount` pin — invalidation drops the
+    // entry's clone, outstanding caller clones keep the old descriptor alive.
+    tup_desc: RefCell<Option<Rc<types_tuple::TupleDescData<'static>>>>,
+    tupdesc_identifier: Cell<u64>,
     domain_base_type: Cell<Oid>,
     domain_base_typmod: Cell<i32>,
     domain_data: Cell<Option<&'static domain::DomainConstraintCache>>,
@@ -205,6 +212,8 @@ impl TypeCacheEntry {
             rng_canonical_finfo: RefCell::new(FmgrInfo::unresolved()),
             rng_subdiff_finfo: RefCell::new(FmgrInfo::unresolved()),
             rngtype: RefCell::new(None),
+            tup_desc: RefCell::new(None),
+            tupdesc_identifier: Cell::new(0),
             domain_base_type: Cell::new(InvalidOid),
             domain_base_typmod: Cell::new(-1),
             domain_data: Cell::new(None),
@@ -274,6 +283,29 @@ impl TypeCacheEntry {
     /// C's `rngtype`; `None` mirrors the NULL pointer ("not a multirange type").
     pub fn rngtype(&self) -> Option<Rc<TypeCacheEntry>> {
         self.rngtype.borrow().clone()
+    }
+    /// C's `tupDesc`; `None` mirrors the NULL pointer (not a composite type,
+    /// or TYPECACHE_TUPDESC was never requested). Cloning the Rc is C's
+    /// IncrTupleDescRefCount: it keeps the descriptor alive across a relcache
+    /// invalidation that resets the cached entry.
+    pub fn tupdesc(&self) -> Option<Rc<types_tuple::TupleDescData<'static>>> {
+        self.tup_desc.borrow().clone()
+    }
+    /// C's `tupDesc_identifier`; 0 means "no identifier assigned" (or stale
+    /// after an invalidation).
+    pub fn tupdesc_identifier(&self) -> u64 {
+        self.tupdesc_identifier.get()
+    }
+    #[inline]
+    pub(crate) fn tupdesc_is_some(&self) -> bool {
+        self.tup_desc.borrow().is_some()
+    }
+    /// C's InvalidateCompositeTypeCacheEntry tupdesc reset: drop our pin
+    /// (outstanding caller Rc clones keep the old descriptor alive) and mark
+    /// the identifier stale.
+    pub(crate) fn clear_tupdesc(&self) {
+        *self.tup_desc.borrow_mut() = None;
+        self.tupdesc_identifier.set(0);
     }
 
     #[inline]
@@ -423,12 +455,6 @@ fn shell_type(t: &PgTypeTypcacheShape) -> Box<PgError> {
         PgError::error(format!("type \"{name}\" is only a shell"))
             .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
     )
-}
-
-#[cold]
-#[inline(never)]
-pub(crate) fn lane_unported(lane: &str, type_id: Oid) -> ! {
-    panic!("typcache: {lane} lane not ported (type {type_id})");
 }
 
 fn load_pg_type_row(type_id: Oid) -> PgResult<PgTypeTypcacheShape> {
@@ -776,8 +802,12 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
             fmgr_seams::fmgr_info::call(e.hash_extended_proc.get())?;
     }
 
-    if (*flags & TYPECACHE_TUPDESC) != 0 && e.typtype.get() == TYPTYPE_COMPOSITE {
-        lane_unported("composite TUPDESC", type_id);
+    // C: "If it's a composite type (row type), get tupdesc if requested".
+    if (*flags & TYPECACHE_TUPDESC) != 0
+        && e.tup_desc.borrow().is_none()
+        && e.typtype.get() == TYPTYPE_COMPOSITE
+    {
+        load_typcache_tupdesc(e)?;
     }
     if (*flags & TYPECACHE_RANGE_INFO) != 0 && e.typtype.get() == TYPTYPE_RANGE {
         match e.rngelemtype() {
@@ -842,6 +872,46 @@ fn missing_btorder_proc(opcintype: Oid, opfamily: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!(
         "missing support function {BTORDER_PROC}({opcintype},{opcintype}) in opfamily {opfamily}"
     )))
+}
+
+/// C: load_typcache_tupdesc (typcache.c) — set up a composite type's
+/// `tupDesc` from its typrelid's relcache entry.
+///
+/// C links to the relcache descriptor and bumps `tdrefcount` (deliberately
+/// bypassing the resource owner — the reference outlives the query); the
+/// owned model copies the descriptor (constraints included, C shares them
+/// too) into the typcache context once and pins it behind an Rc, whose
+/// clones play the refcount.
+fn load_typcache_tupdesc(e: &TypeCacheEntry) -> PgResult<()> {
+    let typrelid = e.typrelid.get();
+    if !types_core::OidIsValid(typrelid) {
+        // C: elog(ERROR, "invalid typrelid for composite type %u") — should
+        // not happen.
+        return Err(Box::new(PgError::error(format!(
+            "invalid typrelid for composite type {}",
+            e.type_id
+        ))));
+    }
+    // Short borrow for the mcx only: relation_open takes AccessShareLock,
+    // which can fire AcceptInvalidationMessages -> the typcache callbacks,
+    // which re-enter with_state. C assigns typentry->tupDesc only after the
+    // open returns; we must equally hold no state borrow across the seam.
+    let mcx = with_state(|st| st.mcx);
+    let rel =
+        relation_seams::relation_open::call(mcx, typrelid, types_rel::lock::AccessShareLock)?;
+    debug_assert_eq!(rel.rd_rel.reltype, e.type_id);
+    let mut d = tupdesc::CreateTupleDescCopyConstr(mcx, rel.descr())?;
+    d.tdtypeid = e.type_id;
+    d.tdtypmod = -1;
+    *e.tup_desc.borrow_mut() = Some(Rc::new(d));
+    // C: typentry->tupDesc_identifier = ++tupledesc_id_counter.
+    let id = with_state(|st| {
+        st.tupledesc_id_counter += 1;
+        st.tupledesc_id_counter
+    });
+    e.tupdesc_identifier.set(id);
+    rel.close(types_rel::lock::AccessShareLock)?;
+    Ok(())
 }
 
 fn load_rangetype_info(e: &TypeCacheEntry) -> PgResult<()> {
@@ -939,8 +1009,14 @@ fn cache_record_field_properties(e: &TypeCacheEntry) -> PgResult<()> {
     if e.type_id == types_core::catalog::RECORDOID {
         e.set_flags(TCFLAGS_HAVE_FIELD_EQUALITY | TCFLAGS_HAVE_FIELD_COMPARE);
     } else if e.typtype.get() == TYPTYPE_COMPOSITE {
-        let mcx = with_state(|st| st.mcx);
-        let tupdesc = lookup_rowtype_tupdesc_copy(mcx, e.type_id, -1)?;
+        // C: fetch the composite's tupdesc if not already cached, then bump
+        // the refcount while doing further catalog lookups — the recursive
+        // lookup_type_cache calls below can fire invals that reset the
+        // entry's tupdesc; our Rc clone keeps this one alive regardless.
+        if e.tup_desc.borrow().is_none() {
+            load_typcache_tupdesc(e)?;
+        }
+        let tupdesc = e.tupdesc().expect("tupdesc just loaded");
         let mut newflags = TCFLAGS_HAVE_FIELD_EQUALITY
             | TCFLAGS_HAVE_FIELD_COMPARE
             | TCFLAGS_HAVE_FIELD_HASHING
@@ -1082,10 +1158,12 @@ pub(crate) fn compute_ready(e: &TypeCacheEntry) -> i32 {
             r |= TYPECACHE_HASH_EXTENDED_PROC_FINFO;
         }
     }
-    // Unported lanes stay slow-path (loud) for the typtypes they apply to; for
-    // every other typtype C's arm is a no-op, so the bit is warm-satisfiable.
+    // For non-matching typtypes C's arm is a no-op, so the bit is
+    // warm-satisfiable; a composite satisfies it once the tupdesc is cached.
+    // (A currently-borrowed tup_desc is necessarily Some: borrows only come
+    // from reads of a loaded descriptor.)
     let tt = e.typtype.get();
-    if tt != TYPTYPE_COMPOSITE {
+    if tt != TYPTYPE_COMPOSITE || e.tup_desc.try_borrow().map_or(true, |d| d.is_some()) {
         r |= TYPECACHE_TUPDESC;
     }
     // RANGE_INFO is never warm-satisfiable for a real range type: C re-checks
@@ -1173,16 +1251,19 @@ pub fn assign_record_type_typmod(tupdesc: &mut types_tuple::TupleDescData<'_>) -
 
 pub const INVALID_TUPLEDESC_IDENTIFIER: u64 = 0;
 
-/// C: assign_record_type_identifier (typcache.c). C divergence: named
-/// composites get a fresh identifier per call — this typcache keeps no
-/// composite tupdesc cache to pin a stable identifier to. Equal ids still
-/// imply the same tupdesc; consumers only lose cache hits, never correctness.
+/// C: assign_record_type_identifier (typcache.c). Named composites read the
+/// typcache entry's `tupDesc_identifier` (stable until a relcache inval on
+/// the underlying relation resets it); transient records read the registered
+/// typmod's id.
 pub fn assign_record_type_identifier(type_id: Oid, typmod: i32) -> PgResult<u64> {
     if type_id != types_core::catalog::RECORDOID {
-        return with_state(|st| {
-            st.tupledesc_id_counter += 1;
-            Ok(st.tupledesc_id_counter)
-        });
+        // It's a named composite type, so use the regular typcache.
+        let e = lookup_type_cache(type_id, TYPECACHE_TUPDESC)?;
+        if !e.tupdesc_is_some() {
+            return Err(type_not_composite(type_id));
+        }
+        debug_assert_ne!(e.tupdesc_identifier.get(), 0);
+        return Ok(e.tupdesc_identifier.get());
     }
     let handle = with_state(|st| std::sync::Arc::clone(&st.record_registry));
     let reg = handle.lock().unwrap_or_else(|e| e.into_inner());
@@ -1190,6 +1271,19 @@ pub fn assign_record_type_identifier(type_id: Oid, typmod: i32) -> PgResult<u64>
         Some(e) => Ok(e.id),
         None => Err(record_type_not_registered()),
     }
+}
+
+// C: ereport(ERRCODE_WRONG_OBJECT_TYPE, "type %s is not composite"). The
+// borrow-free fallback mirrors enum_cmp's: format_type_be re-enters caches
+// and may itself fail; the error must still surface.
+#[track_caller]
+#[cold]
+fn type_not_composite(type_id: Oid) -> Box<PgError> {
+    let name = format_type::format_type_be(type_id).unwrap_or_else(|_| format!("{type_id}"));
+    Box::new(
+        PgError::error(format!("type {name} is not composite"))
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+    )
 }
 
 #[track_caller]
@@ -1202,7 +1296,8 @@ fn record_type_not_registered() -> Box<PgError> {
 }
 
 /// C: lookup_rowtype_tupdesc_copy (typcache.c) — registered records by
-/// typmod; named composites via the relation's descriptor.
+/// typmod; named composites via the typcache entry's cached descriptor
+/// (lookup_rowtype_tupdesc_internal + CreateTupleDescCopyConstr).
 pub fn lookup_rowtype_tupdesc_copy<'mcx>(
     mcx: Mcx<'mcx>,
     type_id: Oid,
@@ -1219,17 +1314,12 @@ pub fn lookup_rowtype_tupdesc_copy<'mcx>(
         d.tdtypmod = typmod;
         return Ok(d);
     }
-    let typrelid = lsyscache::get_typ_typrelid(type_id)?;
-    if !types_core::OidIsValid(typrelid) {
-        return Err(Box::new(
-            PgError::error(format!("type {type_id} is not composite"))
-                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
-        ));
-    }
-    let rel = relation_seams::relation_open::call(mcx, typrelid, types_rel::lock::AccessShareLock)?;
-    let mut d = tupdesc::CreateTupleDescCopy(mcx, rel.descr())?;
-    d.tdtypeid = type_id;
-    d.tdtypmod = -1;
-    rel.close(types_rel::lock::AccessShareLock)?;
-    Ok(d)
+    // It's a named composite type, so use the regular typcache. C's
+    // lookup_rowtype_tupdesc_internal: tupDesc == NULL (the type is not
+    // composite) is the error, not a failed relation open.
+    let e = lookup_type_cache(type_id, TYPECACHE_TUPDESC)?;
+    let Some(cached) = e.tupdesc() else {
+        return Err(type_not_composite(type_id));
+    };
+    tupdesc::CreateTupleDescCopyConstr(mcx, &cached)
 }
