@@ -180,6 +180,10 @@ fn build_setop_child_paths<'mcx>(
 
     let idx = run.root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
     run.swap_with_rel_subroot(idx);
+    // C: the child subroot's parent_root chain stays live here; selfuncs
+    // climbs it for the child's uplevel CTE references (reached via
+    // cost_incremental_sort -> estimate_num_groups on presorted keys).
+    run.swapped_parent_subroot = Some(idx);
     let mut candidates: PgVec<'mcx, ChildCandidate> = PgVec::new_in(run.mcx);
     let mut partial_candidate: Option<ChildCandidate> = None;
     // Swap back before propagating errors (num_groups block pattern below).
@@ -257,6 +261,7 @@ fn build_setop_child_paths<'mcx>(
         }
         Ok(consider_parallel)
     })();
+    run.swapped_parent_subroot = None;
     run.swap_with_rel_subroot(idx);
     let consider_parallel = subroot_result?;
 
@@ -956,7 +961,9 @@ fn generate_setop_tlist<'mcx>(
         tlist.lappend(mcx, tle)?;
         resno += 1;
     }
-    debug_assert!(it.next().is_none());
+    // C's forfour stops at colTypes: a grouped child's processed tlist may
+    // trail resjunk sort/group columns, which setop output never carries.
+    debug_assert!(it.all(|n| n.as_target_entry().expect("tlist cell").resjunk));
     Ok((tlist, trivial))
 }
 
