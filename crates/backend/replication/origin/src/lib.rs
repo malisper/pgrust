@@ -206,9 +206,11 @@ fn text_datum_to_string(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
     let ptr = d.as_usize() as *const u8;
     // SAFETY: a live varlena readable through its full VARSIZE_ANY.
     let raw = unsafe { core::slice::from_raw_parts(ptr, types_tuple::varatt::varsize_any(ptr)) };
-    let img = detoast::detoast_attr(mcx, raw)?;
-    let bytes = varlena::text_to_cstring(mcx, &img)?;
-    Ok(String::from_utf8_lossy(&bytes[..bytes.len().saturating_sub(1)]).into_owned())
+    // open_image (pg_detoast_datum_packed + VARDATA_ANY): the previous
+    // text_to_cstring(&full_image) call kept the 4-byte varlena header glued
+    // to the front of every roname read back through this path.
+    let payload = varlena::open_image(mcx, raw)?;
+    Ok(String::from_utf8_lossy(payload.as_bytes()).into_owned())
 }
 
 fn text_datum(mcx: Mcx<'_>, s: &str) -> PgResult<Datum> {

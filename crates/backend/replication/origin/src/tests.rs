@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn text_datum_round_trip_keeps_name_exact() {
+    // Regression: text_datum_to_string glued the 4-byte varlena header onto
+    // every roname (visible to send_repl_origin and
+    // pg_show_replication_origin_status).
+    let ctx = mcx::MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    for name in ["test_origin", "pg_16400", &"n".repeat(300)] {
+        let d = text_datum(mcx, name).unwrap();
+        assert_eq!(text_datum_to_string(mcx, d).unwrap(), name);
+    }
+}
+
+#[test]
 fn disk_state_layout_matches_c() {
     // ReplicationStateOnDisk: RepOriginId @0, XLogRecPtr @8, sizeof 16.
     let b = serialize_disk_state(0x1234, 0x0102030405060708);

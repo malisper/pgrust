@@ -2,16 +2,17 @@
 // CREATE PUBLICATION/SUBSCRIPTION), registered as a builtin library like
 // test_decoding.
 //
-// Ported for the non-streaming protocol, including two-phase (prepare-family
-// callbacks). The stream_* callbacks C registers are deliberately not
-// registered — the decode stack refuses streaming loudly; a subscriber
-// requesting streaming gets C's own "not supported by output plugin" error.
-// Row-filter publications and partition attribute-remapping refuse loudly;
-// column lists, FOR ALL TABLES, schema publications and identical-descriptor
-// partition routing are ported.
+// Ported: streaming + two-phase protocol families (streamed two-phase still
+// defers stream_prepare_cb — see plugin init), row-filter publications
+// (per-pubaction ExprStates with the UPDATE INSERT/DELETE transform),
+// publish_via_partition_root attribute remapping, column lists, FOR ALL
+// TABLES, schema publications, and replication-origin forwarding
+// (send_repl_origin over the ported origin.c engine).
 //
-// C's TupleTableSlot staging is skipped: changes are written directly from
-// the reorderbuffer's HeapTupleData (see logicalproto::logicalrep_write_tuple).
+// C's unconditional TupleTableSlot staging is skipped: unfiltered, unmapped
+// changes are written directly from the reorderbuffer's HeapTupleData (see
+// logicalproto::logicalrep_write_tuple); entries carrying a row filter or an
+// attrmap stage their tuples through slots per change, like C.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -21,6 +22,12 @@ use std::rc::Rc;
 
 use datum::Datum;
 use elog::{elog, ereport};
+use execexpr::{exec_eval_expr, exec_init_expr, EvalSlots, ExprState, ParamBind};
+use exectuples::{
+    exec_clear_tuple, exec_store_heap_tuple, exec_store_virtual_tuple, execute_attr_map_slot,
+    make_tuple_table_slot, slot_getallattrs,
+};
+use heaptuple::{heap_form_tuple, HeapTuple};
 use logical::{
     OutputPluginCallbacks, OutputPluginContext, OutputPluginOutputType, OutputPluginPrepareWrite,
     OutputPluginUpdateProgress, OutputPluginWrite,
@@ -37,8 +44,10 @@ use logicalproto::{
     LOGICALREP_PROTO_STREAM_VERSION_NUM, LOGICALREP_PROTO_TWOPHASE_VERSION_NUM,
     PUBLISH_GENCOLS_NONE, PUBLISH_GENCOLS_STORED,
 };
-use mcx::MemoryContext;
-use reorderbuffer::{ReorderBuffer, ReorderBufferChange, ReorderBufferChangeData, TxnId};
+use mcx::{MemoryContext, Mcx, PgBox};
+use reorderbuffer::{
+    ReorderBuffer, ReorderBufferChange, ReorderBufferChangeData, ReorderBufferChangeType, TxnId,
+};
 use types_core::catalog::FirstGenbkiObjectId;
 use types_core::{
     InvalidOid, InvalidRepOriginId, InvalidTransactionId, InvalidXLogRecPtr, Oid, RepOriginId,
@@ -50,10 +59,15 @@ use types_error::{
 };
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 use types_nodes::bitmapset::Bitmapset;
+use types_nodes::{Node, NodeList};
 use types_rel::pg_class::RELKIND_PARTITIONED_TABLE;
 use types_rel::RelationData;
+use types_slot::{SlotData, TupleSlotKind};
+use types_tuple::HeapTupleData;
 
-use cache_syscache::cacheinfo::{NAMESPACEOID, PUBLICATIONOID, PUBLICATIONRELMAP};
+use cache_syscache::cacheinfo::{
+    NAMESPACEOID, PUBLICATIONNAMESPACEMAP, PUBLICATIONOID, PUBLICATIONRELMAP,
+};
 use cache_syscache::{ReleaseSysCache, SearchSysCache2, SysCacheGetAttr, SysCacheKey};
 use pg_publication::{
     check_and_fetch_column_list, GetPublicationByName, GetRelationPublications,
@@ -71,12 +85,6 @@ fn loc(func: &'static str) -> ErrorLocation {
     // #[track_caller] resolves to the call site, not this helper.
     let site = core::panic::Location::caller();
     ErrorLocation::new(site.file(), site.line() as i32, func)
-}
-
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported callee reached from pgoutput.c: {what}")
 }
 
 // LOGICALREP_STREAM_* (pg_subscription.h).
@@ -115,10 +123,25 @@ struct PGOutputTxnData {
     sent_begin_txn: bool,
 }
 
-// RelationSyncEntry (pgoutput.c:126), minus the row-filter executor state
-// (row filters refuse loudly) and the tuple slots/attrmap (tuples are written
-// straight from HeapTupleData; descriptor-mismatched partition routing
-// refuses loudly in pgoutput_change).
+// Row-filter pubaction slots (pgoutput.c NUM_ROWFILTER_PUBACTIONS).
+const PUBACTION_INSERT: usize = 0;
+const PUBACTION_UPDATE: usize = 1;
+const PUBACTION_DELETE: usize = 2;
+const NUM_ROWFILTER_PUBACTIONS: usize = 3;
+
+// map_changetype_pubaction (pgoutput.c:1319).
+fn map_changetype_pubaction(action: ReorderBufferChangeType) -> usize {
+    match action {
+        reorderbuffer::Insert => PUBACTION_INSERT,
+        reorderbuffer::Update => PUBACTION_UPDATE,
+        reorderbuffer::Delete => PUBACTION_DELETE,
+        _ => unreachable!("row filter consulted for a non-DML change"),
+    }
+}
+
+// RelationSyncEntry (pgoutput.c:126). The cached old/new tuple slots are not
+// kept here: entries that need slot staging (row filter or attrmap) build
+// slots per change in the change's staging context instead.
 struct RelationSyncEntry {
     replicate_valid: bool,
     schema_sent: bool,
@@ -131,6 +154,17 @@ struct RelationSyncEntry {
     publish_as_relid: Oid,
     // Publication column list as raw attnums, ascending (C: Bitmapset).
     columns: Option<Vec<i16>>,
+    // Row filter per pubaction (pgoutput.c entry->exprstate), compiled into
+    // entry_ctx. The 'static stands for "while entry_ctx lives" (the ts_cache
+    // pattern); declared before entry_ctx so field drop order retires the
+    // states before their arena.
+    exprstate: [Option<PgBox<'static, ExprState<'static>>>; NUM_ROWFILTER_PUBACTIONS],
+    // attmap converting this relation's tuples to the publish_as_relid
+    // ancestor's layout (pgoutput.c entry->attrmap via
+    // build_attrmap_by_name_if_req); None when the layouts already match.
+    attrmap: Option<Vec<i16>>,
+    // C entry->entry_cxt: owns the row-filter node trees and ExprStates.
+    entry_ctx: Option<Box<MemoryContext>>,
 }
 
 impl RelationSyncEntry {
@@ -148,6 +182,9 @@ impl RelationSyncEntry {
             },
             publish_as_relid: InvalidOid,
             columns: None,
+            exprstate: [None, None, None],
+            attrmap: None,
+            entry_ctx: None,
         }
     }
 }
@@ -961,19 +998,90 @@ fn pgoutput_change(
         debug_assert!(relation.rd_rel.relispartition);
         ancestor = relcache::store::RelationIdGetRelation(publish_as_relid)?
             .unwrap_or_else(|| panic!("could not open relation {publish_as_relid}"));
-        // C converts tuples through an attrmap when the partition's
-        // descriptor differs from the ancestor's; that conversion is
-        // unported — refuse unless the descriptors line up.
-        assert_descriptors_match(relation, &ancestor);
         &ancestor
     } else {
         relation
     };
 
-    // Row filters were refused at entry-validation time; no transformation.
+    // Slot staging (pgoutput.c:1541-1587): only entries carrying a row filter
+    // or an attrmap pay for it; everything else keeps the allocation-free
+    // direct HeapTupleData write path.
+    let mut action = action;
+    let (has_attrmap, has_filter) = {
+        let e = relentry.borrow();
+        (
+            e.attrmap.is_some(),
+            e.exprstate[map_changetype_pubaction(action)].is_some(),
+        )
+    };
+
+    // C's data->context, reset after every change: created per change here,
+    // dropped on return. Declared before the slots so the slots (views and
+    // virtual datum arrays inside it) die first.
+    let staging_ctx = (has_attrmap || has_filter).then(|| MemoryContext::new("pgoutput change"));
+    // SAFETY: 'static stands for "while staging_ctx lives" (to the end of
+    // this call). Everything allocated under it — slots, formed tuples, eval
+    // temporaries — is consumed before the function returns.
+    let staging_mcx: Option<Mcx<'static>> = staging_ctx
+        .as_ref()
+        .map(|c| unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(c.mcx()) });
+
+    let mut old_slot: Option<SlotData<'static>> = None;
+    let mut new_slot: Option<SlotData<'static>> = None;
+    let mut tmp_new_slot: Option<SlotData<'static>> = None;
+
+    if let Some(mcx) = staging_mcx {
+        // ExecStoreHeapTuple of the reorderbuffer images (shouldFree=false):
+        // the slots hold non-owning views, the buffer keeps the tuples alive
+        // past this callback.
+        let stage = |t: &HeapTupleData<'static>| -> SlotData<'static> {
+            let mut s =
+                make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(relation.rd_att.clone()));
+            // SAFETY: same live image, non-owning view (see above).
+            let view = unsafe {
+                HeapTupleData::from_raw_parts(t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
+            };
+            exec_store_heap_tuple(&mut s, mcx, view);
+            s
+        };
+        old_slot = oldtuple.map(|t| stage(t));
+        new_slot = newtuple.map(|t| stage(t));
+
+        // Convert tuples into the ancestor's layout if publishing via a root
+        // with a different descriptor (pgoutput.c:1562/1577).
+        {
+            let e = relentry.borrow();
+            if let Some(map) = e.attrmap.as_deref() {
+                for slot in [old_slot.as_mut(), new_slot.as_mut()].into_iter().flatten() {
+                    let mut out = make_tuple_table_slot(
+                        mcx,
+                        TupleSlotKind::Virtual,
+                        Some(targetrel.rd_att.clone()),
+                    );
+                    execute_attr_map_slot(map, slot, &mut out, mcx);
+                    *slot = out;
+                }
+            }
+        }
+
+        // Check the row filter; updates may be transformed to INSERT/DELETE.
+        if !pgoutput_row_filter(
+            mcx,
+            targetrel,
+            old_slot.as_mut(),
+            new_slot.as_mut(),
+            &mut tmp_new_slot,
+            &relentry,
+            &mut action,
+        )? {
+            return Ok(());
+        }
+    }
 
     // Send BEGIN if this is the first published change of the transaction
-    // (streamed txns have no txndata; stream_start already went out).
+    // (streamed txns have no txndata; stream_start already went out). Sent
+    // only after the row filter says the change is going out, so filtered-out
+    // transactions stay empty (pgoutput.c:1595).
     if let Some(txndata) = txndata_from(rb, txn) {
         if !txndata.sent_begin_txn {
             pgoutput_send_begin(opc, rb, txn)?;
@@ -1000,7 +1108,20 @@ fn pgoutput_change(
 
     match action {
         reorderbuffer::Insert => {
-            let new: &types_tuple::HeapTupleData = newtuple.expect("INSERT carries a new tuple");
+            // A case-2 UPDATE transform uses the toast-merged tuple when one
+            // was staged (pgoutput.c:1450); attrmap conversions also
+            // materialize here. Otherwise write the reorderbuffer image.
+            let formed = match staging_mcx {
+                Some(mcx) => match tmp_new_slot.as_mut() {
+                    Some(t) => form_if_virtual(mcx, Some(t), targetrel)?,
+                    None => form_if_virtual(mcx, new_slot.as_mut(), targetrel)?,
+                },
+                None => None,
+            };
+            let new: &HeapTupleData = match &formed {
+                Some(t) => t,
+                None => newtuple.expect("INSERT carries a new tuple"),
+            };
             logicalrep_write_insert(
                 opc.out.as_mut_vec(),
                 xid,
@@ -1012,12 +1133,26 @@ fn pgoutput_change(
             )?;
         }
         reorderbuffer::Update => {
-            let new: &types_tuple::HeapTupleData = newtuple.expect("UPDATE carries a new tuple");
+            let (formed_old, formed_new) = match staging_mcx {
+                Some(mcx) => (
+                    form_if_virtual(mcx, old_slot.as_mut(), targetrel)?,
+                    form_if_virtual(mcx, new_slot.as_mut(), targetrel)?,
+                ),
+                None => (None, None),
+            };
+            let new: &HeapTupleData = match &formed_new {
+                Some(t) => t,
+                None => newtuple.expect("UPDATE carries a new tuple"),
+            };
+            let old: Option<&HeapTupleData> = match &formed_old {
+                Some(t) => Some(t),
+                None => oldtuple.map(|t| &**t),
+            };
             logicalrep_write_update(
                 opc.out.as_mut_vec(),
                 xid,
                 targetrel,
-                oldtuple.map(|t| &**t),
+                old,
                 new,
                 binary,
                 columns,
@@ -1025,7 +1160,14 @@ fn pgoutput_change(
             )?;
         }
         reorderbuffer::Delete => {
-            let old: &types_tuple::HeapTupleData = oldtuple.expect("checked above");
+            let formed = match staging_mcx {
+                Some(mcx) => form_if_virtual(mcx, old_slot.as_mut(), targetrel)?,
+                None => None,
+            };
+            let old: &HeapTupleData = match &formed {
+                Some(t) => t,
+                None => oldtuple.expect("checked above"),
+            };
             logicalrep_write_delete(
                 opc.out.as_mut_vec(),
                 xid,
@@ -1157,17 +1299,24 @@ fn pgoutput_origin_filter(opc: &mut OutputPluginContext, origin_id: RepOriginId)
     Ok(data.publish_no_origin && origin_id != InvalidRepOriginId)
 }
 
-// send_repl_origin (pgoutput.c:2458). Reaching here with a real origin id
-// needs the replication-origin engine (origin.c), owned by a parallel
-// increment; until it lands this path is unreachable and refuses loudly.
+// send_repl_origin (pgoutput.c:2458). Per C's own choice, an origin id whose
+// name is no longer known sends no origin message rather than erroring.
 fn send_repl_origin(
-    _opc: &mut OutputPluginContext,
+    opc: &mut OutputPluginContext,
     origin_id: RepOriginId,
-    _origin_lsn: XLogRecPtr,
+    origin_lsn: XLogRecPtr,
     send_origin: bool,
 ) -> PgResult<()> {
-    if send_origin && origin_id != InvalidRepOriginId {
-        unported("send_repl_origin: replorigin_by_oid (origin.c)");
+    if !send_origin {
+        return Ok(());
+    }
+    debug_assert!(origin_id != InvalidRepOriginId);
+    let ctx = MemoryContext::new("send_repl_origin");
+    if let Some(origin) = origin::replorigin_by_oid(ctx.mcx(), origin_id, true)? {
+        // Message boundary.
+        OutputPluginWrite(opc, false)?;
+        OutputPluginPrepareWrite(opc, true)?;
+        logicalproto::logicalrep_write_origin(opc.out.as_mut_vec(), &origin, origin_lsn);
     }
     Ok(())
 }
@@ -1274,52 +1423,350 @@ fn is_publishable_relation_data(rel: &RelationData<'static>) -> bool {
     )
 }
 
-// The partition-to-ancestor tuple conversion (build_attrmap_by_name_if_req /
-// execute_attr_map_slot) is unported; identical descriptors need no map.
-fn assert_descriptors_match(part: &RelationData<'static>, ancestor: &RelationData<'static>) {
-    let pd = &part.rd_att;
-    let ad = &ancestor.rd_att;
-    let mismatch = pd.natts != ad.natts
-        || (0..pd.natts as usize).any(|i| {
-            let pa = pd.attr(i);
-            let aa = ad.attr(i);
-            pa.attname.name_str() != aa.attname.name_str()
-                || pa.atttypid != aa.atttypid
-                || pa.attisdropped != aa.attisdropped
-        });
-    if mismatch {
-        unported("publish_via_partition_root with differing partition descriptors (attrmap)");
+// init_tuple_slot's attrmap half (pgoutput.c:1209): cache the map converting
+// this relation's tuples into the ancestor's layout. The C half creating the
+// cached old/new slots dissolves: slot staging happens per change.
+fn init_rel_attrmap(
+    entry: &mut RelationSyncEntry,
+    relation: &RelationData<'static>,
+) -> PgResult<()> {
+    if entry.publish_as_relid == relation.rd_id {
+        return Ok(());
     }
+    let ancestor = relcache::store::RelationIdGetRelation(entry.publish_as_relid)?
+        .unwrap_or_else(|| panic!("could not open relation {}", entry.publish_as_relid));
+    let ctx = MemoryContext::new("init_tuple_slot");
+    let map =
+        tupdesc::build_attrmap_by_name_if_req(ctx.mcx(), &relation.rd_att, &ancestor.rd_att, false)?;
+    // Owned copy: the entry outlives this validation's context (C copies into
+    // data->cachectx).
+    entry.attrmap = map.map(|m| m.to_vec());
+    Ok(())
 }
 
-// pgoutput_row_filter_init's detection arm (pgoutput.c:916): any row filter
-// on a subscribed publication is refused loudly (ExprState eval unported).
-fn refuse_row_filters(publications: &[&OwnedPublication], publish_as_relid: Oid) -> PgResult<()> {
-    let schemaid = lsyscache::get_rel_namespace(publish_as_relid)?;
-    let ctx = MemoryContext::new("refuse_row_filters");
-    let schema_pubids = GetSchemaPublications(ctx.mcx(), schemaid)?;
+// SearchSysCacheExists2(PUBLICATIONNAMESPACEMAP, ...) (pgoutput.c:955).
+fn schema_publication_exists(schemaid: Oid, puboid: Oid) -> PgResult<bool> {
+    Ok(match SearchSysCache2(
+        PUBLICATIONNAMESPACEMAP,
+        SysCacheKey::Value(Datum::from_oid(schemaid)),
+        SysCacheKey::Value(Datum::from_oid(puboid)),
+    )? {
+        Some(tup) => {
+            ReleaseSysCache(tup);
+            true
+        }
+        None => false,
+    })
+}
+
+// TextDatumGetCString over a possibly short-headered/compressed pg_node_tree.
+fn text_datum_str(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: a live varlena datum readable through its full VARSIZE_ANY.
+    let raw = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let payload = varlena::open_image(mcx, raw)?;
+    Ok(core::str::from_utf8(payload.as_bytes())
+        .expect("pg_node_tree is server-encoding text")
+        .to_owned())
+}
+
+// pgoutput_row_filter_init (pgoutput.c:916): collect each subscribed
+// publication's row filter per pubaction, OR the filters of like pubactions
+// together, then plan and compile them once per cache entry. A FOR ALL
+// TABLES publication, or one publishing this table's schema, means "no
+// filter" for every pubaction it publishes, overriding other filters.
+fn pgoutput_row_filter_init(
+    entry: &mut RelationSyncEntry,
+    publications: &[&OwnedPublication],
+) -> PgResult<()> {
+    let mut rfnodes: [Vec<String>; NUM_ROWFILTER_PUBACTIONS] = Default::default();
+    let mut no_filter = [false; NUM_ROWFILTER_PUBACTIONS];
+    let mut has_filter = true;
+    let schemaid = lsyscache::get_rel_namespace(entry.publish_as_relid)?;
+    let tmp = MemoryContext::new("pgoutput_row_filter_init");
+
     for pub_ in publications {
-        if pub_.alltables {
+        let mut pub_no_filter = true;
+        let mut qual_src: Option<String> = None;
+
+        if !pub_.alltables && !schema_publication_exists(schemaid, pub_.oid)? {
+            if let Some(rftuple) = SearchSysCache2(
+                PUBLICATIONRELMAP,
+                SysCacheKey::Value(Datum::from_oid(entry.publish_as_relid)),
+                SysCacheKey::Value(Datum::from_oid(pub_.oid)),
+            )? {
+                // Null indicates no filter.
+                let (d, isnull) =
+                    SysCacheGetAttr(PUBLICATIONRELMAP, &rftuple, Anum_pg_publication_rel_prqual)?;
+                pub_no_filter = isnull;
+                if !isnull {
+                    qual_src = Some(text_datum_str(tmp.mcx(), d)?);
+                }
+                ReleaseSysCache(rftuple);
+            }
+        }
+
+        if pub_no_filter {
+            no_filter[PUBACTION_INSERT] |= pub_.pubactions.pubinsert;
+            no_filter[PUBACTION_UPDATE] |= pub_.pubactions.pubupdate;
+            no_filter[PUBACTION_DELETE] |= pub_.pubactions.pubdelete;
+            // Quick exit if every pubaction is published unfiltered.
+            if no_filter.iter().all(|&nf| nf) {
+                has_filter = false;
+                break;
+            }
             continue;
         }
-        // FOR TABLES IN SCHEMA implies no row filter.
-        if schema_pubids.contains(&pub_.oid) {
-            continue;
-        }
-        if let Some(rftuple) = SearchSysCache2(
-            PUBLICATIONRELMAP,
-            SysCacheKey::Value(Datum::from_oid(publish_as_relid)),
-            SysCacheKey::Value(Datum::from_oid(pub_.oid)),
-        )? {
-            let (_d, isnull) =
-                SysCacheGetAttr(PUBLICATIONRELMAP, &rftuple, Anum_pg_publication_rel_prqual)?;
-            ReleaseSysCache(rftuple);
-            if !isnull {
-                unported("row-filter publications (ExprState evaluation)");
+
+        // Form the per-pubaction row filter lists.
+        let src = qual_src.expect("row filter source decoded");
+        for (idx, pubaction) in [
+            (PUBACTION_INSERT, pub_.pubactions.pubinsert),
+            (PUBACTION_UPDATE, pub_.pubactions.pubupdate),
+            (PUBACTION_DELETE, pub_.pubactions.pubdelete),
+        ] {
+            if pubaction && !no_filter[idx] {
+                rfnodes[idx].push(src.clone());
             }
         }
     }
+
+    // Clean the row filter.
+    for idx in 0..NUM_ROWFILTER_PUBACTIONS {
+        if no_filter[idx] {
+            rfnodes[idx].clear();
+        }
+    }
+
+    if !has_filter {
+        return Ok(());
+    }
+
+    // pgoutput_ensure_entry_cxt + the entry_cxt compile block (pgoutput.c:892,
+    // 1024): parse trees and ExprStates live exactly as long as the cache
+    // entry, in the entry's private context. SAFETY: 'static stands for
+    // "while entry.entry_ctx lives"; the Box pins the context address, and
+    // both field order and the revalidation reset retire the compiled states
+    // before the context. The context is parked in the entry BEFORE any state
+    // compiles into it, so an error unwinding out of this function cannot
+    // strand entry states pointing at a dropped arena.
+    entry.entry_ctx = Some(Box::new(MemoryContext::new("entry private context")));
+    let emcx: Mcx<'static> = unsafe {
+        core::mem::transmute::<Mcx<'_>, Mcx<'static>>(
+            entry.entry_ctx.as_ref().expect("just set").mcx(),
+        )
+    };
+
+    let reldata = relcache::store::RelationIdGetRelation(entry.publish_as_relid)?
+        .unwrap_or_else(|| panic!("could not open relation {}", entry.publish_as_relid));
+    let relation = types_rel::Relation::open_rc(reldata, None);
+
+    for (idx, srcs) in rfnodes.iter().enumerate() {
+        if srcs.is_empty() {
+            continue;
+        }
+        let mut filters: Vec<Node<'static>> = Vec::with_capacity(srcs.len());
+        for src in srcs {
+            let node = readfuncs::stringToNode(emcx, src)?;
+            filters.push(planner::prepjointree::expand_generated_columns_in_expr(
+                emcx, node, &relation, 1,
+            )?);
+        }
+        // make_orclause (clauses.c): a single filter stays bare.
+        let rfnode = if filters.len() == 1 {
+            filters[0]
+        } else {
+            clauses::make_orclause(emcx, NodeList::from_slice(emcx, &filters)?)?
+        };
+        // pgoutput_row_filter_init_expr (pgoutput.c:841): expression_planner
+        // (= eval_const_expressions + fix_opfuncids) + ExecPrepareExpr.
+        let planned = clauses::eval_const_expressions(emcx, rfnode)?;
+        nodes_core::fix_opfuncids(planned)?;
+        entry.exprstate[idx] = exec_init_expr(emcx, Some(planned), ParamBind::NONE)?;
+    }
+
     Ok(())
+}
+
+// pgoutput_row_filter_exec_expr (pgoutput.c:871): NULL is taken as false.
+fn pgoutput_row_filter_exec_expr<'c>(
+    state: &mut ExprState<'c>,
+    slot: &mut SlotData<'c>,
+) -> PgResult<bool> {
+    let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
+    let nd = exec_eval_expr(state, &mut slots)?;
+    Ok(!nd.isnull && nd.value.as_usize() != 0)
+}
+
+// The UPDATE transform decision table (pgoutput.c:1435 cases 1-4):
+// (publish?, action to send).
+fn transform_update_action(
+    old_matched: bool,
+    new_matched: bool,
+) -> (bool, ReorderBufferChangeType) {
+    match (old_matched, new_matched) {
+        // Case 1: neither matches — drop the change.
+        (false, false) => (false, reorderbuffer::Update),
+        // Case 2: only the new tuple matches — INSERT it downstream.
+        (false, true) => (true, reorderbuffer::Insert),
+        // Case 3: only the old tuple matches — DELETE it downstream.
+        (true, false) => (true, reorderbuffer::Delete),
+        // Case 4: both match — plain UPDATE.
+        (true, true) => (true, reorderbuffer::Update),
+    }
+}
+
+fn varatt_is_external_ondisk_datum(val: Datum) -> bool {
+    let p = val.as_usize() as *const u8;
+    // SAFETY: a live varlena datum; the first two bytes classify it.
+    unsafe { *p == 0x01 && *p.add(1) == types_tuple::varatt::VARTAG_ONDISK }
+}
+
+// pgoutput_row_filter (pgoutput.c:1301): true when the change is to be
+// replicated. For updates, old/new verdicts that straddle the filter
+// transform the UPDATE to DELETE/INSERT; an INSERT transform may need
+// unchanged toasted replica-identity columns merged over from the old tuple
+// (only logged there — see ReorderBufferToastReplace), staged in
+// tmp_new_slot, which the caller must use as the new tuple iff the action
+// came back INSERT.
+fn pgoutput_row_filter<'c>(
+    mcx: Mcx<'c>,
+    targetrel: &RelationData<'static>,
+    old_slot: Option<&mut SlotData<'c>>,
+    new_slot: Option<&mut SlotData<'c>>,
+    tmp_new_slot: &mut Option<SlotData<'c>>,
+    relentry: &Rc<RefCell<RelationSyncEntry>>,
+    action: &mut ReorderBufferChangeType,
+) -> PgResult<bool> {
+    let idx = map_changetype_pubaction(*action);
+
+    // Take the compiled state out of the entry for the eval: an invalidation
+    // callback firing mid-eval (syscache traffic) walks every entry, and a
+    // RefCell borrow held across the eval would panic where C is fine.
+    let Some(mut state_box) = relentry.borrow_mut().exprstate[idx].take() else {
+        // Bail out if there is no row filter.
+        return Ok(true);
+    };
+    let result = pgoutput_row_filter_guts(
+        mcx,
+        targetrel,
+        old_slot,
+        new_slot,
+        tmp_new_slot,
+        &mut state_box,
+        action,
+    );
+    relentry.borrow_mut().exprstate[idx] = Some(state_box);
+    result
+}
+
+fn pgoutput_row_filter_guts<'c>(
+    mcx: Mcx<'c>,
+    targetrel: &RelationData<'static>,
+    old_slot: Option<&mut SlotData<'c>>,
+    new_slot: Option<&mut SlotData<'c>>,
+    tmp_new_slot: &mut Option<SlotData<'c>>,
+    state_box: &mut PgBox<'static, ExprState<'static>>,
+    action: &mut ReorderBufferChangeType,
+) -> PgResult<bool> {
+    // SAFETY: the state's 'static stands for the entry context, which the
+    // caller keeps alive across this call. Narrowing to 'c only admits the
+    // shorter-lived staging slots; the eval retains nothing across the call,
+    // and its transient allocations (detoast, function results) go to the
+    // per-change staging context armed here — C's per-tuple ExprContext,
+    // reset per change (pgoutput.c:1340 ResetPerTupleExprContext).
+    let state: &mut ExprState<'c> = unsafe {
+        core::mem::transmute::<&mut ExprState<'static>, &mut ExprState<'c>>(&mut *state_box)
+    };
+    state.arm_result_mcx(mcx);
+
+    match (old_slot, new_slot) {
+        // One-tuple cases (pgoutput.c:1360): INSERT (new only), DELETE (old
+        // only), and UPDATE without a logged old tuple (no replica-identity
+        // column changed) — evaluate that tuple and return.
+        (None, Some(slot)) | (Some(slot), None) => pgoutput_row_filter_exec_expr(state, slot),
+        (Some(old_slot), Some(new_slot)) => {
+            debug_assert!(matches!(*action, reorderbuffer::Update));
+            slot_getallattrs(new_slot);
+            slot_getallattrs(old_slot);
+
+            // Merge unchanged toasted replica-identity columns (present only
+            // in the old tuple) into a virtual copy of the new tuple
+            // (pgoutput.c:1385).
+            let desc = &targetrel.rd_att;
+            let natts = desc.natts as usize;
+            let mut merge_cols: Vec<usize> = Vec::new();
+            for i in 0..natts {
+                if new_slot.base().tts_isnull[i] || old_slot.base().tts_isnull[i] {
+                    continue;
+                }
+                if desc.compact_attr(i).attlen == -1
+                    && varatt_is_external_ondisk_datum(new_slot.base().tts_values[i])
+                    && !varatt_is_external_ondisk_datum(old_slot.base().tts_values[i])
+                {
+                    merge_cols.push(i);
+                }
+            }
+            if !merge_cols.is_empty() {
+                let mut t =
+                    make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
+                exec_clear_tuple(&mut t, mcx);
+                {
+                    let nb = new_slot.base();
+                    let tb = t.base_mut();
+                    for i in 0..natts {
+                        tb.tts_values[i] = nb.tts_values[i];
+                        tb.tts_isnull[i] = nb.tts_isnull[i];
+                    }
+                }
+                {
+                    let ob = old_slot.base();
+                    let tb = t.base_mut();
+                    for &i in &merge_cols {
+                        tb.tts_values[i] = ob.tts_values[i];
+                        tb.tts_isnull[i] = ob.tts_isnull[i];
+                    }
+                }
+                *tmp_new_slot = Some(t);
+            }
+
+            let old_matched = pgoutput_row_filter_exec_expr(state, old_slot)?;
+            let new_matched = match tmp_new_slot.as_mut() {
+                Some(t) => {
+                    exec_store_virtual_tuple(t);
+                    pgoutput_row_filter_exec_expr(state, t)?
+                }
+                None => pgoutput_row_filter_exec_expr(state, new_slot)?,
+            };
+
+            let (publish, new_action) = transform_update_action(old_matched, new_matched);
+            *action = new_action;
+            Ok(publish)
+        }
+        (None, None) => unreachable!("row filter with no tuple"),
+    }
+}
+
+// Staged virtual slots (attrmap-converted or toast-merged) materialize into
+// the staging context for the wire writer; heap slots still view the
+// reorderbuffer image, which the caller writes directly.
+fn form_if_virtual<'c>(
+    mcx: Mcx<'c>,
+    slot: Option<&mut SlotData<'c>>,
+    targetrel: &RelationData<'static>,
+) -> PgResult<Option<HeapTuple<'c>>> {
+    let Some(slot) = slot else { return Ok(None) };
+    if !matches!(slot, SlotData::Virtual(_)) {
+        return Ok(None);
+    }
+    slot_getallattrs(slot);
+    let b = slot.base();
+    Ok(Some(heap_form_tuple(
+        mcx,
+        &targetrel.rd_att,
+        &b.tts_values,
+        &b.tts_isnull,
+    )?))
 }
 
 // check_and_init_gencol (pgoutput.c:1062).
@@ -1489,6 +1936,11 @@ fn get_rel_sync_entry(
         e.streamed_txns.clear();
         e.include_gencols_type = PUBLISH_GENCOLS_NONE;
         e.columns = None;
+        // Free objects depending on the earlier definition (pgoutput.c:2118):
+        // compiled row filters first, then the context that owns them.
+        e.exprstate = [None, None, None];
+        e.attrmap = None;
+        e.entry_ctx = None;
         e.pubactions = PublicationActions {
             pubinsert: false,
             pubupdate: false,
@@ -1567,8 +2019,11 @@ fn get_rel_sync_entry(
         e.publish_as_relid = publish_as_relid;
 
         if e.pubactions.pubinsert || e.pubactions.pubupdate || e.pubactions.pubdelete {
-            // Row filters are unported: refuse loudly if any apply.
-            refuse_row_filters(&rel_publications, publish_as_relid)?;
+            // Initialize the tuple conversion map (init_tuple_slot's attrmap
+            // half), the row filter, generated-column mode, and the column
+            // list — C's validation order (pgoutput.c:2310-2325).
+            init_rel_attrmap(&mut e, relation)?;
+            pgoutput_row_filter_init(&mut e, &rel_publications)?;
             check_and_init_gencol(&mut e, &rel_publications, relation)?;
             pgoutput_column_list_init(&mut e, &rel_publications, relation)?;
         }
@@ -1592,4 +2047,60 @@ pub fn init_seams() {
         lookup,
         pg_init: None,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_transform_decision_table() {
+        // pgoutput.c:1435 cases 1-4.
+        assert_eq!(
+            transform_update_action(false, false),
+            (false, reorderbuffer::Update)
+        );
+        assert_eq!(
+            transform_update_action(false, true),
+            (true, reorderbuffer::Insert)
+        );
+        assert_eq!(
+            transform_update_action(true, false),
+            (true, reorderbuffer::Delete)
+        );
+        assert_eq!(
+            transform_update_action(true, true),
+            (true, reorderbuffer::Update)
+        );
+    }
+
+    #[test]
+    fn changetype_pubaction_map() {
+        assert_eq!(map_changetype_pubaction(reorderbuffer::Insert), PUBACTION_INSERT);
+        assert_eq!(map_changetype_pubaction(reorderbuffer::Update), PUBACTION_UPDATE);
+        assert_eq!(map_changetype_pubaction(reorderbuffer::Delete), PUBACTION_DELETE);
+    }
+
+    #[test]
+    fn text_datum_str_all_header_forms() {
+        let ctx = MemoryContext::new("test");
+        let mcx = ctx.mcx();
+        // 4-byte-header text (what pg_node_tree attrs carry inline).
+        let long = "x".repeat(200);
+        for s in ["(a > 10)", long.as_str()] {
+            let img = varlena::cstring_to_text(mcx, s.as_bytes())
+                .unwrap()
+                .into_image()
+                .leak();
+            let d = Datum::from_usize(img.as_ptr() as usize);
+            assert_eq!(text_datum_str(mcx, d).unwrap(), s);
+        }
+        // Short-form (1-byte header) varlena, as heap tuples may store it.
+        let payload = b"{QUERY}";
+        let mut short = mcx::vec_with_capacity_in(mcx, payload.len() + 1).unwrap();
+        short.push(((payload.len() + 1) as u8) << 1 | 0x01);
+        mcx::vec_append_bytes(&mut short, payload).unwrap();
+        let d = Datum::from_usize(short.leak().as_ptr() as usize);
+        assert_eq!(text_datum_str(mcx, d).unwrap(), "{QUERY}");
+    }
 }

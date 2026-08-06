@@ -30,3 +30,13 @@ varlena = { path = "../../backend/utils/adt/varlena" }
 adt_bool = { path = "../../backend/utils/adt/bool" }
 mbutils = { path = "../../backend/utils/mb/mbutils" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+types_slot = { path = "../../_support/types/types_slot" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+tupdesc = { path = "../../backend/access/common/tupdesc" }
+readfuncs = { path = "../../backend/nodes/readfuncs" }
+nodes_core = { path = "../../backend/nodes/nodes_core" }
+clauses = { path = "../../backend/optimizer/util/clauses" }
+planner = { path = "../../backend/optimizer/plan/planner" }
+execexpr = { path = "../../backend/executor/execexpr" }
+exectuples = { path = "../../backend/executor/exectuples" }
+origin = { path = "../../backend/replication/origin" }
