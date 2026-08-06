@@ -66,12 +66,6 @@ const PublicationRelationId: Oid = 6104;
 const PublicationRelRelationId: Oid = 6106;
 const PublicationNamespaceRelationId: Oid = 6237;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: dependency.c {what}")
-}
-
 #[derive(Clone, Copy)]
 struct ObjectAddressExtra {
     flags: i32,
@@ -691,6 +685,26 @@ fn deleteObjectsInList<'mcx>(
     depRel: &mut Option<Relation<'mcx>>,
     flags: i32,
 ) -> PgResult<()> {
+    // Capability check over the WHOLE deletion closure before the first
+    // catalog mutation: C only discovers an unsupported class when the
+    // deletion loop reaches it (mid-mutation, then rolls back); erroring
+    // here keeps the statement's catalog writes at zero. Client-visible
+    // outcome (message + full rollback) is identical.
+    for i in 0..targetObjects.refs.len() {
+        let thisobj = &targetObjects.refs[i];
+        if flags & PERFORM_DELETION_SKIP_ORIGINAL != 0
+            && targetObjects.extras[i].flags & DEPFLAG_ORIGINAL != 0
+        {
+            continue;
+        }
+        if !doDeletion_handles_class(thisobj.classId) {
+            return Err(Box::new(PgError::error(format!(
+                "unsupported object class: {}",
+                thisobj.classId
+            ))));
+        }
+    }
+
     if event_trigger_seams::track_dropped_objects_needed::call(mcx)?
         && flags & PERFORM_DELETION_INTERNAL == 0
     {
@@ -808,7 +822,14 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                     sequence_seams::delete_sequence_tuple::call(object.objectId)?;
                 }
             } else {
-                unported("doDeletion: non-table relkind (foreign-table/composite lanes)");
+                // C's doDeletion has no relkind fence here (any non-index
+                // relkind goes through heap_drop_with_catalog); every relkind
+                // is enumerated above, so this is unreachable. Fail clean,
+                // never mid-deletion panic.
+                return Err(Box::new(PgError::error(format!(
+                    "doDeletion: unexpected relkind '{}' for relation {}",
+                    relKind as char, object.objectId
+                ))));
             }
         }
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
@@ -955,10 +976,77 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             types_core::USER_MAPPING_OID_INDEX_ID,
             object.objectId,
         )?,
-        other => panic!("unported: doDeletion object class {other}"),
+        // C REL_18_3 dependency.c doDeletion: global object classes never
+        // reach per-database deletion — same message, clean error.
+        types_core::AUTH_ID_RELATION_ID
+        | types_core::DATABASE_RELATION_ID
+        | types_core::TABLE_SPACE_RELATION_ID
+        | SubscriptionRelationId_dep
+        | ParameterAclRelationId_dep => {
+            return Err(Box::new(PgError::error(
+                "global objects cannot be deleted by doDeletion".to_string(),
+            )));
+        }
+        other => {
+            // C: `elog(ERROR, "unsupported object class: %u")` — a clean,
+            // fully-rolled-back error, never a mid-deletion panic.
+            return Err(Box::new(PgError::error(format!(
+                "unsupported object class: {other}"
+            ))));
+        }
     }
     Ok(())
 }
+
+// The classId set doDeletion's match handles — keep in sync with the match
+// arms above. deleteObjectsInList consults this BEFORE the first catalog
+// mutation so an undeletable class in the closure fails the statement while
+// the catalogs are still untouched (C discovers this mid-loop and relies on
+// rollback; failing early is strictly safer and client-identical).
+fn doDeletion_handles_class(class_id: Oid) -> bool {
+    matches!(
+        class_id,
+        RELATION_RELATION_ID
+            | TYPE_RELATION_ID
+            | PolicyRelationId
+            | PublicationRelationId
+            | PublicationRelRelationId
+            | PublicationNamespaceRelationId
+            | pg_largeobject::LargeObjectRelationId
+            | types_core::PROCEDURE_RELATION_ID
+            | types_core::EXTENSION_RELATION_ID
+            | AttrDefaultRelationId
+            | ConstraintRelationId
+            | TriggerRelationId
+            | statscmds::StatisticExtRelationId
+            | types_core::NAMESPACE_RELATION_ID
+            | RewriteRelationId
+            | types_core::OPERATOR_RELATION_ID
+            | types_core::OPERATOR_CLASS_RELATION_ID
+            | types_core::OPERATOR_FAMILY_RELATION_ID
+            | types_core::ACCESS_METHOD_OPERATOR_RELATION_ID
+            | types_core::ACCESS_METHOD_PROCEDURE_RELATION_ID
+            | TSDictionaryRelationId
+            | CollationRelationId_dep
+            | TSConfigRelationId
+            | DefaultAclRelationId
+            | AccessMethodRelationId
+            | CastRelationId
+            | ConversionRelationId
+            | LanguageRelationId
+            | TransformRelationId
+            | TSParserRelationId
+            | TSTemplateRelationId
+            | AuthMemRelationId
+            | EventTriggerRelationId
+            | types_core::FOREIGN_DATA_WRAPPER_RELATION_ID
+            | types_core::FOREIGN_SERVER_RELATION_ID
+            | types_core::USER_MAPPING_RELATION_ID
+    )
+}
+
+const SubscriptionRelationId_dep: Oid = 6100;
+const ParameterAclRelationId_dep: Oid = 6243;
 
 const AccessMethodRelationId: Oid = 2601;
 const AmOidIndexId: Oid = 2652;

@@ -65,12 +65,6 @@ pub struct InternalTriggerArgs<'a> {
     pub parent_trigger_oid: Oid,
 }
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: CreateTriggerFiringOn {what}")
-}
-
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -130,17 +124,11 @@ fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
     }
 }
 
-// errdetail_relkind_not_supported (pg_class.c), triggerable-rel error slice.
-pub(crate) fn relkind_not_supported_detail(relkind: u8) -> &'static str {
-    match relkind {
-        b'S' => "This operation is not supported for sequences.",
-        b't' => "This operation is not supported for TOAST tables.",
-        b'i' | b'I' => "This operation is not supported for indexes.",
-        b'c' => "This operation is not supported for composite types.",
-        b'm' => "This operation is not supported for materialized views.",
-        other => unported(&format!("errdetail_relkind_not_supported '{}'", other as char)),
-    }
-}
+// errdetail_relkind_not_supported (pg_class.c): the canonical total port
+// lives in the pg_class crate — no local partial slice (its panic arm was
+// the census 2026-08-05 lane-3 S item: a wrong-relkind trigger DDL error
+// must be C's clean 42809, never a panic).
+pub(crate) use pg_class::errdetail_relkind_not_supported as relkind_not_supported_detail;
 
 #[allow(clippy::too_many_arguments)]
 pub fn CreateTriggerFiringOn<'mcx>(
@@ -240,7 +228,7 @@ pub fn CreateTriggerFiringOn<'mcx>(
                     format!("relation \"{relname}\" cannot have triggers"),
                     ERRCODE_WRONG_OBJECT_TYPE,
                 ))
-                .with_detail(relkind_not_supported_detail(other as u8).to_string()),
+                .with_detail(relkind_not_supported_detail(other as u8)?),
             ));
         }
     }

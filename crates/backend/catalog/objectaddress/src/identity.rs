@@ -117,7 +117,20 @@ pub fn getObjectTypeDescription<'mcx>(
         crate::TSDictionaryRelationId => "text search dictionary".into(),
         crate::TSTemplateRelationId => "text search template".into(),
         crate::TSConfigRelationId => "text search configuration".into(),
-        other => panic!("unported: objectaddress.c getObjectTypeDescription class {other}"),
+        other => {
+            // C getObjectTypeDescription's default arm (objectaddress.c
+            // REL_18_3: `elog(ERROR, "unsupported object class: %u")`) for
+            // any classId outside its switch — SQL reaches it with arbitrary
+            // OIDs (pg_identify_object(16384, 1, 0)). Classes C DOES handle
+            // but this port has not implemented yet stay loud below.
+            if !crate::description::c_described_classes(other) {
+                return Err(crate::err(
+                    ::types_error::ERRCODE_INTERNAL_ERROR,
+                    format!("unsupported object class: {other}"),
+                ));
+            }
+            panic!("unported: objectaddress.c getObjectTypeDescription class {other}")
+        }
     };
     Ok(Some(s))
 }
@@ -1033,7 +1046,18 @@ pub fn getObjectIdentityParts<'mcx>(
         crate::TSConfigRelationId => {
             named_nsp_identity(mcx, object, missing_ok, cache_syscache::cacheinfo::TSCONFIGOID, 2, 3, "text search configuration")
         }
-        other => panic!("unported: objectaddress.c getObjectIdentityParts class {other}"),
+        other => {
+            // As getObjectTypeDescription above: out-of-set class OIDs get
+            // C's clean `elog(ERROR, "unsupported object class: %u")`;
+            // C-handled-but-unported classes stay loud.
+            if !crate::description::c_described_classes(other) {
+                return Err(crate::err(
+                    ::types_error::ERRCODE_INTERNAL_ERROR,
+                    format!("unsupported object class: {other}"),
+                ));
+            }
+            panic!("unported: objectaddress.c getObjectIdentityParts class {other}")
+        }
     }
 }
 

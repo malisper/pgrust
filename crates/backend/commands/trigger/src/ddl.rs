@@ -130,7 +130,7 @@ pub fn RemoveTriggerById<'mcx>(mcx: Mcx<'mcx>, trig_oid: Oid) -> PgResult<()> {
                     format!("relation \"{}\" cannot have triggers", rel.name()),
                     ERRCODE_WRONG_OBJECT_TYPE,
                 ))
-                .with_detail(relkind_not_supported_detail(other as u8).to_string()),
+                .with_detail(relkind_not_supported_detail(other as u8)?),
             ));
         }
     }
@@ -193,7 +193,7 @@ pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()>
                     format!("relation \"{}\" cannot have triggers", rv.relname),
                     ERRCODE_WRONG_OBJECT_TYPE,
                 ))
-                .with_detail(relkind_not_supported_detail(other as u8).to_string()),
+                .with_detail(relkind_not_supported_detail(other as u8)?),
             ));
         }
     }

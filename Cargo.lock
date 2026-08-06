@@ -18397,6 +18397,7 @@ dependencies = [
  "parse_relation",
  "parser_small1",
  "partdesc",
+ "pg_class",
  "pg_constraint",
  "pg_depend",
  "pg_inherits",

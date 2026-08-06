@@ -2174,7 +2174,15 @@ fn exec_rename_stmt_inner<'mcx>(
             )?;
             return Ok(Some(ObjectAddress::set(catalog::AuthIdRelationId, roleid)));
         }
-        other => panic!("unported: ExecRenameStmt {other:?}"),
+        other => {
+            // C ExecRenameStmt's default arm (alter.c REL_18_3:
+            // `elog(ERROR, "unrecognized rename stmt type: %d")`) — every
+            // renameType C handles is ported above, so this is a clean
+            // internal error, never a panic.
+            return Err(Box::new(types_error::PgError::error(format!(
+                "unrecognized rename stmt type: {other:?}"
+            ))));
+        }
     }
     Ok(None)
 }

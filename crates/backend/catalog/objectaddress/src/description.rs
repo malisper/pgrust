@@ -843,7 +843,7 @@ pub fn getObjectDescription(
 
 // The classId set C's getObjectDescription switch handles (objectaddress.c
 // REL_18_3 case list; OIDs from the CATALOG() lines in the pg_*.h headers).
-fn c_described_classes(class_id: types_core::Oid) -> bool {
+pub(crate) fn c_described_classes(class_id: types_core::Oid) -> bool {
     matches!(
         class_id,
         826    // pg_default_acl (DefaultAclRelationId)
