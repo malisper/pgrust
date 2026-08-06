@@ -26,4 +26,8 @@ set enable_hashagg = off;
 explain (costs off) select a, b, sum(c) from gsd group by cube(a,b);
 select a, b, sum(c) from gsd group by cube(a,b) order by 1,2,3;
 reset enable_hashagg;
+-- issue #54: byref-initcond transtypes (avg/stddev) per-set init copies,
+-- default (hashed/AGG_MIXED) strategies.
+select a, avg(c), stddev_samp(c) from gsd group by grouping sets ((a),(b),()) order by 1,2,3;
+select a, b, avg(c) from gsd group by rollup(a,b) order by 1,2,3;
 drop table gsd;

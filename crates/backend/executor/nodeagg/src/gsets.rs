@@ -1313,28 +1313,42 @@ fn prepare_projection_slot<'mcx>(
     }
 }
 
-fn initialize_aggregates_sets(node: &mut AggStateData<'_>, num_reset: usize) {
+fn initialize_aggregates_sets(node: &mut AggStateData<'_>, num_reset: usize) -> PgResult<()> {
     for setno in 0..num_reset {
         // Grouping sets never admit set-mode (init gates on
         // !has_grouping_sets), so force is always false here.
         crate::restart_pertrans_sortstates(&mut node.pertrans_sort, setno, false)
             .expect("sortstate restart");
     }
+    // SAFETY: read of the once-allocated node; no &mut is live to it.
+    let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let gs = node.gsets.as_mut().expect("grouping-sets retrieve");
     for setno in 0..num_reset {
         let base = gs.pergroup_bases[setno];
         for (transno, init) in node.trans_init.iter().enumerate() {
+            let typ = node.trans_typ[transno];
+            let value = if !init.isnull && !typ.byval {
+                // SAFETY: node-lifetime initval datum copied per set into the
+                // aggcontext (C initialize_aggregate's datumCopy in
+                // curaggcontext memory). Without the copy every set's
+                // pergroup slot aliases the SAME by-ref initval, so the
+                // sets' transitions compound into one shared state.
+                unsafe { ::execexpr::agg_datum_copy(aggctx, init.value, typ.len)? }
+            } else {
+                init.value
+            };
             // SAFETY: transno < numtrans slots of the once-allocated per-set
             // array; base pointers are the sole access path.
             unsafe {
                 base.as_ptr().add(transno).write(AggPerGroup {
-                    trans_value: init.value,
+                    trans_value: value,
                     trans_value_is_null: init.isnull,
                     no_trans_value: init.isnull,
                 });
             }
         }
     }
+    Ok(())
 }
 
 // C agg_retrieve_direct, grouping-sets form. projected_set is -1 initially or
@@ -1474,7 +1488,7 @@ where
                     }
                 }
             }
-            initialize_aggregates_sets(node, num_reset);
+            initialize_aggregates_sets(node, num_reset)?;
             if have_group {
                 drain_group(node, estate, fetch_outer)?;
             }

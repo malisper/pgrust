@@ -261,6 +261,13 @@ fn eval_limit_expr<'mcx>(
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
 ) -> PgResult<::datum::NullableDatum> {
+    // C runs pending initplans lazily inside ExecEvalExpr (ExecEvalParamExec
+    // -> ExecSetParamPlan, nodeSubplan.c); the $n params a LIMIT/OFFSET
+    // `(SELECT n)` initplan feeds resolve here instead.
+    if !expr.param_exec_deps().is_empty() {
+        let deps = expr.param_exec_deps().to_vec();
+        ::executils::exec_eval_param_exec_params(estate, &deps)?;
+    }
     // C's ExecEvalExprSwitchContext per-tuple context: reset, then eval with
     // no tuple slots (limit expressions reference no relation columns).
     estate.reset_expr_context(ecxt);

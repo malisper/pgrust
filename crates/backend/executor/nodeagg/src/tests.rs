@@ -1741,6 +1741,112 @@ fn rollup_empty_input_projects_only_empty_set() {
     assert_eq!(got, vec![(None, None, 0, 3)]);
 }
 
+// GROUPING SETS ((a),()) with avg(b): a byref-initcond transtype (_int8
+// '{0,0}'). Issue #54: each set's pergroup slot must own a datumCopy of the
+// initval (C initialize_aggregate); aliasing the node-lifetime initval
+// across sets compounds every set into one shared transition state (g2
+// reported the running average 43.33... instead of 100).
+fn mk_gsets_avg_agg(mcx: Mcx<'_>) -> &Agg<'_> {
+    let a = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let b = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+    let mut outer_tl = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, a, 1, Some("a"), false).unwrap(),
+    )
+    .unwrap();
+    outer_tl
+        .lappend(mcx, Node::mk_target_entry(mcx, b, 2, Some("b"), false).unwrap())
+        .unwrap();
+    let outer_plan = {
+        let mut r = Node::build::<types_nodes::plannodes::Result>(mcx).unwrap();
+        r.plan.targetlist = outer_tl;
+        r.plan.plan_width = 8;
+        r.seal()
+    };
+
+    let ga = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let arg = Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap();
+    let arg_tle = Node::mk_target_entry(mcx, arg, 1, None, false).unwrap();
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = AVG_INT4_OID;
+    aggref.aggtype = NUMERICOID;
+    aggref.aggtranstype = INT8ARRAYOID;
+    aggref.aggargtypes = types_nodes::list::OidList::make1(mcx, INT4OID).unwrap();
+    aggref.args = NodeList::make1(mcx, arg_tle).unwrap();
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    let mut tlist = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, ga, 1, Some("a"), false).unwrap(),
+    )
+    .unwrap();
+    tlist
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, aggref.seal(), 2, Some("avg"), false).unwrap(),
+        )
+        .unwrap();
+
+    let set1 =
+        Node::mk_int_list(mcx, types_nodes::list::IntList::from_slice(mcx, &[0]).unwrap())
+            .unwrap();
+    let set0 =
+        Node::mk_int_list(mcx, types_nodes::list::IntList::from_slice(mcx, &[]).unwrap())
+            .unwrap();
+    let mut gsets = NodeList::make1(mcx, set1).unwrap();
+    gsets.lappend(mcx, set0).unwrap();
+
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    agg.plan.targetlist = tlist;
+    agg.plan.lefttree = Some(outer_plan);
+    agg.aggstrategy = 1;
+    agg.numCols = 1;
+    agg.grpColIdx = mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    agg.grpOperators = mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    agg.grpCollations = mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    agg.numGroups = 3;
+    agg.groupingSets = gsets;
+    agg.seal_ref()
+}
+
+#[test]
+fn grouping_sets_byref_initcond_per_set_copy() {
+    install_seams();
+    let agg = mk_gsets_avg_agg(leaked_mcx());
+    let mut estate_owner =
+        create_executor_state(Box::leak(Box::new(MemoryContext::new("q")))).unwrap();
+    let got = estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = two_int4_desc(mcx);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        let result_desc =
+            desc_of(leaked_mcx(), &[(INT4OID, 4, TYPALIGN_INT), (NUMERICOID, -1, TYPALIGN_INT)]);
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state =
+            exec_init_agg(agg, estate, 0, result_desc, Some(two_int4_desc(leaked_mcx()))).unwrap();
+        let mut got: Vec<(Option<i32>, String)> = Vec::new();
+        let mut feed = feeder2(outer_id, &[(1, 10), (1, 20), (2, 100)]);
+        while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            got.push((
+                (!base.tts_isnull[0]).then(|| base.tts_values[0].as_i32()),
+                numeric_datum_text(base.tts_values[1]),
+            ));
+        }
+        got
+    });
+    // Live PG 18: (1)->15, (2)->100, ()->130/3.
+    assert_eq!(
+        got,
+        vec![
+            (Some(1), "15.0000000000000000".to_string()),
+            (Some(2), "100.0000000000000000".to_string()),
+            (None, "43.3333333333333333".to_string()),
+        ]
+    );
+}
+
 // GROUPING SETS ((a),(b)): two sorted phases; phase 2 re-sorts by b through
 // the inter-phase tuplesort.
 fn mk_two_rollup_chain_agg(mcx: Mcx<'_>) -> &Agg<'_> {

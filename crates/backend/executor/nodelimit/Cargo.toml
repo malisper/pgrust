@@ -21,6 +21,7 @@ postgres_seams = { path = "../../tcop/postgres_seams" }
 
 [dev-dependencies]
 types_core = { path = "../../../_support/types/types_core" }
+types_portal = { path = "../../../_support/types/portal" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }

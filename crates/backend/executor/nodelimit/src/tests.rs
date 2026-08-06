@@ -153,6 +153,52 @@ fn rescan_recomputes_and_replays() {
     assert_eq!(drain(&mut node, &mut child, &mut estate), vec![2, 3]);
 }
 
+// Issue #167: `LIMIT (SELECT n)` — limitCount is a PARAM_EXEC fed by an
+// initplan. C evaluates it lazily inside ExecEvalExpr (ExecEvalParamExec ->
+// ExecSetParamPlan, nodeSubplan.c); recompute_limits must run the pending
+// initplan instead of tripping the pending-initplan guard.
+#[test]
+fn limit_count_from_initplan_param_exec() {
+    let mcx = leaked_mcx();
+    let mut estate = EStateData::new_in(mcx);
+    // paramid 0: pending initplan output (execPlan set, no value yet).
+    estate.es_param_exec_vals.push(::types_portal::params::ParamExecData {
+        value: Datum::null(),
+        isnull: true,
+        exec_plan: true,
+    });
+    estate
+        .es_param_subplans
+        .push(Some(::executils::SubplanStateCell(core::ptr::NonNull::<()>::dangling())));
+    // Stand-in for execmain's ExecSetParamPlan: publish LIMIT 3.
+    unsafe fn hook(
+        _sstate: core::ptr::NonNull<()>,
+        estate: &mut EStateData<'_>,
+    ) -> PgResult<()> {
+        let prm = &mut estate.es_param_exec_vals[0];
+        prm.value = Datum::from_i64(3);
+        prm.isnull = false;
+        prm.exec_plan = false;
+        Ok(())
+    }
+    estate.es_subplan_hook = Some(hook);
+
+    let mut param = Node::build::<types_nodes::primnodes::Param>(mcx).unwrap();
+    param.paramkind = types_nodes::primnodes::ParamKind::PARAM_EXEC;
+    param.paramid = 0;
+    param.paramtype = INT8OID;
+    param.paramtypmod = -1;
+    let plan = mk_limit_plan(mcx, None, Some(param.seal()));
+    let mut node = exec_init_limit(plan, &mut estate, 0, None).unwrap();
+    let mut child = Counter { n: 10, pos: 0, slot: ExecSlotId(0), bound: None };
+    let out = drain(&mut node, &mut child, &mut estate);
+    assert_eq!(out, vec![1, 2, 3]);
+    assert_eq!(child.bound, Some(3));
+    // The initplan ran exactly once and its value stuck.
+    assert!(!estate.es_param_exec_vals[0].exec_plan);
+    assert_eq!(estate.es_param_exec_vals[0].value.as_i64(), 3);
+}
+
 // (backward_within_window_and_windowstart retired with the B4 deletion: the
 // backward walk it pinned — WINDOWEND re-return, in-window backward steps,
 // the LIMIT_WINDOWSTART parking state — is unreachable behind the forward-
