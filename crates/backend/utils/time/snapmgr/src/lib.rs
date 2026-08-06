@@ -1039,10 +1039,9 @@ pub fn DeleteAllExportedSnapshotFiles() {
 // backend's cwd, as in C).
 const SNAPSHOT_EXPORT_DIR: &str = "pg_snapshots";
 
-// ImportSnapshot (snapmgr.c:1385). ExportSnapshot is unported (phase 2), so
-// no export file can exist and every reachable outcome is one of C's
-// precondition/identifier/missing-file errors; an existing file means the
-// otherwise-unreachable parse+install tail, which stays loud.
+// ImportSnapshot (snapmgr.c:1385). Export files are written by
+// ExportSnapshot above, so the whole path is live: C's precondition/
+// identifier/missing-file errors and the parse+install tail.
 pub fn ImportSnapshot(idstr: &str) -> PgResult<()> {
     if FirstSnapshotSet()
         || xact_seams::get_top_transaction_id_if_any::call() != InvalidTransactionId
