@@ -51,3 +51,8 @@ timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 elog_seams = { path = "../../../utils/error/elog_seams" }
 ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
+file_seams = { path = "../../file/file_seams" }
+sync_seams = { path = "../../sync/sync_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }
+libc = "0.2"

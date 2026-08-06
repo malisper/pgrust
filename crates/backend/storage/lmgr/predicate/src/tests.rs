@@ -107,6 +107,46 @@ fn setup() {
         shmem_seams::shmem_alloc::set(|size| {
             Ok(Box::leak(vec![0u8; size].into_boxed_slice()).as_mut_ptr())
         });
+        shmem_seams::shmem_init_struct::set(shmem::ShmemInitStruct);
+
+        // pg_serial SLRU substrate (SerialInit runs inside
+        // PredicateLockShmemInit): a cwd holding pg_serial/ plus the file,
+        // sync, and pgstat seams SimpleLru* consult.
+        let tmp = std::env::temp_dir().join(format!("predicate_test_{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("pg_serial")).unwrap();
+        std::env::set_current_dir(&tmp).unwrap();
+        file_seams::open_transient_file::set(|name, flags| {
+            let c = std::ffi::CString::new(name).unwrap();
+            Ok(unsafe { libc::open(c.as_ptr(), flags, 0o600 as libc::c_uint) })
+        });
+        file_seams::close_transient_file::set(|fd| unsafe { libc::close(fd) });
+        file_seams::pg_fsync::set(|fd| unsafe { libc::fsync(fd) });
+        file_seams::fsync_fname::set(|_, _| Ok(()));
+        file_seams::data_sync_elevel::set(|e| e);
+        file_seams::with_allocated_dir::set(|dirname, cb| {
+            let mut ret = false;
+            for entry in std::fs::read_dir(dirname).unwrap() {
+                let entry = entry.unwrap();
+                ret = cb(entry.file_name().to_str().unwrap())?;
+                if ret {
+                    break;
+                }
+            }
+            Ok(ret)
+        });
+        sync_seams::register_sync_request::set(|_, _, _| Ok(true));
+        pgstat_seams::pgstat_get_slru_index::set(|_| 0);
+        pgstat_seams::pgstat_count_slru_page_zeroed::set(|_| {});
+        pgstat_seams::pgstat_count_slru_page_hit::set(|_| {});
+        pgstat_seams::pgstat_count_slru_page_read::set(|_| {});
+        pgstat_seams::pgstat_count_slru_page_written::set(|_| {});
+        pgstat_seams::pgstat_count_slru_page_exists::set(|_| {});
+        pgstat_seams::pgstat_count_slru_flush::set(|_| {});
+        pgstat_seams::pgstat_count_slru_truncate::set(|_| {});
+        pgstat_seams::pgstat_count_checkpointer_slru_written::set(|| {});
+        transam_xlog_seams::xlog_flush::set(|_| Ok(()));
+        transam_xlog_seams::count_ckpt_slru_written::set(|| {});
+        xlogutils_seams::in_recovery::set(|| false);
 
         twophase_seams::register_two_phase_record::set(|rmid, info, data| {
             REGISTERED.lock().unwrap().push((rmid, info, data.to_vec()));
@@ -485,4 +525,222 @@ fn snapshot_import_installs_xmin_and_rejects_dead_source() {
     me.xmin.value.store(0, std::sync::atomic::Ordering::Relaxed);
 
     procarray::ProcArrayRemove(src_procno, types_core::InvalidTransactionId).unwrap();
+}
+
+// ===========================================================================
+// pg_serial SLRU store (serial.rs).
+// ===========================================================================
+
+use crate::serial::{
+    CheckPointPredicate, SerialAdd, SerialGetMinConflictCommitSeqNo, SerialNextPage, SerialPage,
+    SerialPagePrecedesLogically, SerialResetAfterCrash, SerialSetActiveSerXmin,
+    SERIAL_ENTRIESPERPAGE, SERIAL_MAX_PAGE,
+};
+
+// Pure page arithmetic: xid->page mapping, head-page wraparound, and the
+// wraparound-aware "precedes logically" ordering (C's USE_ASSERT_CHECKING
+// SerialPagePrecedesLogicallyUnitTests scenarios run in SerialInit too).
+#[test]
+fn serial_page_arithmetic_wraparound() {
+    assert_eq!(SERIAL_ENTRIESPERPAGE, 1024);
+    assert_eq!(SerialPage(0), 0);
+    assert_eq!(SerialPage(1023), 0);
+    assert_eq!(SerialPage(1024), 1);
+    assert_eq!(SerialPage(u32::MAX), SERIAL_MAX_PAGE);
+
+    // headPage advances circularly: past SERIAL_MAX_PAGE it wraps to 0.
+    assert_eq!(SerialNextPage(0), 1);
+    assert_eq!(SerialNextPage(SERIAL_MAX_PAGE - 1), SERIAL_MAX_PAGE);
+    assert_eq!(SerialNextPage(SERIAL_MAX_PAGE), 0);
+
+    // Modular xid ordering projected onto pages: with ~2^31 distance the
+    // comparison flips direction (predicate.c:731).
+    assert!(SerialPagePrecedesLogically(10, 20));
+    assert!(!SerialPagePrecedesLogically(20, 10));
+    let half = (1i64 << 31) / SERIAL_ENTRIESPERPAGE as i64;
+    assert!(!SerialPagePrecedesLogically(0, half + 10));
+
+    #[cfg(debug_assertions)]
+    crate::serial::SerialPagePrecedesLogicallyUnitTests();
+}
+
+// Add/get roundtrip across page boundaries (zero-page walk for multi-page
+// xid gaps), tailXid-driven invisibility, checkpoint truncation, and the
+// crash-reset + reuse cycle.
+#[test]
+fn serial_store_roundtrip_truncation_crash_cycle() {
+    become_backend();
+    let (_gate, _base) = exclusive();
+    // Reserve a private range of 8 SLRU pages' worth of xids so parallel
+    // tests' xmins stay monotonic around us.
+    let base = NEXT_XID.fetch_add(8 * 1024, SeqCst);
+    let per_page = SERIAL_ENTRIESPERPAGE;
+
+    SerialSetActiveSerXmin(base).unwrap();
+
+    let xid_a = base + 10;
+    SerialAdd(xid_a, 42).unwrap();
+    assert_eq!(SerialGetMinConflictCommitSeqNo(xid_a).unwrap(), 42);
+
+    // Same page, second entry.
+    SerialAdd(xid_a + 1, 43).unwrap();
+    assert_eq!(SerialGetMinConflictCommitSeqNo(xid_a + 1).unwrap(), 43);
+
+    // A 3-page gap: SerialAdd zeroes every intervening page as it advances
+    // headPage (the isNewPage walk).
+    let xid_b = base + 3 * per_page + 7;
+    SerialAdd(xid_b, InvalidSerCommitSeqNo).unwrap();
+    assert_eq!(
+        SerialGetMinConflictCommitSeqNo(xid_b).unwrap(),
+        InvalidSerCommitSeqNo
+    );
+    // In-range xid never added: zeroed entry reads back 0 ("no conflict").
+    assert_eq!(SerialGetMinConflictCommitSeqNo(base + 2 * per_page).unwrap(), 0);
+    // Still-visible first page.
+    assert_eq!(SerialGetMinConflictCommitSeqNo(xid_a).unwrap(), 42);
+    // Outside [tailXid, headXid]: early-out zeros.
+    assert_eq!(SerialGetMinConflictCommitSeqNo(base - 1).unwrap(), 0);
+    assert_eq!(SerialGetMinConflictCommitSeqNo(xid_b + 1).unwrap(), 0);
+
+    // An xid older than the tail is not stored (SerialAdd's tailXid check).
+    SerialSetActiveSerXmin(xid_b).unwrap();
+    SerialAdd(base + per_page, 99).unwrap();
+    assert_eq!(SerialGetMinConflictCommitSeqNo(base + per_page).unwrap(), 0);
+    // xid_a now precedes the tail: invisible.
+    assert_eq!(SerialGetMinConflictCommitSeqNo(xid_a).unwrap(), 0);
+
+    // Checkpoint with a valid tail truncates up to the tail page and keeps
+    // the live entry readable.
+    CheckPointPredicate().unwrap();
+    assert_eq!(
+        SerialGetMinConflictCommitSeqNo(xid_b).unwrap(),
+        InvalidSerCommitSeqNo
+    );
+
+    // No active serializable xacts: everything becomes discardable, and the
+    // next checkpoint truncates to head and marks the SLRU unused.
+    SerialSetActiveSerXmin(types_core::InvalidTransactionId).unwrap();
+    assert_eq!(SerialGetMinConflictCommitSeqNo(xid_b).unwrap(), 0);
+    CheckPointPredicate().unwrap();
+    // Unused SLRU: a second checkpoint is the headPage<0 fast path.
+    CheckPointPredicate().unwrap();
+
+    // Reuse after truncation.
+    let tail2 = base + 5 * per_page;
+    SerialSetActiveSerXmin(tail2).unwrap();
+    SerialAdd(tail2 + 1, 7).unwrap();
+    assert_eq!(SerialGetMinConflictCommitSeqNo(tail2 + 1).unwrap(), 7);
+
+    // Crash cycle: reset drops all summary state; the store then rebuilds
+    // from empty exactly like fresh shmem.
+    SerialResetAfterCrash();
+    assert_eq!(SerialGetMinConflictCommitSeqNo(tail2 + 1).unwrap(), 0);
+    let tail3 = base + 6 * per_page;
+    SerialSetActiveSerXmin(tail3).unwrap();
+    SerialAdd(tail3 + 1, 9).unwrap();
+    assert_eq!(SerialGetMinConflictCommitSeqNo(tail3 + 1).unwrap(), 9);
+
+    // Leave the store empty for the other tests.
+    SerialSetActiveSerXmin(types_core::InvalidTransactionId).unwrap();
+    CheckPointPredicate().unwrap();
+}
+
+// SSI pressure: exhaust the SERIALIZABLEXACT pool while one old transaction
+// pins SxactGlobalXmin, forcing SummarizeOldestCommittedSxact to push the
+// oldest committed sxacts into the pg_serial SLRU (the path that used to be
+// a loud panic). Then verify the summarized xid is visible through
+// SerialGetMinConflictCommitSeqNo and via CheckForSerializableConflictOut's
+// summary arm, and that draining the pinner releases everything.
+#[test]
+fn summarization_under_sxact_pool_pressure() {
+    become_backend();
+    let (_gate, _base) = exclusive();
+    // Slot pool = (MaxBackends + max_prepared_xacts) * 10; go well past it.
+    let slots = (MAX_BACKENDS + CFG.max_prepared_xacts) * 10;
+    let iters = slots as u32 + 60;
+    let xmin = NEXT_XID.fetch_add(iters + 100, SeqCst);
+    let snap = mvcc_snapshot();
+
+    // Pinner: an old serializable transaction on another backend holding
+    // SxactGlobalXmin at xmin for the whole storm.
+    let (to_pinner, from_main) = mpsc::channel::<()>();
+    let (to_main, from_pinner) = mpsc::channel::<()>();
+    let pinner = std::thread::spawn(move || {
+        become_backend();
+        let snap = mvcc_snapshot();
+        crate::engine::test_acquire_sxact(xmin).unwrap();
+        // Read something so the storm's writers conflict with us like a real
+        // long-running reader would.
+        crate::engine::PredicateLockPage(TESTDB, 30031, false, 1, &snap).unwrap();
+        to_main.send(()).unwrap();
+        from_main.recv().unwrap();
+        // Rollback-release: drops SxactGlobalXminCount to zero, which runs
+        // ClearOldPredicateLocks over the whole finished list.
+        crate::engine::ReleasePredicateLocks(false, false).unwrap();
+        to_main.send(()).unwrap();
+    });
+    from_pinner.recv().unwrap();
+
+    // The storm: sequential committed writers, each holding a slot on the
+    // finished list (the pinner blocks ClearOldPredicateLocks from freeing
+    // them). Once the pool is empty, every further acquisition summarizes
+    // the oldest committed sxact into the SLRU and retries.
+    let first_xid = xmin + 1;
+    for i in 0..iters {
+        let xid = first_xid + i;
+        crate::engine::test_acquire_sxact(xmin).unwrap();
+        crate::engine::RegisterPredicateLockingXid(xid).unwrap();
+        // Write on a page the pinner read: marks us as having written (so we
+        // are not treated as read-only at commit) and records the conflict.
+        crate::engine::CheckForSerializableConflictIn(
+            TESTDB,
+            30031,
+            false,
+            Some((1, (i % 100 + 1) as u16)),
+            1,
+        )
+        .unwrap();
+        crate::engine::PreCommit_CheckForSerializationFailure().unwrap();
+        crate::engine::ReleasePredicateLocks(true, false).unwrap();
+    }
+
+    // The oldest committed writer was summarized to the SLRU. It had a
+    // conflict in (from the pinner) but no conflict out, so its stored
+    // minimum conflict-out commitSeqNo is InvalidSerCommitSeqNo.
+    assert_eq!(
+        SerialGetMinConflictCommitSeqNo(first_xid).unwrap(),
+        InvalidSerCommitSeqNo,
+        "oldest committed sxact was not summarized into pg_serial"
+    );
+
+    // A fresh reader consulting the summarized xid takes the SLRU arm of
+    // CheckForSerializableConflictOut: no failure (no conflict out was
+    // recorded), but the reader is flagged with a summary conflict out.
+    crate::engine::test_acquire_sxact(xmin).unwrap();
+    crate::engine::CheckForSerializableConflictOut(30031, false, first_xid, &snap).unwrap();
+    unsafe {
+        let mysx = crate::engine::test_my_sxact();
+        assert_ne!(
+            (*mysx).flags & SXACT_FLAG_SUMMARY_CONFLICT_OUT,
+            0,
+            "summary conflict-out flag not set from the SLRU lookup"
+        );
+    }
+    crate::engine::ReleasePredicateLocks(false, false).unwrap();
+
+    // Drain: release the pinner; global xmin goes invalid, the finished list
+    // clears, and the serial store empties (headXid invalidated).
+    to_pinner.send(()).unwrap();
+    from_pinner.recv().unwrap();
+    pinner.join().unwrap();
+    assert_eq!(SerialGetMinConflictCommitSeqNo(first_xid).unwrap(), 0);
+
+    // The pool recovered: a full sweep of acquisitions succeeds again.
+    for _ in 0..8 {
+        crate::engine::test_acquire_sxact(xmin + iters + 1).unwrap();
+        crate::engine::ReleasePredicateLocks(false, false).unwrap();
+    }
+
+    // Checkpoint after the storm truncates the now-idle SLRU cleanly.
+    CheckPointPredicate().unwrap();
 }
