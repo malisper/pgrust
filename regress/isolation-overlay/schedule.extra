@@ -16,3 +16,4 @@ test: epq-short-material
 test: epq-short-valuesscan
 test: epq-short-ctescan
 test: epq-short-functionscan
+test: epq-short-unique

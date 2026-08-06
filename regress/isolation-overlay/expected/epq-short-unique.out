@@ -1,0 +1,67 @@
+Parsed test spec with 3 sessions
+
+starting permutation: expl s1u lock s1c final
+step expl: 
+ EXPLAIN (COSTS OFF)
+ WITH requested AS (SELECT 1 AS id),
+ lock_ids AS (
+   SELECT id FROM requested
+   UNION
+   SELECT t.parent_id
+     FROM epq_unique t JOIN requested r USING (id)
+    WHERE t.parent_id IS NOT NULL
+ )
+ SELECT t.id, t.value
+   FROM epq_unique t JOIN lock_ids USING (id)
+  ORDER BY t.id
+  FOR UPDATE OF t;
+
+QUERY PLAN                                                                                  
+--------------------------------------------------------------------------------------------
+LockRows                                                                                    
+  CTE requested                                                                             
+    ->  Result                                                                              
+  ->  Nested Loop                                                                           
+        ->  Subquery Scan on lock_ids                                                       
+              ->  Unique                                                                    
+                    ->  Sort                                                                
+                          Sort Key: requested.id                                            
+                          ->  Append                                                        
+                                ->  CTE Scan on requested                                   
+                                ->  Nested Loop                                             
+                                      ->  CTE Scan on requested r                           
+                                      ->  Index Scan using epq_unique_pkey on epq_unique t_1
+                                            Index Cond: (id = r.id)                         
+                                            Filter: (parent_id IS NOT NULL)                 
+        ->  Index Scan using epq_unique_pkey on epq_unique t                                
+              Index Cond: (id = lock_ids.id)                                                
+(17 rows)
+
+step s1u: UPDATE epq_unique SET value = 'after' WHERE id = 1;
+step lock: 
+ WITH requested AS (SELECT 1 AS id),
+ lock_ids AS (
+   SELECT id FROM requested
+   UNION
+   SELECT t.parent_id
+     FROM epq_unique t JOIN requested r USING (id)
+    WHERE t.parent_id IS NOT NULL
+ )
+ SELECT t.id, t.value
+   FROM epq_unique t JOIN lock_ids USING (id)
+  ORDER BY t.id
+  FOR UPDATE OF t;
+ <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|value
+--+-----
+ 1|after
+(1 row)
+
+step final: SELECT id, value FROM epq_unique ORDER BY id;
+id|value
+--+-----
+ 1|after
+(1 row)
+
