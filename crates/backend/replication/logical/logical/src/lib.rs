@@ -37,12 +37,6 @@ fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
-#[cold]
-#[inline(never)]
-pub fn unported(what: &str) -> ! {
-    panic!("unported callee reached from logical.c: {what}")
-}
-
 fn lsn_pair(lsn: XLogRecPtr) -> (u32, u32) {
     ((lsn >> 32) as u32, lsn as u32)
 }

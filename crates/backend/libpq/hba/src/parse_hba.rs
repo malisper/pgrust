@@ -351,11 +351,14 @@ pub fn parse_hba_line(
         "pam" => unsupauth = Some("pam"),
         "bsd" => unsupauth = Some("bsd"),
         "ldap" => unsupauth = Some("ldap"),
-        // C accepts these in every build; their handlers are unported.
-        "radius" | "oauth" => panic!(
-            "parse_hba_line: auth method \"{ts}\" ({file_name} line {line_num}) — \
-             backend-libpq-auth {ts} arm unported"
-        ),
+        // C accepts these in every build (hba.c:1750,1752); their handlers
+        // (auth.c CheckRADIUSAuth / auth-oauth.c) are unported, so reject
+        // them at load time exactly like C's not-supported-by-this-build
+        // methods (hba.c:1771): a per-line config error, never a panic —
+        // a reload keeps serving with the old config and startup fails
+        // with a clean FATAL naming the file and line.
+        "radius" => unsupauth = Some("radius"),
+        "oauth" => unsupauth = Some("oauth"),
         _ => {
             parse_error!(
                 elevel,

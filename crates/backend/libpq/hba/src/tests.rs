@@ -422,6 +422,26 @@ fn check_hba_ipv6_and_ssl_skip() {
     assert_eq!(port.hba.as_ref().unwrap().auth_method, uaImplicitReject);
 }
 
+// C accepts radius/oauth in every build (hba.c:1750,1752); their handlers are
+// unported here, so the parse must produce C's clean per-line config error
+// (hba.c:1771 "not supported by this build") — never a panic. load_hba then
+// returns false, which the postmaster maps to reload-keeps-old-config
+// (process_pm_reload_request) or a clean startup FATAL (PostmasterMain).
+#[test]
+fn radius_oauth_unported_reject_cleanly() {
+    for method in ["radius", "oauth"] {
+        let err = parse_one(&format!("host all all 127.0.0.1/32 {method}")).unwrap_err();
+        assert_eq!(
+            err,
+            format!("invalid authentication method \"{method}\": not supported by this build")
+        );
+        assert!(!load_hba_content(
+            &format!("{method}.conf"),
+            &format!("local all all trust\nhost all all 127.0.0.1/32 {method}\n")
+        ));
+    }
+}
+
 #[test]
 fn load_hba_failures() {
     // A file with no entries fails.
@@ -554,12 +574,6 @@ fn regex_tokens_compile_and_match() {
     assert!(line.roles[0].regex, "regex marker set by regcomp_auth_token");
     assert!(crate::check::check_role("alice", 101, &line.roles, false).unwrap());
     assert!(!crate::check::check_role("bob", 102, &line.roles, false).unwrap());
-}
-
-#[test]
-#[should_panic(expected = "radius arm unported")]
-fn radius_parse_is_loud() {
-    let _ = parse_one("host all all 10.0.0.0/8 radius radiusservers=r radiussecrets=s");
 }
 
 #[test]

@@ -1,12 +1,13 @@
 //! `contrib/pg_prewarm/pg_prewarm.c` — the `pg_prewarm()` SQL function.
-//! autoprewarm.c (bgworker/shmem) is unported; its two SQL symbols are loud
-//! stubs so `CREATE FUNCTION`'s C validator resolves them.
+//! autoprewarm.c (bgworker/shmem) is unported; its two SQL symbols resolve
+//! for `CREATE FUNCTION`'s C validator and raise a clean
+//! feature-not-supported error when called.
 
 use datum::Datum;
 use types_core::{BlockNumber, ForkNumber, Oid, OidIsValid, BLCKSZ};
 use types_error::{
-    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_TABLE,
-    ERRCODE_WRONG_OBJECT_TYPE,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 use types_nodes::parsenodes::{ObjectType, ACL_SELECT};
@@ -236,18 +237,28 @@ fn fc_pg_prewarm(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(Datum::from_i64(blocks_done))
 }
 
+// autoprewarm.c is unported (leader bgworker + shmem state + dump file);
+// its SQL entry points raise a clean 0A000 instead of C's
+// ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE flavors (autoprewarm.c:819,830),
+// which presuppose the worker machinery exists.
+#[cold]
+fn autoprewarm_unported(fname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("{fname} is not supported by this build"))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(
+                "The autoprewarm background worker (contrib/pg_prewarm/autoprewarm.c) \
+                 is not ported.",
+            ),
+    )
+}
+
 fn fc_autoprewarm_start_worker(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!(
-        "pg_prewarm: autoprewarm_start_worker (contrib/pg_prewarm/autoprewarm.c) is unported \
-         (autoprewarm bgworker/shmem machinery)"
-    );
+    Err(autoprewarm_unported("autoprewarm_start_worker"))
 }
 
 fn fc_autoprewarm_dump_now(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!(
-        "pg_prewarm: autoprewarm_dump_now (contrib/pg_prewarm/autoprewarm.c) is unported \
-         (autoprewarm bgworker/shmem machinery)"
-    );
+    Err(autoprewarm_unported("autoprewarm_dump_now"))
 }
 
 fn lookup(function: &str) -> Option<PGFunction> {
@@ -271,6 +282,29 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The autoprewarm SQL entry points are unported stubs: they must raise a
+    // clean 0A000 (feature not supported), never panic — regression for the
+    // SQL-reachable `SELECT autoprewarm_start_worker()` crash.
+    #[test]
+    fn autoprewarm_stubs_error_cleanly() {
+        for (name, f) in [
+            ("autoprewarm_start_worker", fc_autoprewarm_start_worker as PGFunction),
+            ("autoprewarm_dump_now", fc_autoprewarm_dump_now as PGFunction),
+        ] {
+            let mut fcinfo = types_fmgr::LocalFcinfo::<0>::new(types_core::InvalidOid);
+            let err = f(None, &mut fcinfo).unwrap_err();
+            assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+            assert_eq!(err.message(), format!("{name} is not supported by this build"));
+            assert_eq!(
+                err.detail(),
+                Some(
+                    "The autoprewarm background worker (contrib/pg_prewarm/autoprewarm.c) \
+                     is not ported."
+                )
+            );
+        }
+    }
 
     #[test]
     fn forknames() {

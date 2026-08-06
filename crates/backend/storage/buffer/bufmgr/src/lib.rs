@@ -274,15 +274,6 @@ pub fn RelationGetNumberOfBlocksInFork(
     smgr_seams::rel_smgr_nblocks::call(rel, forknum)
 }
 
-#[allow(unused_macros)] // stub scaffolding for not-yet-ported bufmgr.c callees
-macro_rules! unported {
-    ($(fn $name:ident($($ty:ty),*) -> $ret:ty, $cfn:literal;)+) => {
-        $(pub fn $name($(_: $ty),*) -> $ret {
-            panic!(concat!("unported callee reached from bufmgr.c: ", $cfn, " (phase 2)"));
-        })+
-    };
-}
-
 /// FlushRelationBuffers (bufmgr.c): the shared arm's per-buffer flush loop is
 /// FlushRelationsAllBuffers with one locator (same header-locked scan).
 pub fn FlushRelationBuffers(rlocator: RelFileLocatorBackend) -> PgResult<()> {

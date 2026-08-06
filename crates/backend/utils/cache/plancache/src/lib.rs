@@ -1782,7 +1782,7 @@ pub fn PlanCacheRelCallback(_arg: Datum, relid: Oid) {
             }
         }
     });
-    // cached_expression_list is provably empty: GetCachedExpression defers loud.
+    // cached_expression_list is provably empty: cached expressions (plancache.c GetCachedExpression) are unported.
 }
 
 pub fn PlanCacheObjectCallback(_arg: Datum, cacheid: i32, hashvalue: u32) {
@@ -1815,7 +1815,7 @@ pub fn PlanCacheObjectCallback(_arg: Datum, cacheid: i32, hashvalue: u32) {
             }
         }
     });
-    // cached_expression_list is provably empty: GetCachedExpression defers loud.
+    // cached_expression_list is provably empty: cached expressions (plancache.c GetCachedExpression) are unported.
 }
 
 // hashvalue == 0 matches every entry of the cache (C's cacheid-wide inval).
@@ -1850,8 +1850,4 @@ pub fn ResetPlanCache() {
             }
         }
     });
-}
-
-pub fn GetCachedExpression() -> ! {
-    panic!("GetCachedExpression (plancache.c) deferred: cached expressions unported");
 }

@@ -39,13 +39,6 @@ fn TransactionIdFollowsOrEquals(id1: TransactionId, id2: TransactionId) -> bool 
     (id1.wrapping_sub(id2) as i32) >= 0
 }
 
-#[cold]
-#[inline(never)]
-#[allow(dead_code)]
-fn unported(what: &str) -> ! {
-    panic!("unported callee reached from snapmgr.c: {what}")
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Which {
     Current,

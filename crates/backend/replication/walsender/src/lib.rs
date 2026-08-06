@@ -1,8 +1,10 @@
 // walsender.c — WAL sender (PG 18.3). Increments 1-3 of the replication port:
 // walsender identity flags, exec_replication_command dispatch, IDENTIFY_SYSTEM,
 // SHOW, slot commands, TIMELINE_HISTORY, and physical START_REPLICATION live WAL
-// streaming (CopyBoth + WalSndLoop + XLogSendPhysical). BASE_BACKUP (inc 5),
-// UPLOAD_MANIFEST (inc 5) and logical START_REPLICATION (inc 6) are loud panics.
+// streaming (CopyBoth + WalSndLoop + XLogSendPhysical), BASE_BACKUP (inc 5,
+// via the walsender_seams::base_backup seam) and logical START_REPLICATION
+// (inc 6). UPLOAD_MANIFEST (incremental backup) is unported and refused with
+// a clean feature-not-supported ERROR.
 #![allow(non_snake_case)]
 
 pub mod replies;
@@ -577,17 +579,25 @@ pub fn exec_replication_command(cmd_string: &str) -> PgResult<bool> {
             walsender_seams::base_backup::call(c)?;
             tcop_dest::EndReplicationCommand(cmdtag.as_bytes())?;
         }
-        ReplCommand::UploadManifest => unported("UPLOAD_MANIFEST", 5),
+        ReplCommand::UploadManifest => {
+            // UploadManifest (walsender.c:667) + basebackup_incremental.c are
+            // unported. Refuse with a clean ERROR before any CopyInResponse
+            // is sent, so the client gets ErrorResponse and the connection
+            // stays protocol-sane — never a panic.
+            let cmdtag = "UPLOAD_MANIFEST";
+            ps_status_seams::set_ps_display::call(cmdtag);
+            return ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("UPLOAD_MANIFEST is not supported")
+                .errdetail("Incremental backup is not ported.")
+                .finish(loc(667, "UploadManifest"))
+                .map(|()| true);
+        }
     }
 
     // ps display / pg_stat_activity reset to "idle" by PostgresMain;
     // debug_query_string is not a raw pointer here, nothing to reset.
     Ok(true)
-}
-
-#[cold]
-fn unported(cmdtag: &str, increment: u32) -> ! {
-    panic!("walsender: {cmdtag} unported (replication-p1 increment {increment})");
 }
 
 // GetStandbyFlushRecPtr (xlog.c:6653): what a cascading standby may send —
@@ -1294,5 +1304,31 @@ mod tests {
         let mut w = ctl.walsnds[0].lock().expect("walsnd mutex");
         w.pid = 0;
         w.needreload = false;
+    }
+
+    // UPLOAD_MANIFEST (walsender.c:667 UploadManifest, incremental backup) is
+    // unported: the dispatch must refuse it with a clean feature-not-supported
+    // ERROR — never a panic — so the client gets an ErrorResponse and the
+    // connection stays protocol-sane (regression for the walsender panic on
+    // `pg_basebackup --incremental`).
+    #[test]
+    fn upload_manifest_refused_cleanly() {
+        if !postgres_seams::check_for_interrupts::is_installed() {
+            postgres_seams::check_for_interrupts::set(|| Ok(()));
+        }
+        if !backend_status_seams::pgstat_report_activity::is_installed() {
+            backend_status_seams::pgstat_report_activity::set(|_, _| {});
+        }
+        if !ps_status_seams::set_ps_display::is_installed() {
+            ps_status_seams::set_ps_display::set(|_| {});
+        }
+        // Point MyWalSnd at a slot so the stopping-mode gate can read state.
+        MY_WAL_SND.set(0);
+
+        let err = exec_replication_command("UPLOAD_MANIFEST").unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message(), "UPLOAD_MANIFEST is not supported");
+
+        MY_WAL_SND.set(-1);
     }
 }

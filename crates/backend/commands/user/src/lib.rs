@@ -1,5 +1,6 @@
-//! user.c. Password verifiers (SCRAM/MD5) are unported: PASSWORD <string> is
-//! a loud panic, PASSWORD NULL and the empty-password NOTICE path work.
+//! user.c. Password verifiers are live: PASSWORD <string> is encrypted via
+//! crypt::encrypt_password (SCRAM-SHA-256/MD5 per password_encryption);
+//! PASSWORD NULL and the empty-password NOTICE path (CVE-2017-7546) work too.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
