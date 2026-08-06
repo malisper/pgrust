@@ -64,6 +64,34 @@ pub fn CreateProceduralLanguage<'mcx>(
         ));
     }
 
+    // No-dlopen carve (docs/design/carve-ratifications.md §2): pgrust never
+    // loads C shared objects, so a language handler can only ever dispatch
+    // if its prosrc names a registered in-tree PL entry point. C defers this
+    // to call time (dlopen); here the fence sits at CREATE LANGUAGE so the
+    // catalog never carries a language that cannot run.
+    {
+        let cx = mcx::MemoryContext::new("CreateProceduralLanguage handler check");
+        let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), handler_oid)?
+            .ok_or_else(|| {
+                Box::new(PgError::error(format!(
+                    "cache lookup failed for function {handler_oid}"
+                )))
+            })?;
+        if !fmgr_core::has_registered_c_lang_handler(&prosrc) {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "language handler function {} is not supported",
+                    name_list_to_string(&stmt.plhandler)
+                ))
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_detail(
+                    "pgrust does not load C extension modules; procedural language \
+                     handlers are limited to the built-in set.",
+                ),
+            ));
+        }
+    }
+
     // Return types of the inline and validator functions are ignored.
     let inline_oid = if !stmt.plinline.is_nil() {
         parse_func::LookupFuncName(&stmt.plinline, 1, &[INTERNALOID], false)?

@@ -20,6 +20,7 @@ const Anum_pg_am_oid: i32 = 1;
 const PROCEDURE_RELATION_ID: Oid = 1255;
 const INDEX_AM_HANDLEROID: Oid = 325;
 const TABLE_AM_HANDLEROID: Oid = 269;
+const F_HEAP_TABLEAM_HANDLER: Oid = 3;
 
 const Anum_pg_am_amtype: i32 = 4;
 
@@ -169,6 +170,39 @@ fn lookup_am_handler_func(
                 ),
             )
             .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
+
+    // No-dlopen carve (docs/design/carve-ratifications.md §2): pgrust never
+    // loads C shared objects, so pg_am.amhandler can only ever dispatch if
+    // it resolves inside the closed in-tree AM set. C defers this to first
+    // use (calling the handler); here the fence sits at CREATE ACCESS METHOD
+    // so the catalog never carries an AM that cannot run — the amapi /
+    // relcache resolvers keep loud backstops behind this fence.
+    let known = match amtype {
+        AMTYPE_INDEX => amapi::known_index_am_handler(handlerOid),
+        // Handler proc oid 3 = heap_tableam_handler (pg_proc.dat); the
+        // closed-AM engine carries no other table AM handler (pgrcolumnar is
+        // resolved by pg_am.amname, docs/design/pgrcolumnar-impl.md §7.1).
+        AMTYPE_TABLE => handlerOid == F_HEAP_TABLEAM_HANDLER,
+        _ => unreachable!("amtype validated above"),
+    };
+    if !known {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "access method handler function {} is not supported",
+                    lsyscache::get_func_name(mcx, handlerOid)?
+                        .map(|s| s.as_str().to_string())
+                        .unwrap_or_default()
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(
+                "pgrust does not load C extension modules; access method handlers \
+                 are limited to the built-in set.",
+            ),
         ));
     }
 

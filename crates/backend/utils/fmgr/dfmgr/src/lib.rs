@@ -1,5 +1,6 @@
-// probin is a registry KEY, never a file: no C ABI exists to dlopen, so an
-// unregistered library must stay loud with C's file-access error.
+// probin is a registry KEY, never a file: no C ABI exists to dlopen (ratified
+// no-dlopen carve, docs/design/carve-ratifications.md §2), so an unregistered
+// library must stay loud with C's file-access error.
 
 use std::cell::RefCell;
 use std::sync::Mutex;

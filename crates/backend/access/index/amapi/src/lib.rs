@@ -376,16 +376,36 @@ pub fn amusemaintenanceworkmem(kind: IndexAmKind) -> bool {
     matches!(kind, IndexAmKind::Gin)
 }
 
+/// Whether `amhandler` resolves inside the closed in-tree index-AM set
+/// (builtin handler OIDs, plus the in-tree ported extension handlers by
+/// pg_proc name). CREATE ACCESS METHOD fences on this so pg_am never
+/// carries a handler the closed-AM engine cannot dispatch (no-dlopen carve,
+/// docs/design/carve-ratifications.md §2).
+pub fn known_index_am_handler(amhandler: Oid) -> bool {
+    match amhandler {
+        F_BTHANDLER | F_HASHHANDLER | F_GINHANDLER | F_GISTHANDLER | F_SPGHANDLER
+        | F_BRINHANDLER => true,
+        other => matches!(
+            syscache_seams::pg_proc_proname::call(other),
+            Ok(Some(ref name)) if name.name_str() == b"hnswhandler" || name.name_str() == b"blhandler"
+        ),
+    }
+}
+
+// Backstop behind the CREATE ACCESS METHOD fence (amcmds.rs, which refuses
+// non-builtin handlers with a clean 0A000): only a catalog written outside
+// that fence can reach these (no-dlopen carve,
+// docs/design/carve-ratifications.md §2).
 #[cold]
 #[inline(never)]
 fn unported_handler(amhandler: Oid) -> ! {
-    panic!("unported: index AM handler function {amhandler} (IndexAmKind covers btree+brin; non-builtin handlers need pg_proc + extension loading)")
+    panic!("index AM handler function {amhandler} is not in the closed in-tree AM set (no-dlopen carve, docs/design/carve-ratifications.md; CREATE ACCESS METHOD fences this at DDL time)")
 }
 
 #[cold]
 #[inline(never)]
 fn unported_translate(amoid: Oid) -> ! {
-    panic!("unported: amtranslatestrategy/amtranslatecmptype for non-btree AM {amoid}")
+    panic!("amtranslatestrategy/amtranslatecmptype for AM {amoid} outside the closed in-tree AM set (no-dlopen carve, docs/design/carve-ratifications.md)")
 }
 
 #[track_caller]

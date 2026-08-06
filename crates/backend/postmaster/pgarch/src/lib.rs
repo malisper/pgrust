@@ -19,7 +19,8 @@ use transam_xlog::{
 };
 use types_core::INVALID_PROC_NUMBER;
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, FATAL, LOG, WARNING,
+    ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERROR, FATAL, LOG, WARNING,
 };
 use types_startup::StartupData;
 use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_TIMEOUT};
@@ -165,8 +166,9 @@ fn load_archive_library() -> PgResult<ArchiveModule> {
         both_archive_params_error("LoadArchiveLibrary")?;
     }
     if !lib.is_empty() {
-        // Loadable archive modules are unported; only the shell
-        // archive_command arm exists. This must be an ERROR-channel FATAL,
+        // No-dlopen carve (docs/design/carve-ratifications.md §2): pgrust
+        // never loads C shared objects, so only the shell archive_command
+        // arm exists. This must be an ERROR-channel FATAL,
         // not a Rust panic: the caller fatal_exits (status 1), which the
         // reaper accepts as a normal archiver exit (C CleanupBackend treats
         // 0 and 1 alike for the archiver) — matching C, where a bad
@@ -175,11 +177,14 @@ fn load_archive_library() -> PgResult<ArchiveModule> {
         // boundary and HandleChildCrash cycles the whole cluster, re-fired
         // on every relaunch (crash loop).
         ereport(FATAL)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
-                "archive_library \"{lib}\": loadable archive modules not ported \
-                 (backend-postmaster-pgarch shell arm only)"
+                "loading archive module \"{lib}\" is not supported"
             ))
-            .errdetail("Unset \"archive_library\" or use \"archive_command\" instead.")
+            .errdetail(
+                "pgrust does not load C extension modules. Unset \"archive_library\" \
+                 or use \"archive_command\" instead.",
+            )
             .finish(loc("LoadArchiveLibrary"))?;
     }
     ipc::before_shmem_exit(pgarch_call_module_shutdown_cb, datum::Datum::null())?;

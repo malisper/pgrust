@@ -374,8 +374,10 @@ pub fn fmgr_info_from_builtin(fbp: &FmgrBuiltin, function_id: Oid) -> FmgrInfo {
 /// the 56B carrier through an sret and its droppy slots stop folding (bench).
 /// Non-builtin OIDs resolve through pg_proc (syscache seam): prolang internal
 /// dispatches by prosrc name, prolang sql through the registered SQL-language
-/// handler (resolved once here, never per row); other languages panic
-/// loudly. In-core C-language functions (C's fmgr_info_C_lang dlopen
+/// handler (resolved once here, never per row); languages whose handler is
+/// not registered error cleanly (0A000; no-dlopen carve,
+/// docs/design/carve-ratifications.md §2). In-core C-language functions
+/// (C's fmgr_info_C_lang dlopen
 /// leg) resolve from NATIVE_CLANG instead of pg_proc — their FmgrBuiltin rows
 /// carry the pg_proc metadata.
 #[inline]
@@ -416,7 +418,8 @@ pub fn register_sql_language_handler(handler: ::fmgr::PGFunction) {
 }
 
 // PL handler entry points are C-language extension functions; the dlopen leg
-// is replaced by name-keyed registration (closed set).
+// is replaced by name-keyed registration (closed set; no-dlopen carve,
+// docs/design/carve-ratifications.md §2).
 static PLPGSQL_CALL_HANDLER: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 static PLPGSQL_INLINE_HANDLER: core::sync::atomic::AtomicUsize =
@@ -447,6 +450,14 @@ fn registered_c_lang_fn(prosrc: &str) -> Option<::fmgr::PGFunction> {
     }
     // SAFETY: written only by register_plpgsql_handlers from valid PGFunctions.
     Some(unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) })
+}
+
+/// Whether `prosrc` names a registered in-tree PL entry point. DDL fences
+/// (CREATE LANGUAGE) consult this so a handler that could never dispatch is
+/// refused at creation with a clean 0A000 instead of failing at call time
+/// (no-dlopen carve, docs/design/carve-ratifications.md §2).
+pub fn has_registered_c_lang_handler(prosrc: &str) -> bool {
+    registered_c_lang_fn(prosrc).is_some()
 }
 
 #[cold]
@@ -553,10 +564,20 @@ fn fmgr_info_pg_proc(
                     });
             match registered_c_lang_fn(&hsrc) {
                 Some(f) => f,
-                None => panic!(
-                    "fmgr: language handler \"{}\" not ported (function {function_id})",
-                    hsrc.as_str()
-                ),
+                // Backstop behind the CREATE LANGUAGE fence (proclang.rs):
+                // a catalog that already carries a language whose handler is
+                // not registered errors cleanly rather than panicking
+                // (no-dlopen carve, docs/design/carve-ratifications.md §2).
+                None => {
+                    return Err(alloc::boxed::Box::new(
+                        PgError::error(alloc::format!(
+                            "language handler function \"{}\" is not supported \
+                             (language {lang} of function {function_id})",
+                            hsrc.as_str()
+                        ))
+                        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ))
+                }
             }
         }
     };

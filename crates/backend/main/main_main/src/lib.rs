@@ -316,11 +316,19 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
     }
 
     match dispatch_option {
-        DispatchOption::Check => {
-            panic!("BootstrapModeMain(check_only) unported: unit backend-bootstrap (initdb runs against C postgres)")
-        }
-        DispatchOption::Boot => {
-            panic!("BootstrapModeMain unported: unit backend-bootstrap (initdb runs against C postgres)")
+        // Ratified carve (docs/design/carve-ratifications.md §1): pgrust
+        // does not implement bootstrap mode; clusters are initialized with
+        // stock PostgreSQL's initdb. Refuse cleanly on stderr — initdb
+        // pointed at this binary must see a message, not a Rust backtrace.
+        DispatchOption::Check | DispatchOption::Boot => {
+            eprintln!(
+                "{progname}: bootstrap mode (--boot/--check) is not supported by pgrust"
+            );
+            eprintln!(
+                "{progname}: initialize the data directory with stock PostgreSQL's \
+                 initdb, then start pgrust on it (see docs/design/carve-ratifications.md)"
+            );
+            std::process::exit(1);
         }
         DispatchOption::Forkchild => {
             panic!("DISPATCH_FORKCHILD reached without EXEC_BACKEND")

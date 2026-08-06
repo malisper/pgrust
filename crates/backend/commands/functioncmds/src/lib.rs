@@ -1051,7 +1051,9 @@ pub fn CreateFunction<'mcx>(
     if languageOid != SQLlanguageId && languageOid != INTERNALlanguageId
         && languageOid != ClanguageId && language != "plpgsql"
     {
-        // unported: languages beyond sql, internal, c and plpgsql
+        // Languages beyond sql, internal, c and plpgsql: further PLs arrive
+        // as in-tree Rust ports, never via dlopen (no-dlopen carve,
+        // docs/design/carve-ratifications.md §2).
         return Err(err(
             format!("language \"{language}\" is not supported yet"),
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,

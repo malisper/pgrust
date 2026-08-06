@@ -7,7 +7,7 @@ use types_core::{
     INVALID_PROC_NUMBER, PG_CATALOG_NAMESPACE, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
     RELPERSISTENCE_UNLOGGED,
 };
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR};
 use types_rel::{
     FormData_pg_class, RelationData, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX, RELKIND_RELATION,
     REPLICA_IDENTITY_NOTHING,
@@ -53,10 +53,21 @@ pub(crate) fn RelationInitTableAccessMethod(relkind: u8, relam: Oid) -> PgResult
             tableam_vocab::register_heap_table_am(relam);
             Ok(())
         }
-        Some(other) => panic!(
-            "unported: table AM handler function {other} (relam {relam}); \
-             only heap_tableam_handler is carried"
-        ),
+        // Backstop behind the CREATE ACCESS METHOD fence (amcmds.rs, which
+        // refuses non-builtin handlers with a clean 0A000): only a catalog
+        // written outside that fence can carry another handler (no-dlopen
+        // carve, docs/design/carve-ratifications.md §2).
+        Some(other) => Err(Box::new(
+            PgError::error(format!(
+                "table access method handler function {other} (relam {relam}) \
+                 is not supported"
+            ))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(
+                "pgrust does not load C extension modules; only heap_tableam_handler \
+                 is carried.",
+            ),
+        )),
         None => Err(Box::new(PgError::error(format!(
             "cache lookup failed for access method {relam}"
         )))),
