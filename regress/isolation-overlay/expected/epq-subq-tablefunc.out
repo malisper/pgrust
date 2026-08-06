@@ -1,0 +1,66 @@
+Parsed test spec with 3 sessions
+
+starting permutation: expl s1u lock s1c sel
+step expl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN JSON_TABLE('[1,3]', '$[*]' COLUMNS (doc_id int PATH '$')) x ON x.doc_id = d.id FOR UPDATE OF d;
+QUERY PLAN                                       
+-------------------------------------------------
+LockRows                                         
+  ->  Hash Join                                  
+        Hash Cond: (x.doc_id = d.id)             
+        ->  Table Function Scan on "json_table" x
+        ->  Hash                                 
+              ->  Seq Scan on docs d             
+(6 rows)
+
+step s1u: UPDATE docs SET status = 'revoked' WHERE id = 3;
+step lock: SELECT d.* FROM docs d JOIN JSON_TABLE('[1,3]', '$[*]' COLUMNS (doc_id int PATH '$')) x ON x.doc_id = d.id FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 3|revoked
+(2 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+
+starting permutation: expl s1k lock s1c sel
+step expl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN JSON_TABLE('[1,3]', '$[*]' COLUMNS (doc_id int PATH '$')) x ON x.doc_id = d.id FOR UPDATE OF d;
+QUERY PLAN                                       
+-------------------------------------------------
+LockRows                                         
+  ->  Hash Join                                  
+        Hash Cond: (x.doc_id = d.id)             
+        ->  Table Function Scan on "json_table" x
+        ->  Hash                                 
+              ->  Seq Scan on docs d             
+(6 rows)
+
+step s1k: UPDATE docs SET id = 99 WHERE id = 3;
+step lock: SELECT d.* FROM docs d JOIN JSON_TABLE('[1,3]', '$[*]' COLUMNS (doc_id int PATH '$')) x ON x.doc_id = d.id FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|status 
+--+-------
+ 1|pending
+(1 row)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+99|pending
+(5 rows)
+

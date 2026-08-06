@@ -23,3 +23,12 @@ test: epq-subq-setop
 test: epq-subq-memoize
 test: epq-subq-incsort
 test: epq-subq-mergeappend
+# Whitelist-completion wave (fix/epq-whitelist-completion): the five
+# SQL-reachable tags left refused by the EPQ-unique wave, plus the
+# recursive-CTE class-A pin (CteScan over a RecursiveUnion subplan).
+test: epq-subq-projectset
+test: epq-subq-samplescan
+test: epq-subq-tablefunc
+test: epq-subq-foreignscan
+test: epq-subq-namedtuplestore
+test: epq-subq-recursive

@@ -1,0 +1,82 @@
+Parsed test spec with 3 sessions
+
+starting permutation: expl s1u lock s1c sel
+step expl: EXPLAIN (COSTS OFF) WITH RECURSIVE r AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM r WHERE id < 5) SELECT d.* FROM docs d JOIN r ON r.id = d.id FOR UPDATE OF d;
+QUERY PLAN                           
+-------------------------------------
+LockRows                             
+  CTE r                              
+    ->  Recursive Union              
+          ->  Result                 
+          ->  WorkTable Scan on r r_1
+                Filter: (id < 5)     
+  ->  Hash Join                      
+        Hash Cond: (r.id = d.id)     
+        ->  CTE Scan on r            
+        ->  Hash                     
+              ->  Seq Scan on docs d 
+(11 rows)
+
+step s1u: UPDATE docs SET status = 'revoked' WHERE id = 3;
+step lock: WITH RECURSIVE r AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM r WHERE id < 5) SELECT d.* FROM docs d JOIN r ON r.id = d.id FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+
+starting permutation: expl s1k lock s1c sel
+step expl: EXPLAIN (COSTS OFF) WITH RECURSIVE r AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM r WHERE id < 5) SELECT d.* FROM docs d JOIN r ON r.id = d.id FOR UPDATE OF d;
+QUERY PLAN                           
+-------------------------------------
+LockRows                             
+  CTE r                              
+    ->  Recursive Union              
+          ->  Result                 
+          ->  WorkTable Scan on r r_1
+                Filter: (id < 5)     
+  ->  Hash Join                      
+        Hash Cond: (r.id = d.id)     
+        ->  CTE Scan on r            
+        ->  Hash                     
+              ->  Seq Scan on docs d 
+(11 rows)
+
+step s1k: UPDATE docs SET id = 99 WHERE id = 3;
+step lock: WITH RECURSIVE r AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM r WHERE id < 5) SELECT d.* FROM docs d JOIN r ON r.id = d.id FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+(4 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+99|pending
+(5 rows)
+

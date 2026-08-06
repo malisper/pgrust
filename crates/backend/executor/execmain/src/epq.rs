@@ -217,19 +217,70 @@ pub(crate) fn eval_plan_qual_start<'mcx>(
 //   * MergeAppend admission forced a walker honesty extension: recurse
 //     into mergeplans (same class as the Append/SubqueryScan arms —
 //     without it the tag walk would silently admit any shape underneath).
-// Still refused, deliberately (same panic arm; each needs its own
-// reviewed act + exercising spec before admission):
-//   * T_RecursiveUnion / T_WorkTableScan / T_ProjectSet / T_TableFuncScan /
-//     T_NamedTuplestoreScan / T_SampleScan / T_ForeignScan / T_CustomScan /
-//     T_Gather / T_GatherMerge / T_ModifyTable — no exercising spec exists
-//     yet for these inside a recheck; RecursiveUnion's worktable rescan
-//     discipline and the FDW arms (lane-epq.md §2) need their own review.
+// Whitelist-completion wave (fix/epq-whitelist-completion, 2026-08-05 —
+// lane-epq.md §9's close-out): the 11 tags PR #145 left refused were
+// adjudicated by SQL-reachability (live EXPLAIN + two-session probes on a
+// debug server vs the PostgreSQL 18.3 oracle). Five were reachable today
+// and are admitted below, one reviewed act per shape, each with its
+// two-session C-oracle-expected spec in regress/isolation-overlay:
+//   * ProjectSet (SRF in a subquery tlist under a locking join;
+//     epq-subq-projectset), SampleScan (TABLESAMPLE join source under
+//     FOR UPDATE, REPEATABLE-pinned; epq-subq-samplescan), TableFuncScan
+//     (JSON_TABLE under a locking join; epq-subq-tablefunc), ForeignScan
+//     (file_fdw join source under FOR UPDATE — pgrust HAS in-tree FDW
+//     providers, FdwKind::{FileFdw,PostgresFdw}; epq-subq-foreignscan),
+//     NamedTuplestoreScan (AFTER-trigger transition table read by the
+//     trigger's own contended UPDATE; epq-subq-namedtuplestore). Each has
+//     its exec_rescan_* arm wired in execami (plain + chg dispatch).
+//   * ForeignScan/SampleScan admission extends `table_scan_scanrelid`:
+//     both are rti-indexed ExecScanFetch scans, so the scanrelid == 0
+//     pushed-down-join arm below now guards them as ADMITTED tags (the
+//     lane-epq.md §2 FDW pushdown gap stays loudly refused).
+// Still refused, each now a DOCUMENTED verdict (same panic arm — the
+// panic is an assertion of the invariant, not a coverage gap):
+//   * T_ModifyTable — STRUCTURALLY UNREACHABLE. The recheck plan is
+//     always an owner's SUBPLAN, never a whole statement: procnode.rs
+//     builds EpqState.plan from ModifyTable's lefttree (C
+//     ExecInitModifyTable passes `subplan` to EvalPlanQualInit,
+//     nodeModifyTable.c) or LockRows' lefttree (C ExecInitLockRows), and
+//     ModifyTable only ever tops a statement's main tree (DML inside
+//     CTEs lives in PlannedStmt subplans, which this walk never enters).
+//   * T_Gather / T_GatherMerge — STRUCTURALLY UNREACHABLE. Both EPQ
+//     owners forbid parallel plans at the planner: DML fails the
+//     CMD_SELECT gate (planner lib.rs `assess_parallel`, C
+//     standard_planner planner.c:349), and any query with rowMarks is
+//     PROPARALLEL_UNSAFE (clauses classify.rs `MaxParallelHazard::
+//     scan_query`, C max_parallel_hazard_walker's Query arm) — so no
+//     locking/DML plan ever contains a Gather. Probed live with all
+//     parallel-forcing GUCs: no Gather planned, pgrust == oracle.
+//   * T_RecursiveUnion / T_WorkTableScan — UNREACHABLE IN THE WALKED
+//     TREE. Recursive CTEs are never inlined; RecursiveUnion (and the
+//     WorkTableScan inside its recursive term) lives in a PlannedStmt
+//     SUBPLAN read through an admitted CteScan, and this walk never
+//     descends into subplans. Live-probed: WITH RECURSIVE joined under
+//     FOR UPDATE rechecks fine (epq-subq-recursive pins it). Divergence
+//     note vs C: EvalPlanQualStart re-inits es_subplanstates in its
+//     child estate (fresh CTE tuplestore per recheck); pgrust's shared
+//     parent estate reuses the already-populated CTE state — equal
+//     results at the recheck's snapshot for stable CTE bodies
+//     (lane-epq.md §9, completion-wave entry).
+//   * T_CustomScan — UNREACHABLE UNTIL A FEATURE LANDS: pgrust has no
+//     custom-scan provider API (zero planner path-creation sites; the
+//     executor arm is in unported_nodes!), so no plan can contain one.
+//   * scanrelid == 0 pushed-down-join ForeignScan — stays on its own
+//     loud arm below (lane-epq.md §2; postgres_fdw join pushdown needs
+//     its own reviewed act + spec).
 pub(crate) fn check_epq_plan(plan: Node<'_>) {
     let ok = matches!(
         plan.node_tag(),
         NodeTag::T_Append
             | NodeTag::T_MergeAppend
             | NodeTag::T_SeqScan
+            | NodeTag::T_SampleScan
+            | NodeTag::T_ForeignScan
+            | NodeTag::T_ProjectSet
+            | NodeTag::T_TableFuncScan
+            | NodeTag::T_NamedTuplestoreScan
             | NodeTag::T_TidScan
             | NodeTag::T_TidRangeScan
             | NodeTag::T_IndexScan
@@ -301,8 +352,9 @@ pub(crate) fn check_epq_plan(plan: Node<'_>) {
 /// `scanrelid` of the ADMITTED table-scan tags (the shapes whose EPQ fetch
 /// goes through ExecScanFetch's rti-indexed relsubs arrays). Non-scan tags
 /// and the scan-shaped glue whose rti semantics differ (SubqueryScan /
-/// ValuesScan / CteScan / FunctionScan scan virtual rels; BitmapIndexScan
-/// rides its BitmapHeapScan parent) return None.
+/// ValuesScan / CteScan / FunctionScan / TableFuncScan /
+/// NamedTuplestoreScan scan virtual rels; BitmapIndexScan rides its
+/// BitmapHeapScan parent) return None.
 fn table_scan_scanrelid(plan: Node<'_>) -> Option<u32> {
     if let Some(s) = plan.as_seq_scan() {
         return Some(s.scan.scanrelid);
@@ -320,6 +372,12 @@ fn table_scan_scanrelid(plan: Node<'_>) -> Option<u32> {
         return Some(s.scan.scanrelid);
     }
     if let Some(s) = plan.as_bitmap_heap_scan() {
+        return Some(s.scan.scanrelid);
+    }
+    if let Some(s) = plan.as_sample_scan() {
+        return Some(s.scan.scanrelid);
+    }
+    if let Some(s) = plan.as_foreign_scan() {
         return Some(s.scan.scanrelid);
     }
     None

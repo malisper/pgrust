@@ -173,7 +173,10 @@ fn classify_into<'mcx>(
 /// here — they return None (ticking nothing, like the glue tags) until
 /// the Y3 census delta re-derivation maps them against the try_own_*
 /// inventory; the es_epq_active HARD LAW still refuses all lane
-/// ownership inside rechecks, so this is accounting-only.
+/// ownership inside rechecks, so this is accounting-only. The
+/// whitelist-completion wave (fix/epq-whitelist-completion: ProjectSet /
+/// SampleScan / TableFuncScan / ForeignScan / NamedTuplestoreScan)
+/// follows the same rule — admitted in check_epq_plan, None here.
 fn epq_recheck_verdict(plan: Node<'_>) -> Option<(ShapeClass, EpqNodeVerdict)> {
     use ::types_nodes::NodeTag as T;
     use EpqNodeVerdict as V;

@@ -1,0 +1,72 @@
+Parsed test spec with 3 sessions
+
+starting permutation: expl s1u lock s1c sel
+step expl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN approvals_file a ON a.doc_id = d.id FOR UPDATE OF d;
+QUERY PLAN                                                      
+----------------------------------------------------------------
+LockRows                                                        
+  ->  Nested Loop                                               
+        Join Filter: (d.id = a.doc_id)                          
+        ->  Foreign Scan on approvals_file a                    
+              Foreign File: /tmp/pgrust-epq-subq-foreignscan.csv
+        ->  Seq Scan on docs d                                  
+(6 rows)
+
+step s1u: UPDATE docs SET status = 'revoked' WHERE id = 3;
+step lock: SELECT d.* FROM docs d JOIN approvals_file a ON a.doc_id = d.id FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+
+starting permutation: expl s1k lock s1c sel
+step expl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN approvals_file a ON a.doc_id = d.id FOR UPDATE OF d;
+QUERY PLAN                                                      
+----------------------------------------------------------------
+LockRows                                                        
+  ->  Nested Loop                                               
+        Join Filter: (d.id = a.doc_id)                          
+        ->  Foreign Scan on approvals_file a                    
+              Foreign File: /tmp/pgrust-epq-subq-foreignscan.csv
+        ->  Seq Scan on docs d                                  
+(6 rows)
+
+step s1k: UPDATE docs SET id = 99 WHERE id = 3;
+step lock: SELECT d.* FROM docs d JOIN approvals_file a ON a.doc_id = d.id FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+(4 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+99|pending
+(5 rows)
+

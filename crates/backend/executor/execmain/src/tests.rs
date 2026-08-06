@@ -10297,8 +10297,12 @@ mod epq_seams_w5 {
     /// (fix/epq-unique-recheck) admitted the subquery/aggregate family —
     /// Unique/Agg/Group/WindowAgg/SetOp/Memoize/IncrementalSort/
     /// MergeAppend, each exercised by the epq-storm-unique / epq-subq-*
-    /// isolation specs — so the negative arm pins a shape that stays
-    /// outside the list (ProjectSet: no exercising recheck spec exists).
+    /// isolation specs — and the whitelist-completion wave
+    /// (fix/epq-whitelist-completion) admitted ProjectSet/SampleScan/
+    /// TableFuncScan/ForeignScan/NamedTuplestoreScan, so the negative arm
+    /// pins a shape that stays outside the list PERMANENTLY (Gather:
+    /// structurally unreachable — no locking/DML plan is ever parallel —
+    /// so the panic arm is the documented invariant's assertion).
     /// Wave-7 extension: the positive arm carries a REAL scanrelid (1)
     /// because scanrelid == 0 pushed-down-join scans refuse loudly on
     /// their own arm (see `epq_w7_scanrelid_zero_refused_loudly`).
@@ -10327,10 +10331,10 @@ mod epq_seams_w5 {
         )
         .unwrap();
         crate::epq::check_epq_plan(uniq);
-        // Negative arm: ProjectSet is not exercised for EPQ rescan — LOUD
-        // refuse.
-        let ps = Node::build::<::types_nodes::plannodes::ProjectSet>(mcx).unwrap().seal();
-        crate::epq::check_epq_plan(ps);
+        // Negative arm: Gather can never appear in a recheck plan (the
+        // planner forbids parallel locking/DML plans) — LOUD refuse.
+        let g = Node::build::<::types_nodes::plannodes::Gather>(mcx).unwrap().seal();
+        crate::epq::check_epq_plan(g);
     }
 
     /// `PGRUST_LANE_V2_EPQ` knob A/B (contract §6.3 + §0.6): OFF ticks
@@ -11702,15 +11706,16 @@ mod epq_capture_w7 {
         )
         .unwrap();
         crate::epq::check_epq_plan(ok);
-        // Negative arm: a ProjectSet UNDER an admitted SubqueryScan now
-        // refuses (Agg itself was admitted by the EPQ-unique admission
-        // wave; ProjectSet stays outside the list).
-        let ps = Node::build::<::types_nodes::plannodes::ProjectSet>(mcx).unwrap().seal();
+        // Negative arm: a Gather UNDER an admitted SubqueryScan refuses
+        // (ProjectSet itself was admitted by the whitelist-completion
+        // wave; Gather stays outside the list permanently — structurally
+        // unreachable, the panic is the invariant's assertion).
+        let g = Node::build::<::types_nodes::plannodes::Gather>(mcx).unwrap().seal();
         let bad = Node::mk(
             mcx,
             SubqueryScan {
                 scan: Scan { plan: Plan::default(), scanrelid: 1 },
-                subplan: Some(ps),
+                subplan: Some(g),
                 scanstatus: 0,
             },
         )
