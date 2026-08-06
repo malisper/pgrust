@@ -16,3 +16,10 @@ test: epq-short-material
 test: epq-short-valuesscan
 test: epq-short-ctescan
 test: epq-short-functionscan
+test: epq-storm-unique
+test: epq-subq-agg
+test: epq-subq-window
+test: epq-subq-setop
+test: epq-subq-memoize
+test: epq-subq-incsort
+test: epq-subq-mergeappend

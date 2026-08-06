@@ -165,6 +165,15 @@ fn classify_into<'mcx>(
 ///   * Short            — NO try_own_* surface exists (TidScan,
 ///                        TidRangeScan, MergeJoin, Material, ValuesScan,
 ///                        CteScan, FunctionScan, LockRows)
+///
+/// EPQ-unique admission wave (fix/epq-unique-recheck): check_epq_plan
+/// newly admits Unique / Agg / Group / WindowAgg / SetOp / Memoize /
+/// IncrementalSort / MergeAppend (each exercised by the epq-storm-unique
+/// / epq-subq-* isolation specs). Their census verdicts are NOT minted
+/// here — they return None (ticking nothing, like the glue tags) until
+/// the Y3 census delta re-derivation maps them against the try_own_*
+/// inventory; the es_epq_active HARD LAW still refuses all lane
+/// ownership inside rechecks, so this is accounting-only.
 fn epq_recheck_verdict(plan: Node<'_>) -> Option<(ShapeClass, EpqNodeVerdict)> {
     use ::types_nodes::NodeTag as T;
     use EpqNodeVerdict as V;

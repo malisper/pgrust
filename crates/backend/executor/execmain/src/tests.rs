@@ -10293,15 +10293,19 @@ mod epq_seams_w5 {
 
     /// `check_epq_plan` is THE LOUD ADMISSION LIST (wave-5 contract §6.2c;
     /// wave-7 rung Y2): listed shapes pass silently; an unexercised shape
-    /// panics LOUDLY. It admits nothing new at wave-7 — Agg stays outside
-    /// the list. Wave-7 extension: the positive arm carries a REAL
-    /// scanrelid (1) because scanrelid == 0 pushed-down-join scans now
-    /// refuse loudly on their own arm (see
-    /// `epq_w7_scanrelid_zero_refused_loudly`).
+    /// panics LOUDLY. The EPQ-unique admission wave
+    /// (fix/epq-unique-recheck) admitted the subquery/aggregate family —
+    /// Unique/Agg/Group/WindowAgg/SetOp/Memoize/IncrementalSort/
+    /// MergeAppend, each exercised by the epq-storm-unique / epq-subq-*
+    /// isolation specs — so the negative arm pins a shape that stays
+    /// outside the list (ProjectSet: no exercising recheck spec exists).
+    /// Wave-7 extension: the positive arm carries a REAL scanrelid (1)
+    /// because scanrelid == 0 pushed-down-join scans refuse loudly on
+    /// their own arm (see `epq_w7_scanrelid_zero_refused_loudly`).
     #[test]
     #[should_panic(expected = "recheck plan")]
     fn epq_w5_check_epq_plan_is_the_loud_admission_list() {
-        use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
+        use ::types_nodes::plannodes::{Plan, Scan, SeqScan, Unique};
         let mcx = leaked_mcx();
         // Positive arm first: a whitelist shape passes without panic.
         let seq = Node::mk(
@@ -10313,9 +10317,20 @@ mod epq_seams_w5 {
         )
         .unwrap();
         crate::epq::check_epq_plan(seq);
-        // Negative arm: Agg is not exercised for EPQ rescan — LOUD refuse.
-        let agg = Node::build::<::types_nodes::plannodes::Agg>(mcx).unwrap().seal();
-        crate::epq::check_epq_plan(agg);
+        // Positive arm, EPQ-unique admission wave: a Unique over a SeqScan
+        // (the live 2026-08-05 refusal shape — SELECT DISTINCT subquery
+        // under a FOR UPDATE join) passes, and the walker recurses into
+        // its lefttree (an unadmitted child would still refuse).
+        let uniq = Node::mk(
+            mcx,
+            Unique { plan: Plan { lefttree: Some(seq), ..Plan::default() }, ..Default::default() },
+        )
+        .unwrap();
+        crate::epq::check_epq_plan(uniq);
+        // Negative arm: ProjectSet is not exercised for EPQ rescan — LOUD
+        // refuse.
+        let ps = Node::build::<::types_nodes::plannodes::ProjectSet>(mcx).unwrap().seal();
+        crate::epq::check_epq_plan(ps);
     }
 
     /// `PGRUST_LANE_V2_EPQ` knob A/B (contract §6.3 + §0.6): OFF ticks
@@ -11687,13 +11702,15 @@ mod epq_capture_w7 {
         )
         .unwrap();
         crate::epq::check_epq_plan(ok);
-        // Negative arm: an Agg UNDER an admitted SubqueryScan now refuses.
-        let agg = Node::build::<::types_nodes::plannodes::Agg>(mcx).unwrap().seal();
+        // Negative arm: a ProjectSet UNDER an admitted SubqueryScan now
+        // refuses (Agg itself was admitted by the EPQ-unique admission
+        // wave; ProjectSet stays outside the list).
+        let ps = Node::build::<::types_nodes::plannodes::ProjectSet>(mcx).unwrap().seal();
         let bad = Node::mk(
             mcx,
             SubqueryScan {
                 scan: Scan { plan: Plan::default(), scanrelid: 1 },
-                subplan: Some(agg),
+                subplan: Some(ps),
                 scanstatus: 0,
             },
         )

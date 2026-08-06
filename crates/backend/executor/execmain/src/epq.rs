@@ -200,10 +200,35 @@ pub(crate) fn eval_plan_qual_start<'mcx>(
 //   * SubqueryScan recurses into its subplan (the tag whitelist previously
 //     stopped at the SubqueryScan node, silently admitting any shape
 //     underneath — an honesty gap in the loud list, not a new admission).
+//
+// EPQ-unique admission wave (fix/epq-unique-recheck, from the live
+// T_Unique refusal repro of 2026-08-05 — a SELECT DISTINCT subquery under
+// a FOR UPDATE join panicked here the moment a concurrent committed
+// update fired the recheck; C's EvalPlanQualStart has NO node-type
+// restriction and ExecReScanUnique handles the rescan). One reviewed act
+// per shape, each tied to its exercising evidence per the doctrine above:
+//   * Unique / Agg / Group / WindowAgg / SetOp / Memoize /
+//     IncrementalSort / MergeAppend — each is fully ported (node crate
+//     with exec_rescan_*, procnode init dispatch, execami rescan arm) and
+//     each is exercised by a two-session isolation spec in
+//     regress/isolation-overlay (epq-storm-unique + the epq-subq-* family;
+//     the spec pins the plan shape in-expected via EXPLAIN COSTS OFF and
+//     asserts the post-EPQ result rows against the C oracle).
+//   * MergeAppend admission forced a walker honesty extension: recurse
+//     into mergeplans (same class as the Append/SubqueryScan arms —
+//     without it the tag walk would silently admit any shape underneath).
+// Still refused, deliberately (same panic arm; each needs its own
+// reviewed act + exercising spec before admission):
+//   * T_RecursiveUnion / T_WorkTableScan / T_ProjectSet / T_TableFuncScan /
+//     T_NamedTuplestoreScan / T_SampleScan / T_ForeignScan / T_CustomScan /
+//     T_Gather / T_GatherMerge / T_ModifyTable — no exercising spec exists
+//     yet for these inside a recheck; RecursiveUnion's worktable rescan
+//     discipline and the FDW arms (lane-epq.md §2) need their own review.
 pub(crate) fn check_epq_plan(plan: Node<'_>) {
     let ok = matches!(
         plan.node_tag(),
         NodeTag::T_Append
+            | NodeTag::T_MergeAppend
             | NodeTag::T_SeqScan
             | NodeTag::T_TidScan
             | NodeTag::T_TidRangeScan
@@ -216,7 +241,9 @@ pub(crate) fn check_epq_plan(plan: Node<'_>) {
             | NodeTag::T_HashJoin
             | NodeTag::T_Hash
             | NodeTag::T_Sort
+            | NodeTag::T_IncrementalSort
             | NodeTag::T_Material
+            | NodeTag::T_Memoize
             | NodeTag::T_Result
             | NodeTag::T_ValuesScan
             | NodeTag::T_CteScan
@@ -224,6 +251,11 @@ pub(crate) fn check_epq_plan(plan: Node<'_>) {
             | NodeTag::T_FunctionScan
             | NodeTag::T_LockRows
             | NodeTag::T_Limit
+            | NodeTag::T_Unique
+            | NodeTag::T_Agg
+            | NodeTag::T_Group
+            | NodeTag::T_WindowAgg
+            | NodeTag::T_SetOp
     );
     if !ok {
         panic!(
@@ -243,6 +275,11 @@ pub(crate) fn check_epq_plan(plan: Node<'_>) {
     }
     if let Some(ap) = plan.as_append() {
         for child in ap.appendplans.iter() {
+            check_epq_plan(child);
+        }
+    }
+    if let Some(ma) = plan.as_merge_append() {
+        for child in ma.mergeplans.iter() {
             check_epq_plan(child);
         }
     }

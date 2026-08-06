@@ -1,0 +1,84 @@
+Parsed test spec with 3 sessions
+
+starting permutation: expl s1u lock s1c sel
+step expl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN (SELECT DISTINCT doc_id FROM ap_part WHERE approved) a ON a.doc_id = d.id FOR UPDATE OF d;
+QUERY PLAN                                                                        
+----------------------------------------------------------------------------------
+LockRows                                                                          
+  ->  Nested Loop                                                                 
+        ->  Subquery Scan on a                                                    
+              ->  Unique                                                          
+                    ->  Merge Append                                              
+                          Sort Key: ap_part.doc_id                                
+                          ->  Index Scan using ap_p0_doc_id_idx on ap_p0 ap_part_1
+                                Filter: approved                                  
+                          ->  Index Scan using ap_p1_doc_id_idx on ap_p1 ap_part_2
+                                Filter: approved                                  
+        ->  Index Scan using docs_pkey on docs d                                  
+              Index Cond: (id = a.doc_id)                                         
+(12 rows)
+
+step s1u: UPDATE docs SET status = 'revoked' WHERE id = 3;
+step lock: SELECT d.* FROM docs d JOIN (SELECT DISTINCT doc_id FROM ap_part WHERE approved) a ON a.doc_id = d.id FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+
+starting permutation: expl s1k lock s1c sel
+step expl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN (SELECT DISTINCT doc_id FROM ap_part WHERE approved) a ON a.doc_id = d.id FOR UPDATE OF d;
+QUERY PLAN                                                                        
+----------------------------------------------------------------------------------
+LockRows                                                                          
+  ->  Nested Loop                                                                 
+        ->  Subquery Scan on a                                                    
+              ->  Unique                                                          
+                    ->  Merge Append                                              
+                          Sort Key: ap_part.doc_id                                
+                          ->  Index Scan using ap_p0_doc_id_idx on ap_p0 ap_part_1
+                                Filter: approved                                  
+                          ->  Index Scan using ap_p1_doc_id_idx on ap_p1 ap_part_2
+                                Filter: approved                                  
+        ->  Index Scan using docs_pkey on docs d                                  
+              Index Cond: (id = a.doc_id)                                         
+(12 rows)
+
+step s1k: UPDATE docs SET id = 99 WHERE id = 3;
+step lock: SELECT d.* FROM docs d JOIN (SELECT DISTINCT doc_id FROM ap_part WHERE approved) a ON a.doc_id = d.id FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+(4 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+99|pending
+(5 rows)
+

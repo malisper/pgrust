@@ -1,0 +1,173 @@
+Parsed test spec with 4 sessions
+
+starting permutation: aexpl s1u alock s1c sel
+step aexpl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN (SELECT doc_id, count(*) n FROM approvals WHERE approved GROUP BY doc_id) a ON a.doc_id = d.id AND a.n >= 2 FOR UPDATE OF d;
+QUERY PLAN                                          
+----------------------------------------------------
+LockRows                                            
+  ->  Merge Join                                    
+        Merge Cond: (d.id = a.doc_id)               
+        ->  Sort                                    
+              Sort Key: d.id                        
+              ->  Seq Scan on docs d                
+        ->  Subquery Scan on a                      
+              ->  GroupAggregate                    
+                    Group Key: approvals.doc_id     
+                    Filter: (count(*) >= 2)         
+                    ->  Sort                        
+                          Sort Key: approvals.doc_id
+                          ->  Seq Scan on approvals 
+                                Filter: approved    
+(14 rows)
+
+step s1u: UPDATE docs SET status = 'revoked' WHERE id = 3;
+step alock: SELECT d.* FROM docs d JOIN (SELECT doc_id, count(*) n FROM approvals WHERE approved GROUP BY doc_id) a ON a.doc_id = d.id AND a.n >= 2 FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step alock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+
+starting permutation: aexpl s1k alock s1c sel
+step aexpl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN (SELECT doc_id, count(*) n FROM approvals WHERE approved GROUP BY doc_id) a ON a.doc_id = d.id AND a.n >= 2 FOR UPDATE OF d;
+QUERY PLAN                                          
+----------------------------------------------------
+LockRows                                            
+  ->  Merge Join                                    
+        Merge Cond: (d.id = a.doc_id)               
+        ->  Sort                                    
+              Sort Key: d.id                        
+              ->  Seq Scan on docs d                
+        ->  Subquery Scan on a                      
+              ->  GroupAggregate                    
+                    Group Key: approvals.doc_id     
+                    Filter: (count(*) >= 2)         
+                    ->  Sort                        
+                          Sort Key: approvals.doc_id
+                          ->  Seq Scan on approvals 
+                                Filter: approved    
+(14 rows)
+
+step s1k: UPDATE docs SET id = 99 WHERE id = 3;
+step alock: SELECT d.* FROM docs d JOIN (SELECT doc_id, count(*) n FROM approvals WHERE approved GROUP BY doc_id) a ON a.doc_id = d.id AND a.n >= 2 FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step alock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+(4 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+99|pending
+(5 rows)
+
+
+starting permutation: gexpl s1u glock s1c sel
+step gexpl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN (SELECT doc_id FROM approvals WHERE approved GROUP BY doc_id) a ON a.doc_id = d.id FOR UPDATE OF d;
+QUERY PLAN                                          
+----------------------------------------------------
+LockRows                                            
+  ->  Merge Join                                    
+        Merge Cond: (d.id = a.doc_id)               
+        ->  Sort                                    
+              Sort Key: d.id                        
+              ->  Seq Scan on docs d                
+        ->  Subquery Scan on a                      
+              ->  Group                             
+                    Group Key: approvals.doc_id     
+                    ->  Sort                        
+                          Sort Key: approvals.doc_id
+                          ->  Seq Scan on approvals 
+                                Filter: approved    
+(13 rows)
+
+step s1u: UPDATE docs SET status = 'revoked' WHERE id = 3;
+step glock: SELECT d.* FROM docs d JOIN (SELECT doc_id FROM approvals WHERE approved GROUP BY doc_id) a ON a.doc_id = d.id FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step glock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+
+starting permutation: gexpl s1k glock s1c sel
+step gexpl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN (SELECT doc_id FROM approvals WHERE approved GROUP BY doc_id) a ON a.doc_id = d.id FOR UPDATE OF d;
+QUERY PLAN                                          
+----------------------------------------------------
+LockRows                                            
+  ->  Merge Join                                    
+        Merge Cond: (d.id = a.doc_id)               
+        ->  Sort                                    
+              Sort Key: d.id                        
+              ->  Seq Scan on docs d                
+        ->  Subquery Scan on a                      
+              ->  Group                             
+                    Group Key: approvals.doc_id     
+                    ->  Sort                        
+                          Sort Key: approvals.doc_id
+                          ->  Seq Scan on approvals 
+                                Filter: approved    
+(13 rows)
+
+step s1k: UPDATE docs SET id = 99 WHERE id = 3;
+step glock: SELECT d.* FROM docs d JOIN (SELECT doc_id FROM approvals WHERE approved GROUP BY doc_id) a ON a.doc_id = d.id FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step glock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+(4 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+99|pending
+(5 rows)
+

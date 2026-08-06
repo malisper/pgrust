@@ -1,0 +1,97 @@
+Parsed test spec with 3 sessions
+
+starting permutation: expl s1u lock s1c sel
+step expl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN (SELECT doc_id, row_number() OVER (ORDER BY doc_id) rn FROM approvals WHERE approved) a ON a.doc_id = d.id AND a.rn <= 100 FOR UPDATE OF d;
+QUERY PLAN                                                                            
+--------------------------------------------------------------------------------------
+LockRows                                                                              
+  ->  Merge Join                                                                      
+        Merge Cond: (a.doc_id = d.id)                                                 
+        ->  Subquery Scan on a                                                        
+              ->  WindowAgg                                                           
+                    Window: w1 AS (ORDER BY approvals.doc_id ROWS UNBOUNDED PRECEDING)
+                    Run Condition: (row_number() OVER w1 <= 100)                      
+                    ->  Sort                                                          
+                          Sort Key: approvals.doc_id                                  
+                          ->  Seq Scan on approvals                                   
+                                Filter: approved                                      
+        ->  Sort                                                                      
+              Sort Key: d.id                                                          
+              ->  Seq Scan on docs d                                                  
+(14 rows)
+
+step s1u: UPDATE docs SET status = 'revoked' WHERE id = 3;
+step lock: SELECT d.* FROM docs d JOIN (SELECT doc_id, row_number() OVER (ORDER BY doc_id) rn FROM approvals WHERE approved) a ON a.doc_id = d.id AND a.rn <= 100 FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 1|pending
+ 2|pending
+ 2|pending
+ 3|revoked
+ 3|revoked
+ 4|pending
+ 4|pending
+ 5|pending
+ 5|pending
+(10 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 3|revoked
+ 4|pending
+ 5|pending
+(5 rows)
+
+
+starting permutation: expl s1k lock s1c sel
+step expl: EXPLAIN (COSTS OFF) SELECT d.* FROM docs d JOIN (SELECT doc_id, row_number() OVER (ORDER BY doc_id) rn FROM approvals WHERE approved) a ON a.doc_id = d.id AND a.rn <= 100 FOR UPDATE OF d;
+QUERY PLAN                                                                            
+--------------------------------------------------------------------------------------
+LockRows                                                                              
+  ->  Merge Join                                                                      
+        Merge Cond: (a.doc_id = d.id)                                                 
+        ->  Subquery Scan on a                                                        
+              ->  WindowAgg                                                           
+                    Window: w1 AS (ORDER BY approvals.doc_id ROWS UNBOUNDED PRECEDING)
+                    Run Condition: (row_number() OVER w1 <= 100)                      
+                    ->  Sort                                                          
+                          Sort Key: approvals.doc_id                                  
+                          ->  Seq Scan on approvals                                   
+                                Filter: approved                                      
+        ->  Sort                                                                      
+              Sort Key: d.id                                                          
+              ->  Seq Scan on docs d                                                  
+(14 rows)
+
+step s1k: UPDATE docs SET id = 99 WHERE id = 3;
+step lock: SELECT d.* FROM docs d JOIN (SELECT doc_id, row_number() OVER (ORDER BY doc_id) rn FROM approvals WHERE approved) a ON a.doc_id = d.id AND a.rn <= 100 FOR UPDATE OF d; <waiting ...>
+step s1c: COMMIT;
+step lock: <... completed>
+id|status 
+--+-------
+ 1|pending
+ 1|pending
+ 2|pending
+ 2|pending
+ 4|pending
+ 4|pending
+ 5|pending
+ 5|pending
+(8 rows)
+
+step sel: SELECT id, status FROM docs ORDER BY id;
+id|status 
+--+-------
+ 1|pending
+ 2|pending
+ 4|pending
+ 5|pending
+99|pending
+(5 rows)
+
