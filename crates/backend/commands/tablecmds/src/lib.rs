@@ -45,7 +45,10 @@ pub fn init_seams() {
 
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use types_error::{
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
+};
 
 use commands_tablespace::{GLOBALTABLESPACE_OID, TableSpaceRelationId};
 use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName};
@@ -227,6 +230,27 @@ pub(crate) fn GetAttributeCompression(
     }
 }
 
+// C BuildDescForRelation (tablecmds.c): attdim =
+// list_length(entry->typeName->arrayBounds) — the count of declared array
+// bounds becomes pg_attribute.attndims — with an ERROR above PG_INT16_MAX,
+// and SETOF column declarations rejected at the same spot.
+fn column_def_attdim(tn: &TypeName<'_>, attname: &str) -> PgResult<i32> {
+    let attdim = tn.arrayBounds.len();
+    if attdim > i16::MAX as usize {
+        return Err(Box::new(
+            PgError::new(ERROR, "too many array dimensions")
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+        ));
+    }
+    if tn.setof {
+        return Err(Box::new(
+            PgError::new(ERROR, format!("column \"{attname}\" cannot be declared SETOF"))
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+    Ok(attdim as i32)
+}
+
 // BuildDescForRelation (tablecmds.c in 18.3).
 pub fn BuildDescForRelation<'mcx>(
     mcx: Mcx<'mcx>,
@@ -256,7 +280,8 @@ pub fn BuildDescForRelation<'mcx>(
             aclcheck_error_type(aclresult, atttypid)?;
         }
         let attcollation = GetColumnDefCollation(entry, atttypid)?;
-        tupdesc::TupleDescInitEntry(&mut desc, attnum, Some(colname), atttypid, atttypmod, 0)?;
+        let attdim = column_def_attdim(tn, colname)?;
+        tupdesc::TupleDescInitEntry(&mut desc, attnum, Some(colname), atttypid, atttypmod, attdim)?;
         tupdesc::TupleDescInitEntryCollation(&mut desc, attnum, attcollation);
 
         let att = desc.attr_mut(attnum as usize - 1);
@@ -1100,5 +1125,60 @@ pub fn DefineRelation<'mcx>(
         xact::CommandCounterIncrement()?;
     }
     Ok(relation_id)
+}
+
+#[cfg(test)]
+mod build_desc_tests {
+    use super::*;
+    use types_nodes::Node;
+
+    fn tn_with_bounds<'mcx>(mcx: Mcx<'mcx>, ndims: usize) -> TypeName<'mcx> {
+        // The grammar stores one Integer node per `[]` / `[n]` bound
+        // (gram actions: NodeList::make1(Node::mk_integer(mcx, -1))).
+        let mut tn = TypeName::default();
+        for _ in 0..ndims {
+            tn.arrayBounds.lappend(mcx, Node::mk_integer(mcx, -1).unwrap()).unwrap();
+        }
+        tn
+    }
+
+    // C BuildDescForRelation: attndims = list_length(typeName->arrayBounds).
+    // `labels text[]` carries one bound; `int[][]` two; scalars none.
+    #[test]
+    fn attdim_is_array_bounds_length() {
+        let root = mcx::session_root("attdim-test");
+        let mcx = root.mcx();
+        for ndims in [0usize, 1, 2, 3] {
+            let tn = tn_with_bounds(mcx, ndims);
+            assert_eq!(column_def_attdim(&tn, "c").unwrap(), ndims as i32);
+        }
+    }
+
+    // C caps attdim at PG_INT16_MAX with 54000 "too many array dimensions";
+    // the cap must hold in release builds (not just a debug_assert further
+    // down in TupleDescInitEntry).
+    #[test]
+    fn attdim_cap_error_identity_matches_c() {
+        let root = mcx::session_root("attdim-cap-test");
+        let mcx = root.mcx();
+        let tn = tn_with_bounds(mcx, i16::MAX as usize);
+        assert_eq!(column_def_attdim(&tn, "c").unwrap(), i16::MAX as i32);
+        let tn = tn_with_bounds(mcx, i16::MAX as usize + 1);
+        let e = column_def_attdim(&tn, "c").unwrap_err();
+        assert_eq!(e.message(), "too many array dimensions");
+        assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    }
+
+    // C rejects SETOF column declarations here with 42P16.
+    #[test]
+    fn setof_error_identity_matches_c() {
+        let root = mcx::session_root("attdim-setof-test");
+        let mcx = root.mcx();
+        let mut tn = tn_with_bounds(mcx, 0);
+        tn.setof = true;
+        let e = column_def_attdim(&tn, "x").unwrap_err();
+        assert_eq!(e.message(), "column \"x\" cannot be declared SETOF");
+        assert_eq!(e.sqlstate(), ERRCODE_INVALID_TABLE_DEFINITION);
+    }
 }
 
