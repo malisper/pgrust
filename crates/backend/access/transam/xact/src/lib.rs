@@ -1209,6 +1209,7 @@ pub fn init_seams() {
     xact_seams::set_xact_accessed_temp_namespace::set(seam_set_xact_accessed_temp_namespace);
     xact_seams::get_current_command_id::set(GetCurrentCommandId);
     xact_seams::get_current_transaction_id::set(GetCurrentTransactionId);
+    xact_seams::force_sync_commit::set(ForceSyncCommit);
     xact_seams::or_my_xact_flags::set(OrMyXactFlags);
     xact_seams::get_current_transaction_nest_level::set(GetCurrentTransactionNestLevel);
     xact_seams::get_current_transaction_stop_timestamp::set(GetCurrentTransactionStopTimestamp);

@@ -1262,6 +1262,24 @@ impl CbWriter {
         self.write_header(footer_off)?;
         self.file.sync_data()?;
         self.finish_sync += ft2.elapsed();
+
+        // The part is durable, but the COMMIT that makes these RGs visible
+        // is not yet: cbstore data carries no WAL, so a transaction whose
+        // only writes are cbstore rows reaches RecordTransactionCommit with
+        // wrote_xlog = false and takes xact.c's async-commit shortcut — the
+        // acked commit record sits in WAL buffers and kill -9 loses it,
+        // leaving every RG just published invisible behind the §4 xmin
+        // filter; with no WAL record anywhere carrying that xid, recovery
+        // also rolls nextXid back and a later reuse+commit of the same xid
+        // resurrects the rows (GH #248). Force the sync path: the commit
+        // record is XLogFlush'd before the client sees success (§5's
+        // "commit ordered after data durability", now including the commit
+        // record itself), and replaying it advances nextXid past our xmin
+        // stamps. Seam uninstalled = no backend (unit tests drive CbWriter
+        // directly, outside any transaction).
+        if xact_seams::force_sync_commit::is_installed() {
+            xact_seams::force_sync_commit::call();
+        }
         Ok(())
     }
 
