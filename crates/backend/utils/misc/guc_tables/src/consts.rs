@@ -156,6 +156,14 @@ pub const REGEX_ENGINE_AUTO: i32 = 2;
 // runtime = the M5 unified admission router owns plan-shape routing.
 pub const PARALLEL_ENGINE_LEGACY: i32 = 0;
 pub const PARALLEL_ENGINE_RUNTIME: i32 = 1;
+// pgrust-only version identities — the SINGLE source of truth for both
+// numbers (dl-verstring ruling 2026-08-06). Every rendered banner
+// (version(), the postmaster startup line) derives from these two consts;
+// never write either number anywhere else in the server source. Hosted here
+// because guc_tables already owns the SQL-visible `server_version` default,
+// which references PG_COMPAT_VERSION below.
+pub const PGRUST_VERSION: &str = "0.3-beta";
+pub const PG_COMPAT_VERSION: &str = "18.3";
 pub const RECOVERY_TARGET_ACTION_PAUSE: i32 = 0;
 pub const RELSEG_SIZE: i32 = 131072;
 // tcopprot.h restrict_nonsystem_relation_kind flag bits.
@@ -179,6 +187,13 @@ pub const TOAST_PGLZ_COMPRESSION: i32 = 112;
 pub const TRACK_FUNC_ALL: i32 = 2;
 pub const TRACK_FUNC_OFF: i32 = 0;
 pub const TRACK_FUNC_PL: i32 = 1;
+// pgrust-only pgrust.version_string_style values: which identity leads in
+// version()'s banner. postgres_first (the default) leads with the
+// PostgreSQL compatibility version so first-number parsers (the
+// duckdb-postgres ExtractPostgresVersion class) read it; pgrust_first
+// restores the legacy pgrust-led form.
+pub const VERSION_STRING_POSTGRES_FIRST: i32 = 0;
+pub const VERSION_STRING_PGRUST_FIRST: i32 = 1;
 pub const WAL_COMPRESSION_LZ4: i32 = 2;
 pub const WAL_COMPRESSION_NONE: i32 = 0;
 pub const WAL_COMPRESSION_PGLZ: i32 = 1;

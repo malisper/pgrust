@@ -40,7 +40,9 @@ pub use process::{
 pub use userid::*;
 
 pub(crate) const MISCINIT_C: &str = "src/backend/utils/init/miscinit.c";
-pub(crate) const PG_VERSION: &str = "18.3";
+// The datadir PG_VERSION file contract; the number itself has ONE source of
+// truth (guc_tables::consts, the dl-verstring ruling 2026-08-06).
+pub(crate) const PG_VERSION: &str = guc_tables::consts::PG_COMPAT_VERSION;
 
 thread_local! {
     static MODE: Cell<ProcessingMode> = const { Cell::new(ProcessingMode::InitProcessing) };

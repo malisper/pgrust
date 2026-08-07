@@ -342,6 +342,11 @@ pub static pgrust_parallel_engine_options: &[config_enum_entry] = &[
     config_enum_entry { name: "runtime", val: PARALLEL_ENGINE_RUNTIME, hidden: false },
 ];
 
+pub static pgrust_version_string_style_options: &[config_enum_entry] = &[
+    config_enum_entry { name: "postgres_first", val: VERSION_STRING_POSTGRES_FIRST, hidden: false },
+    config_enum_entry { name: "pgrust_first", val: VERSION_STRING_PGRUST_FIRST, hidden: false },
+];
+
 pub static backslash_quote_options: &[config_enum_entry] = &[
     config_enum_entry { name: "safe_encoding", val: BACKSLASH_QUOTE_SAFE_ENCODING, hidden: false },
     config_enum_entry { name: "on", val: BACKSLASH_QUOTE_ON, hidden: false },
@@ -1062,7 +1067,7 @@ pub static ConfigureNamesString: &[GucStringSetting] = &[
     GucStringSetting { name: "local_preload_libraries", context: PGC_USERSET, group: CLIENT_CONN_PRELOAD, short_desc: Some("Lists unprivileged shared libraries to preload into each backend."), long_desc: None, flags: GUC_LIST_INPUT | GUC_LIST_QUOTE, variable: &vars::local_preload_libraries_string, boot_val: GucDefaultValue::String(Some("")), check_hook: None, assign_hook: None, show_hook: None },
     GucStringSetting { name: "search_path", context: PGC_USERSET, group: CLIENT_CONN_STATEMENT, short_desc: Some("Sets the schema search order for names that are not schema-qualified."), long_desc: None, flags: GUC_LIST_INPUT | GUC_LIST_QUOTE | GUC_EXPLAIN | GUC_REPORT, variable: &vars::namespace_search_path, boot_val: GucDefaultValue::String(Some("\"$user\", public")), check_hook: Some(&hooks::check_search_path), assign_hook: Some(&hooks::assign_search_path), show_hook: None },
     GucStringSetting { name: "server_encoding", context: PGC_INTERNAL, group: PRESET_OPTIONS, short_desc: Some("Shows the server (database) character set encoding."), long_desc: None, flags: GUC_IS_NAME | GUC_REPORT | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE, variable: &vars::server_encoding_string, boot_val: GucDefaultValue::String(Some("SQL_ASCII")), check_hook: None, assign_hook: None, show_hook: None },
-    GucStringSetting { name: "server_version", context: PGC_INTERNAL, group: PRESET_OPTIONS, short_desc: Some("Shows the server version."), long_desc: None, flags: GUC_REPORT | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE, variable: &vars::server_version_string, boot_val: GucDefaultValue::String(Some("18.3")), check_hook: None, assign_hook: None, show_hook: None },
+    GucStringSetting { name: "server_version", context: PGC_INTERNAL, group: PRESET_OPTIONS, short_desc: Some("Shows the server version."), long_desc: None, flags: GUC_REPORT | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE, variable: &vars::server_version_string, boot_val: GucDefaultValue::String(Some(PG_COMPAT_VERSION)), check_hook: None, assign_hook: None, show_hook: None },
     GucStringSetting { name: "role", context: PGC_USERSET, group: UNGROUPED, short_desc: Some("Sets the current role."), long_desc: None, flags: GUC_IS_NAME | GUC_NO_SHOW_ALL | GUC_NO_RESET_ALL | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE | GUC_NOT_WHILE_SEC_REST, variable: &vars::role_string, boot_val: GucDefaultValue::String(Some("none")), check_hook: Some(&hooks::check_role), assign_hook: Some(&hooks::assign_role), show_hook: Some(&hooks::show_role) },
     GucStringSetting { name: "session_authorization", context: PGC_USERSET, group: UNGROUPED, short_desc: Some("Sets the session user name."), long_desc: None, flags: GUC_IS_NAME | GUC_REPORT | GUC_NO_SHOW_ALL | GUC_NO_RESET_ALL | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE | GUC_NOT_WHILE_SEC_REST, variable: &vars::session_authorization_string, boot_val: GucDefaultValue::String(None), check_hook: Some(&hooks::check_session_authorization), assign_hook: Some(&hooks::assign_session_authorization), show_hook: None },
     GucStringSetting { name: "log_destination", context: PGC_SIGHUP, group: LOGGING_WHERE, short_desc: Some("Sets the destination for server log output."), long_desc: Some("Valid values are combinations of \"stderr\", \"syslog\", \"csvlog\", \"jsonlog\", and \"eventlog\", depending on the platform."), flags: GUC_LIST_INPUT, variable: &vars::Log_destination_string, boot_val: GucDefaultValue::String(Some("stderr")), check_hook: Some(&hooks::check_log_destination), assign_hook: Some(&hooks::assign_log_destination), show_hook: None },
@@ -1178,6 +1183,16 @@ pub static ConfigureNamesEnum: &[GucEnumSetting] = &[
     // Visible row (the condition_cache precedent): a product surface, not a
     // debug toggle.
     GucEnumSetting { name: "pgrust.parallel_engine", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects the parallel query engine: legacy Gather machinery or the morsel runtime router."), long_desc: None, flags: 0, variable: &vars::pgrust_parallel_engine, boot_val: GucDefaultValue::Enum(PARALLEL_ENGINE_RUNTIME), options: GucEnumOptions::Inline(pgrust_parallel_engine_options), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust-only (dl-verstring ruling 2026-08-06): which identity leads in
+    // version()'s banner. postgres_first (default) leads with the PostgreSQL
+    // compatibility version — matching C PostgreSQL's own "PostgreSQL <ver>
+    // on ..." shape — so clients that parse the first version number in
+    // version() (the duckdb-postgres ExtractPostgresVersion class) read the
+    // compatibility version instead of pgrust's own; pgrust_first restores
+    // the legacy pgrust-led form. The `server_version` GUC is unaffected
+    // either way. PGC_USERSET: version() reads the session cell at call
+    // time, so per-session scope is free (the parallel_engine precedent).
+    GucEnumSetting { name: "pgrust.version_string_style", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects which identity leads in version(): the PostgreSQL compatibility version (postgres_first) or pgrust's own (pgrust_first)."), long_desc: Some("Clients that parse the first version number out of version() read the PostgreSQL compatibility version under postgres_first, the default. pgrust_first restores the legacy pgrust-led banner. The server_version GUC is unaffected."), flags: 0, variable: &vars::pgrust_version_string_style, boot_val: GucDefaultValue::Enum(VERSION_STRING_POSTGRES_FIRST), options: GucEnumOptions::Inline(pgrust_version_string_style_options), check_hook: None, assign_hook: None, show_hook: None },
     // boot_val diverges from C (DEFAULT_IO_METHOD = worker): sync stays the
     // default until the worker flip letter; check_io_method refuses unported
     // methods cleanly (owner: aio_core).

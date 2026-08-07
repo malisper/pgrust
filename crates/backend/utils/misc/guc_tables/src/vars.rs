@@ -309,6 +309,11 @@ pub static pgrust_condition_cache_size: GucIntVar = GucSlot::new("pgrust_conditi
 // is consulted ONLY under engine=runtime (never by the per-arm bench GUCs).
 pub static pgrust_parallel_engine: GucEnumVar = GucSlot::new("pgrust_parallel_engine");
 pub static pgrust_runtime_dop: GucIntVar = GucSlot::new("pgrust_runtime_dop");
+// pgrust-only: pgrust.version_string_style (dl-verstring ruling 2026-08-06,
+// no C symbol) — selects which identity leads in version()'s banner
+// (consts::VERSION_STRING_*). Default postgres_first so first-number parsers
+// read the PostgreSQL compatibility version; `server_version` is unaffected.
+pub static pgrust_version_string_style: GucEnumVar = GucSlot::new("pgrust_version_string_style");
 // pgrust-only (env-to-guc train, no C symbol): pgrust.runtime is the M0 master
 // switch for the runtime pool (PGC_POSTMASTER); pgrust.mem_autotune gates the
 // boot-time memory auto-tune (PGC_POSTMASTER).

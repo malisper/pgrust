@@ -12,10 +12,18 @@ use crate::{
 };
 
 const PROGNAME: &str = "postgres";
-// PG_VERSION_STR renders compiler/platform detail; the version core is the
-// parity-relevant fragment. Kept in step with adt_misc::introspect's
-// PG_VERSION_STR (the version() banner) — see the rationale there.
-const PG_VERSION_STR: &str = "pgrust 0.3-beta (PostgreSQL 18.3 compatible)";
+// The startup log banner stays pgrust-first REGARDLESS of
+// pgrust.version_string_style (dl-verstring ruling 2026-08-06): it is
+// human/ops-facing, not parser-facing — the GUC exists for clients that
+// parse SQL version() (adt_misc::introspect has the rationale). Both
+// version numbers come from guc_tables::consts, the single source of truth.
+static PG_VERSION_STR: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "pgrust {} (PostgreSQL {} compatible)",
+        guc_tables::consts::PGRUST_VERSION,
+        guc_tables::consts::PG_COMPAT_VERSION,
+    )
+});
 const PG_MODE_MASK_OWNER: libc::mode_t = 0o077;
 const LOG_METAINFO_DATAFILE: &str = "current_logfiles";
 
@@ -458,7 +466,7 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     elog::config::set_where_to_send_output(types_dest_none());
 
-    report(LOG, format!("starting {PG_VERSION_STR}"), 1105, "PostmasterMain");
+    report(LOG, format!("starting {}", *PG_VERSION_STR), 1105, "PostmasterMain");
 
     // pgrust extension (GL-STRDEFECTS-1 witness): the regexp engine tiers
     // are a build property (RE2 links only where libre2 existed at build) —

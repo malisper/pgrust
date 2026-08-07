@@ -56,6 +56,14 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     // byte-for-byte); the per-arm bench pool GUCs layer BENEATH the switch
     // and keep working verbatim either way.
     (pgrust_parallel_engine_cell, i32, pgrust_parallel_engine, set_pgrust_parallel_engine, 1),
+    // pgrust.version_string_style (pgrust-only, dl-verstring ruling
+    // 2026-08-06): which identity leads in version()'s banner. Default
+    // postgres_first — clients that take the FIRST number in version()
+    // (duckdb-postgres's ExtractPostgresVersion parsed the legacy leading
+    // "0.3" as pre-8.3 PostgreSQL and silently degraded) must read the
+    // PostgreSQL compatibility version. pgrust_first restores the legacy
+    // pgrust-led form byte-for-byte. `server_version` is unaffected.
+    (pgrust_version_string_style_cell, i32, pgrust_version_string_style, set_pgrust_version_string_style, crate::consts::VERSION_STRING_POSTGRES_FIRST),
     // pgrust.runtime_dop (pgrust-only, M5-0): the product DOP knob, consulted
     // ONLY under engine=runtime (the M5-1 router). 0 = auto (available cores).
     (pgrust_runtime_dop_cell, i32, pgrust_runtime_dop, set_pgrust_runtime_dop, 0),
@@ -423,7 +431,7 @@ string_var!(
     CELL_server_version_string,
     server_version_string,
     set_server_version_string,
-    Some("18.3") // PG_VERSION
+    Some(crate::consts::PG_COMPAT_VERSION) // PG_VERSION
 );
 session_string_var!(CELL_role_string,
     role_string,

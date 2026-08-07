@@ -148,7 +148,7 @@ pub fn fc_version(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(varlena::cstring_to_text(
         mcx,
-        crate::introspect::PG_VERSION_STR.as_bytes(),
+        crate::introspect::pg_version_str().as_bytes(),
     )?))
 }
 

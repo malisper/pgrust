@@ -212,6 +212,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_parallel_engine,
         set: backing::set_pgrust_parallel_engine,
     });
+    vars::pgrust_version_string_style.install(GucVarAccessors {
+        get: backing::pgrust_version_string_style,
+        set: backing::set_pgrust_version_string_style,
+    });
     vars::pgrust_runtime_dop.install(GucVarAccessors {
         get: backing::pgrust_runtime_dop,
         set: backing::set_pgrust_runtime_dop,

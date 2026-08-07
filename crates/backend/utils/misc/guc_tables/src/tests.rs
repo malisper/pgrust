@@ -62,12 +62,14 @@ fn table_counts_match_compiled_backend_shape() {
     //   pgrust.ephemeral_db_wal_log_threshold (-> 170) = 459.
     // testmode prewarm addendum (pgrust-only): Bool +1
     //   pgrust.ephemeral_db_prewarm (-> 136) = 460.
+    // dl-verstring (pgrust-only, version-string ruling 2026-08-06): Enum +1
+    //   pgrust.version_string_style (-> 48) = 461.
     assert_eq!(ConfigureNamesBool.len(), 136);
     assert_eq!(ConfigureNamesInt.len(), 170);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 79);
-    assert_eq!(ConfigureNamesEnum.len(), 47);
-    assert_eq!(all_settings().count(), 460);
+    assert_eq!(ConfigureNamesEnum.len(), 48);
+    assert_eq!(all_settings().count(), 461);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
@@ -129,6 +131,26 @@ fn common_options_are_present_with_postgres_defaults() {
         find("server_version").default_value(),
         GucDefaultValue::String(Some("18.3"))
     );
+}
+
+#[test]
+fn version_string_style_defaults_postgres_first() {
+    // dl-verstring ruling 2026-08-06: the DEFAULT must be postgres_first so
+    // first-number parsers of version() read the PostgreSQL compatibility
+    // version. Flipping this default is a client-visible ecosystem break.
+    let style = find("pgrust.version_string_style");
+    assert_eq!(style.value_kind(), GucValueKind::Enum);
+    assert_eq!(
+        style.default_value(),
+        GucDefaultValue::Enum(consts::VERSION_STRING_POSTGRES_FIRST)
+    );
+    assert_eq!(style.group(), CUSTOM_OPTIONS);
+    let opts = style.options().unwrap().entries();
+    assert_eq!(opts.len(), 2);
+    assert_eq!(opts[0].name, "postgres_first");
+    assert_eq!(opts[0].val, consts::VERSION_STRING_POSTGRES_FIRST);
+    assert_eq!(opts[1].name, "pgrust_first");
+    assert_eq!(opts[1].val, consts::VERSION_STRING_PGRUST_FIRST);
 }
 
 #[test]

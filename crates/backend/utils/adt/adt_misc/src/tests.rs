@@ -208,3 +208,56 @@ fn recovery_control_fns_error_outside_recovery() {
         );
     }
 }
+
+#[test]
+fn version_string_default_is_postgres_first() {
+    // dl-verstring ruling 2026-08-06: the default rendering leads with the
+    // PostgreSQL compatibility version, pgrust identity parenthesized. The
+    // GUC's TLS backing cell boots postgres_first in every thread; the
+    // reader goes through guc_tables::backing, so no install is needed.
+    // The literals here are the intentional test-side pin of the banner.
+    assert_eq!(
+        crate::introspect::pg_version_str(),
+        format!(
+            "PostgreSQL 18.3 (pgrust 0.3-beta) on {}, 64-bit",
+            env!("PGRUST_TARGET_TRIPLE")
+        )
+    );
+}
+
+#[test]
+fn version_string_pgrust_first_renders_the_legacy_form() {
+    // pgrust_first must reproduce the pre-ruling banner byte-for-byte.
+    guc_tables::backing::set_pgrust_version_string_style(
+        guc_tables::consts::VERSION_STRING_PGRUST_FIRST,
+    );
+    let s = crate::introspect::pg_version_str();
+    // TLS cell: restore this thread's default before asserting.
+    guc_tables::backing::set_pgrust_version_string_style(
+        guc_tables::consts::VERSION_STRING_POSTGRES_FIRST,
+    );
+    assert_eq!(
+        s,
+        format!(
+            "pgrust 0.3-beta (PostgreSQL 18.3 compatible) on {}, 64-bit",
+            env!("PGRUST_TARGET_TRIPLE")
+        )
+    );
+}
+
+#[test]
+fn default_version_first_digit_run_is_the_pg_major() {
+    // THE load-bearing ecosystem contract (dl-verstring ruling 2026-08-06):
+    // clients like duckdb-postgres take the FIRST digit run in version() as
+    // the PostgreSQL version. Under the default style that must be the
+    // compatibility major ("18"), never pgrust's own leading "0" — parsing
+    // "0.3" downgraded such clients to pre-8.3 stubs (no enum introspection,
+    // no parallel ctid scans). If this test breaks, that regression is back.
+    let s = crate::introspect::pg_version_str();
+    let first_run: String = s
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    assert_eq!(first_run, "18");
+}

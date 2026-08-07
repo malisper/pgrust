@@ -12,16 +12,48 @@ use types_tuple::NameData;
 
 // Shaped like C's PG_VERSION_STR ("... on <triple>, ..."): collate.linux.utf8
 // and infinite_recurse gate on version() ~ platform regexes ('linux-gnu'), so
-// the target triple must appear. Leads with pgrust's OWN version — this is not
-// PostgreSQL and should not claim to be — while keeping the "PostgreSQL 18.3"
-// substring, which is the wire-compatibility statement clients care about.
-// The `server_version` GUC stays exactly "18.3": that is what drivers parse
-// for feature detection and it must remain the plain upstream number.
-pub const PG_VERSION_STR: &str = concat!(
-    "pgrust 0.3-beta (PostgreSQL 18.3 compatible) on ",
-    env!("PGRUST_TARGET_TRIPLE"),
-    ", 64-bit"
-);
+// the target triple must appear in BOTH renderings. Which identity leads is
+// GUC-controlled (pgrust.version_string_style, ruling 2026-08-06): the
+// default postgres_first matches C PostgreSQL's own "PostgreSQL <ver> on ..."
+// shape, so clients that parse the FIRST version number out of version()
+// (duckdb-postgres's ExtractPostgresVersion took the legacy leading "0.3"
+// for a pre-8.3 PostgreSQL and silently degraded) read the compatibility
+// version, with pgrust's identity parenthesized; pgrust_first restores the
+// legacy pgrust-led banner byte-for-byte. Both version numbers come from
+// guc_tables::consts — the single source of truth, never re-hardcoded here.
+// The `server_version` GUC stays exactly the plain compat number: that is
+// what drivers parse for feature detection.
+static VERSION_STR_POSTGRES_FIRST: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| {
+        format!(
+            "PostgreSQL {} (pgrust {}) on {}, 64-bit",
+            guc_tables::consts::PG_COMPAT_VERSION,
+            guc_tables::consts::PGRUST_VERSION,
+            env!("PGRUST_TARGET_TRIPLE"),
+        )
+    });
+static VERSION_STR_PGRUST_FIRST: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| {
+        format!(
+            "pgrust {} (PostgreSQL {} compatible) on {}, 64-bit",
+            guc_tables::consts::PGRUST_VERSION,
+            guc_tables::consts::PG_COMPAT_VERSION,
+            env!("PGRUST_TARGET_TRIPLE"),
+        )
+    });
+
+/// version()'s banner under the session's pgrust.version_string_style. Reads
+/// the registered GUC's backing cell directly (the runtime_pool precedent:
+/// always installed, never panics in unit tests).
+pub fn pg_version_str() -> &'static str {
+    if guc_tables::backing::pgrust_version_string_style()
+        == guc_tables::consts::VERSION_STRING_PGRUST_FIRST
+    {
+        &VERSION_STR_PGRUST_FIRST
+    } else {
+        &VERSION_STR_POSTGRES_FIRST
+    }
+}
 
 const DESCRIPTION_RELATION_ID: Oid = 2609;
 const DESCRIPTION_OBJ_INDEX_ID: Oid = 2675;
