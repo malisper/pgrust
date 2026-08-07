@@ -36,6 +36,10 @@ detoast = { path = "../access/common/detoast" }
 heaptuple = { path = "../access/common/heaptuple" }
 catalog = { path = "../catalog/catalog" }
 init_small = { path = "../utils/init/init_small" }
+postgres_seams = { path = "../tcop/postgres_seams" }
 funcapi = { path = "../utils/fmgr/funcapi" }
 namespace_seams = { path = "../catalog/namespace_seams" }
 libc = "0.2"
+
+[dev-dependencies]
+miscinit = { path = "../utils/init/miscinit" }

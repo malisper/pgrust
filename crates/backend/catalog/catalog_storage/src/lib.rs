@@ -236,8 +236,11 @@ pub fn RelationCopyStorage(
     let mut bulkstate = bulkwrite::smgr_bulk_start_smgr(dst, fork_num, use_wal)?;
     let nblocks = smgr::smgrnblocks(src, fork_num)?;
     for blkno in 0..nblocks {
+        // If we got a cancel signal during the copy of the data, quit.
+        // CHECK_FOR_INTERRUPTS() — route a pending interrupt through the
+        // ported ProcessInterrupts seam (the gist/spgist/gin/hash pattern).
         if init_small::globals::InterruptPending() {
-            panic!("CHECK_FOR_INTERRUPTS: ProcessInterrupts (tcop/postgres.c) unported");
+            ::postgres_seams::check_for_interrupts::call()?;
         }
         let mut buf = bulkwrite::smgr_bulk_get_buf(&bulkstate);
         smgr::smgrread(src, fork_num, blkno, buf.page_mut())?;

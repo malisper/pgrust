@@ -544,8 +544,10 @@ fn fc_wait_pid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
             }
             break;
         }
+        // CHECK_FOR_INTERRUPTS() — route a pending interrupt through the
+        // ported ProcessInterrupts seam (the gist/spgist/gin/hash pattern).
         if init_small::globals::InterruptPending() {
-            panic!("CHECK_FOR_INTERRUPTS: ProcessInterrupts (tcop/postgres.c) unported");
+            ::postgres_seams::check_for_interrupts::call()?;
         }
         std::thread::sleep(std::time::Duration::from_micros(50000));
     }
@@ -1235,6 +1237,39 @@ mod tests {
         init_seams();
         assert!(dfmgr::load_external_function("$libdir/regress", "binary_coercible", true).is_ok());
         assert!(dfmgr::library_present("/x/y/regress.so"));
+    }
+
+    /// wait_pid's poll loop: a pending interrupt routes through the ported
+    /// ProcessInterrupts seam (C regress.c wait_pid runs CHECK_FOR_INTERRUPTS
+    /// per 50ms poll) instead of the former unported-panic stub. Probing our
+    /// own (live) pid guarantees the loop reaches the check.
+    #[test]
+    fn wait_pid_pending_interrupt_cancels() {
+        use ::types_error::{PgError, ERRCODE_QUERY_CANCELED};
+
+        // Bare test thread: install a session identity so the superuser gate
+        // resolves (single-user escape path: bootstrap superuser, not under
+        // postmaster).
+        miscinit::SetUserIdAndSecContext(types_core::catalog::BOOTSTRAP_SUPERUSERID, 0);
+
+        // ProcessInterrupts mock: consumes the flag and raises the cancel
+        // error, as C's query-cancel arm does. (Seams are set-once per
+        // process: this is the only test in this binary installing it.)
+        ::postgres_seams::check_for_interrupts::set(|| {
+            init_small::globals::SetInterruptPending(false);
+            Err(Box::new(
+                PgError::error("canceling statement due to user request")
+                    .with_sqlstate(ERRCODE_QUERY_CANCELED),
+            ))
+        });
+
+        init_small::globals::SetInterruptPending(true);
+        let mut fci = fmgr::LocalFcinfo::<1>::new(0);
+        fci.set_arg(0, Datum::from_i32(std::process::id() as i32));
+        let err = fc_wait_pid(None, &mut fci).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_QUERY_CANCELED);
+        // The interrupt was consumed on the seam side; the flag is clean.
+        assert!(!init_small::globals::InterruptPending());
     }
 
     #[test]

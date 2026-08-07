@@ -23,10 +23,13 @@ use crate::{
     NUMERIC_MIN_SIG_DIGITS, NUMERIC_NEG, NUMERIC_POS, NUMERIC_WEIGHT_MAX,
 };
 
-fn check_for_interrupts() {
+fn check_for_interrupts() -> PgResult<()> {
+    // CHECK_FOR_INTERRUPTS() — route a pending interrupt through the ported
+    // ProcessInterrupts seam (the gist/spgist/gin/hash/heapam pattern).
     if init_small::globals::InterruptPending() {
-        panic!("CHECK_FOR_INTERRUPTS: ProcessInterrupts (tcop/postgres.c) unported");
+        return ::postgres_seams::check_for_interrupts::call();
     }
+    Ok(())
 }
 
 #[cold]
@@ -232,7 +235,7 @@ pub fn gcd_var(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar) ->
     let mut modv = NumericVar::new();
 
     loop {
-        check_for_interrupts();
+        check_for_interrupts()?;
 
         mod_var(tmp_arg.view(), result.view(), &mut modv)?;
         if modv.ndigits == 0 {
@@ -1333,7 +1336,7 @@ pub fn numeric_fac(num: i64) -> PgResult<NumericImage> {
 
     let mut n = num - 1;
     while n > 1 {
-        check_for_interrupts();
+        check_for_interrupts()?;
 
         crate::var::set_var_from_int64(n, &mut fact);
         let (src, dst) = res.parts();

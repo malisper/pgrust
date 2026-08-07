@@ -1758,3 +1758,48 @@ fn numeric_typmod_extractors_wrap_at_extremes() {
     assert_eq!(numeric_typmod_precision(tm), 10);
     assert_eq!(numeric_typmod_scale(tm), 2);
 }
+
+/// check_for_interrupts (math.rs): a pending interrupt routes through the
+/// ported ProcessInterrupts seam (the gist/spgist/gin/hash pattern) instead of
+/// the former unported-panic stub. Exercised through both long-loop carriers
+/// (C numeric.c gcd_var and numeric_fac run CHECK_FOR_INTERRUPTS per
+/// iteration); a raised cancel surfaces as the 57014 error and must not leave
+/// the flag set.
+#[test]
+fn pending_interrupt_cancels_gcd_and_factorial() {
+    use ::types_error::{PgError, ERRCODE_QUERY_CANCELED};
+
+    // No pending interrupt: Ok without consulting the seam (which is not
+    // installed yet at this point — a stub call would panic).
+    init_small::globals::SetInterruptPending(false);
+    assert!(math::numeric_fac(100).is_ok());
+
+    // ProcessInterrupts mock: consumes the flag and raises the cancel error,
+    // as C's query-cancel arm does. (Seams are set-once per process: this is
+    // the only test in this binary installing it.)
+    ::postgres_seams::check_for_interrupts::set(|| {
+        init_small::globals::SetInterruptPending(false);
+        Err(Box::new(
+            PgError::error("canceling statement due to user request")
+                .with_sqlstate(ERRCODE_QUERY_CANCELED),
+        ))
+    });
+
+    // factorial loop-top check (C numeric.c numeric_fac).
+    init_small::globals::SetInterruptPending(true);
+    let err = math::numeric_fac(100).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_QUERY_CANCELED);
+    assert!(!init_small::globals::InterruptPending());
+
+    // gcd loop-top check (C numeric.c gcd_var).
+    init_small::globals::SetInterruptPending(true);
+    let a = var::int64_to_var(123456789012345);
+    let b = var::int64_to_var(987654321098765);
+    let mut result = var::NumericVar::new();
+    let err = math::gcd_var(a.view(), b.view(), &mut result).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_QUERY_CANCELED);
+    assert!(!init_small::globals::InterruptPending());
+
+    // The interrupt was consumed on the seam side; clean runs stay clean.
+    assert!(math::numeric_fac(100).is_ok());
+}

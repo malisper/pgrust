@@ -16,6 +16,7 @@ bulkwrite = { path = "../../storage/smgr/bulkwrite" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }
 pgstat = { path = "../../utils/activity/pgstat" }
 init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 types_rel = { path = "../../../_support/types/rel" }
 xact = { path = "../../access/transam/xact" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
