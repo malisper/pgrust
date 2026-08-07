@@ -2911,6 +2911,11 @@ fn runtime_scan_standing_driver(shared: &parallel::ParallelShared) {
         || parallel::standing::pool_sticky_enabled();
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload, sticky)));
     if let Err(unwind) = r {
+        // #70: report the claimant death on the board (count-then-wake)
+        // BEFORE the payload error — the leader's nobody-will-participate
+        // reap counts deaths like refusals; without it a die-pre-bind storm
+        // parks the leader forever.
+        parallel::standing::note_predrive_death();
         payload.fail(PgError::new(ERROR, "runtime scan standing executor panicked").into());
         latch::SetLatch(::types_storage::latch::LatchHandle::proc(
             shared.parallel_leader_proc_number,

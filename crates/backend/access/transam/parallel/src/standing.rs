@@ -87,6 +87,19 @@ pub struct StandingEngagement {
     /// serialized by the gang mutex with the grant check — the atomic form
     /// only so the leader can read it without the lock if ever needed.
     yield_grants: AtomicUsize,
+    /// Claimants that DIED before completing their drive (the arm driver's
+    /// catch_unwind reported a panic through [`note_predrive_death`]) —
+    /// the standing channel's rendering of the launched path's ExitBump
+    /// reap (issue #70). Two consumers: the leader's nobody-will-
+    /// participate check counts these alongside refusals (a claimant that
+    /// died pre-bind will never move `started`, and the re-serve churn
+    /// keeps `claimed > detached` at almost every read, so WITHOUT this
+    /// count the leader parks forever while the board re-serves dying
+    /// claimants — the l1-scan wedge); and [`StandingEngagement::try_claim`]
+    /// quarantines the board once a full ticket-width has died (bounds the
+    /// panic/log storm board-side even when the leader is slow or gone —
+    /// the kill9'd-leader orphaned-board geometry).
+    predrive_deaths: AtomicUsize,
     closed: AtomicBool,
 }
 
@@ -106,9 +119,19 @@ impl StandingEngagement {
     pub fn tickets(&self) -> usize {
         self.tickets
     }
+    pub fn predrive_deaths(&self) -> usize {
+        self.predrive_deaths.load(SeqCst)
+    }
 
     fn try_claim(&self) -> Option<usize> {
-        if self.closed.load(SeqCst) {
+        // Death quarantine (#70): once a full ticket-width of claimants has
+        // died without completing a drive, stop serving the entry — the
+        // die-pre-bind geometry otherwise re-serves at panic speed forever
+        // (~2,200 panics/s, ~10MB/s of backtraces) because every death
+        // detaches and refills the CONCURRENT cap below. Claims already
+        // held keep driving (a live engagement only loses width); the
+        // leader's reap converts the quiescent board into fallback/error.
+        if self.closed.load(SeqCst) || self.predrive_deaths.load(SeqCst) >= self.tickets {
             return None;
         }
         // Over-claims (fetch_add races, bounded by gang size) are returned.
@@ -212,6 +235,33 @@ thread_local! {
     /// teardown fully returns — the arena-outlives-workers law: the leader
     /// join must not release before this thread is done with arena refs.
     static YIELD_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The board entry of the ticket THIS thread is currently serving
+    /// (#70): set RAII around serve_ticket on BOTH channels (pool and
+    /// gang), so the arm drivers' panic-catch can report a claimant death
+    /// through [`note_predrive_death`] without payload plumbing. Distinct
+    /// from CURRENT_SERVE_BOARD (pool-only, the yield-grant surface —
+    /// deliberately untouched).
+    static CURRENT_TICKET_ENTRY: std::cell::RefCell<Option<Arc<StandingEngagement>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Arm-driver side (#70): record that the claimant serving on THIS thread
+/// died (panicked) before completing its drive — the standing channel's
+/// ExitBump equivalent. Count-then-wake (DetachGuard's discipline): the
+/// bump lands before the leader latch set, so the wake that this death
+/// sends (the arm's catch sets the leader latch right after payload.fail;
+/// this helper sets it too for callers outside that shape) can never be
+/// consumed without the leader observing the death. No-op off a ticket
+/// serve (launched/wpool hook catch sites share the arm catch shape).
+pub fn note_predrive_death() {
+    CURRENT_TICKET_ENTRY.with(|slot| {
+        let slot = slot.borrow();
+        let Some(entry) = slot.as_ref() else { return };
+        entry.predrive_deaths.fetch_add(1, SeqCst);
+        latch::SetLatch(types_storage::latch::LatchHandle::proc(
+            entry.shared.parallel_leader_proc_number,
+        ));
+    });
 }
 
 /// POOL-QOS: the arms' serve-yield grant callback body. Grants against the
@@ -472,6 +522,7 @@ pub fn try_engage(shared: &Arc<ParallelShared>, dop: usize) -> Option<Arc<Standi
         refused: AtomicUsize::new(0),
         yielded: AtomicUsize::new(0),
         yield_grants: AtomicUsize::new(0),
+        predrive_deaths: AtomicUsize::new(0),
         closed: AtomicBool::new(false),
     });
     g.current = Some(Arc::clone(&entry));
@@ -890,6 +941,18 @@ fn park_until_board_changes(entry: &Arc<StandingEngagement>) {
 fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
     let shared = &entry.shared;
     let detach = DetachGuard { entry };
+    // #70: expose the served entry to the arm drivers' panic-catch (see
+    // note_predrive_death). RAII so unwinds (FATAL exits) clear it before
+    // the glue respawns anything on this thread — the PoolServeReset
+    // precedent.
+    CURRENT_TICKET_ENTRY.with(|slot| *slot.borrow_mut() = Some(Arc::clone(entry)));
+    struct TicketEntryReset;
+    impl Drop for TicketEntryReset {
+        fn drop(&mut self) {
+            CURRENT_TICKET_ENTRY.with(|slot| slot.borrow_mut().take());
+        }
+    }
+    let _ticket_entry_reset = TicketEntryReset;
     let mut in_procarray = false;
 
     // Per-arm dispatch (M2 inc-1): the driver rides the engagement's
@@ -1450,6 +1513,7 @@ pub fn try_engage_pool(
         refused: AtomicUsize::new(0),
         yielded: AtomicUsize::new(0),
         yield_grants: AtomicUsize::new(0),
+        predrive_deaths: AtomicUsize::new(0),
         closed: AtomicBool::new(false),
     }))
 }

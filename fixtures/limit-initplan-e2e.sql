@@ -24,5 +24,11 @@ select id from li o where id <= (select max(id) - 38 from li i where i.id >= o.i
 select k, (select count(*) from (select id from li order by id limit (select n from lim)) s
            where s.id > k * 10) as c
   from generate_series(0, 2) k order by k;
+-- Inline SubPlan in the LIMIT expression (#190's second half): an
+-- uncorrelated ANY sublink stays an inline SubPlan, never an initplan, so
+-- ExecInitLimit must compile the expression with a SubPlan-capable parent
+-- (C ExecInitExpr with the Limit planstate) and evaluation needs the
+-- EEOP_SUBPLAN pump.
+select id, v from li order by id limit case when 5 in (select id from li) then 3 else 5 end;
 drop table lim;
 drop table li;

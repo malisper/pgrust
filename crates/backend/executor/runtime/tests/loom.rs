@@ -1204,6 +1204,134 @@ fn standing_gang_detach_count_join_no_lost_wake() {
 }
 
 // ===========================================================================
+// STANDING-CHANNEL DIE-PRE-BIND REAP (#70) — the l1-scan liveness wedge:
+// a claimant that dies BETWEEN claim and bind moves neither `started` nor
+// `refused`, its DetachGuard detach refills the CONCURRENT ticket cap, and
+// the board re-serves the next claimant at panic speed — so the leader's
+// only exits (all-refused, and the claim-deadline needle's quiescent
+// `detached >= claimed` read) starve forever while claims stay in flight.
+// The fix is a claim-word extension: the arm driver's catch reports each
+// death on the board (`predrive_deaths`, count-then-wake), try_claim
+// QUARANTINES the entry once a ticket-width has died (value-gated exactly
+// like `closed` — GL-SPINPARK-1: the claim word's transitions are mirrored
+// faithfully, fetch_add + settle, never a bare store-vs-swap), and the
+// leader's nobody-will-participate reap counts deaths like refusals.
+// Mirror-dialect: standing.rs is not loom-buildable (latch/lmgr/PGPROC
+// globals) — the model drives loom atomics + a latch-shaped Mutex/Condvar
+// directly. Must-fail control (transient, not landed): dropping `deaths`
+// from the leader predicate reproduces the wedge — loom's deadlock
+// detector reports the leader parked with every worker exited.
+// ===========================================================================
+
+/// N die-pre-bind claimants churn the board; the leader must reach the
+/// fallback exit in EVERY interleaving (loom's deadlock detector is the
+/// oracle), and the board must be quarantined-or-closed so no further
+/// claim can restart the storm.
+#[test]
+fn standing_predrive_death_reap_unparks_leader() {
+    const TICKETS: usize = 2;
+
+    loom::model(|| {
+        let claimed = Arc::new(AtomicUsize::new(0));
+        let detached = Arc::new(AtomicUsize::new(0));
+        let deaths = Arc::new(AtomicUsize::new(0));
+        let refused = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
+        // The leader latch (SetLatch/WaitLatch shape): set-flag-then-notify
+        // under the mutex; the waiter re-checks its condition after every
+        // wake, so a set landing between check and wait is never lost.
+        let latch = Arc::new((Mutex::new(false), Condvar::new()));
+
+        let set_latch = |latch: &Arc<(Mutex<bool>, Condvar)>| {
+            let (m, cv) = &**latch;
+            *m.lock().unwrap() = true;
+            cv.notify_all();
+        };
+
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let (claimed, detached, deaths, closed, latch) = (
+                    Arc::clone(&claimed),
+                    Arc::clone(&detached),
+                    Arc::clone(&deaths),
+                    Arc::clone(&closed),
+                    Arc::clone(&latch),
+                );
+                thread::spawn(move || {
+                    // The pool re-serve loop, gated exactly like try_claim.
+                    loop {
+                        // try_claim head: closed OR death-quarantine ⇒ no
+                        // serve (pool_serve returns Closed; the worker
+                        // bound-skips the slot).
+                        if closed.load(Ordering::SeqCst)
+                            || deaths.load(Ordering::SeqCst) >= TICKETS
+                        {
+                            break;
+                        }
+                        // try_claim body (mirrored value transitions):
+                        // fetch_add, read detached, concurrent-cap check,
+                        // settle on refusal.
+                        let t = claimed.fetch_add(1, Ordering::SeqCst);
+                        let det = detached.load(Ordering::SeqCst);
+                        if t - det.min(t) < TICKETS && !closed.load(Ordering::SeqCst) {
+                            // Claim held; the driver dies PRE-BIND:
+                            // note_predrive_death (count-then-wake)...
+                            deaths.fetch_add(1, Ordering::SeqCst);
+                            set_latch(&latch);
+                            // ...then the DetachGuard drop (detach + wake).
+                            detached.fetch_add(1, Ordering::SeqCst);
+                            set_latch(&latch);
+                        } else {
+                            // Over-claim: settle and stop serving (full
+                            // board / closed ⇒ Closed verdict, bound_skip).
+                            claimed.fetch_sub(1, Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // Leader: wait_engaged's reap loop, die-pre-bind geometry (started
+        // stays 0 by construction — nobody ever binds).
+        {
+            let (m, cv) = &*latch;
+            loop {
+                // The fixed nobody-will-participate check: deaths count
+                // like refusals. (Must-fail control: drop `+ deaths` and
+                // loom reports the leader deadlocked once both workers
+                // exit.)
+                if refused.load(Ordering::SeqCst) + deaths.load(Ordering::SeqCst) >= TICKETS {
+                    closed.store(true, Ordering::SeqCst);
+                    break; // StandingWait::Fallback
+                }
+                // WaitLatch: park until a set, consume it, re-check.
+                let mut g = m.lock().unwrap();
+                while !*g {
+                    g = cv.wait(g).unwrap();
+                }
+                *g = false;
+            }
+        }
+
+        for w in workers {
+            w.join().unwrap();
+        }
+        // The storm is over and cannot restart: the board is closed AND a
+        // ticket-width of deaths quarantines any late claim.
+        assert!(closed.load(Ordering::SeqCst));
+        assert!(deaths.load(Ordering::SeqCst) >= TICKETS);
+        // Mirrored try_claim after the fact must refuse (no re-serve).
+        let quarantined = closed.load(Ordering::SeqCst)
+            || deaths.load(Ordering::SeqCst) >= TICKETS;
+        assert!(quarantined, "a late claim would restart the storm");
+        // Every claim settled (detach is Drop-guaranteed): the leader's
+        // close_and_await join condition holds.
+        assert_eq!(claimed.load(Ordering::SeqCst), detached.load(Ordering::SeqCst));
+    });
+}
+
+// ===========================================================================
 // WPOOL RE-POOL FENCE — night/gang-churn-stability: a parked standby's
 // retained identity must never RE-ENTER the pool across a flush/crash fence.
 // Production shape (launch_backend::wpool): flush()/flush_for_crash() bump

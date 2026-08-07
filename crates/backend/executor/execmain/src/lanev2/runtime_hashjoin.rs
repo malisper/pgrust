@@ -2617,6 +2617,11 @@ fn runtime_hj_standing_driver(shared: &parallel::ParallelShared) {
     let Ok(payload) = private.downcast::<RuntimeHjShared>() else { return };
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if let Err(unwind) = r {
+        // #70: report the claimant death on the board (count-then-wake)
+        // BEFORE the payload error — the leader's nobody-will-participate
+        // reap counts deaths like refusals; without it a die-pre-bind storm
+        // parks the leader forever.
+        parallel::standing::note_predrive_death();
         payload
             .fail(PgError::new(ERROR, "runtime hash-join standing executor panicked").into());
         latch::SetLatch(::types_storage::latch::LatchHandle::proc(

@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use ::execexpr::{exec_build_grouping_equal, exec_eval_expr, exec_qual, EvalSlots, ExprState};
+use ::execexpr::{exec_build_grouping_equal, exec_qual, EvalSlots, ExprState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{vec_with_capacity_in, PgBox, PgVec};
 use ::types_error::{
@@ -87,8 +87,17 @@ pub fn exec_init_limit<'mcx>(
     let mcx = estate.es_query_cxt;
     let ps_ExprContext = estate.exec_assign_expr_context();
     let params = estate.param_bind();
-    let mut limitOffset = ::execexpr::exec_init_expr(mcx, node.limitOffset, params)?;
-    let mut limitCount = ::execexpr::exec_init_expr(mcx, node.limitCount, params)?;
+    // C ExecInitExpr with the Limit planstate as parent: SubPlans in the
+    // LIMIT/OFFSET expressions wire ExecInitSubPlanExpr. Reachable — an
+    // uncorrelated ANY/ALL sublink there stays an inline SubPlan (never an
+    // initplan); initplan outputs arrive as plain PARAM_EXEC steps (#167).
+    let (mut limitOffset, mut limitCount) =
+        ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+            Ok((
+                ::execexpr::exec_init_expr_subplans(mcx, node.limitOffset, params, env)?,
+                ::execexpr::exec_init_expr_subplans(mcx, node.limitCount, params, env)?,
+            ))
+        })?;
     for st in [limitOffset.as_mut(), limitCount.as_mut()].into_iter().flatten() {
         // C recomputes LIMIT/OFFSET in ps_ExprContext's per-tuple memory;
         // by-ref intermediates ride the armed result mcx.
@@ -271,12 +280,12 @@ fn eval_limit_expr<'mcx>(
     // C's ExecEvalExprSwitchContext per-tuple context: reset, then eval with
     // no tuple slots (limit expressions reference no relation columns).
     estate.reset_expr_context(ecxt);
-    let mut slots = EvalSlots {
-        scan: None,
-        inner: None,
-        outer: None,
-    };
-    exec_eval_expr(expr, &mut slots)
+    // C ExecEvalParamExec runs a pending initplan lazily inside ExecEvalExpr
+    // (nodeSubplan.c ExecSetParamPlan); the decomposed interpreter hoists
+    // that resolution to the owning node, and Limit was the one owner that
+    // never did it — LIMIT (SELECT n) resolves here (#167). The suspension
+    // pump covers inline SubPlans in the expression as well.
+    ::executils::exec_eval_expr_with_subplans(expr, estate, ecxt)
 }
 
 /// `recompute_limits` (also the reset path of `ExecReScanLimit`).

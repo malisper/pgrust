@@ -262,12 +262,30 @@ fn wait_engaged(
         let started = leader.started.load(Ordering::SeqCst);
         let refused = entry.refused() + leader.refused.load(Ordering::SeqCst);
         // Nobody will participate: every ticket-holder refused pre-bind or
-        // at the bind/lane stage, before any granule was claimed.
-        if started == 0 && refused >= entry.tickets() {
-            lane_trace(&format!(
-                "{}: {channel} refused ({refused} refusals) — {next} fallback",
-                arm.label
-            ));
+        // at the bind/lane stage, before any granule was claimed — or DIED
+        // there (#70: the arm driver's catch reports claimant deaths on the
+        // board; a died-pre-bind claimant moves neither `started` nor
+        // `refused`, and the re-serve churn keeps claims in flight at
+        // almost every read, so the claim-deadline needle below — which
+        // needs a quiescent detached >= claimed read — starves. Deaths
+        // count like refusals: no granule was consumed, the RG is
+        // untouched, and the fallback ladder pool → gang → serial is the
+        // designed outcome. The board's own death quarantine has already
+        // stopped re-serves by the time this fires).
+        let died = entry.predrive_deaths();
+        if started == 0 && refused + died >= entry.tickets() {
+            if died == 0 {
+                lane_trace(&format!(
+                    "{}: {channel} refused ({refused} refusals) — {next} fallback",
+                    arm.label
+                ));
+            } else {
+                lane_trace(&format!(
+                    "{}: {channel} refused ({refused} refusals, {died} claimants died \
+                     pre-drive) — {next} fallback",
+                    arm.label
+                ));
+            }
             take_slot();
             parallel::standing::close_and_await(&entry);
             return Ok(StandingWait::Fallback);

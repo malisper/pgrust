@@ -8,6 +8,9 @@ publish.workspace = true
 name = "procsignal"
 path = "src/lib.rs"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"] }
+
 [dependencies]
 walsender_seams = { path = "../../../replication/walsender_seams" }
 types_core = { path = "../../../../_support/types/types_core" }

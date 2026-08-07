@@ -151,10 +151,10 @@ struct PreIdentityTarget {
     interrupt_flag: std::sync::atomic::AtomicPtr<AtomicBool>,
 }
 
-// pgsync by crate law: locked by the postmaster (launch/deliver) and by
-// child threads (adopt/consume) — the CHILD_THREADS precedent.
-static PRE_IDENTITY_TARGETS: pgsync::Mutex<Vec<std::sync::Arc<PreIdentityTarget>>> =
-    pgsync::Mutex::new(Vec::new());
+// pgsync by crate law: locked by the postmaster (launch/deliver) and by child
+// threads (adopt/consume) — the CHILD_THREADS precedent. process_global! is pgsync's sanctioned static shim (#71): this exact plain static on native/sim, per-iteration lazy state under loom (whose Mutex::new is non-const — a bare static broke the whole cfg-loom build cone).
+pgsync::process_global! { static PRE_IDENTITY_TARGETS: pgsync::Mutex<Vec<std::sync::Arc<PreIdentityTarget>>> =
+    pgsync::Mutex::new(Vec::new()); }
 
 thread_local! {
     // The calling thread's adopted entry (pid + shared pending word).
