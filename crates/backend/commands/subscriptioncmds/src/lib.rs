@@ -1403,10 +1403,24 @@ pub fn DropSubscription<'mcx>(
     };
 
     let dropped = (|| -> PgResult<()> {
+        // Drop the tablesync slots of not-yet-READY tables
+        // (subscriptioncmds.c:1858). SYNCDONE means the tablesync worker
+        // already dropped its own slot; anything earlier may or may not have
+        // created one yet, hence missing_ok = true.
         for rstate in &rstates {
-            // Tablesync slots would be dropped here; tablesync states other
-            // than READY are refused upstream (round-4 inc E).
-            let _ = rstate;
+            if rstate.relid == InvalidOid {
+                continue;
+            }
+            if rstate.state != pg_subscription::SUBREL_STATE_SYNCDONE {
+                // ReplicationSlotNameForTablesync (tablesync.c:1302); same
+                // local rendering as the REFRESH path (connect.rs).
+                let syncslot = format!(
+                    "pg_{subid}_sync_{}_{}",
+                    rstate.relid,
+                    transam_xlog::control_file::GetSystemIdentifier()
+                );
+                connect::drop_slot_at_pub_node(&mut wrconn, &syncslot, true)?;
+            }
         }
         if let Some(slot) = slotname {
             connect::drop_slot_at_pub_node(&mut wrconn, slot, false)?;

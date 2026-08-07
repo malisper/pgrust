@@ -761,18 +761,41 @@ pub(crate) fn restore_user_context(ucxt: &Option<types_core::UserContext>) -> Pg
     Ok(())
 }
 
-// Refuse row triggers loudly: ExecBR/AR*Triggers are not wired here.
-fn refuse_row_triggers(rel: &Relation<'_>, op: &str) {
-    if let Some(td) = rel.rd_trigdesc.borrow().as_deref() {
-        if td.trig_insert_before_row
-            || td.trig_insert_after_row
-            || td.trig_update_before_row
-            || td.trig_update_after_row
-            || td.trig_delete_before_row
-            || td.trig_delete_after_row
-        {
-            panic!("unported: row triggers on logical replication target ({op})");
-        }
+// The per-DML row-trigger state of C's ResultRelInfo (ri_TrigDesc,
+// ri_TrigFunctions, ri_TrigWhenExprs). Fetched per apply operation; None when
+// the target carries no triggers.
+struct ApplyTrig<'mcx> {
+    td: std::rc::Rc<types_trigger::TriggerDesc<'static>>,
+    fmgr: trigger::TriggerFmgrCache,
+    when: trigger::TriggerWhenCache<'mcx>,
+}
+
+fn apply_trig<'mcx>(rel: &Relation<'_>) -> PgResult<Option<ApplyTrig<'mcx>>> {
+    if !rel.rd_hastriggers {
+        return Ok(None);
+    }
+    Ok(relcache::RelationGetTriggerDesc(rel.rd_id)?.map(|td| ApplyTrig {
+        td,
+        fmgr: trigger::TriggerFmgrCache::default(),
+        when: trigger::TriggerWhenCache::default(),
+    }))
+}
+
+// BEFORE ROW UPDATE/DELETE triggers on an apply target are still unported:
+// ExecBRUpdateTriggers/ExecBRDeleteTriggers have no standalone (non-
+// ModifyTableState) caller form in this port yet. Narrowed from the former
+// blanket row-trigger refusal — BEFORE ROW INSERT and every AFTER ROW trigger
+// now fire. Loud rather than silently skipped: a BEFORE trigger that would
+// rewrite or suppress the row changes the applied result.
+fn refuse_br_triggers(trig: Option<&ApplyTrig<'_>>, op: &str) {
+    let Some(t) = trig else { return };
+    let refuse = match op {
+        "UPDATE" => t.td.trig_update_before_row,
+        "DELETE" => t.td.trig_delete_before_row,
+        _ => false,
+    };
+    if refuse {
+        panic!("unported: BEFORE ROW {op} triggers on a logical replication target");
     }
 }
 
@@ -1090,8 +1113,21 @@ fn do_insert<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
-    refuse_row_triggers(rel, "INSERT");
     execreplication::CheckCmdReplicaIdentity(mcx, rel, types_nodes::nodes_enums::CmdType::CMD_INSERT)?;
+
+    let mut trig = apply_trig(rel)?;
+    // BEFORE ROW INSERT triggers (execReplication.c:575); a NULL return means
+    // "do nothing" for this row.
+    if let Some(t) = trig.as_mut() {
+        if t.td.trig_insert_before_row {
+            let td = t.td.clone();
+            let mut when =
+                trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols: None };
+            if !trigger::ExecBRInsertTriggers(mcx, rel, &td, &mut t.fmgr, &mut when, slot)? {
+                return Ok(());
+            }
+        }
+    }
 
     let mut generated_exprs = None;
     if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
@@ -1106,9 +1142,9 @@ fn do_insert<'mcx>(
     tableam_real::simple_table_tuple_insert(mcx, rel, slot)?;
 
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
-    if index_state.num_indices() > 0 {
+    let recheck_indexes = if index_state.num_indices() > 0 {
         let eval_cx = mcx::MemoryContext::new("ApplyIndexEval");
-        execindexing::ExecInsertIndexTuples(
+        let r = execindexing::ExecInsertIndexTuples(
             mcx,
             eval_cx.mcx(),
             &mut index_state,
@@ -1119,8 +1155,30 @@ fn do_insert<'mcx>(
             &[],
             false,
         )?;
-    }
+        r.to_vec()
+    } else {
+        Vec::new()
+    };
     execindexing::ExecCloseIndices(index_state)?;
+
+    // AFTER ROW INSERT triggers (execReplication.c:629). C passes no
+    // TransitionCaptureState here (its own comment: after-statement triggers
+    // are not fired by replication yet).
+    if let Some(t) = trig.as_mut() {
+        let td = t.td.clone();
+        let new_tid = slot.base().tts_tid;
+        let mut when = trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols: None };
+        trigger::ExecARInsertTriggers(
+            mcx,
+            rel,
+            Some(&td),
+            new_tid,
+            &recheck_indexes,
+            None,
+            Some(&mut when),
+            None,
+        )?;
+    }
     Ok(())
 }
 
@@ -1133,8 +1191,10 @@ fn do_update<'mcx>(
 ) -> PgResult<()> {
     use tableam_vocab::TU_UpdateIndexes;
 
-    refuse_row_triggers(rel, "UPDATE");
     execreplication::CheckCmdReplicaIdentity(mcx, rel, types_nodes::nodes_enums::CmdType::CMD_UPDATE)?;
+
+    let mut trig = apply_trig(rel)?;
+    refuse_br_triggers(trig.as_ref(), "UPDATE");
 
     let mut generated_exprs = None;
     if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
@@ -1151,12 +1211,13 @@ fn do_update<'mcx>(
     let mut update_indexes = TU_UpdateIndexes::TU_None;
     tableam_real::simple_table_tuple_update(mcx, rel, &otid, slot, &snap, &mut update_indexes)?;
 
+    let mut recheck_indexes: Vec<Oid> = Vec::new();
     if !matches!(update_indexes, TU_UpdateIndexes::TU_None) {
         let only_summarizing = matches!(update_indexes, TU_UpdateIndexes::TU_Summarizing);
         let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
         if index_state.num_indices() > 0 {
             let eval_cx = mcx::MemoryContext::new("ApplyIndexEval");
-            execindexing::ExecInsertIndexTuples(
+            let r = execindexing::ExecInsertIndexTuples(
                 mcx,
                 eval_cx.mcx(),
                 &mut index_state,
@@ -1167,8 +1228,34 @@ fn do_update<'mcx>(
                 &[],
                 only_summarizing,
             )?;
+            recheck_indexes = r.to_vec();
         }
         execindexing::ExecCloseIndices(index_state)?;
+    }
+
+    // AFTER ROW UPDATE triggers (execReplication.c:715): C passes no
+    // source/destination rels (this is an in-place update), no transition
+    // capture, and no updated-cols set.
+    if let Some(t) = trig.as_mut() {
+        let td = t.td.clone();
+        let new_tid = slot.base().tts_tid;
+        let mut when = trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols: None };
+        trigger::ExecARUpdateTriggers(
+            mcx,
+            rel,
+            Some(&td),
+            None,
+            None,
+            Some(otid),
+            Some(new_tid),
+            &recheck_indexes,
+            None,
+            Some(&mut when),
+            false,
+            None,
+            None,
+            None,
+        )?;
     }
     Ok(())
 }
@@ -1179,11 +1266,200 @@ fn do_delete<'mcx>(
     rel: &Relation<'mcx>,
     searchslot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
-    refuse_row_triggers(rel, "DELETE");
     execreplication::CheckCmdReplicaIdentity(mcx, rel, types_nodes::nodes_enums::CmdType::CMD_DELETE)?;
+
+    let mut trig = apply_trig(rel)?;
+    refuse_br_triggers(trig.as_ref(), "DELETE");
+
     let tid = searchslot.base().tts_tid;
     let snap = Some(snapmgr::GetActiveSnapshot());
-    tableam_real::simple_table_tuple_delete(mcx, rel, &tid, &snap)
+    tableam_real::simple_table_tuple_delete(mcx, rel, &tid, &snap)?;
+
+    // AFTER ROW DELETE triggers (execReplication.c:757).
+    if let Some(t) = trig.as_mut() {
+        let td = t.td.clone();
+        let mut when = trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols: None };
+        trigger::ExecARDeleteTriggers(
+            mcx,
+            rel,
+            Some(&td),
+            tid,
+            None,
+            Some(&mut when),
+            false,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+// The routed operation for apply_handle_tuple_routing; Update carries the
+// new-tuple data (the search tuple already sits in the caller's root slot).
+enum RoutedOp<'a> {
+    Insert,
+    Update(&'a LogicalRepTupleData),
+    Delete,
+}
+
+// apply_handle_tuple_routing (worker.c:3130): route the remote tuple (in the
+// partitioned root's layout) to its leaf partition and apply the operation
+// there. Renderings vs C:
+// - PartitionTupleRouting is the execpartition port; there is no
+//   ModifyTableState scaffold (find_partition takes the slot directly).
+// - The per-partition LogicalRepRelMapEntry is rebuilt per call
+//   (logicalrep_partition_open rendering; C caches it in LogicalRepPartMap).
+// - Slot conversions run in the worker's apply context; per-tuple datum
+//   lifetimes follow the caller's InFuncs keep-alive discipline (the
+//   converted slots copy datum pointers whose storage the caller owns).
+fn apply_handle_tuple_routing<'mcx>(
+    mcx: Mcx<'mcx>,
+    entry: &LogicalRepRelMapEntry,
+    rel: &Relation<'mcx>,
+    remoteslot: &mut SlotData<'mcx>,
+    op: RoutedOp<'_>,
+) -> PgResult<()> {
+    let mut proute = execpartition::PartitionTupleRouting::new(mcx, rel)?;
+    // C's per-tuple context for routing-key evaluation.
+    let eval_cx = mcx::MemoryContext::new("ApplyTupleRoutingEval");
+
+    let idx = proute.find_partition(remoteslot, eval_cx.mcx())?;
+    let partrel = proute.leaf_rel(idx).alias();
+    // CheckSubscriptionRelkind (worker.c:3161): the partition set can change,
+    // so CREATE/ALTER SUBSCRIPTION-time checks are insufficient.
+    logicalrelation::check_relkind(
+        partrel.rd_rel.relkind as u8,
+        &entry.remoterel.nspname,
+        &entry.remoterel.relname,
+    )?;
+
+    // Convert the tuple to the partition's rowtype if needed (worker.c:3168).
+    let root_to_leaf: Option<Vec<i16>> = proute.leaf_attrmap(idx).map(|m| m.to_vec());
+    let mut remoteslot_part = tableam_real::table_slot_create(mcx, &partrel)?;
+    match root_to_leaf.as_deref() {
+        Some(map) => exectuples::execute_attr_map_slot(map, remoteslot, &mut remoteslot_part, mcx),
+        None => exectuples::exec_copy_slot(&mut remoteslot_part, remoteslot, mcx, mcx)?,
+    }
+
+    match op {
+        RoutedOp::Insert => do_insert(mcx, &partrel, &mut remoteslot_part),
+        RoutedOp::Delete => {
+            let part_entry =
+                logicalrelation::logicalrep_partition_open(entry, &partrel, root_to_leaf.as_deref())?;
+            check_relation_updatable(&part_entry)?;
+
+            let mut localslot = tableam_real::table_slot_create(mcx, &partrel)?;
+            let found =
+                find_repl_tuple(mcx, &partrel, &part_entry, &mut remoteslot_part, &mut localslot)?;
+            if found {
+                let (localxmin, ctsdata) = get_tuple_transaction_info(&localslot)?;
+                if let Some((localts, localorigin)) = ctsdata {
+                    if localorigin != origin::replorigin_session_origin() {
+                        report_origin_differs_conflict(
+                            mcx, &part_entry, false, localxmin, localorigin, localts,
+                        )?;
+                    }
+                }
+                do_delete(mcx, &partrel, &mut localslot)?;
+            } else {
+                let (nsp, name) = (&part_entry.remoterel.nspname, &part_entry.remoterel.relname);
+                let _ = elog::elog(
+                    LOG,
+                    format!(
+                        "conflict detected on relation \"{nsp}.{name}\": conflict=delete_missing; \
+                         could not find the row to be deleted"
+                    ),
+                );
+            }
+            Ok(())
+        }
+        RoutedOp::Update(newtup) => {
+            let part_entry =
+                logicalrelation::logicalrep_partition_open(entry, &partrel, root_to_leaf.as_deref())?;
+            check_relation_updatable(&part_entry)?;
+
+            let mut localslot = tableam_real::table_slot_create(mcx, &partrel)?;
+            let found =
+                find_repl_tuple(mcx, &partrel, &part_entry, &mut remoteslot_part, &mut localslot)?;
+            if !found {
+                // The tuple to be updated could not be found (worker.c:3213).
+                let (nsp, name) = (&part_entry.remoterel.nspname, &part_entry.remoterel.relname);
+                let _ = elog::elog(
+                    LOG,
+                    format!(
+                        "conflict detected on relation \"{nsp}.{name}\": conflict=update_missing; \
+                         could not find the row to be updated"
+                    ),
+                );
+                return Ok(());
+            }
+            let (localxmin, ctsdata) = get_tuple_transaction_info(&localslot)?;
+            if let Some((localts, localorigin)) = ctsdata {
+                if localorigin != origin::replorigin_session_origin() {
+                    report_origin_differs_conflict(
+                        mcx, &part_entry, true, localxmin, localorigin, localts,
+                    )?;
+                }
+            }
+
+            // Apply the update to the local tuple (worker.c:3253).
+            let mut modfuncs = InFuncs::new(partrel.rd_att.natts as usize);
+            let mut newslot = tableam_real::table_slot_create(mcx, &partrel)?;
+            slot_modify_data(
+                mcx, &mut newslot, &mut localslot, &part_entry, &partrel, newtup, &mut modfuncs,
+            )?;
+
+            // Does the updated tuple still satisfy the current partition's
+            // constraint (worker.c:3264)?
+            let mut check_cache = None;
+            if !partrel.rd_rel.relispartition
+                || execpartition::exec_partition_check(mcx, &mut check_cache, &partrel, &mut newslot)?
+            {
+                // Yes: simply UPDATE the partition.
+                do_update(mcx, &partrel, &mut localslot, &mut newslot)
+            } else {
+                // Move the tuple into the new partition (worker.c:3285):
+                // DELETE from the old partition, re-route via the root, and
+                // INSERT into the new one.
+                let mut rootslot = tableam_real::table_slot_create(mcx, rel)?;
+                match root_to_leaf.as_deref() {
+                    Some(_) => {
+                        let leaf_to_root =
+                            tupdesc::build_attrmap_by_name(mcx, &partrel.rd_att, &rel.rd_att)?;
+                        exectuples::execute_attr_map_slot(
+                            &leaf_to_root, &mut newslot, &mut rootslot, mcx,
+                        );
+                    }
+                    None => exectuples::exec_copy_slot(&mut rootslot, &mut newslot, mcx, mcx)?,
+                }
+
+                let new_idx = proute.find_partition(&mut rootslot, eval_cx.mcx())?;
+                let newpartrel = proute.leaf_rel(new_idx).alias();
+                logicalrelation::check_relkind(
+                    newpartrel.rd_rel.relkind as u8,
+                    &entry.remoterel.nspname,
+                    &entry.remoterel.relname,
+                )?;
+
+                // DELETE old tuple found in the old partition.
+                do_delete(mcx, &partrel, &mut localslot)?;
+
+                // Convert the replacement tuple to the destination partition's
+                // rowtype and INSERT.
+                let new_map: Option<Vec<i16>> =
+                    proute.leaf_attrmap(new_idx).map(|m| m.to_vec());
+                let mut newslot_part = tableam_real::table_slot_create(mcx, &newpartrel)?;
+                match new_map.as_deref() {
+                    Some(map) => exectuples::execute_attr_map_slot(
+                        map, &mut rootslot, &mut newslot_part, mcx,
+                    ),
+                    None => {
+                        exectuples::exec_copy_slot(&mut newslot_part, &mut rootslot, mcx, mcx)?
+                    }
+                }
+                do_insert(mcx, &newpartrel, &mut newslot_part)
+            }
+        }
+    }
 }
 
 // apply_handle_insert (worker.c:2388).
@@ -1203,6 +1479,11 @@ fn apply_handle_insert(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     // the user has opted out of that behavior (worker.c:2427).
     let ucxt = maybe_switch_to_table_owner(mcx, rel.rd_rel.relowner)?;
 
+    // Prepare to catch AFTER triggers (create_edata_for_relation /
+    // finish_edata, worker.c:512/554): the queue is opened and drained around
+    // each apply operation.
+    trigger::AfterTriggerBeginQuery();
+
     // Keep the input-function cache alive past do_insert: flinfo-owned
     // scratch backs the by-ref datums in the slot (see InFuncs).
     let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
@@ -1212,8 +1493,15 @@ fn apply_handle_insert(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     // flinfo-owned scratch until do_insert materializes the tuple.
     let _default_exprs = slot_fill_defaults(mcx, &entry, &rel, &mut remoteslot)?;
 
-    do_insert(mcx, &rel, &mut remoteslot)?;
+    // For a partitioned table, insert the tuple into a partition
+    // (worker.c:2448).
+    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        apply_handle_tuple_routing(mcx, &entry, &rel, &mut remoteslot, RoutedOp::Insert)?;
+    } else {
+        do_insert(mcx, &rel, &mut remoteslot)?;
+    }
 
+    trigger::AfterTriggerEndQuery()?;
     restore_user_context(&ucxt)?;
 
     logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
@@ -1238,6 +1526,9 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     // the user has opted out of that behavior (worker.c:2594).
     let ucxt = maybe_switch_to_table_owner(mcx, rel.rd_rel.relowner)?;
 
+    // Prepare to catch AFTER triggers (create_edata_for_relation).
+    trigger::AfterTriggerBeginQuery();
+
     let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
     let mut remoteslot = tableam_real::table_slot_create(mcx, &rel)?;
     let searchtup = if upd.has_oldtuple {
@@ -1246,6 +1537,22 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         &upd.newtup
     };
     slot_store_data(mcx, &mut remoteslot, &entry, &rel, searchtup, &mut infuncs)?;
+
+    // For a partitioned table, apply the update to the partition the search
+    // tuple routes to (worker.c:2711).
+    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        apply_handle_tuple_routing(
+            mcx,
+            &entry,
+            &rel,
+            &mut remoteslot,
+            RoutedOp::Update(&upd.newtup),
+        )?;
+        trigger::AfterTriggerEndQuery()?;
+        restore_user_context(&ucxt)?;
+        logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
+        return end_replication_step();
+    }
 
     let mut localslot = tableam_real::table_slot_create(mcx, &rel)?;
     let found = find_repl_tuple(mcx, &rel, &entry, &mut remoteslot, &mut localslot)?;
@@ -1278,6 +1585,7 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         );
     }
 
+    trigger::AfterTriggerEndQuery()?;
     restore_user_context(&ucxt)?;
 
     logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
@@ -1302,9 +1610,22 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     // the user has opted out of that behavior (worker.c:2798).
     let ucxt = maybe_switch_to_table_owner(mcx, rel.rd_rel.relowner)?;
 
+    // Prepare to catch AFTER triggers (create_edata_for_relation).
+    trigger::AfterTriggerBeginQuery();
+
     let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
     let mut remoteslot = tableam_real::table_slot_create(mcx, &rel)?;
     slot_store_data(mcx, &mut remoteslot, &entry, &rel, &oldtup, &mut infuncs)?;
+
+    // For a partitioned table, apply the delete in the partition the search
+    // tuple routes to (worker.c:2864).
+    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        apply_handle_tuple_routing(mcx, &entry, &rel, &mut remoteslot, RoutedOp::Delete)?;
+        trigger::AfterTriggerEndQuery()?;
+        restore_user_context(&ucxt)?;
+        logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
+        return end_replication_step();
+    }
 
     let mut localslot = tableam_real::table_slot_create(mcx, &rel)?;
     let found = find_repl_tuple(mcx, &rel, &entry, &mut remoteslot, &mut localslot)?;
@@ -1332,6 +1653,7 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         );
     }
 
+    trigger::AfterTriggerEndQuery()?;
     restore_user_context(&ucxt)?;
 
     logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
@@ -1363,17 +1685,38 @@ fn apply_handle_truncate(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> 
             logicalrelation::logicalrep_rel_close(rel, types_rel::AccessExclusiveLock)?;
             continue;
         }
-        if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-            // C fans the truncate out to the leaf partitions
-            // (find_all_inheritors); partitioned targets are unported in this
-            // apply worker across all handlers.
-            panic!("unported: TRUNCATE apply on a partitioned table");
-        }
         if heapam::relation_is_logically_logged(&rel) {
             relids_logged.push(rel.rd_id);
         }
         relids.push(rel.rd_id);
+        let is_partitioned = rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE;
+        let parentid = rel.rd_id;
         rels.push(rel);
+
+        // Truncate partitions if we got a message to truncate a partitioned
+        // table (worker.c:3277): fan out to all inheritors.
+        if is_partitioned {
+            let children =
+                pg_inherits::find_all_inheritors(mcx, parentid, types_rel::AccessExclusiveLock)?;
+            for &childrelid in children.iter() {
+                if relids.contains(&childrelid) {
+                    continue;
+                }
+                // find_all_inheritors already got the lock.
+                let childrel = table::table_open(mcx, childrelid, types_rel::NoLock)?;
+                // Ignore temp tables of other backends, as ExecuteTruncate
+                // does (worker.c:3299).
+                if childrel.is_other_temp() {
+                    table::table_close(childrel, types_rel::AccessExclusiveLock)?;
+                    continue;
+                }
+                if heapam::relation_is_logically_logged(&childrel) {
+                    relids_logged.push(childrelid);
+                }
+                relids.push(childrelid);
+                rels.push(childrel);
+            }
+        }
     }
 
     if !rels.is_empty() {

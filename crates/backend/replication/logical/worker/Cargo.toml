@@ -28,11 +28,13 @@ commit_ts = { path = "../../../access/transam/commit_ts" }
 clauses = { path = "../../../optimizer/util/clauses" }
 execexpr = { path = "../../../executor/execexpr" }
 execindexing = { path = "../../../executor/execindexing" }
+execpartition = { path = "../../../executor/execpartition" }
 execreplication = { path = "../../../executor/execreplication" }
 exectuples = { path = "../../../executor/exectuples" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 rewrite_handler = { path = "../../../rewrite/rewrite_handler" }
 fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+guc = { path = "../../../utils/misc/guc" }
 guc_file = { path = "../../../utils/misc/guc_file" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 interrupt = { path = "../../../postmaster/interrupt" }
@@ -55,7 +57,12 @@ tablecmds = { path = "../../../commands/tablecmds" }
 heapam = { path = "../../../access/heap/heapam" }
 nodemodifytable = { path = "../../../executor/nodemodifytable" }
 origin = { path = "../../origin" }
+pg_inherits = { path = "../../../catalog/pg_inherits" }
+relcache = { path = "../../../utils/cache/relcache" }
+trigger = { path = "../../../commands/trigger" }
+types_trigger = { path = "../../../../_support/types/types_trigger" }
 pg_subscription = { path = "../../../catalog/pg_subscription" }
+tupdesc = { path = "../../../access/common/tupdesc" }
 fd = { path = "../../../storage/file/fd" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 snapmgr = { path = "../../../utils/time/snapmgr" }

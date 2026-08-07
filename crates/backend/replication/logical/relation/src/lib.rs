@@ -11,9 +11,11 @@
 //   handle that cannot live in a 'static map).
 // - Invalidation: a relcache callback marks entries invalid by local reloid
 //   (logicalrep_relmap_invalidate_cb), C's granularity.
-// - Partitioned targets refuse loudly; FindUsableIndexForReplicaIdentityFull
-//   is out of scope, so REPLICA IDENTITY FULL uses the sequential-scan path
-//   (which C also falls back to).
+// - logicalrep_partition_open builds the per-partition entry on every call
+//   (C caches it in LogicalRepPartMap); correctness-identical, the cache is
+//   a later perf item. FindUsableIndexForReplicaIdentityFull is out of
+//   scope, so REPLICA IDENTITY FULL uses the sequential-scan path (which C
+//   also falls back to).
 #![allow(non_snake_case)]
 
 use std::cell::RefCell;
@@ -155,11 +157,10 @@ fn find_local_index(rel: &Relation<'_>, remoterel: &LogicalRepRelation) -> Oid {
     }
 }
 
-fn check_relkind(relkind: u8, nspname: &str, relname: &str) -> PgResult<()> {
-    if relkind == b'p' {
-        panic!("unported: partitioned apply target \"{nspname}.{relname}\"");
-    }
-    if relkind != b'r' {
+// CheckSubscriptionRelkind (pg_subscription.c): plain and partitioned tables
+// are valid logical replication targets.
+pub fn check_relkind(relkind: u8, nspname: &str, relname: &str) -> PgResult<()> {
+    if relkind != b'r' && relkind != b'p' {
         ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg(format!(
@@ -306,6 +307,48 @@ pub fn logicalrep_rel_open<'mcx>(
 // logicalrep_rel_close (relation.c:504).
 pub fn logicalrep_rel_close(rel: Relation<'_>, lockmode: LOCKMODE) -> PgResult<()> {
     table::table_close(rel, lockmode)
+}
+
+// logicalrep_partition_open (relation.c:633): the tuple-routing entry for a
+// leaf partition of a partitioned apply target. `map` is the root->partition
+// attrmap from the routing machinery (attnums indexed by 0-based partition
+// attno holding the 1-based root attno, 0 = dropped); the produced entry maps
+// 0-based partition attnos to remote column indexes like every other entry.
+// Rendering: built per call — C caches entries in LogicalRepPartMap, a perf
+// difference only (see module header).
+pub fn logicalrep_partition_open(
+    root: &LogicalRepRelMapEntry,
+    partrel: &Relation<'_>,
+    map: Option<&[i16]>,
+) -> PgResult<LogicalRepRelMapEntry> {
+    let remoterel = root.remoterel.clone();
+    let attrmap = match map {
+        Some(map) => map
+            .iter()
+            .map(|&root_attno| {
+                if root_attno == 0 {
+                    -1
+                } else {
+                    root.attrmap.get((root_attno - 1) as usize).copied().unwrap_or(-1)
+                }
+            })
+            .collect(),
+        None => root.attrmap.clone(),
+    };
+    let mut entry = LogicalRepRelMapEntry {
+        remoterel,
+        localreloid: partrel.rd_id,
+        localrelvalid: true,
+        attrmap,
+        updatable: false,
+        localindexoid: InvalidOid,
+        // state/statelsn stay 0 as in C.
+        state: 0,
+        statelsn: InvalidXLogRecPtr,
+    };
+    mark_updatable(&mut entry)?;
+    entry.localindexoid = find_local_index(partrel, &entry.remoterel);
+    Ok(entry)
 }
 
 // logicalrep_relmap_init's callback registration (relation.c:117); called once

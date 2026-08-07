@@ -672,7 +672,18 @@ pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
 fn apply_worker_body(slot: usize) -> PgResult<()> {
     let w = launcher::worker_snapshot(slot).expect("attached worker slot");
 
-    // InitializeLogRepWorker: database connection + subscription load.
+    // InitializeLogRepWorker (worker.c:4661): run as the replica session
+    // replication role BEFORE connecting, so every apply-path trigger and
+    // rewrite rule sees `replica` — ENABLE REPLICA / ENABLE ALWAYS triggers
+    // fire, plain (ENABLE ORIGIN) ones stay silent, exactly as in C.
+    guc::SetConfigOption(
+        "session_replication_role",
+        Some("replica"),
+        types_guc::GucContext::PGC_SUSET,
+        types_guc::GucSource::PGC_S_OVERRIDE,
+    )?;
+
+    // Database connection + subscription load.
     bgworker::BackgroundWorkerInitializeConnectionByOid(w.dbid, w.userid, 0)?;
 
     let top = MemoryContext::new("ApplyContext");

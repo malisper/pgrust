@@ -59,15 +59,19 @@ fn wait_latch_10ms() -> PgResult<()> {
 
 // wait_for_relation_state_change (tablesync.c:229): apply side waits for the
 // catalog state to reach `expected_state` (or the sync worker to vanish).
+// wait_for_relation_state_change (tablesync.c:163): runs inside the CALLER's
+// open transaction (C asserts none of its own; process_syncing_tables_for_
+// apply starts one just before). Starting a nested transaction here was the
+// "StartTransactionCommand: unexpected state STARTED" apply-worker crash at
+// every tablesync handoff. Per-iteration InvalidateCatalogSnapshot keeps the
+// catalog read fresh, as C does.
 fn wait_for_relation_state_change(mcx: Mcx<'_>, relid: Oid, expected_state: u8) -> PgResult<()> {
     let subid = my_sub(|s| s.oid);
     loop {
         postgres_seams::check_for_interrupts::call()?;
-        inval::local::InvalidateSystemCaches()?;
 
-        xact::StartTransactionCommand()?;
+        snapmgr::InvalidateCatalogSnapshot();
         let (state, _lsn) = GetSubscriptionRelState(mcx, subid, relid)?;
-        xact::CommitTransactionCommand()?;
 
         if state == SUBREL_STATE_UNKNOWN || state == expected_state {
             return Ok(());
@@ -317,13 +321,16 @@ fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
-// fetch_remote_table_info (tablesync.c:825), plain-table subset: refuse row
-// filters and published generated columns loudly.
+// fetch_remote_table_info (tablesync.c:825). Also returns the relation's
+// row-filter quals to be OR'ed into the COPY command (tablesync.c:1094-1131):
+// a NULL qual for any subscribed publication means the whole table is copied,
+// so the list collapses to empty. Published generated columns stay refused
+// implicitly (the attribute query excludes attgenerated != '').
 fn fetch_remote_table_info(
     conn: &mut PgConn,
     nspname: &str,
     relname: &str,
-) -> PgResult<logicalproto::LogicalRepRelation> {
+) -> PgResult<(logicalproto::LogicalRepRelation, Vec<String>)> {
     fn text(r: &[Option<Vec<u8>>], i: usize) -> String {
         r.get(i).and_then(|c| c.as_ref()).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
     }
@@ -351,8 +358,10 @@ fn fetch_remote_table_info(
     let replident = text(&res.rows[0], 1).bytes().next().unwrap_or(b'd');
     let relkind = text(&res.rows[0], 2).bytes().next().unwrap_or(b'r');
 
-    // Row filters: any non-null qual for this relation in the subscribed
-    // publications is out of the ported subset.
+    // Row filters (tablesync.c:1094): DISTINCT quals across the subscribed
+    // publications, combined with OR at COPY time. A NULL qual (a publication
+    // without a filter, FOR ALL TABLES, or TABLES IN SCHEMA) means the whole
+    // table is copied — drop any collected filters.
     let pubnames = my_sub(|s| s.publications.clone());
     let publist = pubnames.iter().map(|p| lit(p)).collect::<Vec<_>>().join(", ");
     let cmd = format!(
@@ -360,10 +369,24 @@ fn fetch_remote_table_info(
          pg_get_publication_tables(p.pubname) gpt WHERE gpt.relid = {remoteid} AND p.pubname IN ({publist})"
     );
     let res = conn.exec(&cmd)?;
-    if res.status == ExecStatus::TuplesOk
-        && res.rows.iter().any(|r| r.first().map(|c| c.is_some()).unwrap_or(false))
-    {
-        panic!("unported: row-filter publication in tablesync (round-5 subset)");
+    if res.status != ExecStatus::TuplesOk {
+        ereport(ERROR)
+            .errcode(ERRCODE_CONNECTION_FAILURE)
+            .errmsg(format!(
+                "could not fetch table WHERE clause info for table \"{nspname}.{relname}\": {}",
+                res.err
+            ))
+            .finish(loc("fetch_remote_table_info"))?;
+    }
+    let mut quals: Vec<String> = Vec::new();
+    for row in &res.rows {
+        match row.first().and_then(|c| c.as_ref()) {
+            Some(q) => quals.push(String::from_utf8_lossy(q).into_owned()),
+            None => {
+                quals.clear();
+                break;
+            }
+        }
     }
 
     // Columns (attgenerated = '' excludes generated; gencol publication is
@@ -394,29 +417,39 @@ fn fetch_remote_table_info(
         attkeys.push(text(row, 3) == "t");
     }
 
-    Ok(logicalproto::LogicalRepRelation {
-        remoteid,
-        nspname: nspname.to_string(),
-        relname: relname.to_string(),
-        natts: attnames.len(),
-        attnames,
-        atttyps,
-        replident,
-        relkind,
-        attkeys,
-    })
+    Ok((
+        logicalproto::LogicalRepRelation {
+            remoteid,
+            nspname: nspname.to_string(),
+            relname: relname.to_string(),
+            natts: attnames.len(),
+            attnames,
+            atttyps,
+            replident,
+            relkind,
+            attkeys,
+        },
+        quals,
+    ))
 }
 
-// copy_table's publisher command (tablesync.c:1172-1226): plain tables COPY
-// directly; other relkinds (views, partitioned tables published via root)
-// need COPY (SELECT ...). Row filters and published generated columns refuse
-// loudly before this point (fetch_remote_table_info), so the SELECT arm never
-// carries quals and C's ONLY-for-RELKIND_RELATION branch inside it is
+// copy_table's publisher command (tablesync.c:1172-1246): plain tables with
+// no row filter COPY directly; other relkinds (views, partitioned tables
+// published via root) and filtered tables go through COPY (SELECT ...), with
+// C's ONLY for RELKIND_RELATION (children are copied separately) and the
+// filters OR'ed. Published generated columns stay refused upstream
+// (fetch_remote_table_info excludes them), so C's gencol SELECT arm is
 // unreachable here.
-fn copy_table_cmd(relkind: u8, nspname: &str, relname: &str, attnames: &[String]) -> String {
+fn copy_table_cmd(
+    relkind: u8,
+    nspname: &str,
+    relname: &str,
+    attnames: &[String],
+    quals: &[String],
+) -> String {
     let collist =
         attnames.iter().map(|a| quote_ident(a)).collect::<Vec<_>>().join(", ");
-    if relkind == b'r' {
+    if relkind == b'r' && quals.is_empty() {
         let mut cmd = format!("COPY {}.{}", quote_ident(nspname), quote_ident(relname));
         if !attnames.is_empty() {
             cmd.push_str(" (");
@@ -426,17 +459,24 @@ fn copy_table_cmd(relkind: u8, nspname: &str, relname: &str, attnames: &[String]
         cmd.push_str(" TO STDOUT");
         cmd
     } else {
-        format!(
-            "COPY (SELECT {collist} FROM {}.{}) TO STDOUT",
+        let only = if relkind == b'r' { "ONLY " } else { "" };
+        let mut cmd = format!(
+            "COPY (SELECT {collist} FROM {only}{}.{}",
             quote_ident(nspname),
             quote_ident(relname)
-        )
+        );
+        if !quals.is_empty() {
+            cmd.push_str(" WHERE ");
+            cmd.push_str(&quals.join(" OR "));
+        }
+        cmd.push_str(") TO STDOUT");
+        cmd
     }
 }
 
 // copy_table (tablesync.c:1143).
 fn copy_table(mcx: Mcx<'static>, conn: &mut PgConn, nspname: &str, relname: &str) -> PgResult<()> {
-    let lrel = fetch_remote_table_info(conn, nspname, relname)?;
+    let (lrel, quals) = fetch_remote_table_info(conn, nspname, relname)?;
 
     logicalrelation::logicalrep_relmap_update(&lrel);
     let subid = my_sub(|s| s.oid);
@@ -444,7 +484,7 @@ fn copy_table(mcx: Mcx<'static>, conn: &mut PgConn, nspname: &str, relname: &str
         logicalrelation::logicalrep_rel_open(mcx, lrel.remoteid, types_rel::NoLock, subid)?;
     let _ = &entry;
 
-    let cmd = copy_table_cmd(lrel.relkind, nspname, relname, &lrel.attnames);
+    let cmd = copy_table_cmd(lrel.relkind, nspname, relname, &lrel.attnames, &quals);
 
     let res = conn.exec(&cmd)?;
     if res.status != ExecStatus::CopyOut {
@@ -749,16 +789,35 @@ mod tests {
             super::create_slot_use_snapshot_cmd("s1", true),
             "CREATE_REPLICATION_SLOT \"s1\" LOGICAL pgoutput (FAILOVER, SNAPSHOT 'use')"
         );
-        // Plain table: direct COPY with a column list.
+        let cols = ["a".to_string(), "b".to_string()];
+        // Plain table, no row filter: direct COPY with a column list.
         assert_eq!(
-            super::copy_table_cmd(b'r', "public", "t", &["a".to_string(), "b".to_string()]),
+            super::copy_table_cmd(b'r', "public", "t", &cols, &[]),
             "COPY \"public\".\"t\" (\"a\", \"b\") TO STDOUT"
         );
         // Non-plain publisher relkind (partitioned via root, views): the
-        // COPY (SELECT ...) arm.
+        // COPY (SELECT ...) arm, without C's ONLY (that is table-only).
         assert_eq!(
-            super::copy_table_cmd(b'p', "public", "t", &["a".to_string(), "b".to_string()]),
+            super::copy_table_cmd(b'p', "public", "t", &cols, &[]),
             "COPY (SELECT \"a\", \"b\" FROM \"public\".\"t\") TO STDOUT"
+        );
+        // Single row filter on a plain table: SELECT arm with ONLY + WHERE
+        // (tablesync.c:1199-1240).
+        assert_eq!(
+            super::copy_table_cmd(b'r', "public", "t", &cols, &["(a > 5)".to_string()]),
+            "COPY (SELECT \"a\", \"b\" FROM ONLY \"public\".\"t\" WHERE (a > 5)) TO STDOUT"
+        );
+        // Multiple publications' filters are OR'ed.
+        assert_eq!(
+            super::copy_table_cmd(
+                b'r',
+                "public",
+                "t",
+                &cols,
+                &["(a > 5)".to_string(), "(b IS NULL)".to_string()]
+            ),
+            "COPY (SELECT \"a\", \"b\" FROM ONLY \"public\".\"t\" \
+             WHERE (a > 5) OR (b IS NULL)) TO STDOUT"
         );
     }
 

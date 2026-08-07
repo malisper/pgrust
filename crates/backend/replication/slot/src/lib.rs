@@ -2142,10 +2142,6 @@ pub fn ReplicationSlotNameForTablesync(suboid: Oid, relid: Oid) -> String {
     name
 }
 
-pub fn ReplicationSlotDropAtPubNode() -> PgResult<()> {
-    panic!("ReplicationSlotDropAtPubNode not ported (WalReceiverConn; libpqwalreceiver unported)");
-}
-
 fn idle_timeout_get() -> i32 {
     IDLE_REPLICATION_SLOT_TIMEOUT_SECS.get()
 }
