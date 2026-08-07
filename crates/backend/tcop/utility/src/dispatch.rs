@@ -296,15 +296,7 @@ fn dispatch_switch<'mcx>(
 
         T_DeclareCursorStmt => {
             let stmt = parsetree.as_declare_cursor_stmt().unwrap();
-            // This DECLARE's own slice of the (possibly multi-statement)
-            // source text; PerformCursorOpen re-derives its plan from it.
-            let loc = pstmt.stmt_location.max(0) as usize;
-            let stmt_text = if pstmt.stmt_len > 0 {
-                &source_text[loc..loc + pstmt.stmt_len as usize]
-            } else {
-                &source_text[loc..]
-            };
-            portalcmds::PerformCursorOpen(mcx, stmt, stmt_text, source_text, params, is_top_level)?;
+            portalcmds::PerformCursorOpen(mcx, stmt, source_text, params, is_top_level)?;
         }
         T_ClosePortalStmt => {
             let stmt = parsetree.as_close_portal_stmt().unwrap();

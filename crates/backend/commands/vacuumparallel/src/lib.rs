@@ -1,7 +1,10 @@
 //! vacuumparallel.c: parallel index vacuum/cleanup. Thread-native per
 //! docs/parallel-query-design.md — PVShared is an Arc of typed fields (no
-//! shm_toc), dead items cross as an Arc<[ItemPointerData]> snapshot of the
-//! leader's flat tid vec (C: shared TidStore in DSA), and each worker opens
+//! shm_toc). Dead items cross as ONE Arc<[ItemPointerData]> snapshot per
+//! bulkdel pass, materialized by vacuumlazy's collect_dead_tids and shared
+//! here by Arc clone (C: shared TidStore in DSA; the flat sorted slice is
+//! the recorded divergence until the AM boundary adopts TidStoreIsMember —
+//! the store itself never crosses threads on this path). Each worker opens
 //! its own relations. Divergences recorded in CATALOG: buffer/WAL usage
 //! transfer and progress reporting skipped (consumers elided repo-wide),
 //! queryid/debug_query_string not forwarded, error-context callback elided.
@@ -236,7 +239,7 @@ pub fn parallel_vacuum_bulkdel_all_indexes(
     heaprel: &RelationData<'_>,
     indrels: &[Relation<'_>],
     bstrategy: &BufferAccessStrategy,
-    dead_items: &[ItemPointerData],
+    dead_items: Arc<[ItemPointerData]>,
     num_table_tuples: f64,
     num_index_scans: i32,
 ) -> PgResult<()> {
@@ -244,7 +247,8 @@ pub fn parallel_vacuum_bulkdel_all_indexes(
 
     pvs.shared.reltuples.store(num_table_tuples.to_bits(), SeqCst);
     pvs.shared.estimated_count.store(true, SeqCst);
-    *pvs.shared.dead_items.lock().unwrap_or_else(|e| e.into_inner()) = Arc::from(dead_items);
+    // The caller's per-pass snapshot is shared, not re-copied (Arc clone).
+    *pvs.shared.dead_items.lock().unwrap_or_else(|e| e.into_inner()) = dead_items;
 
     parallel_vacuum_process_all_indexes(pvs, mcx, heaprel, indrels, bstrategy, num_index_scans, true)
 }

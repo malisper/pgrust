@@ -167,6 +167,9 @@ fn install_stub_seams() {
     stub!(syncrep_seams::sync_rep_cleanup_at_proc_exit, || {});
     stub!(condition_variable_seams::condition_variable_cancel_sleep, || false);
     stub!(autovacuum_seams::wake_autovacuum_launcher, || {});
+    // No autovacuum in fixture tests: requests report unrecorded, as C does
+    // when the work-item array has no free slot.
+    stub!(autovacuum_seams::auto_vacuum_request_work, |_, _, _| false);
     stub!(lock_seams::abort_strong_lock_acquire, || {});
     stub!(lock_seams::get_awaited_lock_hashcode, || None);
     stub!(lock_seams::lock_release_all, |_, _| Ok(()));

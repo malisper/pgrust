@@ -138,6 +138,10 @@ pub fn init_seams() {
         autovacuum_seams::wake_autovacuum_launcher::set(wake_autovacuum_launcher);
     }
     autovacuum_seams::autovac_worker_failed::set(launcher::AutoVacWorkerFailed);
+    // Fixture tests pre-install an always-full stub (test_boot); keep it.
+    if !autovacuum_seams::auto_vacuum_request_work::is_installed() {
+        autovacuum_seams::auto_vacuum_request_work::set(worker::AutoVacuumRequestWork);
+    }
 }
 
 // ProcKill's kill(AutovacuumLauncherPid, SIGUSR2): only autovac workers carry

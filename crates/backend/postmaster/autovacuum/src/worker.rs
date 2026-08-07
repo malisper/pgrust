@@ -1237,6 +1237,41 @@ mod tests {
         assert_eq!(decide(&r, Some(&entry(9999, 0, 9999)), None), (true, false, false));
     }
 
+    // AutoVacuumRequestWork (autovacuum.c): a request claims a free slot with
+    // the caller's oid/blkno and this database's oid; a full array reports
+    // false (the queue is best-effort). Claims every slot in one test so no
+    // sibling test observes a partially filled array, and frees them at the
+    // end (the array is process-global).
+    #[test]
+    fn request_work_enqueues_and_reports_full() {
+        assert!(AutoVacuumRequestWork(AVW_BRIN_SUMMARIZE_RANGE, 50042, 41));
+        {
+            let l = shmem::av_lock();
+            let it = l
+                .work_items
+                .iter()
+                .find(|w| w.avw_used && w.avw_relation == 50042)
+                .expect("request stored a used work item");
+            assert_eq!(it.avw_type, AVW_BRIN_SUMMARIZE_RANGE);
+            assert_eq!(it.avw_block_number, 41);
+            assert_eq!(it.avw_database, g::MyDatabaseId());
+            assert!(!it.avw_active);
+        }
+
+        let mut recorded = 1;
+        while AutoVacuumRequestWork(AVW_BRIN_SUMMARIZE_RANGE, 50043, 7) {
+            recorded += 1;
+        }
+        assert_eq!(recorded, NUM_WORKITEMS);
+
+        let mut l = shmem::av_lock();
+        for w in l.work_items.iter_mut() {
+            if w.avw_used && (w.avw_relation == 50042 || w.avw_relation == 50043) {
+                w.avw_used = false;
+            }
+        }
+    }
+
     #[test]
     fn workitem_activity_matches_c_format() {
         let wi = shmem::WorkItem {

@@ -9,7 +9,7 @@ use ::types_error::{
     ERRCODE_UNDEFINED_CURSOR, ERROR,
 };
 use ::types_nodes::nodes_enums::CmdType;
-use ::types_nodes::parsenodes::{DeclareCursorStmt, FetchStmt, Query};
+use ::types_nodes::parsenodes::{DeclareCursorStmt, FetchStmt};
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_dest::CommandDest;
 use ::types_portal::{
@@ -32,7 +32,6 @@ pub fn init_seams() {
 pub fn PerformCursorOpen(
     _mcx: Mcx<'_>,
     cstmt: &DeclareCursorStmt<'_>,
-    stmt_text: &str,
     source_text: &str,
     params: ParamListHandle,
     is_top_level: bool,
@@ -52,23 +51,13 @@ pub fn PerformCursorOpen(
             .into());
     }
 
-    // C copies the finished plan into portalContext (portalcmds.c:109); node
-    // deep-copy is unported, so the plan is DERIVED inside a portal-owned
-    // arena instead: re-parse this DECLARE's own statement text and run
-    // analyze/rewrite/plan with the arena's Mcx. Identical text under the
-    // same snapshot yields the identical plan; the analysis re-run is the
-    // once-per-DECLARE cost of the missing copyObject. C's error order is
-    // preserved (rewrite/plan errors fire before CreatePortal's 42P03).
-    // The re-analysis divergence needs the param TYPES for $n: take them from
-    // the live outer param list — they are the types the outer analysis
-    // resolved (C skips this: it receives the analyzed query and only copies
-    // the VALUES, below). Identical text + identical types + same snapshot
-    // yields the identical query.
-    let param_types: Vec<_> = if params.is_null() {
-        Vec::new()
-    } else {
-        types_portal::params::with(params, |src| src.iter().map(|p| p.ptype).collect())
-    };
+    // C's Query *query = castNode(Query, cstmt->query): parse analysis
+    // already ran (transformDeclareCursorStmt stowed the analyzed Query in
+    // the statement).
+    let src_query = cstmt
+        .query
+        .and_then(|n| n.as_query())
+        .expect("analyzed DECLARE CURSOR carries its Query");
 
     let plan_ctx = Box::new(MemoryContext::new_bump("PortalPlanContext"));
     // SAFETY: the Box gives the context a stable address; PortalDrop reclaims
@@ -76,35 +65,20 @@ pub fn PerformCursorOpen(
     let pctx: &'static MemoryContext = unsafe { &*(&*plan_ctx as *const MemoryContext) };
     let pmcx = pctx.mcx();
 
-    let raw = postgres::pg_parse_query(pmcx, stmt_text)?;
-    assert!(raw.len() == 1, "DECLARE statement slice re-parsed to {} statements", raw.len());
-    let queries = postgres::pg_analyze_and_rewrite_fixedparams(
-        pmcx,
-        &raw[0],
-        stmt_text,
-        &param_types,
-        types_portal::QueryEnvHandle::NULL,
-    )?;
-    assert!(queries.len() == 1, "DECLARE analysis yielded {} queries", queries.len());
-    let util = queries.into_iter().next().expect("len == 1");
-    let cstmt_node = util
-        .utilityStmt
-        .filter(|n| n.node_tag() == types_nodes::NodeTag::T_DeclareCursorStmt)
-        .expect("re-parsed DECLARE slice is a DeclareCursorStmt");
-    // SAFETY: the re-parsed tree is single-owner here; the Query is consumed
-    // exactly as C's QueryRewrite consumes its argument.
-    let query_node = unsafe {
-        cstmt_node.with_mut::<DeclareCursorStmt, _>(|d| d.query.take())
-    }
-    .flatten()
-    .ok_or_else(non_select_in_declare)?;
-    // SAFETY: as above; no derived refs are live.
-    let mut query = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
-        .ok_or_else(non_select_in_declare)?;
+    // C copies the finished plan into portalContext after CreatePortal
+    // (portalcmds.c); here rewrite+plan run with the portal-owned arena's Mcx
+    // directly, so the plan tree is born portal-resident and no second copy
+    // is needed. copy_query keeps the incoming tree pristine — the rewriter
+    // and planner scribble on their input, and the same DECLARE source can
+    // be executed repeatedly (e.g. from a plpgsql loop). C's error order is
+    // preserved (rewrite/plan errors fire before CreatePortal's 42P03).
+    let mut query = copyfuncs::copy_query(pmcx, src_query)?;
 
-    // C jumbles the DECLARE's contained query at entry; the re-parsed tree is
-    // identical, so the queryId matches. post_parse_analyze_hook: no plugin
-    // surface exists.
+    // C: "Query contained by DeclareCursor needs to be jumbled if requested"
+    // — the analysis-time jumble covered only the outer utility Query.
+    // Jumbling the copy leaves the caller's tree unscribbled; the planned
+    // tree's queryId is the same either way. post_parse_analyze_hook: no
+    // plugin surface exists.
     if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(pmcx, &mut query)?;
     }

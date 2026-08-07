@@ -1061,7 +1061,11 @@ pub fn index_constraint_create<'mcx>(
 
 // index_build: btree only, serial only (C divergence: plan_create_index_workers
 // is not consulted — every build runs with ii_ParallelWorkers = 0; C picks the
-// same for tables under min_parallel_table_scan_size).
+// same for tables under min_parallel_table_scan_size). The blocker is one
+// level down: C's parallel builds (_bt_begin_parallel, gin's equivalent) hand
+// each worker a tuplesort sharing a SortCoordinate/Sharedsort, and tuplesort
+// here is serial-only — no coordinate surface exists to hand out. Parallel
+// builds wait on a parallel tuplesort.
 pub fn index_build<'mcx>(
     mcx: Mcx<'mcx>,
     heapRelation: &Relation<'mcx>,

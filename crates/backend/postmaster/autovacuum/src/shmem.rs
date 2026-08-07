@@ -13,7 +13,7 @@ use types_core::{BlockNumber, InvalidOid, Oid, TimestampTz};
 use crate::autovacuum_worker_slots;
 
 pub const NUM_WORKITEMS: usize = 256;
-pub const AVW_BRIN_SUMMARIZE_RANGE: i32 = 0;
+pub use autovacuum_seams::AVW_BRIN_SUMMARIZE_RANGE;
 
 pub const AV_FORK_FAILED: usize = 0;
 pub const AV_REBALANCE: usize = 1;

@@ -1,7 +1,7 @@
 //! brin.c: the BRIN index access method (build, insert, bitmap scan).
 //! Summarize/desummarize SQL paths and vacuum live in brin_funcs/brin_build.
 //! Loud lanes: parallel build. Unsupported opclasses raise clean 0A000;
-//! autosummarize degrades to the C "request was not recorded" LOG arm.
+//! autosummarize enqueues autovacuum work items (AutoVacuumRequestWork).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
@@ -204,6 +204,33 @@ fn initialize_brin_insertstate<'mcx>(
     Ok(BrinInsertState { bis_rmAccess, bis_desc, bis_pages_per_range })
 }
 
+// brininsert's autosummarize request (brin.c): register the previous page
+// range with autovacuum's work-item queue. The queue is best-effort: an
+// unrecorded request (work-item array full) only LOGs, and the range stays
+// summarizable through VACUUM and brin_summarize_new_values().
+fn request_range_summarization(
+    idxRel: &Relation<'_>,
+    lastPageRange: BlockNumber,
+) -> PgResult<()> {
+    let recorded = autovacuum_seams::auto_vacuum_request_work::call(
+        autovacuum_seams::AVW_BRIN_SUMMARIZE_RANGE,
+        idxRel.rd_id,
+        lastPageRange,
+    );
+    if !recorded {
+        elog_seams::ereport_msg::call(
+            ::types_error::LOG,
+            format!(
+                "request for BRIN range summarization for index \"{}\" page {} was not recorded",
+                idxRel.name(),
+                lastPageRange
+            ),
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 /// brininsert. `amcache` is C's indexInfo->ii_AmCache slot, owned by the
 /// executor's per-command index state.
 pub fn brininsert<'mcx>(
@@ -246,20 +273,7 @@ pub fn brininsert<'mcx>(
                 true,
             )?;
             if got.is_none() {
-                // unported: AutoVacuumRequestWork (autovacuum work-item
-                // queue). C treats an unrecorded request as best-effort and
-                // LOGs; with the queue unported every request takes that arm
-                // (recorded = false). Summarization stays available through
-                // VACUUM and brin_summarize_new_values().
-                elog_seams::ereport_msg::call(
-                    ::types_error::LOG,
-                    format!(
-                        "request for BRIN range summarization for index \"{}\" page {} was not recorded",
-                        idxRel.name(),
-                        lastPageRange
-                    ),
-                    None,
-                )?;
+                request_range_summarization(idxRel, lastPageRange)?;
             } else {
                 lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
             }
@@ -754,4 +768,161 @@ fn disk_attr_for(bdesc: &BrinDesc<'_>, keyno: usize, i: usize) -> (bool, i16) {
     }
     let att = bdesc.bd_disktdesc.compact_attr(stored + i);
     (att.attbyval, att.attlen)
+}
+
+#[cfg(test)]
+mod autosummarize_request_tests {
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, MutexGuard, Once};
+
+    use ::types_core::{Oid, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
+    use ::types_rel::pg_class::{FormData_pg_class, RELKIND_INDEX};
+    use ::types_rel::{LockInfoData, LockRelId, RelationData};
+    use ::types_tuple::NameData;
+
+    use super::*;
+
+    // The seams are process-global and set-once: one recorder impl serves
+    // every test, with per-test behavior (queue full or not) behind a lock.
+    static INSTALL: Once = Once::new();
+    static QUEUE_HAS_ROOM: AtomicBool = AtomicBool::new(true);
+    static REQUESTS: Mutex<Vec<(i32, Oid, BlockNumber)>> = Mutex::new(Vec::new());
+    static LOGS: Mutex<Vec<(::types_error::ErrorLevel, String)>> = Mutex::new(Vec::new());
+    static SERIALIZE: Mutex<()> = Mutex::new(());
+
+    fn install_recorders() -> MutexGuard<'static, ()> {
+        INSTALL.call_once(|| {
+            autovacuum_seams::auto_vacuum_request_work::set(|av_type, relation_id, blkno| {
+                REQUESTS.lock().unwrap().push((av_type, relation_id, blkno));
+                QUEUE_HAS_ROOM.load(Ordering::Relaxed)
+            });
+            elog_seams::ereport_msg::set(|elevel, msg, _detail| {
+                LOGS.lock().unwrap().push((elevel, msg));
+                Ok(())
+            });
+        });
+        let guard = SERIALIZE.lock().unwrap();
+        REQUESTS.lock().unwrap().clear();
+        LOGS.lock().unwrap().clear();
+        guard
+    }
+
+    fn index_rel<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str) -> Relation<'mcx> {
+        let mut relname = NameData::default();
+        relname.namestrcpy(name);
+        let rd_rel = FormData_pg_class {
+            relname,
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam: 3580, // BRIN_AM_OID
+            relfilenode: oid,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relisshared: false,
+            relpersistence: RELPERSISTENCE_PERMANENT,
+            relkind: RELKIND_INDEX,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: b'n',
+            relispartition: false,
+            relfrozenxid: 0,
+            relminmxid: 0,
+        };
+        let data = RelationData {
+            rd_locator: Default::default(),
+            rd_smgr: Default::default(),
+            rd_id: oid,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: core::cell::Cell::new(true),
+            rd_createSubid: core::cell::Cell::new(0),
+            rd_newRelfilelocatorSubid: core::cell::Cell::new(0),
+            rd_firstRelfilelocatorSubid: core::cell::Cell::new(0),
+            rd_droppedSubid: core::cell::Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId { relId: oid, dbId: 5 },
+            },
+            rd_rel,
+            rd_att: Rc::new(TupleDescData {
+                natts: 0,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: -1,
+                constr: None,
+                compact_attrs: PgVec::new_in(mcx),
+                attrs: PgVec::new_in(mcx),
+            }),
+            rd_index: None,
+            rd_opcintype: PgVec::new_in(mcx),
+            rd_opfamily: PgVec::new_in(mcx),
+            rd_indoption: PgVec::new_in(mcx),
+            rd_indcollation: PgVec::new_in(mcx),
+            rd_options: None,
+            pgstat_enabled: core::cell::Cell::new(false),
+            pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
+            rd_hasrules: false,
+        };
+        Relation::open(data, None)
+    }
+
+    // Recorded request: the work item carries the index oid and the previous
+    // range's start block, and nothing is LOGged (the engagement witness for
+    // the ported AutoVacuumRequestWork wiring).
+    #[test]
+    fn recorded_request_passes_oid_and_block_and_stays_silent() {
+        let _guard = install_recorders();
+        QUEUE_HAS_ROOM.store(true, Ordering::Relaxed);
+
+        let cxt = MemoryContext::new_bump("autosummarize test");
+        let rel = index_rel(cxt.mcx(), 50042, "summary_idx");
+        request_range_summarization(&rel, 41).unwrap();
+
+        assert_eq!(
+            REQUESTS.lock().unwrap().as_slice(),
+            &[(autovacuum_seams::AVW_BRIN_SUMMARIZE_RANGE, 50042, 41)]
+        );
+        assert!(LOGS.lock().unwrap().is_empty(), "recorded request must not LOG");
+    }
+
+    // Unrecorded request (work-item array full): C's LOG arm, byte-matching
+    // brin.c's message.
+    #[test]
+    fn unrecorded_request_takes_c_log_arm() {
+        let _guard = install_recorders();
+        QUEUE_HAS_ROOM.store(false, Ordering::Relaxed);
+
+        let cxt = MemoryContext::new_bump("autosummarize test");
+        let rel = index_rel(cxt.mcx(), 50043, "summary_idx");
+        request_range_summarization(&rel, 7).unwrap();
+        QUEUE_HAS_ROOM.store(true, Ordering::Relaxed);
+
+        assert_eq!(
+            REQUESTS.lock().unwrap().as_slice(),
+            &[(autovacuum_seams::AVW_BRIN_SUMMARIZE_RANGE, 50043, 7)]
+        );
+        let logs = LOGS.lock().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].0, ::types_error::LOG);
+        assert_eq!(
+            logs[0].1,
+            "request for BRIN range summarization for index \"summary_idx\" page 7 was not recorded"
+        );
+    }
 }

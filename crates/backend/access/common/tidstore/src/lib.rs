@@ -5,7 +5,8 @@
 use core::marker::PhantomData;
 use core::mem::offset_of;
 use core::ptr::NonNull;
-use std::sync::{RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 
 use mcx::Mcx;
 use radixtree::{LocalStore, RadixTree, RtStore, RtValue, SharedRadixTree, SharedStore, Tree};
@@ -225,44 +226,110 @@ impl TidStore {
     }
 }
 
-/// C's caller-held LockExclusive/LockShare/Unlock become RAII guards; workers
-/// share the store by reference instead of dsa handles.
-pub struct SharedTidStore {
+/// The Arc-managed shared state behind every reference to one shared store
+/// (C: the dsa area + control object the handle points into).
+struct SharedTidStoreInner {
     tree: SharedRadixTree<BlocktableEntry>,
+    /// Live attached participant references (excludes the owner and any
+    /// outstanding handles). Debug-level lifecycle sanity only — memory
+    /// safety is the Arc's, never this counter's.
+    participants: AtomicUsize,
+}
+
+/// C's caller-held LockExclusive/LockShare/Unlock become RAII guards; workers
+/// share the store through Arc-backed references instead of dsa handles.
+///
+/// Lifecycle (TidStoreCreateShared / GetHandle / Attach / Detach / Destroy,
+/// thread-native): `create_shared` returns the OWNER's reference;
+/// `get_handle` returns a cheap cloneable [`TidStoreHandle`] (C: the
+/// dsa_pointer other participants attach through); `attach` gives a
+/// participant its own reference; `detach` (or drop) releases it. The owner
+/// drops last — its drop debug_asserts all participants detached first,
+/// mirroring C's discipline where the leader calls TidStoreDestroy only
+/// after every worker detached (the assert is not release-load-bearing:
+/// C does not error there either, and the Arc keeps the memory valid
+/// regardless of teardown order).
+pub struct SharedTidStore {
+    inner: Arc<SharedTidStoreInner>,
+    owner: bool,
+}
+
+/// Cheap value other participants attach through (C: the dsa_pointer from
+/// TidStoreGetHandle). Clone + Send + Sync; holding one keeps the store's
+/// memory alive, so a handle outliving every participant's detach is safe.
+#[derive(Clone)]
+pub struct TidStoreHandle {
+    inner: Arc<SharedTidStoreInner>,
 }
 
 impl SharedTidStore {
-    /// `max_bytes` sized C's dsa segments; `tranche_id` named the LWLock tranche.
+    /// `max_bytes` sized C's dsa segments; `tranche_id` named the LWLock
+    /// tranche. Returns the owner's reference (C: TidStoreCreateShared).
     pub fn create_shared(_max_bytes: usize, _tranche_id: i32) -> PgResult<SharedTidStore> {
-        Ok(SharedTidStore { tree: SharedRadixTree::create()? })
+        Ok(SharedTidStore {
+            inner: Arc::new(SharedTidStoreInner {
+                tree: SharedRadixTree::create()?,
+                participants: AtomicUsize::new(0),
+            }),
+            owner: true,
+        })
     }
 
-    pub fn attach() -> ! {
-        unported("TidStoreAttach (parallel-vacuum lane: thread-native handle plumbing)");
+    /// TidStoreAttach: a participant's own reference to the shared store.
+    pub fn attach(handle: &TidStoreHandle) -> SharedTidStore {
+        handle.inner.participants.fetch_add(1, Ordering::AcqRel);
+        SharedTidStore { inner: Arc::clone(&handle.inner), owner: false }
     }
 
-    pub fn detach(&self) -> ! {
-        unported("TidStoreDetach (parallel-vacuum lane: thread-native handle plumbing)");
+    /// TidStoreDetach: release this participant's reference (drop does the
+    /// same; the named form documents call sites that mirror C's lifecycle).
+    pub fn detach(self) {
+        debug_assert!(!self.owner, "the owner destroys (drops) the store, it never detaches");
+        // The Drop impl performs the participant accounting.
     }
 
-    pub fn get_handle(&self) -> ! {
-        unported("TidStoreGetHandle (parallel-vacuum lane: thread-native handle plumbing)");
+    /// TidStoreGetHandle: the cheap value other participants attach through.
+    pub fn get_handle(&self) -> TidStoreHandle {
+        TidStoreHandle { inner: Arc::clone(&self.inner) }
     }
 
-    pub fn get_dsa(&self) -> ! {
-        unported("TidStoreGetDSA (parallel-vacuum lane: thread-native handle plumbing)");
-    }
+    // TidStoreGetDSA has no thread-native equivalent and is deliberately not
+    // ported: C callers use it to pass the dsa area alongside the handle so
+    // an attacher can map the same segments; here the Arc inside
+    // [`TidStoreHandle`] already carries the allocation, and no pgrust
+    // caller needs a separate area object.
 
     pub fn lock_exclusive(&self) -> SharedTidStoreExclusive<'_> {
-        SharedTidStoreExclusive { tree: self.tree.lock_exclusive() }
+        SharedTidStoreExclusive { tree: self.inner.tree.lock_exclusive() }
     }
 
     pub fn lock_share(&self) -> SharedTidStoreShare<'_> {
-        SharedTidStoreShare { tree: self.tree.lock_share() }
+        SharedTidStoreShare { tree: self.inner.tree.lock_share() }
     }
 
     pub fn memory_usage(&self) -> usize {
-        self.tree.memory_usage() as usize
+        self.inner.tree.memory_usage() as usize
+    }
+}
+
+impl Drop for SharedTidStore {
+    fn drop(&mut self) {
+        if self.owner {
+            // C's assertion discipline (leader destroys after all workers
+            // detached), debug-level only: skipped mid-unwind so an error
+            // path tearing down out of order never double-panics.
+            #[cfg(debug_assertions)]
+            if !std::thread::panicking() {
+                debug_assert_eq!(
+                    self.inner.participants.load(Ordering::Acquire),
+                    0,
+                    "shared TID store destroyed while participants are attached"
+                );
+            }
+        } else {
+            let prev = self.inner.participants.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(prev > 0, "participant detach without a matching attach");
+        }
     }
 }
 
@@ -365,12 +432,6 @@ impl TidStoreIterResult<'_> {
 #[inline(never)]
 fn offset_out_of_range(off: OffsetNumber) -> Box<PgError> {
     PgError::error(format!("tuple offset out of range: {off}")).into()
-}
-
-#[cold]
-#[inline(never)]
-fn unported(unit: &'static str) -> ! {
-    panic!("unported callee reached from tidstore.c: {unit}");
 }
 
 #[cfg(test)]

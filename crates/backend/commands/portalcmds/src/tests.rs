@@ -240,6 +240,38 @@ fn mk_declare(
     d.seal_ref()
 }
 
+// The analyzer's output for `SELECT $1` (PARAM_EXTERN int4 in the target
+// list).
+fn select_param_query(mcx: Mcx<'static>) -> Query<'static> {
+    let param = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::Param {
+            paramkind: ::types_nodes::primnodes::ParamKind::PARAM_EXTERN,
+            paramid: 1,
+            paramtype: INT4OID,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let tle = Node::mk_target_entry(mcx, param, 1, Some("?column?"), false).unwrap();
+    let jointree = mcx::alloc_leak_in(
+        mcx,
+        ::types_nodes::primnodes::FromExpr { fromlist: NodeList::nil(), quals: None },
+    )
+    .unwrap();
+    Query {
+        commandType: CmdType::CMD_SELECT,
+        canSetTag: true,
+        jointree: Some(jointree),
+        targetList: NodeList::make1(mcx, tle).unwrap(),
+        stmt_location: 0,
+        stmt_len: 9,
+        ..Query::default()
+    }
+}
+
 fn push_snapshot() {
     let snap = snapmgr::GetTransactionSnapshot().unwrap();
     snapmgr::PushActiveSnapshot(&snap).unwrap();
@@ -292,7 +324,6 @@ fn declare_fetch_close_select1_e2e() {
     PerformCursorOpen(
         mcx,
         cstmt,
-        "DECLARE c1 CURSOR FOR SELECT 1",
         "DECLARE c1 CURSOR FOR SELECT 1",
         ParamListHandle::NULL,
         false,
@@ -407,6 +438,223 @@ fn declare_fetch_move_close_through_utility_dispatch() {
     );
 }
 
+// DECLARE ... SCROLL ... WITH HOLD over SELECT $1: the analyzed Query is
+// taken from the statement (copied into the portal's plan arena), the outer
+// param VALUES are copied into portal-owned memory, and the SAME statement
+// tree opens the cursor again after CLOSE — the plpgsql OPEN/CLOSE/OPEN
+// reuse shape the copy exists to protect. A duplicate DECLARE without CLOSE
+// hits CreatePortal's 42P03 AFTER rewrite+plan ran again (C's error order).
+#[test]
+fn declare_params_scroll_hold_and_reexecute_same_source_tree() {
+    use ::types_portal::CURSOR_OPT_HOLD;
+    install_fixtures();
+    // Explicit SCROLL over the leafless Result plan needs the store-armed
+    // world (the knob cell is process-global — hold the lock and restore).
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            execmain::cursor_store_fill_set_for_tests(false);
+        }
+    }
+    execmain::cursor_store_fill_set_for_tests(true);
+    let _restore = Restore;
+    let mcx = leaked_mcx();
+
+    let outer_params: &'static [types_portal::params::ParamExternData] = Box::leak(
+        vec![types_portal::params::ParamExternData {
+            value: datum::Datum::from_i32(7),
+            isnull: false,
+            pflags: 0,
+            ptype: INT4OID,
+        }]
+        .into_boxed_slice(),
+    );
+    // SAFETY: the slice is leaked ('static).
+    let params = unsafe { types_portal::params::register(outer_params) };
+
+    let cstmt = {
+        let query = Node::mk(mcx, select_param_query(mcx)).unwrap();
+        let mut d = Node::build::<DeclareCursorStmt>(mcx).unwrap();
+        d.portalname = Some("cp");
+        d.options = CURSOR_OPT_SCROLL | CURSOR_OPT_HOLD;
+        d.query = Some(query);
+        d.seal_ref()
+    };
+    let text = "DECLARE cp SCROLL CURSOR WITH HOLD FOR SELECT $1";
+
+    // WITH HOLD: no transaction block required even at top level.
+    push_snapshot();
+    PerformCursorOpen(mcx, cstmt, text, params, true).unwrap();
+    snapmgr::PopActiveSnapshot().unwrap();
+
+    {
+        let portal = portalmem::GetPortalByName(Some("cp")).unwrap();
+        let p = portal.borrow();
+        assert_ne!(p.cursorOptions & CURSOR_OPT_SCROLL, 0);
+        assert_ne!(p.cursorOptions & CURSOR_OPT_HOLD, 0);
+        // The portal holds its own COPY of the outer param values.
+        assert_ne!(p.portalParams, params, "param values were copied, not aliased");
+        types_portal::params::with(p.portalParams, |copied| {
+            assert_eq!(copied.len(), 1);
+            assert_eq!(copied[0].value.as_i32(), 7);
+            assert_eq!(copied[0].ptype, INT4OID);
+        });
+    }
+
+    let (qc, rows) = fetch("cp", FETCH_FORWARD, 1, false);
+    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 1));
+    assert_eq!(rows, ["7"], "the copied $1 value reached the executor");
+
+    // Same statement tree again while "cp" exists: rewrite+plan succeed on a
+    // fresh copy, then CreatePortal reports the duplicate (42P03).
+    push_snapshot();
+    let err = PerformCursorOpen(mcx, cstmt, text, params, true).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DUPLICATE_CURSOR);
+    snapmgr::PopActiveSnapshot().unwrap();
+
+    PerformPortalClose(Some("cp")).unwrap();
+
+    // Third use of the SAME source tree: the first opens never scribbled it.
+    push_snapshot();
+    PerformCursorOpen(mcx, cstmt, text, params, true).unwrap();
+    snapmgr::PopActiveSnapshot().unwrap();
+    let (qc, rows) = fetch("cp", FETCH_FORWARD, 1, false);
+    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 1));
+    assert_eq!(rows, ["7"]);
+    PerformPortalClose(Some("cp")).unwrap();
+    assert!(portalmem::GetPortalByName(Some("cp")).is_none());
+}
+
+// copy_query fidelity over the node shapes a cursor query can reach beyond
+// the e2e tests above: JOIN (JoinExpr + RangeTblRef), subquery RTE +
+// EXPR_SUBLINK (nested Query), OpExpr quals, and a PARAM_EXTERN Param. The
+// witness is outfuncs equality: the copy serializes byte-identically to the
+// source.
+#[test]
+fn copy_query_covers_join_subquery_param_shapes() {
+    use ::types_nodes::parsenodes::{RTEKind, RangeTblEntry};
+    use ::types_nodes::primnodes::{JoinExpr, OpExpr, RangeTblRef, SubLink, SubLinkType};
+
+    let mcx = leaked_mcx();
+
+    let inner = select_param_query(mcx);
+    let inner_ref = mcx::alloc_leak_in(mcx, inner).unwrap();
+    let inner_node = Node::mk(mcx, select_param_query(mcx)).unwrap();
+
+    let rte_rel = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid: 90001,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let rte_sub = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_SUBQUERY,
+            subquery: Some(inner_ref),
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let quals = Node::mk(
+        mcx,
+        OpExpr {
+            opno: 96, // int4eq
+            opfuncid: 65,
+            opresulttype: 16, // bool
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(
+                mcx,
+                Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap(),
+                Node::mk_var(mcx, 2, 1, INT4OID, -1, 0, 0).unwrap(),
+            )
+            .unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let join = Node::mk(
+        mcx,
+        JoinExpr {
+            jointype: ::types_nodes::jointype::JoinType::JOIN_INNER,
+            isNatural: false,
+            larg: Node::mk(mcx, RangeTblRef { rtindex: 1 }).unwrap(),
+            rarg: Node::mk(mcx, RangeTblRef { rtindex: 2 }).unwrap(),
+            usingClause: NodeList::nil(),
+            join_using_alias: None,
+            quals: Some(quals),
+            alias: None,
+            rtindex: 3,
+        },
+    )
+    .unwrap();
+    let jointree = mcx::alloc_leak_in(
+        mcx,
+        ::types_nodes::primnodes::FromExpr {
+            fromlist: NodeList::make1(mcx, join).unwrap(),
+            quals: None,
+        },
+    )
+    .unwrap();
+
+    let sublink = Node::mk(
+        mcx,
+        SubLink {
+            subLinkType: SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: inner_node,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let tle1 = Node::mk_target_entry(
+        mcx,
+        Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap(),
+        1,
+        Some("a"),
+        false,
+    )
+    .unwrap();
+    let tle2 = Node::mk_target_entry(mcx, sublink, 2, Some("sub"), false).unwrap();
+
+    let query = Query {
+        commandType: CmdType::CMD_SELECT,
+        canSetTag: true,
+        hasSubLinks: true,
+        rtable: NodeList::make2(mcx, rte_rel, rte_sub).unwrap(),
+        jointree: Some(jointree),
+        targetList: NodeList::make2(mcx, tle1, tle2).unwrap(),
+        stmt_location: 0,
+        stmt_len: 0,
+        ..Query::default()
+    };
+    let q_node = Node::mk(mcx, query).unwrap();
+    let src = q_node.as_query().unwrap();
+
+    let ctx: &'static MemoryContext =
+        Box::leak(Box::new(MemoryContext::new_bump("copy-fidelity")));
+    let copied = copyfuncs::copy_query(ctx.mcx(), src).unwrap();
+    let copied_node = Node::mk(ctx.mcx(), copied).unwrap();
+
+    let orig_s = outfuncs::nodeToString(mcx, q_node).unwrap();
+    let copy_s = outfuncs::nodeToString(ctx.mcx(), copied_node).unwrap();
+    assert_eq!(orig_s.as_str(), copy_s.as_str());
+}
+
 #[test]
 fn declare_requires_transaction_block_at_top_level() {
     install_fixtures();
@@ -416,7 +664,6 @@ fn declare_requires_transaction_block_at_top_level() {
     let err = PerformCursorOpen(
         mcx,
         cstmt,
-        "DECLARE c3 CURSOR FOR SELECT 1",
         "DECLARE c3 CURSOR FOR SELECT 1",
         ParamListHandle::NULL,
         true,
@@ -436,7 +683,7 @@ fn cursor_name_errors_match_c_sqlstates() {
         d.portalname = Some("");
         d.seal_ref()
     };
-    let err = PerformCursorOpen(mcx, cstmt, "DECLARE", "DECLARE", ParamListHandle::NULL, false)
+    let err = PerformCursorOpen(mcx, cstmt, "DECLARE", ParamListHandle::NULL, false)
         .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_CURSOR_NAME);
 

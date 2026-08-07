@@ -153,9 +153,9 @@ fn min_granules() -> u64 {
 
 /// Some(K) admits the morsel arm at gang size K. Decision 5: manual VACUUM
 /// only; K = max_parallel_maintenance_workers capped by the PARALLEL option
-/// (doc §4); PARALLEL 0 disables; unported index AMs refuse fail-closed
-/// (only nbtree is wired at this base — doc §3.5); temp relations refuse
-/// (session-local buffers — doc §8).
+/// (doc §4); PARALLEL 0 disables; index AMs outside indexam's
+/// bulkdelete/cleanup dispatch refuse fail-closed (doc §3.5); temp
+/// relations refuse (session-local buffers — doc §8).
 pub(crate) fn admit(vacrel: &LVRelState<'_, '_>, nrequested: i32) -> Option<i32> {
     if !flag_enabled() || !runtime::runtime_enabled() {
         return None;
@@ -183,10 +183,25 @@ pub(crate) fn admit(vacrel: &LVRelState<'_, '_>, nrequested: i32) -> Option<i32>
     }
     let k = if nrequested > 0 { mpmw.min(nrequested) } else { mpmw };
     // Fail-closed index-AM gate: the rounds' INDEX phase is the ported
-    // serial/vacuumparallel path, wired for nbtree only.
+    // serial/vacuumparallel path, which reaches indexes only through
+    // indexam::index_bulk_delete / index_vacuum_cleanup — admit exactly the
+    // AMs that dispatch covers (per-index parallel eligibility —
+    // amparallelvacuumoptions per pass kind, min_parallel_index_scan_size,
+    // cond-cleanup — stays vacuumparallel's, C-exactly); anything else
+    // refuses the whole morsel arm.
     for ind in vacrel.indrels.iter() {
-        if ind.rd_rel.relam != ::types_core::BTREE_AM_OID {
-            return None;
+        use ::types_relscan::IndexAmKind as K;
+        match K::from_relam(ind.rd_rel.relam) {
+            K::Btree
+            | K::Hash
+            | K::Gin
+            | K::Gist
+            | K::Spgist
+            | K::Brin
+            | K::Hnsw
+            | K::Bloom => {}
+            #[allow(unreachable_patterns)]
+            _ => return None,
         }
     }
     if vacrel.rel_pages == 0 {

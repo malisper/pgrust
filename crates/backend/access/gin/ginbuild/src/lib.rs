@@ -46,7 +46,9 @@ pub fn ginbuildempty(index: &Relation<'_>) -> PgResult<()> {
     Ok(())
 }
 
-/// ginbuild: serial accumulate + dump (parallel workers unported).
+/// ginbuild: serial accumulate + dump. C's parallel arm needs a tuplesort
+/// sharing a SortCoordinate across workers; tuplesort here is serial-only,
+/// so the build stays serial until a parallel tuplesort exists.
 pub fn ginbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,

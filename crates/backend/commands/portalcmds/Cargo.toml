@@ -21,6 +21,7 @@ portalcmds_seams = { path = "../portalcmds_seams" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
 resowner_seams = { path = "../../utils/resowner/resowner_seams" }
 types_resowner = { path = "../../../_support/types/types_resowner" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
 nodes_params = { path = "../../nodes/params" }
 postgres = { path = "../../tcop/postgres" }
 pquery = { path = "../../tcop/pquery" }
@@ -63,6 +64,7 @@ scan_fgram = { path = "../../parser/scan_fgram" }
 parser_seams = { path = "../../parser/parser_seams" }
 parse_expr = { path = "../../parser/parse_expr" }
 parser_analyze = { path = "../../parser/parser_analyze" }
+outfuncs = { path = "../../nodes/outfuncs" }
 pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 pqcomm_seams = { path = "../../libpq/pqcomm_seams" }

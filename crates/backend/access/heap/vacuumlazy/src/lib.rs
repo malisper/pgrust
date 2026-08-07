@@ -25,7 +25,7 @@ use ::nbtree::IndexVacuumInfo;
 use ::types_nbtree::IndexBulkDeleteResult;
 use ::types_rel::lock::{NoLock, RowExclusiveLock};
 use ::types_rel::Relation;
-use ::mcx::{Mcx, PgVec};
+use ::mcx::Mcx;
 use ::tableam_vocab::{
     VacOptValue, VacuumCutoffs, VacuumParams, VACOPT_DISABLE_PAGE_SKIPPING, VACOPT_VERBOSE,
 };
@@ -800,10 +800,13 @@ fn dead_items_reset(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
 }
 
 // indexam's reap check binary-searches a sorted dead-TID slice (recorded
-// divergence); materialized per round until that lane adopts TidStoreIsMember.
-fn collect_dead_tids<'mcx>(vacrel: &LVRelState<'_, 'mcx>) -> PgVec<'mcx, ItemPointerData> {
-    let mut tids: PgVec<'mcx, ItemPointerData> =
-        PgVec::with_capacity_in(vacrel.dead_items_info.num_items as usize, vacrel.mcx);
+// divergence); materialized per index pass until that lane adopts
+// TidStoreIsMember. One Arc snapshot per pass: the serial arm reads the
+// slice, the parallel arm shares the SAME allocation with its workers
+// (vacuumparallel stores an Arc clone, never a re-copy).
+fn collect_dead_tids(vacrel: &LVRelState<'_, '_>) -> std::sync::Arc<[ItemPointerData]> {
+    let mut tids: Vec<ItemPointerData> =
+        Vec::with_capacity(vacrel.dead_items_info.num_items as usize);
     let mut iter = vacrel.dead_items.as_ref().unwrap().begin_iterate();
     let mut offsets = [InvalidOffsetNumber; MaxOffsetNumber as usize];
     while let Some(res) = iter.next() {
@@ -814,7 +817,7 @@ fn collect_dead_tids<'mcx>(vacrel: &LVRelState<'_, 'mcx>) -> PgVec<'mcx, ItemPoi
         }
     }
     debug_assert_eq!(tids.len() as i64, vacrel.dead_items_info.num_items);
-    tids
+    tids.into()
 }
 
 fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32) -> PgResult<()> {
@@ -1565,7 +1568,7 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
             vacrel.rel,
             &vacrel.indrels,
             &vacrel.bstrategy,
-            &dead_tids,
+            std::sync::Arc::clone(&dead_tids),
             old_live_tuples,
             vacrel.num_index_scans as i32,
         )?;

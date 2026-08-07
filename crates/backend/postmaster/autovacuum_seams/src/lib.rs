@@ -2,6 +2,21 @@ seam_core::seam!(
     pub fn wake_autovacuum_launcher()
 );
 
+// AutoVacuumWorkItemType (autovacuum.h): AVW_BRINSummarizeRange is the only
+// work-item type C defines.
+pub const AVW_BRIN_SUMMARIZE_RANGE: i32 = 0;
+
+seam_core::seam!(
+    // AutoVacuumRequestWork (autovacuum.c): register a work item for the next
+    // autovacuum worker on this database; returns false when the shmem
+    // work-item array is full (callers treat requests as best-effort).
+    pub fn auto_vacuum_request_work(
+        av_type: i32,
+        relation_id: types_core::Oid,
+        blkno: types_core::BlockNumber
+    ) -> bool
+);
+
 seam_core::seam!(
     // autovac_init (autovacuum.c): startup-time sanity check of autovacuum GUCs.
     pub fn autovac_init()

@@ -600,12 +600,16 @@ fn transientrel_startup<'mcx>(
     // ours does not, so the lock moves to this first open (same end state).
     let rel = table::table_open(state.mcx, state.transientoid, AccessExclusiveLock)?;
     state.output_cid = xact::GetCurrentCommandId(true)?;
-    // C adds TABLE_INSERT_FROZEN; the frozen insert's visibilitymap_pin lane
-    // is unported (hio.rs) — rows carry a live committed xmin instead, same
-    // visibility, page vm/PD_ALL_VISIBLE bits diverge until that lane lands.
-    state.ti_options = tableam_vocab::TABLE_INSERT_SKIP_FSM;
+    // SKIP_FSM | FROZEN as C (matview.c transientrel_startup) — both REFRESH
+    // and the CREATE arm's datafill route here, same as C's
+    // RefreshMatViewByOid (createas.c does NOT freeze plain CTAS, and our
+    // intorel receiver matches that). heap_prepare_insert stamps frozen xmin
+    // on both insert paths; the multi-insert path additionally sets
+    // PD_ALL_VISIBLE + VM bits at load time, and the single-insert path does
+    // not — exactly C's heap_insert/heap_multi_insert split.
+    state.ti_options = tableam_vocab::TABLE_INSERT_SKIP_FSM | tableam_vocab::TABLE_INSERT_FROZEN;
     state.bistate = Some(heapam::GetBulkInsertState());
-    // W1 multi-insert buffering (PGRUST_CTAS_MULTIINSERT, default OFF).
+    // W1 multi-insert buffering (PGRUST_CTAS_MULTIINSERT, default ON).
     state.mibuf = tableam::write_buffer::write_buffer_begin(&rel);
     state.rel = Some(rel);
     Ok(())

@@ -18,6 +18,7 @@ types_relscan = { path = "../../index/relscan" }
 brin_tuple = { path = "../brin_tuple" }
 brin_pageops = { path = "../brin_pageops" }
 brin_minmax = { path = "../brin_minmax" }
+autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 elog_seams = { path = "../../../utils/error/elog_seams" }
 indexam_seams = { path = "../../index/indexam_seams" }

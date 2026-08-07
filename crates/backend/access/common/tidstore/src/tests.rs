@@ -300,3 +300,73 @@ fn shared_store_threads() {
     drop(guard);
     assert!(shared.memory_usage() > 0);
 }
+
+/// Handle lifecycle (TidStoreGetHandle/Attach/Detach, thread-native): the
+/// owner mints the handle, worker threads attach their own participant
+/// references, inserts are visible across participants, workers detach, and
+/// the owner drops (destroys) last.
+#[test]
+fn handle_attach_detach_owner_destroys_last() {
+    let owner = SharedTidStore::create_shared(2 * 1024 * 1024, 0).unwrap();
+    let handle = owner.get_handle();
+    let nthreads = 4u32;
+    let per_thread = 300u32;
+
+    std::thread::scope(|s| {
+        for t in 0..nthreads {
+            let handle = handle.clone();
+            s.spawn(move || {
+                let store = SharedTidStore::attach(&handle);
+                for i in 0..per_thread {
+                    let blk = t * per_thread + i;
+                    let offs = [1, (2 + (blk % 100)) as OffsetNumber];
+                    store.lock_exclusive().set_block_offsets(blk, &offs).unwrap();
+                }
+                // Cross-participant visibility: probe a block another
+                // participant may have inserted; own inserts must be seen.
+                let guard = store.lock_share();
+                assert!(guard.is_member(&ItemPointerData::new(t * per_thread, 1)));
+                drop(guard);
+                store.detach();
+            });
+        }
+    });
+
+    // All participants detached; the owner reads everything and drops last.
+    let guard = owner.lock_share();
+    let mut iter = guard.begin_iterate();
+    let mut n_blocks = 0u32;
+    while let Some(res) = iter.next() {
+        assert_eq!(res.blkno, n_blocks);
+        n_blocks += 1;
+    }
+    assert_eq!(n_blocks, nthreads * per_thread);
+    drop(guard);
+    drop(owner);
+}
+
+/// A handle is a value (C: dsa_pointer): it may outlive every participant's
+/// detach and still be safe to hold, clone, and re-attach through.
+#[test]
+fn handle_outlives_detach() {
+    let owner = SharedTidStore::create_shared(1024 * 1024, 0).unwrap();
+    owner.lock_exclusive().set_block_offsets(7, &[3, 9]).unwrap();
+
+    let handle = owner.get_handle();
+    let p1 = SharedTidStore::attach(&handle);
+    assert!(p1.lock_share().is_member(&ItemPointerData::new(7, 9)));
+    p1.detach();
+
+    // Re-attach through the same (cloned) handle after the first detach.
+    let handle2 = handle.clone();
+    let p2 = SharedTidStore::attach(&handle2);
+    assert!(p2.lock_share().is_member(&ItemPointerData::new(7, 3)));
+    assert!(!p2.lock_share().is_member(&ItemPointerData::new(7, 4)));
+    p2.detach();
+
+    drop(owner);
+    // The handle still holds the memory alive after the owner destroyed;
+    // dropping it releases the last reference.
+    drop(handle);
+    drop(handle2);
+}
