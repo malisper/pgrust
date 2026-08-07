@@ -29,12 +29,18 @@ use types_tuple::NameData;
 
 use crate::fromparse::{EolType, INPUT_BUF_SIZE, RAW_BUF_SIZE};
 use crate::{
-    force_flags, unported, CopyFormatOptions, CopyGetAttnums, ProcessCopyOptions, RELKIND_RELATION,
+    force_flags, CopyFormatOptions, CopyGetAttnums, ProcessCopyOptions, RELKIND_RELATION,
 };
 
 pub(crate) enum CopySrc<'mcx, 's> {
     File { fd: i32, filename: &'s str },
     Frontend { msgbuf: StringInfo<'mcx> },
+    // copyfrom.c:1850 (`cstate->copy_file = stdin`): the pipe source of a
+    // non-remote session — single-user mode's COPY ... FROM STDIN. The read
+    // path mirrors C's greedy fread(maxread): bytes past the \. terminator
+    // that land in raw_buf are discarded with it, exactly as C's shared
+    // stdio buffer loses them to the interactive query loop.
+    Stdin,
     // COPY_CALLBACK (copyfrom_internal.h): tablesync pulls bytes from the
     // publisher's COPY OUT stream. cb(buf, minread) fills up to buf.len()
     // bytes, at least minread unless the stream ends; 0 = EOF.
@@ -348,10 +354,14 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
             CopySrc::File { fd, filename }
         }
         None => {
+            // copyfrom.c:1847: a pipe COPY outside a remote session
+            // (single-user mode) reads from the process's stdin instead of
+            // the frontend protocol.
             if elog::config::where_to_send_output() != CommandDest::Remote {
-                unported("FROM STDIN outside a remote session (stdin file arm)");
+                CopySrc::Stdin
+            } else {
+                receive_copy_begin(mcx, attnumlist.len(), opts.binary)?
             }
-            receive_copy_begin(mcx, attnumlist.len(), opts.binary)?
         }
         }
     };

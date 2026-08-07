@@ -35,7 +35,7 @@ use types_slot::SlotData;
 use types_tuple::TupleDescData;
 
 use crate::{
-    force_flags, unported, CopyFormatOptions, CopyGetAttnums, ProcessCopyOptions, RELKIND_RELATION,
+    force_flags, CopyFormatOptions, CopyGetAttnums, ProcessCopyOptions, RELKIND_RELATION,
 };
 
 // C buffers per-row fwrite in libc's FILE; here fe_msgbuf retains rows until
@@ -45,6 +45,10 @@ const FILE_FLUSH_THRESHOLD: usize = 65536;
 enum CopyDest<'s> {
     File { fd: i32, filename: &'s str },
     Frontend,
+    // copyto.c:919 (`cstate->copy_file = stdout`): the pipe destination of a
+    // non-remote session — single-user mode's COPY ... TO STDOUT. Raw copy
+    // bytes go to the process's stdout, interleaved with debugtup rows.
+    Stdout,
 }
 
 pub struct CopyToState<'mcx, 's> {
@@ -172,10 +176,13 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
             CopyDest::File { fd: copy_file, filename }
         }
         None => {
+            // copyto.c:918: a pipe COPY outside a remote session (single-user
+            // mode) writes to the process's stdout instead of the frontend.
             if elog::config::where_to_send_output() != CommandDest::Remote {
-                unported("TO STDOUT outside a remote session (stdout file arm)");
+                CopyDest::Stdout
+            } else {
+                CopyDest::Frontend
             }
-            CopyDest::Frontend
         }
     };
 
@@ -185,7 +192,8 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
     );
     let progress_type = match dest {
         CopyDest::File { .. } => PROGRESS_COPY_TYPE_FILE,
-        CopyDest::Frontend => PROGRESS_COPY_TYPE_PIPE,
+        // C sets PIPE for the whole pipe arm, stdout included (copyto.c:915).
+        CopyDest::Frontend | CopyDest::Stdout => PROGRESS_COPY_TYPE_PIPE,
     };
     pgstat_progress_update_multi_param(
         &[PROGRESS_COPY_COMMAND, PROGRESS_COPY_TYPE],
@@ -453,6 +461,7 @@ pub fn DoCopyTo<'mcx>(
     }
     match cstate.dest {
         CopyDest::File { .. } => flush_to_file(cstate)?,
+        CopyDest::Stdout => flush_to_stdout(cstate)?,
         CopyDest::Frontend => {
             // SendCopyEnd: no unsent data, then CopyDone.
             debug_assert!(cstate.fe_msgbuf.is_empty());
@@ -676,6 +685,11 @@ fn send_end_of_row(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
                 flush_to_file(cstate)?;
             }
         }
+        CopyDest::Stdout => {
+            if cstate.fe_msgbuf.len() >= FILE_FLUSH_THRESHOLD {
+                flush_to_stdout(cstate)?;
+            }
+        }
         CopyDest::Frontend => {
             pqcomm::pq_putmessage(b'd', cstate.fe_msgbuf.as_bytes())?;
             cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
@@ -718,6 +732,30 @@ fn flush_to_file(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
     Ok(())
 }
 
+// The stdout arm of C's CopySendEndOfRow COPY_FILE fwrite (copy_file =
+// stdout, copyto.c:919). std::io::stdout() is the same buffered handle the
+// debugtup receiver and the "backend> " prompt print through, so ordering
+// with the surrounding session output is preserved exactly as C's shared
+// stdio FILE buffer preserves it.
+fn flush_to_stdout(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
+    debug_assert!(matches!(cstate.dest, CopyDest::Stdout));
+    if cstate.fe_msgbuf.is_empty() {
+        return Ok(());
+    }
+    use std::io::Write;
+    if let Err(e) = std::io::stdout().write_all(cstate.fe_msgbuf.as_bytes()) {
+        ereport(ERROR)
+            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg("could not write to COPY file: %m")
+            .finish(loc("CopySendEndOfRow"))?;
+    }
+    cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
+    pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, cstate.bytes_processed as i64);
+    cstate.fe_msgbuf.reset();
+    Ok(())
+}
+
 /// `EndCopyTo` + `EndCopy` (copyto.c).
 pub fn EndCopyTo(mut cstate: CopyToState<'_, '_>) -> PgResult<()> {
     if let Some(qd) = cstate.query_desc.take() {
@@ -725,6 +763,11 @@ pub fn EndCopyTo(mut cstate: CopyToState<'_, '_>) -> PgResult<()> {
         execmain_seams::executor_end::call(qd)?;
         execmain_seams::free_query_desc::call(qd);
         snapmgr::PopActiveSnapshot()?;
+    }
+    // EndCopy never closes stdout (FreeFile runs only for the filename arm);
+    // flush what DoCopyTo's error paths may have left buffered.
+    if matches!(cstate.dest, CopyDest::Stdout) {
+        flush_to_stdout(&mut cstate)?;
     }
     if let CopyDest::File { fd, filename } = cstate.dest {
         flush_to_file(&mut cstate)?;

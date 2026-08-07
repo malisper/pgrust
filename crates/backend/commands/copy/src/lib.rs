@@ -41,12 +41,6 @@ const ACL_SELECT: u64 = 1 << 1;
 
 const RELKIND_RELATION: u8 = b'r';
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: COPY {what}")
-}
-
 // CopyHeaderChoice (copy.h).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum CopyHeaderChoice {

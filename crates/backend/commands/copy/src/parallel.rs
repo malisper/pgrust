@@ -2279,6 +2279,11 @@ fn admit<'mcx>(
     if matches!(cstate.src, CopySrc::Callback { .. }) {
         refuse!("callback source (tablesync COPY is serial)");
     }
+    // Stdin sources (single-user mode's pipe COPY) stay serial: one thread of
+    // execution owns the interleaved stdin query/data stream.
+    if matches!(cstate.src, CopySrc::Stdin) {
+        refuse!("stdin source (single-user COPY is serial)");
+    }
     // File-source size floor (frontend streams engage regardless).
     if let CopySrc::File { fd, .. } = &cstate.src {
         let size = fd::with_allocated_stdio(*fd, |f| f.metadata().map(|m| m.len()).unwrap_or(0))

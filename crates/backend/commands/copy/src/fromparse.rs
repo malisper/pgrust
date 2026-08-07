@@ -91,6 +91,17 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 }
                 Ok(n)
             }
+            CopySrc::Stdin => {
+                // C's fread(maxread) on stdin (copyfromparse.c:252): greedy
+                // fill to maxread; raw_reached_eof only when a call yields
+                // nothing at all (C checks bytesread == 0, not feof).
+                let dst = &mut self.raw_buf[at..at + maxread];
+                let n = Self::stdin_read(dst)?;
+                if n == 0 {
+                    self.raw_reached_eof = true;
+                }
+                Ok(n)
+            }
             CopySrc::Frontend { .. } => {
                 // SAFETY: dst aliases raw_buf, which the frontend reader
                 // never touches through self (it reads src's msgbuf and the
@@ -112,6 +123,31 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 unreachable!("parquet sources produce rows, not raw bytes")
             }
         }
+    }
+
+    // The stdin arm of C's fread: loop plain reads until the buffer is full
+    // or EOF (fread's own contract). std::io::stdin() is the same buffered
+    // handle interactive_getc reads the query stream through, so the data
+    // lines the interactive reader has not consumed are exactly what COPY
+    // sees — C's shared stdio FILE buffer, same shape.
+    fn stdin_read(dst: &mut [u8]) -> PgResult<usize> {
+        use std::io::Read;
+        let mut filled = 0usize;
+        while filled < dst.len() {
+            match std::io::stdin().read(&mut dst[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    ereport(ERROR)
+                        .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                        .errcode_for_file_access()
+                        .errmsg("could not read from COPY file: %m")
+                        .finish(loc("CopyGetData"))?;
+                }
+            }
+        }
+        Ok(filled)
     }
 
     fn file_read(fd: i32, dst: &mut [u8]) -> PgResult<usize> {
@@ -157,6 +193,9 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             }
             CopySrc::Callback { .. } => {
                 unreachable!("callback sources are refused at parallel admission")
+            }
+            CopySrc::Stdin => {
+                unreachable!("stdin sources are refused at parallel admission")
             }
             CopySrc::Chunk(_) => unreachable!("chunk sources never feed the segmentator"),
             CopySrc::Parquet(_) => {
