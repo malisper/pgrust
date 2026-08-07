@@ -12,7 +12,7 @@ use ::types_storage::bufpage::PageMut;
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
 use crate::{
-    meta_of, opclass, page_bytes_mut, page_mut, page_ref, relation_needs_wal, unported,
+    meta_of, opclass, page_bytes_mut, page_mut, page_ref, relation_needs_wal,
     write_meta_to, write_opaque_to, RM_GIN,
 };
 
@@ -20,8 +20,12 @@ use crate::{
 /// tsvector_ops / array_ops; anything else panics loudly.
 pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     let natts = rel.rd_att.natts;
+    // INVARIANT: 1 <= natts <= GIN_MAX_KEY_COLS (32) == INDEX_MAX_KEYS, enforced at
+    // DDL time (commands/indexcmds/src/define.rs:547 rejects 0 key columns,
+    // define.rs:551-556 rejects >32 with ERRCODE_TOO_MANY_COLUMNS), as C does in
+    // DefineIndex (indexcmds.c).
     if natts < 1 || natts as usize > GIN_MAX_KEY_COLS {
-        unported(&format!("GIN index with {natts} key columns (initGinState)"));
+        panic!("gin index with {natts} key columns outside 1..={GIN_MAX_KEY_COLS}, which DDL rejects (indexcmds/src/define.rs:547,551-556)");
     }
     let mut cols = [GinColState {
         opclass: GinOpclass::JsonbOps,
@@ -44,6 +48,24 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
 fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
     let opcintype = rel.rd_opcintype[i];
     let opfamily = rel.rd_opfamily[i];
+
+    // C's initGinState fetches extractQuery through index_getprocinfo, which
+    // errors here (not later, at planning) when the opclass omits it —
+    // CREATE OPERATOR CLASS ... USING gin does not require FUNCTION 2/3.
+    if lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_EXTRACTQUERY_PROC as i16)?
+        == InvalidOid
+    {
+        let cx = ::mcx::MemoryContext::new("gin extractQuery probe");
+        let relname = lsyscache::get_rel_name(cx.mcx(), rel.rd_id)?
+            .map_or_else(String::new, |n| n.as_str().to_string());
+        return Err(Box::new(
+            ::types_error::PgError::error(format!(
+                "missing support function {GIN_EXTRACTQUERY_PROC} for attribute {} of index \"{relname}\"",
+                i + 1
+            ))
+            .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR),
+        ));
+    }
 
     let extract =
         lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_EXTRACTVALUE_PROC as i16)?;

@@ -1570,16 +1570,31 @@ impl<'mcx> EStateData<'mcx> {
                 // (setrefs zaps groupexprs); C's ExecInitRangeTable is
                 // kind-agnostic.
                 | RTEKind::RTE_GROUP => {}
-                // A pulled-up (dead) subquery RTE stays in the range table
-                // for its lock/ACL surface, as in C; a live subquery is the
-                // unported SubqueryScan lane.
+                // A subquery RTE stays in the range table for its lock/ACL
+                // surface, as in C. The executor only ever sees the flat
+                // rtable, in which setrefs nils rte.subquery
+                // (setrefs/src/lib.rs:194; C setrefs.c:553), so subquery is
+                // always None here; SubqueryScan itself is ported
+                // (createplan/src/lib.rs:4972).
                 RTEKind::RTE_SUBQUERY if rte.subquery.is_none() => {}
+                // Invariant tripwire: setrefs strips live substructure from
+                // every flat-rtable RTE (setrefs/src/lib.rs:194).
                 other => panic!(
-                    "ExecInitRangeTable (execUtils.c): {other:?} lane not ported"
+                    "ExecInitRangeTable (execUtils.c): {other:?} RTE with live substructure \
+                     cannot reach the executor, setrefs nils it in the flat rtable \
+                     (setrefs/src/lib.rs:194; C setrefs.c:553)"
                 ),
             }
+            // Invariant tripwire: RLS is supported and its quals are consumed
+            // by the planner (initsplan/src/lib.rs:747-769,
+            // process_security_barrier_quals), then setrefs nils securityQuals
+            // in every flat-rtable RTE (setrefs/src/lib.rs:217; C setrefs.c:565).
             if !rte.securityQuals.is_nil() {
-                panic!("ExecInitRangeTable: row-level security (securityQuals) not ported");
+                panic!(
+                    "ExecInitRangeTable: securityQuals survive into the flat rtable, the \
+                     planner consumes them (initsplan/src/lib.rs:747-769) and setrefs nils \
+                     them (setrefs/src/lib.rs:217; C setrefs.c:565)"
+                );
             }
             self.es_range_table.push(rte);
             self.es_relations.push(None);

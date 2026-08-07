@@ -107,22 +107,34 @@ fn syncfiletag(tag: &FileTag) -> PgResult<FileTagOpResult> {
                 errno: md::last_errno(),
             })
         }
-        h => panic!("unported callee reached from sync.c syncsw[]: {h:?} sync_syncfiletag"),
+        // INVARIANT: the five arms above exhaust the handlers that are ever
+        // enqueued. The only remaining variant is SYNC_HANDLER_NONE, which is
+        // never attached to a request: every SLRU enqueue is guarded by
+        // `sync_handler != SYNC_HANDLER_NONE` (access/transam/slru/src/lib.rs:922,
+        // :1189, :1262) and md always tags SYNC_HANDLER_MD
+        // (storage/smgr/md/src/lib.rs:1262). C's syncsw[] has no NONE row either.
+        h => panic!("sync request carries handler {h:?}: only NONE is unhandled here and it is never enqueued (slru/src/lib.rs:922)"),
     }
 }
 
 fn unlinkfiletag(tag: &FileTag) -> PgResult<FileTagOpResult> {
     match tag.handler {
         SyncRequestHandler::SYNC_HANDLER_MD => smgr::mdunlinkfiletag(*tag),
-        // C's syncsw rows for the SLRU handlers have no unlinkfiletag.
-        h => panic!("unported callee reached from sync.c syncsw[]: {h:?} sync_unlinkfiletag"),
+        // INVARIANT: C's syncsw rows for the SLRU handlers have no
+        // unlinkfiletag, and nothing here enqueues one either — the only
+        // SYNC_UNLINK_REQUEST producer is md's register_unlink_segment
+        // (storage/smgr/md/src/lib.rs:1316), which always tags SYNC_HANDLER_MD.
+        h => panic!("unlink request carries handler {h:?}: the only producer is md register_unlink_segment (md/src/lib.rs:1316), which tags MD"),
     }
 }
 
 fn filetagmatches(tag: &FileTag, candidate: &FileTag) -> bool {
     match tag.handler {
         SyncRequestHandler::SYNC_HANDLER_MD => smgr::mdfiletagmatches(*tag, *candidate),
-        h => panic!("unported callee reached from sync.c syncsw[]: {h:?} sync_filetagmatches"),
+        // INVARIANT: only SYNC_FILTER_REQUESTs reach this, and their only
+        // producer is md's ForgetDatabaseSyncRequests
+        // (storage/smgr/md/src/lib.rs:1343), which always tags SYNC_HANDLER_MD.
+        h => panic!("filter request carries handler {h:?}: the only producer is md ForgetDatabaseSyncRequests (md/src/lib.rs:1343), which tags MD"),
     }
 }
 

@@ -42,7 +42,19 @@ pub fn subscript_handler_for(container_type: Oid) -> PgResult<Option<(SubscriptH
                 .map(|n| n.as_str().to_string());
             match name.as_deref() {
                 Some("hstore_subscript_handler") => Ok(Some((SubscriptHandler::Hstore, typelem))),
-                _ => panic!("getSubscriptingRoutines: typsubscript handler {other} unported"),
+                // User-reachable: CREATE TYPE ... (SUBSCRIPT = fn) accepts
+                // any (internal)->internal function (typecmds
+                // findTypeSubscriptingFunction), so a superuser can pin an
+                // arbitrary handler oid here. pgrust dispatches on the
+                // closed handler set above and refuses others cleanly
+                // (0A000); C would blindly call the proc and treat its
+                // return value as a SubscriptRoutines*.
+                _ => Err(Box::new(
+                    PgError::error(format!(
+                        "type subscripting handler function {other} is not supported"
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                )),
             }
         }
     }

@@ -162,7 +162,12 @@ pub fn ConditionalLockBufferForCleanup(buffer: Buffer) -> PgResult<bool> {
 pub fn IsBufferCleanupOK(buffer: Buffer) -> bool {
     debug_assert!(BufferIsValid(buffer));
     if buffer < 0 {
-        panic!("unported callee reached from bufmgr.c IsBufferCleanupOK: LocalRefCount (localbuf.c)");
+        // C: there should be exactly one local pin, and nobody else to wait
+        // for (bufmgr.c IsBufferCleanupOK's LocalRefCount arm). Reached by
+        // the hash AM on temp relations (bucket split / bucket cleanup).
+        let refcount = crate::localbuf::local_ref_count(buffer);
+        debug_assert!(refcount > 0);
+        return refcount == 1;
     }
     debug_assert!(BufferIsPinned(buffer));
     let desc = shared_desc(buffer);

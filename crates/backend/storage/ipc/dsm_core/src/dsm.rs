@@ -253,9 +253,17 @@ fn make_main_region_dsm_handle(slot: i32) -> dsm_handle {
     handle
 }
 
+// INVARIANT tripwire: min_dynamic_shared_memory is pinned to 0 by
+// check_min_dynamic_shared_memory_hook (lib.rs), so dsm_estimate_size() is
+// always 0, dsm_shmem_init never builds the main region, and no main-region
+// handle can exist for the other arms below. Reaching this means the GUC
+// pin was bypassed.
 #[cold]
 fn main_region_unported() -> ! {
-    panic!("dsm: main-region segments (min_dynamic_shared_memory) unported: utils/mmgr/freepage.c")
+    panic!(
+        "dsm: main-region segment requested with min_dynamic_shared_memory pinned to 0 \
+         (check hook in dsm_core::init_seams): utils/mmgr/freepage.c is unported"
+    )
 }
 
 fn dsm_control_bytes_needed(nitems: u32) -> u64 {

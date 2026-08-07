@@ -355,13 +355,27 @@ pub fn exec_init_modify_table<'mcx>(
         node.operation,
         CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
     ) {
-        panic!(
-            "ExecInitModifyTable (nodeModifyTable.c): {:?} arm not ported",
+        // Invariant tripwire (C twin: nodeModifyTable.c:4544 elog "unknown
+        // operation"): ModifyTable.operation is only ever written by
+        // createplan (createplan/src/lib.rs:2062-2067), which itself panics
+        // on anything but I/U/D/MERGE.
+        unreachable!(
+            "ExecInitModifyTable: {:?} operation cannot occur, createplan is the sole \
+             writer of ModifyTable.operation and admits only I/U/D/MERGE \
+             (createplan/src/lib.rs:2062-2067); C twin nodeModifyTable.c:4544",
             node.operation
         );
     }
     if !node.fdwPrivLists.is_nil() {
-        panic!("ExecInitModifyTable (nodeModifyTable.c): FDW lists not ported");
+        // Invariant tripwire: fdwPrivLists has no producer — PlanForeignModify
+        // is unwired (see the phase-4 note at postgres_fdw/src/deparse.rs:1546-1552),
+        // and foreign-table DML is refused cleanly first at lib.rs:1175-1191
+        // (0A000, matching C's null-hook error).
+        panic!(
+            "ExecInitModifyTable: fdwPrivLists is non-nil but has no producer, \
+             PlanForeignModify is unwired (postgres_fdw/src/deparse.rs:1546-1552) and \
+             foreign-table DML is refused with 0A000 at nodemodifytable/src/lib.rs:1175-1191"
+        );
     }
     // C's arowmarks loop: resolve each non-parent PlanRowMark's junk attnos
     // against the subplan targetlist (ExecFindRowMark + ExecBuildAuxRowMark);
@@ -1153,7 +1167,16 @@ fn check_valid_result_rel<'mcx>(
             CmdType::CMD_INSERT => trigdesc.is_some_and(|td| td.trig_insert_instead_row),
             CmdType::CMD_UPDATE => trigdesc.is_some_and(|td| td.trig_update_instead_row),
             CmdType::CMD_DELETE => trigdesc.is_some_and(|td| td.trig_delete_instead_row),
-            other => panic!("CheckValidResultRel (execMain.c): {other:?} on a view not ported"),
+            // Invariant tripwire (C twin: nodeModifyTable.c:4544 elog "unknown
+            // operation"): createplan is the sole writer of
+            // ModifyTable.operation (createplan/src/lib.rs:2062-2067) and
+            // init re-gates at nodemodifytable/src/lib.rs:354-361.
+            other => unreachable!(
+                "CheckValidResultRel: {other:?} on a view cannot occur, \
+                 ModifyTable.operation is I/U/D/MERGE by construction \
+                 (createplan/src/lib.rs:2062-2067) and re-gated at init \
+                 (nodemodifytable/src/lib.rs:354-361); C twin nodeModifyTable.c:4544"
+            ),
         };
         if !has_instead {
             return Err(error_view_not_updatable(rel, operation));
@@ -1694,7 +1717,16 @@ pub fn mt_accept_row<'mcx>(
                     return Ok(Some(rslot));
                 }
             }
-            other => panic!("ExecModifyTable (nodeModifyTable.c): {other:?} arm not ported"),
+            // Invariant tripwire (C twin: nodeModifyTable.c:4544 elog "unknown
+            // operation"): createplan is the sole writer of
+            // ModifyTable.operation (createplan/src/lib.rs:2062-2067) and
+            // init re-gates at nodemodifytable/src/lib.rs:354-361.
+            other => unreachable!(
+                "ExecModifyTable: {other:?} operation cannot occur, \
+                 ModifyTable.operation is I/U/D/MERGE by construction \
+                 (createplan/src/lib.rs:2062-2067) and re-gated at init \
+                 (nodemodifytable/src/lib.rs:354-361); C twin nodeModifyTable.c:4544"
+            ),
         }
     }
     // The row was consumed without producing a RETURNING row (the former

@@ -4295,11 +4295,13 @@ struct GinQualCounts {
 
 // gincost_pattern (selfuncs.c). `opfamily`/`opcintype`/`collation` are the
 // clause's own index column's (iclause->indexcol), not column 0's.
+#[allow(clippy::too_many_arguments)]
 fn gincost_pattern(
     opfamily: Oid,
     opcintype: Oid,
     collation: Oid,
     indexcol: usize,
+    index_oid: Oid,
     clause_op: Oid,
     query: Datum,
     counts: &mut GinQualCounts,
@@ -4313,8 +4315,9 @@ fn gincost_pattern(
         lsyscache::amop::get_op_opfamily_properties(clause_op, opfamily, false)?;
     let strategy = _strategy as u16;
 
-    let (nentries, npartial, search_mode) =
-        gin::gincost_extract_query(opfamily, opcintype, collation, query, strategy)?;
+    let (nentries, npartial, search_mode) = gin::gincost_extract_query(
+        opfamily, opcintype, collation, query, strategy, indexcol, index_oid,
+    )?;
 
     if nentries <= 0 && search_mode == GIN_SEARCH_MODE_DEFAULT {
         return Ok(false);
@@ -4344,6 +4347,7 @@ fn gincost_scalararrayopexpr<'mcx>(
     opcintype: Oid,
     collation: Oid,
     indexcol: usize,
+    index_oid: Oid,
     clause: Node<'mcx>,
     num_index_entries: f64,
     counts: &mut GinQualCounts,
@@ -4379,7 +4383,16 @@ fn gincost_scalararrayopexpr<'mcx>(
             continue;
         }
         let mut elemcounts = GinQualCounts::default();
-        if gincost_pattern(opfamily, opcintype, collation, indexcol, clause_op, v, &mut elemcounts)? {
+        if gincost_pattern(
+            opfamily,
+            opcintype,
+            collation,
+            indexcol,
+            index_oid,
+            clause_op,
+            v,
+            &mut elemcounts,
+        )? {
             num_possible += 1;
             if elemcounts.att_has_full_scan[indexcol] && !elemcounts.att_has_normal_scan[indexcol] {
                 elemcounts.partial_entries = 0.0;
@@ -4407,7 +4420,7 @@ fn gincostestimate(
     path_id: types_pathnodes::PathId,
     loop_count: f64,
 ) -> PgResult<AmCostEstimate> {
-    let (index_quals, index_pages, index_tuples, index_rel, reltablespace, gin_stats, opfamilies, opcintypes, indexcollations, nkeycolumns) = {
+    let (index_quals, index_pages, index_tuples, index_rel, reltablespace, gin_stats, opfamilies, opcintypes, indexcollations, nkeycolumns, index_oid) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
         let index = ip.indexinfo.as_ref().expect("indexinfo set");
         (
@@ -4421,6 +4434,7 @@ fn gincostestimate(
             index.opcintype.clone(),
             index.indexcollations.clone(),
             index.nkeycolumns,
+            index.indexoid,
         )
     };
     let index_rel_relid = run.root.rel(index_rel).relid as i32;
@@ -4528,6 +4542,7 @@ fn gincostestimate(
                                     opcintype,
                                     collation,
                                     indexcol,
+                                    index_oid,
                                     opno,
                                     c.constvalue,
                                     &mut counts,
@@ -4545,6 +4560,7 @@ fn gincostestimate(
                             opcintype,
                             collation,
                             indexcol,
+                            index_oid,
                             clause,
                             num_entries,
                             &mut counts,

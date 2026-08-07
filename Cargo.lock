@@ -5060,6 +5060,7 @@ name = "dsm_core"
 version = "0.0.0"
 dependencies = [
  "elog",
+ "guc_seams",
  "guc_tables",
  "init_small",
  "ipc_seams",

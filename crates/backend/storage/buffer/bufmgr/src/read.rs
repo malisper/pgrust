@@ -408,7 +408,14 @@ pub(crate) fn WaitIO(desc: &BufferDesc) -> PgResult<()> {
                 continue;
             }
             if !aio_seams::uring_buf_read_wait::is_installed() {
-                panic!("unported callee reached from bufmgr.c WaitIO: pgaio_wref_wait (io_wref armed with no uring backend)");
+                // INVARIANT: the only writer of an untagged wref is
+                // uring_set_io_wref (uring.rs), reachable only through the
+                // uring_buf_read seam — and uring_buf_read and
+                // uring_buf_read_wait are installed together by
+                // aio_uring::init_seams(), which _support/seams_init calls
+                // unconditionally at boot. An armed wref with no wait seam
+                // means the process skipped seams_init.
+                panic!("io_wref armed but the uring wait seam is absent: uring_buf_read and uring_buf_read_wait install together in aio_uring::init_seams()");
             }
             let gen = ((wref.generation_upper as u64) << 32) | wref.generation_lower as u64;
             aio_seams::uring_buf_read_wait::call(wref.aio_index, gen);
@@ -516,7 +523,13 @@ fn AbortBufferIO(buffer: Buffer) {
         UnlockBufHdr(desc, buf_state);
     } else {
         UnlockBufHdr(desc, buf_state);
-        panic!("unported arm reached from bufmgr.c AbortBufferIO: dirty-write abort (every FlushBuffer error terminates inline; no write path leaks BM_IO_IN_PROGRESS)");
+        // INVARIANT: the only write-side StartBufferIO is FlushBuffer
+        // (write.rs), and every one of its exits calls TerminateBufferIO
+        // inline (with forget_owner) before an Err can propagate, so no
+        // write IO is ever left in progress for abort to clean up. Reaching
+        // this means a callee panicked between StartBufferIO and
+        // TerminateBufferIO on the write path.
+        panic!("AbortBufferIO found a dirty buffer with IO in progress: FlushBuffer terminates every write IO inline (write.rs), so no write path can leak BM_IO_IN_PROGRESS");
     }
     TerminateBufferIO(desc, false, BM_IO_ERROR, false, false);
 }

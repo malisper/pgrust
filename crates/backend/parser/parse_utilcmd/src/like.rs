@@ -28,7 +28,6 @@ const RELKIND_MATVIEW: u8 = b'm';
 const RELKIND_COMPOSITE_TYPE: u8 = b'c';
 const RELKIND_FOREIGN_TABLE: u8 = b'f';
 const RELKIND_PARTITIONED_TABLE: u8 = b'p';
-const BTREE_AM_OID: Oid = 403;
 const ACL_SELECT: u64 = 1 << 1;
 const INDOPTION_DESC: i16 = 1 << 0;
 const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
@@ -589,15 +588,14 @@ pub fn generateClonedIndexStmt<'mcx>(
     let indrelid = idxrec.indrelid;
     let mut constraint_oid = InvalidOid;
 
-    // get_am_name over the closed AM set (AMOID syscache unported).
-    let amname = match source_idx.rd_rel.relam {
-        BTREE_AM_OID => "btree",
-        405 => "hash",
-        2742 => "gin",
-        783 => "gist",
-        4000 => "spgist",
-        3580 => "brin",
-        other => unported(&format!("generateClonedIndexStmt: index AM {other}")),
+    // get_am_name via the AMOID syscache (C parse_utilcmd.c reads
+    // amrec->amname), so extension AMs with dynamic oids (bloom, hnsw)
+    // clone like the builtins.
+    let amname: &'mcx str = {
+        let relam = source_idx.rd_rel.relam;
+        let name = syscache_seams::pg_am_amname::call(relam)?
+            .unwrap_or_else(|| panic!("cache lookup failed for access method {relam}"));
+        str_in(mcx, &name)?
     };
     let table_space = if source_idx.rd_rel.reltablespace != InvalidOid {
         let spc = source_idx.rd_rel.reltablespace;

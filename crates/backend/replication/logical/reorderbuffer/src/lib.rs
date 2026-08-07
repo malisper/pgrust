@@ -36,10 +36,18 @@ use types_rel::RelationData;
 use types_storage::{RelFileLocator, SharedInvalidationMessage};
 use types_tuple::{ItemPointerData, SizeofHeapTupleHeader};
 
+// INVARIANT: the placeholder callbacks below are never invoked. The only
+// production allocator of a ReorderBuffer is StartupDecodingContext
+// (replication/logical/logical/src/lib.rs:316), which overwrites every
+// non-optional slot (logical/src/lib.rs:371-383) before any decoding runs;
+// the optional stream_* slots are installed all-or-nothing
+// (logical/src/lib.rs:642-651), exactly gating streaming as C's
+// ctx->streaming does. Reaching one means a ReorderBuffer was used without
+// StartupDecodingContext.
 #[cold]
 #[inline(never)]
 pub(crate) fn unported(what: &str) -> ! {
-    panic!("unported callee reached from reorderbuffer.c: {what}")
+    panic!("ReorderBuffer callback placeholder invoked: {what} — StartupDecodingContext (logical/src/lib.rs:371) installs every slot before decode")
 }
 
 #[cold]

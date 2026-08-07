@@ -561,9 +561,6 @@ pub fn index_create<'mcx>(
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
     let namespaceId = heapRelation.rd_rel.relnamespace;
-    if heapRelation.rd_rel.relisshared {
-        unported("index_create: shared relations");
-    }
     let relpersistence = heapRelation.rd_rel.relpersistence;
 
     if indexInfo.ii_NumIndexAttrs < 1 {
@@ -597,6 +594,18 @@ pub fn index_create<'mcx>(
                 ERRCODE_FEATURE_NOT_SUPPORTED,
             ));
         }
+    }
+
+    // We cannot allow indexing a shared relation after initdb (there's no way
+    // to make the entry in other databases' pg_class). C index.c:868-873 —
+    // reachable with allow_system_table_mods on, so it must be this clean
+    // 55000 and it must come AFTER the system-catalog refusal above, which is
+    // what a plain superuser sees.
+    if heapRelation.rd_rel.relisshared && !miscinit_seams::is_bootstrap_processing_mode::call() {
+        return Err(err(
+            "shared indexes cannot be created after initdb".to_string(),
+            types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+        ));
     }
 
     if lsyscache::get_relname_relid(indexRelationName, namespaceId)? != InvalidOid {
@@ -1150,7 +1159,7 @@ pub fn index_build<'mcx>(
                 types_relscan::IndexAmKind::Hnsw => pgvector_hnsw_build::hnswbuildempty(indexRelation)?,
                 types_relscan::IndexAmKind::Bloom => bloom_build::blbuildempty(indexRelation)?,
                 #[allow(unreachable_patterns)]
-                other => unported(&format!("index_build: ambuildempty for AM {other:?}")),
+                _ => unreachable!("IndexAmKind match is exhaustive (relscan/src/lib.rs:31); every supported AM has ambuildempty ported"),
             }
         }
     }

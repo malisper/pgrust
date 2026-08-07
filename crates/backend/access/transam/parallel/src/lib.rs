@@ -329,7 +329,12 @@ fn LookupParallelWorkerFunction(library_name: &str, function_name: &str) -> PgRe
         return Ok(*f);
     }
     if UNPORTED_INTERNAL_WORKERS.contains(&function_name) {
-        panic!("LookupParallelWorkerFunction: internal worker \"{function_name}\" unported (its owner registers it when its lane lands)");
+        // INVARIANT: nothing requests these C entrypoints. Query parallelism
+        // registers ParallelQueryMain at executor init; parallel btree builds
+        // run through their own registered pool entrypoint (nbtsort); brin and
+        // gin builds are serial. A request here means a lane started emitting
+        // C's worker names without registering its own.
+        panic!("LookupParallelWorkerFunction: internal worker \"{function_name}\" has no producer — in-tree gangs register their own entrypoints (nbtsort pool main, ParallelQueryMain) or run serial");
     }
     Err(ereport(ERROR)
         .errmsg(format!("internal function \"{function_name}\" not found"))

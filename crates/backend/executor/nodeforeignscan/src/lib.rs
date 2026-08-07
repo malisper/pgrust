@@ -143,6 +143,18 @@ pub fn exec_init_foreign_scan<'mcx>(
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
     // unported: ExecInitForeignScan (nodeForeignscan.c) direct-modify, FDW
     // outer-plan, and fdw_scan_tlist lanes raise clean feature errors.
+    // These backstops are currently unreachable in production — revisit at
+    // phase-4 DML pushdown:
+    // - no PlanDirectModify hook exists: FdwPlanRoutine carries only
+    //   rel_size/paths/plan hooks (planner/src/fdwplan.rs:34-37), so
+    //   operation stays CMD_SELECT and resultRelation 0;
+    // - both create_foreignscan_path call sites pass fdw_outerpath None
+    //   (postgres_fdw/src/plan.rs:281-294, file_fdw/src/lib.rs:551-564),
+    //   so no outer subplan is attached;
+    // - both GetForeignPlan impls pass fdw_scan_tlist nil
+    //   (postgres_fdw/src/plan.rs:372-383, file_fdw/src/lib.rs:593-601),
+    //   and postgres_fdw refuses non-baserels at plan.rs:313-317, so
+    //   scanrelid is never 0.
     if node.operation != CmdType::CMD_SELECT || node.resultRelation != 0 {
         return Err(foreign_scan_unported("direct modification of a foreign table"));
     }

@@ -751,6 +751,8 @@ pub fn gincost_extract_query(
     collation: ::types_core::Oid,
     query: Datum,
     strategy: StrategyNumber,
+    indexcol: usize,
+    index_oid: ::types_core::Oid,
 ) -> PgResult<(i32, i32, i32)> {
     let extract = lsyscache::get_opfamily_proc(
         opfamily,
@@ -759,7 +761,18 @@ pub fn gincost_extract_query(
         GIN_EXTRACTQUERY_PROC as i16,
     )?;
     if extract == ::types_core::InvalidOid {
-        crate::unported("missing GIN extractQuery support proc (gincostestimate)");
+        // User-reachable: CREATE OPERATOR CLASS ... USING gin without a
+        // FUNCTION 2 (extractQuery) entry is accepted at DDL time, and the
+        // planner lands here on the first scan over such an index. C throws
+        // the same error as index_getprocinfo (selfuncs.c:8018).
+        let cx = ::mcx::MemoryContext::new("gincost extract probe");
+        let relname = lsyscache::get_rel_name(cx.mcx(), index_oid)?
+            .map_or_else(String::new, |n| n.as_str().to_string());
+        return Err(Box::new(::types_error::PgError::error(format!(
+            "missing support function {GIN_EXTRACTQUERY_PROC} for attribute {} of index \"{relname}\"",
+            indexcol + 1
+        ))
+        .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR)));
     }
     let (opclass, can_partial) = match extract {
         3483 => (GinOpclass::JsonbOps, false),

@@ -39,11 +39,30 @@ fn set_query_completion(qc: &mut Option<&mut QueryCompletion>, tag: types_core::
 }
 
 // Uncollected command types stay loud instead of silently missing from
-// pg_event_trigger_ddl_commands.
-fn collect_gap(what: &str) {
+// pg_event_trigger_ddl_commands. C collects every one of these via
+// EventTriggerCollectSimpleCommand (event_trigger.c) and never errors here;
+// porting collection per command type is the event-trigger-collection lane.
+// Until then the refusal is a clean 0A000, not a panic: it fires only while
+// an event trigger with ddl_command_end/sql_drop is active, and erroring
+// aborts the (sub)transaction, so no half-collected DDL escapes.
+fn collect_gap(what: &str) -> PgResult<()> {
     if event_trigger::EventTriggerCollectionActive() {
-        panic!("unported: {what} command collection (active ddl_command_end/sql_drop state)");
+        return Err(Box::new(
+            ::elog::ereport(types_error::ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "{what} is not supported while an event trigger with a \
+                     ddl_command_end or sql_drop tag exists"
+                ))
+                .errdetail(
+                    "Collecting this command for pg_event_trigger_ddl_commands() is not \
+                     implemented yet; the command is refused rather than firing the \
+                     trigger with it missing.",
+                )
+                .into_error(),
+        ));
     }
+    Ok(())
 }
 
 // ProcessUtility_hook (hook-surface.md section 2): enter/leave pair so a
@@ -1156,7 +1175,7 @@ fn slow_switch<'mcx>(
                 >(stmt)
             };
             // C: address = AlterCollation; no address surface yet.
-            collect_gap("ALTER COLLATION");
+            collect_gap("ALTER COLLATION")?;
             collationcmds::AlterCollation(mcx, stmt)?;
             Ok(None)
         }
@@ -1165,7 +1184,7 @@ fn slow_switch<'mcx>(
             let stmt = parsetree
                 .as_variant::<types_nodes::rawnodes::AlterStatsStmt>()
                 .expect("AlterStatsStmt");
-            collect_gap("ALTER STATISTICS");
+            collect_gap("ALTER STATISTICS")?;
             statscmds::AlterStatistics(mcx, stmt)?;
             Ok(None)
         }
@@ -1200,7 +1219,7 @@ fn slow_switch<'mcx>(
             match exec_rename_stmt_inner(mcx, stmt)? {
                 Some(address) => Ok(Some(address)),
                 None => {
-                    collect_gap("RENAME");
+                    collect_gap("RENAME")?;
                     Ok(None)
                 }
             }
@@ -1228,7 +1247,7 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::AlterFdwStmt>()
                 .expect("AlterFdwStmt");
-            collect_gap("ALTER FOREIGN DATA WRAPPER");
+            collect_gap("ALTER FOREIGN DATA WRAPPER")?;
             foreigncmds::AlterForeignDataWrapper(mcx, stmt, source_text)?;
             Ok(None)
         }
@@ -1245,7 +1264,7 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::AlterForeignServerStmt>()
                 .expect("AlterForeignServerStmt");
-            collect_gap("ALTER SERVER");
+            collect_gap("ALTER SERVER")?;
             foreigncmds::AlterForeignServer(mcx, stmt)?;
             Ok(None)
         }
@@ -1263,7 +1282,7 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::AlterUserMappingStmt>()
                 .expect("AlterUserMappingStmt");
-            collect_gap("ALTER USER MAPPING");
+            collect_gap("ALTER USER MAPPING")?;
             foreigncmds::AlterUserMapping(mcx, stmt)?;
             Ok(None)
         }
@@ -1272,7 +1291,7 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::DropUserMappingStmt>()
                 .expect("DropUserMappingStmt");
-            collect_gap("DROP USER MAPPING");
+            collect_gap("DROP USER MAPPING")?;
             foreigncmds::RemoveUserMapping(mcx, stmt)?;
             Ok(None)
         }
@@ -1281,7 +1300,7 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::ImportForeignSchemaStmt>()
                 .expect("ImportForeignSchemaStmt");
-            collect_gap("IMPORT FOREIGN SCHEMA");
+            collect_gap("IMPORT FOREIGN SCHEMA")?;
             foreigncmds::ImportForeignSchema(mcx, stmt)?;
             Ok(None)
         }
@@ -1294,7 +1313,7 @@ fn slow_switch<'mcx>(
 
         T_SecLabelStmt => {
             // C: address = ExecSecLabelStmt; the address is not collected yet.
-            collect_gap("SECURITY LABEL");
+            collect_gap("SECURITY LABEL")?;
             exec_seclabel_stmt(mcx, parsetree)?;
             Ok(None)
         }
@@ -1401,14 +1420,14 @@ fn slow_switch<'mcx>(
                         pstate.p_sourcetext = Some(v.leak());
                     }
                     // C: address = DefineCollation; the ported form returns no address.
-                    collect_gap("CREATE COLLATION");
+                    collect_gap("CREATE COLLATION")?;
                     collationcmds::DefineCollation(mcx, &mut pstate, stmt)?;
                     parser_small1::free_parsestate(pstate)?;
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR => {
                     debug_assert!(!stmt.oldstyle);
                     // C: address = DefineOperator; the ported form returns no address.
-                    collect_gap("CREATE OPERATOR");
+                    collect_gap("CREATE OPERATOR")?;
                     operatorcmds::DefineOperator(mcx, &stmt.defnames, &stmt.definition)?;
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_TYPE => {
@@ -1420,7 +1439,7 @@ fn slow_switch<'mcx>(
                         pstate.p_sourcetext = Some(v.leak());
                     }
                     // C: address = DefineType; the ported form returns no address.
-                    collect_gap("CREATE TYPE");
+                    collect_gap("CREATE TYPE")?;
                     typecmds::DefineType(mcx, &mut pstate, &stmt.defnames, &stmt.definition)?;
                     parser_small1::free_parsestate(pstate)?;
                 }
@@ -1432,7 +1451,7 @@ fn slow_switch<'mcx>(
                         pstate.p_sourcetext = Some(v.leak());
                     }
                     // C: address = DefineAggregate; the ported form returns no address.
-                    collect_gap("CREATE AGGREGATE");
+                    collect_gap("CREATE AGGREGATE")?;
                     aggregatecmds::DefineAggregate(
                         mcx,
                         &mut pstate,
@@ -1446,22 +1465,22 @@ fn slow_switch<'mcx>(
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_TSPARSER => {
                     // C: address = DefineTSParser; the ported form returns no address.
-                    collect_gap("CREATE TEXT SEARCH PARSER");
+                    collect_gap("CREATE TEXT SEARCH PARSER")?;
                     tsearchcmds::DefineTSParser(mcx, stmt)?;
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_TSTEMPLATE => {
                     // C: address = DefineTSTemplate; the ported form returns no address.
-                    collect_gap("CREATE TEXT SEARCH TEMPLATE");
+                    collect_gap("CREATE TEXT SEARCH TEMPLATE")?;
                     tsearchcmds::DefineTSTemplate(mcx, stmt)?;
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY => {
                     // C: address = DefineTSDictionary; the ported form returns no address.
-                    collect_gap("CREATE TEXT SEARCH DICTIONARY");
+                    collect_gap("CREATE TEXT SEARCH DICTIONARY")?;
                     tsearchcmds::DefineTSDictionary(mcx, stmt)?;
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_TSCONFIGURATION => {
                     // C: address = DefineTSConfiguration; the ported form returns no address.
-                    collect_gap("CREATE TEXT SEARCH CONFIGURATION");
+                    collect_gap("CREATE TEXT SEARCH CONFIGURATION")?;
                     tsearchcmds::DefineTSConfiguration(mcx, stmt)?;
                 }
                 // unported: DefineStmt kinds without a define lane — 0A000.
@@ -1495,7 +1514,7 @@ fn slow_switch<'mcx>(
                 .as_variant::<types_nodes::rawnodes::AlterTSDictionaryStmt>()
                 .expect("AlterTSDictionaryStmt");
             // C: address = AlterTSDictionary; the ported form returns no address.
-            collect_gap("ALTER TEXT SEARCH DICTIONARY");
+            collect_gap("ALTER TEXT SEARCH DICTIONARY")?;
             tsearchcmds::AlterTSDictionary(mcx, stmt)?;
             Ok(None)
         }
@@ -1505,7 +1524,7 @@ fn slow_switch<'mcx>(
                 .as_variant::<types_nodes::rawnodes::AlterTSConfigurationStmt>()
                 .expect("AlterTSConfigurationStmt");
             // C: address = AlterTSConfiguration; the ported form returns no address.
-            collect_gap("ALTER TEXT SEARCH CONFIGURATION");
+            collect_gap("ALTER TEXT SEARCH CONFIGURATION")?;
             tsearchcmds::AlterTSConfiguration(mcx, stmt)?;
             Ok(None)
         }
@@ -1602,7 +1621,7 @@ fn slow_switch<'mcx>(
                 | types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY
                 | types_nodes::parsenodes::ObjectType::OBJECT_TSPARSER
                 | types_nodes::parsenodes::ObjectType::OBJECT_TSTEMPLATE => {
-                    collect_gap("ALTER SET SCHEMA");
+                    collect_gap("ALTER SET SCHEMA")?;
                     commands_alter::ExecAlterObjectSchemaStmt_generic(mcx, stmt)?;
                 }
                 // ExecAlterObjectSchemaStmt (alter.c): relations route through
@@ -1612,13 +1631,13 @@ fn slow_switch<'mcx>(
                 | types_nodes::parsenodes::ObjectType::OBJECT_VIEW
                 | types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW
                 | types_nodes::parsenodes::ObjectType::OBJECT_FOREIGN_TABLE => {
-                    collect_gap("ALTER SET SCHEMA");
+                    collect_gap("ALTER SET SCHEMA")?;
                     tablecmds::AlterTableNamespace(mcx, stmt)?;
                 }
                 // ExecAlterObjectSchemaStmt (alter.c) OBJECT_EXTENSION arm:
                 // AlterExtensionNamespace moves the member objects too.
                 types_nodes::parsenodes::ObjectType::OBJECT_EXTENSION => {
-                    collect_gap("ALTER SET SCHEMA");
+                    collect_gap("ALTER SET SCHEMA")?;
                     let name = stmt
                         .object
                         .expect("AlterObjectSchemaStmt.object")
@@ -1737,7 +1756,7 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::parsenodes::AlterOpFamilyStmt>()
                 .expect("AlterOpFamilyStmt");
-            collect_gap("ALTER OPERATOR FAMILY");
+            collect_gap("ALTER OPERATOR FAMILY")?;
             opclasscmds::AlterOpFamily(mcx, stmt)?;
             Ok(None)
         }
@@ -1747,7 +1766,7 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::parsenodes::AlterOperatorStmt>()
                 .expect("AlterOperatorStmt");
-            collect_gap("ALTER OPERATOR");
+            collect_gap("ALTER OPERATOR")?;
             operatorcmds::AlterOperator(mcx, stmt)?;
             Ok(None)
         }
@@ -1758,7 +1777,7 @@ fn slow_switch<'mcx>(
                 .as_variant::<types_nodes::parsenodes::CreateCastStmt>()
                 .expect("CreateCastStmt");
             // C: address = CreateCast; the ported form's address is uncollected.
-            collect_gap("CREATE CAST");
+            collect_gap("CREATE CAST")?;
             functioncmds::CreateCast(mcx, stmt)?;
             Ok(None)
         }
@@ -1769,7 +1788,7 @@ fn slow_switch<'mcx>(
                 .as_variant::<types_nodes::parsenodes::CreateTransformStmt>()
                 .expect("CreateTransformStmt");
             // C: address = CreateTransform; the ported form's address is uncollected.
-            collect_gap("CREATE TRANSFORM");
+            collect_gap("CREATE TRANSFORM")?;
             functioncmds::CreateTransform(mcx, stmt)?;
             Ok(None)
         }
@@ -1780,7 +1799,7 @@ fn slow_switch<'mcx>(
                 .as_variant::<types_nodes::parsenodes::CreateAmStmt>()
                 .expect("CreateAmStmt");
             // C: address = CreateAccessMethod; the ported form's address is uncollected.
-            collect_gap("CREATE ACCESS METHOD");
+            collect_gap("CREATE ACCESS METHOD")?;
             commands_amcmds::CreateAccessMethod(mcx, stmt)?;
             Ok(None)
         }
@@ -1792,7 +1811,7 @@ fn slow_switch<'mcx>(
                 .as_variant::<types_nodes::rawnodes::CreateExtensionStmt>()
                 .expect("CreateExtensionStmt");
             // C: address = CreateExtension; the ported form returns no address.
-            collect_gap("CREATE EXTENSION");
+            collect_gap("CREATE EXTENSION")?;
             extension::CreateExtension(mcx, stmt)?;
             Ok(None)
         }
@@ -1802,7 +1821,7 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::AlterExtensionStmt>()
                 .expect("AlterExtensionStmt");
-            collect_gap("ALTER EXTENSION");
+            collect_gap("ALTER EXTENSION")?;
             extension::ExecAlterExtensionStmt(mcx, stmt)?;
             Ok(None)
         }
@@ -1812,7 +1831,7 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::AlterExtensionContentsStmt>()
                 .expect("AlterExtensionContentsStmt");
-            collect_gap("ALTER EXTENSION ... ADD/DROP");
+            collect_gap("ALTER EXTENSION ... ADD/DROP")?;
             extension::ExecAlterExtensionContentsStmt(mcx, stmt)?;
             Ok(None)
         }
@@ -1850,7 +1869,7 @@ fn slow_switch<'mcx>(
                         false,
                     )?;
                     // C: address = ExecAlterOwnerStmt; no address surface yet.
-                    collect_gap("ALTER OWNER");
+                    collect_gap("ALTER OWNER")?;
                     typecmds::AlterTypeOwner(mcx, names, newowner, stmt.objectType)?;
                     Ok(None)
                 }
@@ -1876,7 +1895,7 @@ fn slow_switch<'mcx>(
                 | types_nodes::parsenodes::ObjectType::OBJECT_FOREIGN_SERVER
                 | types_nodes::parsenodes::ObjectType::OBJECT_SCHEMA => {
                     // C: address = ExecAlterOwnerStmt; no address collected yet.
-                    collect_gap("ALTER OWNER");
+                    collect_gap("ALTER OWNER")?;
                     commands_alter::ExecAlterOwnerStmt(mcx, stmt)?;
                     Ok(None)
                 }

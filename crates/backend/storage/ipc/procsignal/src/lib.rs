@@ -958,10 +958,20 @@ fn CheckProcSignal(reason: ProcSignalReason) -> bool {
     false
 }
 
+// Tripwire for a procsignal reason whose handler is absent. Two shapes reach
+// it, both invariants:
+//   * seam-backed handlers (walsender, recovery conflict): the seam is
+//     installed at single-threaded boot (replication/walsender/src/lib.rs:1267
+//     and tcop/postgres/src/lib.rs:55, both via _support/seams_init) before any
+//     sender thread exists, and seams_init's lint test pins the installs — so
+//     an uninstalled seam means the process skipped seams_init entirely;
+//   * PROCSIG_PARALLEL_APPLY_MESSAGE: no sender exists at all, because
+//     parallel apply is unported (replication/logical/worker/src/stream_apply.rs)
+//     and nothing launches a WORKERTYPE_PARALLEL_APPLY worker.
 #[cold]
 #[inline(never)]
 fn unported_handler(what: &str) -> ! {
-    panic!("procsignal reason received but its handler's owner is not ported: {what}");
+    panic!("procsignal reason delivered with no handler installed: {what}");
 }
 
 // Allocation-free (signal-dispatch-reachable); each unported arm panics

@@ -52,12 +52,6 @@ pub use search::{bt_peek_same_block_tids, BtScanInsert};
 pub use utils::{bt_check_third_page, bt_keep_natts_fast, bt_mkscankey, bt_truncate};
 pub use fcframe::OrderProcFrame;
 
-#[cold]
-#[inline(never)]
-pub(crate) fn unported_phase2(what: &str) -> ! {
-    panic!("unported: nbtree {what} is phase 2")
-}
-
 /// skey.h SK_ROW_HEADER contract: sk_argument holds the pointer word of the
 /// arena-owned subsidiary ScanKeyData array, SK_ROW_END-terminated. All
 /// copies of the header share the one array, as C's struct assignment does.

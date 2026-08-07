@@ -198,7 +198,12 @@ fn redo_recompress(buffer: Buffer, rdata: &[u8]) -> PgResult<()> {
     // SAFETY: redo lock protocol.
     let bytes = unsafe { page_bytes_mut(buffer) };
     if opaque_of(bytes).flags & GIN_COMPRESSED == 0 {
-        panic!("unported: gin redo of pre-9.4 uncompressed leaf page");
+        // INVARIANT: pgrust WAL never describes pre-9.4 pages — every posting-tree
+        // leaf is stamped GIN_COMPRESSED at creation (gin_xlog/src/lib.rs:152 redo
+        // create-ptree, gin/src/datapage.rs:1171, :658-659) and there is no
+        // pg_upgrade lineage; C keeps the uncompressed lane (gindatapage.c:139-199)
+        // only for pg_upgrade'd pages.
+        panic!("gin redo recompress on non-GIN_COMPRESSED leaf: pgrust WAL never describes pre-9.4 pages (gin_xlog/src/lib.rs:152, gin/src/datapage.rs:1171)");
     }
 
     let nactions = u16::from_ne_bytes([rdata[0], rdata[1]]) as usize;

@@ -593,9 +593,13 @@ pub fn comparator_for_opfamily(
                 })
             }
         }
+        // Invariant tripwire: the constant set at ssup.rs:10-33 is complete
+        // against every btree amprocnum '2' entry in pg_amproc.dat, and a
+        // missing sortsupport proc rides the BTORDER_PROC shim arm above.
         other => panic!(
-            "sortsupport routine {other} (opfamily {opfamily}) has no comparator arm; \
-             abbreviated-key sortsupport (e.g. bttextsortsupport) not ported"
+            "sortsupport routine {other} (opfamily {opfamily}) has no comparator arm, \
+             the constant set at ssup.rs:10-33 covers every btree amprocnum '2' entry \
+             in pg_amproc.dat and unlisted procs ride the BTORDER_PROC shim (ssup.rs:573)"
         ),
     })
 }
@@ -726,9 +730,13 @@ pub fn comparator_for_index_col(
                 })
             }
         }
+        // Invariant tripwire: the constant set at ssup.rs:10-33 is complete
+        // against every btree amprocnum '2' entry in pg_amproc.dat, and a
+        // missing sortsupport proc rides the BTORDER_PROC shim arm above.
         other => panic!(
-            "sortsupport routine {other} (opfamily {opfamily}) has no comparator arm; \
-             abbreviated-key sortsupport not ported"
+            "sortsupport routine {other} (opfamily {opfamily}) has no comparator arm, \
+             the constant set at ssup.rs:10-33 covers every btree amprocnum '2' entry \
+             in pg_amproc.dat and unlisted procs ride the BTORDER_PROC shim (ssup.rs:708)"
         ),
     })
 }

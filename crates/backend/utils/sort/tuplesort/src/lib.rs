@@ -1908,7 +1908,17 @@ impl Tuplesort {
     /// `tuplesort_skiptuples`, forward-only (the C backward arm needs
     /// random access and has no in-tree caller).
     pub fn skiptuples(&mut self, ntuples: i64, forward: bool) -> PgResult<bool> {
-        assert!(forward, "tuplesort_skiptuples: backward skip not ported");
+        // Invariant (release-effective, matching C tuplesort.c:1718
+        // Assert(forward)): all callers pass literal true
+        // (orderedsetaggs/src/lib.rs:434/517/667/744, matching C
+        // orderedsetaggs.c:479/580/818/947); backward cursor motion uses
+        // gettupleslot/tuplestore, never skiptuples.
+        assert!(
+            forward,
+            "tuplesort_skiptuples: every caller passes forward=true \
+             (orderedsetaggs/src/lib.rs:434/517/667/744), backward motion rides \
+             gettupleslot/tuplestore; C twin tuplesort.c:1718 Assert(forward)"
+        );
         if ntuples < 0 {
             return Ok(false);
         }

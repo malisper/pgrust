@@ -124,9 +124,6 @@ pub fn CheckIndexCompatible<'mcx>(
     exclusion_op_names: &types_nodes::NodeList<'mcx>,
     is_without_overlaps: bool,
 ) -> PgResult<bool> {
-    if !exclusion_op_names.is_nil() || is_without_overlaps {
-        unported("CheckIndexCompatible: exclusion / WITHOUT OVERLAPS constraints");
-    }
     let relationId = catalog_index::IndexGetRelation(mcx, old_id, false)?;
     let am = resolve_index_am(Some(access_method_name))?;
     let (accessMethodId, amname, amcanorder) = (am.oid, am.name.as_str(), am.amcanorder);
@@ -247,7 +244,36 @@ pub fn CheckIndexCompatible<'mcx>(
             }
         }
     }
-    // ii_ExclusionOps comparison: exclusion indexes are loud upstream.
+    // Any change in exclusion operator selections breaks compatibility
+    // (indexcmds.c:324-352). C tests `indexInfo->ii_ExclusionOps != NULL`,
+    // which makeIndexInfo allocates exactly when the caller asked for an
+    // exclusion constraint or WITHOUT OVERLAPS — the same condition here,
+    // since ComputeIndexAttrs fills ii_ExclusionOps only on those paths.
+    if ret && (!exclusion_op_names.is_nil() || is_without_overlaps) {
+        let mut old_ops = [InvalidOid; INDEX_MAX_KEYS as usize];
+        let mut old_procs = [InvalidOid; INDEX_MAX_KEYS as usize];
+        let mut old_strats = [0u16; INDEX_MAX_KEYS as usize];
+        execindexing::RelationGetExclusionInfo(
+            mcx,
+            &irel,
+            &mut old_ops,
+            &mut old_procs,
+            &mut old_strats,
+        )?;
+        ret = old_ops[..old_natts] == indexInfo.ii_ExclusionOps[..old_natts];
+        // Require an exact input type match for polymorphic operators.
+        if ret {
+            for i in 0..old_natts {
+                let (left, right) = lsyscache::op_input_types(indexInfo.ii_ExclusionOps[i])?;
+                if (coerce::IsPolymorphicType(left) || coerce::IsPolymorphicType(right))
+                    && irel.rd_att.attr(i).atttypid != typeIds[i]
+                {
+                    ret = false;
+                    break;
+                }
+            }
+        }
+    }
     indexam::index_close(irel, types_rel::NoLock)?;
     Ok(ret)
 }

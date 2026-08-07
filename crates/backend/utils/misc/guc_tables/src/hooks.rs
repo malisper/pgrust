@@ -81,6 +81,7 @@ pub static check_log_destination: GucStringCheckHook = GucSlot::new("check_log_d
 pub static check_log_stats: GucBoolCheckHook = GucSlot::new("check_log_stats");
 pub static check_log_timezone: GucStringCheckHook = GucSlot::new("check_log_timezone");
 pub static check_max_stack_depth: GucIntCheckHook = GucSlot::new("check_max_stack_depth");
+pub static check_min_dynamic_shared_memory: GucIntCheckHook = GucSlot::new("check_min_dynamic_shared_memory");
 pub static check_multixact_member_buffers: GucIntCheckHook = GucSlot::new("check_multixact_member_buffers");
 pub static check_multixact_offset_buffers: GucIntCheckHook = GucSlot::new("check_multixact_offset_buffers");
 pub static check_notify_buffers: GucIntCheckHook = GucSlot::new("check_notify_buffers");

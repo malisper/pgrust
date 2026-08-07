@@ -82,12 +82,6 @@ pub mod amcheck {
     pub use crate::{opaque_of, page_bytes};
 }
 
-#[cold]
-#[inline(never)]
-pub(crate) fn unported(what: &str) -> ! {
-    panic!("unported: gin {what}")
-}
-
 // unported: feature arms that a user can reach through plain SQL (an
 // unsupported opclass / element type at CREATE INDEX or scan setup) raise a
 // clean 0A000 instead of panicking; invariant/data-format arms stay loud.

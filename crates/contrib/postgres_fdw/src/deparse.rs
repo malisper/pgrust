@@ -1782,6 +1782,10 @@ pub fn deparse_direct_update_sql<'mcx>(
     returning_list: &[Node<'mcx>],
     retrieved_attrs: &mut PgVec<'mcx, i32>,
 ) -> PgResult<()> {
+    // This guard sits in currently-callerless code: deparse_direct_update_sql
+    // has no callers because PlanDirectModify is unported. JOINREL foreignrels
+    // are additionally refused upstream at plan.rs:316 until phase-3 join
+    // pushdown.
     if ctx.run.root.rel(ctx.foreignrel).reloptkind == types_pathnodes::RELOPT_JOINREL {
         return Err(direct_modify_join_unported());
     }
@@ -1827,6 +1831,10 @@ pub fn deparse_direct_delete_sql<'mcx>(
     returning_list: &[Node<'mcx>],
     retrieved_attrs: &mut PgVec<'mcx, i32>,
 ) -> PgResult<()> {
+    // This guard sits in currently-callerless code: deparse_direct_delete_sql
+    // has no callers because PlanDirectModify is unported. JOINREL foreignrels
+    // are additionally refused upstream at plan.rs:316 until phase-3 join
+    // pushdown.
     if ctx.run.root.rel(ctx.foreignrel).reloptkind == types_pathnodes::RELOPT_JOINREL {
         return Err(direct_modify_join_unported());
     }

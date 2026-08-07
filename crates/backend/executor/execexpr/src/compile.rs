@@ -82,15 +82,9 @@ pub const INNER_VAR: i32 = -1;
 pub const OUTER_VAR: i32 = -2;
 pub const INDEX_VAR: i32 = -3;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("execexpr: {what} not ported")
-}
-
 // unported: user-reachable unported-feature legs raise a clean
 // ERRCODE_FEATURE_NOT_SUPPORTED error instead of panicking; invariant breaks
-// keep the loud `unported` panic above.
+// panic loudly at their sites.
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -581,14 +575,20 @@ pub fn exec_build_agg_trans_plain_masked<'mcx>(
     build_agg_trans_masked(mcx, specs, Some(keep), PergroupMode::Fixed, agg_node, params, sub)
 }
 
-// The tag proves the FmNodePtr is an AggStateNode (WindowAgg passes None).
+// The tag proves the FmNodePtr is an AggStateNode. Every production caller
+// supplies one: nodeagg passes it at nodeagg/src/lib.rs:1127, and nodewindowagg
+// creates an AggStateNode whenever any window agg exists
+// (nodewindowagg/src/lib.rs:606-612) and passes it at :761 and :1225.
 fn agg_state_node(agg_node: FmNodePtr) -> PgResult<NonNull<::types_fmgr::AggStateNode>> {
     let Some(p) = agg_node else {
-        // unported: by-ref transtype without an AggState (nodeWindowAgg lane).
-        return Err(feature_unported(
-            "aggregate with a by-reference transition type outside an Agg node \
-             (nodeWindowAgg lane)",
-        ));
+        // Invariant tripwire: a by-ref transition type always comes with an
+        // AggStateNode (nodeagg/src/lib.rs:1127; nodewindowagg/src/lib.rs:606-612,
+        // passed at :761 and :1225).
+        panic!(
+            "by-reference transition type without an AggStateNode: every production \
+             caller supplies one (nodeagg/src/lib.rs:1127, \
+             nodewindowagg/src/lib.rs:761 and :1225)"
+        );
     };
     // SAFETY: build-time read of the caller's live node header.
     assert!(
@@ -1940,8 +1940,17 @@ pub(crate) fn init_expr_rec<'mcx>(
         }
         NodeTag::T_Aggref => {
             let aggref = node.as_aggref().unwrap();
+            // Invariant tripwire (C twin: execExpr.c:1096 "Aggref found in
+            // non-Agg plan node"): setrefs fixes Aggrefs only in Agg tlists
+            // (setrefs/src/lib.rs:1655), and only
+            // exec_build_agg_projection_info[_subplans] (compile.rs:331/342,
+            // sole caller nodeagg/src/lib.rs:1536) passes Bind::Agg.
             let Some(Bind::Agg(bind)) = agg else {
-                unported("EEOP_AGGREF outside an Agg projection (nodeAgg.c)");
+                panic!(
+                    "Aggref found in non-Agg plan node: setrefs confines Aggrefs to Agg \
+                     tlists (setrefs/src/lib.rs:1655) and only nodeagg's projection build \
+                     passes Bind::Agg (compile.rs:331/342); C twin execExpr.c:1096"
+                );
             };
             let aggno = aggref.aggno;
             assert!(
@@ -1960,8 +1969,15 @@ pub(crate) fn init_expr_rec<'mcx>(
             push_step(state, mcx, Step::AggrefEval { value, null, out })
         }
         NodeTag::T_GroupingFunc => {
+            // Invariant tripwire (C twin: execExpr.c:1110): setrefs fixes
+            // GroupingFuncs only in Agg tlists (setrefs/src/lib.rs:1720), and
+            // only nodeagg's projection build passes Bind::Agg.
             let Some(Bind::Agg(bind)) = agg else {
-                unported("EEOP_GROUPING_FUNC outside an Agg projection (execExpr.c)");
+                panic!(
+                    "GroupingFunc found in non-Agg plan node: setrefs confines GroupingFuncs \
+                     to Agg tlists (setrefs/src/lib.rs:1720) and only nodeagg's projection \
+                     build passes Bind::Agg (compile.rs:331/342); C twin execExpr.c:1110"
+                );
             };
             let g = node.as_grouping_func().unwrap();
             let cols_src = g.cols.as_slice();
@@ -1991,8 +2007,18 @@ pub(crate) fn init_expr_rec<'mcx>(
             )
         }
         NodeTag::T_WindowFunc => {
+            // Invariant tripwire (C twin: execExpr.c:1162 "WindowFunc found in
+            // non-WindowAgg plan node"): setrefs confines WindowFuncs to
+            // WindowAgg tlists (setrefs/src/lib.rs:1754, :2487-2511), and only
+            // exec_build_window_projection_info[_subplans] (compile.rs:355/366)
+            // passes Bind::Win.
             let Some(Bind::Win(win)) = agg else {
-                unported("EEOP_WINDOW_FUNC outside a WindowAgg projection (nodeWindowAgg.c)");
+                panic!(
+                    "WindowFunc found in non-WindowAgg plan node: setrefs confines \
+                     WindowFuncs to WindowAgg tlists (setrefs/src/lib.rs:1754) and only the \
+                     window projection build passes Bind::Win (compile.rs:355/366); C twin \
+                     execExpr.c:1162"
+                );
             };
             let wfuncno = win
                 .wfuncnos

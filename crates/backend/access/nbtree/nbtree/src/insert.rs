@@ -45,7 +45,7 @@ use crate::page::{
 };
 use crate::search::{bt_binsrch, bt_compare, BtScanInsert};
 use crate::utils::{bt_check_third_page, bt_mkscankey, bt_truncate, bt_vacuum_cycleid};
-use crate::{relation_needs_wal, unported_phase2};
+use crate::relation_needs_wal;
 
 const BTREE_FASTPATH_MIN_LEVEL: i32 = 2;
 
@@ -925,8 +925,13 @@ unsafe fn bt_findinsertloc<'mcx>(
         debug_assert!(P_ISLEAF(&opaque) && !P_INCOMPLETE_SPLIT(&opaque));
     }
     debug_assert!(!insertstate.bounds_valid || checkingunique);
+    // INVARIANT: every pgrust metapage is created at BTREE_VERSION 4
+    // (nbtree/src/page.rs:567 _bt_initmetapage, called from nbtsort/src/lib.rs:161
+    // btbuildempty and nbtsort/src/lib.rs:562 btbuild) and there is no pg_upgrade
+    // lineage, so heapkeyspace is always true here; C nbtinsert.c keeps the v2/v3
+    // lane only for pg_upgrade'd indexes.
     if !insertstate.itup_key.heapkeyspace {
-        unported_phase2("!heapkeyspace (btree version 2/3) insert lane");
+        panic!("btree insert on a !heapkeyspace (version 2/3) index, which pgrust never creates (nbtree/src/page.rs:567 stamps BTREE_VERSION 4)");
     }
     debug_assert!(insertstate.itup_key.scantid.is_some());
 

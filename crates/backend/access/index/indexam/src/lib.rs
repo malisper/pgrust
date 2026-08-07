@@ -129,12 +129,6 @@ fn mock_outside_tests() -> ! {
     unreachable!("mock index AM outside indexam's own tests")
 }
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: {what}")
-}
-
 // C divergence: IndexInfo is not threaded; only its ii_AmCache slot is passed.
 pub fn index_insert<'mcx>(
     mcx: Mcx<'mcx>,
@@ -278,7 +272,7 @@ pub fn index_bulk_delete_collect<'mcx>(
         IndexAmKind::Brin => Ok(IndexBulkDeleteResult::default()),
         // Reachable only with the mock feature (IndexAmKind::Mock); dead otherwise.
         #[allow(unreachable_patterns)]
-        _ => panic!("unported: ambulkdelete TID-collect beyond btree/hash/gin/gist/spgist/brin (validate_index)"),
+        _ => unreachable!("IndexAmKind match is exhaustive (relscan/src/lib.rs:31); every supported AM has a TID-collect lane"),
     }
 }
 
@@ -1093,7 +1087,11 @@ fn am_insert_cleanup(
     am_cache: &mut Option<Box<dyn core::any::Any>>,
 ) -> PgResult<()> {
     match kind {
-        IndexAmKind::Btree => unported("nbtree aminsertcleanup (insert lane is phase 2)"),
+        // INVARIANT: index_insert_cleanup only dispatches AMs with
+        // has_aminsertcleanup() == true (indexam/src/lib.rs:332-333), and that is
+        // false for Btree (relscan/src/lib.rs:241; only Brin is true, :246),
+        // matching C nbtree's NULL aminsertcleanup.
+        IndexAmKind::Btree => unreachable!("btree has no aminsertcleanup and is filtered by has_aminsertcleanup (indexam/src/lib.rs:332, relscan/src/lib.rs:241)"),
         IndexAmKind::Hash => unreachable!("hash lacks aminsertcleanup (guarded)"),
         IndexAmKind::Gin => unreachable!("gin lacks aminsertcleanup (guarded)"),
         IndexAmKind::Gist => Ok(()),

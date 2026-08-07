@@ -3223,10 +3223,21 @@ fn datum_is_equal(v1: ::datum::Datum, v2: ::datum::Datum, typbyval: bool, typlen
     unsafe { core::slice::from_raw_parts(p1, size) == core::slice::from_raw_parts(p2, size) }
 }
 
+// Invariant tripwire: this private datum_is_equal (dml.rs:3200) is called only
+// from any_attr_modified (dml.rs:3146) and identity_attrs_info (dml.rs:3184)
+// with att.attlen of positive-attnum table columns; typlen -2 (cstring/unknown)
+// cannot be a table column because CheckAttributeType refuses pseudo-types
+// (catalog_heap/src/create.rs:102-127) and no bootstrap catalog column has
+// attlen -2. C's datum.c:96/313 carries the -2 strcmp arm as a general-purpose
+// helper, equally unexercised on this path.
 #[cold]
 #[inline(never)]
 fn unported_ret(typlen: i32) -> ! {
-    panic!("backend-access-heap-heapam reached unported unit: datumIsEqual cstring typlen {typlen} (datum.c)")
+    panic!(
+        "datumIsEqual (datum.c:96): typlen {typlen} cannot reach heap DML equality, \
+         table columns never have attlen -2 since CheckAttributeType refuses \
+         pseudo-types (catalog_heap/src/create.rs:102-127)"
+    )
 }
 
 /// `heap_lock_updated_tuple` (heapam.c): lock all descendant versions of an

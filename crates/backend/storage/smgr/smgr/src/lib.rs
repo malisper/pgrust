@@ -959,7 +959,12 @@ pub fn init_seams() {
                     md::md_aio_reopen_fd(key, &mut r.md, td.smgr.forkNum, td.smgr.blockNum, offset)
                 }
             })?,
-            _ => panic!("unported arm reached from smgr.c smgr_aio_reopen: writev"),
+            // INVARIANT: PGAIO_OP_READV is the only op ever staged — the sole
+            // stager is pgaio_io_start_readv_current (aio_core), and no
+            // pgaio_io_start_writev twin exists here. C 18's writev reopen
+            // arm is equally dead (pgaio_io_start_writev has no callers in
+            // aio_io.c either).
+            _ => panic!("smgr_aio_reopen: {op:?} staged, but READV is the only op any caller stages (aio_core pgaio_io_start_readv_current)"),
         }
     });
     smgr_seams::aio_md_readv_complete::set(md::md_readv_complete);

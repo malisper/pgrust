@@ -18,7 +18,7 @@ use crate::postinglist::{
 };
 use crate::util::{gin_init_page_bytes, GinNewBuffer};
 use crate::{
-    opaque_of, page_bytes, page_mut, page_opaque, page_ref, relation_needs_wal, unported,
+    opaque_of, page_bytes, page_mut, page_opaque, page_ref, relation_needs_wal,
     vec_append, write_opaque_to, GinPageIsCompressed, GinPageIsDeleted, GinPageIsLeaf,
     GinPageRightMost, RM_GIN,
 };
@@ -141,7 +141,12 @@ pub fn gin_data_leaf_page_get_items(
     out: &mut PgVec<'_, ItemPointerData>,
 ) -> PgResult<()> {
     if !GinPageIsCompressed(&opaque_of(bytes)) {
-        unported("pre-9.4 uncompressed GIN posting-tree leaf");
+        // INVARIANT: every pgrust-created posting-tree leaf is stamped GIN_COMPRESSED
+        // (datapage.rs:1171 createPostingTree, datapage.rs:658-659 leaf split,
+        // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
+        // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
+        // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
+        panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
     }
     let all = data_leaf_posting_list(bytes);
     let mut off = 0usize;
@@ -168,7 +173,12 @@ pub(crate) fn gin_data_leaf_page_get_items_to_tbm(
     tbm: &mut ::tidbitmap::TIDBitmap<'_>,
 ) -> PgResult<i64> {
     if !GinPageIsCompressed(&opaque_of(bytes)) {
-        unported("pre-9.4 uncompressed GIN posting-tree leaf");
+        // INVARIANT: every pgrust-created posting-tree leaf is stamped GIN_COMPRESSED
+        // (datapage.rs:1171 createPostingTree, datapage.rs:658-659 leaf split,
+        // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
+        // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
+        // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
+        panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
     }
     crate::postinglist::ginPostingListDecodeAllSegmentsToTbm(mcx, data_leaf_posting_list(bytes), tbm)
 }
@@ -250,7 +260,12 @@ fn items_slice<'x>(si: &SegItems, new_items: &'x [ItemPointerData]) -> &'x [Item
 /// disassembleLeaf.
 fn disassemble_leaf(bytes: &[u8]) -> DisassembledLeaf {
     if !GinPageIsCompressed(&opaque_of(bytes)) {
-        unported("pre-9.4 uncompressed GIN posting-tree leaf");
+        // INVARIANT: every pgrust-created posting-tree leaf is stamped GIN_COMPRESSED
+        // (datapage.rs:1171 createPostingTree, datapage.rs:658-659 leaf split,
+        // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
+        // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
+        // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
+        panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
     }
     let all = data_leaf_posting_list(bytes);
     let mut segs = Vec::new();
@@ -599,7 +614,12 @@ fn data_place_to_page_leaf_recompress(buf: Buffer, leaf: &DisassembledLeaf) {
     // SAFETY: borrow confined to this function.
     let bytes = unsafe { crate::page_bytes_mut(&mut page) };
     if !GinPageIsCompressed(&opaque_of(bytes)) {
-        unported("pre-9.4 uncompressed GIN posting-tree leaf");
+        // INVARIANT: every pgrust-created posting-tree leaf is stamped GIN_COMPRESSED
+        // (datapage.rs:1171 createPostingTree, datapage.rs:658-659 leaf split,
+        // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
+        // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
+        // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
+        panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
     }
     let mut ptr = GinDataPageDataOffset;
     let mut newsize = 0usize;

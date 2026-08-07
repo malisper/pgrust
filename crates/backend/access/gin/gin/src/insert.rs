@@ -19,7 +19,7 @@ use crate::entrypage::{
 };
 use crate::postinglist::{ginCompressPostingList, ginMergeItemPointers};
 use crate::util::{gin_use_fastupdate, ginExtractEntries, initGinState};
-use crate::{page_ref, unported, GinPageIsLeaf, GIN_UNLOCK};
+use crate::{page_ref, GinPageIsLeaf, GIN_UNLOCK};
 
 use std::cell::RefCell;
 
@@ -65,9 +65,12 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
                     4 => GinOpclass::TrgmOps,
                     5 => GinOpclass::HstoreOps,
                     31 => GinOpclass::IntArrayOps,
+                    // INVARIANT: tags round-trip with the encoder in this file
+                    // (insert.rs:113-135); rd_amcache is process-local, so an
+                    // unknown tag means memory corruption, not an unported case.
                     other => match GinBtreeType::from_tag(other - 6) {
                         Some(ty) => GinOpclass::BtreeOps(ty),
-                        None => unported(&format!("rd_amcache gin opclass tag {other}")),
+                        None => panic!("rd_amcache gin opclass tag {other} not produced by the encoder (insert.rs:113-135); process-local cache is corrupt"),
                     },
                 },
                 elem_cmp: match c.elem_cmp {
@@ -78,7 +81,10 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
                     4 => GinElemCmp::Oid,
                     5 => GinElemCmp::Text,
                     6 => GinElemCmp::Fmgr(c.elem_cmp_proc),
-                    other => unported(&format!("rd_amcache gin elem_cmp tag {other}")),
+                    // INVARIANT: tags round-trip with the encoder in this file
+                    // (insert.rs:113-135); rd_amcache is process-local, so an
+                    // unknown tag means memory corruption, not an unported case.
+                    other => panic!("rd_amcache gin elem_cmp tag {other} not produced by the encoder (insert.rs:113-135); process-local cache is corrupt"),
                 },
                 support_collation: c.support_collation,
                 can_partial_match: c.can_partial_match,

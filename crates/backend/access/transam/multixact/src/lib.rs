@@ -1942,17 +1942,38 @@ pub fn TruncateMultiXact(
     _new_oldest_multi_db: Oid,
 ) -> PgResult<()> {
     // C-exact early exit: nothing to truncate away unless the horizon moved
-    // forward past the current oldest (datminmxid never advances until the
-    // freeze lane lands, so this is the live arm).
+    // forward past the current oldest.
     let oldest_multi = MultiXactState().oldestMultiXactId.load(Relaxed);
     debug_assert!(MultiXactIdIsValid(oldest_multi));
     if MultiXactIdPrecedesOrEquals(new_oldest_multi, oldest_multi) {
         return Ok(());
     }
-    panic!(
-        "unported caller path reached: TruncateMultiXact (multixact.c) — vacuum lane \
-         (vac_truncate_clog); needs delay-chkpt seam + WAL truncate record"
-    );
+    // The truncation body itself (SLRU page range walk + delay-chkpt seam +
+    // XLOG_MULTIXACT_TRUNCATE_ID record) is unported. The horizon DOES
+    // advance in normal operation: vac_update_datfrozenxid writes
+    // pg_database.datminmxid (commands/vacuum/src/lib.rs:1337-1351) and
+    // vac_truncate_clog takes the min over every database
+    // (vacuum/src/lib.rs:1386-1420) — including template0, which autovacuum
+    // reaches via INIT_PG_OVERRIDE_ALLOW_CONNS
+    // (postmaster/autovacuum/src/worker.rs:194). So this is a real gap that
+    // arms on any aging cluster that consumes multixacts, not an invariant.
+    //
+    // Skipping is safe (retaining pg_multixact segments costs disk, never
+    // correctness) and is strictly better than erroring: the caller has
+    // already truncated CLOG and commit-ts, and an error here would abort
+    // before SetTransactionIdLimit/SetMultiXactIdLimit, stalling the
+    // wraparound-protection horizons on every subsequent VACUUM. Loud, once
+    // per attempt, so the retained segments are never silent.
+    ereport(WARNING)
+        .errmsg(format!(
+            "skipping pg_multixact truncation to {new_oldest_multi}: not supported yet"
+        ))
+        .errdetail(
+            "The multixact horizon is advanced, but the pg_multixact segments before it are \
+             retained; they consume disk space until multixact truncation is implemented.",
+        )
+        .finish(loc("TruncateMultiXact"))?;
+    Ok(())
 }
 
 fn MultiXactOffsetPagePrecedes(page1: i64, page2: i64) -> bool {

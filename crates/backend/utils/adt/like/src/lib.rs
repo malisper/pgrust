@@ -58,8 +58,12 @@ fn ilike_nondeterministic() -> Box<PgError> {
         .into()
 }
 
-// unported: like_match.c MB arm for non-UTF8 multibyte database encodings;
-// clean feature error (LIKE/ILIKE evaluation, safe unwind).
+// unported: like_match.c MB arm for non-UTF8 multibyte database encodings.
+// This is a REACHABLE feature gap, not an invariant: such databases are
+// creatable — createdb accepts the full pg_valid_server_encoding set
+// (dbcommands/src/createdb.rs:527-551) — so LIKE in e.g. an EUC_JP database
+// hits this clean 0A000 feature error (safe unwind). Single-byte encodings
+// take the ported SB path.
 #[cold]
 #[inline(never)]
 fn mb_matchtext_unported(encoding: pg_enc) -> Box<::types_error::PgError> {

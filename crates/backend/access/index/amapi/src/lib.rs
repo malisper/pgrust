@@ -119,8 +119,9 @@ pub fn IndexAmTranslateStrategy(
         IndexAmKind::Hnsw => COMPARE_INVALID,
         // amtranslatestrategy == NULL (contrib/bloom blhandler).
         IndexAmKind::Bloom => COMPARE_INVALID,
+        // dead arm kept for enum growth
         #[allow(unreachable_patterns)]
-        _ => unported_translate(amoid),
+        _ => unreachable!("IndexAmKind match above is exhaustive (relscan/src/lib.rs:31)"),
     };
 
     if !missing_ok && result == COMPARE_INVALID {
@@ -163,8 +164,9 @@ pub fn IndexAmTranslateCompareType(
         IndexAmKind::Hnsw => InvalidStrategy,
         // amtranslatecmptype == NULL (contrib/bloom blhandler).
         IndexAmKind::Bloom => InvalidStrategy,
+        // dead arm kept for enum growth
         #[allow(unreachable_patterns)]
-        _ => unported_translate(amoid),
+        _ => unreachable!("IndexAmKind match above is exhaustive (relscan/src/lib.rs:31)"),
     };
 
     if !missing_ok && result == InvalidStrategy {
@@ -210,7 +212,7 @@ pub fn amvalidate(opclassoid: Oid) -> PgResult<bool> {
         IndexAmKind::Hnsw => pgvector_hnsw::hnswvalidate(opclassoid),
         IndexAmKind::Bloom => bloom::blvalidate(opclassoid),
         #[allow(unreachable_patterns)]
-        other => panic!("unported: amvalidate for index AM {other:?}"),
+        _ => unreachable!("IndexAmKind match is exhaustive over the supported AMs (relscan/src/lib.rs:31); the remaining arm is the cfg(mock) test variant"),
     }
 }
 
@@ -240,7 +242,7 @@ pub fn am_adjust_members(
         // C blhandler sets amadjustmembers = NULL.
         IndexAmKind::Bloom => Ok(()),
         #[allow(unreachable_patterns)]
-        other => panic!("unported: amadjustmembers for index AM {other:?}"),
+        _ => unreachable!("IndexAmKind match is exhaustive over the supported AMs (relscan/src/lib.rs:31); the remaining arm is the cfg(mock) test variant"),
     }
 }
 
@@ -400,12 +402,6 @@ pub fn known_index_am_handler(amhandler: Oid) -> bool {
 #[inline(never)]
 fn unported_handler(amhandler: Oid) -> ! {
     panic!("index AM handler function {amhandler} is not in the closed in-tree AM set (no-dlopen carve, docs/design/carve-ratifications.md; CREATE ACCESS METHOD fences this at DDL time)")
-}
-
-#[cold]
-#[inline(never)]
-fn unported_translate(amoid: Oid) -> ! {
-    panic!("amtranslatestrategy/amtranslatecmptype for AM {amoid} outside the closed in-tree AM set (no-dlopen carve, docs/design/carve-ratifications.md)")
 }
 
 #[track_caller]
