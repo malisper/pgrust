@@ -27,6 +27,7 @@ catcache = { path = "../../utils/cache/catcache" }
 catalog_namespace = { path = "../catalog_namespace" }
 table = { path = "../../access/table/table" }
 heaptuple = { path = "../../access/common/heaptuple" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_depend = { path = "../pg_depend" }
 pg_shdepend = { path = "../pg_shdepend" }
@@ -54,4 +55,6 @@ foreigncmds_seams = { path = "../../commands/foreigncmds_seams" }
 tablespace_seams = { path = "../../commands/tablespace_seams" }
 
 [dev-dependencies]
+detoast = { path = "../../access/common/detoast" }
 init_small = { path = "../../utils/init/init_small" }
+pglz = { path = "../../../common/pglz" }
