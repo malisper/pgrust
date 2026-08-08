@@ -74,35 +74,10 @@ thread_local! {
     static ACL_SCRATCH: RefCell<Vec<AclItem>> = const { RefCell::new(Vec::new()) };
 }
 
-// DatumGetAclP without the container copy: run `f` over the decoded items of
-// a stored aclitem[]. `d` must come from SysCacheGetAttr on a still-held
-// tuple (non-null).
-pub fn with_acl_datum<R>(
-    d: Datum,
+fn with_acl_payload<R>(
+    payload: &[u8],
     f: impl FnOnce(&[AclItem]) -> PgResult<R>,
 ) -> PgResult<R> {
-    use types_tuple::varatt;
-    let p = d.as_usize() as *const u8;
-    // SAFETY: caller contract — `d` points at a live varlena inside a held
-    // catalog tuple.
-    let payload: &[u8] = unsafe {
-        if varatt::varatt_is_1b_e(p) || (!varatt::varatt_is_1b(p) && !varatt::varatt_is_4b_u(p)) {
-            // pg_class/pg_attribute have no toast tables; only inline
-            // compression can appear here.
-            panic!("aclchk: compressed/external ACL varlena — detoast gap");
-        }
-        if varatt::varatt_is_1b(p) {
-            core::slice::from_raw_parts(
-                p.add(varatt::VARHDRSZ_SHORT),
-                varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,
-            )
-        } else {
-            core::slice::from_raw_parts(
-                p.add(varatt::VARHDRSZ),
-                varatt::varsize_4b(p) - varatt::VARHDRSZ,
-            )
-        }
-    };
     let n = adt_acl::varlena::check_acl_payload(payload)?;
     ACL_SCRATCH.with(|s| {
         let mut v = s.borrow_mut();
@@ -113,6 +88,42 @@ pub fn with_acl_datum<R>(
         }
         f(&v)
     })
+}
+
+// DatumGetAclP without the container copy: run `f` over the decoded items of
+// a stored aclitem[]. `d` must come from SysCacheGetAttr on a still-held
+// tuple (non-null).
+pub fn with_acl_datum<R>(d: Datum, f: impl FnOnce(&[AclItem]) -> PgResult<R>) -> PgResult<R> {
+    use types_tuple::varatt;
+    let p = d.as_usize() as *const u8;
+
+    // SAFETY: caller contract — `d` points at a live varlena inside a held
+    // catalog tuple. Plain and short images retain the allocation-free path.
+    unsafe {
+        if varatt::varatt_is_1b(p) && !varatt::varatt_is_1b_e(p) {
+            let payload = core::slice::from_raw_parts(
+                p.add(varatt::VARHDRSZ_SHORT),
+                varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,
+            );
+            return with_acl_payload(payload, f);
+        }
+        if varatt::varatt_is_4b_u(p) {
+            let payload = core::slice::from_raw_parts(
+                p.add(varatt::VARHDRSZ),
+                varatt::varsize_4b(p) - varatt::VARHDRSZ,
+            );
+            return with_acl_payload(payload, f);
+        }
+
+        // PostgreSQL's DatumGetAclP accepts every valid varlena form. Flatten
+        // compressed/external images in bounded scratch storage and keep that
+        // image alive until the callback has finished reading its payload.
+        let raw = core::slice::from_raw_parts(p, varatt::varsize_any(p));
+        let scratch = mcx::MemoryContext::new_bump("aclchk detoast");
+        let flat = detoast_seams::detoast_attr::call(scratch.mcx(), raw)?;
+        debug_assert!(varatt::varatt_is_4b_u(flat.as_ptr()));
+        with_acl_payload(&flat[varatt::VARHDRSZ..], f)
+    }
 }
 
 pub fn object_aclcheck(classid: Oid, objectid: Oid, roleid: Oid, mode: u64) -> PgResult<i32> {
