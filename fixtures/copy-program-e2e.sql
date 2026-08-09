@@ -1,8 +1,9 @@
 -- COPY TO/FROM PROGRAM + file_fdw PROGRAM differential corpus (issue #76
 -- close-out). Run via scripts/copy-program-e2e.sh (regress-diff.sh two-binary
 -- mode against C 18.3): loads, exit-code error surfaces (38000), the COPY TO
--- PROGRAM EPIPE lane, and file_fdw program scans incl. the early-termination
--- SIGPIPE tolerance. TO PROGRAM content is verified in-band with exit-code
+-- PROGRAM EPIPE lane, file_fdw program scans incl. the early-termination
+-- SIGPIPE tolerance, and the pg_execute_server_program privilege gate
+-- (denied 42501 / member success). TO PROGRAM content is verified in-band with exit-code
 -- assertions (grep/wc in the child) so no per-server temp paths leak into
 -- the diffable output.
 \set VERBOSITY verbose
@@ -70,10 +71,47 @@ SELECT count(*) FROM prog_ft_fail;
 -- ANALYZE on a program source: no file size, quietly skipped.
 ANALYZE prog_ft;
 
+-- PRIVILEGE GATE (the security boundary of this feature): server-side
+-- program execution requires superuser or pg_execute_server_program
+-- membership. DoCopy checks it BEFORE any table permission; file_fdw
+-- checks it when the "program" option is SET (validator) — per C, a plain
+-- SELECT from an existing program table needs only table privileges.
+CREATE ROLE prog_nsu NOSUPERUSER LOGIN;
+GRANT ALL ON prog_t TO prog_nsu;
+GRANT ALL ON FOREIGN SERVER prog_srv TO prog_nsu;
+GRANT CREATE ON SCHEMA public TO prog_nsu;
+SET ROLE prog_nsu;
+-- denied: 42501 with the pg_execute_server_program detail (C-exact via diff)
+COPY prog_t FROM PROGRAM 'printf ''9\tnope\n''';
+COPY prog_t TO PROGRAM 'cat > /dev/null';
+-- denied: setting the file_fdw "program" option
+CREATE FOREIGN TABLE prog_ft_denied (line text) SERVER prog_srv
+  OPTIONS (program 'printf ''nope\n''', format 'text');
+RESET ROLE;
+-- C parity: SELECT from an EXISTING program table is table-privilege only
+GRANT SELECT ON prog_ft TO prog_nsu;
+SET ROLE prog_nsu;
+SELECT * FROM prog_ft;
+RESET ROLE;
+-- membership flips the gate open
+GRANT pg_execute_server_program TO prog_nsu;
+SET ROLE prog_nsu;
+COPY prog_t FROM PROGRAM 'printf ''9\tmember\n''';
+SELECT * FROM prog_t WHERE a = 9;
+COPY (SELECT 42) TO PROGRAM 'grep -q ''^42$'' || exit 9';
+CREATE FOREIGN TABLE prog_ft_member (line text) SERVER prog_srv
+  OPTIONS (program 'printf ''member\n''', format 'text');
+SELECT * FROM prog_ft_member;
+DROP FOREIGN TABLE prog_ft_member;
+RESET ROLE;
+
 DROP FOREIGN TABLE prog_ft_fail;
 DROP FOREIGN TABLE prog_ft_big;
 DROP FOREIGN TABLE prog_ft;
+REVOKE ALL ON FOREIGN SERVER prog_srv FROM prog_nsu;
 DROP SERVER prog_srv;
 DROP EXTENSION file_fdw;
 DROP TABLE prog_seq;
 DROP TABLE prog_t;
+REVOKE CREATE ON SCHEMA public FROM prog_nsu;
+DROP ROLE prog_nsu;

@@ -1,0 +1,74 @@
+-- COPY FROM/TO PROGRAM (the malisper/pgrust#76 C-parity gap, PR #449
+-- stopgap retired): the server popens the command and streams its
+-- stdout/stdin as the COPY data pipe. Expected output frozen from real
+-- C PostgreSQL 18.x.
+CREATE TABLE copyprog_t (a int, b text);
+COPY copyprog_t FROM PROGRAM 'printf ''1\thello\n2\tworld\n''';
+SELECT * FROM copyprog_t ORDER BY a;
+ a |   b   
+---+-------
+ 1 | hello
+ 2 | world
+(2 rows)
+
+-- round-trip through a program pipe pair
+COPY copyprog_t TO PROGRAM 'cat > /tmp/pgrust_copyprog76.txt';
+CREATE TABLE copyprog_rt (a int, b text);
+COPY copyprog_rt FROM PROGRAM 'cat /tmp/pgrust_copyprog76.txt';
+SELECT * FROM copyprog_rt ORDER BY a;
+ a |   b   
+---+-------
+ 1 | hello
+ 2 | world
+(2 rows)
+
+-- COPY (query) TO PROGRAM
+COPY (SELECT a + 10, b FROM copyprog_t ORDER BY a) TO PROGRAM 'cat > /dev/null';
+-- failing program: nonzero exit is reported with the child's status
+COPY copyprog_rt FROM PROGRAM 'exit 3';
+ERROR:  program "exit 3" failed
+DETAIL:  child process exited with exit code 3
+COPY copyprog_t TO PROGRAM 'exit 3';
+ERROR:  program "exit 3" failed
+DETAIL:  child process exited with exit code 3
+-- a program that keeps writing after the \. terminator dies of SIGPIPE;
+-- a COPY FROM that stopped before EOF must tolerate that, not error
+COPY copyprog_rt FROM PROGRAM 'printf ''3\tearly\n\\.\n''; yes ''4	late''';
+SELECT * FROM copyprog_rt ORDER BY a;
+ a |   b   
+---+-------
+ 1 | hello
+ 2 | world
+ 3 | early
+(3 rows)
+
+-- privilege gate: superuser or pg_execute_server_program members only,
+-- checked before any table permissions
+CREATE ROLE copyprog_nsu LOGIN;
+SET SESSION AUTHORIZATION copyprog_nsu;
+COPY copyprog_t FROM PROGRAM 'printf ''9\tnope\n''';
+ERROR:  permission denied to COPY to or from an external program
+DETAIL:  Only roles with privileges of the "pg_execute_server_program" role may COPY to or from an external program.
+HINT:  Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
+COPY copyprog_t TO PROGRAM 'cat > /dev/null';
+ERROR:  permission denied to COPY to or from an external program
+DETAIL:  Only roles with privileges of the "pg_execute_server_program" role may COPY to or from an external program.
+HINT:  Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
+RESET SESSION AUTHORIZATION;
+GRANT pg_execute_server_program TO copyprog_nsu;
+GRANT ALL ON copyprog_t TO copyprog_nsu;
+SET SESSION AUTHORIZATION copyprog_nsu;
+COPY copyprog_t FROM PROGRAM 'printf ''5\tmember\n''';
+RESET SESSION AUTHORIZATION;
+SELECT * FROM copyprog_t ORDER BY a;
+ a |   b    
+---+--------
+ 1 | hello
+ 2 | world
+ 5 | member
+(3 rows)
+
+-- cleanup (the program consumes stdin first so the writer never sees EPIPE)
+COPY (SELECT 1) TO PROGRAM 'cat > /dev/null; rm -f /tmp/pgrust_copyprog76.txt';
+DROP TABLE copyprog_t, copyprog_rt;
+DROP ROLE copyprog_nsu;
