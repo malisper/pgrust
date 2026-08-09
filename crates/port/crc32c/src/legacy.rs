@@ -29,6 +29,18 @@ pub fn legacy_crc32_lexeme(data: &[u8]) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
+// Incremental form of the standard reflected CRC-32, zlib convention:
+// start from 0, feed chunks, the running value is always the finished CRC
+// (equivalent to zlib's crc32(crc, buf, len)). The gzip member trailer
+// (RFC 1952 CRC32 field) is computed with this.
+pub fn zlib_crc32_extend(crc: u32, data: &[u8]) -> u32 {
+    let mut c = crc ^ 0xFFFF_FFFF;
+    for &b in data {
+        c = PG_CRC32_TABLE[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
+    }
+    c ^ 0xFFFF_FFFF
+}
+
 // Standard reflected CRC-32 (zlib/Ethernet): COMP_CRC32_NORMAL_TABLE, the
 // algorithm behind the SQL crc32(bytea) builtin.
 pub fn traditional_crc32(data: &[u8]) -> u32 {

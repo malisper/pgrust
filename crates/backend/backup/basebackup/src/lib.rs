@@ -3,23 +3,26 @@
 // the data directory streaming each file as a tar archive, injects backup_label
 // / tablespace_map / pg_control, and emits the backup manifest.
 //
-// Scope (increment 5, default pg_basebackup -Xstream oracle). Loud contained
-// refusals, tagged increment 5, for surface a default backup never engages:
-// server-side compression, incremental backups, non-client targets, inline WAL
-// inclusion (WAL=true; default pg_basebackup streams WAL on a separate
-// connection). Backup-time page-checksum verification is deferred (it only
-// counts corruption warnings; it does not alter the streamed bytes).
+// Scope: server-side compression (COMPRESSION 'gzip'|'lz4'|'zstd' +
+// COMPRESSION_DETAIL) is implemented via the basebackup_compress sinks.
+// Incremental backups remain a loud contained refusal (they need the
+// UPLOAD_MANIFEST / WAL-summarizer machinery, a separate effort). Backup-time
+// page-checksum verification is implemented; WAL=true is handled inline.
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
 use std::cell::Cell;
 
+use compression::{
+    parse_compress_algorithm, parse_compress_specification, validate_compress_specification,
+    PgCompressAlgorithm, PgCompressSpecification,
+};
 use elog::ereport;
 use mcx::Mcx;
 use repl_gram::{BaseBackupCmd, ReplOption, ReplOptionArg};
 use types_core::{Oid, TimeLineID, XLogRecPtr};
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+    ErrorLocation, PgResult, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR, WARNING,
 };
 
@@ -286,6 +289,8 @@ struct BasebackupOptions {
     target_handle: Option<basebackup_target::BaseBackupTargetHandle>,
     manifest: BackupManifestOption,
     manifest_checksum_type: PgChecksumType,
+    compression: PgCompressAlgorithm,
+    compression_specification: PgCompressSpecification,
 }
 
 impl Default for BasebackupOptions {
@@ -303,6 +308,8 @@ impl Default for BasebackupOptions {
             target_handle: None,
             manifest: BackupManifestOption::No,
             manifest_checksum_type: CHECKSUM_TYPE_CRC32C,
+            compression: PgCompressAlgorithm::None,
+            compression_specification: PgCompressSpecification::default(),
         }
     }
 }
@@ -375,13 +382,6 @@ fn dup_err(name: &str) -> PgResult<()> {
     ereport(ERROR)
         .errcode(ERRCODE_SYNTAX_ERROR)
         .errmsg(format!("duplicate option \"{name}\""))
-        .finish(loc("parse_basebackup_options"))
-}
-
-fn refuse(feature: &str) -> PgResult<()> {
-    ereport(ERROR)
-        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-        .errmsg(format!("{feature} unported (replication-p1 increment 5)"))
         .finish(loc("parse_basebackup_options"))
 }
 
@@ -507,18 +507,15 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
             }
             "compression" => {
                 if o_compression { dup_err(name)?; }
-                let v = opt_string(o)?.to_string();
-                // parse_compress_algorithm subset: only "none" runs without a
-                // compression sink; real algorithms stay a loud refusal.
-                if strcasecmp(&v, "none") {
-                    // PG_COMPRESSION_NONE: no compression sink layer.
-                } else if strcasecmp(&v, "gzip") || strcasecmp(&v, "lz4") || strcasecmp(&v, "zstd")
-                {
-                    refuse("server-side compression")?;
-                } else {
-                    ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
-                        .errmsg(format!("unrecognized compression algorithm: \"{v}\""))
-                        .finish(loc("parse_basebackup_options"))?;
+                let v = opt_string(o)?;
+                // parse_compress_algorithm is case-sensitive, as C's strcmp.
+                match parse_compress_algorithm(v) {
+                    Some(alg) => opt.compression = alg,
+                    None => {
+                        ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
+                            .errmsg(format!("unrecognized compression algorithm: \"{v}\""))
+                            .finish(loc("parse_basebackup_options"))?;
+                    }
                 }
                 o_compression = true;
             }
@@ -577,14 +574,16 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
             .errmsg("compression detail cannot be specified unless compression is enabled")
             .finish(loc("parse_basebackup_options"))?;
     }
-    if o_compression_detail {
-        // Only "none" reaches here; none accepts no detail options
-        // (validate_compress_specification wording).
-        let detail = compression_detail_str.as_deref().unwrap_or("");
-        ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
-            .errmsg(format!("invalid compression specification: compression algorithm \"none\" does not accept a compression level"))
-            .errdetail(format!("Compression detail was \"{detail}\"."))
-            .finish(loc("parse_basebackup_options"))?;
+    if o_compression {
+        opt.compression_specification =
+            parse_compress_specification(opt.compression, compression_detail_str.as_deref());
+        if let Some(error_detail) =
+            validate_compress_specification(&opt.compression_specification)
+        {
+            ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("invalid compression specification: {error_detail}"))
+                .finish(loc("parse_basebackup_options"))?;
+        }
     }
 
     if opt.incremental {
@@ -621,14 +620,30 @@ pub fn SendBaseBackup<'mcx>(mcx: Mcx<'mcx>, cmd: &BaseBackupCmd) -> PgResult<()>
     }
 
     // Client copy sink; if the target is not 'client' the backup data goes
-    // wherever BaseBackupGetSink routes it instead. Server-side compression
-    // is refused in parse, so no compression sink layers.
+    // wherever BaseBackupGetSink routes it instead.
     let mut sink: Box<Bbsink<'mcx>> = backup_copy::bbsink_copystream_new(mcx, opt.send_to_client);
     if let Some(handle) = opt.target_handle.take() {
         sink = basebackup_target::BaseBackupGetSink(mcx, handle, sink)?;
     }
+
+    // Set up network throttling, if client requested it (as in C, throttling
+    // wraps inside compression: the rate limit applies to compressed bytes).
     if opt.maxrate > 0 {
         sink = throttle::bbsink_throttle_new(mcx, sink, opt.maxrate);
+    }
+
+    // Set up server-side compression, if client requested it.
+    match opt.compression {
+        PgCompressAlgorithm::Gzip => {
+            sink = basebackup_compress::bbsink_gzip_new(mcx, sink, &opt.compression_specification)?;
+        }
+        PgCompressAlgorithm::Lz4 => {
+            sink = basebackup_compress::bbsink_lz4_new(mcx, sink, &opt.compression_specification)?;
+        }
+        PgCompressAlgorithm::Zstd => {
+            sink = basebackup_compress::bbsink_zstd_new(mcx, sink, &opt.compression_specification)?;
+        }
+        PgCompressAlgorithm::None => {}
     }
 
     // Set up progress reporting (basebackup.c:1051). Always wrapped, as in C;

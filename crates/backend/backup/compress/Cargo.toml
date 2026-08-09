@@ -1,0 +1,30 @@
+[package]
+name = "basebackup_compress"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "basebackup_compress"
+path = "src/lib.rs"
+
+[dependencies]
+elog = { path = "../../utils/error/elog" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+sink = { path = "../sink" }
+compression = { path = "../../../common/compression" }
+# zlib CRC-32 for the gzip member trailer (RFC 1952).
+crc32c = { path = "../../../port/crc32c" }
+# gzip body: raw DEFLATE via miniz_oxide (pure Rust; already in-tree for pgcrypto).
+miniz_oxide = "0.8"
+# lz4: LZ4 frame format via lz4_flex (pure Rust; already in-tree for pgrcolumnar).
+# NOTE: fast-mode encoder only; levels 1..12 are accepted (C validation) but
+# compress at fast mode. See lz4.rs.
+lz4_flex = "0.11"
+
+# zstd links C (zstd-sys); no wasm32 build. The wasm arm keeps C's exact
+# "zstd compression is not supported by this build" refusal.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+zstd = "0.13"

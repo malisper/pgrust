@@ -31,6 +31,8 @@ xlogbackup = { path = "../../access/transam/xlogbackup" }
 # interfaces). The root workspace wiring + these paths are reconciled at
 # integration time.
 sink = { path = "../sink" }
+basebackup_compress = { path = "../compress" }
+compression = { path = "../../../common/compression" }
 backup_copy = { path = "../backup_copy" }
 backup_copy_seams = { path = "../backup_copy_seams" }
 throttle = { path = "../throttle" }

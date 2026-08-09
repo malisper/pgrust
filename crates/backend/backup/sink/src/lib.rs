@@ -176,6 +176,26 @@ impl<'mcx> Bbsink<'mcx> {
         self.buffer_length = 0;
         self.shares_next_buffer = false;
     }
+
+    /// Split-borrow for compression sinks: the sink's own (input) buffer,
+    /// read-only up to `len`, together with the successor sink. C's
+    /// compression sinks read `bbs_buffer` while writing into
+    /// `bbs_next->bbs_buffer`; this hands out both sides at once. Panics if
+    /// the sink shares its successor's buffer, has no buffer, or has no
+    /// successor.
+    pub fn own_buffer_and_next(&mut self, len: Size) -> (&[u8], &mut Bbsink<'mcx>) {
+        assert!(
+            !self.shares_next_buffer,
+            "own_buffer_and_next requires a private buffer"
+        );
+        assert!(!self.buffer.is_empty(), "bbsink buffer must be set");
+        assert!(len <= self.buffer.len(), "buffer length exceeded");
+        let next = self
+            .next
+            .as_deref_mut()
+            .expect("compression sink must have next sink");
+        (&self.buffer[..len], next)
+    }
 }
 
 // Dispatch: the `bbsink_*` inline helpers from the C header.

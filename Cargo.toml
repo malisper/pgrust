@@ -8,6 +8,8 @@ members = [
     "crates/backend/replication/logical/worker",
     "crates/contrib/pgoutput",
     "crates/backend/backup/sink",
+    "crates/backend/backup/compress",
+    "crates/common/compression",
     "crates/backend/backup/sink_support",
     "crates/backend/backup/backup_copy",
     "crates/backend/backup/backup_copy_seams",

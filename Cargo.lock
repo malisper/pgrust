@@ -1940,7 +1940,9 @@ version = "0.0.0"
 dependencies = [
  "backup_copy",
  "backup_copy_seams",
+ "basebackup_compress",
  "basebackup_target",
+ "compression",
  "datum",
  "elog",
  "exectuples_output",
@@ -1970,6 +1972,22 @@ dependencies = [
  "walsender",
  "walsender_seams",
  "xlogbackup",
+]
+
+[[package]]
+name = "basebackup_compress"
+version = "0.0.0"
+dependencies = [
+ "compression",
+ "crc32c",
+ "elog",
+ "lz4_flex",
+ "mcx",
+ "miniz_oxide",
+ "sink",
+ "types_core",
+ "types_error",
+ "zstd",
 ]
 
 [[package]]
@@ -4384,6 +4402,14 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "compression"
+version = "0.0.0"
+dependencies = [
+ "pgstrcasecmp",
+ "zstd",
 ]
 
 [[package]]

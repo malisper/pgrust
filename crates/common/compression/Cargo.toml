@@ -1,0 +1,18 @@
+[package]
+name = "compression"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "compression"
+path = "src/lib.rs"
+
+[dependencies]
+pgstrcasecmp = { path = "../../port/pgstrcasecmp" }
+
+# zstd links C (zstd-sys); no wasm32 build. On wasm the zstd algorithm is
+# reported as "this build does not support compression with ZSTD", which is
+# exactly C's !USE_ZSTD arm.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+zstd = "0.13"

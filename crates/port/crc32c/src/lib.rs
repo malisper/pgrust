@@ -10,7 +10,7 @@ mod sse42;
 
 #[cfg(target_arch = "aarch64")]
 pub use armv8::pg_comp_crc32c_armv8;
-pub use legacy::{legacy_crc32_lexeme, traditional_crc32};
+pub use legacy::{legacy_crc32_lexeme, traditional_crc32, zlib_crc32_extend};
 pub use sb8::pg_comp_crc32c_sb8;
 #[cfg(target_arch = "x86_64")]
 pub use sse42::pg_comp_crc32c_sse42;
