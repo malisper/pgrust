@@ -33,6 +33,27 @@ pub fn pg_checksum_type_name(ty: PgChecksumType) -> &'static str {
     }
 }
 
+/// C: `pg_checksum_parse_type` (common/checksum_helper.c). Case-insensitive
+/// (pg_strcasecmp is ASCII-only in the C locale); returns None where C
+/// returns false.
+pub fn pg_checksum_parse_type(name: &[u8]) -> Option<PgChecksumType> {
+    if name.eq_ignore_ascii_case(b"none") {
+        Some(PgChecksumType::None)
+    } else if name.eq_ignore_ascii_case(b"crc32c") {
+        Some(PgChecksumType::Crc32c)
+    } else if name.eq_ignore_ascii_case(b"sha224") {
+        Some(PgChecksumType::Sha224)
+    } else if name.eq_ignore_ascii_case(b"sha256") {
+        Some(PgChecksumType::Sha256)
+    } else if name.eq_ignore_ascii_case(b"sha384") {
+        Some(PgChecksumType::Sha384)
+    } else if name.eq_ignore_ascii_case(b"sha512") {
+        Some(PgChecksumType::Sha512)
+    } else {
+        None
+    }
+}
+
 enum Raw {
     None,
     Crc(u32),

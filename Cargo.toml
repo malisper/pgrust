@@ -32,6 +32,7 @@ members = [
     "crates/backend/utils/adt/tsvector_stat",
     "crates/_support/types/stringinfo",
     "crates/common/blkreftable",
+    "crates/common/parse_manifest",
     "crates/common/hashfn",
     "crates/common/stringhash",
     "crates/_support/types/fmgr",

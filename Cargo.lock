@@ -11072,6 +11072,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse_manifest"
+version = "0.1.0"
+dependencies = [
+ "adt_json",
+ "manifest",
+ "mcx",
+ "pg_sha2",
+ "pg_string",
+ "pgtz_seams",
+ "types_core",
+ "types_error",
+ "wchar",
+]
+
+[[package]]
 name = "parse_oper"
 version = "0.0.0"
 dependencies = [

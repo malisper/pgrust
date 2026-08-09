@@ -18,7 +18,8 @@ use timeline::readTimeLineHistory;
 use varlena::bytea::hex_encode_into;
 
 pub use checksum::{
-    pg_checksum_type_name, PgChecksumContext, PgChecksumType, PG_CHECKSUM_MAX_LENGTH,
+    pg_checksum_parse_type, pg_checksum_type_name, PgChecksumContext, PgChecksumType,
+    PG_CHECKSUM_MAX_LENGTH,
 };
 
 pub mod seams {
