@@ -1,0 +1,2 @@
+pg_combinebackup: error: backup at "/tmp/fx/full" is a full backup, but only the first backup should be a full backup
+exit=1

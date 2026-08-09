@@ -1,0 +1,2 @@
+pg_combinebackup: error: backup at "/tmp/fx/full" starts at LSN 0/D00028, but expected 0/1100028
+exit=1

@@ -11687,6 +11687,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_combinebackup"
+version = "0.0.0"
+dependencies = [
+ "controldata_utils",
+ "libc",
+ "manifest",
+ "mcx",
+ "parse_manifest",
+ "pg_sha2",
+ "pgtz_seams",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "pg_config"
 version = "0.0.0"
 dependencies = [

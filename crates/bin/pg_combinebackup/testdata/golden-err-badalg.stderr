@@ -1,0 +1,2 @@
+pg_combinebackup: error: unrecognized checksum algorithm: "BOGUS"
+exit=1

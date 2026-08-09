@@ -908,7 +908,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      product build. (The product STATE block in typcache/src/lib.rs
     //      pre-existed this pin and is already a session_sources row;
     //      unchanged.)
-    assert_eq!(count_tree(crates), 557, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 558, re-pinned at the incremental-basebackup Stage-5 landing:
+    //   +1 bin/pg_combinebackup/src/main.rs — a per-process cleanup-list
+    //      thread_local in the pg_combinebackup frontend CLI (atexit-equivalent
+    //      removal of a half-written output dir). Non-session: a one-shot
+    //      standalone client process, never a backend session; nothing to do
+    //      with the server session envelope. Documented, not a session_sources
+    //      row.
+    assert_eq!(count_tree(crates), 558, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
