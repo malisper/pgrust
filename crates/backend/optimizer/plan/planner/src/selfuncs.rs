@@ -927,8 +927,9 @@ fn convert_network_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
     Some(res)
 }
 
-// convert_string_datum (selfuncs.c); the non-C-collation pg_strxfrm leg is
-// the locale-aware lane and stays loud.
+// convert_string_datum (selfuncs.c). For a non-C collation the string is
+// passed through pg_strxfrm (libc strxfrm_l / ICU sort key) so byte-wise
+// interpolation sees locale sort order, exactly as C does.
 fn convert_string_datum<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     value: Datum,
@@ -963,7 +964,17 @@ fn convert_string_datum<'mcx>(
     let locale = pg_locale::pg_newlocale_from_collation(collid)
         .expect("convert_string_datum: collation lookup");
     if !locale.collate_is_c {
-        panic!("convert_string_datum (selfuncs.c): pg_strxfrm leg; C-collation lane only");
+        // C's two-call pattern: size with a NULL dest, allocate xfrmlen+1,
+        // fill. glibc's second call may legitimately return a smaller value
+        // than the first, hence <=. (C's WIN32 INT_MAX escape has no lane
+        // here.) C treats the result as a NUL-terminated string afterwards,
+        // so the slice ends at the reported length.
+        let xfrmlen = locale.pg_strnxfrm(&mut [], bytes);
+        let mut xfrm = mcx::PgVec::<u8>::new_in(mcx);
+        xfrm.resize(xfrmlen + 1, 0);
+        let xfrmlen2 = locale.pg_strnxfrm(&mut xfrm, bytes);
+        debug_assert!(xfrmlen2 <= xfrmlen);
+        return Some(&xfrm.leak()[..xfrmlen2]);
     }
     Some(bytes)
 }

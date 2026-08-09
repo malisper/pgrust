@@ -1,0 +1,21 @@
+-- Histogram range-selectivity interpolation over a non-C collation
+-- (convert_string_datum's pg_strxfrm leg, selfuncs.c). Reported on a public
+-- thread (HN 49220159): planning `s < 'const'` with the constant inside the
+-- histogram range of a non-C-collated text column panicked the backend.
+-- The collation is created explicitly so the case is independent of the
+-- runner's initdb locale (--no-locale); libc provider exercises the
+-- strxfrm_l lane on both glibc and macOS.
+CREATE COLLATION regress_en_us_libc (provider = libc, locale = 'en_US.UTF-8');
+CREATE TABLE collate_hist_est (s text COLLATE regress_en_us_libc);
+INSERT INTO collate_hist_est SELECT md5(i::text) FROM generate_series(1, 5000) i;
+CREATE INDEX collate_hist_est_s_idx ON collate_hist_est (s);
+ANALYZE collate_hist_est;
+-- constant inside the histogram range -> interpolation (the panic path)
+SELECT count(*) FROM collate_hist_est WHERE s < '8';
+-- highly selective range: the interpolated estimate must be small enough to
+-- prefer the index; a default-selectivity fallback (0.33) would seq-scan,
+-- so this plan shape witnesses the transform actually engaging
+EXPLAIN (COSTS OFF) SELECT * FROM collate_hist_est WHERE s < '01';
+SELECT count(*) FROM collate_hist_est WHERE s < '01';
+DROP TABLE collate_hist_est;
+DROP COLLATION regress_en_us_libc;
