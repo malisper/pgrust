@@ -2377,6 +2377,16 @@ fn bad_int8_transarray() -> Box<::types_error::PgError> {
     Box::new(::types_error::PgError::error("expected 2-element int8 array"))
 }
 
+#[cold]
+#[inline(never)]
+fn toasted_int8_transarray() -> Box<::types_error::PgError> {
+    // Unreachable in practice (see int8_avg_trans_read); an honest,
+    // non-crashing error if a toasted transvalue ever reaches the raw reader.
+    Box::new(::types_error::PgError::error(
+        "unexpected toasted int8 transition value",
+    ))
+}
+
 /// `int8_avg`'s transarray read without the fmgr frame: the SAME image
 /// validation `adt_numeric::int8_transarray` performs (4B-U size == 24 + 16,
 /// no null bitmap; a tuple-queue-packed 1B short image validates at the
@@ -2407,8 +2417,15 @@ pub(crate) unsafe fn int8_avg_trans_read(d: Datum) -> PgResult<(i64, i64)> {
             ));
         }
         if !varatt::varatt_is_4b_u(p) {
-            // int8_transarray's exact unreachable-arm behavior.
-            panic!("int8 transarray: toasted array datum (detoast unported)");
+            // A compressed (4B-C) or external (1B-E TOAST pointer) image. The
+            // int8_avg {count,sum} transvalue is a fixed 16-byte array built in
+            // the aggcontext and never stored or externalized, and the parallel
+            // combine path moves it as a bytea via serialize/deserialize — so a
+            // toasted datum never actually reaches this raw-array reader. Return
+            // a clean error rather than crashing the backend if that invariant
+            // is ever violated by a future caller (issue #64 hardening: this arm
+            // was a panic; every other bad-shape exit here already returns Err).
+            return Err(toasted_int8_transarray());
         }
         let size = varatt::varsize_4b(p);
         let hasnull = p.add(8).cast::<i32>().read() != 0;
@@ -2491,6 +2508,25 @@ mod batch_emit_tests {
         // SAFETY: live image.
         assert!(unsafe { int8_avg_trans_read(Datum::from_usize(big.0.as_ptr() as usize)) }
             .is_err());
+    }
+
+    /// #64 hardening: a compressed (4B-C) transvalue image must return a clean
+    /// Err, not panic. This arm is unreachable in practice (the 16-byte int8_avg
+    /// transvalue is never toasted), but before the fix it crashed the backend;
+    /// this asserts the crash is gone. RED at base (panic), GREEN after.
+    #[test]
+    fn transarray_read_rejects_toasted_image() {
+        #[repr(align(8))]
+        struct Aligned([u8; 40]);
+        let mut buf = Aligned([0u8; 40]);
+        // A 4B-C compressed varlena header — varatt_is_4b_u is false for it, so
+        // it takes the toasted arm.
+        buf.0[0..4].copy_from_slice(
+            &::types_tuple::varatt::set_varsize_4b_c_word(40).to_ne_bytes(),
+        );
+        // SAFETY: live 40-byte image with a compressed header.
+        let got = unsafe { int8_avg_trans_read(Datum::from_usize(buf.0.as_ptr() as usize)) };
+        assert!(got.is_err(), "toasted transvalue must Err, not panic");
     }
 
     /// The batched avg kernel composition (reader → int64_avg_div) feeds the
