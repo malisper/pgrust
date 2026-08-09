@@ -555,3 +555,155 @@ fn truncate_line_pointer_array_keeps_used_prefix() {
     assert!(page.has_free_line_pointers(), "hint set: unused lp remains");
     bufmgr_seams::release_buffer::call(buf).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Tracker #66: morsel-vacuum deferred/above-rewind drains must not
+// double-count dead_items_info.num_items on a §5.2 coverage-guard trip.
+// Direct-call repro: constructs the leader-finalize accounting state exactly
+// as scan_rounds sees it after a lose-local fault, drives the real guard
+// (resume_granule + verify_prefix_coverage + rewind), the real drain plan
+// (morsels::round_drain_plan), the real store accounting (dead_items_add),
+// and the serial arm's idempotent re-scan from the rewound resume point —
+// then asserts num_items equals the store's actual content (the
+// collect_dead_tids invariant, lib.rs).
+// ---------------------------------------------------------------------------
+
+/// Count the items actually held by the store (collect_dead_tids' walk,
+/// without its debug_assert so the comparison stays a test assertion).
+fn store_item_count(dead_items: &TidStore) -> i64 {
+    let mut n = 0i64;
+    let mut iter = dead_items.begin_iterate();
+    let mut offsets = [InvalidOffsetNumber; MaxOffsetNumber as usize];
+    while let Some(res) = iter.next() {
+        n += res.block_offsets(&mut offsets) as i64;
+    }
+    n
+}
+
+#[test]
+fn morsel_coverage_trip_counts_each_dead_item_once() {
+    // The experimental morsel arm is what this accounting belongs to; the
+    // direct-call drive below IS that arm's leader-finalize path.
+    std::env::set_var("PGRUST_RUNTIME_VACUUM", "1");
+    let ctx = MemoryContext::new("t66");
+    let mcx = ctx.mcx();
+
+    // Identity skip map: granule i == block i, 4 granules. Three workers:
+    //   w0 scanned [0,1): dead run at block 0 (offsets 1,2)
+    //   w1 scanned [1,2): dead run at block 1 (offset 3) — LOST below
+    //   w2 scanned [2,4): dead run at block 2 (offset 1), and block 3 hit
+    //      the §5.3 deferred-cleanup ledger (dead offsets 5,6 on re-prune).
+    let total = 4u64;
+    let mut w0 = ::vacuum_morsels::VacScanLocal::new(0, 1000, 1);
+    w0.claims.push(::vacuum_morsels::ClaimRecord { start: 0, end: 1, scanned: true });
+    w0.record_dead(0, vec![1, 2]);
+    let mut w1 = ::vacuum_morsels::VacScanLocal::new(1, 1000, 1);
+    w1.claims.push(::vacuum_morsels::ClaimRecord { start: 1, end: 2, scanned: true });
+    w1.record_dead(1, vec![3]);
+    let mut w2 = ::vacuum_morsels::VacScanLocal::new(2, 1000, 1);
+    w2.claims.push(::vacuum_morsels::ClaimRecord { start: 2, end: 4, scanned: true });
+    w2.record_dead(2, vec![1]);
+    w2.deferred_cleanup.push(3);
+    let mut locals = vec![w0, w1, w2];
+    // PGRUST_RUNTIME_VACUUM_FAULT=lose-local shape: one Local never lands.
+    locals.remove(1);
+
+    // Leader finalize, scan_rounds' exact sequence: resume + coverage guard
+    // + rewind-to-hole.
+    let mut resume_g = ::vacuum_morsels::resume_granule(&locals, total);
+    assert_eq!(resume_g, total, "no unscanned claim: resume starts at total");
+    let mut coverage_failed = false;
+    if let Err(e) = ::vacuum_morsels::verify_prefix_coverage(&locals, resume_g) {
+        coverage_failed = true;
+        resume_g = match e {
+            ::vacuum_morsels::CoverageError::HoleAt(gr)
+            | ::vacuum_morsels::CoverageError::OverlapAt(gr) => gr.min(resume_g),
+            ::vacuum_morsels::CoverageError::ScannedBeyondResume { .. } => resume_g,
+        };
+    }
+    assert!(coverage_failed, "lost Local must trip the §5.2 guard");
+    assert_eq!(resume_g, 1, "rewound to the hole");
+    let resume_block: BlockNumber = resume_g as BlockNumber; // identity map
+
+    let mut dead_items = TidStore::create_local(mcx, 1024 * 1024, true).unwrap();
+    let mut info = VacDeadItemsInfo { max_bytes: 1024 * 1024, num_items: 0 };
+
+    // The leader drain, as scan_rounds performs it: merged dead runs into
+    // the round store, then the deferred-cleanup pages (whose prune sink is
+    // dead_items_add with that block's dead offsets).
+    let (runs, deferred) = morsels::round_drain_plan(&locals, resume_block);
+    for run in &runs {
+        dead_items_add(&mut dead_items, &mut info, run.block, &run.offsets).unwrap();
+    }
+    let deferred_page_offsets: &[(BlockNumber, &[OffsetNumber])] = &[(3, &[5, 6])];
+    for blk in deferred {
+        let offs = deferred_page_offsets.iter().find(|(b, _)| *b == blk).unwrap().1;
+        dead_items_add(&mut dead_items, &mut info, blk, offs).unwrap();
+    }
+
+    // coverage_failed => ScanHandoff::Resume { resume_block }: the serial
+    // arm re-scans EVERY block from the rewound resume point; re-pruning is
+    // idempotent, so each re-scanned block re-adds its same dead offsets.
+    let serial_rescan: &[(BlockNumber, &[OffsetNumber])] =
+        &[(1, &[3]), (2, &[1]), (3, &[5, 6])];
+    for (blk, offs) in serial_rescan {
+        dead_items_add(&mut dead_items, &mut info, *blk, offs).unwrap();
+    }
+
+    // The store holds each dead item once (set_block_offsets replaces per
+    // block): blocks 0(2) + 1(1) + 2(1) + 3(2).
+    let store_items = store_item_count(&dead_items);
+    assert_eq!(store_items, 6);
+    // #66: num_items must count each dead item exactly once across the
+    // defer + coverage-trip + serial-resume path. Before the fix the drain
+    // plan handed blocks 2 and 3 (>= the rewound resume point) to the
+    // leader AND the serial arm: num_items = 9, store = 6.
+    assert_eq!(
+        info.num_items, store_items,
+        "#66 double-count: dead_items_info.num_items diverged from the TidStore content"
+    );
+}
+
+/// Non-fault pin: a verified round (no coverage trip) drains every run and
+/// every deferred page — the clamp is a no-op and the common case is
+/// unchanged.
+#[test]
+fn morsel_verified_round_drains_all_runs_and_deferred() {
+    std::env::set_var("PGRUST_RUNTIME_VACUUM", "1");
+    let ctx = MemoryContext::new("t66b");
+    let mcx = ctx.mcx();
+
+    let total = 4u64;
+    let mut w0 = ::vacuum_morsels::VacScanLocal::new(0, 1000, 1);
+    w0.claims.push(::vacuum_morsels::ClaimRecord { start: 0, end: 2, scanned: true });
+    w0.record_dead(0, vec![1, 2]);
+    w0.record_dead(1, vec![3]);
+    let mut w1 = ::vacuum_morsels::VacScanLocal::new(1, 1000, 1);
+    w1.claims.push(::vacuum_morsels::ClaimRecord { start: 2, end: 4, scanned: true });
+    w1.record_dead(2, vec![1]);
+    w1.deferred_cleanup.push(3);
+    let locals = vec![w0, w1];
+
+    let resume_g = ::vacuum_morsels::resume_granule(&locals, total);
+    assert_eq!(resume_g, total);
+    assert!(::vacuum_morsels::verify_prefix_coverage(&locals, resume_g).is_ok());
+    // complete => resume_block = rel_pages (scan_rounds), here 4.
+    let resume_block: BlockNumber = 4;
+
+    let mut dead_items = TidStore::create_local(mcx, 1024 * 1024, true).unwrap();
+    let mut info = VacDeadItemsInfo { max_bytes: 1024 * 1024, num_items: 0 };
+
+    let (runs, deferred) = morsels::round_drain_plan(&locals, resume_block);
+    assert_eq!(runs.len(), 3, "all runs drained on a verified round");
+    assert_eq!(deferred, vec![3], "deferred page drained on a verified round");
+    for run in &runs {
+        dead_items_add(&mut dead_items, &mut info, run.block, &run.offsets).unwrap();
+    }
+    for blk in deferred {
+        dead_items_add(&mut dead_items, &mut info, blk, &[5, 6]).unwrap();
+    }
+
+    let store_items = store_item_count(&dead_items);
+    assert_eq!(store_items, 6);
+    assert_eq!(info.num_items, store_items);
+}

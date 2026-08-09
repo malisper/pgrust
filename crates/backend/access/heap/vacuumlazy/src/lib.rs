@@ -1463,7 +1463,12 @@ fn lazy_vacuum(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     let mut bypass = false;
     if vacrel.consider_bypass_optimization && vacrel.rel_pages > 0 {
         debug_assert!(vacrel.num_index_scans == 0);
-        debug_assert!(vacrel.folds.counters.lpdead_items == vacrel.dead_items_info.num_items as u64);
+        // coverage_hole: counter folds above a §5.2 rewind overcount page
+        // visits (tolerated by design); num_items stays store-exact (#66).
+        debug_assert!(
+            vacrel.coverage_hole
+                || vacrel.folds.counters.lpdead_items == vacrel.dead_items_info.num_items as u64
+        );
         let threshold = vacrel.rel_pages as f64 * BYPASS_THRESHOLD_PAGES;
         bypass = (vacrel.folds.counters.lpdead_item_pages as f64) < threshold
             && vacrel.dead_items.as_ref().unwrap().memory_usage() < 32 * 1024 * 1024;
@@ -1578,8 +1583,11 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
         }
     }
 
+    // coverage_hole: counter folds above a §5.2 rewind overcount page
+    // visits (tolerated by design); num_items stays store-exact (#66).
     debug_assert!(
         vacrel.num_index_scans > 0
+            || vacrel.coverage_hole
             || vacrel.dead_items_info.num_items as u64 == vacrel.folds.counters.lpdead_items
     );
     debug_assert!(allindexes || VacuumFailsafeActive());
@@ -1725,8 +1733,11 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
             vacrel.dead_items_info.num_items,
         ));
     }
+    // coverage_hole: counter folds above a §5.2 rewind overcount page
+    // visits (tolerated by design); num_items stays store-exact (#66).
     debug_assert!(
         vacrel.num_index_scans > 1
+            || vacrel.coverage_hole
             || (vacrel.dead_items_info.num_items as u64 == vacrel.folds.counters.lpdead_items
                 && vacuumed_pages as u64 == vacrel.folds.counters.lpdead_item_pages)
     );

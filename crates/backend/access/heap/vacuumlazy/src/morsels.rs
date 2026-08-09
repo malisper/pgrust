@@ -63,8 +63,8 @@ use ::types_storage::bufpage::PageRef;
 use ::types_storage::ReadBufferMode;
 use ::vacuum_morsels::{
     merge_dead_runs, resume_granule, verify_prefix_coverage, ClaimRecord, CoverageError,
-    QuiesceState, ScanCounters, SkipMapParams, VacScanLocal, VacuumBlockSource, VM_ALL_FROZEN,
-    VM_ALL_VISIBLE,
+    DeadRun, QuiesceState, ScanCounters, SkipMapParams, VacScanLocal, VacuumBlockSource,
+    VM_ALL_FROZEN, VM_ALL_VISIBLE,
 };
 use ::visibilitymap::{
     visibilitymap_get_status, visibilitymap_pin, VmBuffer, VISIBILITYMAP_ALL_FROZEN,
@@ -408,7 +408,11 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
             // the remainder to the SERIAL arm from the hole (re-scanning any
             // block is idempotent; counter folds above the hole may
             // overcount page visits, which reltuples estimation tolerates
-            // and advancement no longer consumes).
+            // and advancement no longer consumes). Dead-ITEM accounting is
+            // NOT overcount-tolerant (num_items must equal the TidStore's
+            // content — tracker #66), so the leader's drains below are
+            // clamped strictly below the rewound resume point via
+            // round_drain_plan.
             vacrel.coverage_hole = true;
             coverage_failed = true;
             resume_g = match e {
@@ -430,12 +434,24 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         vacrel.skippedallvis |= source.skipsallvis_before(resume_g);
         clock.finalize_ns += t_finalize.elapsed().as_nanos() as u64;
 
+        // The round's resume point, FIXED before any leader drain: on a
+        // coverage trip resume_g was rewound above, and everything at or
+        // beyond this block will be re-scanned (serial arm from the hole),
+        // so draining it here would double-count dead_items_info.num_items
+        // when the re-scan re-adds the same blocks (set_block_offsets
+        // replaces per block; the num_items += does not — tracker #66).
+        let complete = resume_g >= total;
+        resume_block =
+            if complete { vacrel.rel_pages } else { source.block_of(resume_g).block };
+
+        let (dead_runs, deferred) = round_drain_plan(&locals, resume_block);
+
         // Merge the per-worker dead-TID runs into the round authority store
         // (the ONE serial O(dead TIDs) step per round — doc §3.2).
         let t_merge = std::time::Instant::now();
         {
             let super::LVRelState { dead_items, dead_items_info, .. } = &mut *vacrel;
-            for run in merge_dead_runs(&locals) {
+            for run in dead_runs {
                 dead_items_add(
                     dead_items.as_mut().expect("dead_items live during scan"),
                     dead_items_info,
@@ -493,10 +509,10 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         }
 
         // Deferred blocking-cleanup pages (§5.3): leader-serial, BEFORE the
-        // round's INDEX phase, so the round's dead set is complete.
-        let mut deferred: Vec<BlockNumber> =
-            locals.iter().flat_map(|l| l.deferred_cleanup.iter().copied()).collect();
-        deferred.sort_unstable();
+        // round's INDEX phase, so the round's dead set is complete. Already
+        // clamped below resume_block by round_drain_plan: a deferred page at
+        // or above a coverage-trip rewind stays deferred to the serial
+        // re-scan (which takes the blocking cleanup wait itself — #66).
         for blk in deferred {
             leader_deferred_block(vacrel, &source, blk)?;
         }
@@ -509,9 +525,6 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
             );
         }
 
-        let complete = resume_g >= total;
-        resume_block =
-            if complete { vacrel.rel_pages } else { source.block_of(resume_g).block };
         clock.rounds_ns += t_round.elapsed().as_nanos() as u64;
         vtrace(&format!(
             "round done rel={} granules={total} resume_g={resume_g} resume_block={resume_block} \
@@ -557,6 +570,37 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
             pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_SCAN_HEAP);
         }
     }
+}
+
+/// The leader's round drain plan (§3.2 merge + §5.3 deferred), clamped
+/// STRICTLY BELOW the round's final resume block.
+///
+/// On a verified round the clamp is a no-op: runs and deferred pages come
+/// only from scanned claims, and verify_prefix_coverage guarantees those
+/// tile `[0, resume_g)`. On a §5.2 coverage trip resume_g is REWOUND to the
+/// hole, so surviving Locals can hold dead runs and deferred-cleanup pages
+/// at or above the resume point — blocks the serial arm will re-scan and
+/// re-add. Draining those here would double-count
+/// `dead_items_info.num_items` (dead_items_add's `num_items +=` is not
+/// per-block idempotent, unlike set_block_offsets), breaking the
+/// num_items == TidStore-content invariant that sizes collect_dead_tids
+/// and feeds progress + bypass accounting (tracker #66). C's accounting
+/// (vacuumlazy.c dead_items_add) counts each dead item exactly once
+/// because the C scan visits each block exactly once; the clamp restores
+/// that: every block is drained by exactly one arm.
+pub(crate) fn round_drain_plan(
+    locals: &[VacScanLocal],
+    resume_block: BlockNumber,
+) -> (Vec<DeadRun>, Vec<BlockNumber>) {
+    let mut runs = merge_dead_runs(locals);
+    runs.retain(|r| r.block < resume_block);
+    let mut deferred: Vec<BlockNumber> = locals
+        .iter()
+        .flat_map(|l| l.deferred_cleanup.iter().copied())
+        .filter(|&b| b < resume_block)
+        .collect();
+    deferred.sort_unstable();
+    (runs, deferred)
 }
 
 /// One deferred page (§5.3): the serial per-block ladder, blocking cleanup
