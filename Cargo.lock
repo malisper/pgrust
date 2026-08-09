@@ -12644,6 +12644,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_walsummary"
+version = "0.0.0"
+dependencies = [
+ "blkreftable",
+ "libc",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
+
+[[package]]
 name = "pgarch"
 version = "0.0.0"
 dependencies = [
@@ -20210,6 +20222,7 @@ dependencies = [
  "walreceiverfuncs_seams",
  "walsummarizer_seams",
  "xact",
+ "xact_seams",
  "xlogreader",
  "xlogreader_seams",
  "xlogrecovery",

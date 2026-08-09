@@ -898,6 +898,80 @@ pub fn fc_pg_get_wal_summarizer_state(
     composite_result(flinfo, fcinfo, &values, &[false, false, false, pid < 0])
 }
 
+/// C: walsummaryfuncs.c pg_available_wal_summaries (OID 6321) — list the WAL
+/// summary files available in pg_wal/summaries. Columns (tli int8,
+/// start_lsn pg_lsn, end_lsn pg_lsn); rows in directory order, like C.
+pub fn fc_pg_available_wal_summaries(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_available_wal_summaries: NULL flinfo");
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    // C: InitMaterializedSRF(fcinfo, 0) — tupdesc from the pg_proc OUT params.
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+
+    let wslist = walsummarizer_seams::get_available_wal_summaries::call()?;
+    for (tli, start_lsn, end_lsn) in wslist {
+        postgres_seams::check_for_interrupts::call()?;
+        srf.putvalues(
+            &[
+                Datum::from_i64(tli as i64),
+                Datum::from_i64(start_lsn as i64),
+                Datum::from_i64(end_lsn as i64),
+            ],
+            &[false, false, false],
+        )?;
+    }
+    Ok(srf.finish(fcinfo))
+}
+
+/// C: walsummaryfuncs.c pg_wal_summary_contents (OID 6322) — list the
+/// contents of the WAL summary file identified by (tli, start_lsn, end_lsn).
+/// Columns (relfilenode oid, reltablespace oid, reldatabase oid,
+/// relforknumber int2, relblocknumber int8, is_limit_block bool); per
+/// relation fork the limit_block row (if any) precedes the modified-block
+/// rows, which keep blkreftable reader order (C does not sort them).
+pub fn fc_pg_wal_summary_contents(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_wal_summary_contents: NULL flinfo");
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+
+    // C: the timeline could in theory exceed 2^31 and SQL has no unsigned
+    // types, so it arrives as int8; range-check it here.
+    let raw_tli = fcinfo.arg_i64(0);
+    if raw_tli < 1 || raw_tli > i32::MAX as i64 {
+        return Err(Box::new(
+            PgError::error(format!("invalid timeline {raw_tli}"))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    let start_lsn = fcinfo.arg_i64(1) as u64;
+    let end_lsn = fcinfo.arg_i64(2) as u64;
+
+    let rows =
+        walsummarizer_seams::wal_summary_contents::call(raw_tli as u32, start_lsn, end_lsn)?;
+    for row in rows {
+        postgres_seams::check_for_interrupts::call()?;
+        srf.putvalues(
+            &[
+                Datum::from_oid(row.relfilenode),
+                Datum::from_oid(row.reltablespace),
+                Datum::from_oid(row.reldatabase),
+                Datum::from_i16(row.relforknumber),
+                Datum::from_i64(row.relblocknumber),
+                Datum::from_bool(row.is_limit_block),
+            ],
+            &[false; 6],
+        )?;
+    }
+    Ok(srf.finish(fcinfo))
+}
+
 fn fc_pg_my_temp_schema(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let _ = fcinfo;
     Ok(Datum::from_oid(catalog_namespace::GetTempNamespaceState().0))
@@ -1289,6 +1363,22 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(2034, "pg_conf_load_time", 0, fc_pg_conf_load_time),
     b(315, "pg_jit_available", 0, fc_pg_jit_available),
     b(6323, "pg_get_wal_summarizer_state", 0, fc_pg_get_wal_summarizer_state),
+    FmgrBuiltin {
+        foid: 6321,
+        name: "pg_available_wal_summaries",
+        nargs: 0,
+        strict: true,
+        retset: true,
+        func: fc_pg_available_wal_summaries,
+    },
+    FmgrBuiltin {
+        foid: 6322,
+        name: "pg_wal_summary_contents",
+        nargs: 3,
+        strict: true,
+        retset: true,
+        func: fc_pg_wal_summary_contents,
+    },
     b(6241, "pg_stop_making_pinned_objects", 0, fc_pg_stop_making_pinned_objects),
     FmgrBuiltin {
         foid: 3800,

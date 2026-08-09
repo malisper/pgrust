@@ -1245,6 +1245,113 @@ fn parse_wal_summary_filename(name: &str) -> Option<(TimeLineID, XLogRecPtr, XLo
     Some((tli, start, end))
 }
 
+/// walsummaryfuncs.c pg_wal_summary_contents, data half: open the summary
+/// file named by (tli, start_lsn, end_lsn) (C: OpenWalSummaryFile(ws, false)
+/// + ReadWalSummary feeding CreateBlockRefTableReader) and flatten it to the
+/// SRF's rows in C's emission order — per relation fork, one limit_block row
+/// first when the limit block is valid, then the modified blocks in reader
+/// order (C does not sort here; array chunks may yield out-of-order block
+/// numbers and that order is surfaced as-is). The SQL half (tli range check,
+/// tuplestore) lives with the builtin in adt_misc; C materializes into a
+/// tuplestore, here the rows come back as one Vec (memory-resident either
+/// way for the sizes summaries reach; C only spills past work_mem).
+pub fn WalSummaryContentsRows(
+    tli: TimeLineID,
+    start_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+) -> PgResult<Vec<walsummarizer_seams::WalSummaryContentsRow>> {
+    wal_summary_contents_rows_in(&format!("{XLOGDIR}/summaries"), tli, start_lsn, end_lsn)
+}
+
+/// [`WalSummaryContentsRows`] against an explicit summaries directory
+/// (production passes `pg_wal/summaries`; tests a scratch dir).
+fn wal_summary_contents_rows_in(
+    summaries_dir: &str,
+    tli: TimeLineID,
+    start_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+) -> PgResult<Vec<walsummarizer_seams::WalSummaryContentsRow>> {
+    const MAX_BLOCKS_PER_CALL: usize = 256;
+    const WAIT_EVENT_WAL_SUMMARY_READ: u32 = 0x0A00_0000 + 76;
+
+    // C: OpenWalSummaryFile — XLOGDIR/summaries/%08X%08X%08X%08X%08X.summary.
+    let path = format!(
+        "{summaries_dir}/{:08X}{:08X}{:08X}{:08X}{:08X}.summary",
+        tli,
+        (start_lsn >> 32) as u32,
+        start_lsn as u32,
+        (end_lsn >> 32) as u32,
+        end_lsn as u32
+    );
+    let file = fd::PathNameOpenFile(&path, libc::O_RDONLY)?;
+    if file.0 < 0 {
+        ereport(ERROR)
+            .with_saved_errno(fd::get_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not open file \"{path}\": %m"))
+            .finish(loc("OpenWalSummaryFile"))?;
+        unreachable!();
+    }
+
+    // C: ReadWalSummary — a positioned FileRead loop with C's error text.
+    let mut filepos: i64 = 0;
+    let read_cb = |buf: &mut [u8]| -> PgResult<usize> {
+        let nbytes = fd::FileRead(file, buf, filepos, WAIT_EVENT_WAL_SUMMARY_READ)?;
+        if nbytes < 0 {
+            return ereport(ERROR)
+                .with_saved_errno(fd::get_errno())
+                .errcode_for_file_access()
+                .errmsg(format!("could not read file \"{}\": %m", fd::FilePathName(file)))
+                .finish(loc("ReadWalSummary"))
+                .map(|()| 0);
+        }
+        filepos += nbytes as i64;
+        Ok(nbytes as usize)
+    };
+
+    let reader_cx = MemoryContext::new("wal_summary_contents");
+    let mut rows = Vec::new();
+    let mut reader = blkreftable::BlockRefTableReader::new(reader_cx.mcx(), read_cb, &path)?;
+    let mut blocks = [0u32; MAX_BLOCKS_PER_CALL];
+    while let Some((rlocator, forknum, limit_block)) = reader.next_relation()? {
+        let template = walsummarizer_seams::WalSummaryContentsRow {
+            relfilenode: rlocator.relNumber,
+            reltablespace: rlocator.spcOid,
+            reldatabase: rlocator.dbOid,
+            relforknumber: forknum as i32 as i16,
+            relblocknumber: 0,
+            is_limit_block: false,
+        };
+
+        // C: a row with is_limit_block = true, only when the limit block is
+        // valid (InvalidBlockNumber means no block that high can exist).
+        if limit_block != types_core::InvalidBlockNumber {
+            rows.push(walsummarizer_seams::WalSummaryContentsRow {
+                relblocknumber: limit_block as i64,
+                is_limit_block: true,
+                ..template
+            });
+        }
+
+        loop {
+            let nblocks = reader.get_blocks(&mut blocks)?;
+            if nblocks == 0 {
+                break;
+            }
+            for &blkno in &blocks[..nblocks] {
+                rows.push(walsummarizer_seams::WalSummaryContentsRow {
+                    relblocknumber: blkno as i64,
+                    ..template
+                });
+            }
+        }
+    }
+    drop(reader);
+    fd::FileClose(file)?;
+
+    Ok(rows)
+}
+
 pub fn RemoveWalSummaryIfOlderThan(ws: &WalSummaryFile, cutoff_time: i64) -> PgResult<()> {
     let path = format!(
         "{XLOGDIR}/summaries/{:08X}{:08X}{:08X}{:08X}{:08X}.summary",
@@ -1298,4 +1405,13 @@ pub fn init_seams() {
         let s = GetWalSummarizerState()?;
         Ok((s.summarized_tli, s.summarized_lsn, s.pending_lsn, s.summarizer_pid))
     });
+    walsummarizer_seams::get_available_wal_summaries::set(|| {
+        // C: GetWalSummaries(0, InvalidXLogRecPtr, InvalidXLogRecPtr) —
+        // every summary file, directory order, no sort.
+        let scan_cx = MemoryContext::new("pg_available_wal_summaries");
+        let wslist =
+            GetWalSummaries(scan_cx.mcx(), 0, InvalidXLogRecPtr, InvalidXLogRecPtr)?;
+        Ok(wslist.iter().map(|ws| (ws.tli, ws.start_lsn, ws.end_lsn)).collect())
+    });
+    walsummarizer_seams::wal_summary_contents::set(WalSummaryContentsRows);
 }

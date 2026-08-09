@@ -139,3 +139,126 @@ fn latest_lsn_prefers_further_ahead_flush() {
     // No walreceiver: invalid flush LSN reduces to the replay position.
     assert_eq!(latest_lsn_from_flush_and_replay((0, 0), (0x1000, 1)), (0x1000, 1));
 }
+
+// ---------------------------------------------------------------------------
+// wal_summary_contents_rows_in — the data half of the pg_wal_summary_contents
+// SRF (walsummaryfuncs.c): per relation fork, limit_block row first (when
+// valid), then modified blocks in blkreftable reader order (NOT sorted).
+// ---------------------------------------------------------------------------
+
+mod contents_rows {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Once;
+
+    use super::super::*;
+    use walsummarizer_seams::WalSummaryContentsRow;
+
+    static SCRATCH_N: AtomicU32 = AtomicU32::new(0);
+
+    fn fd_setup() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            guc_tables::init_seams();
+            elog::init_seams();
+            fd::init_seams();
+            xact_seams::get_current_sub_transaction_id::set(|| 1);
+            if !postgres_seams::check_for_interrupts::is_installed() {
+                postgres_seams::check_for_interrupts::set(|| Ok(()));
+            }
+            aio_seams::pgaio_closing_fd::set(|_| {});
+            waitevent_seams::pgstat_report_wait_start::set(|_| {});
+            waitevent_seams::pgstat_report_wait_end::set(|| {});
+        });
+        fd::InitFileAccess();
+    }
+
+    fn scratch_summaries_dir() -> String {
+        let n = SCRATCH_N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "pgrust_walsummary_srf_test_{}_{n}/summaries",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_str().unwrap().to_owned()
+    }
+
+    fn rl(spc: u32, db: u32, rel: u32) -> RelFileLocator {
+        RelFileLocator { spcOid: spc, dbOid: db, relNumber: rel }
+    }
+
+    /// Serialize `tab` under the summary filename for (tli, start, end),
+    /// byte-identical to what the WAL summarizer persists.
+    fn write_summary_file(
+        dir: &str,
+        tli: TimeLineID,
+        start_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        tab: &blkreftable::BlockRefTable<'_>,
+    ) {
+        let mut bytes: Vec<u8> = Vec::new();
+        tab.write(|chunk: &[u8]| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })
+        .unwrap();
+        let name = format!(
+            "{dir}/{:08X}{:08X}{:08X}{:08X}{:08X}.summary",
+            tli,
+            (start_lsn >> 32) as u32,
+            start_lsn as u32,
+            (end_lsn >> 32) as u32,
+            end_lsn as u32
+        );
+        std::fs::write(name, bytes).unwrap();
+    }
+
+    #[test]
+    fn contents_rows_match_c_emission_order() {
+        fd_setup();
+        let dir = scratch_summaries_dir();
+        let cx = MemoryContext::new("contents-test");
+        let mcx = cx.mcx();
+
+        let mut tab = blkreftable::BlockRefTable::new(mcx);
+        // Blocks marked out of order: reader order (array chunk insertion
+        // order) is the SRF's row order, exactly like C — no sorting here.
+        tab.mark_block_modified(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, 3).unwrap();
+        tab.mark_block_modified(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, 1).unwrap();
+        // A second fork with a valid limit block and no modified blocks.
+        tab.set_limit_block(rl(1663, 5, 16385), ForkNumber::VISIBILITYMAP_FORKNUM, 12);
+        write_summary_file(&dir, 1, 0x1000, 0x2000, &tab);
+
+        let rows = wal_summary_contents_rows_in(&dir, 1, 0x1000, 0x2000).unwrap();
+        let row = |rel: u32, fork: i16, blk: i64, limit: bool| WalSummaryContentsRow {
+            relfilenode: rel,
+            reltablespace: 1663,
+            reldatabase: 5,
+            relforknumber: fork,
+            relblocknumber: blk,
+            is_limit_block: limit,
+        };
+        assert_eq!(
+            rows,
+            vec![
+                // rel 16384 MAIN: no limit row (InvalidBlockNumber), blocks
+                // in insertion order 3 then 1.
+                row(16384, 0, 3, false),
+                row(16384, 0, 1, false),
+                // rel 16385 VM: only the limit row.
+                row(16385, 2, 12, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn contents_rows_missing_file_is_c_open_error() {
+        fd_setup();
+        let dir = scratch_summaries_dir();
+        let err = wal_summary_contents_rows_in(&dir, 7, 0x7000, 0x8000).unwrap_err();
+        assert!(
+            err.message().starts_with("could not open file \""),
+            "{}",
+            err.message()
+        );
+    }
+}

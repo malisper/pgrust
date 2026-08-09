@@ -53,3 +53,6 @@ waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 aio_seams = { path = "../../storage/aio/aio_seams" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
 walreceiverfuncs_seams = { path = "../../replication/walreceiverfuncs_seams" }
+
+[dev-dependencies]
+xact_seams = { path = "../../access/transam/xact_seams" }

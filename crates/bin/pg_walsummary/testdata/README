@@ -1,0 +1,19 @@
+pg_walsummary test fixtures
+===========================
+
+sample.summary
+    A WAL summary file written by pgrust's blkreftable writer (byte-identical
+    to what the WAL summarizer persists; native-endian, generated on a
+    little-endian host like every supported target). Regenerate with:
+        cargo test -p pg_walsummary --test cli -- --ignored generate_fixture
+
+golden-default.out / golden-individual.out / golden-quiet.out
+    Output of the STOCK C pg_walsummary (PostgreSQL 18, Homebrew 18.4) run on
+    sample.summary with no flags, --individual, and -q respectively — the
+    byte-exact bar for the pgrust port. Regenerate (after regenerating the
+    fixture) with:
+        pg_walsummary sample.summary            > golden-default.out
+        pg_walsummary --individual sample.summary > golden-individual.out
+        pg_walsummary -q sample.summary         > golden-quiet.out
+    Note -q still emits the limit-block lines: C prints those before its
+    quiet check, and the port preserves that.
