@@ -1123,6 +1123,7 @@ fn MaybeRemoveOldWalSummaries(mcx: Mcx<'_>) -> PgResult<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WalSummaryFile {
     pub start_lsn: XLogRecPtr,
     pub end_lsn: XLogRecPtr,
@@ -1163,6 +1164,69 @@ pub fn GetWalSummaries<'m>(
     }
     fd::FreeDir(sdir)?;
     Ok(result)
+}
+
+// walsummary.c FilterWalSummaries: narrow an existing list to summaries that
+// overlap [start_lsn, end_lsn] on the given timeline. NOTE: unlike the
+// GetWalSummaries directory-scan filter (strict >=/<=), this uses inclusive
+// comparisons, exactly as the C does — a summary touching the range endpoint
+// is kept here but not there. Preserved verbatim.
+pub fn FilterWalSummaries<'m>(
+    mcx: Mcx<'m>,
+    wslist: &[WalSummaryFile],
+    tli: TimeLineID,
+    start_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+) -> PgVec<'m, WalSummaryFile> {
+    let mut result = PgVec::new_in(mcx);
+    for ws in wslist {
+        if tli != 0 && tli != ws.tli {
+            continue;
+        }
+        if start_lsn != InvalidXLogRecPtr && start_lsn > ws.end_lsn {
+            continue;
+        }
+        if end_lsn != InvalidXLogRecPtr && end_lsn < ws.start_lsn {
+            continue;
+        }
+        result.push(*ws);
+    }
+    result
+}
+
+// walsummary.c WalSummariesAreComplete: does the list cover every LSN in
+// [start_lsn, end_lsn)? Timeline-blind — callers filter to one TLI first
+// (FilterWalSummaries). On failure returns Err-side info via the second tuple
+// element: the first uncovered LSN, or InvalidXLogRecPtr when the list is
+// empty. Tolerates overlapping summary ranges, like the C.
+pub fn WalSummariesAreComplete(
+    wslist: &[WalSummaryFile],
+    start_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+) -> (bool, XLogRecPtr) {
+    if wslist.is_empty() {
+        return (false, InvalidXLogRecPtr);
+    }
+
+    // Private sorted copy, ordered by start_lsn (C: list_sort with
+    // ListComparatorForWalSummaryFiles / pg_cmp_u64 on start_lsn; tie order
+    // is unspecified there and immaterial to the sweep).
+    let mut sorted: Vec<WalSummaryFile> = wslist.to_vec();
+    sorted.sort_by_key(|ws| ws.start_lsn);
+
+    let mut current_lsn = start_lsn;
+    for ws in &sorted {
+        if ws.start_lsn > current_lsn {
+            break; // gap
+        }
+        if ws.end_lsn > current_lsn {
+            current_lsn = ws.end_lsn;
+            if current_lsn >= end_lsn {
+                return (true, InvalidXLogRecPtr);
+            }
+        }
+    }
+    (false, current_lsn)
 }
 
 fn parse_wal_summary_filename(name: &str) -> Option<(TimeLineID, XLogRecPtr, XLogRecPtr)> {

@@ -33,6 +33,91 @@ fn diff_ms_rounds_up_and_clamps() {
     assert_eq!(diff_ms(0, 10_000_000), 10_000);
 }
 
+fn ws(tli: TimeLineID, start_lsn: XLogRecPtr, end_lsn: XLogRecPtr) -> WalSummaryFile {
+    WalSummaryFile { tli, start_lsn, end_lsn }
+}
+
+#[test]
+fn summaries_complete_empty_list() {
+    // C: empty list -> false with missing_lsn = InvalidXLogRecPtr.
+    assert_eq!(WalSummariesAreComplete(&[], 0x1000, 0x2000), (false, InvalidXLogRecPtr));
+}
+
+#[test]
+fn summaries_complete_contiguous_chain() {
+    let list = [ws(1, 0x1000, 0x1800), ws(1, 0x1800, 0x2000)];
+    assert_eq!(WalSummariesAreComplete(&list, 0x1000, 0x2000), (true, InvalidXLogRecPtr));
+    // Unsorted input: the function sorts a private copy.
+    let rev = [ws(1, 0x1800, 0x2000), ws(1, 0x1000, 0x1800)];
+    assert_eq!(WalSummariesAreComplete(&rev, 0x1000, 0x2000), (true, InvalidXLogRecPtr));
+}
+
+#[test]
+fn summaries_complete_reports_first_gap() {
+    // Gap between 0x1800 and 0x1900: missing_lsn = end of covered prefix.
+    let list = [ws(1, 0x1000, 0x1800), ws(1, 0x1900, 0x2000)];
+    assert_eq!(WalSummariesAreComplete(&list, 0x1000, 0x2000), (false, 0x1800));
+    // Runs out before end_lsn without a gap.
+    let short = [ws(1, 0x1000, 0x1800)];
+    assert_eq!(WalSummariesAreComplete(&short, 0x1000, 0x2000), (false, 0x1800));
+    // First summary starts after start_lsn: missing_lsn = start_lsn.
+    let late = [ws(1, 0x1100, 0x2000)];
+    assert_eq!(WalSummariesAreComplete(&late, 0x1000, 0x2000), (false, 0x1000));
+}
+
+#[test]
+fn summaries_complete_tolerates_overlap_and_containment() {
+    // Overlapping ranges must still prove completeness (C comment: "intended
+    // to be correct even in case of overlap").
+    let list = [ws(1, 0x1000, 0x1a00), ws(1, 0x1400, 0x2000)];
+    assert_eq!(WalSummariesAreComplete(&list, 0x1000, 0x2000), (true, InvalidXLogRecPtr));
+    // A fully-contained range neither helps nor hurts.
+    let contained = [ws(1, 0x1000, 0x1800), ws(1, 0x1200, 0x1600), ws(1, 0x1800, 0x2000)];
+    assert_eq!(WalSummariesAreComplete(&contained, 0x1000, 0x2000), (true, InvalidXLogRecPtr));
+    // Coverage extending past end_lsn counts.
+    let over = [ws(1, 0x0800, 0x2800)];
+    assert_eq!(WalSummariesAreComplete(&over, 0x1000, 0x2000), (true, InvalidXLogRecPtr));
+}
+
+#[test]
+fn summaries_complete_is_timeline_blind() {
+    // Documented C behavior: TLIs are ignored; callers filter first.
+    let list = [ws(1, 0x1000, 0x1800), ws(2, 0x1800, 0x2000)];
+    assert_eq!(WalSummariesAreComplete(&list, 0x1000, 0x2000), (true, InvalidXLogRecPtr));
+}
+
+#[test]
+fn filter_wal_summaries_bounds_are_inclusive() {
+    let cx = MemoryContext::new("filter-wal-summaries-test");
+    let mcx = cx.mcx();
+    {
+        let list = [
+            ws(1, 0x1000, 0x1800),
+            ws(1, 0x1800, 0x2000),
+            ws(2, 0x2000, 0x2800),
+            ws(1, 0x2800, 0x3000),
+        ];
+        // TLI filter.
+        let r = FilterWalSummaries(mcx, &list, 2, InvalidXLogRecPtr, InvalidXLogRecPtr);
+        assert_eq!(&r[..], &[ws(2, 0x2000, 0x2800)]);
+        // tli == 0 means any timeline.
+        let r = FilterWalSummaries(mcx, &list, 0, InvalidXLogRecPtr, InvalidXLogRecPtr);
+        assert_eq!(r.len(), 4);
+        // start_lsn bound is inclusive: a summary ENDING exactly at start_lsn
+        // is kept (contrast GetWalSummaries' strict >=).
+        let r = FilterWalSummaries(mcx, &list, 0, 0x1800, InvalidXLogRecPtr);
+        assert_eq!(r.len(), 4);
+        let r = FilterWalSummaries(mcx, &list, 0, 0x1801, InvalidXLogRecPtr);
+        assert_eq!(&r[0], &ws(1, 0x1800, 0x2000));
+        assert_eq!(r.len(), 3);
+        // end_lsn bound is inclusive: a summary STARTING exactly at end_lsn is kept.
+        let r = FilterWalSummaries(mcx, &list, 0, InvalidXLogRecPtr, 0x2800);
+        assert_eq!(r.len(), 4);
+        let r = FilterWalSummaries(mcx, &list, 0, InvalidXLogRecPtr, 0x27ff);
+        assert_eq!(r.len(), 3);
+    }
+}
+
 // GetLatestLSN's recovery arm: C takes max(GetWalRcvFlushRecPtr, replay) —
 // flushed-but-unreplayed WAL on a streaming standby advances the summarizer.
 #[test]
