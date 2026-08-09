@@ -10,8 +10,9 @@ use types_core::{
 };
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED,
-    ERRCODE_FDW_INVALID_OPTION_NAME, ERRCODE_INSUFFICIENT_PRIVILEGE,
-    ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR, ERROR, NOTICE,
+    ERRCODE_FDW_INVALID_OPTION_NAME, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR,
+    ERROR, NOTICE,
 };
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 use types_nodes::parsenodes::{DefElem, DefElemAction};
@@ -642,11 +643,18 @@ fn file_begin_foreign_scan<'mcx>(
     let rel = node.ss.ss_currentRelation.as_ref().expect("foreign scan has a relation");
     let (filename, is_program, mut options) = file_get_options(mcx, rel.rd_id)?;
     if is_program {
-        panic!(
-            "file_fdw: program option (COPY FROM PROGRAM, OpenPipeStream lane) is unported \
-             for table \"{}\"",
-            rel.name()
-        );
+        // COPY FROM PROGRAM is not ported (commands/copy rejects is_program
+        // the same way); a program-sourced scan fails clean instead of
+        // running the pipe.
+        return Err(Box::new(
+            PgError::error("COPY TO/FROM PROGRAM is not supported yet".to_string())
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_detail(format!(
+                    "Foreign table \"{}\" uses the file_fdw \"program\" option, which runs a \
+                     COPY FROM PROGRAM pipe.",
+                    rel.name()
+                )),
+        ));
     }
     for def in node.plan.fdw_private.iter() {
         options.lappend(mcx, def)?;

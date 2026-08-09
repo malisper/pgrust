@@ -8,6 +8,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+stack_depth_core = { path = "../../utils/misc/stack_depth_core" }
 dfmgr = { path = "../../utils/fmgr/dfmgr" }
 copyfuncs = { path = "../../nodes/copyfuncs" }
 rewrite_define = { path = "../../rewrite/rewrite_define" }

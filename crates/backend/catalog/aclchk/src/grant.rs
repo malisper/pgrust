@@ -2011,21 +2011,26 @@ fn exec_grant_largeobject<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_
     Ok(())
 }
 
-fn text_attr(d: Datum) -> String {
+fn text_attr(d: Datum) -> PgResult<String> {
     use types_tuple::varatt;
     let p = d.as_usize() as *const u8;
     // SAFETY: non-null text attr datum inside a held catalog tuple; length is
     // read from its own varlena header before slicing.
     unsafe {
         if varatt::varatt_is_1b_e(p) || (!varatt::varatt_is_1b(p) && !varatt::varatt_is_4b_u(p)) {
-            panic!("ExecGrant_Parameter: compressed/external parname varlena — detoast gap");
+            // C reads this via TextDatumGetCString = text_to_cstring, which
+            // detoasts (pg_parameter_acl has a TOAST table).
+            let raw = core::slice::from_raw_parts(p, varatt::varsize_any(p));
+            let cx = mcx::MemoryContext::new("aclchk detoast");
+            let image = detoast_seams::detoast_attr::call(cx.mcx(), raw)?;
+            return Ok(String::from_utf8_lossy(&image[varatt::VARHDRSZ..]).into_owned());
         }
         let (off, len) = if varatt::varatt_is_1b(p) {
             (varatt::VARHDRSZ_SHORT, varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT)
         } else {
             (varatt::VARHDRSZ, varatt::varsize_4b(p) - varatt::VARHDRSZ)
         };
-        String::from_utf8_lossy(core::slice::from_raw_parts(p.add(off), len)).into_owned()
+        Ok(String::from_utf8_lossy(core::slice::from_raw_parts(p.add(off), len)).into_owned())
     }
 }
 
@@ -2055,7 +2060,7 @@ fn exec_grant_parameter<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>)
             PARAMETERACLOID,
             &tuple,
             Anum_pg_parameter_acl_parname,
-        )?);
+        )?)?;
 
         // All parameters belong to the bootstrap superuser.
         let owner_id = types_core::catalog::BOOTSTRAP_SUPERUSERID;

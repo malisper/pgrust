@@ -942,7 +942,27 @@ pub fn get_config_option_by_name(
     missing_ok: bool,
 ) -> PgResult<Option<String>> {
     match reg.find_option(name) {
-        Some(record) => Ok(Some(show_guc_option(record, true))),
+        Some(record) => {
+            // C: GetConfigOptionByName (guc.c) always restricts privileged
+            // reads — ConfigOptionIsVisible (guc_funcs.c): GUC_SUPERUSER_ONLY
+            // needs has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_SETTINGS).
+            if record.gen().flags & types_guc::GUC_SUPERUSER_ONLY != 0
+                && !acl_seams::has_privs_of_role::call(
+                    miscinit::GetUserId(),
+                    crate::ROLE_PG_READ_ALL_SETTINGS,
+                )?
+            {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+                    .errmsg(format!("permission denied to examine \"{name}\""))
+                    .errdetail(
+                        "Only roles with privileges of the \"pg_read_all_settings\" role may examine this parameter.",
+                    )
+                    .into_error()
+                    .into());
+            }
+            Ok(Some(show_guc_option(record, true)))
+        }
         None if missing_ok => Ok(None),
         None => Err(unrecognized(name).into()),
     }

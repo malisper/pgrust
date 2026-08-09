@@ -1484,6 +1484,11 @@ pub fn ExplainNode<'mcx>(
             crate::show_buffer_usage(es, &i.bufusage);
         }
     }
+    if es.wal {
+        if let Some(i) = &instrument {
+            crate::show_wal_usage(es, &i.walusage);
+        }
+    }
 
     // EA-on-morsels refusal transparency (docs/design/ea-morsels.md §6): the
     // runtime admission walk's verdict for a node that did not engage.
@@ -1740,14 +1745,19 @@ pub fn ExplainNode<'mcx>(
 
     // Per-worker buffer usage, then flush the worker
     // sections and pop the set-aside state.
-    if es.workers_state.is_some() && es.buffers && es.verbose {
+    if es.workers_state.is_some() && (es.buffers || es.wal) && es.verbose {
         let w = worker_instrument.as_ref().expect("workers_state implies worker data");
         for (n, i) in w.iter().enumerate() {
             if i.nloops <= 0.0 {
                 continue;
             }
             explain_open_worker(n, es);
-            crate::show_buffer_usage(es, &i.bufusage);
+            if es.buffers {
+                crate::show_buffer_usage(es, &i.bufusage);
+            }
+            if es.wal {
+                crate::show_wal_usage(es, &i.walusage);
+            }
             explain_close_worker(n, es);
         }
     }

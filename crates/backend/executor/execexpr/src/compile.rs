@@ -1814,6 +1814,10 @@ pub(crate) fn init_expr_rec<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<()> {
+    // C: check_stack_depth() (ExecInitExprRec, execExpr.c) — guard against
+    // stack overflow from overly complex / deeply recursive expressions.
+    stack_depth_core::check_stack_depth()?;
+
     match node.node_tag() {
         NodeTag::T_Var => {
             let variable = node.as_var().unwrap();

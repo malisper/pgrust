@@ -136,7 +136,9 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
         || context == PROCESS_UTILITY_QUERY_NONATOMIC)
         || xact::IsTransactionBlock();
 
-    // C: check_stack_depth() — recursion guard unported repo-wide (stack lane).
+    // C: check_stack_depth() (standard_ProcessUtility, utility.c) — utility
+    // statements can recurse (e.g. EXPLAIN/CREATE TABLE AS containing DDL).
+    stack_depth_core::check_stack_depth()?;
 
     // C: pstmt = copyObject(pstmt) — consumers scribble on the tree, so a
     // plancache-held tree is never executed directly.

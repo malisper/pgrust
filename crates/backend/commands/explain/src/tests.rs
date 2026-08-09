@@ -810,14 +810,36 @@ fn explain_analyze_never_executed_matches_pg() {
     );
 }
 
+// show_wal_usage text arm (C explain.c): positive-only segments, exact
+// labels including the space in "buffers full".
 #[test]
-#[should_panic(expected = "xloginsert lane")]
-fn analyze_wal_is_loud() {
+fn show_wal_usage_matches_c_shape() {
     install_fixtures();
     let mcx = leaked_mcx();
-    let opts = [opt(mcx, "analyze", None), opt(mcx, "wal", None)];
-    let stmt = mcx::alloc_leak_in(mcx, explain_stmt(mcx, &opts)).unwrap();
-    let _ = run_explain_stmt(mcx, stmt);
+    let mut es = NewExplainState(mcx).unwrap();
+    let mut u = types_core::instrument::WalUsage {
+        wal_records: 3,
+        wal_bytes: 177,
+        ..Default::default()
+    };
+    crate::show_wal_usage(&mut es, &u);
+    assert_eq!(es_text(&es), "WAL: records=3 bytes=177\n");
+
+    let mut es = NewExplainState(mcx).unwrap();
+    u = types_core::instrument::WalUsage {
+        wal_records: 1,
+        wal_fpi: 2,
+        wal_bytes: 4242,
+        wal_buffers_full: 7,
+    };
+    crate::show_wal_usage(&mut es, &u);
+    assert_eq!(es_text(&es), "WAL: records=1 fpi=2 bytes=4242 buffers full=7\n");
+
+    // All-zero usage prints nothing in text format.
+    let mut es = NewExplainState(mcx).unwrap();
+    u = Default::default();
+    crate::show_wal_usage(&mut es, &u);
+    assert_eq!(es_text(&es), "");
 }
 
 // show_buffer_usage text arm, values chosen to cover C's comma placement.

@@ -83,15 +83,21 @@ pub fn with_acl_datum<R>(
 ) -> PgResult<R> {
     use types_tuple::varatt;
     let p = d.as_usize() as *const u8;
+    // C: DatumGetAclP is PG_DETOAST_DATUM (acl.h) — compressed/external
+    // images are normal for catalogs with TOAST tables (pg_proc,
+    // pg_default_acl, pg_parameter_acl, ...); detoast into a scratch copy.
+    let mut detoasted: Vec<u8> = Vec::new();
     // SAFETY: caller contract — `d` points at a live varlena inside a held
     // catalog tuple.
     let payload: &[u8] = unsafe {
         if varatt::varatt_is_1b_e(p) || (!varatt::varatt_is_1b(p) && !varatt::varatt_is_4b_u(p)) {
-            // pg_class/pg_attribute have no toast tables; only inline
-            // compression can appear here.
-            panic!("aclchk: compressed/external ACL varlena — detoast gap");
-        }
-        if varatt::varatt_is_1b(p) {
+            let raw = core::slice::from_raw_parts(p, varatt::varsize_any(p));
+            let cx = mcx::MemoryContext::new("aclchk detoast");
+            let image = detoast_seams::detoast_attr::call(cx.mcx(), raw)?;
+            // detoast_attr always yields a plain 4B-header image.
+            detoasted.extend_from_slice(&image[varatt::VARHDRSZ..]);
+            &detoasted
+        } else if varatt::varatt_is_1b(p) {
             core::slice::from_raw_parts(
                 p.add(varatt::VARHDRSZ_SHORT),
                 varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,

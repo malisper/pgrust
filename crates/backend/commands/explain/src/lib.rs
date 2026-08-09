@@ -8,7 +8,9 @@ use std::time::Instant;
 
 use mcx::Mcx;
 use tcop_dest::DestReceiver;
-use types_core::instrument::{BufferUsage, INSTRUMENT_BUFFERS, INSTRUMENT_ROWS, INSTRUMENT_TIMER};
+use types_core::instrument::{
+    BufferUsage, WalUsage, INSTRUMENT_BUFFERS, INSTRUMENT_ROWS, INSTRUMENT_TIMER, INSTRUMENT_WAL,
+};
 use types_core::{Oid, TEXTOID};
 use types_error::PgResult;
 use types_nodes::nodes_enums::CmdType;
@@ -484,10 +486,7 @@ fn ExplainOnePlanRef<'mcx>(
         instrument_option |= INSTRUMENT_BUFFERS;
     }
     if es.wal {
-        panic!(
-            "ExplainOnePlan (explain.c): WAL needs pgWalUsage counters + \
-             show_wal_usage (xloginsert lane)"
-        );
+        instrument_option |= INSTRUMENT_WAL;
     }
 
     // C: statement-level timing is always collected for SUMMARY, even with
@@ -985,5 +984,38 @@ pub(crate) fn show_buffer_usage(es: &mut ExplainState<'_>, usage: &BufferUsage) 
             }
         }
         append!(es, "\n");
+    }
+}
+
+// show_wal_usage (explain.c).
+pub(crate) fn show_wal_usage(es: &mut ExplainState<'_>, usage: &WalUsage) {
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        // Show only positive counter values.
+        if usage.wal_records > 0
+            || usage.wal_fpi > 0
+            || usage.wal_bytes > 0
+            || usage.wal_buffers_full > 0
+        {
+            ExplainIndentText(es);
+            append!(es, "WAL:");
+            if usage.wal_records > 0 {
+                append!(es, " records={}", usage.wal_records);
+            }
+            if usage.wal_fpi > 0 {
+                append!(es, " fpi={}", usage.wal_fpi);
+            }
+            if usage.wal_bytes > 0 {
+                append!(es, " bytes={}", usage.wal_bytes);
+            }
+            if usage.wal_buffers_full > 0 {
+                append!(es, " buffers full={}", usage.wal_buffers_full);
+            }
+            append!(es, "\n");
+        }
+    } else {
+        ExplainPropertyInteger("WAL Records", None, usage.wal_records, es);
+        ExplainPropertyInteger("WAL FPI", None, usage.wal_fpi, es);
+        ExplainPropertyUInteger("WAL Bytes", None, usage.wal_bytes, es);
+        ExplainPropertyInteger("WAL Buffers Full", None, usage.wal_buffers_full, es);
     }
 }

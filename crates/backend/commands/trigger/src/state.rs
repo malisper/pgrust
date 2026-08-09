@@ -1,5 +1,4 @@
-// AfterTriggerSetState (trigger.c): SET CONSTRAINTS. LOUD: catalog-qualified
-// constraint names (cross-database check needs get_database_name).
+// AfterTriggerSetState (trigger.c): SET CONSTRAINTS.
 use datum::Datum;
 use mcx::Mcx;
 use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
@@ -8,7 +7,8 @@ use types_core::{
     NAMEDATALEN,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::rawnodes::ConstraintsSetStmt;
 use types_rel::AccessShareLock;
@@ -77,8 +77,20 @@ pub fn AfterTriggerSetState<'mcx>(mcx: Mcx<'mcx>, stmt: &ConstraintsSetStmt<'_>)
         for lc in stmt.constraints.iter() {
             let constraint = lc.as_range_var().expect("SET CONSTRAINTS name is a RangeVar");
             let conname = constraint.relname.expect("RangeVar.relname");
-            if constraint.catalogname.is_some() {
-                panic!("AfterTriggerSetState (trigger.c): catalog-qualified constraint name");
+            if let Some(catalogname) = constraint.catalogname {
+                // C: a catalog qualifier naming the current database is
+                // accepted; any other database is a clean feature error.
+                let dbname =
+                    dbcommands_seams::get_database_name::call(init_small::globals::MyDatabaseId())?;
+                if dbname.as_deref() != Some(catalogname) {
+                    let schemaname = constraint.schemaname.unwrap_or("");
+                    return Err(err(
+                        format!(
+                            "cross-database references are not implemented: \"{catalogname}.{schemaname}.{conname}\""
+                        ),
+                        ERRCODE_FEATURE_NOT_SUPPORTED,
+                    ));
+                }
             }
             let namespacelist: mcx::PgVec<'mcx, Oid> = match constraint.schemaname {
                 Some(schema) => {

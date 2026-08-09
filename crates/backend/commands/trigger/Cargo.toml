@@ -50,6 +50,7 @@ superuser = { path = "../../utils/misc/superuser" }
 aclchk = { path = "../../catalog/aclchk" }
 adt_acl = { path = "../../utils/adt/acl" }
 init_small = { path = "../../utils/init/init_small" }
+dbcommands_seams = { path = "../dbcommands_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 elog_seams = { path = "../../utils/error/elog_seams" }

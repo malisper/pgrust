@@ -190,7 +190,9 @@ fn event_trigger_common_setup(
 }
 
 fn EventTriggerInvoke(fn_oid_list: &[Oid], event: &'static str, tag: CommandTag) -> PgResult<()> {
-    // C: check_stack_depth() — recursion guard unported repo-wide (stack lane).
+    // C: check_stack_depth() (EventTriggerInvoke, event_trigger.c) — event
+    // triggers whose actions fire further event triggers recurse here.
+    stack_depth_core::check_stack_depth()?;
     let mut first = true;
     for &fnoid in fn_oid_list {
         if first {

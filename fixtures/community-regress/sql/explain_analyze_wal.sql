@@ -1,0 +1,14 @@
+-- Issue malisper/pgrust#72: EXPLAIN (ANALYZE, WAL) must display WAL usage
+-- (C: show_wal_usage, explain.c) instead of failing. Counter values are
+-- workload/layout-dependent, so the pin asserts the shape via FORMAT JSON.
+CREATE TABLE issue72_t(a int);
+DO $$
+DECLARE j json;
+BEGIN
+  EXECUTE 'EXPLAIN (ANALYZE, WAL, FORMAT JSON) INSERT INTO issue72_t VALUES (1)' INTO j;
+  RAISE NOTICE 'wal_records_ge_1=%', ((j->0->'Plan'->>'WAL Records')::bigint >= 1);
+  RAISE NOTICE 'wal_bytes_gt_0=%', ((j->0->'Plan'->>'WAL Bytes')::bigint > 0);
+  RAISE NOTICE 'wal_fpi_ge_0=%', ((j->0->'Plan'->>'WAL FPI')::bigint >= 0);
+  RAISE NOTICE 'wal_buffers_full_present=%', ((j->0->'Plan'->'WAL Buffers Full') IS NOT NULL);
+END $$;
+DROP TABLE issue72_t;

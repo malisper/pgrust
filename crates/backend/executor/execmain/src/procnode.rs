@@ -534,6 +534,11 @@ pub fn exec_init_node<'mcx>(
     let Some(node) = node else {
         return Ok(None);
     };
+
+    // C: check_stack_depth() (ExecInitNode, execProcnode.c) — bounds
+    // user-code recursion (plpgsql/SQL-function/trigger re-entry via SPI).
+    stack_depth_core::check_stack_depth()?;
+
     let result = match node.node_tag() {
         NodeTag::T_Result => PlanStateNode::Result(exec_init_result(
             node.as_result().unwrap(),
