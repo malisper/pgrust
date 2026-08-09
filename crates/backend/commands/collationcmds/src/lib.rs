@@ -348,31 +348,12 @@ fn creation_namespace<'mcx, 'a>(
     for (i, n) in qualified.iter().enumerate() {
         names[i] = n.as_string().expect("qualified name").sval;
     }
-    let (schemaname, name) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
-    let namespace = match schemaname {
-        Some("pg_temp") => {
-            panic!("DefineCollation (collationcmds.c): pg_temp-alias collation creation")
-        }
-        Some(schemaname) => catalog_namespace::get_namespace_oid(schemaname, false)?,
-        None => {
-            let path = catalog_namespace::fetch_search_path(mcx, false)?;
-            match path.first() {
-                Some(&ns) => ns,
-                None => {
-                    return Err(Box::new(
-                        PgError::new(
-                            ERROR,
-                            "no schema has been selected to create in".to_string(),
-                        )
-                        .with_sqlstate(types_error::ERRCODE_UNDEFINED_SCHEMA),
-                    ));
-                }
-            }
-        }
-    };
-    if catalog_namespace::isAnyTempNamespace(namespace)? {
-        panic!("DefineCollation (collationcmds.c): temp-namespace collation creation");
-    }
+    // C resolves the namespace via QualifiedNameGetCreationNamespace, which
+    // maps the pg_temp alias (and a pending temp creation namespace on the
+    // search path) to this session's temp namespace; temp collations are
+    // legal in C and dropped with the temp schema.
+    let (namespace, name) =
+        catalog_namespace::QualifiedNameGetCreationNamespace(mcx, &names[..nnames])?;
     if aclchk::object_aclcheck(
         NAMESPACE_RELATION_ID,
         namespace,
