@@ -1,6 +1,6 @@
 //! like_support.c planner slice: patternsel family (regexeqsel/likesel/... and
 //! negators) over Var-op-Const, plus the SupportRequestIndexCondition leg
-//! (match_pattern_prefix). C-collation lane; locale-aware arms are loud.
+//! (match_pattern_prefix).
 
 use datum::Datum;
 use mcx::Mcx;
@@ -421,8 +421,8 @@ fn byte_increment(ptr: &mut [u8]) -> bool {
     true
 }
 
-// make_greater_string (like_support.c). Non-C collations need the
-// suffix-and-varstr_cmp leg; loud until that lane lands.
+// make_greater_string (like_support.c): smallest string greater than the
+// prefix, or None (caller then omits the upper bound).
 fn make_greater_string<'mcx>(
     mcx: Mcx<'mcx>,
     str_const: PrefixConst,
@@ -435,13 +435,31 @@ fn make_greater_string<'mcx>(
     let mut workstr = mcx::vec_with_capacity_in(mcx, src.len())?;
     mcx::vec_append_bytes(&mut workstr, src)?;
     let mut len = workstr.len();
-    let cmpstr = str_const.value;
-    if datatype != BYTEAOID
-        && len > 0
-        && !pg_locale::pg_newlocale_from_collation(collation)?.collate_is_c
+
+    // In C locale the comparison baseline is the prefix itself, and bytea
+    // sorts bytewise so it never needs a suffix either. For other collations
+    // the candidate must sort above prefix||suffixchar — the highest-sorting
+    // of 'Z','z','y','9' under the collation — so that a candidate accepted
+    // here also bounds every string extending the prefix (C's varstr_cmp
+    // suffix leg; the per-process suffixchar cache is a pure memo, recomputed
+    // here instead).
+    let cmpstr = if datatype == BYTEAOID
+        || len == 0
+        || pg_locale::pg_newlocale_from_collation(collation)?.collate_is_c
     {
-        panic!("make_greater_string (like_support.c): non-C collation suffix leg; C-collation lane only");
-    }
+        str_const.value
+    } else {
+        let mut suffixchar = b'Z';
+        for cand in [b'z', b'y', b'9'] {
+            if varlena::varstr_cmp(&[suffixchar], &[cand], collation)? < 0 {
+                suffixchar = cand;
+            }
+        }
+        let mut cmp = mcx::vec_with_capacity_in(mcx, len + 1)?;
+        mcx::vec_append_bytes(&mut cmp, src)?;
+        cmp.push(suffixchar);
+        text_const(mcx, &cmp, datatype)?.value
+    };
 
     let charinc: fn(&mut [u8]) -> bool = if datatype == BYTEAOID {
         byte_increment
