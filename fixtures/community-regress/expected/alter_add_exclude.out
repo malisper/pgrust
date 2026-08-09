@@ -1,0 +1,133 @@
+-- Audit item A5 (notes/audits/unported-panic-inventory-2026-08-08.md):
+-- ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE was inventoried as an unported
+-- ALTER lane. Pin the full lane at C parity: add on empty table, enforcement,
+-- existing-data violation, invalid AM / operator identity, deferrable,
+-- partitioned, foreign table, and ALTER TYPE rewrite preservation.
+-- Expected output captured from real PostgreSQL 18.
+CREATE TABLE ae (c circle, i int);
+-- basic add on empty table
+ALTER TABLE ae ADD CONSTRAINT ae_x EXCLUDE USING gist (c WITH &&);
+INSERT INTO ae VALUES ('<(0,0),2>', 1);
+INSERT INTO ae VALUES ('<(1,1),2>', 2);
+ERROR:  conflicting key value violates exclusion constraint "ae_x"
+DETAIL:  Key (c)=(<(1,1),2>) conflicts with existing key (c)=(<(0,0),2>).
+INSERT INTO ae VALUES ('<(10,10),1>', 3);
+\d ae
+                 Table "public.ae"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ c      | circle  |           |          | 
+ i      | integer |           |          | 
+Indexes:
+    "ae_x" EXCLUDE USING gist (c WITH &&)
+
+ALTER TABLE ae DROP CONSTRAINT ae_x;
+-- existing-data violation
+INSERT INTO ae VALUES ('<(0,0),3>', 4);
+ALTER TABLE ae ADD CONSTRAINT ae_x2 EXCLUDE USING gist (c WITH &&);
+ERROR:  could not create exclusion constraint "ae_x2"
+DETAIL:  Key (c)=(<(0,0),2>) conflicts with key (c)=(<(0,0),3>).
+-- non-indexable AM
+ALTER TABLE ae ADD CONSTRAINT ae_gin EXCLUDE USING gin (i WITH =);
+ERROR:  access method "gin" does not support exclusion constraints
+ALTER TABLE ae ADD CONSTRAINT ae_brin EXCLUDE USING brin (i WITH =);
+ERROR:  access method "brin" does not support exclusion constraints
+-- operator not in opclass
+ALTER TABLE ae ADD CONSTRAINT ae_badop EXCLUDE USING gist (c WITH =);
+ERROR:  operator =(circle,circle) is not a member of operator family "circle_ops"
+DETAIL:  The exclusion operator must be related to the index operator class for the constraint.
+-- non-commutative operator
+ALTER TABLE ae ADD CONSTRAINT ae_noncommut EXCLUDE USING gist (c WITH <<);
+ERROR:  operator <<(circle,circle) is not commutative
+DETAIL:  Only commutative operators can be used in exclusion constraints.
+-- btree exclusion with where clause
+DELETE FROM ae;
+ALTER TABLE ae ADD CONSTRAINT ae_btree EXCLUDE USING btree (i WITH =) WHERE (i > 0);
+INSERT INTO ae VALUES (NULL, 5);
+INSERT INTO ae VALUES (NULL, 5);
+ERROR:  conflicting key value violates exclusion constraint "ae_btree"
+DETAIL:  Key (i)=(5) conflicts with existing key (i)=(5).
+INSERT INTO ae VALUES (NULL, -5);
+INSERT INTO ae VALUES (NULL, -5);
+\d ae
+                 Table "public.ae"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ c      | circle  |           |          | 
+ i      | integer |           |          | 
+Indexes:
+    "ae_btree" EXCLUDE USING btree (i WITH =) WHERE (i > 0)
+
+-- deferrable exclusion, violation caught at commit
+ALTER TABLE ae ADD CONSTRAINT ae_def EXCLUDE USING btree (i WITH =) DEFERRABLE INITIALLY DEFERRED;
+ERROR:  could not create exclusion constraint "ae_def"
+DETAIL:  Key (i)=(-5) conflicts with key (i)=(-5).
+BEGIN;
+INSERT INTO ae VALUES (NULL, 7);
+INSERT INTO ae VALUES (NULL, 7);
+ERROR:  conflicting key value violates exclusion constraint "ae_btree"
+DETAIL:  Key (i)=(7) conflicts with existing key (i)=(7).
+COMMIT;
+-- NOT VALID rejected
+ALTER TABLE ae ADD CONSTRAINT ae_nv EXCLUDE USING btree (i WITH =) NOT VALID;
+ERROR:  EXCLUDE constraints cannot be marked NOT VALID
+LINE 1: ...D CONSTRAINT ae_nv EXCLUDE USING btree (i WITH =) NOT VALID;
+                                                             ^
+-- foreign table refusal
+CREATE FOREIGN DATA WRAPPER a5dummy;
+CREATE SERVER a5srv FOREIGN DATA WRAPPER a5dummy;
+CREATE FOREIGN TABLE aef (i int) SERVER a5srv;
+ALTER TABLE aef ADD CONSTRAINT aef_x EXCLUDE USING btree (i WITH =);
+ERROR:  exclusion constraints are not supported on foreign tables
+LINE 1: ALTER TABLE aef ADD CONSTRAINT aef_x EXCLUDE USING btree (i ...
+                            ^
+-- partitioned table: non-key exclusion refused, key-equality allowed
+CREATE TABLE aep (i int, c circle) PARTITION BY LIST (i);
+ALTER TABLE aep ADD CONSTRAINT aep_x EXCLUDE USING gist (c WITH &&);
+ERROR:  unique constraint on partitioned table must include all partitioning columns
+DETAIL:  EXCLUDE constraint on table "aep" lacks column "i" which is part of the partition key.
+ALTER TABLE aep ADD CONSTRAINT aep_ok EXCLUDE USING btree (i WITH =);
+CREATE TABLE aep1 PARTITION OF aep FOR VALUES IN (1);
+INSERT INTO aep VALUES (1, NULL);
+INSERT INTO aep VALUES (1, NULL);
+ERROR:  conflicting key value violates exclusion constraint "aep1_i_excl"
+DETAIL:  Key (i)=(1) conflicts with existing key (i)=(1).
+\d aep
+          Partitioned table "public.aep"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ i      | integer |           |          | 
+ c      | circle  |           |          | 
+Partition key: LIST (i)
+Indexes:
+    "aep_ok" EXCLUDE USING btree (i WITH =)
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- expression key
+CREATE TABLE aee (t text);
+ALTER TABLE aee ADD CONSTRAINT aee_x EXCLUDE USING btree (lower(t) WITH =);
+INSERT INTO aee VALUES ('Foo');
+INSERT INTO aee VALUES ('FOO');
+ERROR:  conflicting key value violates exclusion constraint "aee_x"
+DETAIL:  Key (lower(t))=(foo) conflicts with existing key (lower(t))=(foo).
+-- ALTER TYPE rewrite preserving an ALTER-added exclusion constraint
+CREATE TABLE aer (i int);
+ALTER TABLE aer ADD CONSTRAINT aer_x EXCLUDE USING btree (i WITH =);
+ALTER TABLE aer ALTER COLUMN i TYPE bigint;
+\d aer
+                Table "public.aer"
+ Column |  Type  | Collation | Nullable | Default 
+--------+--------+-----------+----------+---------
+ i      | bigint |           |          | 
+Indexes:
+    "aer_x" EXCLUDE USING btree (i WITH =)
+
+INSERT INTO aer VALUES (9);
+INSERT INTO aer VALUES (9);
+ERROR:  conflicting key value violates exclusion constraint "aer_x"
+DETAIL:  Key (i)=(9) conflicts with existing key (i)=(9).
+-- cleanup
+DROP TABLE ae, aep, aee, aer;
+DROP FOREIGN TABLE aef;
+DROP SERVER a5srv;
+DROP FOREIGN DATA WRAPPER a5dummy;
