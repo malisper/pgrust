@@ -1,8 +1,8 @@
 // copy.c/copyto.c/copyfrom.c/copyfromparse.c — text, CSV and binary formats,
-// file and wire STDIN/STDOUT variants; column defaults, the DEFAULT marker,
-// FROM ... WHERE, COPY (query) TO and the RLS TO->SELECT rewrite live. Loud
-// (named): PROGRAM, HEADER match, volatile defaults/WHERE. Option parsing
-// (ProcessCopyOptions) is full-parity.
+// file, PROGRAM (OpenPipeStream lane) and wire STDIN/STDOUT variants; column
+// defaults, the DEFAULT marker, FROM ... WHERE, COPY (query) TO and the RLS
+// TO->SELECT rewrite live. Loud (named): HEADER match, volatile
+// defaults/WHERE. Option parsing (ProcessCopyOptions) is full-parity.
 #![allow(non_snake_case)]
 
 use mcx::{vec_from_elem_in, Mcx, PgVec};
@@ -35,6 +35,7 @@ pub use to::copy_attribute_out_text;
 
 const ROLE_PG_READ_SERVER_FILES: Oid = 4569;
 const ROLE_PG_WRITE_SERVER_FILES: Oid = 4570;
+const ROLE_PG_EXECUTE_SERVER_PROGRAM: Oid = 4571;
 
 const ACL_INSERT: u64 = 1 << 0;
 const ACL_SELECT: u64 = 1 << 1;
@@ -115,17 +116,14 @@ pub fn DoCopy<'mcx>(
     stmt_len: types_core::ParseLoc,
 ) -> PgResult<u64> {
     let is_from = stmt.is_from;
-    if stmt.is_program {
-        // unported: COPY TO/FROM PROGRAM (OpenPipeStream lane)
-        return Err(Box::new(
-            PgError::error("COPY TO/FROM PROGRAM is not supported yet".to_string())
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
-    }
 
+    // Disallow COPY to/from file or program except to users with the
+    // appropriate role (copy.c DoCopy).
     let userid = miscinit_seams::get_user_id::call();
     if stmt.filename.is_some() {
-        let (role, denied) = if is_from {
+        let (role, denied) = if stmt.is_program {
+            (ROLE_PG_EXECUTE_SERVER_PROGRAM, program_denied as fn() -> Box<PgError>)
+        } else if is_from {
             (ROLE_PG_READ_SERVER_FILES, from_file_denied as fn() -> Box<PgError>)
         } else {
             (ROLE_PG_WRITE_SERVER_FILES, to_file_denied as fn() -> Box<PgError>)
@@ -148,6 +146,7 @@ pub fn DoCopy<'mcx>(
             Some(&raw_query),
             types_core::InvalidOid,
             stmt.filename,
+            stmt.is_program,
             &stmt.attlist,
             &stmt.options,
             Some(source_text),
@@ -332,6 +331,7 @@ pub fn DoCopy<'mcx>(
             Some(&raw_query),
             query_rel_id,
             stmt.filename,
+            stmt.is_program,
             &stmt.attlist,
             &stmt.options,
             Some(source_text),
@@ -350,6 +350,7 @@ pub fn DoCopy<'mcx>(
             &rel,
             where_clause,
             stmt.filename,
+            stmt.is_program,
             &stmt.attlist,
             &stmt.options,
             Some(source_text),
@@ -364,6 +365,7 @@ pub fn DoCopy<'mcx>(
             None,
             types_core::InvalidOid,
             stmt.filename,
+            stmt.is_program,
             &stmt.attlist,
             &stmt.options,
             Some(source_text),
@@ -1148,6 +1150,24 @@ fn from_file_denied() -> Box<PgError> {
             .with_detail(
                 "Only roles with privileges of the \"pg_read_server_files\" role may COPY \
                  from a file.",
+            )
+            .with_hint(
+                "Anyone can COPY to stdout or from stdin. psql's \\copy command also works \
+                 for anyone.",
+            ),
+    )
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn program_denied() -> Box<PgError> {
+    Box::new(
+        PgError::error("permission denied to COPY to or from an external program")
+            .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .with_detail(
+                "Only roles with privileges of the \"pg_execute_server_program\" role may COPY \
+                 to or from an external program.",
             )
             .with_hint(
                 "Anyone can COPY to stdout or from stdin. psql's \\copy command also works \

@@ -318,6 +318,56 @@ pub fn PipeStreamGets(index: i32, buf: &mut [u8]) -> Result<usize, i32> {
     })
 }
 
+// fread(buf, 1, buf.len(), fh) over an OpenPipeStream "r" handle: greedy
+// fill to buf.len() (stdio fread loops internally), short only at EOF.
+// Ok(0) is EOF-without-bytes; Err(errno) is C's ferror case.
+pub fn PipeStreamRead(index: i32, buf: &mut [u8]) -> Result<usize, i32> {
+    use std::io::Read;
+
+    with_fd(|fd| {
+        let Some(Some(desc)) = fd.allocated_descs.get_mut(index as usize) else {
+            return Err(libc::EBADF);
+        };
+        let AllocatedHandle::Pipe(pipe) = &mut desc.desc else {
+            return Err(libc::EBADF);
+        };
+        let Some(out) = pipe.stdout.as_mut() else {
+            return Err(libc::EBADF);
+        };
+        let mut filled = 0usize;
+        while filled < buf.len() {
+            match out.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.raw_os_error().unwrap_or(libc::EIO)),
+            }
+        }
+        Ok(filled)
+    })
+}
+
+// fwrite over an OpenPipeStream "w" handle. Err(errno) is C's
+// fwrite-short/ferror case; a dead child surfaces as EPIPE (SIGPIPE is
+// ignored process-wide in the Rust runtime, matching the backend's SIG_IGN).
+pub fn PipeStreamWrite(index: i32, buf: &[u8]) -> Result<(), i32> {
+    use std::io::Write;
+
+    with_fd(|fd| {
+        let Some(Some(desc)) = fd.allocated_descs.get_mut(index as usize) else {
+            return Err(libc::EBADF);
+        };
+        let AllocatedHandle::Pipe(pipe) = &mut desc.desc else {
+            return Err(libc::EBADF);
+        };
+        let Some(child_stdin) = pipe.stdin.as_mut() else {
+            return Err(libc::EBADF);
+        };
+        // write_all retries ErrorKind::Interrupted internally.
+        child_stdin.write_all(buf).map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))
+    })
+}
+
 // C contract: pclose()'s wait status, -1 on a stream we don't track.
 pub fn ClosePipeStream(index: i32) -> PgResult<i32> {
     let found = with_fd(|fd| {

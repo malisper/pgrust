@@ -549,6 +549,51 @@ fn pipe_stream_round_trip() {
 }
 
 #[test]
+fn pipe_stream_read_drains_child_stdout() {
+    setup();
+    let idx = crate::desc::OpenPipeStream("printf 'ab\\ncd\\n'", "r").unwrap();
+    assert!(idx >= 0);
+    let mut buf = [0u8; 64];
+    // Greedy fill (fread semantics): short only at EOF.
+    let n = crate::desc::PipeStreamRead(idx, &mut buf).unwrap();
+    assert_eq!(&buf[..n], b"ab\ncd\n");
+    assert_eq!(crate::desc::PipeStreamRead(idx, &mut buf).unwrap(), 0);
+    assert_eq!(crate::desc::ClosePipeStream(idx).unwrap(), 0);
+}
+
+#[test]
+fn pipe_stream_write_feeds_child_stdin() {
+    setup();
+    // Child asserts the bytes it receives; a mismatch surfaces as exit 9
+    // in the pclose status word.
+    let idx =
+        crate::desc::OpenPipeStream("test \"$(cat)\" = 'payload' || exit 9", "w").unwrap();
+    assert!(idx >= 0);
+    crate::desc::PipeStreamWrite(idx, b"payload").unwrap();
+    assert_eq!(crate::desc::ClosePipeStream(idx).unwrap(), 0);
+}
+
+#[test]
+fn pipe_stream_write_epipe_when_child_quit() {
+    setup();
+    let idx = crate::desc::OpenPipeStream("exit 0", "w").unwrap();
+    assert!(idx >= 0);
+    // Wait for the child to be gone, then write until the pipe breaks.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let payload = [0u8; 65536];
+    let mut saw_epipe = false;
+    for _ in 0..4 {
+        if let Err(en) = crate::desc::PipeStreamWrite(idx, &payload) {
+            assert_eq!(en, libc::EPIPE);
+            saw_epipe = true;
+            break;
+        }
+    }
+    assert!(saw_epipe, "write to a dead child's pipe never returned EPIPE");
+    assert_eq!(crate::desc::ClosePipeStream(idx).unwrap(), 0);
+}
+
+#[test]
 fn pwrite_zeros_buffer_is_io_aligned() {
     // O_DIRECT contract (c.h PGIOAlignedBlock, common/file_utils.c
     // pg_pwrite_zeros): the zero buffer handed to pwritev must be

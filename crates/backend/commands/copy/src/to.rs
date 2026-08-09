@@ -8,7 +8,7 @@ use std::rc::Rc;
 use backend_progress::progress::{
     PROGRESS_COPY_BYTES_PROCESSED, PROGRESS_COPY_COMMAND, PROGRESS_COPY_COMMAND_TO,
     PROGRESS_COPY_TUPLES_PROCESSED, PROGRESS_COPY_TYPE, PROGRESS_COPY_TYPE_FILE,
-    PROGRESS_COPY_TYPE_PIPE,
+    PROGRESS_COPY_TYPE_PIPE, PROGRESS_COPY_TYPE_PROGRAM,
 };
 use backend_progress::{
     pgstat_progress_end_command, pgstat_progress_start_command, pgstat_progress_update_multi_param,
@@ -44,6 +44,10 @@ const FILE_FLUSH_THRESHOLD: usize = 65536;
 
 enum CopyDest<'s> {
     File { fd: i32, filename: &'s str },
+    // COPY TO PROGRAM (copyto.c is_program arm): `fd` is an OpenPipeStream
+    // index; rows stream into the child's stdin. Closed via
+    // ClosePipeToProgram in EndCopyTo (any nonzero exit is an error).
+    Program { fd: i32, filename: &'s str },
     Frontend,
     // copyto.c:919 (`cstate->copy_file = stdout`): the pipe destination of a
     // non-remote session — single-user mode's COPY ... TO STDOUT. Raw copy
@@ -87,6 +91,7 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
     raw_query: Option<&RawStmt<'mcx>>,
     query_rel_id: types_core::Oid,
     filename: Option<&'s str>,
+    is_program: bool,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
     source_text: Option<&str>,
@@ -136,6 +141,18 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
     let encoding_embeds_ascii = wchar::pg_encoding_is_client_only(file_encoding);
 
     let dest = match filename {
+        Some(filename) if is_program => {
+            // copyto.c is_program arm: popen the command, write its stdin.
+            let copy_file = fd::OpenPipeStream(filename, "w")?;
+            if copy_file < 0 {
+                ereport(ERROR)
+                    .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not execute command \"{filename}\": %m"))
+                    .finish(loc("BeginCopyTo"))?;
+            }
+            CopyDest::Program { fd: copy_file, filename }
+        }
         Some(filename) => {
             if !filename.starts_with('/') {
                 return Err(Box::new(
@@ -192,6 +209,7 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
     );
     let progress_type = match dest {
         CopyDest::File { .. } => PROGRESS_COPY_TYPE_FILE,
+        CopyDest::Program { .. } => PROGRESS_COPY_TYPE_PROGRAM,
         // C sets PIPE for the whole pipe arm, stdout included (copyto.c:915).
         CopyDest::Frontend | CopyDest::Stdout => PROGRESS_COPY_TYPE_PIPE,
     };
@@ -461,6 +479,7 @@ pub fn DoCopyTo<'mcx>(
     }
     match cstate.dest {
         CopyDest::File { .. } => flush_to_file(cstate)?,
+        CopyDest::Program { .. } => flush_to_program(cstate)?,
         CopyDest::Stdout => flush_to_stdout(cstate)?,
         CopyDest::Frontend => {
             // SendCopyEnd: no unsent data, then CopyDone.
@@ -685,6 +704,11 @@ fn send_end_of_row(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
                 flush_to_file(cstate)?;
             }
         }
+        CopyDest::Program { .. } => {
+            if cstate.fe_msgbuf.len() >= FILE_FLUSH_THRESHOLD {
+                flush_to_program(cstate)?;
+            }
+        }
         CopyDest::Stdout => {
             if cstate.fe_msgbuf.len() >= FILE_FLUSH_THRESHOLD {
                 flush_to_stdout(cstate)?;
@@ -729,6 +753,59 @@ fn flush_to_file(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
     cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
     pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, cstate.bytes_processed as i64);
     cstate.fe_msgbuf.reset();
+    Ok(())
+}
+
+// The PROGRAM arm of C's CopySendEndOfRow COPY_FILE fwrite. On EPIPE the
+// pipe is closed first: the subprocess' exit status usually carries a better
+// error than "Broken pipe"; if the child in fact exited cleanly after
+// closing its stdin early, the EPIPE write error is still an error
+// (copyto.c:456-477).
+fn flush_to_program(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
+    let CopyDest::Program { fd, filename } = cstate.dest else {
+        panic!("COPY TO: flush_to_program on non-program destination")
+    };
+    if cstate.fe_msgbuf.is_empty() {
+        return Ok(());
+    }
+    match fd::PipeStreamWrite(fd, cstate.fe_msgbuf.as_bytes()) {
+        Ok(()) => {}
+        Err(en) => {
+            if en == libc::EPIPE {
+                close_pipe_to_program(fd, filename)?;
+                // ClosePipeToProgram didn't throw: the program terminated
+                // normally but closed the pipe first. Throw the EPIPE error.
+            }
+            ereport(ERROR)
+                .with_saved_errno(en)
+                .errcode_for_file_access()
+                .errmsg("could not write to COPY program: %m")
+                .finish(loc("CopySendEndOfRow"))?;
+        }
+    }
+    cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
+    pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, cstate.bytes_processed as i64);
+    cstate.fe_msgbuf.reset();
+    Ok(())
+}
+
+// ClosePipeToProgram (copyto.c): pclose and check the wait status; unlike
+// COPY FROM PROGRAM, any nonzero exit (SIGPIPE included) is an error.
+fn close_pipe_to_program(fd: i32, filename: &str) -> PgResult<()> {
+    let pclose_rc = fd::ClosePipeStream(fd)?;
+    if pclose_rc == -1 {
+        ereport(ERROR)
+            .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg("could not close pipe to external command: %m")
+            .finish(loc("ClosePipeToProgram"))?;
+    } else if pclose_rc != 0 {
+        return Err(Box::new(
+            PgError::error(format!("program \"{filename}\" failed"))
+                .with_sqlstate(types_error::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION)
+                .with_detail(wait_error::wait_result_to_str(pclose_rc)),
+        ));
+    }
     Ok(())
 }
 
@@ -778,6 +855,10 @@ pub fn EndCopyTo(mut cstate: CopyToState<'_, '_>) -> PgResult<()> {
                 .errmsg(format!("could not close file \"{filename}\": %m"))
                 .finish(loc("EndCopy"))?;
         }
+    }
+    if let CopyDest::Program { fd, filename } = cstate.dest {
+        flush_to_program(&mut cstate)?;
+        close_pipe_to_program(fd, filename)?;
     }
     pgstat_progress_end_command();
     Ok(())

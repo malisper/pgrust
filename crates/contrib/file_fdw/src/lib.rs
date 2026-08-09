@@ -1,6 +1,5 @@
 //! `contrib/file_fdw/file_fdw.c` — foreign-data wrapper for server-side flat
-//! files. PROGRAM sources are unported (no COPY FROM PROGRAM lane): the
-//! validator accepts the option (C parity), the scan/analyze paths are loud.
+//! files and PROGRAM pipe sources (the COPY FROM PROGRAM lane).
 #![allow(non_snake_case)]
 
 use datum::Datum;
@@ -10,7 +9,7 @@ use types_core::{
 };
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED,
-    ERRCODE_FDW_INVALID_OPTION_NAME, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_FDW_INVALID_OPTION_NAME,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR,
     ERROR, NOTICE,
 };
@@ -79,6 +78,7 @@ struct FileFdwPlanState {
 // context resets (executils 'static-restamp precedent).
 struct FileFdwExecutionState {
     filename: &'static str,
+    is_program: bool,
     options: NodeList<'static>,
     cstate: Option<CopyFromState<'static, 'static>>,
 }
@@ -612,6 +612,7 @@ fn begin_copy<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     filename: &'mcx str,
+    is_program: bool,
     options: &NodeList<'mcx>,
 ) -> PgResult<CopyFromState<'static, 'static>> {
     let cstate = copy_cmd::BeginCopyFrom(
@@ -619,6 +620,7 @@ fn begin_copy<'mcx>(
         rel,
         NodeList::nil(),
         Some(filename),
+        is_program,
         &NodeList::nil(),
         options,
         None,
@@ -642,24 +644,10 @@ fn file_begin_foreign_scan<'mcx>(
     let mcx = estate.es_query_cxt;
     let rel = node.ss.ss_currentRelation.as_ref().expect("foreign scan has a relation");
     let (filename, is_program, mut options) = file_get_options(mcx, rel.rd_id)?;
-    if is_program {
-        // COPY FROM PROGRAM is not ported (commands/copy rejects is_program
-        // the same way); a program-sourced scan fails clean instead of
-        // running the pipe.
-        return Err(Box::new(
-            PgError::error("COPY TO/FROM PROGRAM is not supported yet".to_string())
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
-                .with_detail(format!(
-                    "Foreign table \"{}\" uses the file_fdw \"program\" option, which runs a \
-                     COPY FROM PROGRAM pipe.",
-                    rel.name()
-                )),
-        ));
-    }
     for def in node.plan.fdw_private.iter() {
         options.lappend(mcx, def)?;
     }
-    let cstate = begin_copy(mcx, rel, filename, &options)?;
+    let cstate = begin_copy(mcx, rel, filename, is_program, &options)?;
     // SAFETY: same es_query_cxt restamp as begin_copy.
     let (filename, options) = unsafe {
         (
@@ -667,8 +655,12 @@ fn file_begin_foreign_scan<'mcx>(
             core::mem::transmute::<NodeList<'mcx>, NodeList<'static>>(options),
         )
     };
-    node.fdw_state =
-        Some(Box::new(FileFdwExecutionState { filename, options, cstate: Some(cstate) }));
+    node.fdw_state = Some(Box::new(FileFdwExecutionState {
+        filename,
+        is_program,
+        options,
+        cstate: Some(cstate),
+    }));
     Ok(())
 }
 
@@ -754,7 +746,7 @@ fn file_rescan_foreign_scan<'mcx>(
     // SAFETY: undoes the begin-time 'static restamp (same es_query_cxt).
     let options =
         unsafe { core::mem::transmute::<&NodeList<'static>, &NodeList<'mcx>>(&f.options) };
-    f.cstate = Some(begin_copy(mcx, rel, f.filename, options)?);
+    f.cstate = Some(begin_copy(mcx, rel, f.filename, f.is_program, options)?);
     Ok(())
 }
 
@@ -878,18 +870,12 @@ fn file_acquire_sample_rows<'mcx>(
     let mut nulls = vec![true; natts];
 
     let (filename, is_program, options) = file_get_options(mcx, onerel.rd_id)?;
-    if is_program {
-        panic!(
-            "file_fdw: program option (COPY FROM PROGRAM, OpenPipeStream lane) is unported \
-             for table \"{}\"",
-            onerel.name()
-        );
-    }
     let mut cstate = copy_cmd::BeginCopyFrom(
         mcx,
         onerel,
         NodeList::nil(),
         Some(filename),
+        is_program,
         &NodeList::nil(),
         &options,
         None,

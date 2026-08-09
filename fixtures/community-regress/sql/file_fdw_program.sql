@@ -1,10 +1,6 @@
--- Issue malisper/pgrust#76: file_fdw "program" foreign tables — DDL is
--- accepted, and scanning fails with a clean feature_not_supported error.
--- C-PARITY GAP (deliberate, pinned): real PostgreSQL runs the program via
--- COPY FROM PROGRAM (OpenPipeStream); pgrust has no PROGRAM pipe anywhere
--- (commands/copy rejects is_program the same way), so this expected file is
--- pgrust's clean error, NOT real-PG output. Re-freeze from C when PROGRAM
--- pipes are ported.
+-- Issue malisper/pgrust#76: file_fdw "program" foreign tables run the
+-- command via the COPY FROM PROGRAM pipe (OpenPipeStream lane). Expected
+-- output re-frozen from real C PG 18 after the PROGRAM port landed.
 CREATE EXTENSION file_fdw;
 CREATE SERVER issue76_srv FOREIGN DATA WRAPPER file_fdw;
 CREATE FOREIGN TABLE issue76_ft(line text) SERVER issue76_srv

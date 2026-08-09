@@ -81,6 +81,18 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 }
                 Ok(n)
             }
+            CopySrc::Program { fd, .. } => {
+                // C's fread(maxread) over the popen'd FILE (copyfromparse.c
+                // COPY_FILE arm): greedy fill; raw_reached_eof only when a
+                // call yields nothing at all.
+                let fd = *fd;
+                let dst = &mut self.raw_buf[at..at + maxread];
+                let n = Self::program_read(fd, dst)?;
+                if n == 0 {
+                    self.raw_reached_eof = true;
+                }
+                Ok(n)
+            }
             CopySrc::Callback { .. } => {
                 // Split borrows: the callback writes straight into raw_buf.
                 let CopyFromState { src, raw_buf, raw_reached_eof, .. } = self;
@@ -150,6 +162,22 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         Ok(filled)
     }
 
+    // The PROGRAM arm of C's fread: PipeStreamRead loops to fill dst (stdio
+    // fread semantics), short only at child-stdout EOF.
+    fn program_read(fd: i32, dst: &mut [u8]) -> PgResult<usize> {
+        match fd::PipeStreamRead(fd, dst) {
+            Ok(n) => Ok(n),
+            Err(en) => {
+                ereport(ERROR)
+                    .with_saved_errno(en)
+                    .errcode_for_file_access()
+                    .errmsg("could not read from COPY file: %m")
+                    .finish(loc("CopyGetData"))?;
+                unreachable!()
+            }
+        }
+    }
+
     fn file_read(fd: i32, dst: &mut [u8]) -> PgResult<usize> {
         let read = fd::with_allocated_stdio(fd, |f| {
             use std::io::Read;
@@ -196,6 +224,9 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             }
             CopySrc::Stdin => {
                 unreachable!("stdin sources are refused at parallel admission")
+            }
+            CopySrc::Program { .. } => {
+                unreachable!("program sources are refused at parallel admission")
             }
             CopySrc::Chunk(_) => unreachable!("chunk sources never feed the segmentator"),
             CopySrc::Parquet(_) => {

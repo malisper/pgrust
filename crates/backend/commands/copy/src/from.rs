@@ -34,6 +34,10 @@ use crate::{
 
 pub(crate) enum CopySrc<'mcx, 's> {
     File { fd: i32, filename: &'s str },
+    // COPY FROM PROGRAM (copyfrom.c is_program arm): `fd` is an
+    // OpenPipeStream index; the child's stdout feeds the same refill path a
+    // file does. Closed via ClosePipeFromProgram semantics in EndCopyFrom.
+    Program { fd: i32, filename: &'s str },
     Frontend { msgbuf: StringInfo<'mcx> },
     // copyfrom.c:1850 (`cstate->copy_file = stdin`): the pipe source of a
     // non-remote session — single-user mode's COPY ... FROM STDIN. The read
@@ -138,11 +142,22 @@ pub fn BeginCopyFrom<'mcx: 's, 's>(
     rel: &Relation<'mcx>,
     where_clause: NodeList<'mcx>,
     filename: Option<&'s str>,
+    is_program: bool,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
     source_text: Option<&str>,
 ) -> PgResult<CopyFromState<'mcx, 's>> {
-    begin_copy_from_guts(mcx, rel, where_clause, filename, None, attnamelist, options, source_text)
+    begin_copy_from_guts(
+        mcx,
+        rel,
+        where_clause,
+        filename,
+        is_program,
+        None,
+        attnamelist,
+        options,
+        source_text,
+    )
 }
 
 // BeginCopyFrom's data_source_cb form (COPY_CALLBACK): tablesync feeds bytes
@@ -155,7 +170,17 @@ pub fn BeginCopyFromCallback<'mcx: 's, 's>(
     options: &NodeList<'s>,
     cb: Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + 's>,
 ) -> PgResult<CopyFromState<'mcx, 's>> {
-    begin_copy_from_guts(mcx, rel, NodeList::nil(), None, Some(cb), attnamelist, options, None)
+    begin_copy_from_guts(
+        mcx,
+        rel,
+        NodeList::nil(),
+        None,
+        false,
+        Some(cb),
+        attnamelist,
+        options,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -164,6 +189,7 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
     rel: &Relation<'mcx>,
     where_clause: NodeList<'mcx>,
     filename: Option<&'s str>,
+    is_program: bool,
     mut data_source_cb: Option<Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + 's>>,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
@@ -297,6 +323,12 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
     let src = if opts.parquet {
         // Server-side file only in this increment (STDIN and callback
         // sources error cleanly inside open_source / here).
+        if is_program {
+            return Err(Box::new(
+                PgError::error("COPY FROM PROGRAM with parquet format is not supported")
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
         if data_source_cb.is_some() {
             return Err(Box::new(
                 PgError::error(
@@ -326,6 +358,19 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
         CopySrc::Callback { cb }
     } else {
         match filename {
+        Some(filename) if is_program => {
+            // copyfrom.c is_program arm: popen the command, read its stdout.
+            let fd = fd::OpenPipeStream(filename, "r")?;
+            if fd < 0 {
+                ereport(ERROR)
+                    .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not execute command \"{filename}\": %m"))
+                    .finish(loc("BeginCopyFrom"))?;
+            }
+            progress_type = backend_progress::progress::PROGRESS_COPY_TYPE_PROGRAM;
+            CopySrc::Program { fd, filename }
+        }
         Some(filename) => {
             let fd = fd::AllocateFile(filename, "rb")?;
             if fd < 0 {
@@ -1480,7 +1525,34 @@ pub fn EndCopyFrom(cstate: CopyFromState<'_, '_>) -> PgResult<()> {
                 .finish(loc("EndCopyFrom"))?;
         }
     }
+    if let CopySrc::Program { fd, filename } = &cstate.src {
+        close_pipe_from_program(*fd, filename, cstate.raw_reached_eof)?;
+    }
     pgstat_progress_end_command();
+    Ok(())
+}
+
+// ClosePipeFromProgram (copyfrom.c): pclose and check the wait status. A
+// SIGPIPE death is expected — and not an error — when COPY FROM PROGRAM
+// stopped reading before the child reached EOF.
+fn close_pipe_from_program(fd: i32, filename: &str, raw_reached_eof: bool) -> PgResult<()> {
+    let pclose_rc = fd::ClosePipeStream(fd)?;
+    if pclose_rc == -1 {
+        ereport(ERROR)
+            .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg("could not close pipe to external command: %m")
+            .finish(loc("EndCopyFrom"))?;
+    } else if pclose_rc != 0 {
+        if !raw_reached_eof && wait_error::wait_result_is_signal(pclose_rc, libc::SIGPIPE) {
+            return Ok(());
+        }
+        return Err(Box::new(
+            PgError::error(format!("program \"{filename}\" failed"))
+                .with_sqlstate(types_error::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION)
+                .with_detail(wait_error::wait_result_to_str(pclose_rc)),
+        ));
+    }
     Ok(())
 }
 
