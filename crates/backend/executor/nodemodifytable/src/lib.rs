@@ -66,6 +66,11 @@ pub struct ResultRelExec<'mcx> {
     // resolved into update_cols by exec_init_update_projection.
     update_colnos: Option<&'mcx types_nodes::IntList<'mcx>>,
     indexes: Option<execindexing::ResultRelIndexState<'mcx>>,
+    // C ri_projectNew, INSERT leg (ExecInitInsertProjection): the junk-column
+    // filter projection over the subplan output into ri_newTupleSlot; None =
+    // junk-free tlist (ExecGetInsertNewTuple's slot-type-coercion arm).
+    // UPDATE's ri_projectNew counterpart is the update_cols source map.
+    project_new: Option<PgBox<'mcx, ExprState<'mcx>>>,
     project_returning: Option<PgBox<'mcx, ExprState<'mcx>>>,
     // ri_CheckConstraintExprs (built on first ExecRelCheck, per C); each
     // compiled qual rides with its constraint name for the 23514 report.
@@ -1097,6 +1102,7 @@ fn init_result_rel<'mcx>(
         update_cols: mcx::PgVec::new_in(mcx),
         update_colnos,
         indexes: None,
+        project_new: None,
         project_returning,
         check_exprs: None,
         partition_check: None,
@@ -3403,6 +3409,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
         if let Some(indexes) = r.indexes.take() {
             execindexing::ExecCloseIndices(indexes).expect("ExecCloseIndices");
         }
+        r.project_new = None;
         r.project_returning = None;
         r.check_exprs = None;
         r.partition_check = None;
@@ -3449,9 +3456,11 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.index_eval_cx = None;
 }
 
-// ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
-// columns on this lane (loud below), so need_projection is always false and
-// ri_newTupleSlot only exists for slot-type coercion.
+// ExecInitInsertProjection (nodeModifyTable.c): extract the non-junk columns
+// of the subplan tlist, verify they produce a tuple suitable for the result
+// relation, and build the junk-filter projection over ri_newTupleSlot when
+// the tlist carries resjunk columns (C's need_projection leg,
+// ExecBuildProjectionInfo).
 #[inline(always)] // se2-cost-fix round 3: the round-2 plain hint did not take (+139/stmt outlined)
 fn exec_init_insert_projection<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
@@ -3464,28 +3473,58 @@ fn exec_init_insert_projection<'mcx>(
         .expect("ModifyTable has a subplan")
         .as_plan()
         .expect("plan node");
+    let mcx = estate.es_query_cxt;
+
+    // Extract non-junk columns of the subplan's result tlist (C
+    // insertTargetList; the entries keep their original resnos, which are
+    // consecutive 1..N because junk columns always trail the data columns).
+    let mut insert_tlist =
+        types_nodes::NodeList::with_capacity(mcx, subplan.targetlist.len())?;
+    let mut need_projection = false;
     for tle_node in &subplan.targetlist {
         let tle = tle_node.as_target_entry().expect("TargetEntry");
         if tle.resjunk {
-            panic!(
-                "ExecInitInsertProjection (nodeModifyTable.c): junk-column \
-                 projection (ExecBuildProjectionInfo) not ported"
-            );
+            need_projection = true;
+        } else {
+            insert_tlist.lappend(mcx, tle_node)?;
         }
     }
 
-    let mcx = estate.es_query_cxt;
     let (kind, desc) = {
         let rel = estate.es_relations[(mt.rel().rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
-        exec_check_plan_output(rel, &subplan.targetlist)?;
+        // The junk-free list must produce a tuple suitable for the result
+        // relation.
+        exec_check_plan_output(rel, &insert_tlist)?;
         (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
     };
-    let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
+    let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc.clone()));
     let id = ExecSlotId(estate.es_tupleTable.len() as u32);
     estate.es_tupleTable.push(slot);
     mt.rel_mut().ri_newTupleSlot = Some(id);
+
+    // Build ProjectionInfo if needed (it probably isn't: the planner wraps
+    // INSERT ... SELECT sources carrying junk in a "*SELECT*" subquery whose
+    // scan projects the junk away, so C flags this leg as currently-dead
+    // defensive code too).
+    if need_projection {
+        let params = estate.param_bind();
+        let proj = executils::with_subplan_compile_env(estate, |env| {
+            execexpr::exec_build_projection_info_subplans(
+                mcx,
+                &insert_tlist,
+                Some(&desc),
+                params,
+                env,
+            )
+        })?;
+        // C: "need an expression context to do the projection".
+        if proj.has_subplan() && mt.node_ecxt.is_none() {
+            mt.node_ecxt = Some(estate.create_expr_context());
+        }
+        mt.rel_mut().project_new = Some(proj);
+    }
     mt.rel_mut().ri_projectNewInfoValid = true;
     Ok(())
 }
@@ -3576,18 +3615,23 @@ fn expr_type(node: Node<'_>) -> u32 {
     }
 }
 
-// ExecGetInsertNewTuple (nodeModifyTable.c), no-projection arm.
+// ExecGetInsertNewTuple (nodeModifyTable.c).
 //
 // inline(always): the per-row new-tuple fetch (and its exec_copy_slot call
 // site) was inline in exec_modify_table at base; after the wave-2 seam
 // split it went outlined in BOTH monomorphizations (+51 instr/row named by
-// the se2-cost dist-prof attribution) — se2-cost-fix round 2.
+// the se2-cost dist-prof attribution) — se2-cost-fix round 2. The junk
+// projection arm is out-of-line cold: plans that need it are vanishingly
+// rare (C flags the leg as currently-dead defensive code).
 #[inline(always)]
 fn exec_get_insert_new_tuple<'mcx>(
-    mt: &ModifyTableState<'mcx>,
+    mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     plan_slot: ExecSlotId,
 ) -> PgResult<ExecSlotId> {
+    if mt.rel().project_new.is_some() {
+        return exec_get_insert_new_tuple_projected(mt, estate, plan_slot);
+    }
     let new_slot = mt.rel().ri_newTupleSlot.expect("ExecInitInsertProjection ran");
     let mcx = estate.es_query_cxt;
     let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
@@ -3604,6 +3648,50 @@ fn exec_get_insert_new_tuple<'mcx>(
         )
     };
     exectuples::exec_copy_slot(dst, src, mcx, mcx)?;
+    Ok(new_slot)
+}
+
+// ExecGetInsertNewTuple's projection arm: run ri_projectNew over the plan
+// (outer) tuple into ri_newTupleSlot, discarding the junk columns; since the
+// output slot is ri_newTupleSlot this also fixes any slot-type problem (C
+// nodeModifyTable.c). SubPlan-bearing projections ride the node ecxt driver
+// (the exec_process_returning shape).
+#[cold]
+#[inline(never)]
+fn exec_get_insert_new_tuple_projected<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_slot: ExecSlotId,
+) -> PgResult<ExecSlotId> {
+    let new_slot = mt.rel().ri_newTupleSlot.expect("ExecInitInsertProjection ran");
+    assert_ne!(new_slot, plan_slot);
+    let mcx = estate.es_query_cxt;
+    let ecxt = mt.node_ecxt;
+    let proj = mt
+        .rel_mut()
+        .project_new
+        .as_deref_mut()
+        .expect("caller checked project_new");
+    if proj.has_subplan() {
+        let ec = ecxt.expect("node ecxt created with the SubPlan-bearing projection");
+        estate.reset_expr_context(ec);
+        {
+            let e = estate.ecxt_mut(ec);
+            e.ecxt_scantuple = None;
+            e.ecxt_innertuple = None;
+            e.ecxt_outertuple = Some(plan_slot);
+        }
+        executils::exec_project_with_subplans(proj, estate, ec, new_slot)?;
+    } else {
+        let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
+        let (n, p) = (new_slot.0 as usize, plan_slot.0 as usize);
+        assert!(n < table.len() && p < table.len());
+        let base = table.as_mut_ptr();
+        // SAFETY: distinct in-bounds indices of one live slice.
+        let (dst, outer) = unsafe { (&mut *base.add(n), &mut *base.add(p)) };
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer) };
+        execexpr::exec_project(proj, &mut slots, dst, mcx)?;
+    }
     Ok(new_slot)
 }
 
@@ -6211,19 +6299,16 @@ fn exec_insert<'mcx>(
                 &mut r.generated_exprs,
             ),
         };
-        let remapped = work_slot != slot_id;
         let slot = &mut es_tupleTable[work_slot.0 as usize];
 
         slot.base_mut().tts_tableOid = rel.rd_id;
+        // C computes stored generated columns against the routed leaf's own
+        // ResultRelInfo (ExecComputeStoredGenerated over ExecInitStoredGenerated,
+        // nodeModifyTable.c): the compile is leaf-relative — the leaf's own
+        // pg_attrdef adbin trees, in leaf attnos — and `slot` is already the
+        // leaf-layout slot (execute_attr_map_slot above), so an attno-remapped
+        // leaf needs no extra mapping.
         if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
-            if remapped {
-                // Leaf-relative compile should agree with the leaf-layout
-                // slot; unverified, loud.
-                panic!(
-                    "ExecInsert: stored generated columns on an attno-remapped \
-                     partition not ported"
-                );
-            }
             exec_compute_stored_generated(mcx, gen_exprs, rel, slot)?;
         }
         exectuples::exec_materialize_slot(slot, mcx)?;
@@ -8225,7 +8310,7 @@ fn plan_output_mismatch(detail: impl Into<String>) -> Box<PgError> {
 
 mcx::forget_safe_nodrop!(NewColSrc);
 
-// Exempt: indexes/snapshot_any/project_returning/on_conflict/check_exprs/
+// Exempt: indexes/snapshot_any/project_new/project_returning/on_conflict/check_exprs/
 // trigdesc/trig_fmgr/trig_when/generated_exprs/router/leaf_indexes/
 // leaf_partition_check/leaf_on_conflict/leaf_returning/leaf_trigdesc/
 // leaf_trig_fmgr/leaf_trig_when/index_eval_cx/merge
@@ -8244,7 +8329,7 @@ mcx::forget_safe_struct!(
     ResultRelExec<'_> { rti, rd_id, relkind, ri_newTupleSlot, ri_oldTupleSlot,
         ri_ReturningSlot, ri_AllNullSlot, ri_projectNewInfoValid, ri_RowIdAttNo,
         update_cols, update_colnos;
-        indexes, project_returning, check_exprs, partition_check, trigdesc,
+        indexes, project_new, project_returning, check_exprs, partition_check, trigdesc,
         trig_fmgr, trig_old_slot, trig_when, all_updated_cols, child_to_root,
         generated_exprs, virtual_nn_exprs, wco_exprs, merge },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,

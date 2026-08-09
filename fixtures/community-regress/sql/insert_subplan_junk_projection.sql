@@ -1,0 +1,23 @@
+-- Panic-audit A1 (notes/audits/unported-panic-inventory-2026-08-08.md):
+-- ExecInitInsertProjection's junk-column projection leg. Expected output
+-- captured from real PostgreSQL 18.
+-- The planner wraps every INSERT ... SELECT source carrying resjunk columns
+-- (ORDER BY sort keys, FOR UPDATE rowmarks) in a "*SELECT*" subquery whose
+-- scan projects the junk away, so these shapes pass at base too (C flags the
+-- executor leg as currently-dead defensive code); this case pins the whole
+-- family, including the plan shape, against planner drift on either side.
+CREATE TABLE ins_junk_target (a int);
+CREATE TABLE ins_junk_src (a int, b int);
+INSERT INTO ins_junk_src VALUES (10, 3), (20, 1), (30, 2);
+EXPLAIN (COSTS OFF, VERBOSE)
+  INSERT INTO ins_junk_target (a) SELECT a FROM ins_junk_src ORDER BY b;
+INSERT INTO ins_junk_target (a) SELECT a FROM ins_junk_src ORDER BY b;
+SELECT a FROM ins_junk_target ORDER BY a;
+-- expression source + junk sort key + RETURNING (insertion order feeds the
+-- RETURNING stream)
+INSERT INTO ins_junk_target (a)
+  SELECT a + 100 FROM ins_junk_src ORDER BY b DESC RETURNING a;
+-- rowmark junk (FOR UPDATE ctid) in the INSERT source
+INSERT INTO ins_junk_target (a) SELECT a + 200 FROM ins_junk_src FOR UPDATE;
+SELECT count(*) FROM ins_junk_target;
+DROP TABLE ins_junk_target, ins_junk_src;
