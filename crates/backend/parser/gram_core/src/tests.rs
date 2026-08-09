@@ -2757,3 +2757,41 @@ fn udeescape_hard_failures_carry_an_error_cursor() {
     assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
     assert_eq!(err.cursor_position(), Some(11));
 }
+
+// A8 regression pins (unported-panic inventory 2026-08-08): parseable
+// statements whose gram.y actions are still unported used to hit the
+// catch-all panic fence in reduce(), crashing the backend. They must return
+// a clean ERRCODE_FEATURE_NOT_SUPPORTED naming the grammar rule instead.
+// The full reachable-rule enumeration: notes/audits/unported-grammar-actions.md.
+#[test]
+fn unported_grammar_action_errors_instead_of_panicking() {
+    // set_rest_more: SET NAMES opt_encoding (gram.y:1741).
+    let e = parse_err("SET NAMES 'UTF8'");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert!(
+        e.message().contains("not yet implemented (grammar rule"),
+        "unexpected message: {}",
+        e.message()
+    );
+
+    // AlterObjectDependsStmt: ALTER INDEX ... DEPENDS ON EXTENSION (gram.y:10040).
+    let e = parse_err("ALTER INDEX i DEPENDS ON EXTENSION e");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert!(e.message().contains("not yet implemented (grammar rule"));
+
+    // CreateAssertionStmt (gram.y:6334) — C itself raises 0A000 "CREATE
+    // ASSERTION is not yet implemented"; the unported fence keeps the class.
+    let e = parse_err("CREATE ASSERTION a CHECK (1 = 1)");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+
+    // a_expr UNIQUE predicate (gram.y:15337) — C raises 0A000 "UNIQUE
+    // predicate is not yet implemented".
+    let e = parse_err("SELECT UNIQUE (SELECT 1)");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+
+    // Ported neighbors must stay ported (the stale "ENABLE/DISABLE RULE"
+    // marker comment next to the fence was wrong — those arms are live).
+    parse("ALTER TABLE t ENABLE RULE r");
+    parse("ALTER TABLE t DISABLE RULE r");
+}
+

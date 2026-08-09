@@ -195,3 +195,21 @@ fn clean_shutdown_boot_path() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// A4 regression pin (unported-panic inventory 2026-08-08): a WAL record
+// carrying XLR_CHECK_CONSISTENCY — written by a C primary running with
+// wal_consistency_checking on — used to panic! the startup process at the
+// apply_wal_record post-redo hook, so the server never came up. The check
+// must be SKIPPED with a one-time warning instead (C would verify via
+// verifyBackupPageConsistency; the full port is a tracked follow-up).
+#[test]
+fn consistency_check_flagged_record_skips_not_panics() {
+    // xlogrecord.h: #define XLR_CHECK_CONSISTENCY 0x02
+    assert_eq!(XLR_CHECK_CONSISTENCY, 0x02);
+    // First flagged record: warns (once) and returns — must not panic.
+    skip_unported_consistency_check(0, 0xB0 | XLR_CHECK_CONSISTENCY, 0x1_0000_0028);
+    assert!(CONSISTENCY_CHECK_SKIP_WARNED.load(Relaxed));
+    // Every later flagged record is skipped silently — must also not panic.
+    skip_unported_consistency_check(10, XLR_CHECK_CONSISTENCY, 0x1_0000_0060);
+    assert!(CONSISTENCY_CHECK_SKIP_WARNED.load(Relaxed));
+}

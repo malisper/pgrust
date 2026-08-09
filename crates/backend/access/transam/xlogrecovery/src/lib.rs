@@ -1715,6 +1715,36 @@ fn xlogrecovery_redo(rec: &mut Recovery) -> PgResult<()> {
 
 const XLR_CHECK_CONSISTENCY: u8 = 0x02;
 
+// verifyBackupPageConsistency (xlogrecovery.c:2483) is not yet ported: C
+// re-reads each replayed block, applies the rmgr's rm_mask when one exists
+// (masking is optional per-rmgr; C compares either way) and byte-compares it
+// against the primary's page image, elog(FATAL) on mismatch. pgrust pins
+// wal_consistency_checking empty, so flagged records only appear when
+// replaying WAL written by a C primary that has the GUC on — a supported
+// deployment shape. Until the check is ported, skip it (replay itself is
+// unaffected; the pages were applied normally) and say so loudly ONCE per
+// startup instead of aborting the startup process. Full port is tracked as
+// a follow-up in the unported-panic inventory (A4).
+static CONSISTENCY_CHECK_SKIP_WARNED: AtomicBool = AtomicBool::new(false);
+
+fn skip_unported_consistency_check(rmid: u8, info: u8, end_lsn: u64) {
+    if !CONSISTENCY_CHECK_SKIP_WARNED.swap(true, Relaxed) {
+        let _ = elog(
+            WARNING,
+            format!(
+                "WAL record at {} (rmid {}, info {:#04x}) requests a page consistency check \
+                 (wal_consistency_checking was enabled on the primary), which is not yet \
+                 implemented; skipping this and all later consistency checks — WAL replay \
+                 itself is unaffected, but replayed pages are not being cross-verified \
+                 against the primary's page images",
+                lsn_fmt(end_lsn),
+                rmid,
+                info
+            ),
+        );
+    }
+}
+
 fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult<()> {
     let xid = rec.reader.XLogRecGetXid();
     let rmid = rec.reader.XLogRecGetRmid();
@@ -1786,8 +1816,10 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
         }
     }
 
+    // C: if ((record->xl_info & XLR_CHECK_CONSISTENCY) != 0)
+    //         verifyBackupPageConsistency(xlogreader);
     if info & XLR_CHECK_CONSISTENCY != 0 {
-        panic!("verifyBackupPageConsistency not ported (wal_consistency_checking record seen)");
+        skip_unported_consistency_check(rmid, info, rec.reader.v.EndRecPtr);
     }
 
     LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);

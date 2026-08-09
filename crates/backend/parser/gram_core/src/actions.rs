@@ -143,23 +143,15 @@ const IM_MINUTE: i32 = 1 << 11;
 const IM_SECOND: i32 = 1 << 12;
 const INTERVAL_FULL_RANGE: i32 = 0x7FFF;
 
-#[cfg(not(feature = "unported-soft"))]
-#[cold]
-#[inline(never)]
-fn unimplemented_rule(rule: usize) -> ! {
-    panic!(
-        "gram_core: unimplemented grammar action: rule {rule} ({}), gram.y:{}",
-        YYTNAME[YYR1[rule] as usize], YYRLINE[rule]
-    )
-}
-
 // Fuzz-only carve fence (100%-coverage campaign, lane p1-new2): the sentinel
 // SQLSTATE lets the gram_core_diff differential driver classify inputs that
-// reach a not-yet-ported grammar action WITHOUT unwinding (cargo-fuzz builds
-// abort on panic), while every non-fuzz build keeps the loud panic above —
-// the panic list IS the later-phase porting TODO list and release behavior
-// is unchanged. The driver treats this state as the UNPORTED carve verdict
-// (no tree compare; the C side must still parse or raise a real error).
+// reach a not-yet-ported grammar action, distinguishing them from REAL
+// C-parity 0A000 errors (e.g. MATCH PARTIAL), which must still tree/error
+// compare. Non-fuzz builds return ERRCODE_FEATURE_NOT_SUPPORTED instead (see
+// unimplemented_rule_error below); the rule list remains the later-phase
+// porting TODO list, enumerated in notes/audits/unported-grammar-actions.md.
+// The driver treats this state as the UNPORTED carve verdict (no tree
+// compare; the C side must still parse or raise a real error).
 #[cfg(feature = "unported-soft")]
 pub const UNPORTED_RULE_SQLSTATE: types_error::SqlState =
     types_error::make_sqlstate(*b"GRUNP");
@@ -10436,13 +10428,35 @@ impl<'mcx> Parser<'mcx> {
                     -1,
                 )?));
             }
-            // alter_table_cmd ENABLE/DISABLE RULE
             #[cfg(not(feature = "unported-soft"))]
-            _ => unimplemented_rule(rule),
+            _ => return Err(self.unimplemented_rule_error(rule, yyloc)),
             #[cfg(feature = "unported-soft")]
             _ => return Err(unimplemented_rule_soft(rule)),
         }
         Ok(())
+    }
+
+    // A8 (unported-panic inventory 2026-08-08): a parseable statement whose
+    // gram.y action is still unported must fail the STATEMENT, not the
+    // backend — C-shaped ERRCODE_FEATURE_NOT_SUPPORTED at the construct's
+    // cursor position instead of the old catch-all panic. The reachable rule
+    // set is enumerated in notes/audits/unported-grammar-actions.md; the
+    // message names the rule so the error list stays the porting TODO list.
+    #[cfg(not(feature = "unported-soft"))]
+    #[cold]
+    #[inline(never)]
+    fn unimplemented_rule_error(&self, rule: usize, yyloc: i32) -> Box<types_error::PgError> {
+        Box::new(
+            (*self.errposition_error(
+                format!(
+                    "this SQL construct is not yet implemented (grammar rule {rule}: {}, gram.y:{})",
+                    YYTNAME[YYR1[rule] as usize],
+                    YYRLINE[rule]
+                ),
+                yyloc,
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        )
     }
 
     // makeJsonTablePathSpec (makefuncs.c): the path string re-wraps as an
