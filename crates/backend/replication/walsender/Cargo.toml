@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+basebackup_incremental = { path = "../../backup/basebackup_incremental" }
 backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
 condition_variable = { path = "../../storage/lmgr/condition_variable" }
 guc_file = { path = "../../utils/misc/guc_file" }
@@ -65,3 +66,7 @@ walsender_config = { path = "../walsender_config" }
 walsender_seams = { path = "../walsender_seams" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 xact = { path = "../../access/transam/xact" }
+
+[dev-dependencies]
+be_secure_seams = { path = "../../libpq/be_secure_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }

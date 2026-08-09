@@ -3,8 +3,10 @@
 // SHOW, slot commands, TIMELINE_HISTORY, and physical START_REPLICATION live WAL
 // streaming (CopyBoth + WalSndLoop + XLogSendPhysical), BASE_BACKUP (inc 5,
 // via the walsender_seams::base_backup seam) and logical START_REPLICATION
-// (inc 6). UPLOAD_MANIFEST (incremental backup) is unported and refused with
-// a clean feature-not-supported ERROR.
+// (inc 6), and UPLOAD_MANIFEST (incremental backup Stage 3): the CopyIn
+// manifest receive loop feeding basebackup_incremental's parser, with the
+// resulting IncrementalBackupInfo held in the SESSION-owned slot store
+// (Q2 ruling — see WalSndCtlData.uploaded_manifests).
 #![allow(non_snake_case)]
 
 pub mod replies;
@@ -124,6 +126,23 @@ const fn walsnd_empty() -> WalSnd {
 // broadcast them via the wal_snd_wakeup seam.
 pub struct WalSndCtlData {
     pub walsnds: Box<[Mutex<WalSnd>]>,
+    // UPLOAD_MANIFEST session store — pgrust-only field, absent from C's
+    // shared WalSndCtlData.
+    //
+    // Q2 RULING (binding): C keeps the parsed manifest in a per-PROCESS
+    // static (walsender.c:152 `uploaded_manifest`, parented under
+    // CacheMemoryContext). pgrust is thread-per-backend under the
+    // "no state belongs to a thread" ruling: this state — potentially 100s
+    // of MB — must be SESSION-owned, never a per-thread static or
+    // thread_local, because sessions may migrate across pool threads and a
+    // second session hosted on the same thread must never see (or pay for)
+    // the prior session's manifest. The session identity we key on is the
+    // walsender slot tenure: InitWalSenderSlot acquires a slot at session
+    // start and WalSndKill (on_shmem_exit) releases it at session end, and
+    // both points clear this entry — so the manifest is dropped with the
+    // session, exactly when C's process death would have freed it.
+    pub(crate) uploaded_manifests:
+        Box<[Mutex<Option<Box<basebackup_incremental::IncrementalBackupInfo>>>]>,
     pub wal_flush_cv: ConditionVariable,
     pub wal_replay_cv: ConditionVariable,
     pub wal_confirm_rcv_cv: ConditionVariable,
@@ -148,6 +167,7 @@ pub fn WalSndCtl() -> &'static WalSndCtlData {
         let n = walsender_config::max_wal_senders().max(0) as usize;
         WalSndCtlData {
             walsnds: (0..n).map(|_| Mutex::new(walsnd_empty())).collect(),
+            uploaded_manifests: (0..n).map(|_| Mutex::new(None)).collect(),
             wal_flush_cv: ConditionVariable::new(),
             wal_replay_cv: ConditionVariable::new(),
             wal_confirm_rcv_cv: ConditionVariable::new(),
@@ -219,6 +239,10 @@ fn InitWalSenderSlot() {
         walsnd.pid = my_pid;
         walsnd.kind = kind;
         drop(walsnd);
+        // Session-ownership (Q2): a fresh session tenure must never observe
+        // a prior tenant's uploaded manifest. WalSndKill already clears it
+        // at session end; this is the acquire-side belt to that suspender.
+        *ctl.uploaded_manifests[i].lock().expect("uploaded manifest mutex") = None;
         MY_WAL_SND.set(i as i32);
         break;
     }
@@ -235,6 +259,13 @@ fn WalSndKill(_code: i32, _arg: usize) {
         return;
     }
     MY_WAL_SND.set(-1);
+    // Session-ownership (Q2): the uploaded manifest dies with the session's
+    // slot tenure (C frees it implicitly at process death; there is no
+    // process death per session here). Drop it BEFORE releasing the slot so
+    // no successor tenant can race into a stale entry.
+    *WalSndCtl().uploaded_manifests[i as usize]
+        .lock()
+        .expect("uploaded manifest mutex") = None;
     WalSndCtl().walsnds[i as usize].lock().expect("walsnd mutex").pid = 0;
 }
 
@@ -580,18 +611,11 @@ pub fn exec_replication_command(cmd_string: &str) -> PgResult<bool> {
             tcop_dest::EndReplicationCommand(cmdtag.as_bytes())?;
         }
         ReplCommand::UploadManifest => {
-            // UploadManifest (walsender.c:667) + basebackup_incremental.c are
-            // unported. Refuse with a clean ERROR before any CopyInResponse
-            // is sent, so the client gets ErrorResponse and the connection
-            // stays protocol-sane — never a panic.
             let cmdtag = "UPLOAD_MANIFEST";
             ps_status_seams::set_ps_display::call(cmdtag);
-            return ereport(ERROR)
-                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                .errmsg("UPLOAD_MANIFEST is not supported")
-                .errdetail("Incremental backup is not ported.")
-                .finish(loc(667, "UploadManifest"))
-                .map(|()| true);
+            xact::PreventInTransactionBlock(true, cmdtag)?;
+            UploadManifest(mcx)?;
+            tcop_dest::EndReplicationCommand(cmdtag.as_bytes())?;
         }
     }
 
@@ -1094,6 +1118,149 @@ fn DropReplicationSlot(cmd: DropReplicationSlotCmd) -> PgResult<()> {
     slot::ReplicationSlotDrop(cmd.slotname.as_deref().unwrap_or(""), !cmd.wait)
 }
 
+// ===========================================================================
+// UPLOAD_MANIFEST (walsender.c:667 UploadManifest) — receive a backup
+// manifest as a CopyIn stream and stash the parsed IncrementalBackupInfo in
+// the SESSION-owned store (see WalSndCtlData.uploaded_manifests for the Q2
+// session-ownership ruling; C uses a process-static under
+// CacheMemoryContext, which pgrust must not).
+// ===========================================================================
+
+// pqcomm.h message-size limits (as in commands/copy fromparse.rs).
+const PQ_SMALL_MESSAGE_LIMIT: i32 = 10000;
+const PQ_LARGE_MESSAGE_LIMIT: i32 = 0x3fffffff - 1;
+
+/// The session's uploaded-manifest cell, keyed by the walsender slot this
+/// session holds; None when MyWalSnd is unset. Stage-4's SendBaseBackup
+/// reads the manifest through this (C: the `uploaded_manifest` argument of
+/// SendBaseBackup), holding the lock for the duration of its use — the only
+/// other toucher is this same session's UploadManifest/WalSndKill.
+pub fn uploaded_manifest_cell(
+) -> Option<&'static Mutex<Option<Box<basebackup_incremental::IncrementalBackupInfo>>>> {
+    let i = MY_WAL_SND.get();
+    if i < 0 {
+        return None;
+    }
+    Some(&WalSndCtl().uploaded_manifests[i as usize])
+}
+
+/// Whether this walsender session has an uploaded manifest (basebackup's
+/// `ib == NULL` gate for BASE_BACKUP (INCREMENTAL)).
+pub fn uploaded_manifest_exists() -> bool {
+    uploaded_manifest_cell()
+        .is_some_and(|m| m.lock().expect("uploaded manifest mutex").is_some())
+}
+
+// Handle UPLOAD_MANIFEST command (walsender.c:667).
+fn UploadManifest(mcx: mcx::Mcx<'_>) -> PgResult<()> {
+    // C switches to AuxProcessResourceOwner because parsing uses the
+    // cryptohash machinery; pgrust's SHA-256 (pg_sha2) is plain Rust with no
+    // resource-owner footprint, so there is nothing to pin here.
+
+    let mut ib = Box::new(basebackup_incremental::CreateIncrementalBackupInfo(
+        transam_xlog::GetSystemIdentifier(),
+    ));
+
+    // Send a CopyInResponse message: overall format 0, 0 columns.
+    pqcomm::pq_putmessage(b'G', &[0u8, 0, 0])?;
+    pqcomm::pq_flush()?;
+
+    // Receive packets from client until done.
+    let mut buf = stringinfo::StringInfo::new_in(mcx)?;
+    while HandleUploadManifestPacket(&mut buf, &mut ib)? {}
+
+    // Finish up manifest processing.
+    ib.FinalizeIncrementalManifest()?;
+
+    // Discard any old manifest information and arrange to preserve the new
+    // information we just got (C: MemoryContextDelete of the prior context +
+    // reparent under CacheMemoryContext; here the session cell's old Box
+    // drops on overwrite). Error paths above leave any prior manifest
+    // intact, exactly like C.
+    let cell = uploaded_manifest_cell().expect("walsender has a WalSnd slot");
+    *cell.lock().expect("uploaded manifest mutex") = Some(ib);
+
+    Ok(())
+}
+
+// Process one packet received during the handling of an UPLOAD_MANIFEST
+// operation (walsender.c:733 HandleUploadManifestPacket). `buf` is scratch
+// space. Returns true if the caller should continue processing additional
+// packets, false if the UPLOAD_MANIFEST operation is complete.
+fn HandleUploadManifestPacket(
+    buf: &mut stringinfo::StringInfo<'_>,
+    ib: &mut basebackup_incremental::IncrementalBackupInfo,
+) -> PgResult<bool> {
+    // HOLD_CANCEL_INTERRUPTS() .. RESUME_CANCEL_INTERRUPTS() around the
+    // message read (drop guard: the resume must run on error paths too).
+    struct CancelHoldoff;
+    impl Drop for CancelHoldoff {
+        fn drop(&mut self) {
+            init_small::globals::ResumeCancelInterrupts();
+        }
+    }
+    init_small::globals::HoldCancelInterrupts();
+    let holdoff = CancelHoldoff;
+
+    pqcomm::pq_startmsgread()?;
+    let mtype = pqcomm::pq_getbyte()?;
+    if mtype == pqcomm::EOF {
+        return ereport(ERROR)
+            .errcode(types_error::ERRCODE_CONNECTION_FAILURE)
+            .errmsg("unexpected EOF on client connection with an open transaction")
+            .finish(loc(744, "HandleUploadManifestPacket"))
+            .map(|()| false);
+    }
+
+    let maxmsglen = match mtype as u8 {
+        b'd' => PQ_LARGE_MESSAGE_LIMIT, /* CopyData */
+        b'c' | b'f' | b'H' | b'S' => PQ_SMALL_MESSAGE_LIMIT, /* CopyDone, CopyFail, Flush, Sync */
+        _ => {
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_PROTOCOL_VIOLATION)
+                .errmsg(format!(
+                    "unexpected message type 0x{:02X} during COPY from stdin",
+                    mtype
+                ))
+                .finish(loc(760, "HandleUploadManifestPacket"))?;
+            unreachable!();
+        }
+    };
+
+    // Now collect the message body.
+    if pqcomm::pq_getmessage(buf, maxmsglen)? != 0 {
+        return ereport(ERROR)
+            .errcode(types_error::ERRCODE_CONNECTION_FAILURE)
+            .errmsg("unexpected EOF on client connection with an open transaction")
+            .finish(loc(770, "HandleUploadManifestPacket"))
+            .map(|()| false);
+    }
+    drop(holdoff); // RESUME_CANCEL_INTERRUPTS
+
+    // Process the message.
+    match mtype as u8 {
+        b'd' => {
+            /* CopyData */
+            ib.AppendIncrementalManifestData(buf.as_bytes());
+            Ok(true)
+        }
+        b'c' => Ok(false), /* CopyDone */
+        b'H' | b'S' => Ok(true), /* Sync/Flush: ignore, as elsewhere in CopyOut */
+        b'f' => {
+            /* CopyFail */
+            let body = buf.as_bytes();
+            let nul = body.iter().position(|&b| b == 0).unwrap_or(body.len());
+            let msg = String::from_utf8_lossy(&body[..nul]);
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_QUERY_CANCELED)
+                .errmsg(format!("COPY from stdin failed: {msg}"))
+                .finish(loc(791, "HandleUploadManifestPacket"))?;
+            unreachable!();
+        }
+        _ => unreachable!("message type validated above"),
+    }
+}
+
 // AlterReplicationSlot (walsender.c:1405).
 fn AlterReplicationSlot(cmd: AlterReplicationSlotCmd) -> PgResult<()> {
     let mut failover_given = false;
@@ -1282,6 +1449,7 @@ mod tests {
     // free slots (pid == 0) untouched, as C's per-slot pid gate does.
     #[test]
     fn rqst_file_reload_flags_only_active_slots() {
+        let _g = slot_lock();
         let ctl = WalSndCtl();
         assert!(ctl.walsnds.len() >= 2, "boot max_wal_senders covers two slots");
         {
@@ -1306,29 +1474,235 @@ mod tests {
         w.needreload = false;
     }
 
-    // UPLOAD_MANIFEST (walsender.c:667 UploadManifest, incremental backup) is
-    // unported: the dispatch must refuse it with a clean feature-not-supported
-    // ERROR — never a panic — so the client gets an ErrorResponse and the
-    // connection stays protocol-sane (regression for the walsender panic on
-    // `pg_basebackup --incremental`).
+    // ------------------------------------------------------------------
+    // UPLOAD_MANIFEST (walsender.c:667) — protocol flow + the Q2
+    // session-ownership contract for the uploaded IncrementalBackupInfo.
+    // ------------------------------------------------------------------
+
+    use std::cell::RefCell as StdRefCell;
+    use std::collections::VecDeque;
+    use std::sync::Once;
+
+    // Serialize every test that touches WalSndCtl slot state (they run on
+    // parallel threads within one process; slots are shared).
+    static SLOT_LOCK: Mutex<()> = Mutex::new(());
+
+    fn slot_lock() -> std::sync::MutexGuard<'static, ()> {
+        SLOT_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    thread_local! {
+        static WIRE: StdRefCell<Vec<u8>> = const { StdRefCell::new(Vec::new()) };
+        static INPUT: StdRefCell<VecDeque<Vec<u8>>> = const { StdRefCell::new(VecDeque::new()) };
+    }
+
+    // Real C-generated manifest (the Stage-2 corpus fixture; provenance in
+    // parse_manifest/src/tests.rs).
+    const C_FIXTURE: &[u8] =
+        include_bytes!("../../../../common/parse_manifest/testdata/backup_manifest_pg18");
+    const C_FIXTURE_SYSID: u64 = 7671867332315642488;
+    const C_FIXTURE_NFILES: usize = 968;
+
+    fn upload_setup() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            if !postgres_seams::check_for_interrupts::is_installed() {
+                postgres_seams::check_for_interrupts::set(|| Ok(()));
+            }
+            if !backend_status_seams::pgstat_report_activity::is_installed() {
+                backend_status_seams::pgstat_report_activity::set(|_, _| {});
+            }
+            if !ps_status_seams::set_ps_display::is_installed() {
+                ps_status_seams::set_ps_display::set(|_| {});
+            }
+            ipc_seams::on_shmem_exit::set(|_, _| {});
+            init_small::init_seams();
+            pqcomm::init_seams();
+            pgstat_seams::pgstat_set_session_end_cause_fatal::set(|| {});
+            // Fake wire: writes append to WIRE, reads drain INPUT.
+            be_secure_seams::secure_write::set(|buf| {
+                WIRE.with(|w| w.borrow_mut().extend_from_slice(buf));
+                Ok(Ok(buf.len()))
+            });
+            be_secure_seams::secure_read::set(|buf| {
+                INPUT.with(|q| {
+                    let mut q = q.borrow_mut();
+                    match q.front_mut() {
+                        None => Ok(Ok(0)),
+                        Some(chunk) => {
+                            let n = chunk.len().min(buf.len());
+                            buf[..n].copy_from_slice(&chunk[..n]);
+                            chunk.drain(..n);
+                            if chunk.is_empty() {
+                                q.pop_front();
+                            }
+                            Ok(Ok(n))
+                        }
+                    }
+                })
+            });
+            be_secure_seams::set_port_noblock::set(|_| true);
+            // The uploaded manifest is checked against this server's sysid;
+            // pin the zeroed in-process control file to the fixture's.
+            transam_xlog::control_file_mark_read_for_tests();
+            transam_xlog::control_file::control_file_update(|cf| {
+                cf.system_identifier = C_FIXTURE_SYSID;
+            });
+        });
+        pqcomm::pq_init_buffers().expect("pq buffers");
+        WIRE.with(|w| w.borrow_mut().clear());
+        INPUT.with(|q| q.borrow_mut().clear());
+    }
+
+    /// Frame one frontend protocol message: type byte + i32 length
+    /// (self-inclusive) + body.
+    fn feed_msg(msgtype: u8, body: &[u8]) {
+        let mut m = Vec::with_capacity(body.len() + 5);
+        m.push(msgtype);
+        m.extend_from_slice(&((body.len() as u32 + 4).to_be_bytes()));
+        m.extend_from_slice(body);
+        INPUT.with(|q| q.borrow_mut().push_back(m));
+    }
+
+    // The full UPLOAD_MANIFEST CopyIn flow over the (fake) wire: dispatch
+    // sends CopyInResponse, drains CopyData/Flush packets to CopyDone,
+    // parses the real C manifest, and stashes the IncrementalBackupInfo in
+    // the SESSION store (file count + WAL ranges + sysid gate all live).
     #[test]
-    fn upload_manifest_refused_cleanly() {
-        if !postgres_seams::check_for_interrupts::is_installed() {
-            postgres_seams::check_for_interrupts::set(|| Ok(()));
+    fn upload_manifest_copyin_flow_builds_session_manifest() {
+        let _g = slot_lock();
+        upload_setup();
+
+        // Acquire a walsender slot the way a session does.
+        assert_eq!(MY_WAL_SND.get(), -1);
+        InitWalSenderSlot();
+        assert!(MY_WAL_SND.get() >= 0);
+
+        // Split the manifest across several CopyData messages, with a Flush
+        // ('H') interleaved (must be ignored), then CopyDone.
+        let mid = C_FIXTURE.len() / 2;
+        feed_msg(b'd', &C_FIXTURE[..mid]);
+        feed_msg(b'H', &[]);
+        feed_msg(b'd', &C_FIXTURE[mid..]);
+        feed_msg(b'c', &[]);
+
+        let ran = exec_replication_command("UPLOAD_MANIFEST").expect("UPLOAD_MANIFEST succeeds");
+        assert!(ran);
+        // CommandComplete is buffered until the main loop's ReadyForQuery
+        // flush; flush explicitly to inspect the full wire.
+        pqcomm::pq_flush().unwrap();
+
+        // Wire starts with CopyInResponse: 'G', len 7, format 0, 0 columns.
+        let wire = WIRE.with(|w| w.borrow().clone());
+        assert_eq!(&wire[..8], &[b'G', 0, 0, 0, 7, 0, 0, 0]);
+        // ... and ends with CommandComplete("UPLOAD_MANIFEST\0").
+        let tail_needle = b"UPLOAD_MANIFEST\0";
+        assert!(
+            wire.windows(tail_needle.len()).any(|w| w == tail_needle),
+            "CommandComplete missing from wire"
+        );
+
+        // The manifest is in the session store, fully parsed.
+        assert!(uploaded_manifest_exists());
+        {
+            let cell = uploaded_manifest_cell().unwrap();
+            let guard = cell.lock().unwrap();
+            let ib = guard.as_ref().expect("manifest stored");
+            assert_eq!(ib.manifest_file_count(), C_FIXTURE_NFILES);
+            assert_eq!(ib.manifest_file_lookup(b"PG_VERSION"), Some(3));
+            assert_eq!(ib.manifest_wal_ranges().len(), 1);
+            assert_eq!(ib.manifest_wal_ranges()[0].tli, 1);
+            assert_eq!(ib.manifest_wal_ranges()[0].start_lsn, 0x2000028);
+            assert_eq!(ib.manifest_wal_ranges()[0].end_lsn, 0x2000120);
         }
-        if !backend_status_seams::pgstat_report_activity::is_installed() {
-            backend_status_seams::pgstat_report_activity::set(|_, _| {});
+
+        // Session end: WalSndKill (the on_shmem_exit hook) must drop the
+        // manifest with the session.
+        let slot = MY_WAL_SND.get();
+        WalSndKill(0, 0);
+        assert_eq!(MY_WAL_SND.get(), -1);
+        assert!(
+            WalSndCtl().uploaded_manifests[slot as usize].lock().unwrap().is_none(),
+            "manifest must die with the session"
+        );
+    }
+
+    // Q2 correctness point: the uploaded manifest is SESSION-owned, not
+    // thread-owned. A second session hosted on the SAME thread (pool-thread
+    // reuse) must never observe the prior session's manifest — neither via
+    // the accessor nor by re-acquiring the same slot.
+    #[test]
+    fn uploaded_manifest_is_dropped_with_session_not_thread() {
+        let _g = slot_lock();
+        upload_setup();
+
+        // --- Session 1 on this thread ---
+        assert_eq!(MY_WAL_SND.get(), -1);
+        InitWalSenderSlot();
+        let slot1 = MY_WAL_SND.get();
+        let cell = uploaded_manifest_cell().expect("slot held");
+        *cell.lock().unwrap() = Some(Box::new(
+            basebackup_incremental::CreateIncrementalBackupInfo(42),
+        ));
+        assert!(uploaded_manifest_exists());
+
+        // Session 1 ends (on_shmem_exit runs WalSndKill).
+        WalSndKill(0, 0);
+
+        // Between sessions this thread must hold nothing.
+        assert!(uploaded_manifest_cell().is_none());
+        assert!(!uploaded_manifest_exists());
+        assert!(
+            WalSndCtl().uploaded_manifests[slot1 as usize].lock().unwrap().is_none(),
+            "session 1's manifest leaked past WalSndKill"
+        );
+
+        // --- Session 2 on the same thread ---
+        InitWalSenderSlot();
+        let slot2 = MY_WAL_SND.get();
+        // Whichever slot session 2 landed on (usually slot1 again), it must
+        // start with no manifest.
+        assert!(!uploaded_manifest_exists(), "second session saw prior session's manifest");
+        assert!(
+            WalSndCtl().uploaded_manifests[slot2 as usize].lock().unwrap().is_none()
+        );
+
+        // Belt-and-suspenders: even a manifest left behind WITHOUT WalSndKill
+        // (crash-shaped teardown) is cleared by the acquire side.
+        *WalSndCtl().uploaded_manifests[slot2 as usize].lock().unwrap() = Some(Box::new(
+            basebackup_incremental::CreateIncrementalBackupInfo(43),
+        ));
+        WalSndCtl().walsnds[slot2 as usize].lock().unwrap().pid = 0; // slot freed, cell stale
+        MY_WAL_SND.set(-1);
+        InitWalSenderSlot();
+        let slot3 = MY_WAL_SND.get();
+        if slot3 == slot2 {
+            assert!(
+                !uploaded_manifest_exists(),
+                "acquire-side clear failed: stale manifest visible to new session"
+            );
         }
-        if !ps_status_seams::set_ps_display::is_installed() {
-            ps_status_seams::set_ps_display::set(|_| {});
-        }
-        // Point MyWalSnd at a slot so the stopping-mode gate can read state.
-        MY_WAL_SND.set(0);
+        WalSndKill(0, 0);
+    }
+
+    // CopyFail ('f') aborts UPLOAD_MANIFEST with C's query-canceled error and
+    // leaves no manifest behind.
+    #[test]
+    fn upload_manifest_copyfail_cancels_c_exact() {
+        let _g = slot_lock();
+        upload_setup();
+
+        assert_eq!(MY_WAL_SND.get(), -1);
+        InitWalSenderSlot();
+
+        feed_msg(b'd', &C_FIXTURE[..128]);
+        feed_msg(b'f', b"client bailed\0");
 
         let err = exec_replication_command("UPLOAD_MANIFEST").unwrap_err();
-        assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
-        assert_eq!(err.message(), "UPLOAD_MANIFEST is not supported");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_QUERY_CANCELED);
+        assert_eq!(err.message(), "COPY from stdin failed: client bailed");
+        assert!(!uploaded_manifest_exists(), "failed upload must not stash a manifest");
 
-        MY_WAL_SND.set(-1);
+        WalSndKill(0, 0);
     }
 }

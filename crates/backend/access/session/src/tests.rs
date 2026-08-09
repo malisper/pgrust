@@ -915,7 +915,15 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      standalone client process, never a backend session; nothing to do
     //      with the server session envelope. Documented, not a session_sources
     //      row.
-    assert_eq!(count_tree(crates), 558, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 559, re-pinned at the incremental-basebackup Stage-3 landing:
+    //   +1 replication/walsender/src/lib.rs — a cfg(test) WIRE/INPUT
+    //      thread_local pair driving the UPLOAD_MANIFEST protocol mock (the
+    //      test feeds CopyData chunks and captures wire output). Non-session:
+    //      test-harness scratch on the test's own thread, compiled out of
+    //      every product build. The product-side uploaded manifest is
+    //      session-owned in WalSndCtlData (slot-keyed), not thread-local, per
+    //      the Q2 ruling — so it is NOT a TLS-census entry at all.
+    assert_eq!(count_tree(crates), 559, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

@@ -1947,6 +1947,7 @@ dependencies = [
  "elog",
  "exectuples_output",
  "fd",
+ "guc_tables",
  "init_small",
  "libc",
  "manifest",
@@ -1988,6 +1989,31 @@ dependencies = [
  "types_core",
  "types_error",
  "zstd",
+]
+
+[[package]]
+name = "basebackup_incremental"
+version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "blkreftable",
+ "elog",
+ "fd",
+ "guc_tables",
+ "libc",
+ "manifest",
+ "mcx",
+ "parse_manifest",
+ "pg_sha2",
+ "postgres_seams",
+ "timeline_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "waitevent_seams",
+ "walsummarizer",
+ "xact_seams",
+ "xlogbackup",
 ]
 
 [[package]]
@@ -20063,6 +20089,8 @@ version = "0.0.0"
 dependencies = [
  "adt_timestamp",
  "backend_status_seams",
+ "basebackup_incremental",
+ "be_secure_seams",
  "condition_variable",
  "datum",
  "dbcommands_seams",
@@ -20084,6 +20112,7 @@ dependencies = [
  "lwlock",
  "mcx",
  "pgstat",
+ "pgstat_seams",
  "pmsignal",
  "postgres_seams",
  "pqcomm",

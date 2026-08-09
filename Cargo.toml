@@ -17,6 +17,7 @@ members = [
     "crates/backend/backup/throttle",
     "crates/backend/backup/manifest",
     "crates/backend/backup/basebackup",
+    "crates/backend/backup/basebackup_incremental",
     "crates/_support/jit_deform",
     "crates/_support/types/types_error",
     "crates/_support/types/types_core",

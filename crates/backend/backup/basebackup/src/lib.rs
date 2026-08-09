@@ -22,8 +22,9 @@ use mcx::Mcx;
 use repl_gram::{BaseBackupCmd, ReplOption, ReplOptionArg};
 use types_core::{Oid, TimeLineID, XLogRecPtr};
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR, WARNING,
+    ErrorLocation, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ERRCODE_SYNTAX_ERROR, ERROR, WARNING,
 };
 
 use manifest::checksum::{
@@ -440,6 +441,13 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
             "incremental" => {
                 if o_incremental { dup_err(name)?; }
                 opt.incremental = opt_bool(o)?;
+                // C basebackup.c line ~792: the summarize_wal prerequisite
+                // gate, raised at option-parse time exactly as in C.
+                if opt.incremental && !guc_tables::vars::summarize_wal.read() {
+                    ereport(ERROR).errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                        .errmsg("incremental backups cannot be taken unless WAL summarization is enabled")
+                        .finish(loc("parse_basebackup_options"))?;
+                }
                 o_incremental = true;
             }
             "max_rate" => {
@@ -586,12 +594,6 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
         }
     }
 
-    if opt.incremental {
-        // Incremental requires a prior UPLOAD_MANIFEST (still unported).
-        ereport(ERROR).errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-            .errmsg("must UPLOAD_MANIFEST before performing an incremental BASE_BACKUP")
-            .finish(loc("parse_basebackup_options"))?;
-    }
     Ok(opt)
 }
 
@@ -608,6 +610,29 @@ pub fn SendBaseBackup<'mcx>(mcx: Mcx<'mcx>, cmd: &BaseBackupCmd) -> PgResult<()>
     }
 
     let mut opt = parse_basebackup_options(&cmd.options)?;
+
+    // C basebackup.c line ~1015: an incremental backup without a prior
+    // UPLOAD_MANIFEST is an ERROR; a full backup with one just ignores it.
+    // (C threads `ib` in as an argument; the session-owned store lives in
+    // walsender — see WalSndCtlData.uploaded_manifests, the Q2 ruling site.)
+    if opt.incremental {
+        if !walsender::uploaded_manifest_exists() {
+            return ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg("must UPLOAD_MANIFEST before performing an incremental BASE_BACKUP")
+                .finish(loc("SendBaseBackup"));
+        }
+        // Stage-4 boundary (incremental-basebackup-port.md): the manifest is
+        // uploaded and validated, but the incremental send path
+        // (PrepareForIncrementalBackup wiring + GetFileBackupMethod +
+        // incremental sendFile emission) lands in Stage 4. Refuse loudly
+        // rather than silently taking a full backup labeled incremental.
+        return ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("BASE_BACKUP (INCREMENTAL) is not supported yet")
+            .errdetail("The incremental file send path is not ported (Stage 4).")
+            .finish(loc("SendBaseBackup"));
+    }
 
     walsender::WalSndSetState(WalSndState::Backup);
 
@@ -1803,4 +1828,41 @@ mod bcs_bridge {
 fn send_base_backup_entry(cmd: BaseBackupCmd) -> PgResult<()> {
     let ctx = mcx::MemoryContext::new("SendBaseBackup");
     SendBaseBackup(ctx.mcx(), &cmd)
+}
+
+#[cfg(test)]
+mod incremental_gate_tests {
+    use super::*;
+
+    fn incr_opt() -> Vec<ReplOption> {
+        vec![ReplOption { name: "incremental".to_string(), arg: Some(ReplOptionArg::Bool(true)) }]
+    }
+
+    // C basebackup.c line ~792: INCREMENTAL without summarize_wal fails at
+    // option parse with C's exact prerequisite error; with summarize_wal on,
+    // the option parses and the UPLOAD_MANIFEST gate (line ~1015) then lives
+    // in SendBaseBackup against the session-owned store (protocol coverage
+    // in the walsender crate). One test: the GUC backing is process-global,
+    // so the two branches must not run in parallel.
+    #[test]
+    fn incremental_summarize_wal_gate_c_exact() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(guc_tables::init_seams);
+
+        assert!(!guc_tables::vars::summarize_wal.read(), "boot default is off");
+        let err = match parse_basebackup_options(&incr_opt()) {
+            Ok(_) => panic!("expected prerequisite error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.sqlstate(), ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+        assert_eq!(
+            err.message(),
+            "incremental backups cannot be taken unless WAL summarization is enabled"
+        );
+
+        guc_tables::vars::summarize_wal.write(true);
+        let parsed = parse_basebackup_options(&incr_opt());
+        guc_tables::vars::summarize_wal.write(false);
+        assert!(parsed.unwrap().incremental);
+    }
 }
