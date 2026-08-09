@@ -421,3 +421,252 @@ fn merge_reads_and_combines_summary_files() {
     let msg = errmsg_of(merge_required_summaries(mcx, &[missing], &dir));
     assert!(msg.starts_with("could not open file"), "{msg}");
 }
+
+// ---------------------------------------------------------------------------
+// GetFileBackupMethod — the FULL-vs-INCREMENTAL decision ladder, every rung
+// in C order (basebackup_incremental.c:663), plus the incremental-file size
+// helpers. BLCKSZ = 8192, RELSEG_SIZE = 131072 throughout.
+// ---------------------------------------------------------------------------
+
+const B: u64 = BLCKSZ as u64;
+
+/// An ib whose manifest "contains" the given paths (finalized-shaped), and a
+/// brtab to thread alongside.
+fn ib_with_files(paths: &[&str]) -> IncrementalBackupInfo {
+    let mut ib = CreateIncrementalBackupInfo(C_FIXTURE_SYSID);
+    for p in paths {
+        ib.manifest_files.insert(p.as_bytes().into(), 0);
+    }
+    ib.finalized = true;
+    ib
+}
+
+/// Call GetFileBackupMethod with the C out-param shape collapsed to a tuple:
+/// (method, num_blocks_required, blocks, truncation_block_length).
+#[allow(clippy::too_many_arguments)]
+fn method_of(
+    ib: &IncrementalBackupInfo,
+    brtab: &BlockRefTable<'_>,
+    path: &str,
+    dboid: Oid,
+    spcoid: Oid,
+    relfilenumber: RelFileNumber,
+    forknum: ForkNumber,
+    segno: u32,
+    size: u64,
+) -> (FileBackupMethod, u32, Vec<BlockNumber>, u32) {
+    let mut num_blocks: u32 = 0;
+    let mut trunc: u32 = 0;
+    let mut blocks = vec![0u32; RELSEG_SIZE as usize];
+    let method = ib
+        .GetFileBackupMethod(
+            brtab, path, dboid, spcoid, relfilenumber, forknum, segno, size,
+            &mut num_blocks, &mut blocks, &mut trunc,
+        )
+        .unwrap();
+    blocks.truncate(num_blocks as usize);
+    (method, num_blocks, blocks, trunc)
+}
+
+#[test]
+fn gfbm_odd_size_or_oversized_segment_is_full() {
+    let cx = MemoryContext::new("gfbm");
+    let mcx = cx.mcx();
+    let ib = ib_with_files(&["base/5/16384"]);
+    let brtab = BlockRefTable::new(mcx);
+
+    // size % BLCKSZ != 0 -> full.
+    let (m, ..) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, B + 1);
+    assert_eq!(m, FileBackupMethod::Fully);
+
+    // size / BLCKSZ > RELSEG_SIZE -> full.
+    let (m, ..) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, (RELSEG_SIZE as u64 + 1) * B);
+    assert_eq!(m, FileBackupMethod::Fully);
+
+    // Exactly RELSEG_SIZE blocks is fine (falls through the first rung).
+    let (m, n, _, t) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, RELSEG_SIZE as u64 * B);
+    assert_eq!(m, FileBackupMethod::Incrementally);
+    assert_eq!((n, t), (0, RELSEG_SIZE));
+}
+
+#[test]
+fn gfbm_fsm_fork_is_always_full() {
+    let cx = MemoryContext::new("gfbm");
+    let ib = ib_with_files(&["base/5/16384_fsm"]);
+    let brtab = BlockRefTable::new(cx.mcx());
+    let (m, ..) = method_of(&ib, &brtab, "base/5/16384_fsm", 5, 1663, 16384,
+        ForkNumber::FSM_FORKNUM, 0, 3 * B);
+    assert_eq!(m, FileBackupMethod::Fully);
+}
+
+#[test]
+fn gfbm_file_absent_from_prior_manifest_is_full_incremental_name_counts() {
+    let cx = MemoryContext::new("gfbm");
+    let brtab = BlockRefTable::new(cx.mcx());
+
+    // Not in the manifest under either name -> full.
+    let ib = ib_with_files(&["base/5/99999"]);
+    let (m, ..) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, 4 * B);
+    assert_eq!(m, FileBackupMethod::Fully);
+
+    // Present only under the INCREMENTAL.* name (prior backup was itself
+    // incremental) -> proceeds down the ladder.
+    let ib = ib_with_files(&["base/5/INCREMENTAL.16384"]);
+    let (m, n, _, t) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, 4 * B);
+    assert_eq!(m, FileBackupMethod::Incrementally);
+    assert_eq!((n, t), (0, 4));
+
+    // Segmented file: the INCREMENTAL name keeps the .segno suffix.
+    let ib = ib_with_files(&["base/5/INCREMENTAL.16384.1"]);
+    let (m, ..) = method_of(&ib, &brtab, "base/5/16384.1", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 1, 4 * B);
+    assert_eq!(m, FileBackupMethod::Incrementally);
+}
+
+#[test]
+fn gfbm_db_recreated_sentinel_forces_full() {
+    let cx = MemoryContext::new("gfbm");
+    let mcx = cx.mcx();
+    let ib = ib_with_files(&["base/5/16384"]);
+    // The {spc, db, rel=0} MAIN_FORKNUM sentinel: this database was
+    // (re)created since the prior backup.
+    let mut brtab = BlockRefTable::new(mcx);
+    brtab.set_limit_block(rl(1663, 5, 0), ForkNumber::MAIN_FORKNUM, 0);
+
+    let (m, ..) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, 4 * B);
+    assert_eq!(m, FileBackupMethod::Fully);
+}
+
+#[test]
+fn gfbm_no_brtab_entry_zero_length_full_else_zero_block_incremental() {
+    let cx = MemoryContext::new("gfbm");
+    let brtab = BlockRefTable::new(cx.mcx());
+    let ib = ib_with_files(&["base/5/16384"]);
+
+    // Unchanged file of zero length -> full (an incremental file is always
+    // longer than zero bytes).
+    let (m, ..) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, 0);
+    assert_eq!(m, FileBackupMethod::Fully);
+
+    // Unchanged nonzero file -> incremental with zero blocks.
+    let (m, n, blocks, t) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, 7 * B);
+    assert_eq!(m, FileBackupMethod::Incrementally);
+    assert_eq!((n, t), (0, 7));
+    assert!(blocks.is_empty());
+}
+
+#[test]
+fn gfbm_limit_block_at_or_before_segment_start_is_full() {
+    let cx = MemoryContext::new("gfbm");
+    let mcx = cx.mcx();
+    let ib = ib_with_files(&["base/5/16384.1"]);
+    let mut brtab = BlockRefTable::new(mcx);
+    // Truncated to exactly the segment-1 boundary: limit_block == segno *
+    // RELSEG_SIZE -> full.
+    brtab.set_limit_block(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, RELSEG_SIZE);
+
+    let (m, ..) = method_of(&ib, &brtab, "base/5/16384.1", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 1, 4 * B);
+    assert_eq!(m, FileBackupMethod::Fully);
+}
+
+#[test]
+fn gfbm_ninety_percent_threshold_exact() {
+    let cx = MemoryContext::new("gfbm");
+    let mcx = cx.mcx();
+    let ib = ib_with_files(&["base/5/16384"]);
+
+    // 10-block file, 9 modified: 9*BLCKSZ > 10*BLCKSZ*0.9 is FALSE (equal),
+    // so C sends it INCREMENTALLY — the threshold is strictly greater-than.
+    let mut brtab = BlockRefTable::new(mcx);
+    for b in 0..9 {
+        brtab.mark_block_modified(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, b).unwrap();
+    }
+    let (m, n, blocks, t) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, 10 * B);
+    assert_eq!(m, FileBackupMethod::Incrementally);
+    assert_eq!(n, 9);
+    assert_eq!(blocks, (0..9).collect::<Vec<_>>());
+    assert_eq!(t, 10);
+
+    // All 10 of 10 modified: 10*BLCKSZ > 9*BLCKSZ -> FULL.
+    let mut brtab = BlockRefTable::new(mcx);
+    for b in 0..10 {
+        brtab.mark_block_modified(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, b).unwrap();
+    }
+    let (m, ..) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, 10 * B);
+    assert_eq!(m, FileBackupMethod::Fully);
+
+    // 3 of 10 modified (<90%) -> incremental, blocks sorted.
+    let mut brtab = BlockRefTable::new(mcx);
+    for b in [7u32, 2, 5] {
+        brtab.mark_block_modified(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, b).unwrap();
+    }
+    let (m, n, blocks, t) = method_of(&ib, &brtab, "base/5/16384", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 0, 10 * B);
+    assert_eq!(m, FileBackupMethod::Incrementally);
+    assert_eq!((n, t), (3, 10));
+    assert_eq!(blocks, vec![2, 5, 7]);
+}
+
+#[test]
+fn gfbm_segno_relativizes_blocks_and_truncation_uses_limit_block() {
+    let cx = MemoryContext::new("gfbm");
+    let mcx = cx.mcx();
+    let ib = ib_with_files(&["base/5/16384.1"]);
+
+    // Segment 1: absolute blocks RELSEG_SIZE+{1,3} modified (within the
+    // 4-block segment file — get_blocks' stop bound is exclusive, so blocks
+    // at/after EOF are not returned); the relation grew to limit_block =
+    // RELSEG_SIZE + 6 (beyond the current 4-block segment file size), so
+    // truncation_block_length is raised to 6.
+    let mut brtab = BlockRefTable::new(mcx);
+    brtab.set_limit_block(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, RELSEG_SIZE + 6);
+    for b in [RELSEG_SIZE + 3, RELSEG_SIZE + 1] {
+        brtab.mark_block_modified(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, b).unwrap();
+    }
+    let (m, n, blocks, t) = method_of(&ib, &brtab, "base/5/16384.1", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 1, 4 * B);
+    assert_eq!(m, FileBackupMethod::Incrementally);
+    assert_eq!(n, 2);
+    assert_eq!(blocks, vec![1, 3]); // relative to the segment, sorted
+    assert_eq!(t, 6); // raised from 4 to the relative limit block
+
+    // The truncation length is clamped to RELSEG_SIZE.
+    let mut brtab = BlockRefTable::new(mcx);
+    brtab.set_limit_block(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, 3 * RELSEG_SIZE);
+    brtab.mark_block_modified(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, RELSEG_SIZE + 2).unwrap();
+    let (m, _, _, t) = method_of(&ib, &brtab, "base/5/16384.1", 5, 1663, 16384,
+        ForkNumber::MAIN_FORKNUM, 1, 4 * B);
+    assert_eq!(m, FileBackupMethod::Incrementally);
+    assert_eq!(t, RELSEG_SIZE);
+}
+
+#[test]
+fn incremental_path_and_size_helpers_match_c() {
+    assert_eq!(GetIncrementalFilePath("base/5/16384"), "base/5/INCREMENTAL.16384");
+    assert_eq!(GetIncrementalFilePath("base/5/16384.3"), "base/5/INCREMENTAL.16384.3");
+    assert_eq!(GetIncrementalFilePath("global/1262"), "global/INCREMENTAL.1262");
+    assert_eq!(
+        GetIncrementalFilePath("pg_tblspc/16390/PG_18_202506291/5/16400_vm"),
+        "pg_tblspc/16390/PG_18_202506291/5/INCREMENTAL.16400_vm"
+    );
+
+    // Header: 12 bytes + 4/block, rounded to BLCKSZ only when blocks > 0.
+    assert_eq!(GetIncrementalHeaderSize(0), 12);
+    assert_eq!(GetIncrementalHeaderSize(1), BLCKSZ);
+    assert_eq!(GetIncrementalHeaderSize(2045), BLCKSZ); // 12 + 8180 = 8192 exactly
+    assert_eq!(GetIncrementalHeaderSize(2046), 2 * BLCKSZ);
+    assert_eq!(GetIncrementalFileSize(0), 12);
+    assert_eq!(GetIncrementalFileSize(1), BLCKSZ + BLCKSZ);
+    assert_eq!(GetIncrementalFileSize(2045), BLCKSZ + 2045 * BLCKSZ);
+}

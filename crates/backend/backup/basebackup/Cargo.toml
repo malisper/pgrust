@@ -20,6 +20,8 @@ pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }
 repl_gram = { path = "../../replication/repl_gram" }
 walsender = { path = "../../replication/walsender" }
 walsender_seams = { path = "../../replication/walsender_seams" }
+basebackup_incremental = { path = "../basebackup_incremental" }
+blkreftable = { path = "../../../common/blkreftable" }
 ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
 ps_status = { path = "../../utils/misc/ps_status" }
 fd = { path = "../../storage/file/fd" }

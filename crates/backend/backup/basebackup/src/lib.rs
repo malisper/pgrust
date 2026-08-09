@@ -5,9 +5,12 @@
 //
 // Scope: server-side compression (COMPRESSION 'gzip'|'lz4'|'zstd' +
 // COMPRESSION_DETAIL) is implemented via the basebackup_compress sinks.
-// Incremental backups remain a loud contained refusal (they need the
-// UPLOAD_MANIFEST / WAL-summarizer machinery, a separate effort). Backup-time
-// page-checksum verification is implemented; WAL=true is handled inline.
+// Incremental backups (BASE_BACKUP (INCREMENTAL) after UPLOAD_MANIFEST) are
+// implemented: PrepareForIncrementalBackup merges the WAL summaries, sendDir
+// consults GetFileBackupMethod per relation file, and sendFile emits the
+// incremental file format (INCREMENTAL_MAGIC header + block list + blocks).
+// Backup-time page-checksum verification is implemented; WAL=true is handled
+// inline.
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
@@ -22,7 +25,7 @@ use mcx::Mcx;
 use repl_gram::{BaseBackupCmd, ReplOption, ReplOptionArg};
 use types_core::{Oid, TimeLineID, XLogRecPtr};
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ErrorLocation, PgResult,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_SYNTAX_ERROR, ERROR, WARNING,
 };
@@ -55,6 +58,11 @@ const SINK_BUFFER_LENGTH: usize = if 32768 > types_core::BLCKSZ { 32768 } else {
 const TAR_BLOCK_SIZE: usize = 512;
 
 const INVALID_OID: Oid = types_core::InvalidOid;
+
+// pg_tablespace_d.h: the pinned tablespace OIDs (GetFileBackupMethod's
+// manifest lookups key shared/default relations by these).
+const DEFAULTTABLESPACE_OID: Oid = 1663;
+const GLOBALTABLESPACE_OID: Oid = 1664;
 
 const BACKUP_LABEL_FILE: &str = "backup_label";
 const TABLESPACE_MAP: &str = "tablespace_map";
@@ -612,26 +620,26 @@ pub fn SendBaseBackup<'mcx>(mcx: Mcx<'mcx>, cmd: &BaseBackupCmd) -> PgResult<()>
     let mut opt = parse_basebackup_options(&cmd.options)?;
 
     // C basebackup.c line ~1015: an incremental backup without a prior
-    // UPLOAD_MANIFEST is an ERROR; a full backup with one just ignores it.
-    // (C threads `ib` in as an argument; the session-owned store lives in
-    // walsender — see WalSndCtlData.uploaded_manifests, the Q2 ruling site.)
+    // UPLOAD_MANIFEST is an ERROR; a full backup with one just ignores it
+    // (C: `if (!opt.incremental) ib = NULL`). C threads `ib` in as an
+    // argument; the session-owned store lives in walsender — see
+    // WalSndCtlData.uploaded_manifests, the Q2 ruling site. We hold the
+    // session cell's lock for the duration of the backup: the only other
+    // toucher is this same session's UploadManifest/WalSndKill, neither of
+    // which can run while this synchronous command is executing.
+    let mut manifest_guard = None;
     if opt.incremental {
-        if !walsender::uploaded_manifest_exists() {
-            return ereport(ERROR)
-                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-                .errmsg("must UPLOAD_MANIFEST before performing an incremental BASE_BACKUP")
-                .finish(loc("SendBaseBackup"));
+        let locked = walsender::uploaded_manifest_cell()
+            .map(|cell| cell.lock().expect("uploaded manifest mutex"));
+        match locked {
+            Some(guard) if guard.is_some() => manifest_guard = Some(guard),
+            _ => {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .errmsg("must UPLOAD_MANIFEST before performing an incremental BASE_BACKUP")
+                    .finish(loc("SendBaseBackup"));
+            }
         }
-        // Stage-4 boundary (incremental-basebackup-port.md): the manifest is
-        // uploaded and validated, but the incremental send path
-        // (PrepareForIncrementalBackup wiring + GetFileBackupMethod +
-        // incremental sendFile emission) lands in Stage 4. Refuse loudly
-        // rather than silently taking a full backup labeled incremental.
-        return ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("BASE_BACKUP (INCREMENTAL) is not supported yet")
-            .errdetail("The incremental file send path is not ported (Stage 4).")
-            .finish(loc("SendBaseBackup"));
     }
 
     walsender::WalSndSetState(WalSndState::Backup);
@@ -677,10 +685,14 @@ pub fn SendBaseBackup<'mcx>(mcx: Mcx<'mcx>, cmd: &BaseBackupCmd) -> PgResult<()>
     sink = sink_support::bbsink_progress_new(mcx, sink, opt.progress);
 
     let mut state = BbsinkState::default();
+    // The uploaded IncrementalBackupInfo, borrowed from the locked session
+    // cell for the duration of the backup (C: the `ib` argument).
+    let ib: Option<&mut basebackup_incremental::IncrementalBackupInfo> =
+        manifest_guard.as_mut().and_then(|g| g.as_deref_mut());
     // The DestRemoteSimple bridge needs the command mcx during the synchronous
     // result-set sends inside perform_base_backup.
     bcs_bridge::set_backup_mcx(mcx);
-    let result = perform_base_backup(mcx, &opt, &mut sink, &mut state);
+    let result = perform_base_backup(mcx, &opt, &mut sink, &mut state, ib);
     bcs_bridge::clear_backup_mcx();
 
     // PG_FINALLY: always clean up the sink; propagate the primary error first.
@@ -706,6 +718,7 @@ fn perform_base_backup<'mcx>(
     opt: &BasebackupOptions,
     sink: &mut Bbsink<'mcx>,
     state: &mut BbsinkState,
+    mut ib: Option<&mut basebackup_incremental::IncrementalBackupInfo>,
 ) -> PgResult<()> {
     state.tablespaces = Vec::new();
     state.tablespace_num = 0;
@@ -740,6 +753,22 @@ fn perform_base_backup<'mcx>(
     let mut endtli: TimeLineID = 0;
 
     let mut body = || -> PgResult<()> {
+        // If this is an incremental backup, execute preparatory steps
+        // (basebackup.c:287): validate the manifest WAL ranges against this
+        // server's history, wait for WAL summarization, and merge the
+        // required summaries into one block-reference table. C keeps the
+        // result in ib->brtab; here it is returned and threaded to
+        // GetFileBackupMethod alongside &IncrementalBackupInfo.
+        let brtab = match ib.as_deref_mut() {
+            Some(ib) => Some(ib.PrepareForIncrementalBackup(mcx, &mut backup_state)?),
+            None => None,
+        };
+        let incr: Option<(&basebackup_incremental::IncrementalBackupInfo, &blkreftable::BlockRefTable<'_>)> =
+            match (ib.as_deref(), brtab.as_ref()) {
+                (Some(ib), Some(brtab)) => Some((ib, brtab)),
+                _ => None,
+            };
+
         // Node for the base directory, sent last.
         state.tablespaces.push(TablespaceInfo {
             oid: INVALID_OID,
@@ -773,7 +802,7 @@ fn perform_base_backup<'mcx>(
                     sendtblspclinks = false;
                 }
 
-                sendDir(sink, state, ".", 1, sendtblspclinks, &mut manifest)?;
+                sendDir(sink, state, ".", 1, sendtblspclinks, &mut manifest, incr)?;
 
                 // pg_control last.
                 let statbuf = match lstat_file(XLOG_CONTROL_FILE)? {
@@ -784,11 +813,11 @@ fn perform_base_backup<'mcx>(
                             .finish(loc("perform_base_backup"));
                     }
                 };
-                sendFile(sink, state, XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf, false, INVALID_OID, None, &mut manifest)?;
+                sendFile(sink, state, XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf, false, INVALID_OID, None, &mut manifest, None, 0)?;
             } else {
                 let archive_name = format!("{oid}.tar");
                 bbsink_begin_archive(sink, state, &archive_name)?;
-                sendTablespace(sink, state, path.as_deref().unwrap(), oid, &mut manifest)?;
+                sendTablespace(sink, state, path.as_deref().unwrap(), oid, &mut manifest, incr)?;
             }
 
             // If we're including WAL, and this is the main data directory,
@@ -980,7 +1009,7 @@ fn perform_base_backup<'mcx>(
                         .finish(loc("perform_base_backup"));
                 }
             };
-            sendFile(sink, state, &pathbuf, &pathbuf, &statbuf, false, INVALID_OID, None, &mut manifest)?;
+            sendFile(sink, state, &pathbuf, &pathbuf, &statbuf, false, INVALID_OID, None, &mut manifest, None, 0)?;
 
             // Unconditionally mark file as archived.
             let done_path = transam_xlog::StatusFilePath(fname, ".done");
@@ -1190,12 +1219,22 @@ fn sendFileWithContent(
     AddFileToBackupManifest(manifest, INVALID_OID, filename.as_bytes(), len as i64, statbuf.mtime, &mut ctx)
 }
 
+/// The per-relation-file incremental context threaded from
+/// perform_base_backup down to sendDir/sendFile: the uploaded manifest info
+/// plus the merged block-reference table (C: the `ib` parameter, whose brtab
+/// member carries the merged table).
+type IncrCtx<'a, 'mcx> = Option<(
+    &'a basebackup_incremental::IncrementalBackupInfo,
+    &'a blkreftable::BlockRefTable<'mcx>,
+)>;
+
 fn sendTablespace(
     sink: &mut Bbsink<'_>,
     state: &mut BbsinkState,
     path: &str,
     spcoid: Oid,
     manifest: &mut BackupManifestInfo,
+    incr: IncrCtx<'_, '_>,
 ) -> PgResult<i64> {
     let pathbuf = format!("{path}/{TABLESPACE_VERSION_DIRECTORY}");
     let statbuf = match lstat_file(&pathbuf)? {
@@ -1203,7 +1242,7 @@ fn sendTablespace(
         None => return Ok(0), // tablespace went away — not an error
     };
     let mut size = _tarWriteHeader(sink, state, TABLESPACE_VERSION_DIRECTORY, None, &statbuf)?;
-    size += sendDir_spc(sink, state, &pathbuf, path.len() as i32, true, manifest, spcoid)?;
+    size += sendDir_spc(sink, state, &pathbuf, path.len() as i32, true, manifest, spcoid, incr)?;
     Ok(size)
 }
 
@@ -1214,8 +1253,9 @@ fn sendDir(
     basepathlen: i32,
     sendtblspclinks: bool,
     manifest: &mut BackupManifestInfo,
+    incr: IncrCtx<'_, '_>,
 ) -> PgResult<i64> {
-    sendDir_spc(sink, state, path, basepathlen, sendtblspclinks, manifest, INVALID_OID)
+    sendDir_spc(sink, state, path, basepathlen, sendtblspclinks, manifest, INVALID_OID, incr)
 }
 
 fn sendDir_spc(
@@ -1226,12 +1266,23 @@ fn sendDir_spc(
     sendtblspclinks: bool,
     manifest: &mut BackupManifestInfo,
     spcoid: Oid,
+    incr: IncrCtx<'_, '_>,
 ) -> PgResult<i64> {
     let mut size: i64 = 0;
+
+    // Since this array is relatively large, avoid putting it on the stack.
+    // But we don't need it at all if this is not an incremental backup.
+    // (C: palloc(sizeof(BlockNumber) * RELSEG_SIZE) per sendDir call.)
+    let mut relative_block_numbers: Vec<types_core::BlockNumber> = if incr.is_some() {
+        vec![0; basebackup_incremental::RELSEG_SIZE as usize]
+    } else {
+        Vec::new()
+    };
 
     // Determine if the current path is a database directory that can contain
     // relations (basebackup.c sendDir head): last path component all digits
     // with parent "./base" or a tablespace version path, or "./global".
+    let is_global_dir = path == "./global";
     let (is_relation_dir, dboid): (bool, u32) = match path.rfind('/') {
         Some(idx)
             if idx + 1 < path.len()
@@ -1244,7 +1295,7 @@ fn sendDir_spc(
                 (false, 0)
             }
         }
-        _ => (path == "./global", 0),
+        _ => (is_global_dir, 0),
     };
 
     for d_name in read_dir_names(path)? {
@@ -1362,16 +1413,66 @@ fn sendDir_spc(
                 skip = true;
             }
             if !skip {
-                size += sendDir_spc(sink, state, &pathbuf, basepathlen, sendtblspclinks, manifest, spcoid)?;
+                size += sendDir_spc(sink, state, &pathbuf, basepathlen, sendtblspclinks, manifest, spcoid, incr)?;
             }
         } else if S_ISREG(statbuf.mode) {
-            let tarfilename = &pathbuf[basepathlen as usize + 1..];
+            let mut tarfilename = pathbuf[basepathlen as usize + 1..].to_string();
             let relfile = if is_relation_file {
                 Some((relfilenumber, segno_of))
             } else {
                 None
             };
-            let sent = sendFile(sink, state, &pathbuf, tarfilename, &statbuf, true, spcoid, relfile, manifest)?;
+
+            // Incremental decision per relation file (basebackup.c:1478).
+            let mut num_blocks_required: u32 = 0;
+            let mut truncation_block_length: u32 = 0;
+            let mut method = basebackup_incremental::FileBackupMethod::Fully;
+            if let (Some((ib, brtab)), true) = (incr, is_relation_file) {
+                // The manifest stores a tablespace-relative path for files in
+                // user tablespaces; recompute the tablespace OID for shared
+                // vs. default-database relations (C: relspcoid/lookup_path).
+                let (relspcoid, lookup_path) = if spcoid != INVALID_OID {
+                    (spcoid, format!("pg_tblspc/{spcoid}/{tarfilename}"))
+                } else if is_global_dir {
+                    (GLOBALTABLESPACE_OID, tarfilename.clone())
+                } else {
+                    (DEFAULTTABLESPACE_OID, tarfilename.clone())
+                };
+
+                method = ib.GetFileBackupMethod(
+                    brtab,
+                    &lookup_path,
+                    dboid,
+                    relspcoid,
+                    relfilenumber,
+                    rel_fork,
+                    segno_of,
+                    statbuf.size as u64,
+                    &mut num_blocks_required,
+                    &mut relative_block_numbers,
+                    &mut truncation_block_length,
+                )?;
+                if method == basebackup_incremental::FileBackupMethod::Incrementally {
+                    statbuf.size =
+                        basebackup_incremental::GetIncrementalFileSize(num_blocks_required) as i64;
+                    tarfilename = format!(
+                        "{}/INCREMENTAL.{}",
+                        &path[basepathlen as usize + 1..],
+                        d_name
+                    );
+                }
+            }
+
+            let incremental_blocks =
+                if method == basebackup_incremental::FileBackupMethod::Incrementally {
+                    Some(&relative_block_numbers[..num_blocks_required as usize])
+                } else {
+                    None
+                };
+            let sent = sendFile(
+                sink, state, &pathbuf, &tarfilename, &statbuf, true, spcoid, relfile, manifest,
+                incremental_blocks, truncation_block_length,
+            )?;
             if sent {
                 size += statbuf.size;
                 size += tar_padding_bytes_required(statbuf.size as usize) as i64;
@@ -1387,6 +1488,138 @@ fn sendDir_spc(
     Ok(size)
 }
 
+// read_file_data_into_buffer (basebackup.c:1850): read up to
+// min(buffer_length, length) bytes at `offset` into the start of the sink
+// buffer, verifying page checksums (with the one-shot torn-write retry) when
+// requested. `blkno` is the *absolute* block number of the first block in
+// the read (caller adds segno * RELSEG_SIZE). Returns the byte count read;
+// on a mid-verify concurrent truncation the count is clamped to the blocks
+// already processed.
+#[allow(clippy::too_many_arguments)]
+fn read_file_data_into_buffer(
+    sink: &mut Bbsink<'_>,
+    state: &BbsinkState,
+    readfilename: &str,
+    fd: i32,
+    offset: i64,
+    length: usize,
+    blkno: u32,
+    verify_checksum: bool,
+    checksum_failures: &mut i32,
+) -> PgResult<isize> {
+    const BLCKSZ: usize = types_core::BLCKSZ;
+
+    let want = sink.buffer_length().min(length);
+    // buf is a live writable slice; fd is an open regular file.
+    let mut cnt = {
+        let buf = sink.buffer_slice_mut(want);
+        fd::pg_pread(fd, buf, offset)
+    };
+    if cnt < 0 {
+        fd::CloseTransientFile(fd);
+        return ereport(ERROR).errcode_for_file_access()
+            .errmsg(format!("could not read file \"{readfilename}\""))
+            .finish(loc("read_file_data_into_buffer")).map(|()| 0);
+    }
+
+    // Can't verify checksums if read length is not a multiple of BLCKSZ.
+    if !verify_checksum || cnt <= 0 || (cnt as usize % BLCKSZ) != 0 {
+        return Ok(cnt);
+    }
+
+    // Verify checksum for each block.
+    let nblocks = cnt as usize / BLCKSZ;
+    for i in 0..nblocks {
+        let expected = {
+            let buf = sink.buffer_slice(cnt as usize);
+            verify_page_checksum(
+                &buf[i * BLCKSZ..(i + 1) * BLCKSZ],
+                state.startptr,
+                blkno + i as u32,
+            )
+        };
+        let Some(_) = expected else { continue };
+
+        // Retry the block once: a torn concurrent write may finish
+        // and update the page LSN so we then skip it.
+        let reread_cnt = {
+            let buf = sink.buffer_slice_mut(cnt as usize);
+            unsafe {
+                libc::pread(
+                    fd,
+                    buf[i * BLCKSZ..].as_mut_ptr().cast(),
+                    BLCKSZ,
+                    offset as libc::off_t + (i * BLCKSZ) as libc::off_t,
+                )
+            }
+        };
+        if reread_cnt == 0 {
+            // Concurrent truncation: keep only the processed blocks.
+            cnt = (BLCKSZ * i) as isize;
+            break;
+        }
+        let (expected, actual) = {
+            let buf = sink.buffer_slice(cnt as usize);
+            let page = &buf[i * BLCKSZ..(i + 1) * BLCKSZ];
+            (
+                verify_page_checksum(page, state.startptr, blkno + i as u32),
+                u16::from_ne_bytes([page[8], page[9]]),
+            )
+        };
+        let Some(expected) = expected else { continue };
+
+        *checksum_failures += 1;
+        if *checksum_failures <= 5 {
+            let _ = ereport(WARNING)
+                .errmsg(format!(
+                    "checksum verification failed in file \"{readfilename}\", block {}: calculated {:X} but expected {:X}",
+                    blkno + i as u32, expected, actual
+                ))
+                .finish(loc("read_file_data_into_buffer"));
+        }
+        if *checksum_failures == 5 {
+            let _ = ereport(WARNING)
+                .errmsg(format!(
+                    "further checksum verification failures in file \"{readfilename}\" will not be reported"
+                ))
+                .finish(loc("read_file_data_into_buffer"));
+        }
+    }
+
+    Ok(cnt)
+}
+
+// push_to_sink (basebackup.c:1900): copy data into the sink buffer at
+// `*bytes_done`, flushing (checksum + archive) whenever the buffer fills.
+// The sink buffer length is a BLCKSZ multiple, so flush boundaries preserve
+// block alignment.
+fn push_to_sink(
+    sink: &mut Bbsink<'_>,
+    state: &mut BbsinkState,
+    ctx: &mut PgChecksumContext,
+    bytes_done: &mut usize,
+    mut data: &[u8],
+) -> PgResult<()> {
+    while !data.is_empty() {
+        let buffer_len = sink.buffer_length();
+        let n = (buffer_len - *bytes_done).min(data.len());
+        sink.buffer_slice_mut(*bytes_done + n)[*bytes_done..].copy_from_slice(&data[..n]);
+        *bytes_done += n;
+        data = &data[n..];
+
+        // If the buffer is full, we need to push the contents to the sink
+        // and then flush the checksum over what we pushed.
+        if *bytes_done == buffer_len {
+            let chunk = sink.buffer_slice(buffer_len).to_vec();
+            checksum_update(ctx, &chunk)?;
+            bbsink_archive_contents(sink, state, buffer_len)?;
+            *bytes_done = 0;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn sendFile(
     sink: &mut Bbsink<'_>,
     state: &mut BbsinkState,
@@ -1399,6 +1632,12 @@ fn sendFile(
     // filename in a relation directory (checksum verification surface).
     relfile: Option<(u32, u32)>,
     manifest: &mut BackupManifestInfo,
+    // If the file is to be sent incrementally, the sorted segment-relative
+    // block numbers to send (C: incremental_blocks + num_incremental_blocks;
+    // None sends the whole file) and the truncation block length for the
+    // incremental file header.
+    incremental_blocks: Option<&[u32]>,
+    truncation_block_length: u32,
 ) -> PgResult<bool> {
     let mut ctx = checksum_init(manifest.checksum_type(), readfilename)?;
 
@@ -1416,6 +1655,13 @@ fn sendFile(
 
     _tarWriteHeader(sink, state, tarfilename, None, statbuf)?;
 
+    const BLCKSZ: usize = types_core::BLCKSZ;
+    const RELSEG_SIZE: u32 = basebackup_incremental::RELSEG_SIZE;
+
+    // Checksums are verified in multiples of BLCKSZ, so the buffer length
+    // should be a multiple of the block size as well.
+    debug_assert!(sink.buffer_length() % BLCKSZ == 0);
+
     // If we weren't told not to verify checksums, and checksums are enabled
     // for this cluster, and this is a relation file, verify per-block.
     let mut verify_checksum = !NOVERIFY_CHECKSUMS.with(Cell::get)
@@ -1424,85 +1670,103 @@ fn sendFile(
     let segno = relfile.map(|(_, s)| s).unwrap_or(0);
     let mut checksum_failures: i32 = 0;
     let mut blkno: u32 = 0;
-    const BLCKSZ: usize = types_core::BLCKSZ;
-    const RELSEG_SIZE: u32 = (1024 * 1024 * 1024) / BLCKSZ as u32;
+    let mut ibindex: usize = 0;
 
     let mut bytes_done: i64 = 0;
+
+    // If we're sending an incremental file, write the file header
+    // (basebackup.c:1623): INCREMENTAL_MAGIC, block count, truncation block
+    // length, the sorted relative block numbers, zero-padded to a BLCKSZ
+    // multiple iff the file has any block data. Native-endian, like C.
+    if let Some(blocks) = incremental_blocks {
+        let num_incremental_blocks = blocks.len() as u32;
+        let mut header_bytes_done: usize = 0;
+
+        push_to_sink(sink, state, &mut ctx, &mut header_bytes_done,
+            &basebackup_incremental::INCREMENTAL_MAGIC.to_ne_bytes())?;
+        push_to_sink(sink, state, &mut ctx, &mut header_bytes_done,
+            &num_incremental_blocks.to_ne_bytes())?;
+        push_to_sink(sink, state, &mut ctx, &mut header_bytes_done,
+            &truncation_block_length.to_ne_bytes())?;
+        let mut blkbytes: Vec<u8> = Vec::with_capacity(4 * blocks.len());
+        for b in blocks {
+            blkbytes.extend_from_slice(&b.to_ne_bytes());
+        }
+        push_to_sink(sink, state, &mut ctx, &mut header_bytes_done, &blkbytes)?;
+
+        // Add padding to align header to a multiple of BLCKSZ, but only if
+        // the incremental file has some blocks, and the alignment is
+        // actually needed. If there are no blocks we don't want to make the
+        // file unnecessarily large, as that might make some filesystem
+        // optimizations impossible. (The buffer length is a BLCKSZ multiple,
+        // so the in-buffer offset is congruent to the total mod BLCKSZ.)
+        if num_incremental_blocks > 0 && header_bytes_done % BLCKSZ != 0 {
+            let paddinglen = BLCKSZ - (header_bytes_done % BLCKSZ);
+            let padding = vec![0u8; paddinglen];
+            bytes_done += paddinglen as i64;
+            push_to_sink(sink, state, &mut ctx, &mut header_bytes_done, &padding)?;
+        }
+
+        // Flush out any data still in the buffer so it's again empty.
+        if header_bytes_done > 0 {
+            let chunk = sink.buffer_slice(header_bytes_done).to_vec();
+            checksum_update(&mut ctx, &chunk)?;
+            bbsink_archive_contents(sink, state, header_bytes_done)?;
+        }
+
+        // Update our notion of file position.
+        bytes_done += 4 + 4 + 4 + 4 * num_incremental_blocks as i64;
+    }
+
+    // Loop until we read the amount of data the caller told us to expect.
+    // The file could be longer, if it was extended while we were sending it,
+    // but for a base backup we can ignore such extended data. It will be
+    // restored from WAL.
     loop {
-        if bytes_done >= statbuf.size {
-            break;
-        }
-        let want = sink.buffer_length().min((statbuf.size - bytes_done) as usize);
-        // buf is a live writable slice; fd is an open regular file.
-        let mut cnt = {
-            let buf = sink.buffer_slice_mut(want);
-            fd::pg_pread(fd, buf, bytes_done)
-        };
-        if cnt < 0 {
-            fd::CloseTransientFile(fd);
-            return ereport(ERROR).errcode_for_file_access()
-                .errmsg(format!("could not read file \"{readfilename}\""))
-                .finish(loc("sendFile")).map(|()| false);
-        }
-
-        // read_file_data_into_buffer's per-block verification (basebackup.c).
-        if verify_checksum && cnt > 0 && (cnt as usize % BLCKSZ) == 0 {
-            let nblocks = cnt as usize / BLCKSZ;
-            let abs_base = blkno + segno * RELSEG_SIZE;
-            for i in 0..nblocks {
-                let expected = {
-                    let buf = sink.buffer_slice(cnt as usize);
-                    verify_page_checksum(
-                        &buf[i * BLCKSZ..(i + 1) * BLCKSZ],
-                        state.startptr,
-                        abs_base + i as u32,
-                    )
-                };
-                let Some(_) = expected else { continue };
-
-                // Retry the block once: a torn concurrent write may finish
-                // and update the page LSN so we then skip it.
-                let reread_cnt = {
-                    let buf = sink.buffer_slice_mut(cnt as usize);
-                    unsafe {
-                        libc::pread(
-                            fd,
-                            buf[i * BLCKSZ..].as_mut_ptr().cast(),
-                            BLCKSZ,
-                            bytes_done as libc::off_t + (i * BLCKSZ) as libc::off_t,
-                        )
-                    }
-                };
-                if reread_cnt == 0 {
-                    // Concurrent truncation: keep only the processed blocks.
-                    cnt = (BLCKSZ * i) as isize;
+        // Determine whether we've read all the data that we need, and if
+        // not, read some more.
+        let cnt;
+        match incremental_blocks {
+            None => {
+                // If we've read the required number of bytes, then it's time
+                // to stop.
+                if bytes_done >= statbuf.size {
                     break;
                 }
-                let (expected, actual) = {
-                    let buf = sink.buffer_slice(cnt as usize);
-                    let page = &buf[i * BLCKSZ..(i + 1) * BLCKSZ];
-                    (
-                        verify_page_checksum(page, state.startptr, abs_base + i as u32),
-                        u16::from_ne_bytes([page[8], page[9]]),
-                    )
-                };
-                let Some(expected) = expected else { continue };
-
-                checksum_failures += 1;
-                if checksum_failures <= 5 {
-                    let _ = ereport(WARNING)
-                        .errmsg(format!(
-                            "checksum verification failed in file \"{readfilename}\", block {}: calculated {:X} but expected {:X}",
-                            abs_base + i as u32, expected, actual
-                        ))
-                        .finish(loc("sendFile"));
+                let remaining = (statbuf.size - bytes_done) as usize;
+                cnt = read_file_data_into_buffer(
+                    sink, state, readfilename, fd, bytes_done, remaining,
+                    blkno + segno * RELSEG_SIZE, verify_checksum, &mut checksum_failures,
+                )?;
+            }
+            Some(blocks) => {
+                // If we've read all the blocks, then it's time to stop.
+                if ibindex >= blocks.len() {
+                    break;
                 }
-                if checksum_failures == 5 {
-                    let _ = ereport(WARNING)
-                        .errmsg(format!(
-                            "further checksum verification failures in file \"{readfilename}\" will not be reported"
-                        ))
-                        .finish(loc("sendFile"));
+
+                // Read just one block, whichever one is the next that we're
+                // supposed to include.
+                let relative_blkno = blocks[ibindex];
+                ibindex += 1;
+                cnt = read_file_data_into_buffer(
+                    sink, state, readfilename, fd,
+                    relative_blkno as i64 * BLCKSZ as i64, BLCKSZ,
+                    relative_blkno + segno * RELSEG_SIZE,
+                    verify_checksum, &mut checksum_failures,
+                )?;
+
+                // If we get a partial read, that must mean that the relation
+                // is being truncated. Ultimately, it should be truncated to
+                // a multiple of BLCKSZ, since this path should only be
+                // reached for relation files, but we might transiently
+                // observe an intermediate value.
+                //
+                // It should be fine to treat this just as if the entire
+                // block had been truncated away - i.e. fill this and all
+                // later blocks with zeroes. WAL replay will fix things up.
+                if (cnt as usize) < BLCKSZ {
+                    break;
                 }
             }
         }
@@ -1517,14 +1781,29 @@ fn sendFile(
             verify_checksum = false;
         }
 
+        // If we hit end-of-file, a concurrent truncation must have occurred.
+        // That's not an error condition, because WAL replay will fix things
+        // up.
         if cnt == 0 {
-            break; // concurrent truncation
+            break;
         }
+
+        // Update block number and # of bytes done for next loop iteration.
         blkno += (cnt as usize / BLCKSZ) as u32;
+        bytes_done += cnt as i64;
+
+        // Make sure incremental files with block data are properly aligned
+        // (header is a multiple of BLCKSZ, blocks are BLCKSZ too).
+        debug_assert!(
+            !(matches!(incremental_blocks, Some(b) if !b.is_empty())
+                && bytes_done % BLCKSZ as i64 != 0)
+        );
+
+        // Archive the data we just read; also feed it to the checksum
+        // machinery.
         let chunk = sink.buffer_slice(cnt as usize).to_vec();
         checksum_update(&mut ctx, &chunk)?;
         bbsink_archive_contents(sink, state, cnt as usize)?;
-        bytes_done += cnt as i64;
     }
 
     // Pad with zeros if truncated during send.

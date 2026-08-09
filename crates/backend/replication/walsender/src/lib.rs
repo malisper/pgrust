@@ -1131,7 +1131,7 @@ const PQ_SMALL_MESSAGE_LIMIT: i32 = 10000;
 const PQ_LARGE_MESSAGE_LIMIT: i32 = 0x3fffffff - 1;
 
 /// The session's uploaded-manifest cell, keyed by the walsender slot this
-/// session holds; None when MyWalSnd is unset. Stage-4's SendBaseBackup
+/// session holds; None when MyWalSnd is unset. basebackup's SendBaseBackup
 /// reads the manifest through this (C: the `uploaded_manifest` argument of
 /// SendBaseBackup), holding the lock for the duration of its use — the only
 /// other toucher is this same session's UploadManifest/WalSndKill.

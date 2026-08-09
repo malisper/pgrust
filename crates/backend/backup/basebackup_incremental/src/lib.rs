@@ -4,11 +4,12 @@
 //! `PrepareForIncrementalBackup`, which cross-checks the summarized-WAL
 //! coverage and determines the LSN from which the incremental is taken.
 //!
-//! Stage-3 scope (incremental-basebackup-port.md): CreateIncrementalBackupInfo,
+//! Full scope (incremental-basebackup-port.md): CreateIncrementalBackupInfo,
 //! AppendIncrementalManifestData, FinalizeIncrementalManifest,
-//! PrepareForIncrementalBackup. The send-side consumers (GetFileBackupMethod,
-//! GetIncrementalFilePath, GetIncrementalHeaderSize/GetIncrementalFileSize)
-//! are Stage 4, which also wires the basebackup sendFile path.
+//! PrepareForIncrementalBackup, plus the send-side consumers
+//! (GetFileBackupMethod, GetIncrementalFilePath,
+//! GetIncrementalHeaderSize/GetIncrementalFileSize) that the basebackup
+//! sendDir/sendFile path calls per relation file.
 //!
 //! Divergences from C, all deliberate:
 //!
@@ -31,7 +32,8 @@
 //! - **brtab lifetime.** C stashes the merged block-reference table in
 //!   `ib->brtab` for GetFileBackupMethod. Here `PrepareForIncrementalBackup`
 //!   *returns* the `BlockRefTable`, tied to the caller's (command-lifetime)
-//!   memory context — Stage 4 threads it to GetFileBackupMethod alongside
+//!   memory context — the basebackup send path threads it to
+//!   GetFileBackupMethod alongside
 //!   `&IncrementalBackupInfo`. This avoids a self-referential
 //!   session-object/arena pairing (the C1 decode-arena lifetime trap).
 
@@ -46,10 +48,15 @@ use manifest::checksum::PgChecksumType;
 use mcx::{Mcx, MemoryContext, PgVec};
 use parse_manifest::{json_parse_manifest, JsonManifestParseContext};
 use timeline_seams::TimeLineHistoryEntry;
-use types_core::{BlockNumber, TimeLineID, XLogRecPtr};
-use types_error::{
-    ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
+use types_core::{
+    BlockNumber, ForkNumber, InvalidBlockNumber, Oid, RelFileNumber, TimeLineID, XLogRecPtr,
+    BLCKSZ,
 };
+use types_error::{
+    ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
+};
+use types_storage::RelFileLocator;
 use walsummarizer::{
     FilterWalSummaries, GetWalSummaries, WaitForWalSummarization, WalSummariesAreComplete,
     WalSummaryFile,
@@ -161,8 +168,8 @@ impl IncrementalBackupInfo {
         Ok(())
     }
 
-    /// The number of file entries taken from the manifest (Stage-4's
-    /// GetFileBackupMethod consumes the lookups; tests consume the count).
+    /// The number of file entries taken from the manifest
+    /// (GetFileBackupMethod consumes the lookups; tests consume the count).
     pub fn manifest_file_count(&self) -> usize {
         self.manifest_files.len()
     }
@@ -529,6 +536,276 @@ fn merge_required_summaries<'mcx>(
     }
 
     Ok(brtab)
+}
+
+// ===========================================================================
+// Send-side consumers (C: the bottom half of basebackup_incremental.c):
+// GetFileBackupMethod, GetIncrementalFilePath, GetIncrementalHeaderSize,
+// GetIncrementalFileSize. Called from basebackup's sendDir/sendFile.
+// ===========================================================================
+
+/// C: INCREMENTAL_MAGIC (backup/basebackup_incremental.h). Native-endian on
+/// the wire, like the rest of the incremental file header.
+pub const INCREMENTAL_MAGIC: u32 = 0xd3ae1f0d;
+
+/// C: RELSEG_SIZE (pg_config.h) — blocks per 1GB relation segment.
+pub const RELSEG_SIZE: u32 = ((1024 * 1024 * 1024) / BLCKSZ) as u32;
+
+/// C: enum FileBackupMethod (backup/basebackup_incremental.h).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileBackupMethod {
+    /// C: BACK_UP_FILE_FULLY.
+    Fully,
+    /// C: BACK_UP_FILE_INCREMENTALLY.
+    Incrementally,
+}
+
+/// C: GetIncrementalFilePath(dboid, spcoid, relfilenumber, forknum, segno) —
+/// the pathname used when a file is sent incrementally.
+///
+/// C rebuilds the relation path from its locator via GetRelationPath and then
+/// splices `INCREMENTAL.` in front of the last component (appending `.segno`
+/// for segno > 0). The caller's `path` here is basebackup.c's `lookup_path`,
+/// which is by construction the identical string GetRelationPath would
+/// produce (including the `.segno` suffix carried by the directory entry
+/// name), so splicing on `path` is value-identical to C.
+pub fn GetIncrementalFilePath(path: &str) -> String {
+    match path.rfind('/') {
+        Some(i) => format!("{}/INCREMENTAL.{}", &path[..i], &path[i + 1..]),
+        // C: Assert(lastslash != NULL) — relation paths always contain '/'.
+        None => format!("INCREMENTAL.{path}"),
+    }
+}
+
+/// C: GetIncrementalHeaderSize — size of an incremental file header holding
+/// `num_blocks_required` block numbers. Rounded up to a BLCKSZ multiple, but
+/// only if the file will store some block data.
+pub fn GetIncrementalHeaderSize(num_blocks_required: u32) -> usize {
+    debug_assert!(num_blocks_required <= RELSEG_SIZE);
+
+    // Three four-byte quantities (magic number, truncation block length,
+    // block count) followed by block numbers.
+    let mut result = 3 * 4 + 4 * num_blocks_required as usize;
+
+    // Round the header size to a multiple of BLCKSZ - when not a multiple of
+    // BLCKSZ, add the missing fraction of a block. But do this only if the
+    // file will store data for some blocks, otherwise keep it small.
+    if num_blocks_required > 0 && result % BLCKSZ != 0 {
+        result += BLCKSZ - (result % BLCKSZ);
+    }
+
+    result
+}
+
+/// C: GetIncrementalFileSize — total size of an incremental file containing
+/// a given number of blocks.
+pub fn GetIncrementalFileSize(num_blocks_required: u32) -> usize {
+    debug_assert!(num_blocks_required <= RELSEG_SIZE);
+    GetIncrementalHeaderSize(num_blocks_required) + BLCKSZ * num_blocks_required as usize
+}
+
+impl IncrementalBackupInfo {
+    /// C: GetFileBackupMethod(ib, path, dboid, spcoid, relfilenumber,
+    /// forknum, segno, size, &num_blocks_required, relative_block_numbers,
+    /// &truncation_block_length).
+    ///
+    /// How should we back up a particular file as part of an incremental
+    /// backup?
+    ///
+    /// If the return value is [`FileBackupMethod::Fully`], caller should back
+    /// up the whole file just as if this were not an incremental backup. The
+    /// contents of the `relative_block_numbers` array are unspecified in this
+    /// case.
+    ///
+    /// If the return value is [`FileBackupMethod::Incrementally`], caller
+    /// should include an incremental file in the backup instead of the entire
+    /// file. On return, `*num_blocks_required` will be set to the number of
+    /// blocks that need to be sent, and the actual block numbers will have
+    /// been stored in `relative_block_numbers`, which should be an array of
+    /// at least RELSEG_SIZE. In addition, `*truncation_block_length` will be
+    /// set to the value that should be included in the incremental file.
+    ///
+    /// `brtab` is the merged block-reference table returned by
+    /// [`Self::PrepareForIncrementalBackup`] (C keeps it in `ib->brtab`; see
+    /// the module comment for why it is threaded separately here).
+    #[allow(clippy::too_many_arguments)]
+    pub fn GetFileBackupMethod(
+        &self,
+        brtab: &BlockRefTable<'_>,
+        path: &str,
+        dboid: Oid,
+        spcoid: Oid,
+        relfilenumber: RelFileNumber,
+        forknum: ForkNumber,
+        segno: u32,
+        size: u64,
+        num_blocks_required: &mut u32,
+        relative_block_numbers: &mut [BlockNumber],
+        truncation_block_length: &mut u32,
+    ) -> PgResult<FileBackupMethod> {
+        // Should only be called after PrepareForIncrementalBackup.
+        assert!(self.finalized, "GetFileBackupMethod before FinalizeIncrementalManifest");
+
+        // dboid could be InvalidOid if shared rel, but spcoid and
+        // relfilenumber should have legal values.
+        debug_assert!(spcoid != 0);
+        debug_assert!(relfilenumber != 0);
+
+        // If the file size is too large or not a multiple of BLCKSZ, then
+        // something weird is happening, so give up and send the whole file.
+        if size % BLCKSZ as u64 != 0 || size / BLCKSZ as u64 > RELSEG_SIZE as u64 {
+            return Ok(FileBackupMethod::Fully);
+        }
+
+        // The free-space map fork is not properly WAL-logged, so we need to
+        // backup the entire file every time.
+        if forknum == ForkNumber::FSM_FORKNUM {
+            return Ok(FileBackupMethod::Fully);
+        }
+
+        // If this file was not part of the prior backup, back it up fully.
+        //
+        // If this file was created after the prior backup and before the
+        // start of the current backup, then the WAL summary information will
+        // tell us to back up the whole file. However, if this file was
+        // created after the start of the current backup, then the WAL
+        // summary won't know anything about it. Without this logic, we would
+        // erroneously conclude that it was OK to send it incrementally.
+        //
+        // (The prior backup may itself have sent this file incrementally, in
+        // which case the manifest carries the INCREMENTAL.* name.)
+        if self.manifest_file_lookup(path.as_bytes()).is_none() {
+            let ipath = GetIncrementalFilePath(path);
+            if self.manifest_file_lookup(ipath.as_bytes()).is_none() {
+                return Ok(FileBackupMethod::Fully);
+            }
+        }
+
+        // Look up the special block reference table entry for the database
+        // as a whole.
+        let mut rlocator = RelFileLocator { spcOid: spcoid, dbOid: dboid, relNumber: 0 };
+        if brtab.get_entry(rlocator, ForkNumber::MAIN_FORKNUM).is_some() {
+            // According to the WAL summary, this database OID/tablespace OID
+            // pairing has been created since the previous backup. So,
+            // everything in it must be backed up fully.
+            return Ok(FileBackupMethod::Fully);
+        }
+
+        // Look up the block reference table entry for this relfilenode.
+        rlocator.relNumber = relfilenumber;
+        let brtentry = brtab.get_entry(rlocator, forknum);
+
+        // If there is no entry, then there have been no WAL-logged changes
+        // to the relation since the predecessor backup was taken, so we can
+        // back it up incrementally and need not include any modified blocks.
+        //
+        // However, if the file is zero-length, we should do a full backup,
+        // because an incremental file is always more than zero length, and
+        // it's silly to take an incremental backup when a full backup would
+        // be smaller.
+        let Some(brtentry) = brtentry else {
+            if size == 0 {
+                return Ok(FileBackupMethod::Fully);
+            }
+            *num_blocks_required = 0;
+            *truncation_block_length = (size / BLCKSZ as u64) as u32;
+            return Ok(FileBackupMethod::Incrementally);
+        };
+        let limit_block = brtentry.limit_block();
+
+        // If the limit_block is less than or equal to the point where this
+        // segment starts, send the whole file.
+        if limit_block as u64 <= segno as u64 * RELSEG_SIZE as u64 {
+            return Ok(FileBackupMethod::Fully);
+        }
+
+        // Get relevant entries from the block reference table entry.
+        //
+        // We shouldn't overflow computing the start or stop block numbers,
+        // but if it manages to happen somehow, detect it and throw an error.
+        // (C computes in unsigned 32-bit with defined wraparound; mirror.)
+        let start_blkno = segno.wrapping_mul(RELSEG_SIZE);
+        let stop_blkno = start_blkno.wrapping_add((size / BLCKSZ as u64) as u32);
+        if start_blkno / RELSEG_SIZE != segno || stop_blkno < start_blkno {
+            ereport(ERROR)
+                .errcode(ERRCODE_INTERNAL_ERROR)
+                .errmsg(format!(
+                    "overflow computing block number bounds for segment {segno} with size {size}"
+                ))
+                .finish(loc("GetFileBackupMethod"))?;
+            unreachable!();
+        }
+
+        // This will write *absolute* block numbers into the output array,
+        // but we'll transpose them below.
+        let nblocks =
+            brtentry.get_blocks(start_blkno, stop_blkno, &mut relative_block_numbers[..RELSEG_SIZE as usize]);
+        debug_assert!(nblocks <= RELSEG_SIZE as usize);
+
+        // If we're going to have to send nearly all of the blocks, then just
+        // send the whole file, because that won't require much extra storage
+        // or transfer and will speed up and simplify backup restoration.
+        // It's not clear what threshold is most appropriate here and perhaps
+        // it ought to be configurable, but for now we're just going to say
+        // that if we'd need to send 90% of the blocks anyway, give up and
+        // send the whole file.
+        //
+        // NB: If you change the threshold here, at least make sure to back
+        // up the file fully when every single block must be sent, because
+        // there's nothing good about sending an incremental file in that
+        // case. (C: `nblocks * BLCKSZ > size * 0.9`, a double comparison.)
+        if (nblocks as u64 * BLCKSZ as u64) as f64 > size as f64 * 0.9 {
+            return Ok(FileBackupMethod::Fully);
+        }
+
+        // Looks like we can send an incremental file, so sort the block
+        // numbers and then transpose them from absolute block numbers to
+        // relative block numbers if necessary.
+        //
+        // NB: If the block reference table was using the bitmap
+        // representation for a given chunk, the block numbers in that chunk
+        // will already be sorted, but when the array-of-offsets
+        // representation is used, we can receive block numbers here out of
+        // order.
+        let out = &mut relative_block_numbers[..nblocks];
+        out.sort_unstable();
+        if start_blkno != 0 {
+            for b in out.iter_mut() {
+                *b -= start_blkno;
+            }
+        }
+        *num_blocks_required = nblocks as u32;
+
+        // The truncation block length is the minimum length of the
+        // reconstructed file. Any block numbers below this threshold that
+        // are not present in the backup need to be fetched from the prior
+        // backup. At or above this threshold, blocks should only be included
+        // in the result if they are present in the backup. (This may require
+        // inserting zero blocks if the blocks included in the backup are
+        // non-consecutive.)
+        *truncation_block_length = (size / BLCKSZ as u64) as u32;
+        if limit_block != InvalidBlockNumber {
+            let relative_limit = limit_block - segno * RELSEG_SIZE;
+
+            // We can't set a truncation_block_length in excess of the limit
+            // block number (relativized to the current segment). To do so
+            // would be to treat blocks from older backups as valid current
+            // contents even if they were subsequently truncated away.
+            if *truncation_block_length < relative_limit {
+                *truncation_block_length = relative_limit;
+            }
+
+            // We also can't set a truncation_block_length in excess of the
+            // segment size, since the reconstructed file can't be larger
+            // than that.
+            if *truncation_block_length > RELSEG_SIZE {
+                *truncation_block_length = RELSEG_SIZE;
+            }
+        }
+
+        // Send it incrementally.
+        Ok(FileBackupMethod::Incrementally)
+    }
 }
 
 /// The JsonManifestParseContext wired to an IncrementalBackupInfo (C: the
