@@ -16822,7 +16822,6 @@ dependencies = [
  "datum",
  "mcx",
  "pg_locale",
- "pg_locale_seams",
  "types_core",
  "types_error",
  "types_fmgr",

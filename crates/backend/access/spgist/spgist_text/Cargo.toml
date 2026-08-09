@@ -14,5 +14,4 @@ types_scan = { path = "../../../../_support/types/types_scan" }
 types_spgist = { path = "../../../../_support/types/types_spgist" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 pg_locale = { path = "../../../utils/adt/pg_locale" }
-pg_locale_seams = { path = "../../../utils/adt/pg_locale_seams" }
 varlena = { path = "../../../utils/adt/varlena" }

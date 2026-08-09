@@ -1,0 +1,31 @@
+-- SP-GiST text_ops prefix search (^@) under a nondeterministic ICU
+-- collation must raise C's 0A000 error, not panic (unported-panic audit
+-- A3). C's spg_text_leaf_consistent delegates the prefix probe to
+-- text_starts_with (varlena.c), which rejects nondeterministic collations
+-- with "nondeterministic collations are not supported for substring
+-- searches"; the pgrust leaf arm panicked at the same decision point.
+-- Ordinary btree-strategy searches through the same index keep working.
+CREATE COLLATION regress_nd_icu (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+CREATE TABLE spgist_nd (x text COLLATE regress_nd_icu);
+INSERT INTO spgist_nd VALUES ('foobar'), ('foolish'), ('bar'), ('quux');
+CREATE INDEX spgist_nd_idx ON spgist_nd USING spgist (x);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+-- plan-shape pin: the prefix probe really goes through the SP-GiST index,
+-- so the error below exercises the opclass consistent functions
+EXPLAIN (COSTS OFF) SELECT * FROM spgist_nd WHERE x ^@ 'foo';
+SELECT * FROM spgist_nd WHERE x ^@ 'foo';
+-- catchability pin: C raises a normal 0A000 error that plpgsql exception
+-- blocks can trap; a panic at the same site unwinds past the handler and
+-- fails the whole DO statement instead of reaching the NOTICE
+DO $$ BEGIN
+  PERFORM count(*) FROM spgist_nd WHERE x ^@ 'foo';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'caught sqlstate=%', SQLSTATE;
+END $$;
+-- non-prefix strategies on the same nondeterministic index still work
+SELECT * FROM spgist_nd WHERE x = 'foobar' ORDER BY x COLLATE "C";
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+DROP TABLE spgist_nd;
+DROP COLLATION regress_nd_icu;

@@ -1,7 +1,7 @@
 //! get_rule_expr slice: Const, Var, OpExpr, BoolExpr, RelabelType,
 //! CoerceViaIO, FuncExpr, NullTest, Aggref, CaseExpr, CoalesceExpr,
-//! MinMaxExpr, ScalarArrayOpExpr, ArrayExpr, SubLink, Param. Every other
-//! node tag is a loud named panic.
+//! MinMaxExpr, ScalarArrayOpExpr, ArrayExpr, SubLink, Param,
+//! NextValueExpr. Every other node tag is a loud named panic.
 
 use std::rc::Rc;
 
@@ -12,14 +12,17 @@ use types_core::{InvalidOid, Oid, BOOLOID, INT4OID, NUMERICOID, UNKNOWNOID};
 use types_error::PgResult;
 use types_nodes::primnodes::{
     Aggref, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CoalesceExpr, CoercionForm, Const,
-    FuncExpr, MinMaxExpr, MinMaxOp, NullTest, NullTestType, OpExpr, Param, ParamKind,
+    FuncExpr, MinMaxExpr, MinMaxOp, NextValueExpr, NullTest, NullTestType, OpExpr, Param,
+    ParamKind,
     ScalarArrayOpExpr, SubLink, SubLinkType, Var, VarReturningType,
 };
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum, PartitionRangeDatumKind};
 use types_nodes::{BoolTestType, Node, NodeList, NodeTag, RTEKind, RangeTblEntry};
 
 use crate::query::{self, DeparseNamespace};
-use crate::{gap, generate_function_name, generate_operator_name, quote_identifier};
+use crate::{
+    gap, generate_function_name, generate_operator_name, generate_relation_name, quote_identifier,
+};
 
 pub(crate) const PRETTYINDENT_STD: i32 = 8;
 pub(crate) const PRETTYINDENT_JOIN: i32 = 4;
@@ -599,6 +602,17 @@ pub(crate) fn get_rule_expr<'mcx>(
                 }
                 other => panic!("unrecognized partition strategy: {other}"),
             }
+            Ok(())
+        }
+        // C: "This isn't exactly nextval(), but that seems close enough for
+        // EXPLAIN's purposes." Rewriter-added for identity columns; renders
+        // as nextval('seqname').
+        NodeTag::T_NextValueExpr => {
+            let nvexpr = node.as_variant::<NextValueExpr>().unwrap();
+            ctx.buf.push_str("nextval(");
+            let relname = generate_relation_name(ctx.mcx, nvexpr.seqid)?;
+            simple_quote_literal(&mut ctx.buf, &relname);
+            ctx.buf.push(')');
             Ok(())
         }
         // Only seen while EXPLAINing a plan (rewriter-added, never in a rule);

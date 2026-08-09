@@ -490,12 +490,11 @@ fn fc_spg_text_leaf_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
         let query = unsafe { text_bytes(key.sk_argument) };
 
         if strategy == RTPrefixStrategyNumber {
-            res = level >= query.len() || {
-                if !pg_locale_seams::collation_is_deterministic::call(collation)? {
-                    panic!("nondeterministic collations are not supported for substring searches");
-                }
-                full_value.len() >= query.len() && &full_value[..query.len()] == query
-            };
+            // C: DirectFunctionCall2Coll(text_starts_with, ...) — which raises
+            // the 0A000 "nondeterministic collations are not supported for
+            // substring searches" error itself (varlena.c) before comparing.
+            res = level >= query.len()
+                || varlena::text_starts_with(full_value, query, collation)?;
             if !res {
                 break;
             }
