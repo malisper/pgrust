@@ -127,6 +127,40 @@ fn constraint_reset_default_tblspc_distinguishes_queryid() {
 }
 
 #[test]
+fn grouping_set_simple_content_jumbles_as_intlist() {
+    EnableQueryId();
+    let ctx = MemoryContext::new_bump("qjumble-test");
+    let mcx = ctx.mcx();
+
+    // Post-analysis SIMPLE grouping sets carry Integer nodes in memory where
+    // C carries an IntList (list_make1_int in transformGroupClause); the
+    // jumble must emit C's byte stream (T_IntList tag + raw ints), not
+    // T_List + per-Integer tags. Trip-wire: GroupingSet.kind is NOT jumbled,
+    // so under a generic list walk SIMPLE and SETS content with the same ref
+    // would collide — C-exact jumbling separates them. R1-F1
+    // JUMBLE-GROUPING-SETS.
+    let gsets_query = |kind| -> Query<'_> {
+        let content = NodeList::make1(mcx, Node::mk_integer(mcx, 1).unwrap()).unwrap();
+        let gs = Node::mk_grouping_set(mcx, kind, content, -1).unwrap();
+        Query {
+            commandType: types_nodes::nodes_enums::CmdType::CMD_SELECT,
+            groupingSets: NodeList::make1(mcx, gs).unwrap(),
+            ..Default::default()
+        }
+    };
+    let mut q_simple =
+        gsets_query(types_nodes::parsenodes::GroupingSetKind::GROUPING_SET_SIMPLE);
+    let mut q_sets = gsets_query(types_nodes::parsenodes::GroupingSetKind::GROUPING_SET_SETS);
+    JumbleQuery(mcx, &mut q_simple).unwrap();
+    JumbleQuery(mcx, &mut q_sets).unwrap();
+    assert_ne!(q_simple.queryId, 0);
+    assert_ne!(
+        q_simple.queryId, q_sets.queryId,
+        "SIMPLE grouping-set content must jumble as C's IntList, not a generic node list"
+    );
+}
+
+#[test]
 fn jumble_buffer_overflow_folds() {
     EnableQueryId();
     let ctx = MemoryContext::new_bump("qjumble-test");

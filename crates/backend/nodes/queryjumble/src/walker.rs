@@ -1107,7 +1107,22 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             js.f_bool(e.nulls_first);
         }
         NodeTag::T_GroupingSet => {
-            list(js, &cast!(q::GroupingSet).content)?;
+            // C's post-analysis invariant: a SIMPLE grouping set's content is
+            // an IntList of sortgrouprefs (list_make1_int / lappend_int in
+            // transformGroupClause), which _jumbleNode jumbles as T_IntList
+            // tag + raw ints. In memory pgrust carries Integer nodes instead
+            // (same trick as outfuncs' out_grouping_set) — re-emit the
+            // C-exact IntList byte stream here. Non-SIMPLE kinds carry
+            // GroupingSet children and jumble as a plain node list. R1-F1.
+            let e = cast!(q::GroupingSet);
+            if e.kind == q::GroupingSetKind::GROUPING_SET_SIMPLE && !e.content.is_nil() {
+                js.tag(NodeTag::T_IntList);
+                for n in e.content.iter() {
+                    js.f_i32(n.as_integer().expect("SIMPLE grouping-set ref").ival);
+                }
+            } else {
+                list(js, &e.content)?;
+            }
         }
         NodeTag::T_WindowClause => {
             let e = cast!(q::WindowClause);
