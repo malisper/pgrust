@@ -1,5 +1,6 @@
 use crate::{
-    lookup_relation, recovery_in_progress_error, stats_check_arg_array, stats_check_arg_pair,
+    detoast_array_datum, lookup_relation, recovery_in_progress_error, stats_check_arg_array,
+    stats_check_arg_pair,
     stats_check_required_arg, stats_fill_fcinfo_from_arg_pairs, text_datum_string, warn,
     warn_error_data, Arg, StatsArgInfo, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX,
 };
@@ -357,18 +358,37 @@ fn attribute_statistics_update(mcx: Mcx<'_>, args: &[Arg]) -> PgResult<bool> {
             atttypmod,
         )? {
             Some(img) => {
-                let stavalues = Datum::from_usize(img.as_ptr() as usize);
-                images.push(img);
-                set_stats_slot(
-                    &mut values,
-                    &mut nulls,
-                    &mut replaces,
-                    STATISTIC_KIND_MCV,
-                    eq_opr,
-                    atttypcoll,
-                    Some(stanumbers),
-                    Some(stavalues),
-                )?;
+                // C 18.4: an MCV vals/freqs element-count mismatch is rejected
+                // before installing the slot. Both arrays are 1-D here (vals
+                // via text_to_stavalues, freqs via stats_check_arg_array), so
+                // dims[0] is the element count.
+                let nums_arr = detoast_array_datum(mcx, stanumbers)?;
+                let nvals = arrayfuncs::arr_dim(&img, 0);
+                let nnums = arrayfuncs::arr_dim(&nums_arr, 0);
+
+                if nvals != nnums {
+                    warn(
+                        "attribute_statistics_update",
+                        "could not parse \"most_common_vals\": incorrect number of elements (same as \"most_common_freqs\" required)".to_string(),
+                        Some(ERRCODE_INVALID_PARAMETER_VALUE),
+                        None,
+                        None,
+                    )?;
+                    result = false;
+                } else {
+                    let stavalues = Datum::from_usize(img.as_ptr() as usize);
+                    images.push(img);
+                    set_stats_slot(
+                        &mut values,
+                        &mut nulls,
+                        &mut replaces,
+                        STATISTIC_KIND_MCV,
+                        eq_opr,
+                        atttypcoll,
+                        Some(stanumbers),
+                        Some(stavalues),
+                    )?;
+                }
             }
             None => result = false,
         }
@@ -664,6 +684,19 @@ fn text_to_stavalues<'m>(
     }
 
     let Some(img) = arr else { return Ok(None) };
+
+    // C 18.4: reject non-1-D results (including empty arrays, ndim 0) before
+    // the null-elements check.
+    if arrayfuncs::arr_ndim(&img) != 1 {
+        warn(
+            "text_to_stavalues",
+            format!("\"{staname}\" must be a one-dimensional array"),
+            Some(ERRCODE_INVALID_PARAMETER_VALUE),
+            None,
+            None,
+        )?;
+        return Ok(None);
+    }
 
     if arrayfuncs::array_contains_nulls(&img) {
         warn(
