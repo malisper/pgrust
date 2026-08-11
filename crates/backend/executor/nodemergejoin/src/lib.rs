@@ -364,6 +364,12 @@ fn eval_outer_values<'mcx>(
         return Ok(MJEvalResult::EndOfJoin);
     };
     estate.reset_expr_context(node.mj_OuterEContext);
+    // C MJEvalOuterValues: econtext->ecxt_outertuple = mj_OuterTupleSlot
+    // before evaluating the lclauses. The compiled lexpr reads the row via
+    // the explicit outer binding below, but a SubPlan nested in a merge key
+    // expression evaluates through the ExprContext slot triple and needs the
+    // bind (S4-B EXEC-OUTER-SLOT-XX000 family).
+    estate.ecxt_mut(node.mj_OuterEContext).ecxt_outertuple = Some(slot_id);
     let mut result = MJEvalResult::Matchable;
     for i in 0..node.clauses.len() {
         let v = ::executils::exec_eval_expr_with_subplans_outer_slot(
@@ -396,6 +402,10 @@ fn eval_inner_values<'mcx>(
         return Ok(MJEvalResult::EndOfJoin);
     };
     estate.reset_expr_context(node.mj_InnerEContext);
+    // C MJEvalInnerValues: econtext->ecxt_innertuple = innerslot before
+    // evaluating the rclauses (same nested-SubPlan slot-supply frame as
+    // eval_outer_values above).
+    estate.ecxt_mut(node.mj_InnerEContext).ecxt_innertuple = Some(slot_id);
     let mut result = MJEvalResult::Matchable;
     for i in 0..node.clauses.len() {
         let v = ::executils::exec_eval_expr_with_subplans_inner_slot(

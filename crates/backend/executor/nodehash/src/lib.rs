@@ -840,6 +840,14 @@ impl<'mcx> HashState<'mcx> {
         slot_id: ExecSlotId,
     ) -> PgResult<Option<u32>> {
         estate.reset_expr_context(self.ps_ExprContext);
+        // C MultiExecPrivateHash/MultiExecParallelHash bind the build row as
+        // econtext->ecxt_outertuple before evaluating hash_expr (nodeHash.c).
+        // The compiled expr reads the row through the explicit inner binding
+        // below, but a SubPlan inside the hash keys (a correlated sublink in
+        // a join key expression) evaluates its testexpr/args through the
+        // ExprContext slot triple — without this bind, an OUTER Var there
+        // finds no slot (S4-B EXEC-OUTER-SLOT-XX000).
+        estate.ecxt_mut(self.ps_ExprContext).ecxt_outertuple = Some(slot_id);
         let r = ::executils::exec_eval_expr_with_subplans_inner_slot(
             &mut self.hash_expr,
             estate,

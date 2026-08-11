@@ -478,6 +478,11 @@ fn spool_and_transition<'mcx>(
         {
             let et = state.evaltrans.as_mut().expect("numaggs > 0 implies evaltrans");
             if et.has_subplan() {
+                // C eval_windowaggregates: tmpcontext->ecxt_outertuple =
+                // agg_row_slot before advance_windowaggregate — a SubPlan in
+                // an agg argument evaluates through the ExprContext triple
+                // (S4-B EXEC-OUTER-SLOT-XX000 family).
+                estate.ecxt_mut(state.tmpcontext).ecxt_outertuple = Some(tuple);
                 ::executils::exec_eval_expr_with_subplans_outer_slot(
                     et,
                     estate,
