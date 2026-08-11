@@ -1769,6 +1769,44 @@ impl<'mcx> ExprState<'mcx> {
         self.scan_proj_expr_key
     }
 
+    /// True when evaluating this projection performs no computation at all:
+    /// every step is a slot fetch, a Var-to-result assign, or a compile-time
+    /// Const store — no function calls, coercions, params, or subplans;
+    /// nothing that can raise an error or observe/advance state. This is the
+    /// bar for a driver to legally SKIP the projection: C evaluates a scan's
+    /// compiled projection per returned row even when the parent reads none
+    /// of it (count(*) over a projected scan), so a skipped projection is
+    /// unobservable only under this predicate — a merely-STABLE expression
+    /// can still error (e.g. to_char format checks) and must run (S4-A).
+    pub fn projection_evaluates_nothing(&self) -> bool {
+        match self.kernel {
+            Kernel::Program => self.steps.iter().all(|s| {
+                matches!(
+                    s,
+                    Step::ScanFetchSome { .. }
+                        | Step::InnerFetchSome { .. }
+                        | Step::OuterFetchSome { .. }
+                        | Step::AssignScanVar { .. }
+                        | Step::AssignInnerVar { .. }
+                        | Step::AssignOuterVar { .. }
+                        | Step::AssignScanVar2 { .. }
+                        | Step::Const { .. }
+                        | Step::AssignTmp { .. }
+                        | Step::AssignTmpMakeRo { .. }
+                        | Step::DoneReturn
+                        | Step::DoneNoReturn
+                )
+            }),
+            Kernel::JustConst { .. }
+            | Kernel::JustConstAssign { .. }
+            | Kernel::JustVar { .. }
+            | Kernel::JustVarVirt { .. }
+            | Kernel::JustAssignVar { .. }
+            | Kernel::JustAssignVarVirt { .. } => true,
+            _ => false,
+        }
+    }
+
     #[inline]
     pub fn has_old(&self) -> bool {
         self.flags & EEO_FLAG_HAS_OLD != 0

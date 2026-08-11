@@ -2222,12 +2222,17 @@ pub(crate) fn seq_agg_fusible<'mcx>(
     // Projected scans (CP_SMALL_TLIST — the qual'd count(*) plan shape) fuse
     // only for outer-read-free drains: the drain skips the projection, which
     // is unobservable exactly when the agg reads no outer column and the
-    // tlist carries no subplan/param (Var-only projections evaluate nothing).
+    // projection evaluates nothing (Var/Const-only — no calls, params, or
+    // subplans). C evaluates the scan's projection per row even under
+    // count(*), so a computing projection — however STABLE — must run: it
+    // can still raise (S4-A UNUSED-STABLE-PROJECTION-ELIDED, the to_char
+    // 22007 shape). Such scans refuse the fuse and take the per-tuple drive.
     let outer_read_free = || {
         ::nodeagg::agg_batch_outer_prefix(agg) == Some(0)
-            && ss.ss.ps_ProjInfo.as_ref().is_some_and(|p| {
-                !p.pi_state.has_subplan() && p.pi_state.param_exec_deps().is_empty()
-            })
+            && ss.ss
+                .ps_ProjInfo
+                .as_ref()
+                .is_some_and(|p| p.pi_state.projection_evaluates_nothing())
     };
     match ss.variant() {
         ::nodeseqscan::SeqScanVariant::Plain => true,

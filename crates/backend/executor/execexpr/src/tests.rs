@@ -4572,3 +4572,62 @@ fn hash32_expr_strict_null_key_aborts_c_verbatim() {
         assert!(!eval(mcx, &mut s2, None, None));
     });
 }
+
+// S4-A UNUSED-STABLE-PROJECTION-ELIDED: `projection_evaluates_nothing` is the
+// bar for the fused agg drive to SKIP a scan projection (procnode
+// outer_read_free). C evaluates the compiled scan projection per row even
+// under count(*), so only Var/Const-only projections — which evaluate
+// nothing — may be skipped; any computing projection (however STABLE) can
+// still raise and must refuse the skip.
+#[test]
+fn projection_evaluates_nothing_gates_fused_skip() {
+    with_mcx(|mcx| {
+        let desc = desc_int4(mcx, 2);
+        // Var-only projection: skippable, in both the Just* kernel and
+        // forced-program forms.
+        let mk_var_only = || {
+            let tle1 =
+                Node::mk_target_entry(mcx, mk_scan_var(mcx, 2, INT4OID), 1, None, false).unwrap();
+            let tle2 =
+                Node::mk_target_entry(mcx, mk_scan_var(mcx, 1, INT4OID), 2, None, false).unwrap();
+            let mut tlist = NodeList::make1(mcx, tle1).unwrap();
+            tlist.lappend(mcx, tle2).unwrap();
+            exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap()
+        };
+        let mut s = mk_var_only();
+        assert!(s.projection_evaluates_nothing());
+        s.force_program_kernel();
+        assert!(s.projection_evaluates_nothing());
+
+        // Const-only column: still evaluation-free.
+        let tle =
+            Node::mk_target_entry(mcx, mk_int4_const(mcx, Some(7)), 1, None, false).unwrap();
+        let tlist = NodeList::make1(mcx, tle).unwrap();
+        let mut s = exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap();
+        assert!(s.projection_evaluates_nothing());
+        s.force_program_kernel();
+        assert!(s.projection_evaluates_nothing());
+
+        // Computing projection (strict int4eq over a scan Var): can raise —
+        // NOT skippable, in either kernel form.
+        let mk_computing = || {
+            let args =
+                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
+                    .unwrap();
+            let tle = Node::mk_target_entry(
+                mcx,
+                mk_opexpr(mcx, 65, BOOLOID, args),
+                1,
+                None,
+                false,
+            )
+            .unwrap();
+            let tlist = NodeList::make1(mcx, tle).unwrap();
+            exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap()
+        };
+        let mut s = mk_computing();
+        assert!(!s.projection_evaluates_nothing());
+        s.force_program_kernel();
+        assert!(!s.projection_evaluates_nothing());
+    });
+}
