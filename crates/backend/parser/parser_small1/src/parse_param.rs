@@ -355,12 +355,12 @@ pub fn plpgsql_paramref_hook<'mcx>(
 /// error when the name's rec prefix is known but the field key is not.
 pub fn plpgsql_resolve_column_ref<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &ParseState<'_, 'mcx>,
+    _pstate: &ParseState<'_, 'mcx>,
     parstate: &PlpgsqlHookState<'_>,
     fields: &[&str],
     location: i32,
     error_if_no_field: bool,
-    encoding: pg_enc,
+    _encoding: pg_enc,
 ) -> PgResult<Option<Node<'mcx>>> {
     if fields.is_empty() || fields.len() > 3 {
         return Ok(None);
@@ -402,13 +402,17 @@ pub fn plpgsql_resolve_column_ref<'mcx>(
         if parstate.recs.iter().any(|r| *r == prefix) {
             let recname = fields[fields.len() - 2];
             let field = fields[fields.len() - 1];
+            // No errposition: C's reachable error for a field the record's
+            // current tuple lacks is exec_get_datum_type_info's RECFIELD arm
+            // (pl_exec.c:5496-5499, no cursor; the SPI callback supplies the
+            // statement context). resolve_column_ref's own errposition arm
+            // (pl_comp.c:1219-1223) is "should not get here" defensive code.
             return Err(Box::new(
                 ereport(ERROR)
                     .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
                     .errmsg(alloc::format!(
                         "record \"{recname}\" has no field \"{field}\""
                     ))
-                    .errposition(parser_errposition(pstate, location, encoding))
                     .into_error()
                     .with_error_location(loc("resolve_column_ref")),
             ));

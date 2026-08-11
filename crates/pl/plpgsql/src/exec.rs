@@ -934,6 +934,20 @@ impl<'a> Estate<'a> {
                         names.push(marker.clone());
                     }
                     pending.push(marker);
+                    // C resolve_column_ref resolves a qualified name via
+                    // ns_lookup (nearest rec/row binding wins; Var entries
+                    // are skipped for qualified lookups) and only THEN
+                    // errors if that rec is unassigned. So the unqualified
+                    // `recname` / `recname.field` keys and the valueless
+                    // marking belong ONLY to the nearest rec binding for the
+                    // name — an outer unassigned rec shadowed by a nearer
+                    // same-named rec (e.g. a cursor FOR loop's private
+                    // record over an explicitly DECLAREd one,
+                    // P2-CURSORFOR-SHADOW) must not poison the prefix, and
+                    // fields the nearer rec lacks must not leak through from
+                    // the shadowed one. Label-qualified (pending) entries
+                    // are unaffected: they resolve by qualified name.
+                    let is_visible_rec_binding = !recs.contains(&recname);
                     for d in &func.datums {
                         if let PlDatum::RecField(f) = d {
                             if f.recparentno == recno {
@@ -943,7 +957,7 @@ impl<'a> Estate<'a> {
                                         f.fieldname.to_ascii_lowercase()
                                     );
                                     let info = (key.clone(), f.dno, t, m, c);
-                                    if !have(&names, &key) {
+                                    if is_visible_rec_binding && !have(&names, &key) {
                                         names.push(info.clone());
                                     }
                                     pending.push(info);
@@ -951,13 +965,13 @@ impl<'a> Estate<'a> {
                             }
                         }
                     }
-                    if !recs.contains(&recname) {
+                    if is_visible_rec_binding {
                         recs.push(recname.clone());
                     }
                     if matches!(&self.datums[recno as usize], DatumVal::Rec(None))
                         && self.rec_meta(recno).rectypeid == RECORDOID
                     {
-                        if !valueless.contains(&recname) {
+                        if is_visible_rec_binding {
                             valueless.push(recname.clone());
                         }
                         pending_valueless.push(recname.clone());
