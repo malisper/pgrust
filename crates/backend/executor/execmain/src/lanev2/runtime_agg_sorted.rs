@@ -1106,7 +1106,7 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
     // --- Plan/shape gates (fail-closed). The caller proved pgrcolumnar +
     // seq_scan_fusible before the choice memo; re-checked cheaply here.
     if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
-        refuse("scan not fusible cbstore");
+        refuse("scan not fusible pgrcolumnar");
         return Ok(false);
     }
     if ss.ss.ps_ProjInfo.is_some() {

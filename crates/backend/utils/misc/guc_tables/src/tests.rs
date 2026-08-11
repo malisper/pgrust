@@ -64,12 +64,15 @@ fn table_counts_match_compiled_backend_shape() {
     //   pgrust.ephemeral_db_prewarm (-> 136) = 460.
     // dl-verstring (pgrust-only, version-string ruling 2026-08-06): Enum +1
     //   pgrust.version_string_style (-> 48) = 461.
-    assert_eq!(ConfigureNamesBool.len(), 136);
+    // covdiff E1-A (pgrust-only): Bool +1 pgrust.explain_runtime_verdicts
+    //   (-> 137) = 462 — EXPLAIN display gate for runtime refusal verdicts,
+    //   default off (C-parity default output).
+    assert_eq!(ConfigureNamesBool.len(), 137);
     assert_eq!(ConfigureNamesInt.len(), 170);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 79);
     assert_eq!(ConfigureNamesEnum.len(), 48);
-    assert_eq!(all_settings().count(), 461);
+    assert_eq!(all_settings().count(), 462);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

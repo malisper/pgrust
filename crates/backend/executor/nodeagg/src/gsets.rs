@@ -1407,7 +1407,15 @@ where
             }
         }
         if switch_to_hash {
-            update_hash_metrics(node, estate, false, 0);
+            // No metrics update here: C's mixed agg records hash metrics only
+            // via hashagg_finish_initial_spills / batch processing, both of
+            // which require at least one input tuple to have been processed
+            // during phase 1 (nodeAgg.c:2545-2553). With EMPTY input the
+            // hash_mem_peak stays 0, and show_hashagg_info therefore omits
+            // HashAgg Batches / Peak Memory Usage / Disk Usage in structured
+            // formats. An unconditional update at the hash-output switch
+            // recorded a nonzero metacontext peak and made those fields
+            // appear where C prints nothing (covdiff-fuzzer HashAgg-counters).
             return agg_retrieve_hash_table(node, estate);
         }
 

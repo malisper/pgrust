@@ -504,134 +504,34 @@ fn collect_node_subplans<'mcx>(
     Ok(out)
 }
 
+// SubPlan references hide at ANY depth of ANY initialized expression (C's
+// ExecInitExprRec reaches them through the generic expression walk). The
+// former hand-rolled recursion here covered only a subset of expression
+// vocabulary — SubPlans nested under unlisted node types (NULLIF/NullIfExpr,
+// FieldSelect, SubscriptingRef, ...) were silently dropped, eliding their
+// whole SubPlan subtree from EXPLAIN output (covdiff-fuzzer E1-B). The
+// generic expression_tree_walker matches C's coverage; its T_SubPlan arm
+// descends testexpr then args (C ExecInitSubPlan order), so nested SubPlans
+// land on the same node's list in C's order.
+struct SubPlanCollector<'a, 'mcx> {
+    out: &'a mut PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for SubPlanCollector<'_, 'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(sp) = node.as_sub_plan() {
+            self.out.push(sp);
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
+}
+
 fn collect_subplans_expr<'mcx>(
     node: Node<'mcx>,
     out: &mut PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
 ) {
-    if let Some(sp) = node.as_sub_plan() {
-        out.push(sp);
-        if let Some(te) = sp.testexpr {
-            collect_subplans_expr(te, out);
-        }
-        // C ExecInitSubPlan inits args after testexpr; nested SubPlans there
-        // (outer-agg arguments) land on the same node's subPlan list.
-        for a in &sp.args {
-            collect_subplans_expr(a, out);
-        }
-        return;
-    }
-    match node.node_tag() {
-        // onConflictWhere carries an implicit-AND List (qual convention).
-        NodeTag::T_List => {
-            if let Some(l) = node.as_list() {
-                for e in l {
-                    collect_subplans_expr(e, out);
-                }
-            }
-        }
-        NodeTag::T_TargetEntry => {
-            collect_subplans_expr(node.as_target_entry().unwrap().expr, out)
-        }
-        NodeTag::T_OpExpr => {
-            for a in &node.as_op_expr().unwrap().args {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_FuncExpr => {
-            for a in &node.as_func_expr().unwrap().args {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_BoolExpr => {
-            for a in &node.as_bool_expr().unwrap().args {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_RelabelType => {
-            collect_subplans_expr(node.as_relabel_type().unwrap().arg, out)
-        }
-        NodeTag::T_NullTest => {
-            if let Some(a) = node.as_null_test().unwrap().arg {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_BooleanTest => {
-            if let Some(a) = node.as_boolean_test().unwrap().arg {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_DistinctExpr => {
-            for a in &node.as_distinct_expr().unwrap().args {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_Aggref => {
-            for a in &node.as_aggref().unwrap().args {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_CaseExpr => {
-            let c = node.as_case_expr().unwrap();
-            if let Some(a) = c.arg {
-                collect_subplans_expr(a, out);
-            }
-            for w in &c.args {
-                collect_subplans_expr(w, out);
-            }
-            if let Some(d) = c.defresult {
-                collect_subplans_expr(d, out);
-            }
-        }
-        NodeTag::T_CaseWhen => {
-            let w = node.as_case_when().unwrap();
-            if let Some(e) = w.expr {
-                collect_subplans_expr(e, out);
-            }
-            if let Some(r) = w.result {
-                collect_subplans_expr(r, out);
-            }
-        }
-        NodeTag::T_CoalesceExpr => {
-            for a in &node.as_coalesce_expr().unwrap().args {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_MinMaxExpr => {
-            for a in &node.as_min_max_expr().unwrap().args {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_ScalarArrayOpExpr => {
-            for a in &node.as_scalar_array_op_expr().unwrap().args {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_ArrayExpr => {
-            for e in &node.as_array_expr().unwrap().elements {
-                collect_subplans_expr(e, out);
-            }
-        }
-        NodeTag::T_RowExpr => {
-            for a in &node.as_row_expr().unwrap().args {
-                collect_subplans_expr(a, out);
-            }
-        }
-        NodeTag::T_CoerceViaIO => {
-            collect_subplans_expr(node.as_coerce_via_io().unwrap().arg, out)
-        }
-        NodeTag::T_CoerceToDomain => {
-            collect_subplans_expr(node.as_coerce_to_domain().unwrap().arg, out)
-        }
-        NodeTag::T_WithCheckOption => {
-            if let Some(q) = node.as_with_check_option().unwrap().qual {
-                collect_subplans_expr(q, out);
-            }
-        }
-        NodeTag::T_ReturningExpr => {
-            collect_subplans_expr(node.as_returning_expr().unwrap().retexpr, out)
-        }
-        _ => {}
-    }
+    let mut w = SubPlanCollector { out };
+    nodes_core::NodeWalker::visit(&mut w, node).expect("subplan collection walk");
 }
 
 // ExplainNode's T_ForeignScan naming (explain.c): (pname, sname, operation);
@@ -1492,10 +1392,14 @@ pub fn ExplainNode<'mcx>(
 
     // EA-on-morsels refusal transparency (docs/design/ea-morsels.md §6): the
     // runtime admission walk's verdict for a node that did not engage.
-    // Records exist ONLY on armed + instrumented walks — unarmed sessions
-    // (every existing gate: the C-diff explain e2e, regress) print nothing
-    // and stay byte-identical.
-    if es.analyze && !es.qd.is_null() {
+    // Display-gated on pgrust.explain_runtime_verdicts (default OFF): C
+    // prints nothing here, and default EXPLAIN output must stay C-parity
+    // (covdiff-fuzzer E1-A — the refusal lines leaked into vanilla EXPLAIN
+    // ANALYZE whenever the admission walk recorded a verdict).
+    if es.analyze
+        && !es.qd.is_null()
+        && guc_tables::backing::pgrust_explain_runtime_verdicts()
+    {
         if let Some(refs) =
             execmain_seams::query_desc_runtime_ea_refusals::call(es.qd, plan.plan_node_id)
         {
@@ -2842,8 +2746,12 @@ fn show_instrumentation_count(
     }
     let Some(i) = instrument else { return };
     let nfiltered = if which == 2 { i.nfiltered2 } else { i.nfiltered1 };
-    if i.nloops > 0.0 && (nfiltered > 0.0 || es.format != EXPLAIN_FORMAT_TEXT) {
-        crate::format::ExplainPropertyFloat(qlabel, None, nfiltered / i.nloops, 0, es);
+    // In text mode, suppress zero counts; they're not interesting enough.
+    // Structured formats print the field regardless of value, and a
+    // never-executed node (nloops == 0) prints 0 (explain.c:3981-3987).
+    if nfiltered > 0.0 || es.format != EXPLAIN_FORMAT_TEXT {
+        let value = if i.nloops > 0.0 { nfiltered / i.nloops } else { 0.0 };
+        crate::format::ExplainPropertyFloat(qlabel, None, value, 0, es);
     }
 }
 

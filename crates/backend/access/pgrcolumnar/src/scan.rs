@@ -756,17 +756,17 @@ impl<'mcx> CbScanDescData<'mcx> {
         // CI cluster runs is the profile that has to fail closed.
         if self.rs_base.rs_parallel.is_some() {
             return Err(Box::new(PgError::error(
-                "cbstore: granule-range positioning on a parallel scan".to_string(),
+                "pgrcolumnar: granule-range positioning on a parallel scan".to_string(),
             )));
         }
         let Some(part) = self.part.as_ref() else {
             return Err(Box::new(PgError::error(
-                "cbstore: granule range on an empty part".to_string(),
+                "pgrcolumnar: granule range on an empty part".to_string(),
             )));
         };
         if g0 >= g1 || g1 > part.total_granules() {
             return Err(Box::new(PgError::error(format!(
-                "cbstore: invalid granule range [{g0}, {g1}) of {}",
+                "pgrcolumnar: invalid granule range [{g0}, {g1}) of {}",
                 part.total_granules()
             ))));
         }

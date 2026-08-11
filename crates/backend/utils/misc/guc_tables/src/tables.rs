@@ -672,7 +672,11 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // (ClickHouse QueryConditionCache counterpart; approved 2026-07-10 as
     // the one sanctioned cross-query in-memory cache, GUC-gated). Default
     // OFF; benchmark arms enable it explicitly and record it in manifests.
-    GucBoolSetting { name: "pgrust.condition_cache", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the cbstore condition cache (cross-query cached qual verdicts per granule)."), long_desc: None, flags: 0, variable: &vars::pgrust_condition_cache, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
+    GucBoolSetting { name: "pgrust.condition_cache", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the pgrcolumnar condition cache (cross-query cached qual verdicts per granule)."), long_desc: None, flags: 0, variable: &vars::pgrust_condition_cache, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.explain_runtime_verdicts (pgrust-only): EXPLAIN ANALYZE display
+    // gate for the runtime admission walk's refusal verdicts (E1-A: default
+    // EXPLAIN output must stay C-parity, so the diagnostics are opt-in).
+    GucBoolSetting { name: "pgrust.explain_runtime_verdicts", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Shows runtime-engine refusal verdicts in EXPLAIN ANALYZE output."), long_desc: Some("Off (the default) keeps EXPLAIN output identical to PostgreSQL. On adds a per-node diagnostic line naming the reason the parallel runtime declined to execute a node."), flags: 0, variable: &vars::pgrust_explain_runtime_verdicts, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.runtime (pgrust-only, env-to-guc train): the M0 master switch for
     // the morsel runtime worker pool, replacing the PGRUST_RUNTIME env var as
     // the product surface. PGC_POSTMASTER (the pool spawns once at boot),

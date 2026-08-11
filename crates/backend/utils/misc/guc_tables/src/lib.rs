@@ -204,6 +204,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_condition_cache,
         set: backing::set_pgrust_condition_cache,
     });
+    vars::pgrust_explain_runtime_verdicts.install(GucVarAccessors {
+        get: backing::pgrust_explain_runtime_verdicts,
+        set: backing::set_pgrust_explain_runtime_verdicts,
+    });
     vars::pgrust_condition_cache_size.install(GucVarAccessors {
         get: backing::pgrust_condition_cache_size,
         set: backing::set_pgrust_condition_cache_size,

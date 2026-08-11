@@ -73,7 +73,7 @@ fn apply_intcodec_cols_env(
     for pair in cols.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let (name, v) = pair.split_once('=').ok_or_else(|| {
             Box::new(PgError::error(format!(
-                "cbstore: bad PGRUST_CBSTORE_INTCODEC_COLS entry \"{pair}\""
+                "pgrcolumnar: bad PGRUST_CBSTORE_INTCODEC_COLS entry \"{pair}\""
             )))
         })?;
         let idx = col_index_of(rel, name.trim())? as usize;
@@ -82,7 +82,7 @@ fn apply_intcodec_cols_env(
             "off" | "0" | "false" => false,
             other => {
                 return Err(Box::new(PgError::error(format!(
-                    "cbstore: bad PGRUST_CBSTORE_INTCODEC_COLS value \"{other}\""
+                    "pgrcolumnar: bad PGRUST_CBSTORE_INTCODEC_COLS value \"{other}\""
                 ))))
             }
         };
@@ -120,7 +120,7 @@ fn col_index_of(rel: &::types_rel::Relation<'_>, name: &str) -> PgResult<u16> {
     }
     Err(Box::new(
         PgError::error(format!(
-            "cbstore: cluster/codec option references unknown column \"{name}\""
+            "pgrcolumnar: cluster/codec option references unknown column \"{name}\""
         ))
         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
     ))
@@ -151,12 +151,12 @@ pub fn writer_opts_of(
     }
     if out.cluster_key.len() > CB_CLUSTER_KEY_MAX_COLS {
         return Err(Box::new(PgError::error(format!(
-            "cbstore: cluster_key supports at most {CB_CLUSTER_KEY_MAX_COLS} columns"
+            "pgrcolumnar: cluster_key supports at most {CB_CLUSTER_KEY_MAX_COLS} columns"
         ))));
     }
     for pair in o.codec_cols().split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let (name, codec) = pair.split_once('=').ok_or_else(|| {
-            Box::new(PgError::error(format!("cbstore: bad codec_cols entry \"{pair}\"")))
+            Box::new(PgError::error(format!("pgrcolumnar: bad codec_cols entry \"{pair}\"")))
         })?;
         let idx = col_index_of(rel, name.trim())? as usize;
         out.codec[idx] = match codec.trim() {
@@ -166,7 +166,7 @@ pub fn writer_opts_of(
             "plain" => CodecChoice::Plain,
             other => {
                 return Err(Box::new(PgError::error(format!(
-                    "cbstore: unknown codec \"{other}\" in codec_cols"
+                    "pgrcolumnar: unknown codec \"{other}\" in codec_cols"
                 ))))
             }
         };
@@ -197,7 +197,7 @@ fn apply_presort_env(
     }
     if out.presort_key.len() > CB_CLUSTER_KEY_MAX_COLS {
         return Err(Box::new(PgError::error(format!(
-            "cbstore: PGRUST_COPY_PRESORT supports at most {CB_CLUSTER_KEY_MAX_COLS} columns"
+            "pgrcolumnar: PGRUST_COPY_PRESORT supports at most {CB_CLUSTER_KEY_MAX_COLS} columns"
         ))));
     }
     Ok(())
@@ -721,7 +721,7 @@ pub fn coltypes_of(rel: &::types_rel::Relation<'_>) -> PgResult<Vec<ColType>> {
             ColType::of_type_oid(a.atttypid).ok_or_else(|| {
                 Box::new(
                     PgError::error(format!(
-                        "cbstore does not support the type of column \"{}\" (type oid {})",
+                        "pgrcolumnar does not support the type of column \"{}\" (type oid {})",
                         String::from_utf8_lossy(a.attname.name_str()),
                         a.atttypid
                     ))
@@ -861,7 +861,7 @@ fn open_writer_inner(
             Some((footer_off, fp, version)) => {
                 if fp != w.fingerprint {
                     return Err(Box::new(PgError::error(
-                        "cbstore: schema fingerprint mismatch".to_string(),
+                        "pgrcolumnar: schema fingerprint mismatch".to_string(),
                     )));
                 }
                 if footer_off != 0 {
@@ -939,7 +939,7 @@ impl CbWriter {
             if let Some(c) = isnull[..self.ncols].iter().position(|&n| n) {
                 let _ = c;
                 return Err(Box::new(
-                    PgError::error("cbstore does not support NULL values".to_string())
+                    PgError::error("pgrcolumnar does not support NULL values".to_string())
                         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
                 ));
             }
@@ -1314,7 +1314,7 @@ fn append_row_into(
     for c in 0..coltypes.len() {
         if isnull[c] {
             return Err(Box::new(
-                PgError::error("cbstore does not support NULL values".to_string())
+                PgError::error("pgrcolumnar does not support NULL values".to_string())
                     .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
             ));
         }

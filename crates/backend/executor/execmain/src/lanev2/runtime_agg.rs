@@ -5074,7 +5074,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         seq_scan_fusible(ss, estate)?
     };
     if !fusible || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
-        refuse(estate, ea, node_id, "scan not fusible cbstore");
+        refuse(estate, ea, node_id, "scan not fusible pgrcolumnar");
         return Ok(false);
     }
     // Unprojected K2 class only in phase 1 (exprkey/Reduced/Multi are the

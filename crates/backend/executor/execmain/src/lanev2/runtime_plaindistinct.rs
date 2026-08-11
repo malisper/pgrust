@@ -810,7 +810,7 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
             || (::nodeseqscan::seq_scan_is_heap(ss)
                 && super::runtime_distinct::distinct_heap_enabled()))
     {
-        refused(estate, ea, node_id, "scan not fusible/cbstore");
+        refused(estate, ea, node_id, "scan not fusible/pgrcolumnar");
         return Ok(None);
     }
     if estate.es_epq_active {
@@ -943,7 +943,7 @@ pub(super) fn try_own_plain_selectdistinct_runtime<'mcx>(
             || (::nodeseqscan::seq_scan_is_heap(ss)
                 && super::runtime_distinct::distinct_heap_enabled()))
     {
-        refused(estate, ea, node_id, "scan not fusible/cbstore");
+        refused(estate, ea, node_id, "scan not fusible/pgrcolumnar");
         return Ok(false);
     }
     if estate.es_epq_active {

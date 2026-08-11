@@ -303,6 +303,12 @@ pub static pgrust_lane_executor: GucBoolVar = GucSlot::new("pgrust_lane_executor
 // OFF, LRU-bounded by the size GUC (KB).
 pub static pgrust_condition_cache: GucBoolVar = GucSlot::new("pgrust_condition_cache");
 pub static pgrust_condition_cache_size: GucIntVar = GucSlot::new("pgrust_condition_cache_size");
+// pgrust-only: pgrust.explain_runtime_verdicts (no C symbol) — shows the
+// runtime admission walk's refusal verdicts in EXPLAIN ANALYZE. Default OFF:
+// C prints nothing there, and default EXPLAIN output is C-parity
+// (covdiff-fuzzer E1-A).
+pub static pgrust_explain_runtime_verdicts: GucBoolVar =
+    GucSlot::new("pgrust_explain_runtime_verdicts");
 // pgrust-only: pgrust.parallel_engine + pgrust.runtime_dop (M5-0,
 // docs/design/m5-planner.md §2.2; no C symbol). The engine selector routes
 // covered serial shapes to the morsel runtime under `runtime`; the DOP knob

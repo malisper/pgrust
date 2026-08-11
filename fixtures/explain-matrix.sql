@@ -73,3 +73,35 @@ RESET work_mem;
 
 -- never-executed arm
 EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF) SELECT * FROM em WHERE a = 1 LIMIT 0;
+
+-- === covdiff-fuzzer E1 pinning legs (fix-explain-fidelity) ===
+
+-- E1-B: correlated SubPlan subtrees must print. NULLIF (NullIfExpr) nests the
+-- SubPlan reference under a node the old hand-rolled collector skipped.
+EXPLAIN (COSTS OFF) SELECT NULLIF((SELECT max(x) FROM em_small WHERE y = em.b), em.a) FROM em WHERE a = 2;
+EXPLAIN (COSTS OFF, FORMAT JSON) SELECT NULLIF((SELECT max(x) FROM em_small WHERE y = em.b), em.a) FROM em WHERE a = 2;
+-- E1-B: SubPlan whose body is a Result + One-Time Filter over an outer ref.
+EXPLAIN (COSTS OFF) SELECT x FROM em_small t WHERE EXISTS (SELECT 1 FROM em WHERE t.y IS NULL);
+EXPLAIN (COSTS OFF, VERBOSE) SELECT x FROM em_small t WHERE EXISTS (SELECT 1 FROM em WHERE t.y IS NULL);
+
+-- E1-C: structured formats print zero-valued Rows Removed by Filter, and a
+-- never-executed node prints the field with value 0 (text keeps omitting).
+EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF, SUMMARY OFF, FORMAT JSON) SELECT * FROM em WHERE b = 999999;
+EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF, SUMMARY OFF, FORMAT JSON) SELECT * FROM em WHERE a = 1 AND b = 999999 LIMIT 0;
+
+-- DISABLED-PROP: Disabled marks only the disabled subtree roots (the scans);
+-- the Hash node inherits the child count so the join is NOT marked.
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM em e, em_small s WHERE e.b = s.x;
+EXPLAIN (COSTS OFF, FORMAT JSON) SELECT count(*) FROM em e, em_small s WHERE e.b = s.x;
+RESET enable_seqscan;
+
+-- HashAgg counters: a Mixed grouping-sets agg over EMPTY input records no
+-- hash_mem_peak, so JSON omits HashAgg Batches/Peak Memory Usage/Disk Usage.
+EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF, SUMMARY OFF, FORMAT JSON) SELECT x, y, count(*) FROM em_small WHERE false GROUP BY GROUPING SETS ((x, y), (x), ());
+
+-- E1-A: no runtime diagnostic lines in default EXPLAIN ANALYZE output (the
+-- pgrust.explain_runtime_verdicts GUC defaults off; these agg-over-heap
+-- shapes are exactly where the refusal lines leaked).
+EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF, SUMMARY OFF) SELECT b, count(*) FROM em GROUP BY b ORDER BY b LIMIT 3;
+EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF, SUMMARY OFF, FORMAT JSON) SELECT avg(b) FROM em_small;

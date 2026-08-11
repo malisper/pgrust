@@ -4216,7 +4216,7 @@ fn cb_scan_info<'mcx>(
     }
     if cx.syscol {
         return Err(Box::new(PgError::error(
-            "cbstore does not support system columns".to_string(),
+            "pgrcolumnar does not support system columns".to_string(),
         )));
     }
     if cx.wholerow {

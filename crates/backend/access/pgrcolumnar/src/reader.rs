@@ -36,7 +36,7 @@ fn arena_frame(arena: &mut Vec<u64>, raw_len: usize) -> &mut [u8] {
 pub fn read_header(hdr: &[u8]) -> PgResult<(u64, u64, u32)> {
     let version = get_u32(hdr, 8);
     if get_u64(hdr, 0) != CB_MAGIC || !(CB_VERSION_V1..=CB_VERSION).contains(&version) {
-        return Err(Box::new(PgError::error("cbstore: bad part header".to_string())));
+        return Err(Box::new(PgError::error("pgrcolumnar: bad part header".to_string())));
     }
     Ok((get_u64(hdr, 16), get_u64(hdr, 24), version))
 }
@@ -200,7 +200,7 @@ pub fn read_footer_rgs(
         || footer_off.checked_add(pre_len as u64).is_none_or(|e| e > total_len)
     {
         return Err(Box::new(PgError::error(
-            "cbstore: corrupt part (footer offset out of bounds)".to_string(),
+            "pgrcolumnar: corrupt part (footer offset out of bounds)".to_string(),
         )));
     }
     let mut fixed = vec![0u8; pre_len];
@@ -208,7 +208,7 @@ pub fn read_footer_rgs(
     let nrgs = get_u32(&fixed, 0) as usize;
     let fncols = get_u32(&fixed, 4) as usize;
     if fncols != ncols {
-        return Err(Box::new(PgError::error("cbstore: footer ncols mismatch".to_string())));
+        return Err(Box::new(PgError::error("pgrcolumnar: footer ncols mismatch".to_string())));
     }
     let lay = footer_layout(version, nrgs, ncols);
     let nlencols = if version >= CB_VERSION_V7 {
@@ -224,7 +224,7 @@ pub fn read_footer_rgs(
     // must produce a clean error, not a huge alloc or a read past EOF.
     if body_len as u64 > total_len - footer_off {
         return Err(Box::new(PgError::error(
-            "cbstore: corrupt part (footer body out of bounds)".to_string(),
+            "pgrcolumnar: corrupt part (footer body out of bounds)".to_string(),
         )));
     }
     // vec![0; n] allocates zeroed (fresh anonymous pages for footers this
@@ -319,7 +319,7 @@ fn parse_footer_checked(
         || get_u64(buf, tail) != buf.len() as u64
         || (check_crc && get_u32(buf, tail + 8) != crc32c(&buf[..tail]))
     {
-        return Err(Box::new(PgError::error("cbstore: corrupt footer".to_string())));
+        return Err(Box::new(PgError::error("pgrcolumnar: corrupt footer".to_string())));
     }
     // v7 prelude tail: per-column length-stats flags; all-0 on pre-v7 parts.
     let mut lenflags = vec![0u8; ncols];
@@ -383,7 +383,7 @@ fn parse_footer_checked(
     if version >= CB_VERSION_V6 {
         let nkeys = u16::from_le_bytes(buf[off..off + 2].try_into().unwrap()) as usize;
         if nkeys > CB_CLUSTER_KEY_MAX_COLS {
-            return Err(Box::new(PgError::error("cbstore: corrupt footer".to_string())));
+            return Err(Box::new(PgError::error("pgrcolumnar: corrupt footer".to_string())));
         }
         for k in 0..nkeys {
             let o = off + 2 + k * 2;
@@ -642,7 +642,7 @@ impl Part {
         for rg in &rgs {
             if rg.file_off.saturating_add(CB_RG_HEADER_LEN as u64) > map.bytes().len() as u64 {
                 return Err(Box::new(PgError::error(
-                    "cbstore: corrupt part (row group out of bounds)".to_string(),
+                    "pgrcolumnar: corrupt part (row group out of bounds)".to_string(),
                 )));
             }
         }

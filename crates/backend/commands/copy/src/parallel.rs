@@ -1205,7 +1205,7 @@ impl ParCopyShared {
                 let ncols = self.plan.coltypes.len();
                 if base.tts_isnull[..ncols].iter().any(|&n| n) {
                     return Err(Box::new(
-                        PgError::error("cbstore does not support NULL values".to_string())
+                        PgError::error("pgrcolumnar does not support NULL values".to_string())
                             .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
                     ));
                 }
@@ -1439,7 +1439,7 @@ impl ParCopyShared {
                     .expect("parquet parallel without a worker sort state");
                 if base.tts_isnull[..ncols].iter().any(|&x| x) {
                     return Err(Box::new(
-                        PgError::error("cbstore does not support NULL values".to_string())
+                        PgError::error("pgrcolumnar does not support NULL values".to_string())
                             .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
                     ));
                 }

@@ -2155,7 +2155,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // bodies were already AM-generic; see distinct_task_source).
     let heap_ok = ::nodeseqscan::seq_scan_is_heap(ss) && distinct_heap_enabled();
     if !fusible || !(is_cb || heap_ok) {
-        refused(estate, ea, node_id, "scan not fusible/cbstore");
+        refused(estate, ea, node_id, "scan not fusible/pgrcolumnar");
         return Ok(None);
     }
     if !is_cb && ea {

@@ -55,7 +55,7 @@ fn seg_bytes_cell() -> &'static std::sync::OnceLock<u64> {
 }
 
 fn io_err(path: &str, e: std::io::Error) -> Box<PgError> {
-    Box::new(PgError::error(format!("cbstore io error on \"{path}\": {e}")))
+    Box::new(PgError::error(format!("pgrcolumnar io error on \"{path}\": {e}")))
 }
 
 /// The errno of the vfs op that just failed, rendered exactly as the old
@@ -513,11 +513,11 @@ impl SegMap {
                     if vfs::get_errno() == libc::EINTR {
                         continue;
                     }
-                    return Err(io_err_errno("cbstore segment"));
+                    return Err(io_err_errno("pgrcolumnar segment"));
                 }
                 if n == 0 {
                     return Err(io_err(
-                        "cbstore segment",
+                        "pgrcolumnar segment",
                         std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
                             "failed to fill whole buffer",
@@ -548,7 +548,7 @@ impl SegMap {
                 0,
             );
             if reserve == libc::MAP_FAILED {
-                return Err(Box::new(PgError::error("cbstore: mmap reserve failed".to_string())));
+                return Err(Box::new(PgError::error("pgrcolumnar: mmap reserve failed".to_string())));
             }
             for (i, f) in files.iter().enumerate() {
                 if lens[i] == 0 {
@@ -566,7 +566,7 @@ impl SegMap {
                 if p == libc::MAP_FAILED {
                     libc::munmap(reserve, maplen);
                     return Err(Box::new(PgError::error(
-                        "cbstore: mmap segment failed".to_string(),
+                        "pgrcolumnar: mmap segment failed".to_string(),
                     )));
                 }
                 #[cfg(target_os = "linux")]

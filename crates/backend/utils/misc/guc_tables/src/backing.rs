@@ -46,6 +46,11 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     // Default OFF — the benchmark arms enable it explicitly and record it in
     // manifests. The PREWHERE arm reads the cell at qual-arm time.
     (pgrust_condition_cache_cell, bool, pgrust_condition_cache, set_pgrust_condition_cache, false),
+    // pgrust.explain_runtime_verdicts (pgrust-only): EXPLAIN ANALYZE display
+    // gate for the runtime admission walk's refusal verdicts. Default OFF —
+    // C prints nothing there and default EXPLAIN output stays C-parity
+    // (covdiff-fuzzer E1-A).
+    (pgrust_explain_runtime_verdicts_cell, bool, pgrust_explain_runtime_verdicts, set_pgrust_explain_runtime_verdicts, false),
     // pgrust.condition_cache_size: the cache's byte budget in KB (work_mem
     // unit idiom); default 102400 KB = 100 MB, ClickHouse's
     // query_condition_cache_size default. LRU-evicted at that bound.

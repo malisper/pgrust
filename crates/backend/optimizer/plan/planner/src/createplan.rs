@@ -4103,9 +4103,9 @@ fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
     for te in inner_plan.as_plan().expect("inner plan").targetlist.iter() {
         inner_tlist.lappend(mcx, te)?;
     }
-    let (i_startup, i_total, i_rows, i_width) = {
+    let (i_startup, i_total, i_rows, i_width, i_disabled) = {
         let p = inner_plan.as_plan().unwrap();
-        (p.startup_cost, p.total_cost, p.plan_rows, p.plan_width)
+        (p.startup_cost, p.total_cost, p.plan_rows, p.plan_width, p.disabled_nodes)
     };
     hash_plan.plan.targetlist = inner_tlist;
     hash_plan.plan.qual = NodeList::nil();
@@ -4113,6 +4113,12 @@ fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
     hash_plan.plan.righttree = None;
     hash_plan.hashkeys = inner_hashkeys;
     // copy_plan_costsize + Hash startup == total (EXPLAIN-only).
+    // disabled_nodes MUST ride along (createplan.c:5532): without it the
+    // Hash node reads 0 while its child carries the count, so
+    // plan_is_disabled sees the join's disabled_nodes exceed its children's
+    // sum and EXPLAIN falsely marks the ancestor join Disabled
+    // (covdiff-fuzzer DISABLED-PROP).
+    hash_plan.plan.disabled_nodes = i_disabled;
     hash_plan.plan.plan_rows = i_rows;
     hash_plan.plan.plan_width = i_width;
     hash_plan.plan.total_cost = i_total;

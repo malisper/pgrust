@@ -54,7 +54,7 @@ pub fn varlena_bytes<'a>(d: Datum) -> PgResult<&'a [u8]> {
         if b0 & 0x01 != 0 {
             if b0 == 0x01 {
                 return Err(Box::new(PgError::error(
-                    "cbstore: TOASTed input value; load via COPY".to_string(),
+                    "pgrcolumnar: TOASTed input value; load via COPY".to_string(),
                 )));
             }
             let len = ((b0 >> 1) & 0x7f) as usize;
@@ -62,7 +62,7 @@ pub fn varlena_bytes<'a>(d: Datum) -> PgResult<&'a [u8]> {
         }
         if b0 & 0x02 != 0 {
             return Err(Box::new(PgError::error(
-                "cbstore: compressed input value; load via COPY".to_string(),
+                "pgrcolumnar: compressed input value; load via COPY".to_string(),
             )));
         }
         let word = (p as *const u32).read_unaligned();
@@ -147,7 +147,7 @@ pub fn footer_stitch_gndv(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Ve
 
 pub fn unsupported(what: &str) -> Box<PgError> {
     Box::new(
-        PgError::error(format!("cbstore does not support {what}"))
+        PgError::error(format!("pgrcolumnar does not support {what}"))
             .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
     )
 }

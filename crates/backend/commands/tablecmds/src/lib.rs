@@ -748,7 +748,7 @@ pub fn DefineRelation<'mcx>(
                     PgError::new(
                         ERROR,
                         format!(
-                            "cbstore does not support the type of column \"{}\" (type oid {})",
+                            "pgrcolumnar does not support the type of column \"{}\" (type oid {})",
                             String::from_utf8_lossy(att.attname.name_str()),
                             att.atttypid
                         ),
