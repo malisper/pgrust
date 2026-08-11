@@ -1810,7 +1810,20 @@ pub fn create_agg_path<'mcx>(
     let sub = run.root.path(subpath_id).base();
     let rel = run.root.rel(rel_id);
     let pathkeys = if aggstrategy == types_pathnodes::AGG_SORTED {
-        types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &sub.pathkeys)
+        // Attempt to preserve the order of the subpath.  Additional pathkeys
+        // may have been added in adjust_group_pathkeys_for_groupagg() to
+        // support ORDER BY / DISTINCT aggregates.  Pathkeys added there
+        // belong to columns within the aggregate function, so we must strip
+        // these additional pathkeys off as those columns are unavailable
+        // above the aggregate node (create_agg_path, pathnode.c).
+        let n = run.root.num_groupby_pathkeys as usize;
+        if sub.pathkeys.len() > n {
+            let mut keys = PgVec::new_in(run.mcx);
+            keys.extend(sub.pathkeys.iter().take(n).copied());
+            keys
+        } else {
+            types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &sub.pathkeys)
+        }
     } else {
         // AGG_HASHED/AGG_PLAIN output is unordered.
         PgVec::new_in(run.mcx)
