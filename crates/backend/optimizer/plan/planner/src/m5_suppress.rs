@@ -287,12 +287,12 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
     MatrixRow {
         class: CoverClass::CbHashJoinMultiBuild,
         covered: true,
-        qualifiers: "m5p1: 3-6 cbstore rels, flat/left-deep-INNER forms; connected int equi graph; unindexed; EVERY rel nbatch==1 (walk is unbatched-only); plain whitelisted aggs; floor reused from hashjoin-nbatch1 (provisional — GL-M5P1-1 letter owed)",
+        qualifiers: "m5p1: 3-6 pgrcolumnar rels, flat/left-deep-INNER forms; connected int equi graph; unindexed; EVERY rel nbatch==1 (walk is unbatched-only); plain whitelisted aggs; floor reused from hashjoin-nbatch1 (provisional — GL-M5P1-1 letter owed)",
     },
     MatrixRow {
         class: CoverClass::CbHashJoinGroupedAgg,
         covered: true,
-        qualifiers: "se-aggjoin: 2-6 cbstore rels, flat/left-deep INNER-only forms; connected int equi graph; unindexed distinct rels; EVERY rel nbatch==1; int2/4/8 bare-Var group keys; PLAIN_FOLD_AGGS incl. avg/sum numeric-family int states; enable_hashagg+enable_hashjoin required; Agg-root only (no sort/limit/distinct); ngroups < min(groupby_high, 64k export headroom); floor reused from hashjoin-nbatch1 (provisional — GL-AGGJOIN-1 letter owed)",
+        qualifiers: "se-aggjoin: 2-6 pgrcolumnar rels, flat/left-deep INNER-only forms; connected int equi graph; unindexed distinct rels; EVERY rel nbatch==1; int2/4/8 bare-Var group keys; PLAIN_FOLD_AGGS incl. avg/sum numeric-family int states; enable_hashagg+enable_hashjoin required; Agg-root only (no sort/limit/distinct); ngroups < min(groupby_high, 64k export headroom); floor reused from hashjoin-nbatch1 (provisional — GL-AGGJOIN-1 letter owed)",
     },
     MatrixRow {
         class: CoverClass::CbMetaFooterAgg,
@@ -1264,7 +1264,7 @@ fn aggjoin_numeric_enabled() -> bool {
 
 /// SE-JHEAP (the GL-JHEAP-1 lane, conversion-scope car 2 — the heap-side join blocker):
 /// heap-side join admission. Every join classifier admitted pgrcolumnar rels
-/// ONLY ('side not cbstore' — the pure-shape census refusal), while the
+/// ONLY ('side not pgrcolumnar' — the pure-shape census refusal), while the
 /// executor's K2 heap feed (BatchGranuleSource seam) has been DEFAULT ON
 /// since the SE9/SE15 flips: the single-join arm and the multibuild
 /// build/probe walk both admit heap SeqScans (`k2_heap` in
@@ -1327,7 +1327,7 @@ fn k2_heapfeed_live() -> bool {
 const JHEAP_NL_MARGIN: f64 = 4.0;
 
 /// GL-COST-2 x conversion-flips-train merge carve: the flipped knob paths
-/// (aggjoinnum / decoroot-grouped / joinfilters cbstore-int) borrowed the
+/// (aggjoinnum / decoroot-grouped / joinfilters pgrcolumnar-int) borrowed the
 /// RIDER guards as their provisional floor; the GL-COST-2 unwire zeroed
 /// those rider rectangles on the riders' OWN witnessed grids (pure-
 /// bootstrap int-key shapes, rt/legacy 3.0-6.4x), but the knob paths'
@@ -4081,7 +4081,7 @@ fn classify_join_sides<'mcx>(
             // byte-for-byte. Index tolerance/stats ride jheap_shape_guards
             // below (they need the qual set).
             if !(jheap_enabled() && k2_heapfeed_live()) {
-                return refuse_join("side not cbstore");
+                return refuse_join("side not pgrcolumnar");
             }
             heap.push((i, rel_id));
         }
@@ -4475,7 +4475,7 @@ pub(crate) fn m5_suppress_gather_nlidx(
         _ => return refuse_nlidx("serial NL outer is not a plain seqscan"),
     };
     if run.root.rel(outer_parent).amflags & AMFLAG_PGRCOLUMNAR != 0 {
-        return refuse_nlidx("driver side is cbstore");
+        return refuse_nlidx("driver side is pgrcolumnar");
     }
     match run.root.path(inner_id) {
         types_pathnodes::PathNode::IndexPath(ip) => {
@@ -4621,7 +4621,7 @@ fn classify_nlidx_shape_uncached(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             return refuse_nlidx("side has no RelOptInfo yet");
         };
         if run.root.rel(rel_id).amflags & AMFLAG_PGRCOLUMNAR != 0 {
-            return refuse_nlidx("side is cbstore");
+            return refuse_nlidx("side is pgrcolumnar");
         }
     }
     if relids[0] == relids[1] {
@@ -5063,7 +5063,7 @@ fn multibuild_rel_guards(
             // executor feed kill thrown) takes the pre-existing refusal
             // byte-for-byte, trace included.
             if !(jheap_enabled() && k2_heapfeed_live()) {
-                return refuse_join_none("side not cbstore");
+                return refuse_join_none("side not pgrcolumnar");
             }
             heap.push((i, rel_id));
         }

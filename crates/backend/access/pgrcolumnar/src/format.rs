@@ -370,13 +370,13 @@ impl ChunkHeader {
 
     pub fn decode(b: &[u8]) -> ChunkHeader {
         ChunkHeader {
-            encoding: Encoding::from_u8(b[0]).expect("cbstore: bad chunk encoding"),
+            encoding: Encoding::from_u8(b[0]).expect("pgrcolumnar: bad chunk encoding"),
             width: b[1],
             flags: u16::from_le_bytes(b[2..4].try_into().unwrap()),
             ngranules: get_u32(b, 4),
             aux: get_i64(b, 8),
             payload_len: get_u64(b, 16),
-            codec: Codec::from_u8(b[24]).expect("cbstore: bad chunk codec"),
+            codec: Codec::from_u8(b[24]).expect("pgrcolumnar: bad chunk codec"),
         }
     }
 

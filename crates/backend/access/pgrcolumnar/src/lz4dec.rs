@@ -474,7 +474,7 @@ mod tests {
     // meaningful run (see notes in the branch report).
     #[test]
     fn fuzz_mutated_frames() {
-        let iters: u64 = std::env::var("CBSTORE_LZ4_FUZZ_ITERS")
+        let iters: u64 = std::env::var("PGRCOLUMNAR_LZ4_FUZZ_ITERS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(5_000);

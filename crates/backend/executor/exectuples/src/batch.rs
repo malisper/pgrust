@@ -923,7 +923,7 @@ pub fn soa_deform_columns(
     atts: &[CompactAttribute],
     qual_col_only: Option<u16>,
 ) {
-    debug_assert!(!plan.is_virtual(), "virtual prefix plans are cbstore-only (no offset chain)");
+    debug_assert!(!plan.is_virtual(), "virtual prefix plans are pgrcolumnar-only (no offset chain)");
     let n = soa.nrows as usize;
     let ncols = plan.ncols as usize;
     // Walk-tail plans (AGGSEQ-STAGE): the static column-major pass covers
@@ -1117,7 +1117,7 @@ pub fn soa_deform_columns_set(
     cols: &[u16],
     sel: Option<&[u64]>,
 ) {
-    debug_assert!(!plan.is_virtual(), "virtual prefix plans are cbstore-only (no offset chain)");
+    debug_assert!(!plan.is_virtual(), "virtual prefix plans are pgrcolumnar-only (no offset chain)");
     // AGGSEQ-STAGE: the K1-latemat split never arms over a walk-tail plan
     // (`seq_scan_k1_latemat_arm` refuses NAMED `k1-latemat-varwalk`) — this
     // pass indexes the static offset chain, which covers the head only.

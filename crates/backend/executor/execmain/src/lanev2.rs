@@ -637,7 +637,7 @@ fn arm_scan_staging<'mcx>(
         };
         if ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, ask)? {
             if vcol.is_some() {
-                lane_trace("cbstore prewhere+varlane dual arm engaged");
+                lane_trace("pgrcolumnar prewhere+varlane dual arm engaged");
             }
             // Multi-key dict co-arm on the PREWHERE-owned batch (the two-key
             // dict-int + text grouped-count shape whose qual sits on the
@@ -667,7 +667,7 @@ fn arm_scan_staging<'mcx>(
             // cold resolves).
             if let ScanFeedShape::HashAggFold { agg } = &shape {
                 if try_arm_cb_multikey_dict(agg, ss, estate) {
-                    lane_trace("cbstore multikey co-armed on prewhere lane");
+                    lane_trace("pgrcolumnar multikey co-armed on prewhere lane");
                 }
             }
             return Ok(());
@@ -1084,7 +1084,7 @@ pub fn try_own_seq_scan<'mcx>(
                 // Arm the qual staging (PREWHERE lane or kernel bitmap).
                 // Stitch stays off: tier-2 bodies are drain-pipeline-only,
                 // and this is a per-pull feed.
-                arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "standalone cbstore scan", stitch: false })?;
+                arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "standalone pgrcolumnar scan", stitch: false })?;
                 let armed = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
                 ss.set_cb_standalone_verdict(armed);
                 if !armed {
@@ -3055,7 +3055,7 @@ fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
             plan.vguards.is_empty()
                 || lanefold_varlane_col(plan).is_some()
                 || src.batch_soa().is_some(),
-            "multi-varlena fold without the cbstore staging armed"
+            "multi-varlena fold without the pgrcolumnar staging armed"
         );
         lanefold_varlane_col(plan)
     };
@@ -6326,7 +6326,7 @@ fn scan_mk_batch<'mcx>(
                     }
                     debug_assert!(
                         shape.nullable || !isnull[i],
-                        "cbstore no-NULLs proof violated in a multi-key window"
+                        "pgrcolumnar no-NULLs proof violated in a multi-key window"
                     );
                     let v = match width {
                         2 => values[i].as_i16() as i64,
@@ -6431,7 +6431,7 @@ fn scan_mk_batch<'mcx>(
                         let values = soa.col_values(att);
                         debug_assert!(
                             rows.iter().all(|&i| !soa.col_isnull(att)[i as usize]),
-                            "cbstore no-NULLs proof violated in a multi-key window"
+                            "pgrcolumnar no-NULLs proof violated in a multi-key window"
                         );
                         for (k, &i) in rows.iter().enumerate() {
                             let d = values[i as usize];
@@ -6617,7 +6617,7 @@ fn scan_mk1_text_direct_batch<'mcx>(
             let values = soa.col_values(att);
             debug_assert!(
                 rows.iter().all(|&i| !soa.col_isnull(att)[i as usize]),
-                "cbstore no-NULLs proof violated in a single-text window"
+                "pgrcolumnar no-NULLs proof violated in a single-text window"
             );
             for &i in rows.iter() {
                 let d = values[i as usize];

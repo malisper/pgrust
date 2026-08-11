@@ -304,8 +304,9 @@ pub fn register_heap_table_am(relam: Oid) {
 }
 
 thread_local! {
-    // pg_am oids whose amname is "cbstore" (the frozen SQL-surface AM name for
-    // the pgrcolumnar engine; closed-AM engine: handlers are
+    // pg_am oids whose amname is "pgrcolumnar" (the SQL-surface AM name for
+    // the pgrcolumnar engine; the pre-2026-08 name has NO alias — only this
+    // exact amname binds the engine. Closed-AM engine: handlers are
     // never invoked, so pgrcolumnar is identified by name at relcache build —
     // docs/design/pgrcolumnar-impl.md §7.1).
     static PGRCOLUMNAR_AMS: std::cell::RefCell<Vec<Oid>> =

@@ -1636,7 +1636,7 @@ fn pgrcolumnar_acquire_sample_rows<'mcx>(
                      row: u32|
      -> PgResult<HeapTupleData<'mcx>> {
         if !tableam::pgrcolumnar_analyze_fetch_row(scan, rg, row, slot) {
-            panic!("cbstore analyze: sampled row ref out of range");
+            panic!("pgrcolumnar analyze: sampled row ref out of range");
         }
         let b = slot.base();
         let owned = heaptuple::heap_form_tuple(mcx, tupdesc, &b.tts_values, &b.tts_isnull)?;
@@ -1697,7 +1697,7 @@ fn pgrcolumnar_acquire_sample_rows<'mcx>(
         tableam::table_endscan(scan)?;
         if trace {
             eprintln!(
-                "ANALYZE|TRACE|cbstore acquire: pool={} refs={} granule_tasks={} wall={:.3}s",
+                "ANALYZE|TRACE|pgrcolumnar acquire: pool={} refs={} granule_tasks={} wall={:.3}s",
                 pool,
                 refs.len(),
                 tasks,
@@ -1762,7 +1762,7 @@ fn pgrcolumnar_acquire_sample_rows<'mcx>(
     }
     if trace {
         eprintln!(
-            "ANALYZE|TRACE|cbstore acquire: pool=0 refs={} wall={:.3}s",
+            "ANALYZE|TRACE|pgrcolumnar acquire: pool=0 refs={} wall={:.3}s",
             numrows,
             t0.elapsed().as_secs_f64()
         );

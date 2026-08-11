@@ -736,7 +736,7 @@ pub fn DefineRelation<'mcx>(
     // (docs/design/pgrcolumnar-impl.md §3).
     if access_method_id != InvalidOid
         && access_method_id != 2
-        && syscache_seams::pg_am_amname::call(access_method_id)?.as_deref() == Some("cbstore")
+        && syscache_seams::pg_am_amname::call(access_method_id)?.as_deref() == Some("pgrcolumnar")
     {
         for i in 0..descriptor.natts as usize {
             let att = descriptor.attr(i);

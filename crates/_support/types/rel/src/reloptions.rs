@@ -130,7 +130,7 @@ pub enum PgrcolumnarCodec {
 pub const PGRCOLUMNAR_CLUSTER_KEY_MAX: usize = 512;
 pub const PGRCOLUMNAR_CODEC_COLS_MAX: usize = 2048;
 
-// pgrcolumnar AM storage options (CREATE TABLE ... USING cbstore WITH (...)).
+// pgrcolumnar AM storage options (CREATE TABLE ... USING pgrcolumnar WITH (...)).
 // Strings live in fixed inline buffers so RdOptions stays Copy; lengths are
 // validated at option-parse time.
 #[derive(Clone, Copy, Debug, PartialEq)]

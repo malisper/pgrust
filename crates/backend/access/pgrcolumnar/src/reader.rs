@@ -777,7 +777,7 @@ impl Part {
         let bytes = self.bytes();
         let end = off.checked_add(count as u64 * 4)?;
         if off % 4 != 0 || end > bytes.len() as u64 {
-            debug_assert!(false, "cbstore: torn stitch directory entry");
+            debug_assert!(false, "pgrcolumnar: torn stitch directory entry");
             return None;
         }
         // SAFETY: bounds and 4-alignment checked above; the mmap base is
@@ -1026,15 +1026,15 @@ pub(crate) fn decompress_frame_into(codec: Codec, src: &[u8], dst: &mut [u8], ra
     match codec {
         Codec::Lz4 => {
             crate::lz4dec::decompress_padded(src, dst, raw_len)
-                .unwrap_or_else(|e| panic!("cbstore: corrupt LZ4 frame: {e}"));
+                .unwrap_or_else(|e| panic!("pgrcolumnar: corrupt LZ4 frame: {e}"));
         }
         #[cfg(not(target_family = "wasm"))]
         Codec::Zstd => {
             let got = zstd::bulk::Decompressor::new()
-                .expect("cbstore: zstd decompressor init failed")
+                .expect("pgrcolumnar: zstd decompressor init failed")
                 .decompress_to_buffer(src, &mut dst[..raw_len])
-                .expect("cbstore: corrupt ZSTD frame");
-            assert_eq!(got, raw_len, "cbstore: ZSTD frame length mismatch");
+                .expect("pgrcolumnar: corrupt ZSTD frame");
+            assert_eq!(got, raw_len, "pgrcolumnar: ZSTD frame length mismatch");
         }
         // wasm32: zstd-sys links C and has no wasm build; pgrcolumnar tables
         // carrying ZSTD frames are unreadable on this target (documented
@@ -1042,9 +1042,9 @@ pub(crate) fn decompress_frame_into(codec: Codec, src: &[u8], dst: &mut [u8], ra
         #[cfg(target_family = "wasm")]
         Codec::Zstd => {
             let _ = (src, raw_len);
-            panic!("cbstore: ZSTD frames are not supported on wasm32-wasip1");
+            panic!("pgrcolumnar: ZSTD frames are not supported on wasm32-wasip1");
         }
-        Codec::None => unreachable!("cbstore: decompress with Codec::None"),
+        Codec::None => unreachable!("pgrcolumnar: decompress with Codec::None"),
     }
 }
 
@@ -1339,7 +1339,7 @@ impl<'a> ChunkView<'a> {
         let fo = self.granule(g).payload_off as usize;
         let raw_len = get_u32(p, fo) as usize;
         let comp_len = get_u32(p, fo + 4) as usize;
-        assert_eq!(raw_len, n * w, "cbstore: framed granule length mismatch");
+        assert_eq!(raw_len, n * w, "pgrcolumnar: framed granule length mismatch");
         let dst = arena_frame(arena, raw_len);
         decompress_frame_into(self.hdr.frame_codec(), &p[fo + 8..fo + 8 + comp_len], dst, raw_len);
         &dst[..raw_len]
@@ -1568,7 +1568,7 @@ impl<'a> ChunkView<'a> {
                             ));
                         }
                     }
-                    w => panic!("cbstore: FOR width {w}"),
+                    w => panic!("pgrcolumnar: FOR width {w}"),
                 }
                 // SAFETY: every slot of dst (the first `n` spare slots) was
                 // written by exactly one arm above.
@@ -1821,7 +1821,7 @@ mod tests {
     }
 
     fn tmp(name: &str) -> String {
-        let p = std::env::temp_dir().join(format!("cbstore-footer-{}-{}", std::process::id(), name));
+        let p = std::env::temp_dir().join(format!("pgrcolumnar-footer-{}-{}", std::process::id(), name));
         p.to_str().unwrap().to_string()
     }
 

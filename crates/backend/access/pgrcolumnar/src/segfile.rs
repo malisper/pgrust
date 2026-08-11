@@ -606,7 +606,7 @@ mod dirsync_tests {
 
     fn tmp(name: &str) -> String {
         let p = std::env::temp_dir()
-            .join(format!("cbstore-dirsync-{}-{}", std::process::id(), name));
+            .join(format!("pgrcolumnar-dirsync-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(format!("{}.1", p.display()));
         std::fs::write(&p, []).unwrap();

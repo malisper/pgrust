@@ -1685,7 +1685,7 @@ fn vec_cols(
     // engaged columnar granule starts. The t43 stack generalized the arm's
     // task source to heap morsels, so the vec rider must now refuse heap
     // itself — None = the incumbent per-row accept, the member's original
-    // heap semantics (caught by the cbstore-lane off-arm heap corpus).
+    // heap semantics (caught by the pgrcolumnar-lane off-arm heap corpus).
     if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return None;
     }

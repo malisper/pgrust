@@ -178,7 +178,7 @@ mod cb {
 #[cold]
 #[inline(never)]
 fn cb_refused(what: &'static str) -> ! {
-    panic!("cbstore does not support {what} (unreachable without indexes/DML)")
+    panic!("pgrcolumnar does not support {what} (unreachable without indexes/DML)")
 }
 
 // heapam_handler.c's heapam_methods, bound directly onto heapam /
@@ -1039,7 +1039,7 @@ pub fn pgrcolumnar_footer_stitch_gndv(rel: &Relation<'_>) -> PgResult<Option<Vec
 pub fn pgrcolumnar_analyze_visible_rgs(scan: &TableScanDesc<'_>) -> PgResult<Vec<(u32, u32)>> {
     match scan {
         TableScanDesc::Pgrcolumnar(c) => c.analyze_visible_rgs(),
-        TableScanDesc::Heap(_) => panic!("cbstore_analyze_visible_rgs: heap scan"),
+        TableScanDesc::Heap(_) => panic!("pgrcolumnar_analyze_visible_rgs: heap scan"),
     }
 }
 
@@ -1051,7 +1051,7 @@ pub fn pgrcolumnar_analyze_fetch_row(
 ) -> bool {
     match scan {
         TableScanDesc::Pgrcolumnar(c) => c.gather_row(rg, row, slot),
-        TableScanDesc::Heap(_) => panic!("cbstore_analyze_fetch_row: heap scan"),
+        TableScanDesc::Heap(_) => panic!("pgrcolumnar_analyze_fetch_row: heap scan"),
     }
 }
 
@@ -1069,7 +1069,7 @@ pub fn pgrcolumnar_analyze_gather_rows(
 ) -> PgResult<u64> {
     match scan {
         TableScanDesc::Pgrcolumnar(c) => c.analyze_gather_rows(refs, pool, slot, per_row),
-        TableScanDesc::Heap(_) => panic!("cbstore_analyze_gather_rows: heap scan"),
+        TableScanDesc::Heap(_) => panic!("pgrcolumnar_analyze_gather_rows: heap scan"),
     }
 }
 
@@ -1517,7 +1517,7 @@ pub fn table_scan_granule_meta_peek(
 /// Consume the granule the peek just answered (pgrcolumnar only).
 pub fn table_scan_granule_meta_consume(scan: &mut TableScanDesc<'_>) {
     match scan {
-        TableScanDesc::Heap(_) => unreachable!("granule meta is cbstore-only"),
+        TableScanDesc::Heap(_) => unreachable!("granule meta is pgrcolumnar-only"),
         TableScanDesc::Pgrcolumnar(c) => c.granule_meta_consume(),
     }
 }
@@ -1547,7 +1547,7 @@ pub fn table_scan_agg_meta_peek(
 /// Consume the row group the peek just answered (`MetaRg`; pgrcolumnar only).
 pub fn table_scan_agg_meta_consume_rg(scan: &mut TableScanDesc<'_>) {
     match scan {
-        TableScanDesc::Heap(_) => unreachable!("agg meta is cbstore-only"),
+        TableScanDesc::Heap(_) => unreachable!("agg meta is pgrcolumnar-only"),
         TableScanDesc::Pgrcolumnar(c) => c.agg_meta_consume_rg(),
     }
 }
@@ -1555,7 +1555,7 @@ pub fn table_scan_agg_meta_consume_rg(scan: &mut TableScanDesc<'_>) {
 /// Consume the granule the peek just answered (`MetaGranule`; pgrcolumnar only).
 pub fn table_scan_agg_meta_consume_granule(scan: &mut TableScanDesc<'_>) {
     match scan {
-        TableScanDesc::Heap(_) => unreachable!("agg meta is cbstore-only"),
+        TableScanDesc::Heap(_) => unreachable!("agg meta is pgrcolumnar-only"),
         TableScanDesc::Pgrcolumnar(c) => c.agg_meta_consume_granule(),
     }
 }
@@ -1570,7 +1570,7 @@ pub fn table_scan_supports_meta_count(scan: &TableScanDesc<'_>) -> bool {
 pub fn table_scan_meta_count_next(scan: &mut TableScanDesc<'_>) -> PgResult<u32> {
     match scan {
         TableScanDesc::Pgrcolumnar(c) => c.next_meta_count(),
-        TableScanDesc::Heap(_) => unreachable!("meta count is cbstore-only"),
+        TableScanDesc::Heap(_) => unreachable!("meta count is pgrcolumnar-only"),
     }
 }
 
@@ -1742,7 +1742,7 @@ pub fn table_scan_batch_fill_len<'mcx>(
 ) {
     match scan {
         TableScanDesc::Pgrcolumnar(cb) => cb.batch_fill_len_col(c as usize, chars, soa),
-        _ => unreachable!("length lanes arm on cbstore batches only"),
+        _ => unreachable!("length lanes arm on pgrcolumnar batches only"),
     }
 }
 
@@ -1794,7 +1794,7 @@ pub fn table_scan_batch_deform_col<'mcx>(
     soa: &mut ::exectuples::SoaBatch<'_>,
 ) {
     match scan {
-        TableScanDesc::Heap(_) => unreachable!("staged deform is cbstore-only"),
+        TableScanDesc::Heap(_) => unreachable!("staged deform is pgrcolumnar-only"),
         TableScanDesc::Pgrcolumnar(cb) => cb.batch_deform_col(c as usize, soa),
     }
 }

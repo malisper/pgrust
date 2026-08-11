@@ -370,7 +370,7 @@ fn capture_positioned<'mcx>(
 }
 
 /// SEAM-WIRING (SE10-GATES item 1): is a scan of this range-table entry
-/// TID-capturable? pgrcolumnar (cbstore) is a scan-only AM — its slots are
+/// TID-capturable? pgrcolumnar (pgrcolumnar) is a scan-only AM — its slots are
 /// VIRTUAL (no `tts_tid`), TID scans/updates are unsupported — so §4.2
 /// capture over it is structurally useless: the un-narrowed probe forced
 /// exactly the lane batch-fill breadth (standalone SeqScan over

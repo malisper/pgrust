@@ -2190,7 +2190,7 @@ fn admit<'mcx>(
         refuse!("not a postmaster session leader");
     }
     if tableam_vocab::TableAm::of(rel) != Some(tableam_vocab::TableAm::Pgrcolumnar) {
-        refuse!("not a cbstore relation");
+        refuse!("not a pgrcolumnar relation");
     }
     if has_triggers {
         refuse!("relation has triggers");
@@ -2247,7 +2247,7 @@ fn admit<'mcx>(
     // drains serially by construction).
     let coltypes = match pgrcolumnar::coltypes_of(rel) {
         Ok(t) => t,
-        Err(_) => refuse!("unsupported cbstore column type (serial raises the error)"),
+        Err(_) => refuse!("unsupported pgrcolumnar column type (serial raises the error)"),
     };
     let sort = match pgrcolumnar::writer::writer_opts_of(rel, &coltypes) {
         Ok(opts) if opts.cluster_key.is_empty() && opts.presort_key.is_empty() => None,
@@ -2273,7 +2273,7 @@ fn admit<'mcx>(
                 memstore: None, // resolved after dop, below
             })
         }
-        Err(_) => refuse!("cbstore reloption error (serial raises it)"),
+        Err(_) => refuse!("pgrcolumnar reloption error (serial raises it)"),
     };
     // Callback sources (tablesync's publisher COPY OUT stream) stay serial.
     if matches!(cstate.src, CopySrc::Callback { .. }) {

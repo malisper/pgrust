@@ -831,11 +831,11 @@ pub fn relam_is_pgrcolumnar(relam: Oid) -> bool {
         && (tableam_vocab::is_pgrcolumnar_am_oid(relam)
             || matches!(
                 syscache_seams::pg_am_amname::call(relam),
-                Ok(Some(ref n)) if n == "cbstore"
+                Ok(Some(ref n)) if n == "pgrcolumnar"
             ))
 }
 
-// pgrcolumnar AM storage options (CREATE TABLE ... USING cbstore WITH (...)).
+// pgrcolumnar AM storage options (CREATE TABLE ... USING pgrcolumnar WITH (...)).
 // A closed hand-rolled parse table (no C counterpart — pgrcolumnar is native):
 // cluster_key='col,...' (sort-on-ingest key), codec=auto|lz4|zstd|plain,
 // zstd_level=1..22, codec_cols='col=codec,...' (per-column overrides).

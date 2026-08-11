@@ -115,7 +115,7 @@ seam_core::seam!(
     // ForceSyncCommit() (xact.c): make this transaction's commit XLogFlush
     // its commit record before the client sees success. Consumed by
     // pgrcolumnar's part publish (docs/design/pgrcolumnar-impl.md §5):
-    // cbstore data carries no WAL, so a COPY/INSERT-only transaction
+    // pgrcolumnar data carries no WAL, so a COPY/INSERT-only transaction
     // reaches RecordTransactionCommit with wrote_xlog = false and would
     // otherwise take the async-commit shortcut (GH #248).
     pub fn force_sync_commit()

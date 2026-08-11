@@ -1120,11 +1120,11 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
                     b.cond_armed = ::tableam::table_scan_condcache_arm(sd, fp, cap);
                     if b.cond_armed {
                         ::laneexec::log_condcache_armed();
-                        lane_trace("cbstore condition cache armed");
+                        lane_trace("pgrcolumnar condition cache armed");
                     }
                 }
             }
-            lane_trace("cbstore prewhere armed");
+            lane_trace("pgrcolumnar prewhere armed");
             Ok(true)
         }
         None => {
@@ -1257,9 +1257,9 @@ pub fn seq_scan_cb_columnar_arm<'mcx>(
         mcx,
     ));
     lane_trace(if dict_key.is_some() {
-        "cbstore dict-group staging armed"
+        "pgrcolumnar dict-group staging armed"
     } else {
-        "cbstore columnar staging armed"
+        "pgrcolumnar columnar staging armed"
     });
     true
 }

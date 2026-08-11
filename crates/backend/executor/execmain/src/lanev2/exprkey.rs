@@ -3013,7 +3013,7 @@ fn exprkey_mk_batch<'mcx>(
     let Some(shape) = mk_shape.filter(|_| armed) else {
         return per_row_batch(agg, ss, n, estate);
     };
-    debug_assert!(!shape.nullable, "the expr-key multi-key arm is cbstore-only (no null byte)");
+    debug_assert!(!shape.nullable, "the expr-key multi-key arm is pgrcolumnar-only (no null byte)");
     // Derive the computed key over the survivors. Errors: refuse-and-replay.
     let mut derive_err = false;
     let mut null_key = false;
@@ -3131,7 +3131,7 @@ fn exprkey_mk_batch<'mcx>(
                         let i = i as usize;
                         debug_assert!(
                             !isnull[i],
-                            "cbstore no-NULLs proof violated in a multi-key window"
+                            "pgrcolumnar no-NULLs proof violated in a multi-key window"
                         );
                         match ::nodeagg::mk_numeric_datum_bits(values[i], width) {
                             Some(bits) => packbuf[k] |= (bits as u128) << off_bits,
@@ -3152,7 +3152,7 @@ fn exprkey_mk_batch<'mcx>(
                         let i = i as usize;
                         debug_assert!(
                             !isnull[i],
-                            "cbstore no-NULLs proof violated in a multi-key window"
+                            "pgrcolumnar no-NULLs proof violated in a multi-key window"
                         );
                         let v = match width {
                             2 => values[i].as_i16() as i64,
@@ -3342,7 +3342,7 @@ fn exprkey_mk_batch<'mcx>(
                             let values = soa.col_values(base);
                             debug_assert!(
                                 rows.iter().all(|&i| !soa.col_isnull(base)[i as usize]),
-                                "cbstore no-NULLs proof violated in a multi-key window"
+                                "pgrcolumnar no-NULLs proof violated in a multi-key window"
                             );
                             for (k, &i) in rows.iter().enumerate() {
                                 let d = values[i as usize];

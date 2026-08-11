@@ -638,8 +638,8 @@ impl<'mcx> CbScanDescData<'mcx> {
             range_end: None,
             direct_handed: false,
             block_mask: !0,
-            block_zm_enabled: !env_off("CBSTORE_DISABLE_BLOCK_ZM"),
-            bloom_enabled: !env_off("CBSTORE_DISABLE_BLOOM"),
+            block_zm_enabled: !env_off("PGRCOLUMNAR_DISABLE_BLOCK_ZM"),
+            bloom_enabled: !env_off("PGRCOLUMNAR_DISABLE_BLOOM"),
             window_rows: env_window_rows(),
             lazy: false,
             all_ready: (u32::MAX, u32::MAX, u64::MAX),
@@ -776,7 +776,7 @@ impl<'mcx> CbScanDescData<'mcx> {
         let len = (g1 - g0) as usize;
         if g_in_rg + len > rg_granules {
             return Err(Box::new(PgError::error(format!(
-                "cbstore: granule range [{g0}, {g1}) crosses a row-group boundary"
+                "pgrcolumnar: granule range [{g0}, {g1}) crosses a row-group boundary"
             ))));
         }
         // Same-RG carry-over: keep the rg_checked verdict (pure per-RG
@@ -824,7 +824,7 @@ impl<'mcx> CbScanDescData<'mcx> {
         debug_assert!(self.adaptive.is_none(), "direct top-N drive vs adaptive drive");
         let (Some(end), true) = (self.range_end, self.rg_claimed) else {
             return Err(Box::new(PgError::error(
-                "cbstore: direct top-N granule outside a granule-range claim".to_string(),
+                "pgrcolumnar: direct top-N granule outside a granule-range claim".to_string(),
             )));
         };
         let Some(part) = self.part.clone() else { return Ok(None) };
@@ -2663,7 +2663,7 @@ impl<'mcx> CbScanDescData<'mcx> {
         let Some(part) = self.part.as_ref() else { return false };
         let (rg, row) = (rg as usize, row as usize);
         if rg >= part.rgs.len() || row >= part.rgs[rg].nrows as usize {
-            debug_assert!(false, "cbstore gather_row: ref out of range");
+            debug_assert!(false, "pgrcolumnar gather_row: ref out of range");
             return false;
         }
         let g = row / GRANULE_ROWS;
@@ -3089,7 +3089,7 @@ mod analyze_gather_tests {
 
     fn tmp(name: &str) -> String {
         let p = std::env::temp_dir()
-            .join(format!("cbstore-anlz-gather-{}-{}", std::process::id(), name));
+            .join(format!("pgrcolumnar-anlz-gather-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         std::fs::write(&p, []).unwrap();
         p.to_str().unwrap().to_string()

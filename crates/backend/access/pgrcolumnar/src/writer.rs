@@ -15,7 +15,7 @@ use crate::segfile::SegFile;
 use ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
 use crate::varlena_bytes;
 
-// ---- per-table writer options (CREATE TABLE ... USING cbstore WITH (...)) --
+// ---- per-table writer options (CREATE TABLE ... USING pgrcolumnar WITH (...)) --
 
 /// Table-level codec policy (the v6 per-column codec menu, plan §3.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,12 +258,12 @@ impl CodecCtx {
             Codec::Lz4 => lz4_flex::compress(data),
             #[cfg(not(target_family = "wasm"))]
             Codec::Zstd => zstd::bulk::compress(data, self.zstd_level)
-                .expect("cbstore: zstd compress failed"),
+                .expect("pgrcolumnar: zstd compress failed"),
             // wasm32: zstd-sys links C and has no wasm build; the codec
             // picker never selects Zstd on this target (see pick()).
             #[cfg(target_family = "wasm")]
-            Codec::Zstd => panic!("cbstore: ZSTD codec is not supported on wasm32-wasip1"),
-            Codec::None => unreachable!("cbstore: compress with Codec::None"),
+            Codec::Zstd => panic!("pgrcolumnar: ZSTD codec is not supported on wasm32-wasip1"),
+            Codec::None => unreachable!("pgrcolumnar: compress with Codec::None"),
         }
     }
 
@@ -1264,8 +1264,8 @@ impl CbWriter {
         self.finish_sync += ft2.elapsed();
 
         // The part is durable, but the COMMIT that makes these RGs visible
-        // is not yet: cbstore data carries no WAL, so a transaction whose
-        // only writes are cbstore rows reaches RecordTransactionCommit with
+        // is not yet: pgrcolumnar data carries no WAL, so a transaction whose
+        // only writes are pgrcolumnar rows reaches RecordTransactionCommit with
         // wrote_xlog = false and takes xact.c's async-commit shortcut — the
         // acked commit record sits in WAL buffers and kill -9 loses it,
         // leaving every RG just published invisible behind the §4 xmin
@@ -2592,7 +2592,7 @@ mod abortsafe_tests {
 
     fn tmp(name: &str) -> String {
         let p = std::env::temp_dir()
-            .join(format!("cbstore-abortsafe-{}-{}", std::process::id(), name));
+            .join(format!("pgrcolumnar-abortsafe-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         std::fs::write(&p, []).unwrap();
         p.to_str().unwrap().to_string()
@@ -2685,7 +2685,7 @@ mod lenstats_tests {
 
     fn tmp(name: &str) -> String {
         let p = std::env::temp_dir()
-            .join(format!("cbstore-lenstats-{}-{}", std::process::id(), name));
+            .join(format!("pgrcolumnar-lenstats-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         std::fs::write(&p, []).unwrap();
         p.to_str().unwrap().to_string()
@@ -2805,7 +2805,7 @@ mod sorted_flag_tests {
 
     fn tmp(name: &str) -> String {
         let p = std::env::temp_dir()
-            .join(format!("cbstore-sorted-{}-{}", std::process::id(), name));
+            .join(format!("pgrcolumnar-sorted-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         std::fs::write(&p, []).unwrap();
         p.to_str().unwrap().to_string()
@@ -3323,7 +3323,7 @@ mod cluster_key_tests {
 
     fn tmp(name: &str) -> String {
         let p = std::env::temp_dir()
-            .join(format!("cbstore-ckey-{}-{}", std::process::id(), name));
+            .join(format!("pgrcolumnar-ckey-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         std::fs::write(&p, []).unwrap();
         p.to_str().unwrap().to_string()
@@ -3333,7 +3333,7 @@ mod cluster_key_tests {
     fn tup_desc() -> std::rc::Rc<::types_tuple::TupleDescData<'static>> {
         use ::types_tuple::*;
         let m: &'static ::mcx::MemoryContext =
-            Box::leak(Box::new(::mcx::MemoryContext::new("cbstore-ckey-test")));
+            Box::leak(Box::new(::mcx::MemoryContext::new("pgrcolumnar-ckey-test")));
         let mcx = m.mcx();
         let mut attrs = ::mcx::PgVec::new_in(mcx);
         let mut compact = ::mcx::PgVec::new_in(mcx);
@@ -3831,7 +3831,7 @@ mod stitch_tests {
 
     fn tmp(name: &str) -> String {
         let p = std::env::temp_dir()
-            .join(format!("cbstore-stitch-{}-{}", std::process::id(), name));
+            .join(format!("pgrcolumnar-stitch-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         std::fs::write(&p, []).unwrap();
         p.to_str().unwrap().to_string()
@@ -3966,7 +3966,7 @@ mod parallel_ingest_tests {
 
     fn tmp(name: &str) -> String {
         let p = std::env::temp_dir()
-            .join(format!("cbstore-paringest-{}-{}", std::process::id(), name));
+            .join(format!("pgrcolumnar-paringest-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         std::fs::write(&p, []).unwrap();
         p.to_str().unwrap().to_string()
@@ -4123,7 +4123,7 @@ mod ndv_regs_tests {
 
     fn tmp(name: &str) -> String {
         let p =
-            std::env::temp_dir().join(format!("cbstore-ndvregs-{}-{}", std::process::id(), name));
+            std::env::temp_dir().join(format!("pgrcolumnar-ndvregs-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         std::fs::write(&p, []).unwrap();
         p.to_str().unwrap().to_string()
