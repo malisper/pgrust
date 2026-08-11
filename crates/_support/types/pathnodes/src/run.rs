@@ -558,6 +558,52 @@ pub fn rinfo_is_pushed_down(
     ri.is_pushed_down || !crate::relids::relids_is_subset(&ri.required_relids, joinrelids)
 }
 
+// join_clause_is_movable_into (restrictinfo.c). Lives here, not in pathnode,
+// because costsize is below pathnode in the crate graph and has_indexed_join_quals
+// needs it (pathnode re-exports this name unchanged).
+pub fn join_clause_is_movable_into(
+    run: &PlannerRun<'_>,
+    rid: crate::RinfoId,
+    currentrelids: &crate::Relids<'_>,
+    current_and_outer: &crate::Relids<'_>,
+) -> bool {
+    use crate::relids::{relids_is_subset, relids_overlap};
+    let ri = run.root.rinfo(rid);
+    if !relids_is_subset(&ri.clause_relids, current_and_outer) {
+        return false;
+    }
+    if !relids_overlap(currentrelids, &ri.clause_relids) {
+        return false;
+    }
+    if relids_overlap(currentrelids, &ri.outer_relids) {
+        return false;
+    }
+    true
+}
+
+// is_redundant_with_indexclauses (equivclass.c). Lives here for the same
+// crate-graph reason as join_clause_is_movable_into; equivclass re-exports it.
+pub fn is_redundant_with_indexclauses(
+    run: &PlannerRun<'_>,
+    rinfo: crate::RinfoId,
+    indexclauses: &[crate::IndexClause<'_>],
+) -> bool {
+    let parent_ec = run.root.rinfo(rinfo).parent_ec;
+    for iclause in indexclauses {
+        if iclause.lossy {
+            continue;
+        }
+        let other = iclause.rinfo.expect("IndexClause rinfo");
+        if rinfo == other {
+            return true;
+        }
+        if parent_ec.is_some() && run.root.rinfo(other).parent_ec == parent_ec {
+            return true;
+        }
+    }
+    false
+}
+
 // get_sortgrouplist_exprs (tlist.c) into estimate_num_groups' input shape.
 pub fn sortgrouplist_exprs<'mcx>(
     run: &mut PlannerRun<'mcx>,

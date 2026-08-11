@@ -518,10 +518,17 @@ pub(crate) fn make_pathkeys_for_window<'mcx>(
     if !wc.orderClause.is_nil() {
         let orderby =
             crate::pathkeys::make_pathkeys_for_sortclauses(run, &wc.orderClause, tlist)?;
-        // append_pathkeys: skip entries already present (canonical identity).
-        for pk in orderby.iter() {
-            if !window_pathkeys.iter().any(|p| p == pk) {
-                window_pathkeys.push(*pk);
+        if window_pathkeys.is_empty() {
+            window_pathkeys = orderby;
+        } else {
+            // append_pathkeys: an ORDER BY key whose eclass already appears
+            // among the PARTITION BY pathkeys is redundant even when its
+            // direction differs (pathkey_is_redundant matches on eclass
+            // alone), e.g. ORDER BY x DESC under PARTITION BY y with x = y.
+            for &pk in orderby.iter() {
+                if !crate::pathkeys::pathkey_is_redundant(run, pk, &window_pathkeys) {
+                    window_pathkeys.push(pk);
+                }
             }
         }
     }

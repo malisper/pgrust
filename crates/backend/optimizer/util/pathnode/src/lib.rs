@@ -878,26 +878,10 @@ pub fn calc_non_nestloop_required_outer<'mcx>(
     relids_union(mcx, &outer_paramrels, &inner_paramrels)
 }
 
-// join_clause_is_movable_into (restrictinfo.c).
-pub fn join_clause_is_movable_into(
-    run: &PlannerRun<'_>,
-    rid: types_pathnodes::RinfoId,
-    currentrelids: &types_pathnodes::Relids<'_>,
-    current_and_outer: &types_pathnodes::Relids<'_>,
-) -> bool {
-    use types_pathnodes::relids::{relids_is_subset, relids_overlap};
-    let ri = run.root.rinfo(rid);
-    if !relids_is_subset(&ri.clause_relids, current_and_outer) {
-        return false;
-    }
-    if !relids_overlap(currentrelids, &ri.clause_relids) {
-        return false;
-    }
-    if relids_overlap(currentrelids, &ri.outer_relids) {
-        return false;
-    }
-    true
-}
+// join_clause_is_movable_into (restrictinfo.c). The body lives in
+// types_pathnodes::run so costsize (below this crate in the graph) can use it
+// for has_indexed_join_quals; this stays the name callers reach for.
+pub use types_pathnodes::run::join_clause_is_movable_into;
 
 // get_baserel_parampathinfo (relnode.c). The path holds a copy of the cached
 // PPI (C shares the pointer; nothing compares PPIs by identity here).

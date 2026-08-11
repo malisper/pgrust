@@ -9,7 +9,7 @@ use mcx::PgVec;
 use types_error::PgResult;
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::{
-    ECDerivesKey, EcId, EmId, EquivalenceClass, EquivalenceMember, IndexClause, RelId, Relids,
+    ECDerivesKey, EcId, EmId, EquivalenceClass, EquivalenceMember, RelId, Relids,
     RinfoId, SpecialJoinInfo, RELOPT_BASEREL,
 };
 
@@ -1969,26 +1969,10 @@ pub fn is_redundant_derived_clause(
         .any(|&other| run.root.rinfo(other).parent_ec == Some(parent_ec))
 }
 
-pub fn is_redundant_with_indexclauses(
-    run: &PlannerRun<'_>,
-    rinfo: RinfoId,
-    indexclauses: &[IndexClause<'_>],
-) -> bool {
-    let parent_ec = run.root.rinfo(rinfo).parent_ec;
-    for iclause in indexclauses {
-        if iclause.lossy {
-            continue;
-        }
-        let other = iclause.rinfo.expect("IndexClause rinfo");
-        if rinfo == other {
-            return true;
-        }
-        if parent_ec.is_some() && run.root.rinfo(other).parent_ec == parent_ec {
-            return true;
-        }
-    }
-    false
-}
+// is_redundant_with_indexclauses (equivclass.c). The body lives in
+// types_pathnodes::run so costsize (below this crate in the graph) can use it
+// for has_indexed_join_quals; this stays the name callers reach for.
+pub use types_pathnodes::run::is_redundant_with_indexclauses;
 
 pub fn get_eclass_indexes_for_relids<'mcx>(
     run: &PlannerRun<'mcx>,
