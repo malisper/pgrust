@@ -830,11 +830,15 @@ impl<'mcx> HashState<'mcx> {
     }
 
     /// Hash a build-side tuple bound as the inner slot (shared insert path).
+    /// None = the strict hash expr returned SQL NULL (a strict-op key was
+    /// NULL and the jointype keeps no NULLs): C's MultiExecPrivateHash /
+    /// MultiExecParallelHash `if (!isnull)` — the tuple is not inserted and
+    /// not counted in totalTuples (nodeHash.c).
     pub fn eval_build_hash(
         &mut self,
         estate: &mut EStateData<'mcx>,
         slot_id: ExecSlotId,
-    ) -> PgResult<u32> {
+    ) -> PgResult<Option<u32>> {
         estate.reset_expr_context(self.ps_ExprContext);
         let r = ::executils::exec_eval_expr_with_subplans_inner_slot(
             &mut self.hash_expr,
@@ -842,7 +846,7 @@ impl<'mcx> HashState<'mcx> {
             self.ps_ExprContext,
             slot_id,
         )?;
-        Ok(r.value.as_u32())
+        Ok(if r.isnull { None } else { Some(r.value.as_u32()) })
     }
     /// Slot deform prefix the build-side hash reads per row (its FETCHSOME
     /// bound); None = shape unknown to the batch-deform planner.
@@ -856,13 +860,17 @@ impl<'mcx> HashState<'mcx> {
     }
 }
 
-/// `ExecInitHash`.
+/// `ExecInitHash`. `hash_strict`/`keep_nulls` come from the parent HashJoin
+/// (C builds hashstate->hash_expr in ExecInitHashJoin for exactly this
+/// reason: `keep_nulls = HJ_FILL_INNER`, `hash_strict[i] = op_strict`).
 pub fn exec_init_hash<'mcx>(
     node: &'mcx Hash<'mcx>,
     estate: &mut EStateData<'mcx>,
     inner_desc: Rc<TupleDescData<'static>>,
     inner_hashfn_oids: &[Oid],
     collations: &[Oid],
+    hash_strict: &[bool],
+    keep_nulls: bool,
 ) -> PgResult<HashState<'mcx>> {
     let mcx = estate.es_query_cxt;
     let params = estate.param_bind();
@@ -873,6 +881,8 @@ pub fn exec_init_hash<'mcx>(
             &node.hashkeys,
             inner_hashfn_oids,
             collations,
+            hash_strict,
+            keep_nulls,
             0,
             params,
             env,
@@ -943,17 +953,11 @@ fn hash_insert_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
     slot_id: ExecSlotId,
 ) -> PgResult<()> {
-    estate.reset_expr_context(hs.ps_ExprContext);
-    let hashvalue = {
-        let r = ::executils::exec_eval_expr_with_subplans_inner_slot(
-            &mut hs.hash_expr,
-            estate,
-            hs.ps_ExprContext,
-            slot_id,
-        )?;
-        // Non-strict fold keeps NULL-key tuples: they never match the
-        // recheck, so results equal C for every jointype.
-        r.value.as_u32()
+    // C MultiExecPrivateHash: a NULL hash-expr result (strict-op key NULL,
+    // jointype keeps no NULLs) skips the tuple entirely — not inserted, not
+    // counted in totalTuples (EXPLAIN ANALYZE's Hash actual rows).
+    let Some(hashvalue) = hs.eval_build_hash(estate, slot_id)? else {
+        return Ok(());
     };
     let ecxt = hs.ps_ExprContext;
     let table = hs.table.as_mut().expect("hash table created");

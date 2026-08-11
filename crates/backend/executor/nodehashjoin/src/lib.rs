@@ -187,6 +187,8 @@ pub fn exec_init_hash_join<'mcx>(
         Rc<TupleDescData<'static>>,
         &[::types_core::Oid],
         &[::types_core::Oid],
+        &[bool],
+        bool,
     ) -> PgResult<HashState<'mcx>>,
 ) -> PgResult<(HashJoinState<'mcx>, HashState<'mcx>)> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
@@ -228,10 +230,12 @@ pub fn exec_init_hash_join<'mcx>(
         estate.exec_init_extra_tuple_slot(Some(outer_desc.clone()), TupleSlotKind::MinimalTuple);
 
     // get_op_hash_functions -> (outer_hashfn, inner_hashfn); outer is left.
+    // hash_strict[i] = op_strict(hashop), C ExecInitHashJoin.
     let n = node.hashoperators.len();
     let mut outer_hashfns: ::mcx::PgVec<'mcx, ::types_core::Oid> = ::mcx::PgVec::new_in(mcx);
     let mut inner_hashfns: ::mcx::PgVec<'mcx, ::types_core::Oid> = ::mcx::PgVec::new_in(mcx);
     let mut collations: ::mcx::PgVec<'mcx, ::types_core::Oid> = ::mcx::PgVec::new_in(mcx);
+    let mut hash_strict: ::mcx::PgVec<'mcx, bool> = ::mcx::PgVec::new_in(mcx);
     for i in 0..n {
         let hashop = node.hashoperators.nth(i);
         let (left, right) = lsyscache::get_op_hash_functions(hashop)?
@@ -239,11 +243,22 @@ pub fn exec_init_hash_join<'mcx>(
         outer_hashfns.push(left);
         inner_hashfns.push(right);
         collations.push(node.hashcollations.nth(i));
+        hash_strict.push(lsyscache::op_strict(hashop)?);
     }
 
     let params = estate.param_bind();
     // C ExecInitHashJoin compiles the outer hash keys with the HashJoinState
     // parent, so SubPlans are legal in them.
+    //
+    // keep_nulls: C passes HJ_FILL_OUTER — the probe hash aborts to NULL on
+    // strict-key NULLs so ExecHashJoinOuterGetTuple can skip un-matchable
+    // outer tuples before probing. pgrust keeps the outer expr non-strict
+    // (keep_nulls=true): a NULL-key probe hashes as 0, misses or fails the
+    // recheck, and joins/fills identically — results and EXPLAIN counters
+    // are unaffected, and the columnar probe covers (staged_hash /
+    // probe_hash_col byte-equality) stay total. ACCEPTED RESIDUAL, see
+    // docs/fuzzing/findings-hj-counters.md (re-open if a probe-side eval
+    // side effect or counter surface is found).
     let outer_hash_expr = ::executils::with_subplan_compile_env(estate, |env| {
         exec_build_hash32_from_exprs(
             mcx,
@@ -251,6 +266,8 @@ pub fn exec_init_hash_join<'mcx>(
             &node.hashkeys,
             &outer_hashfns,
             &collations,
+            &hash_strict,
+            true,
             0,
             params,
             env,
@@ -275,7 +292,11 @@ pub fn exec_init_hash_join<'mcx>(
             Ok((proj, hashclauses, joinqual, otherqual))
         })?;
 
-    let hash_state = init_hash(estate, inner_desc, &inner_hashfns, &collations)?;
+    // C: the inner hash_expr gets keep_nulls = HJ_FILL_INNER — a RIGHT/
+    // RIGHT_ANTI/FULL build keeps NULL-key tuples (they null-fill); every
+    // other jointype skips them at build (nodeHash.c MultiExecPrivateHash).
+    let hash_state =
+        init_hash(estate, inner_desc, &inner_hashfns, &collations, &hash_strict, hj_fill_inner)?;
     let hash_node = node
         .join
         .plan

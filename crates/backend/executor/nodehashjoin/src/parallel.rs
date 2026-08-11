@@ -84,7 +84,11 @@ where
                         let Some(slot_id) = hash_child.exec_proc(estate)? else {
                             break;
                         };
-                        let hashvalue = hash_state.eval_build_hash(estate, slot_id)?;
+                        // C MultiExecParallelHash `if (!isnull)`: strict-key
+                        // NULL skips the tuple — not inserted, not counted.
+                        let Some(hashvalue) = hash_state.eval_build_hash(estate, slot_id)? else {
+                            continue;
+                        };
                         let (ptr, len) = phj::slot_min_tuple_image(
                             estate,
                             slot_id,

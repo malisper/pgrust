@@ -2,9 +2,9 @@
 //!
 //! The per-row halves the runtime arm drives on each helper:
 //! - BUILD-ACCEPT: [`shared_build_accept`] — the row path's build hash
-//!   (`hash_insert_slot`'s eval, verbatim: non-strict fold keeps NULL-key
-//!   tuples; they never match the recheck, so results equal C for every
-//!   jointype) + minimal-tuple materialization into the worker's
+//!   (`hash_insert_slot`'s eval, verbatim: a strict-op key NULL under a
+//!   no-null-keep jointype skips the tuple, C's MultiExecPrivateHash
+//!   `if (!isnull)`) + minimal-tuple materialization into the worker's
 //!   [`JoinBuildLocal`], instead of `ExecHashTableInsert`.
 //! - PROBE: [`shared_probe_outer`] — `exec_hash_join`'s per-outer-row
 //!   HJ_NEED_NEW_OUTER → HJ_SCAN_BUCKET → HJ_FILL_OUTER_TUPLE arc over the
@@ -62,8 +62,12 @@ pub fn shared_build_hash_tuple<'mcx, R>(
     estate: &mut EStateData<'mcx>,
     slot_id: ExecSlotId,
     f: impl FnOnce(u32, &[u8]) -> PgResult<R>,
-) -> PgResult<R> {
-    let hashvalue = hs.eval_build_hash(estate, slot_id)?;
+) -> PgResult<Option<R>> {
+    // None = strict-key NULL skip (C MultiExecPrivateHash `if (!isnull)`):
+    // the tuple is neither materialized nor pushed nor counted.
+    let Some(hashvalue) = hs.eval_build_hash(estate, slot_id)? else {
+        return Ok(None);
+    };
     let query_mcx = estate.es_query_cxt;
     let (slot, scratch_mcx) = estate.slot_and_per_tuple_mcx(slot_id, hs.ps_ExprContext);
     let fetched = exec_fetch_slot_minimal_tuple(slot, query_mcx, scratch_mcx)?;
@@ -76,7 +80,7 @@ pub fn shared_build_hash_tuple<'mcx, R>(
     };
     // SAFETY: a minimal tuple image is t_len readable bytes.
     let bytes = unsafe { core::slice::from_raw_parts(ptr, t_len as usize) };
-    f(hashvalue, bytes)
+    f(hashvalue, bytes).map(Some)
 }
 
 /// One build-side row into the worker's Local: hash, materialize the
@@ -89,9 +93,10 @@ pub fn shared_build_accept<'mcx>(
     slot_id: ExecSlotId,
     local: &mut JoinBuildLocal,
 ) -> PgResult<Result<(), BudgetExceeded>> {
-    shared_build_hash_tuple(hs, estate, slot_id, |hashvalue, bytes| {
+    Ok(shared_build_hash_tuple(hs, estate, slot_id, |hashvalue, bytes| {
         Ok(local.push(hashvalue, bytes))
-    })
+    })?
+    .unwrap_or(Ok(())))
 }
 
 /// [`shared_build_accept`] + the HJPROBE-V2 dense-key record: reads the
@@ -114,9 +119,10 @@ pub fn shared_build_accept_keyed<'mcx>(
         &mut isnull,
     );
     let key = if isnull { NULL_KEY } else { v.as_i32() as i64 };
-    shared_build_hash_tuple(hs, estate, slot_id, |hashvalue, bytes| {
+    Ok(shared_build_hash_tuple(hs, estate, slot_id, |hashvalue, bytes| {
         Ok(local.push_keyed(hashvalue, bytes, key))
-    })
+    })?
+    .unwrap_or(Ok(())))
 }
 
 /// HJPROBE-V2 dense-seat gate: `Some(build-side key col, 0-based)` iff the

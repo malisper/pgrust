@@ -879,7 +879,9 @@ mod emit {
                 | Step::BoolOrStep { jumpdone, .. }
                 | Step::SbsrefSubscripts { jumpdone, .. }
                 | Step::JsonbSbsrefSubscripts { jumpdone, .. }
-                | Step::ReturningExprStep { jumpdone, .. } => t[*jumpdone as usize] = true,
+                | Step::ReturningExprStep { jumpdone, .. }
+                | Step::HashDatumFirstStrict { jumpdone, .. }
+                | Step::HashDatumNext32Strict { jumpdone, .. } => t[*jumpdone as usize] = true,
                 Step::AggStrictInputCheck { jumpnull, .. }
                 | Step::AggStrictInputCheck1 { jumpnull, .. }
                 | Step::AggStrictDeserialize { jumpnull, .. } => t[*jumpnull as usize] = true,

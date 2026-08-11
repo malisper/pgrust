@@ -2975,6 +2975,8 @@ fn mk_hashjoin_pstmt_est<'mcx>(
 #[test]
 fn hashjoin_inner_join_matches_nestloop_result() {
     install_seams();
+    // op_strict(int4eq) via lookup_pg_proc_shape (rowmode superset install).
+    rowmode_ab::install_rowmode_seams();
     scanfix::install();
     let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mcx = leaked_mcx();
@@ -3002,6 +3004,8 @@ fn hashjoin_inner_join_matches_nestloop_result() {
 #[test]
 fn hashjoin_with_empty_inner_returns_nothing() {
     install_seams();
+    // op_strict(int4eq) via lookup_pg_proc_shape (rowmode superset install).
+    rowmode_ab::install_rowmode_seams();
     scanfix::install();
     let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mcx = leaked_mcx();
@@ -3025,6 +3029,8 @@ fn hashjoin_with_empty_inner_returns_nothing() {
 #[test]
 fn hashjoin_semi_and_anti_join_over_fake_heaps() {
     install_seams();
+    // op_strict(int4eq) via lookup_pg_proc_shape (rowmode superset install).
+    rowmode_ab::install_rowmode_seams();
     scanfix::install();
     let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mcx = leaked_mcx();
@@ -3075,6 +3081,8 @@ fn hashjoin_semi_and_anti_join_over_fake_heaps() {
 #[test]
 fn hashjoin_right_semi_and_right_anti_join_over_fake_heaps() {
     install_seams();
+    // op_strict(int4eq) via lookup_pg_proc_shape (rowmode superset install).
+    rowmode_ab::install_rowmode_seams();
     scanfix::install();
     let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mcx = leaked_mcx();
@@ -3130,6 +3138,8 @@ fn hashjoin_right_semi_and_right_anti_join_over_fake_heaps() {
 #[test]
 fn hashjoin_full_join_over_fake_heaps() {
     install_seams();
+    // op_strict(int4eq) via lookup_pg_proc_shape (rowmode superset install).
+    rowmode_ab::install_rowmode_seams();
     scanfix::install();
     let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mcx = leaked_mcx();
@@ -3166,6 +3176,8 @@ fn hashjoin_full_join_over_fake_heaps() {
 #[test]
 fn hashjoin_multibatch_matches_single_batch_results() {
     install_seams();
+    // op_strict(int4eq) via lookup_pg_proc_shape (rowmode superset install).
+    rowmode_ab::install_rowmode_seams();
     scanfix::install();
     if !guc_tables::vars::work_mem.installed() {
         init_small::init_seams();
@@ -4981,6 +4993,26 @@ mod rowmode_ab {
                         proretset: false,
                         proisstrict: false,
                         proleakproof: false,
+                        prosecdef: false,
+                        proconfig_isnull: true,
+                    }),
+                    // int4eq — the hashjoin e2e corpus (ExecInitHashJoin
+                    // now reads op_strict(96) -> proisstrict of oprcode 65
+                    // for the strict build-side NULL-key skip). PostgreSQL
+                    // 18.3 pg_proc.
+                    65 => Some(syscache_seams::PgProcShape {
+                        pronamespace: 11,
+                        prorettype: BOOLOID,
+                        provariadic: 0,
+                        prosupport: 0,
+                        prolang: 12,
+                        pronargs: 2,
+                        prokind: b'f' as i8,
+                        provolatile: b'i' as i8,
+                        proparallel: b's' as i8,
+                        proretset: false,
+                        proisstrict: true,
+                        proleakproof: true,
                         prosecdef: false,
                         proconfig_isnull: true,
                     }),

@@ -401,11 +401,13 @@ fn eval_kernel<'mcx>(
                 isnull: false,
             })
         }
-        Kernel::Hash32Var { src, attnum, frame } => {
+        Kernel::Hash32Var { src, attnum, frame, strict } => {
             let mut isnull = false;
             let v = exectuples::slot_getattr(slots.get(src), attnum as i32 + 1, &mut isnull);
             if isnull {
-                return Ok(NullableDatum { value: Datum::from_u32(0), isnull: false });
+                // strict: EEOP_HASHDATUM_FIRST_STRICT — NULL key returns SQL
+                // NULL (single-key: the step's out IS the result cell).
+                return Ok(NullableDatum { value: Datum::from_u32(0), isnull: strict });
             }
             let f = &mut state.frames[frame as usize];
             // SAFETY: 'mcx-live frame fcinfo image + boxed FmgrInfo, sole refs.
@@ -1335,6 +1337,20 @@ fn run_program<'mcx>(
             }
             Step::HashDatumNext32 { call, iresult, out } => {
                 step_hash_datum_next32(call, *iresult, *out)?;
+            }
+            Step::HashDatumFirstStrict { call, jumpdone, out } => {
+                if step_hash_datum_first_strict(call, *out)? {
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::HashDatumNext32Strict { call, iresult, jumpdone, out } => {
+                if step_hash_datum_next32_strict(call, *iresult, *out)? {
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
             }
             Step::BoolTestIsTrue { out } => {
                 let r = read_out(*out);
@@ -3956,6 +3972,44 @@ fn step_hash_datum_next32(
     Ok(())
 }
 
+/// C EEOP_HASHDATUM_FIRST_STRICT: a NULL key writes (0, isnull) to THIS
+/// step's out and jumps to done (returns true = jump). C-verbatim: an
+/// intermediate-key out is the iresult, so the result cell keeps the
+/// previous evaluation's value (execExprInterp.c behavior as of 18.4).
+#[inline(always)]
+fn step_hash_datum_first_strict(call: &FuncCall, out: OutRef) -> PgResult<bool> {
+    // SAFETY: arg 0 of the call's live fcinfo image; hash fns
+    // never return NULL (C reads fn_addr's Datum directly).
+    let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+    if a0.isnull {
+        write_out(out, Datum::from_u32(0), true);
+        return Ok(true);
+    }
+    write_out(out, invoke(call)?.0, false);
+    Ok(false)
+}
+
+/// C EEOP_HASHDATUM_NEXT32_STRICT; see [`step_hash_datum_first_strict`].
+#[inline(always)]
+fn step_hash_datum_next32_strict(
+    call: &FuncCall,
+    iresult: core::ptr::NonNull<NullableDatum>,
+    out: OutRef,
+) -> PgResult<bool> {
+    // SAFETY: iresult is a build-owned once-allocated slot; arg 0
+    // as HashDatumFirst.
+    let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+    if a0.isnull {
+        write_out(out, Datum::from_u32(0), true);
+        return Ok(true);
+    }
+    // SAFETY: as above.
+    let existing = unsafe { iresult.read() }.value.as_u32().rotate_left(1);
+    let combined = existing ^ invoke(call)?.0.as_u32();
+    write_out(out, Datum::from_u32(combined), false);
+    Ok(false)
+}
+
 // SAFETY contract: live fcinfo image; `pg` the sole live pergroup pointer.
 #[inline(always)]
 unsafe fn agg_trans_byval(call: &FuncCall, pg: *mut crate::steps::AggPerGroup) -> PgResult<()> {
@@ -4682,6 +4736,16 @@ pub(crate) fn exec_one_step<'mcx>(
         Step::HashDatumNext32 { call, iresult, out } => {
             step_hash_datum_next32(&call, iresult, out)?;
         }
+        Step::HashDatumFirstStrict { call, jumpdone, out } => {
+            if step_hash_datum_first_strict(&call, out)? {
+                return Ok(StepFlow::Jump(jumpdone));
+            }
+        }
+        Step::HashDatumNext32Strict { call, iresult, jumpdone, out } => {
+            if step_hash_datum_next32_strict(&call, iresult, out)? {
+                return Ok(StepFlow::Jump(jumpdone));
+            }
+        }
         Step::RowCompareStep { call, strict, jumpnull, jumpdone, out } => {
             match eval_row_compare_step(&call, strict)? {
                 None => {
@@ -4846,6 +4910,8 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::HashDatumSetInitVal { .. }
         | Step::HashDatumFirst { .. }
         | Step::HashDatumNext32 { .. }
+        | Step::HashDatumFirstStrict { .. }
+        | Step::HashDatumNext32Strict { .. }
         | Step::RowCompareStep { .. }
         | Step::RowCompareFinal { .. }
         | Step::CurrentOfExpr => true,

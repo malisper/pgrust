@@ -236,6 +236,19 @@ pub enum Step {
     HashDatumFirst { call: FuncCall, out: OutRef },
     // iresult: build-owned intermediate hash slot the rotate-xor chain reads.
     HashDatumNext32 { call: FuncCall, iresult: NonNull<NullableDatum>, out: OutRef },
+    // EEOP_HASHDATUM_FIRST_STRICT / EEOP_HASHDATUM_NEXT32_STRICT: a NULL key
+    // writes (0, isnull=true) to THIS step's out and jumps to jumpdone (the
+    // DoneReturn step). C-verbatim, including the consequence that an
+    // intermediate-key abort writes iresult — not the result cell — so
+    // DoneReturn returns the PREVIOUS evaluation's result (observed C 18.3/
+    // 18.4 behavior; see docs/fuzzing/findings-hj-counters.md).
+    HashDatumFirstStrict { call: FuncCall, jumpdone: u32, out: OutRef },
+    HashDatumNext32Strict {
+        call: FuncCall,
+        iresult: NonNull<NullableDatum>,
+        jumpdone: u32,
+        out: OutRef,
+    },
     NotDistinct { call: FuncCall, out: OutRef },
     ParamSet { prm: NonNull<::types_portal::params::ParamExecData>, out: OutRef },
     // EEOP_SUBPLAN: the interpreter suspends; the caller's driver runs
@@ -1496,7 +1509,9 @@ pub enum Kernel {
     JustAssignVarVirt { src: SlotSrc, attnum: u16, resultnum: u16 },
     QualScanVarCmpConst { attnum: u16, konst: Datum, cmp: CmpOp },
     QualVarCmpVar { a_src: SlotSrc, a_attnum: u16, b_src: SlotSrc, b_attnum: u16, cmp: CmpOp },
-    Hash32Var { src: SlotSrc, attnum: u16, frame: u32 },
+    // strict: EEOP_HASHDATUM_FIRST_STRICT single-key cover — a NULL key
+    // returns SQL NULL (the caller skips the tuple, nodeHash.c C parity).
+    Hash32Var { src: SlotSrc, attnum: u16, frame: u32, strict: bool },
     JustFunc { fn_addr: PGFunction, frame: u32, nargs: u16, strict: bool },
     // Argless byval transition (count(*)-class 2-step programs): the whole
     // per-row program without the interpreter loop (ExecJust* precedent).
@@ -1572,8 +1587,13 @@ impl<'mcx> ExprState<'mcx> {
         let rl = Layout::new::<NullableDatum>();
         let resnd: NonNull<NullableDatum> =
             mcx.allocate(rl).map_err(|_| mcx.oom(rl.size()))?.cast();
-        // SAFETY: fresh exclusive allocation.
-        unsafe { resnd.write(NullableDatum::null()) };
+        // SAFETY: fresh exclusive allocation. C's makeNode(ExprState) zeroes
+        // the node: resvalue=0, resnull=FALSE. Observable through programs
+        // that can reach DONE_RETURN without writing the cell (today: the
+        // EEOP_HASHDATUM_*_STRICT abort on an intermediate key, whose out is
+        // the iresult) — the first evaluation then returns this initial
+        // value, and C's is not-null zero.
+        unsafe { resnd.write(NullableDatum { value: Datum::from_u32(0), isnull: false }) };
         // On steps-alloc failure the header chunk stays until reset (C's palloc-then-throw shape).
         let steps = ::mcx::vec_with_capacity_in(mcx, 16)?;
         // SAFETY: fresh exclusive layout-sized allocation from `mcx`; written once, then box-owned.
@@ -1620,7 +1640,7 @@ impl<'mcx> ExprState<'mcx> {
     /// (hashint4/hashoid: hash_bytes_uint32 of the datum's low 32 bits,
     /// never errors) — the columnar precompute cover; 0-based key attnum.
     pub fn hash32var_low32(&self, src: SlotSrc) -> Option<u16> {
-        let Kernel::Hash32Var { src: s, attnum, frame } = self.kernel else {
+        let Kernel::Hash32Var { src: s, attnum, frame, .. } = self.kernel else {
             return None;
         };
         if s != src {

@@ -4488,3 +4488,87 @@ fn current_of_expr_compiles_and_errors_cleanly_at_eval() {
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
     assert_eq!(e.message(), "WHERE CURRENT OF is not supported for this table type");
 }
+
+// ExecBuildHash32Expr strict arms (EEOP_HASHDATUM_FIRST_STRICT /
+// NEXT32_STRICT): with keep_nulls=false a strict-op NULL key aborts the
+// expression to SQL NULL — nodeHash.c then skips the tuple (build-side
+// NULL-key skip; EXPLAIN ANALYZE Hash actual-rows parity, the KNOWN-HJ
+// counter family). Pins C 18.3/18.4 semantics VERBATIM, including the
+// first-key-abort quirk: an intermediate key's strict abort writes the
+// iresult, not the result cell, so DONE_RETURN returns the PREVIOUS
+// evaluation's result (fresh state: makeNode-zeroed => (0, not-null)).
+#[test]
+fn hash32_expr_strict_null_key_aborts_c_verbatim() {
+    with_mcx(|mcx| {
+        let desc = desc_int4(mcx, 2);
+        let keys = NodeList::make2(
+            mcx,
+            Node::mk_var(mcx, crate::compile::OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap(),
+            Node::mk_var(mcx, crate::compile::OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap(),
+        )
+        .unwrap();
+        let mut state = crate::compile::exec_build_hash32_from_exprs(
+            mcx,
+            &desc,
+            &keys,
+            &[450, 450],
+            &[0, 0],
+            &[true, true],
+            false,
+            0,
+            ParamBind::NONE,
+            None,
+        )
+        .unwrap();
+        fn eval<'m>(
+            mcx: Mcx<'m>,
+            state: &mut ExprState<'m>,
+            a: Option<i32>,
+            b: Option<i32>,
+        ) -> bool {
+            let mut slot = virtual_slot(mcx, &[a, b]);
+            let mut slots = EvalSlots { scan: None, inner: Some(&mut slot), outer: None };
+            exec_eval_expr(state, &mut slots).unwrap().isnull
+        }
+        // C row sequence (verified against PostgreSQL 18.4, the same counts
+        // nodeHash's totalTuples showed): fresh state, first-key abort reads
+        // the zeroed cell -> NOT null; second-key abort -> null; first-key
+        // abort after a null -> stale null; non-null row resets; first-key
+        // abort after a non-null row -> stale not-null.
+        assert!(!eval(mcx, &mut state, None, Some(2)), "fresh first-key abort: C zeroed cell");
+        assert!(eval(mcx, &mut state, Some(2), None), "last-key abort writes the result cell");
+        assert!(eval(mcx, &mut state, None, Some(5)), "first-key abort: stale null carried");
+        assert!(!eval(mcx, &mut state, Some(1), Some(1)), "non-null row");
+        assert!(!eval(mcx, &mut state, None, Some(7)), "first-key abort: stale not-null carried");
+
+        // Single-key strict: the Hash32Var kernel cover — NULL returns NULL
+        // every time (the step's out IS the result cell).
+        let key1 = NodeList::make1(
+            mcx,
+            Node::mk_var(mcx, crate::compile::OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap(),
+        )
+        .unwrap();
+        let mut s1 = crate::compile::exec_build_hash32_from_exprs(
+            mcx, &desc, &key1, &[450], &[0], &[true], false, 0, ParamBind::NONE, None,
+        )
+        .unwrap();
+        assert!(matches!(s1.kernel(), Kernel::Hash32Var { strict: true, .. }));
+        assert!(!eval(mcx, &mut s1, Some(3), None));
+        assert!(eval(mcx, &mut s1, None, None));
+        assert!(!eval(mcx, &mut s1, Some(3), None));
+
+        // keep_nulls=true (HJ_FILL_INNER): non-strict fold — NULL hashes as
+        // 0, never aborts (RIGHT/RIGHT_ANTI/FULL builds keep NULL keys).
+        let key1b = NodeList::make1(
+            mcx,
+            Node::mk_var(mcx, crate::compile::OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap(),
+        )
+        .unwrap();
+        let mut s2 = crate::compile::exec_build_hash32_from_exprs(
+            mcx, &desc, &key1b, &[450], &[0], &[true], true, 0, ParamBind::NONE, None,
+        )
+        .unwrap();
+        assert!(matches!(s2.kernel(), Kernel::Hash32Var { strict: false, .. }));
+        assert!(!eval(mcx, &mut s2, None, None));
+    });
+}

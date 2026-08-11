@@ -1065,24 +1065,36 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
 }
 
 /// C `ExecBuildHash32Expr` (execExpr.c), serial hashjoin arm: hash arbitrary
-/// key expressions of the hashed slot, non-strict fold (NULL keys hash as 0,
-/// the recheck rejects them). C binds the hashed slot as ecxt_outertuple; our
-/// hashjoin eval sites bind it as the inner slot, so outer-slot reads are
-/// remapped to inner reads (datum-identical). All-plain-Var keys take the
+/// key expressions of the hashed slot. `hash_strict[i]` is the hash
+/// operator's `op_strict`; with `keep_nulls` false a strict key's NULL
+/// aborts the whole expression to SQL NULL (EEOP_HASHDATUM_*_STRICT — the
+/// caller skips the tuple, nodeHash.c parity). With `keep_nulls` true (or a
+/// non-strict op) a NULL key folds as hash 0 and the recheck rejects it.
+/// C binds the hashed slot as ecxt_outertuple; our hashjoin eval sites bind
+/// it as the inner slot, so outer-slot reads are remapped to inner reads
+/// (datum-identical). All-plain-Var keys with no strict aborting take the
 /// [`exec_build_hash32_from_attrs`] path.
+#[allow(clippy::too_many_arguments)]
 pub fn exec_build_hash32_from_exprs<'mcx>(
     mcx: Mcx<'mcx>,
     desc: &TupleDescData<'_>,
     hash_exprs: &NodeList<'mcx>,
     hash_fn_oids: &[Oid],
     collations: &[Oid],
+    hash_strict: &[bool],
+    keep_nulls: bool,
     init_value: u32,
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let num_cols = hash_exprs.len();
     debug_assert!(hash_fn_oids.len() == num_cols && collations.len() == num_cols);
+    debug_assert!(hash_strict.len() == num_cols);
+    let any_strict_abort = !keep_nulls && hash_strict.iter().any(|s| *s);
     'exprs: {
+        if any_strict_abort {
+            break 'exprs;
+        }
         let mut attnums: PgVec<'mcx, i16> = PgVec::new_in(mcx);
         attnums.try_reserve(num_cols).map_err(|_| mcx.oom(num_cols * 2))?;
         for k in hash_exprs.iter() {
@@ -1156,19 +1168,29 @@ pub fn exec_build_hash32_from_exprs<'mcx>(
         } else {
             OutRef(iresult.expect("multi-part hash requires an intermediate slot"))
         };
-        let step = if first {
-            Step::HashDatumFirst { call, out }
-        } else {
-            Step::HashDatumNext32 {
+        // C: `opstrict[i] && !keep_nulls ? strict_opcode : opcode`; jumpdone
+        // is fixed up to the DoneReturn index below (C's adjust_jumps).
+        let strict_abort = hash_strict[i] && !keep_nulls;
+        let step = match (first, strict_abort) {
+            (true, false) => Step::HashDatumFirst { call, out },
+            (true, true) => Step::HashDatumFirstStrict { call, jumpdone: u32::MAX, out },
+            (false, false) => Step::HashDatumNext32 {
                 call,
                 iresult: iresult.expect("NEXT32 requires an intermediate slot"),
                 out,
-            }
+            },
+            (false, true) => Step::HashDatumNext32Strict {
+                call,
+                iresult: iresult.expect("NEXT32 requires an intermediate slot"),
+                jumpdone: u32::MAX,
+                out,
+            },
         };
         push_step(&mut state, mcx, step)?;
         first = false;
     }
 
+    let done = state.steps.len() as u32;
     for s in state.steps.iter_mut() {
         match *s {
             Step::OuterVar { attnum, vartype, out } => {
@@ -1177,6 +1199,11 @@ pub fn exec_build_hash32_from_exprs<'mcx>(
             Step::OuterSysVar { attnum, out } => *s = Step::InnerSysVar { attnum, out },
             Step::WholeRow { src: SlotSrc::Outer, wr, frame, out } => {
                 *s = Step::WholeRow { src: SlotSrc::Inner, wr, frame, out }
+            }
+            Step::HashDatumFirstStrict { ref mut jumpdone, .. }
+            | Step::HashDatumNext32Strict { ref mut jumpdone, .. } => {
+                debug_assert_eq!(*jumpdone, u32::MAX);
+                *jumpdone = done;
             }
             _ => {}
         }
@@ -4508,6 +4535,12 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
             Step::ReturningExprStep { jumpdone, .. } => {
                 assert!((*jumpdone as usize) < len, "returningexpr jump target out of range");
             }
+            Step::HashDatumFirstStrict { call, jumpdone, .. }
+            | Step::HashDatumNext32Strict { call, jumpdone, .. } => {
+                assert!((*jumpdone as usize) < len, "hashdatum jump target out of range");
+                let f = &state.frames[call.frame as usize];
+                assert!(call.nargs == f.nargs && call.fcinfo == f.fcinfo);
+            }
             Step::FuncExpr { call, .. }
             | Step::FuncExprStrict1 { call, .. }
             | Step::FuncExprStrict2 { call, .. }
@@ -5029,7 +5062,9 @@ fn select_kernel(state: &ExprState<'_>) -> Kernel {
     }
 }
 
-// Single-key hash [FETCHSOME, VAR->arg0, HASHDATUM_FIRST->result, DONE].
+// Single-key hash [FETCHSOME, VAR->arg0, HASHDATUM_FIRST[_STRICT]->result,
+// DONE]. The strict form's jumpdone is the DONE step, so the kernel's
+// NULL-returns-NULL covers it exactly (single key: out IS the result cell).
 fn select_hash32_var(state: &ExprState<'_>) -> Option<Kernel> {
     let steps = state.steps.as_slice();
     let fsrc = fetch_src(&steps[0])?;
@@ -5037,8 +5072,13 @@ fn select_hash32_var(state: &ExprState<'_>) -> Option<Kernel> {
     if fsrc != src {
         return None;
     }
-    let Step::HashDatumFirst { call, out } = &steps[2] else {
-        return None;
+    let (call, out, strict) = match &steps[2] {
+        Step::HashDatumFirst { call, out } => (call, out, false),
+        Step::HashDatumFirstStrict { call, jumpdone, out } => {
+            debug_assert_eq!(*jumpdone, 3);
+            (call, out, true)
+        }
+        _ => return None,
     };
     if !state.is_result(*out) || !matches!(steps[3], Step::DoneReturn) {
         return None;
@@ -5047,7 +5087,7 @@ fn select_hash32_var(state: &ExprState<'_>) -> Option<Kernel> {
     if var_out.0 != frame.arg_slot(0) {
         return None;
     }
-    Some(Kernel::Hash32Var { src, attnum, frame: call.frame })
+    Some(Kernel::Hash32Var { src, attnum, frame: call.frame, strict })
 }
 
 // [FETCHSOME x2, VAR->arg x2, FUNCEXPR_STRICT_2 int comparator, QUAL, DONE].
