@@ -92,18 +92,21 @@ fn current_of_unsupported() -> Box<PgError> {
     )
 }
 
-#[cold]
-#[inline(never)]
-fn param_exec_plan_pending() -> ! {
-    panic!(
-        "execexpr EEOP_PARAM_EXEC: pending initplan — owning node did not run \
-         exec_eval_param_exec_params before evaluation (nodeSubplan.c lane)"
-    )
+/// Why the program suspended: a SubPlan step wants the driver to run its
+/// subplan, or a PARAM_EXEC fetch found a pending (not-yet-run) initplan and
+/// wants the driver to run ExecSetParamPlan for that param (C's lazy
+/// ExecEvalParamExec, execExprInterp.c ~3053: params are evaluated on first
+/// fetch, never pre-hoisted, so untaken COALESCE/CASE arms leave their
+/// initplans un-run).
+#[derive(Clone, Copy, Debug)]
+pub enum SuspendKind {
+    SubPlan(core::ptr::NonNull<()>),
+    ParamExec(u32),
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Suspension {
-    pub sstate: core::ptr::NonNull<()>,
+    pub kind: SuspendKind,
     step: u32,
     regs: NullableDatum,
 }
@@ -120,8 +123,8 @@ impl Suspension {
         Resume { step: self.step, regs: self.regs, result }
     }
 
-    pub(crate) fn new(sstate: core::ptr::NonNull<()>, step: u32, regs: NullableDatum) -> Suspension {
-        Suspension { sstate, step, regs }
+    pub(crate) fn new(kind: SuspendKind, step: u32, regs: NullableDatum) -> Suspension {
+        Suspension { kind, step, regs }
     }
 }
 
@@ -140,8 +143,9 @@ pub enum EvalOutcome {
 #[inline(never)]
 fn subplan_without_driver() -> ! {
     panic!(
-        "execexpr EEOP_SUBPLAN: SubPlan expression evaluated through a subplan-less \
-         entry point — owning node must use the executils subplan driver"
+        "execexpr: SubPlan step or pending-initplan PARAM_EXEC fetch evaluated \
+         through a driver-less entry point — owning node must use the executils \
+         suspension driver (nodeSubplan.c lane)"
     )
 }
 
@@ -542,13 +546,22 @@ fn run_program<'mcx>(
     if let Some(r) = resume {
         // SAFETY: as above.
         unsafe { res.write(r.regs) };
-        let Step::SubPlan { out, .. } = steps[r.step as usize] else {
-            panic!("resume target is not a SubPlan step")
-        };
-        write_out(out, r.result.value, r.result.isnull);
-        // SAFETY: r.step is a validated in-bounds index; the program is
-        // Done-terminated so step+1 is in bounds.
-        sp = unsafe { base.add(r.step as usize + 1) };
+        match steps[r.step as usize] {
+            Step::SubPlan { out, .. } => {
+                write_out(out, r.result.value, r.result.isnull);
+                // SAFETY: r.step is a validated in-bounds index; the program
+                // is Done-terminated so step+1 is in bounds.
+                sp = unsafe { base.add(r.step as usize + 1) };
+            }
+            // Pending-initplan resume: the driver ran ExecSetParamPlan, which
+            // cleared exec_plan and stored the value — re-execute the fetch
+            // (C ExecEvalParamExec reads prm after ExecSetParamPlan).
+            Step::ParamExec { .. } => {
+                // SAFETY: r.step is a validated in-bounds index.
+                sp = unsafe { base.add(r.step as usize) };
+            }
+            _ => panic!("resume target is not a SubPlan/ParamExec step"),
+        }
     }
     loop {
         // SAFETY: ready_expr validated Done-termination and every jump
@@ -574,7 +587,7 @@ fn run_program<'mcx>(
                 // SAFETY: sp is derived from base and in bounds.
                 let step_ix = unsafe { sp.offset_from(base) } as u32;
                 return Ok(EvalOutcome::Suspended(Suspension {
-                    sstate: *sstate,
+                    kind: SuspendKind::SubPlan(*sstate),
                     step: step_ix,
                     // SAFETY: res is the state's live result cell.
                     regs: unsafe { res.read() },
@@ -746,11 +759,21 @@ fn run_program<'mcx>(
             Step::ParamExternMissing { paramid } => {
                 return Err(crate::compile::no_param_value(*paramid));
             }
-            Step::ParamExec { prm, out } => {
+            Step::ParamExec { prm, out, paramid } => {
                 // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
                 let p = unsafe { prm.read() };
                 if p.exec_plan {
-                    param_exec_plan_pending();
+                    // C ExecEvalParamExec: parameter not evaluated yet — run
+                    // the initplan on demand (lazy, first-fetch). The driver
+                    // runs ExecSetParamPlan and resumes at this step.
+                    // SAFETY: sp is derived from base and in bounds.
+                    let step_ix = unsafe { sp.offset_from(base) } as u32;
+                    return Ok(EvalOutcome::Suspended(Suspension {
+                        kind: SuspendKind::ParamExec(*paramid),
+                        step: step_ix,
+                        // SAFETY: res is the state's live result cell.
+                        regs: unsafe { res.read() },
+                    }));
                 }
                 write_out(*out, p.value, p.isnull);
             }
@@ -4009,7 +4032,7 @@ unsafe fn agg_trans_init_strict_byval(
 pub(crate) enum StepFlow {
     Next,
     Jump(u32),
-    Suspend(core::ptr::NonNull<()>),
+    Suspend(SuspendKind),
 }
 
 // exec_one_step's OLD/NEW resolution; borrows the scan Option directly so
@@ -4255,11 +4278,13 @@ pub(crate) fn exec_one_step<'mcx>(
         Step::ParamExternMissing { paramid } => {
             return Err(crate::compile::no_param_value(paramid));
         }
-        Step::ParamExec { prm, out } => {
+        Step::ParamExec { prm, out, paramid } => {
             // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
             let p = unsafe { prm.read() };
             if p.exec_plan {
-                param_exec_plan_pending();
+                // C ExecEvalParamExec: pending initplan — suspend so the
+                // driver runs ExecSetParamPlan, then re-execute this step.
+                return Ok(StepFlow::Suspend(SuspendKind::ParamExec(paramid)));
             }
             write_out(out, p.value, p.isnull);
         }
@@ -4273,7 +4298,9 @@ pub(crate) fn exec_one_step<'mcx>(
                 (*p).exec_plan = false;
             }
         }
-        Step::SubPlan { sstate, out: _ } => return Ok(StepFlow::Suspend(sstate)),
+        Step::SubPlan { sstate, out: _ } => {
+            return Ok(StepFlow::Suspend(SuspendKind::SubPlan(sstate)))
+        }
         Step::MakeReadonly { slot } => {
             // SAFETY: compile-allocated workspace holding a live datum.
             unsafe {

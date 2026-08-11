@@ -190,15 +190,22 @@ impl<'mcx> GroupState<'mcx> {
     }
 
     // C resolves an initplan's PARAM_EXEC lazily inside ExecEvalParamExec;
-    // this executor hoists instead, but only once a first-of-group row
-    // actually exists to run the qual over (a fully-exhausted outer child
-    // must never touch a param C would never read).
+    // param-dep quals ride the suspension driver so the fetch stays lazy —
+    // and only once a first-of-group row actually exists to run the qual
+    // over (a fully-exhausted outer child must never touch a param C would
+    // never read).
     fn check_qual(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
-        if let Some(q) = self.qual.as_deref() {
-            let deps = q.param_exec_deps();
-            if !deps.is_empty() {
-                ::executils::exec_eval_param_exec_params(estate, deps)?;
-            }
+        if self
+            .qual
+            .as_deref()
+            .is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty())
+        {
+            return ::executils::exec_qual_with_subplans_outer(
+                self.qual.as_deref_mut(),
+                &mut self.firsttuple_slot,
+                estate,
+                self.ps_ExprContext,
+            );
         }
         let mut slots =
             EvalSlots { scan: None, inner: None, outer: Some(&mut self.firsttuple_slot) };
@@ -206,9 +213,15 @@ impl<'mcx> GroupState<'mcx> {
     }
 
     fn project(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
-        let deps = self.proj.param_exec_deps();
-        if !deps.is_empty() {
-            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        if self.proj.has_subplan() || !self.proj.param_exec_deps().is_empty() {
+            ::executils::exec_project_with_subplans_outer(
+                &mut self.proj,
+                &mut self.firsttuple_slot,
+                estate,
+                self.ps_ExprContext,
+                self.ps_ResultTupleSlot,
+            )?;
+            return Ok(Some(self.ps_ResultTupleSlot));
         }
         let mcx = estate.es_query_cxt;
         let result_slot = estate.slot_mut(self.ps_ResultTupleSlot);

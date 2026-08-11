@@ -2258,11 +2258,16 @@ impl<'mcx> WindowAggStateData<'mcx> {
         Ok(1)
     }
 
-    // C resolves an initplan's PARAM_EXEC lazily inside ExecEvalParamExec
-    // (execExprInterp.c) via ExecSetParamPlan; this executor hoists instead:
-    // any pending initplan a program depends on runs before the node
-    // evaluates it (nodeagg hoist_pending_initplans pattern). all_first-gated:
-    // a rescan that re-marks exec_plan also resets all_first.
+    // RESIDUAL eager arm: WindowAgg programs (projection, equality, trans,
+    // runcondition, qual, per-function args/filters) evaluate through
+    // node-local fused paths with no suspension driver in reach, so pending
+    // initplan params are still force-run before the node evaluates them
+    // rather than lazily at first PARAM_EXEC fetch (C ExecEvalParamExec,
+    // execExprInterp.c:3053). Divergence needs an erroring initplan inside
+    // an untaken short-circuit arm of one of these window expressions.
+    // all_first-gated: a rescan that re-marks exec_plan also resets
+    // all_first; a fully-empty partition input still hoists only after a
+    // first spooled row exists.
     fn hoist_pending_initplans(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         let mut deps: Vec<u32> = Vec::new();
         for state in [

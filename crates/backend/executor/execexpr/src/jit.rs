@@ -71,7 +71,7 @@ struct HelperEnv {
     // and the driver resumes the unwind on the Rust side (interpreter-
     // identical panic semantics).
     panic: Option<Box<dyn core::any::Any + Send>>,
-    suspend: Option<(NonNull<()>, u32)>,
+    suspend: Option<(crate::interp::SuspendKind, u32)>,
 }
 
 /// Copy handle stored on the ExprState; the block itself lives in the
@@ -264,12 +264,17 @@ pub(crate) fn run_jit<'mcx>(
         let (regs, result, step) = r.into_parts();
         // SAFETY: res is the state's live result cell.
         unsafe { res.write(regs) };
-        let Step::SubPlan { out, .. } = state.steps[step as usize] else {
-            panic!("resume target is not a SubPlan step")
-        };
-        // SAFETY: out cells are 'mcx-live (compile-time invariant).
-        unsafe { out.0.write(result) };
-        start = step + 1;
+        match state.steps[step as usize] {
+            Step::SubPlan { out, .. } => {
+                // SAFETY: out cells are 'mcx-live (compile-time invariant).
+                unsafe { out.0.write(result) };
+                start = step + 1;
+            }
+            // Pending-initplan resume: ExecSetParamPlan ran and cleared
+            // exec_plan — re-execute the fetch (run_program parity).
+            Step::ParamExec { .. } => start = step,
+            _ => panic!("resume target is not a SubPlan/ParamExec step"),
+        }
     }
     if handle.fetch[0] > 0 {
         exectuples::slot_getsomeattrs(
@@ -329,9 +334,9 @@ pub(crate) fn run_jit<'mcx>(
             Err(env.err.take().expect("jit kernel error without a stashed PgError"))
         }
         RET_SUSPEND => {
-            let (sstate, step) = env.suspend.take().expect("jit suspend without state");
+            let (kind, step) = env.suspend.take().expect("jit suspend without state");
             // SAFETY: res is the state's live result cell.
-            Ok(EvalOutcome::Suspended(Suspension::new(sstate, step, unsafe { res.read() })))
+            Ok(EvalOutcome::Suspended(Suspension::new(kind, step, unsafe { res.read() })))
         }
         other => panic!("jit kernel returned unknown code {other}"),
     }
@@ -360,8 +365,8 @@ unsafe extern "C" fn jitq_step(env: *mut HelperEnv, ix: u32) -> i64 {
     match r {
         Ok(Ok(crate::interp::StepFlow::Next)) => ix as i64 + 1,
         Ok(Ok(crate::interp::StepFlow::Jump(t))) => t as i64,
-        Ok(Ok(crate::interp::StepFlow::Suspend(sstate))) => {
-            env.suspend = Some((sstate, ix));
+        Ok(Ok(crate::interp::StepFlow::Suspend(kind))) => {
+            env.suspend = Some((kind, ix));
             STEP_SUSPEND
         }
         Ok(Err(e)) => {

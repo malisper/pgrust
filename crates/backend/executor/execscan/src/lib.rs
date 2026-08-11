@@ -295,17 +295,10 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
         let ss = node.ss_mut();
         estate.ecxt_mut(ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
 
-        // ExecEvalParamExec pending-initplan arm, hoisted out of the interpreter.
-        if QUAL {
-            let deps = ss.qual.as_deref().unwrap().param_exec_deps();
-            if !deps.is_empty() {
-                executils::exec_eval_param_exec_params(estate, deps)?;
-            }
-        }
-
-        let ss = node.ss_mut();
         let passes = if QUAL {
-            if ss.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+            // Subplan and pending-initplan param quals ride the suspension
+            // driver (lazy PARAM_EXEC fetch, C ExecEvalParamExec).
+            if ss.qual.as_deref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty()) {
                 let ecxt = ss.ps_ExprContext;
                 executils::exec_qual_with_subplans(ss.qual.as_deref_mut(), estate, ecxt)?
             } else {
@@ -329,19 +322,14 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
 
         if passes {
             if PROJ {
-                // C reads projection initplan params inside the projection,
-                // which never runs on a qual-rejected tuple.
-                {
-                    let deps = ss.ps_ProjInfo.as_ref().unwrap().pi_state.param_exec_deps();
-                    if !deps.is_empty() {
-                        executils::exec_eval_param_exec_params(estate, deps)?;
-                    }
-                }
                 let ss = node.ss_mut();
                 let ecxt = ss.ps_ExprContext;
                 let proj = ss.ps_ProjInfo.as_mut().unwrap();
                 let result_id = proj.pi_result_slot;
-                if proj.pi_state.has_subplan() {
+                // Subplan and pending-initplan param projections ride the
+                // suspension driver (lazy PARAM_EXEC fetch never runs on a
+                // qual-rejected tuple, C ExecEvalParamExec).
+                if proj.pi_state.has_subplan() || !proj.pi_state.param_exec_deps().is_empty() {
                     executils::exec_project_with_subplans(
                         &mut proj.pi_state,
                         estate,
@@ -421,13 +409,10 @@ pub fn lane_scan_accept<'mcx>(
     estate.ecxt_mut(ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
 
     if ss.qual.is_some() {
-        // ExecEvalParamExec pending-initplan arm, hoisted out of the
-        // interpreter (exec_scan_impl parity).
-        let deps = ss.qual.as_deref().unwrap().param_exec_deps();
-        if !deps.is_empty() {
-            executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-        let passes = if ss.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        // Subplan and pending-initplan param quals ride the suspension
+        // driver (lazy PARAM_EXEC fetch, C ExecEvalParamExec;
+        // exec_scan_impl parity).
+        let passes = if ss.qual.as_deref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty()) {
             let ecxt = ss.ps_ExprContext;
             executils::exec_qual_with_subplans(ss.qual.as_deref_mut(), estate, ecxt)?
         } else {
@@ -457,16 +442,10 @@ pub fn lane_scan_accept<'mcx>(
     let Some(proj) = ss.ps_ProjInfo.as_mut() else {
         return Ok(Some(scan_id));
     };
-    // C reads projection initplan params inside the projection, which never
-    // runs on a qual-rejected tuple.
-    {
-        let deps = proj.pi_state.param_exec_deps();
-        if !deps.is_empty() {
-            executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-    }
     let result_id = proj.pi_result_slot;
-    if proj.pi_state.has_subplan() {
+    // Subplan and pending-initplan param projections ride the suspension
+    // driver (lazy fetch never runs on a qual-rejected tuple).
+    if proj.pi_state.has_subplan() || !proj.pi_state.param_exec_deps().is_empty() {
         executils::exec_project_with_subplans(&mut proj.pi_state, estate, ecxt, result_id)?;
         return Ok(Some(result_id));
     }

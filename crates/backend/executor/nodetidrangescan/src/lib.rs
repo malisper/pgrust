@@ -108,16 +108,18 @@ impl<'mcx> TidRangeScanState<'mcx> {
         let mut upper_bound = ItemPointerData::new(InvalidBlockNumber, u16::MAX);
 
         for i in 0..self.trss_tidexprs.len() {
-            let state = &mut self.trss_tidexprs[i].exprstate;
-            let deps = state.param_exec_deps();
-            if !deps.is_empty() {
-                ::executils::exec_eval_param_exec_params(estate, deps)?;
-            }
             let te = &mut self.trss_tidexprs[i];
             // SAFETY: the per-tuple context object outlives the plan.
             unsafe { te.exprstate.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
-            let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-            let nd = exec_eval_expr(&mut te.exprstate, &mut slots)?;
+            // Pending-initplan $n params (and any SubPlan) ride the
+            // suspension driver (lazy PARAM_EXEC fetch, C ExecEvalParamExec).
+            let st = &mut te.exprstate;
+            let nd = if st.has_subplan() || !st.param_exec_deps().is_empty() {
+                ::executils::exec_eval_expr_with_subplans(st, estate, ecxt)?
+            } else {
+                let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+                exec_eval_expr(st, &mut slots)?
+            };
             if nd.isnull {
                 return Ok(false);
             }

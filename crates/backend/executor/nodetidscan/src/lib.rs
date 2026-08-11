@@ -184,15 +184,17 @@ impl<'mcx> TidScanState<'mcx> {
                 TidExprKind::Single | TidExprKind::Array => {
                     let state =
                         self.tss_tidexprs[i].exprstate.as_deref_mut().expect("exprstate");
-                    let deps = state.param_exec_deps();
-                    if !deps.is_empty() {
-                        ::executils::exec_eval_param_exec_params(estate, deps)?;
-                    }
-                    let state = self.tss_tidexprs[i].exprstate.as_deref_mut().unwrap();
                     // SAFETY: the per-tuple context object outlives the plan.
                     unsafe { state.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
-                    let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-                    let nd = exec_eval_expr(state, &mut slots)?;
+                    let nd = if state.has_subplan() || !state.param_exec_deps().is_empty() {
+                        // Subplan/pending-initplan param tid exprs ride the
+                        // suspension driver (lazy PARAM_EXEC fetch, C
+                        // ExecEvalParamExec).
+                        ::executils::exec_eval_expr_with_subplans(state, estate, ecxt)?
+                    } else {
+                        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+                        exec_eval_expr(state, &mut slots)?
+                    };
                     if nd.isnull {
                         continue;
                     }

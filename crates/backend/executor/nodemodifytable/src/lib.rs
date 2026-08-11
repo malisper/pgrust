@@ -5461,8 +5461,15 @@ fn get_tuple_for_trigger<'mcx>(
     }
 }
 
-// ExecEvalParamExec's pending-initplan arm, hoisted out of the interpreter
-// (execscan precedent).
+// RESIDUAL eager arm: MERGE action quals/projections, WCO quals, and the
+// ON CONFLICT set/where expressions evaluate inside EStateData destructures
+// with no suspension driver in reach, so their pending initplan params are
+// still force-run up front rather than lazily at first PARAM_EXEC fetch (C
+// ExecEvalParamExec). C itself pre-hoists around DML EPQ already
+// (ExecSetParamPlanMulti, execMain.c:2972/3076); divergence needs an
+// erroring initplan inside an untaken short-circuit arm of one of these
+// DML-only expressions. RETURNING projections are NOT hoisted — they ride
+// the suspension loop and stay C-lazy.
 fn pre_eval_param_deps(
     state: Option<&ExprState<'_>>,
     estate: &mut EStateData<'_>,
@@ -5547,20 +5554,8 @@ fn exec_process_returning<'mcx>(
     if let Some((idx, _)) = leaf {
         resolve_leaf_returning(mt, estate, idx)?;
     }
-    // C runs pending initplans lazily inside ExecProject (ExecEvalParamExec);
-    // RETURNING-list $n params resolve here instead (execscan note).
-    {
-        let ModifyTableState { rels, cur, leaf_returning, .. } = &*mt;
-        let deps = match leaf {
-            Some((idx, _)) => leaf_returning[idx].as_deref(),
-            None => rels[*cur].project_returning.as_deref(),
-        }
-        .expect("RETURNING projection built")
-        .param_exec_deps();
-        if !deps.is_empty() {
-            executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-    }
+    // RETURNING-list pending-initplan $n params run lazily at first fetch
+    // inside the suspension loop below (C ExecEvalParamExec).
     // The insert leaf path carries no OLD/NEW steps (gated above): keep both
     // sources empty so the slot-aliasing checks below see only
     // scan/plan/result (the root-format new slot may alias the plan slot).
@@ -5674,7 +5669,17 @@ fn exec_process_returning<'mcx>(
                 return Ok(result_id);
             }
             Some(sus) => {
-                let d = executils::run_subplan_eval(sus.sstate, estate, ec)?;
+                let d = match sus.kind {
+                    execexpr::SuspendKind::SubPlan(ss) => {
+                        executils::run_subplan_eval(ss, estate, ec)?
+                    }
+                    // Pending initplan: run it on demand (C ExecEvalParamExec
+                    // -> ExecSetParamPlan), then re-execute the fetch.
+                    execexpr::SuspendKind::ParamExec(pid) => {
+                        executils::exec_set_param_plan(estate, pid)?;
+                        ::datum::NullableDatum::null()
+                    }
+                };
                 resume = Some(sus.resume_with(d));
             }
         }

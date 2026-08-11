@@ -730,11 +730,19 @@ fn eval_expr_nested_subplans<'mcx>(
         match outcome {
             ::execexpr::EvalOutcome::Done(nd) => return Ok(nd),
             ::execexpr::EvalOutcome::Suspended(s) => {
-                // SAFETY: the suspension's sstate was installed by
-                // subplan_expr_init_hook on this estate (nested compile env).
-                let v = unsafe {
-                    subplan_expr_eval_hook(s.sstate, estate, ecxt, outer.as_deref_mut())
-                }?;
+                let v = match s.kind {
+                    // SAFETY: the suspension's sstate was installed by
+                    // subplan_expr_init_hook on this estate (nested env).
+                    ::execexpr::SuspendKind::SubPlan(ss) => unsafe {
+                        subplan_expr_eval_hook(ss, estate, ecxt, outer.as_deref_mut())
+                    }?,
+                    // Pending initplan: run it on demand (C ExecEvalParamExec
+                    // -> ExecSetParamPlan), then re-execute the fetch.
+                    ::execexpr::SuspendKind::ParamExec(pid) => {
+                        ::executils::exec_set_param_plan(estate, pid)?;
+                        NullableDatum::null()
+                    }
+                };
                 resume = Some(s.resume_with(v));
             }
         }
@@ -774,10 +782,16 @@ fn project_lhs_nested_subplans<'mcx>(
                 return Ok(());
             }
             Some(s) => {
-                // SAFETY: as eval_expr_nested_subplans.
-                let v = unsafe {
-                    subplan_expr_eval_hook(s.sstate, estate, ecxt, outer.as_deref_mut())
-                }?;
+                let v = match s.kind {
+                    // SAFETY: as eval_expr_nested_subplans.
+                    ::execexpr::SuspendKind::SubPlan(ss) => unsafe {
+                        subplan_expr_eval_hook(ss, estate, ecxt, outer.as_deref_mut())
+                    }?,
+                    ::execexpr::SuspendKind::ParamExec(pid) => {
+                        ::executils::exec_set_param_plan(estate, pid)?;
+                        NullableDatum::null()
+                    }
+                };
                 resume = Some(s.resume_with(v));
             }
         }
@@ -847,14 +861,9 @@ fn scan_sub_plan_loop<'mcx>(
                 }
                 found = true;
                 load_param_ids(sstate, estate, slot_id);
-                // C reads the testexpr's pending initplan params only here,
-                // per returned row (ExecEvalParamExec) — never on zero rows.
-                {
-                    let deps = sstate.testexpr.as_deref().unwrap().param_exec_deps();
-                    if !deps.is_empty() {
-                        ::executils::exec_eval_param_exec_params(estate, deps)?;
-                    }
-                }
+                // Testexpr pending-initplan params run lazily at first
+                // fetch inside the nested pump (C ExecEvalParamExec) —
+                // never on zero rows.
                 let testexpr = sstate
                     .testexpr
                     .as_deref_mut()
@@ -865,14 +874,8 @@ fn scan_sub_plan_loop<'mcx>(
             SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => {
                 found = true;
                 load_param_ids(sstate, estate, slot_id);
-                // As ROWCOMPARE: per-row lazy initplan reads (C
-                // ExecEvalParamExec); idempotent after the first row.
-                {
-                    let deps = sstate.testexpr.as_deref().unwrap().param_exec_deps();
-                    if !deps.is_empty() {
-                        ::executils::exec_eval_param_exec_params(estate, deps)?;
-                    }
-                }
+                // As ROWCOMPARE: pending initplans run lazily at first
+                // fetch inside the nested pump (C ExecEvalParamExec).
                 let testexpr = sstate
                     .testexpr
                     .as_deref_mut()
@@ -1148,13 +1151,9 @@ fn exec_hash_sub_plan<'mcx>(
 
     let lhs_slot = h.lhs_slot;
     {
-        // C ExecProject(projLeft) reads pending initplan params here — after
-        // the empty-tables early return above, never before it.
-        let deps = h.proj_left.param_exec_deps();
-        if !deps.is_empty() {
-            ::executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-        let h = sstate.hashed.as_mut().unwrap();
+        // C ExecProject(projLeft) reads pending initplan params lazily at
+        // first fetch inside the pump — after the empty-tables early return
+        // above, never before it.
         let proj_left = &mut h.proj_left;
         project_lhs_nested_subplans(proj_left, estate, ecxt, lhs_slot, outer)?;
     }

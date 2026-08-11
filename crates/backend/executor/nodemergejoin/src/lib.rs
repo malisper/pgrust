@@ -486,18 +486,9 @@ fn eval_qual_subplan_aware<'mcx>(
     let Some(qual) = qual else {
         return Ok(true);
     };
-    // ExecEvalParamExec pending-initplan arm, hoisted out of the interpreter.
-    let deps = qual.param_exec_deps();
-    if !deps.is_empty() {
-        ::executils::exec_eval_param_exec_params(estate, deps)?;
-    }
-    let qual = match which {
-        Qual::Join => node.joinqual.as_deref(),
-        Qual::Other => node.otherqual.as_deref(),
-    }
-    .expect("qual checked above");
-    let has_sub = qual.has_subplan();
-    if has_sub {
+    // Subplan and pending-initplan param quals ride the suspension driver
+    // (lazy PARAM_EXEC fetch, C ExecEvalParamExec).
+    if qual.has_subplan() || !qual.param_exec_deps().is_empty() {
         let outer_id = node.mj_OuterTupleSlot.expect("outer slot set");
         let ecxt = node.ps_ExprContext;
         {
@@ -527,12 +518,9 @@ fn project_result_with<'mcx>(
     estate: &mut EStateData<'mcx>,
     inner_id: ExecSlotId,
 ) -> PgResult<ExecSlotId> {
-    // ExecEvalParamExec pending-initplan arm, hoisted out of the interpreter.
-    let deps = node.proj.param_exec_deps();
-    if !deps.is_empty() {
-        ::executils::exec_eval_param_exec_params(estate, deps)?;
-    }
-    if node.proj.has_subplan() {
+    // Subplan and pending-initplan param projections ride the suspension
+    // driver (lazy PARAM_EXEC fetch, C ExecEvalParamExec).
+    if node.proj.has_subplan() || !node.proj.param_exec_deps().is_empty() {
         let outer_id = node.mj_OuterTupleSlot.expect("outer slot set");
         let ecxt = node.ps_ExprContext;
         {

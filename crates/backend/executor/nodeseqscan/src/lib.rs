@@ -3362,29 +3362,10 @@ pub fn seq_scan_batch_emit<'mcx>(
         let scan_id = node.ss.ss_ScanTupleSlot;
         let ecxt = node.ss.ps_ExprContext;
         estate.ecxt_mut(ecxt).ecxt_scantuple = Some(scan_id);
-        // ExecEvalParamExec pending-initplan arm, hoisted out of the
-        // interpreter — mirrors `exec_scan_impl`.
-        let deps = node.ss.qual.as_deref().unwrap().param_exec_deps();
-        if !deps.is_empty() {
-            ::executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-        if node.ss.qual.as_deref().is_some_and(|q| q.has_subplan()) {
-            ::executils::exec_qual_with_subplans(node.ss.qual.as_deref_mut(), estate, ecxt)?
-        } else {
-            // Param-only qual (initplan or correlated exec params, no subplan
-            // steps): the params are plain datum reads once evaluated above —
-            // `exec_scan_impl`'s ordinary per-row qual arm.
-            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
-            // SAFETY: reset-only context, arena-boxed (address-stable),
-            // outlives the plan.
-            unsafe { node.ss.qual.as_deref_mut().unwrap().arm_result_mcx_raw(per_tuple) };
-            let mut slots = ::execexpr::EvalSlots {
-                scan: Some(estate.slot_mut(scan_id)),
-                inner: None,
-                outer: None,
-            };
-            ::execexpr::exec_qual(node.ss.qual.as_deref_mut(), &mut slots)?
-        }
+        // Subplan and pending-initplan param quals ride the suspension
+        // driver (lazy PARAM_EXEC fetch, C ExecEvalParamExec) — mirrors
+        // `exec_scan_impl`.
+        ::executils::exec_qual_with_subplans(node.ss.qual.as_deref_mut(), estate, ecxt)?
     } else {
         seq_scan_batch_fetch(node, estate, i)?
     };
@@ -3397,17 +3378,12 @@ pub fn seq_scan_batch_emit<'mcx>(
     if node.ss.ps_ProjInfo.is_none() {
         return Ok(Some(scan_id));
     };
-    // C reads projection initplan params inside the projection, which never
-    // runs on a qual-rejected tuple — mirrors `exec_scan_impl`.
-    {
-        let deps = node.ss.ps_ProjInfo.as_ref().unwrap().pi_state.param_exec_deps();
-        if !deps.is_empty() {
-            ::executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-    }
     let proj = node.ss.ps_ProjInfo.as_mut().unwrap();
     let result_id = proj.pi_result_slot;
-    if proj.pi_state.has_subplan() {
+    // Subplan and pending-initplan param projections ride the suspension
+    // driver (lazy fetch never runs on a qual-rejected tuple) — mirrors
+    // `exec_scan_impl`.
+    if proj.pi_state.has_subplan() || !proj.pi_state.param_exec_deps().is_empty() {
         ::executils::exec_project_with_subplans(&mut proj.pi_state, estate, ecxt, result_id)?;
         return Ok(Some(result_id));
     }

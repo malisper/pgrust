@@ -170,10 +170,10 @@ pub(crate) fn lane_result_childless_next<'mcx>(
 
 /// `exec_result`'s One-Time Filter arm (`rs_checkqual`): evaluate
 /// `resconstantqual` once, clause by clause in list order with C's ExecQual
-/// short-circuit — each clause's pending-initplan $n params are hoisted only
-/// when that clause is reached (C runs them lazily inside ExecEvalParamExec;
-/// a false earlier clause must leave later clauses' initplans un-run) —
-/// consuming `rs_checkqual`. False → the node is done for good (`rs_done`),
+/// short-circuit — each clause's pending-initplan $n params run lazily at
+/// first fetch inside the clause (C ExecEvalParamExec; a false earlier
+/// clause must leave later clauses' initplans un-run) — consuming
+/// `rs_checkqual`. False → the node is done for good (`rs_done`),
 /// no row is ever produced.
 pub(crate) fn lane_result_gate<'mcx>(
     node: &mut ResultState<'mcx>,
@@ -184,11 +184,11 @@ pub(crate) fn lane_result_gate<'mcx>(
     let mut qual_result = true;
     let clauses = node.resconstantqual.as_deref_mut().expect("rs_checkqual without qual");
     for clause in clauses.iter_mut() {
-        let deps = clause.param_exec_deps();
-        if !deps.is_empty() {
-            ::executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-        let passes = if clause.has_subplan() {
+        // Subplan and pending-initplan param clauses ride the suspension
+        // driver: a clause's $n initplans run lazily at first fetch (C
+        // ExecEvalParamExec), so a false earlier clause leaves later
+        // clauses' initplans un-run.
+        let passes = if clause.has_subplan() || !clause.param_exec_deps().is_empty() {
             ::executils::exec_qual_with_subplans(Some(&mut **clause), estate, ecxt)?
         } else {
             with_eval_slots(estate, ecxt, None, |slots, _, _| {
@@ -207,8 +207,8 @@ pub(crate) fn lane_result_gate<'mcx>(
     Ok(qual_result)
 }
 
-/// `exec_result`'s projection tail: pending-initplan param hoist + the
-/// (subplan-aware) projection into the result slot. The caller has already
+/// `exec_result`'s projection tail: the (subplan- and pending-initplan-
+/// aware) projection into the result slot. The caller has already
 /// staged the input — `ecxt_outertuple` set for a child row, untouched for
 /// the no-FROM single row — exactly as the Volcano body does.
 pub(crate) fn lane_result_project<'mcx>(
@@ -217,18 +217,11 @@ pub(crate) fn lane_result_project<'mcx>(
 ) -> PgResult<ExecSlotId> {
     let ecxt = ps.ps_ExprContext.expect("ResultState without ExprContext");
     let result_slot = ps.ps_ResultTupleSlot.expect("ResultState without result slot");
-    if !ps
-        .ps_ProjInfo
-        .as_deref()
-        .expect("ResultState without projection")
-        .param_exec_deps()
-        .is_empty()
-    {
-        let deps = ps.ps_ProjInfo.as_deref().unwrap().param_exec_deps();
-        ::executils::exec_eval_param_exec_params(estate, deps)?;
-    }
     let proj = ps.ps_ProjInfo.as_deref_mut().expect("ResultState without projection");
-    if proj.has_subplan() {
+    // Subplan and pending-initplan param projections ride the suspension
+    // driver (lazy PARAM_EXEC fetch, C ExecEvalParamExec): an initplan in a
+    // never-taken COALESCE/CASE arm stays un-run.
+    if proj.has_subplan() || !proj.param_exec_deps().is_empty() {
         ::executils::exec_project_with_subplans(proj, estate, ecxt, result_slot)?;
     } else {
         with_eval_slots(estate, ecxt, Some(result_slot), |slots, result, mcx| {

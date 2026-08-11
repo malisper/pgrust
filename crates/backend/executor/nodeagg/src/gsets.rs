@@ -1173,7 +1173,10 @@ pub(crate) fn agg_retrieve_hash_table<'mcx>(
 
         // Qual/tlist SubPlans need the suspension drivers (node-ecxt), same
         // as the plain and sorted retrieval paths.
-        if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        if node.proj.has_subplan()
+            || !node.proj.param_exec_deps().is_empty()
+            || node.qual.as_deref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty())
+        {
             let ecxt = node.ps_ExprContext;
             let result = node.ps_ResultTupleSlot;
             let instr_idx = node.instr_idx;
@@ -1510,7 +1513,10 @@ where
 
         // Qual/tlist SubPlans need the suspension drivers (node-ecxt), same
         // as the plain and sorted retrieval paths.
-        if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        if node.proj.has_subplan()
+            || !node.proj.param_exec_deps().is_empty()
+            || node.qual.as_deref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty())
+        {
             let ecxt = node.ps_ExprContext;
             let result = node.ps_ResultTupleSlot;
             let instr_idx = node.instr_idx;

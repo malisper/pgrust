@@ -47,7 +47,7 @@ pub use compile::{
 pub use interp::{
     agg_datum_copy, agg_datum_replace, exec_eval_expr, exec_eval_expr_outcome, exec_project, exec_project_prearmed, exec_project_outcome,
     exec_project_returning, exec_project_returning_outcome, exec_qual, exec_qual_outcome, EvalOutcome, EvalSlots, QualOutcome,
-    Resume, RetSlot, RetSlots, Suspension,
+    Resume, RetSlot, RetSlots, SuspendKind, Suspension,
 };
 pub use steps::{
     agg_count_star_advance, qual_bitmap_cmp_const, qual_bitmap_contains, AggPerGroup, CmpOp,

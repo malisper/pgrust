@@ -3792,6 +3792,13 @@ fn copy_scratch_datum<'m>(
 // C resolves an initplan's PARAM_EXEC lazily inside ExecEvalParamExec; this
 // executor hoists instead: any pending initplan a program depends on runs
 // before the drive evaluates it (noderesult.c pattern).
+// RESIDUAL eager arm: the transition-eval (evaltrans) and grouping-sets
+// programs run through fused per-row kernels with no suspension driver in
+// reach, so their pending initplan params are still force-run up front
+// rather than lazily at first fetch (C ExecEvalParamExec). HAVING quals and
+// the result projection are NOT hoisted here — they ride the suspension
+// driver and stay C-lazy (untaken COALESCE/CASE arms leave initplans
+// un-run).
 fn hoist_pending_initplans<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -3799,10 +3806,6 @@ fn hoist_pending_initplans<'mcx>(
     let mut deps: Vec<u32> = Vec::new();
     if let Some(et) = node.evaltrans.as_deref() {
         deps.extend_from_slice(et.param_exec_deps());
-    }
-    deps.extend_from_slice(node.proj.param_exec_deps());
-    if let Some(q) = node.qual.as_deref() {
-        deps.extend_from_slice(q.param_exec_deps());
     }
     if let Some(gs) = node.gsets.as_deref() {
         gs.collect_param_deps(&mut deps);
@@ -3873,7 +3876,10 @@ fn plain_finish<'mcx>(
     node.agg_done = true;
 
     // project_aggregates: the HAVING qual (var-free here) gates the one row.
-    if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+    if node.proj.has_subplan()
+        || !node.proj.param_exec_deps().is_empty()
+        || node.qual.as_deref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty())
+    {
         let ecxt = node.ps_ExprContext;
         if !::executils::exec_qual_with_subplans(node.qual.as_deref_mut(), estate, ecxt)? {
             estate.instr_count_filtered1(node.instr_idx);
@@ -6326,7 +6332,10 @@ pub fn agg_sorted_emit<'mcx>(
     process_ordered_aggregates(node, estate)?;
     finalize_aggregates(node, estate, node.pergroup_base)?;
 
-    if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+    if node.proj.has_subplan()
+        || !node.proj.param_exec_deps().is_empty()
+        || node.qual.as_deref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty())
+    {
         let ecxt = node.ps_ExprContext;
         let result = node.ps_ResultTupleSlot;
         let instr_idx = node.instr_idx;
@@ -6870,7 +6879,10 @@ where
         process_ordered_aggregates(node, estate)?;
         finalize_aggregates(node, estate, node.pergroup_base)?;
 
-        if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        if node.proj.has_subplan()
+            || !node.proj.param_exec_deps().is_empty()
+            || node.qual.as_deref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty())
+        {
             let ecxt = node.ps_ExprContext;
             let result = node.ps_ResultTupleSlot;
             let instr_idx = node.instr_idx;
@@ -7139,7 +7151,10 @@ fn agg_retrieve_hash_table<'mcx>(
         // empty.
         finalize_aggregates(node, estate, pergroup)?;
 
-        if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        if node.proj.has_subplan()
+            || !node.proj.param_exec_deps().is_empty()
+            || node.qual.as_deref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty())
+        {
             let ecxt = node.ps_ExprContext;
             let result = node.ps_ResultTupleSlot;
             let instr_idx = node.instr_idx;

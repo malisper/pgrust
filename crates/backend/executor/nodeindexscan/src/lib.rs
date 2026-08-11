@@ -1145,17 +1145,14 @@ pub fn exec_index_eval_runtime_keys<'mcx>(
     orderby_keys: &mut [ScanKeyData],
 ) -> PgResult<()> {
     for rk in runtime_keys.iter_mut() {
-        // ExecEvalParamExec pending-initplan arm, hoisted per repo convention.
-        let deps = rk.key_expr.param_exec_deps();
-        if !deps.is_empty() {
-            ::executils::exec_eval_param_exec_params(estate, deps)?;
-        }
         // SAFETY: the per-tuple context object outlives the plan (reset-only).
         unsafe {
             rk.key_expr
                 .arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx())
         };
-        let nd = if rk.key_expr.has_subplan() {
+        // Pending-initplan $n params in a runtime key ride the suspension
+        // driver too (lazy PARAM_EXEC fetch, C ExecEvalParamExec).
+        let nd = if rk.key_expr.has_subplan() || !rk.key_expr.param_exec_deps().is_empty() {
             // A correlated SubPlan pushed into an Index Cond (min-subquery
             // runtime key, HammerDB TPROC-C DELIVERY): C's ExecEvalExpr
             // recurses into ExecEvalSubPlan; the decomposed interpreter must

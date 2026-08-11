@@ -476,7 +476,13 @@ fn get_matching_partitions<'mcx>(
     let ctx = if initial { pprune.initial_ctx.as_mut() } else { pprune.exec_ctx.as_mut() }
         .expect("prune context initialized for this pass");
 
-    // ExecEvalParamExec pending-initplan arm, hoisted (execScan precedent).
+    // RESIDUAL eager arm: prune-step expressions evaluate deep inside
+    // perform_pruning_base_step_exec with no suspension driver in reach, so
+    // pending initplan params are still force-run here rather than lazily at
+    // first fetch (C ExecEvalParamExec). Observable divergence would need an
+    // erroring initplan inside an untaken short-circuit arm of a pruning
+    // steps expression — not reachable from planner-built prune steps today
+    // (each step's expr is a single comparison value).
     let mut deps: Vec<u32> = Vec::new();
     for st in ctx.exprstates.iter().flatten() {
         deps.extend_from_slice(st.param_exec_deps());

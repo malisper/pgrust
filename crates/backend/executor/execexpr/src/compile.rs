@@ -4010,7 +4010,7 @@ fn init_param(param: &Param, params: ParamBind<'_>, out: OutRef) -> PgResult<Ste
             let base = params.exec_vals.expect("n_exec > 0 implies a base pointer");
             // SAFETY: paramid bounds-checked against the once-sized array.
             let prm = unsafe { NonNull::new_unchecked(base.as_ptr().add(paramid as usize)) };
-            Ok(Step::ParamExec { prm, out })
+            Ok(Step::ParamExec { prm, out, paramid: paramid as u32 })
         }
         ParamKind::PARAM_EXTERN => {
             let list = params.extern_params.unwrap_or(&[]);

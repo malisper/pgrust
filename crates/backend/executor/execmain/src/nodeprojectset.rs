@@ -302,9 +302,13 @@ fn exec_project_srf<'mcx>(
 ) -> PgResult<bool> {
     let ecxt = node.base.ps_ExprContext.expect("ProjectSetState without ExprContext");
     let result = node.base.ps_ResultTupleSlot.expect("ProjectSetState without result slot");
-    // C runs pending initplans lazily inside ExecEvalExpr (ExecEvalParamExec,
-    // execExprInterp.c); the SRF args' and scalar elems' $n params resolve
-    // here instead (execscan note).
+    // RESIDUAL eager arm: SRF args and scalar tlist elems evaluate inside
+    // the with_eval_slots closure below with no suspension driver in reach,
+    // so their pending initplan params are still force-run up front rather
+    // than lazily at first PARAM_EXEC fetch (C ExecEvalParamExec,
+    // execExprInterp.c:3053). Divergence needs an erroring initplan inside
+    // an untaken short-circuit arm of a ProjectSet tlist element; ordering
+    // vs an earlier erroring elem is the only observable skew.
     for elem in node.elems.iter() {
         match elem {
             Elem::Srf(srf) => {

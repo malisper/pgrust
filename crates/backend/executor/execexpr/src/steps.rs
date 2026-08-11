@@ -53,7 +53,10 @@ pub enum Step {
     // Unbound PARAM_EXTERN: C errors at evaluation (ExecEvalParamExtern),
     // not at init — EXPLAIN (GENERIC_PLAN) inits but never evaluates.
     ParamExternMissing { paramid: i32 },
-    ParamExec { prm: NonNull<::types_portal::params::ParamExecData>, out: OutRef },
+    // paramid rides along for the pending-initplan lane: a fetch that finds
+    // exec_plan set suspends so the driver can run ExecSetParamPlan for this
+    // param on demand (C ExecEvalParamExec, execExprInterp.c).
+    ParamExec { prm: NonNull<::types_portal::params::ParamExecData>, out: OutRef, paramid: u32 },
     FuncExpr { call: FuncCall, out: OutRef },
     FuncExprStrict1 { call: FuncCall, out: OutRef },
     FuncExprStrict2 { call: FuncCall, out: OutRef },

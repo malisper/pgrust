@@ -74,11 +74,8 @@ impl<'mcx> ScanNode<'mcx> for ValuesScanState<'mcx> {
             }
             for resind in 0..states.len() {
                 // C runs pending initplans lazily inside ExecEvalExpr
-                // (ExecEvalParamExec); the $n params resolve here instead.
-                if !states[resind].param_exec_deps().is_empty() {
-                    let deps = states[resind].param_exec_deps().to_vec();
-                    ::executils::exec_eval_param_exec_params(estate, &deps)?;
-                }
+                // (ExecEvalParamExec); the suspension driver services the
+                // $n fetches on demand.
                 let d = ::executils::exec_eval_expr_with_subplans(
                     &mut states[resind],
                     estate,

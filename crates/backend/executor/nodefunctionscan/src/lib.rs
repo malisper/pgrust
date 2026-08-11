@@ -495,15 +495,6 @@ fn exec_make_table_function_result<'mcx>(
     ecxt: ::executils::EcxtId,
     arg_mcx: &mut ::mcx::MemoryContext,
 ) -> PgResult<Tuplestore> {
-    // ExecEvalParamExec pending-initplan arm, hoisted out of the interpreter
-    // (execscan pattern): the funcexpr args may carry InitPlan Params.
-    for st in setexpr.elided_func_state.iter().map(|b| &**b).chain(setexpr.args.iter().map(|b| &**b))
-    {
-        let deps = st.param_exec_deps();
-        if !deps.is_empty() {
-            ::executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-    }
     if setexpr.elided_func_state.is_some() {
         return run_elided(setexpr, expected_desc, random_access, estate, ecxt);
     }
@@ -545,8 +536,15 @@ fn run_elided<'mcx>(
     // The row is copied into the tuplestore before the next per-tuple reset.
     // SAFETY: the ExprContext outlives this call frame.
     unsafe { elided.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
-    let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-    let NullableDatum { value, isnull } = exec_eval_expr(elided, &mut slots)?;
+    // Pending-initplan $n params (and any SubPlan) in the elided funcexpr
+    // ride the suspension driver (lazy PARAM_EXEC fetch, C ExecEvalParamExec).
+    let NullableDatum { value, isnull } =
+        if elided.has_subplan() || !elided.param_exec_deps().is_empty() {
+            ::executils::exec_eval_expr_with_subplans(elided, estate, ecxt)?
+        } else {
+            let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+            exec_eval_expr(elided, &mut slots)?
+        };
     if setexpr.returns_tuple {
         let mut set_desc: Option<TupleDescData<'mcx>> = None;
         put_composite_row(&mut store, expected_desc, &mut set_desc, value, isnull, estate)?;
@@ -591,8 +589,16 @@ fn run_value_per_call<'mcx, const N: usize>(
         // SAFETY: arg_mcx is owned by the scan state and outlives this loop;
         // it is only reset at the next scan start.
         unsafe { setexpr.args[i].arm_result_mcx_raw(arg_mcx.mcx()) };
-        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-        let NullableDatum { value, isnull } = exec_eval_expr(&mut setexpr.args[i], &mut slots)?;
+        // Pending-initplan $n params (and any SubPlan) in SRF args ride the
+        // suspension driver (lazy PARAM_EXEC fetch, C ExecEvalParamExec).
+        let arg = &mut setexpr.args[i];
+        let NullableDatum { value, isnull } =
+            if arg.has_subplan() || !arg.param_exec_deps().is_empty() {
+                ::executils::exec_eval_expr_with_subplans(arg, estate, ecxt)?
+            } else {
+                let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+                exec_eval_expr(arg, &mut slots)?
+            };
         if isnull {
             fcinfo.set_arg_null(i);
             all_null_skip |= flinfo.fn_strict;
