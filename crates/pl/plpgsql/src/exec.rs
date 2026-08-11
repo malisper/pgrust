@@ -2254,6 +2254,10 @@ impl<'a> Estate<'a> {
                     rc = r;
                     break;
                 }
+                // C's LOOP_RC_PROCESSING (pl_exec.c): a consumed CONTINUE
+                // resets rc to OK before the next iteration, so exhaustion
+                // right after CONTINUE returns RC_OK, not a stale RC_CONTINUE.
+                rc = RC_OK;
             }
         } else {
             let outer: usize = dims[..(ndim - slice) as usize]
@@ -2290,6 +2294,8 @@ impl<'a> Estate<'a> {
                     rc = r;
                     break;
                 }
+                // See the slice==0 arm: consumed CONTINUE must reset rc.
+                rc = RC_OK;
             }
         }
 
@@ -2742,6 +2748,10 @@ impl<'a> Estate<'a> {
                 }
                 break;
             }
+            // C's LOOP_RC_PROCESSING (pl_exec.c): a consumed CONTINUE resets
+            // rc to OK, so exhaustion right after a final-iteration CONTINUE
+            // returns RC_OK instead of leaking a stale RC_CONTINUE.
+            rc = RC_OK;
             // Increment with overflow guard (C checks bounds against i32).
             if reverse {
                 match loop_value.checked_sub(step_value) {
