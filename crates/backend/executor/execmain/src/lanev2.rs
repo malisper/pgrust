@@ -12306,6 +12306,25 @@ fn join_probe_drain_dispatch<'mcx>(
     }
 }
 
+/// C's HJ_BUILD_HASHTABLE empty-outer check, lane form: PEEK the first probe
+/// (outer) row BEFORE the build (C's `ExecProcNode(outerNode)` at the top of
+/// HJ_BUILD_HASHTABLE), so an empty probe side skips the build entirely —
+/// build-side scan quals are never evaluated, exactly C's order. Unlike C
+/// (which stashes the fetched tuple in hj_FirstOuterTupleSlot), the lane
+/// peeks Volcano-style and the caller RESCANS the outer on a nonempty
+/// verdict: a stashed row plus a partially consumed staged batch would be
+/// stranded whenever the lane refuses post-build (the multi-batch refuse —
+/// the Volcano fallback's Plain-variant scan skips lane-staged batches),
+/// which is exactly the row-loss class this replaced. The re-fetched prefix
+/// is unobservable inside the lane's admission envelope (kernel-shaped,
+/// non-volatile scan quals only).
+fn join_probe_prefetch_dispatch<'mcx>(
+    outer: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    ::nodehashjoin::HashJoinOuter::exec_proc(outer, estate)
+}
+
 /// Probe-pipeline pull (bare join): one PG pull's worth through the chain
 /// into the root adapter — exercising the mid-expansion pause/resume.
 fn join_probe_pull_dispatch<'mcx>(
@@ -12420,6 +12439,19 @@ fn hash_join_refuse_reason<'mcx>(
     if hstate.parallel_state().is_some() || hstate.is_parallel_aware() {
         return Ok(Some(RefuseReason::ParallelGate));
     }
+    // C's HJ_BUILD_HASHTABLE empty-outer prefetch over a shared parallel
+    // scan: the lane's peek-and-rescan form is unsound there (a participant
+    // rescanning the shared allocator loses/duplicates other participants'
+    // claims), and a per-call bail would let the lane grab the probe phase
+    // of a row-path-built join (mixed drives). Refuse STRUCTURALLY so the
+    // row path owns the join whole-life — its stash flow is C's exact
+    // parallel-safe mechanism. (hj_OuterNotEmpty is false on an untouched
+    // join, so the prefetch predicate is plan-static here.)
+    if ::nodehashjoin::lane_prefetch_wanted(state)
+        && ::nodehashjoin::lane_outer_parallel_aware(state)
+    {
+        return Ok(Some(RefuseReason::ParallelGate));
+    }
     if !::nodehash::lane_build_hash_admissible(hstate) {
         return Ok(Some(RefuseReason::SubplanParam));
     }
@@ -12470,6 +12502,21 @@ pub fn try_own_hash_join<'mcx>(
     let crate::procnode::HashJoinNode { state, outer, hash, .. } = hj;
     let crate::procnode::HashSubNode { state: hstate, child } = &mut **hash;
     if ::nodehashjoin::lane_join_phase(state, hstate) == ::nodehashjoin::LaneJoinPhase::Build {
+        // C's HJ_BUILD_HASHTABLE empty-outer check: peek the first probe
+        // row BEFORE the build; an empty probe side quits without building
+        // (build-side scan quals never run — C's evaluation order). A
+        // nonempty peek rescans the outer (no stash — see
+        // join_probe_prefetch_dispatch) and records C's hj_OuterNotEmpty.
+        if ::nodehashjoin::lane_prefetch_wanted(state) {
+            // Parallel-aware outers were refused structurally in
+            // hash_join_refuse_reason — the peek below runs on serial
+            // scans only.
+            if join_probe_prefetch_dispatch(outer, estate)?.is_none() {
+                return Ok(Some(None));
+            }
+            ::nodehashjoin::HashJoinOuter::rescan(&mut **outer, estate)?;
+            ::nodehashjoin::lane_note_outer_not_empty(state);
+        }
         let done = join_build_dispatch(state, hstate, child, estate)?;
         if done.empty {
             // C's empty-build early return: no output, outer never pulled.
@@ -13846,6 +13893,23 @@ fn agg_hash_join_build_if_needed<'mcx>(
     if ::nodehashjoin::lane_join_phase(state, hstate)
         == ::nodehashjoin::LaneJoinPhase::Build
     {
+        // C's HJ_BUILD_HASHTABLE empty-outer check (see try_own_hash_join):
+        // an empty probe side skips the build — build-side scan quals never
+        // run — and the agg finalizes over an empty input. A nonempty peek
+        // rescans the outer (no stash) and records C's hj_OuterNotEmpty.
+        if ::nodehashjoin::lane_prefetch_wanted(state) {
+            // Parallel-aware outers were refused structurally in
+            // hash_join_refuse_reason — the peek below runs on serial
+            // scans only.
+            if join_probe_prefetch_dispatch(outer, estate)?.is_none() {
+                stats::tick_owned(ShapeClass::AggBuild);
+                let mut sink = HashAggBuildSink { agg };
+                sink.finish(estate)?;
+                return Ok(true);
+            }
+            ::nodehashjoin::HashJoinOuter::rescan(&mut **outer, estate)?;
+            ::nodehashjoin::lane_note_outer_not_empty(state);
+        }
         let done = join_build_dispatch(state, hstate, child, estate)?;
         if !done.empty && done.nbatch > 1 {
             // Spill refuse before any lane tuple is emitted; the

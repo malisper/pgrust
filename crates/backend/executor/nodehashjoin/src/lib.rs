@@ -92,6 +92,10 @@ pub struct HashJoinState<'mcx> {
     hj_NullInnerTupleSlot: Option<ExecSlotId>,
     hj_NullOuterTupleSlot: Option<ExecSlotId>,
     hj_OuterTupleSlot: ExecSlotId,
+    /// C's `hj_FirstOuterTupleSlot`: the probe-side tuple fetched by the
+    /// HJ_BUILD_HASHTABLE empty-outer check, stashed for later consumption
+    /// by `get_outer_tuple` / `get_outer_key` (ExecHashJoinOuterGetTuple).
+    hj_FirstOuterTupleSlot: Option<ExecSlotId>,
     hj_JoinState: u8,
     hj_CurHashValue: u32,
     hj_CurBucketNo: u32,
@@ -325,6 +329,7 @@ pub fn exec_init_hash_join<'mcx>(
         hj_NullInnerTupleSlot,
         hj_NullOuterTupleSlot,
         hj_OuterTupleSlot,
+        hj_FirstOuterTupleSlot: None,
         hj_JoinState: HJ_BUILD_HASHTABLE,
         hj_CurHashValue: 0,
         hj_CurBucketNo: 0,
@@ -362,6 +367,42 @@ where
         match node.hj_JoinState {
             HJ_BUILD_HASHTABLE => {
                 debug_assert!(hash_state.table.is_none());
+                // C HJ_BUILD_HASHTABLE prologue (nodeHashjoin.c): if the
+                // outer relation is completely empty, and it's not a
+                // right/right-anti/full join (HJ_FILL_INNER), quit without
+                // building the hash table. For an inner join the check is
+                // only tried when the outer's startup cost is below the
+                // projected build cost (and, on rescan, when the previous
+                // scan found the outer empty); for a fill-outer join
+                // (LEFT/ANTI/FULL) it is always tried. The only way to
+                // check is to fetch a tuple from the outer plan; a fetched
+                // tuple is stashed in hj_FirstOuterTupleSlot for later
+                // consumption by get_outer_tuple / get_outer_key. The
+                // serial path never builds shared tables, so C's parallel
+                // opt-out branch has no counterpart here.
+                // Disarm any stale probe filter BEFORE the first-outer-tuple
+                // fetch: a rescan-rebuild reaches here with the PREVIOUS
+                // build's bloom still armed on the outer drive, and a
+                // prefetch through it silently skips probe rows the new
+                // build would match (C's fetch has no filter semantics; the
+                // post-build push below re-arms the correct one).
+                outer.set_hash_filter(estate, None)?;
+                if node.hj_fill_inner {
+                    // No chance to not build the hash table.
+                    node.hj_FirstOuterTupleSlot = None;
+                } else if node.hj_fill_outer
+                    || (outer_plan_startup_cost(node) < hash_plan_total_cost(node)
+                        && !node.hj_OuterNotEmpty)
+                {
+                    node.hj_FirstOuterTupleSlot = outer.exec_proc(estate)?;
+                    if node.hj_FirstOuterTupleSlot.is_none() {
+                        node.hj_OuterNotEmpty = false;
+                        return Ok(None);
+                    }
+                    node.hj_OuterNotEmpty = true;
+                } else {
+                    node.hj_FirstOuterTupleSlot = None;
+                }
                 let want_filter = !node.hj_fill_outer
                     && node.outer_hash_expr.hash32var_low32(::execexpr::SlotSrc::Inner).is_some();
                 hash_state.table =
@@ -738,6 +779,30 @@ fn scan_hash_table_for_unmatched<'mcx>(
     }
 }
 
+// HJ_BUILD_HASHTABLE empty-outer gate operands: C compares
+// `outerNode->plan->startup_cost < hashNode->ps.plan->total_cost`.
+fn outer_plan_startup_cost(node: &HashJoinState<'_>) -> f64 {
+    node.plan
+        .join
+        .plan
+        .lefttree
+        .expect("HashJoin without an outer plan")
+        .as_plan()
+        .expect("HashJoin outer is a plan node")
+        .startup_cost
+}
+
+fn hash_plan_total_cost(node: &HashJoinState<'_>) -> f64 {
+    node.plan
+        .join
+        .plan
+        .righttree
+        .expect("HashJoin without a Hash inner plan")
+        .as_plan()
+        .expect("HashJoin inner is a plan node")
+        .total_cost
+}
+
 // ExecHashJoinOuterGetTuple: the plan child on the first pass, the outer
 // batch file afterwards.
 fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
@@ -749,8 +814,17 @@ fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
     let curbatch = hash_state.table.as_ref().expect("hash table built").curbatch;
     let ecxt = node.ps_ExprContext;
     if curbatch == 0 {
-        let Some(slot_id) = outer.exec_proc(estate)? else {
-            return Ok(None);
+        // First outer tuple may already have been fetched by the build
+        // arm's empty-outer check and not used yet (C's
+        // hj_FirstOuterTupleSlot consumption).
+        let slot_id = match node.hj_FirstOuterTupleSlot.take() {
+            Some(slot_id) => slot_id,
+            None => {
+                let Some(slot_id) = outer.exec_proc(estate)? else {
+                    return Ok(None);
+                };
+                slot_id
+            }
         };
         {
             let e = estate.ecxt_mut(ecxt);
@@ -834,8 +908,16 @@ fn get_outer_key<'mcx, O: HashJoinOuter<'mcx>>(
     outer: &mut O,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<(i32, bool)>> {
-    let Some(slot_id) = outer.exec_proc(estate)? else {
-        return Ok(None);
+    // Consume the build arm's stashed first outer tuple, if any (C's
+    // hj_FirstOuterTupleSlot; dense implies nbatch==1, i.e. curbatch 0).
+    let slot_id = match node.hj_FirstOuterTupleSlot.take() {
+        Some(slot_id) => slot_id,
+        None => {
+            let Some(slot_id) = outer.exec_proc(estate)? else {
+                return Ok(None);
+            };
+            slot_id
+        }
     };
     {
         let e = estate.ecxt_mut(node.ps_ExprContext);
@@ -1068,7 +1150,11 @@ pub fn exec_rescan_hash_join_chg<'mcx>(
     node.hj_CurBucketNo = 0;
     node.hj_CurTuple = core::ptr::null_mut();
     node.hj_MatchedOuter = false;
-    node.hj_OuterNotEmpty = false;
+    node.hj_FirstOuterTupleSlot = None;
+    // hj_OuterNotEmpty is deliberately NOT reset here: C's destroy arm
+    // leaves it alone ("ExecHashJoin will need it the first time through"
+    // — the rescan heuristic that suppresses the empty-outer prefetch when
+    // the previous scan proved the outer nonempty).
     node.dense_on = false;
     node.hj_CurDense = ::nodehash::DENSE_END;
     Ok(())
@@ -1138,6 +1224,7 @@ pub fn exec_rescan_hash_join<'mcx>(
     node.hj_CurBucketNo = 0;
     node.hj_CurTuple = core::ptr::null_mut();
     node.hj_MatchedOuter = false;
+    node.hj_FirstOuterTupleSlot = None;
     node.hj_CurDense = ::nodehash::DENSE_END;
     Ok(rescan_inner)
 }
@@ -1237,6 +1324,47 @@ pub fn lane_join_admissible(node: &HashJoinState<'_>) -> bool {
 /// takeover from row-path-left state).
 pub fn lane_join_untouched(node: &HashJoinState<'_>, hs: &HashState<'_>) -> bool {
     node.hj_JoinState == HJ_BUILD_HASHTABLE && hs.table.is_none() && hs.ptable.is_none()
+}
+
+/// C's HJ_BUILD_HASHTABLE empty-outer prefetch gate for the lane driver:
+/// try to fetch the first probe-side tuple BEFORE building when an empty
+/// outer lets the join quit without building (never for the right-fill
+/// family — HJ_FILL_INNER has no chance to skip the build; always for
+/// fill-outer LEFT/ANTI/FULL; for the rest only when the outer's startup
+/// cost is below the projected build cost and no previous scan proved the
+/// outer nonempty). Serial-only by construction — the lane never owns
+/// parallel hash (C's parallel arm never prefetches either).
+pub fn lane_prefetch_wanted(node: &HashJoinState<'_>) -> bool {
+    !node.hj_fill_inner
+        && (node.hj_fill_outer
+            || (outer_plan_startup_cost(node) < hash_plan_total_cost(node)
+                && !node.hj_OuterNotEmpty))
+}
+
+/// True when the probe (outer) plan is parallel-aware (a shared scan under
+/// Gather). The lane/runtime peek-and-rescan prefetch is UNSOUND there — a
+/// participant rescanning the shared allocator loses/duplicates other
+/// participants' claims — so those arms must refuse ownership and let the
+/// row path run C's exact stash flow (single-drive, parallel-safe).
+pub fn lane_outer_parallel_aware(node: &HashJoinState<'_>) -> bool {
+    node.plan
+        .join
+        .plan
+        .lefttree
+        .expect("HashJoin without an outer plan")
+        .as_plan()
+        .expect("HashJoin outer is a plan node")
+        .parallel_aware
+}
+
+/// Record a peek-only prefetch verdict (the lane and morsel-runtime arms
+/// peek the first probe row and RESCAN the outer instead of stashing — a
+/// stash plus a partially consumed staged batch would be stranded on a
+/// post-build lane refuse, and the runtime's workers rescan the probe side
+/// from scratch anyway): C's hj_OuterNotEmpty bit, so later build arms skip
+/// the redundant prefetch exactly as C's rescan heuristic does.
+pub fn lane_note_outer_not_empty(node: &mut HashJoinState<'_>) {
+    node.hj_OuterNotEmpty = true;
 }
 
 /// Build-phase entry: `exec_hash_join`'s HJ_BUILD_HASHTABLE table creation,
@@ -1668,6 +1796,7 @@ mcx::forget_safe_struct!(
         js_single_match, hj_fill_outer, hj_fill_inner, hj_NullInnerTupleSlot,
         hj_NullOuterTupleSlot, hj_JoinState, hj_CurHashValue, hj_CurBucketNo,
         hj_CurTuple, hj_MatchedOuter, hj_OuterNotEmpty, hj_OuterTupleSlot,
+        hj_FirstOuterTupleSlot,
         outer_saved_scratch, inner_saved_scratch, hash_instr, js_instr,
         dense_cols, dense_on, hj_CurDense, lane_flt_seen, lane_flt_drop;
         ps_ResultTupleDesc, proj, hashclauses, joinqual, otherqual,

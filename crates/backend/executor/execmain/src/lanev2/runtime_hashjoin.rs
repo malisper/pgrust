@@ -4110,6 +4110,31 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
             | ::types_nodes::JoinType::JOIN_RIGHT_ANTI
     );
 
+    // C's HJ_BUILD_HASHTABLE empty-outer check (serial nodeHashjoin.c): the
+    // serial plan this arm replaces fetches the first probe-side tuple
+    // BEFORE building, so an empty probe side never evaluates build-side
+    // scan quals. Peek serially (Volcano pull + rescan — the workers rescan
+    // the probe side from scratch, so nothing is stashed): an empty probe
+    // refuses to the serial arms, which implement C's short-circuit; a
+    // nonempty probe records C's hj_OuterNotEmpty bit so the serial build
+    // arms skip the redundant re-prefetch on a later fallback. The peek's
+    // extra probe-qual evaluations are unobservable inside this arm's
+    // admission envelope (parallel-safe exprs only).
+    if ::nodehashjoin::lane_prefetch_wanted(&hj.state)
+        && !::nodehashjoin::lane_outer_parallel_aware(&hj.state)
+    {
+        let first = ::nodeseqscan::exec_seq_scan(outer_ss, estate)?;
+        ::nodeseqscan::exec_rescan_seq_scan(outer_ss, estate)?;
+        if first.is_none() {
+            lane_trace(
+                "runtime-hashjoin: REFUSED (empty probe side — C empty-outer short-circuit) — serial arm",
+            );
+            refuse("empty-probe-shortcircuit");
+            return Ok(None);
+        }
+        ::nodehashjoin::lane_note_outer_not_empty(&mut hj.state);
+    }
+
     // Router counter choke point (M5-1): Engaged = ceremony entered;
     // Completed = the runtime answered; Fallback = R5 serial rerun.
     router::tick(ArmClass::HashJoin, ArmCounter::Engaged);
@@ -4374,6 +4399,30 @@ fn try_own_multibuild<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         // Grouped done-repulls exit at the dispatch gate; belt only.
         return if grouped { Ok(None) } else { Ok(Some(None)) };
+    }
+    // C's HJ_BUILD_HASHTABLE empty-outer check for the tree's TOP join
+    // (see the single-join arm above): peek serially and refuse to the
+    // serial arms on an empty probe side, so no build-side scan qual in the
+    // whole tree is ever evaluated — C's serial executor short-circuits
+    // every build under the top join's empty outer. SeqScan outers only
+    // (a join-on-the-outer tree keeps the pre-peek behavior; the serial
+    // row path still applies C's order there after a refusal for any other
+    // reason).
+    if let crate::procnode::PlanStateNode::SeqScan(top_outer_ss) = &mut *hj.outer {
+        if ::nodehashjoin::lane_prefetch_wanted(&hj.state)
+            && !::nodehashjoin::lane_outer_parallel_aware(&hj.state)
+        {
+            let first = ::nodeseqscan::exec_seq_scan(top_outer_ss, estate)?;
+            ::nodeseqscan::exec_rescan_seq_scan(top_outer_ss, estate)?;
+            if first.is_none() {
+                lane_trace(
+                    "runtime-hashjoin: REFUSED multibuild (empty probe side — C empty-outer short-circuit) — serial arm",
+                );
+                refuse("empty-probe-shortcircuit");
+                return Ok(None);
+            }
+            ::nodehashjoin::lane_note_outer_not_empty(&mut hj.state);
+        }
     }
     router::tick(ArmClass::HashJoin, ArmCounter::Engaged);
     let sources: Vec<Arc<dyn runtime::MorselSource>> =
