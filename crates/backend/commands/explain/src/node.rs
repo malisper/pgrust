@@ -510,9 +510,17 @@ fn collect_node_subplans<'mcx>(
 // vocabulary — SubPlans nested under unlisted node types (NULLIF/NullIfExpr,
 // FieldSelect, SubscriptingRef, ...) were silently dropped, eliding their
 // whole SubPlan subtree from EXPLAIN output (covdiff-fuzzer E1-B). The
-// generic expression_tree_walker matches C's coverage; its T_SubPlan arm
-// descends testexpr then args (C ExecInitSubPlan order), so nested SubPlans
-// land on the same node's list in C's order.
+// generic expression_tree_walker matches C's coverage.
+//
+// List ORDER for nested SubPlans (EXPLAIN-SUBPLAN-ORDER, covdiff s13 i1864):
+// C's planstate->subPlan entry for a SubPlan node is lappend'ed only AFTER
+// its input machinery is initialized — ExecInitSubPlanExpr ExecInitExprRec's
+// the parParam args first, then ExecInitSubPlan initializes testexpr with
+// the same parent planstate (nodeSubplan.c ExecInitSubPlan), and only then
+// does ExecInitSubPlanExpr lappend the node's own SubPlanState. So SubPlans
+// nested inside args/testexpr land on the parent's list BEFORE the enclosing
+// SubPlan: emit args-nested, then testexpr-nested, then self (NOT walker
+// pre-order, and NOT the walker's testexpr-before-args field order).
 struct SubPlanCollector<'a, 'mcx> {
     out: &'a mut PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
 }
@@ -520,7 +528,14 @@ struct SubPlanCollector<'a, 'mcx> {
 impl<'mcx> nodes_core::NodeWalker<'mcx> for SubPlanCollector<'_, 'mcx> {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         if let Some(sp) = node.as_sub_plan() {
+            if nodes_core::walk_list(&sp.args, self)? {
+                return Ok(true);
+            }
+            if nodes_core::walk_opt(sp.testexpr, self)? {
+                return Ok(true);
+            }
             self.out.push(sp);
+            return Ok(false);
         }
         nodes_core::expression_tree_walker(node, self)
     }
