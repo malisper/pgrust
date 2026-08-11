@@ -825,6 +825,10 @@ fn AttachPartitionEnsureIndexes<'mcx>(
         attach_infos.push(execindexing::BuildIndexInfo(mcx, &r)?);
         attachrel_idx_rels.push(r);
     }
+    // Child indexes attached to a parent index within this command; stands in
+    // for C's relispartition re-read of the in-place-rebuilt relcache entry.
+    let mut attached: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+    attached.resize(attachrel_idx_rels.len(), false);
 
     // A foreign table can carry no constraint indexes: refuse if any parent
     // index is unique/primary, otherwise nothing to ensure (C's goto out).
@@ -870,7 +874,16 @@ fn AttachPartitionEnsureIndexes<'mcx>(
         let mut found = false;
         for (i, cld_rel) in attachrel_idx_rels.iter().enumerate() {
             let cld_idx_id = cld_rel.rd_id;
-            if cld_rel.rd_rel.relispartition {
+            // C reads rd_rel->relispartition here, and its in-place relcache
+            // rebuild refreshes the held-open entry at the CCI after
+            // IndexSetParentIndex — so a child index attached to an earlier
+            // parent index in THIS loop is skipped. Our relcache rebuild
+            // replaces the entry Rc, leaving this held Relation's rd_rel
+            // stale; track in-command attachments explicitly so a second
+            // identical parent index cannot re-claim the same child index
+            // (F3: bogus pg_inherit row on re-ATTACH with two identical
+            // partitioned indexes).
+            if cld_rel.rd_rel.relispartition || attached[i] {
                 continue;
             }
             if !cld_rel.rd_index.as_ref().expect("rd_index").indisvalid {
@@ -909,6 +922,7 @@ fn AttachPartitionEnsureIndexes<'mcx>(
                         attachrel.rd_id,
                     )?;
                 }
+                attached[i] = true;
                 found = true;
                 xact::CommandCounterIncrement()?;
                 break;
