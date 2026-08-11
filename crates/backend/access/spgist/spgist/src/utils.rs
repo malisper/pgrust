@@ -187,10 +187,12 @@ pub fn spgGetCache(index: &Relation<'_>) -> PgResult<SpGistCache> {
 
     let config_oid = index_getprocid(index, spgKeyColumn, SPGIST_CONFIG_PROC);
     if config_oid == InvalidOid {
-        panic!(
+        // C: index_getprocinfo's elog (indexam.c) — user-reachable via a
+        // defective opclass, so ereport rather than panic.
+        return Err(Box::new(PgError::error(format!(
             "missing support function {SPGIST_CONFIG_PROC} for attribute 1 of index \"{}\"",
             index.name()
-        );
+        ))));
     }
     let mut config_fn = fmgr_seams::fmgr_info::call(config_oid)?;
     let cfgin = spgConfigIn { attType: atttype };
@@ -294,10 +296,11 @@ pub fn initSpGistState<'mcx>(
     let resolve = |procnum: u16| -> PgResult<::types_fmgr::FmgrInfo> {
         let oid = index_getprocid(index, spgKeyColumn, procnum);
         if oid == InvalidOid {
-            panic!(
+            // C: index_getprocinfo's elog (indexam.c).
+            return Err(Box::new(PgError::error(format!(
                 "missing support function {procnum} for attribute 1 of index \"{}\"",
                 index.name()
-            );
+            ))));
         }
         fmgr_seams::fmgr_info::call(oid)
     };

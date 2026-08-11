@@ -47,11 +47,32 @@ pub fn hash_procinfo(rel: &Relation<'_>) -> PgResult<FmgrInfo> {
         HASHSTANDARD_PROC as i16,
     )?;
     if proc == 0 {
-        return Err(missing_support_function(rel, opcintype, opcintype));
+        return Err(missing_support_function(rel));
     }
     let fi = fmgr_core::fmgr_info(proc)?;
     rel.rd_supportinfo.borrow_mut()[0] = Some(fi.clone());
     Ok(fi)
+}
+
+/// index_getprocid(rel, 1, HASHSTANDARD_PROC): the support proc's oid, or
+/// InvalidOid — WITHOUT erroring — when the opclass carries no same-type
+/// hash proc. C's `_hash_init` stores that InvalidOid in the metapage and
+/// lets the defect surface lazily at the first `index_getprocinfo` use
+/// (first tuple hashed at build, insert, or scan).
+pub(crate) fn hash_procid(rel: &Relation<'_>) -> PgResult<RegProcedure> {
+    {
+        let cache = rel.rd_supportinfo.borrow();
+        if let Some(Some(fi)) = cache.first() {
+            return Ok(fi.fn_oid);
+        }
+    }
+    let opcintype = rel.rd_opcintype[0];
+    lsyscache::get_opfamily_proc(
+        rel.rd_opfamily[0],
+        opcintype,
+        opcintype,
+        HASHSTANDARD_PROC as i16,
+    )
 }
 
 thread_local! {
@@ -130,9 +151,10 @@ pub(crate) fn _hash_datum2hashkey_type(
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn missing_support_function(rel: &Relation<'_>, lefttype: Oid, righttype: Oid) -> Box<PgError> {
+fn missing_support_function(rel: &Relation<'_>) -> Box<PgError> {
+    // C: index_getprocinfo's elog (indexam.c) — no argtype parenthetical.
     Box::new(PgError::error(format!(
-        "missing support function {HASHSTANDARD_PROC}({lefttype},{righttype}) for attribute 1 of index \"{}\"",
+        "missing support function {HASHSTANDARD_PROC} for attribute 1 of index \"{}\"",
         rel.name()
     )))
 }

@@ -266,7 +266,10 @@ pub fn _hash_init(
         ffactor = 10;
     }
 
-    let procid: RegProcedure = crate::util::hash_procinfo(rel)?.fn_oid;
+    // C: index_getprocid — NOT index_getprocinfo. A defective opclass yields
+    // InvalidOid here without erroring; the metapage stores 0 and the empty
+    // index builds fine, failing lazily at first use (C parity, P2-F2).
+    let procid: RegProcedure = crate::util::hash_procid(rel)?;
 
     let metabuf = _hash_getnewbuf(rel, HASH_METAPAGE, fork_num)?;
     _hash_init_metabuffer(metabuf, num_tuples, procid, ffactor as u16, false);

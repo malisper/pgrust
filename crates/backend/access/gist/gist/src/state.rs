@@ -85,12 +85,14 @@ fn opclass_name(index: &Relation<'_>, attno_0based: usize) -> String {
 
 #[cold]
 #[inline(never)]
-fn missing_support_proc(procnum: u16, attno: usize, rel: &Relation<'_>) -> ! {
-    panic!(
+fn missing_support_proc(procnum: u16, attno: usize, rel: &Relation<'_>) -> Box<::types_error::PgError> {
+    // C: index_getprocinfo's elog (indexam.c) — a plain user-reachable
+    // defective-opclass error, not a crash surface.
+    Box::new(::types_error::PgError::error(format!(
         "missing support function {procnum} for attribute {} of index \"{}\"",
         attno + 1,
         rel.name()
-    )
+    )))
 }
 
 // index_getprocid over the relcache rd_support preload.
@@ -160,7 +162,7 @@ pub fn initGISTstate<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<G
         let mandatory = |procnum: u16| -> PgResult<FmgrInfo> {
             let oid = index_getprocid(index, i, procnum);
             if oid == InvalidOid {
-                missing_support_proc(procnum, i, index);
+                return Err(missing_support_proc(procnum, i, index));
             }
             let finfo = resolve(oid)?;
             // Mandatory procs must be callable; see not_ported_support_proc.

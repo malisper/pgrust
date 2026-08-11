@@ -766,6 +766,30 @@ mod tape;
 
 pub use tape::tuplesort_merge_order;
 
+/// C's `_bt_mkscankey` → `index_getprocinfo(rel, attno, BTORDER_PROC)` probe
+/// for one index column: a defective opclass (no same-type comparison proc,
+/// e.g. a domain opclass whose amproc rows sit under the base type) ereports
+/// with `index_getprocinfo`'s elog message — XX000, index + attribute
+/// spelling — not the opfamily spelling of the sortsupport resolve.
+fn btorder_proc_check(index_rel: &types_rel::Relation<'_>, i: usize) -> PgResult<()> {
+    let opcintype = index_rel.rd_opcintype[i];
+    let proc = lsyscache::get_opfamily_proc(
+        index_rel.rd_opfamily[i],
+        opcintype,
+        opcintype,
+        ::types_nbtree::BTORDER_PROC as i16,
+    )?;
+    if proc == 0 {
+        return Err(Box::new(PgError::error(format!(
+            "missing support function {} for attribute {} of index \"{}\"",
+            ::types_nbtree::BTORDER_PROC,
+            i + 1,
+            index_rel.name()
+        ))));
+    }
+    Ok(())
+}
+
 impl Tuplesort {
     /// `tuplesort_begin_heap`.
     #[allow(clippy::too_many_arguments)]
@@ -837,6 +861,13 @@ impl Tuplesort {
         const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
         let nkeys = index_rel.indnkeyatts() as usize;
         assert!(nkeys > 0);
+        // C runs `_bt_mkscankey` (per-column index_getprocinfo of BTORDER_PROC,
+        // all columns) BEFORE the PrepareSortSupportFromIndexRel loop, so a
+        // defective opclass fails with the index-attribute elog even when a
+        // sortsupport arm exists; replicate that ordering and message.
+        for i in 0..nkeys {
+            btorder_proc_check(index_rel, i)?;
+        }
         let mut keys = Vec::with_capacity(nkeys);
         for i in 0..nkeys {
             let indoption = index_rel.rd_indoption[i];
@@ -961,6 +992,11 @@ impl Tuplesort {
         let mut attnums = [0i16; 32];
         attnums[..nkeys].copy_from_slice(&index_attnums[..nkeys]);
         assert!(attnums[..nkeys].iter().all(|&a| a >= 0), "system-attribute index columns");
+        // C: tuplesort_begin_cluster also starts from `_bt_mkscankey`; see
+        // begin_index_btree for the ordering contract.
+        for i in 0..nkeys {
+            btorder_proc_check(index_rel, i)?;
+        }
         // SAFETY: lifetime erasure as for heap_tup_desc; the caller keeps the
         // index relation open for the life of the sort.
         let index_desc: Option<std::rc::Rc<TupleDescData<'static>>> =

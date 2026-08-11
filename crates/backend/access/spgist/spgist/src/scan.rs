@@ -8,7 +8,7 @@ use ::datum::Datum;
 use ::mcx::{Mcx, MemoryContext, PgBox};
 use ::types_core::fmgr::INDEX_MAX_KEYS;
 use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_rel::Relation;
 use ::types_relscan::{relation_get_index_scan, IndexScanDescData, IndexScanOpaque};
 use ::types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL};
@@ -37,6 +37,16 @@ fn fmgr_info_copy(src: &::types_fmgr::FmgrInfo) -> ::types_fmgr::FmgrInfo {
     )
 }
 
+#[cold]
+#[inline(never)]
+fn missing_scan_proc(rel: &Relation<'_>, procnum: u16) -> Box<PgError> {
+    // C: index_getprocinfo's elog (indexam.c).
+    Box::new(PgError::error(format!(
+        "missing support function {procnum} for attribute 1 of index \"{}\"",
+        rel.name()
+    )))
+}
+
 /// spgbeginscan.
 pub fn spgbeginscan<'mcx>(
     mcx: Mcx<'mcx>,
@@ -47,13 +57,15 @@ pub fn spgbeginscan<'mcx>(
     let state = crate::initSpGistState(mcx, r)?;
     let recon_tup_desc = crate::utils::getSpGistTupleDesc(mcx, r, &state.attType)?;
 
+    // C: spgbeginscan resolves each proc via index_getprocinfo, whose elog
+    // (indexam.c) names the proc number — inner first, then leaf.
     let inner_oid = index_getprocid(r, spgKeyColumn, SPGIST_INNER_CONSISTENT_PROC);
+    if inner_oid == 0 {
+        return Err(missing_scan_proc(r, SPGIST_INNER_CONSISTENT_PROC));
+    }
     let leaf_oid = index_getprocid(r, spgKeyColumn, SPGIST_LEAF_CONSISTENT_PROC);
-    if inner_oid == 0 || leaf_oid == 0 {
-        panic!(
-            "missing support function for attribute 1 of index \"{}\"",
-            r.name()
-        );
+    if leaf_oid == 0 {
+        return Err(missing_scan_proc(r, SPGIST_LEAF_CONSISTENT_PROC));
     }
     let inner_fn = fmgr_seams::fmgr_info::call(inner_oid)?;
     let leaf_fn = fmgr_seams::fmgr_info::call(leaf_oid)?;

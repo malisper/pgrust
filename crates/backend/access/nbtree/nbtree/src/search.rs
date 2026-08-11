@@ -397,7 +397,7 @@ pub fn order_procinfo(rel: &Relation<'_>, attno: usize) -> PgResult<FmgrInfo> {
         BTORDER_PROC as i16,
     )?;
     if proc == 0 {
-        return Err(missing_support_function(rel, opcintype, opcintype, attno));
+        return Err(missing_support_function(rel, attno));
     }
     let fi = fmgr_core::fmgr_info(proc)?;
     rel.rd_supportinfo.borrow_mut()[attno - 1] = Some(fi.clone());
@@ -407,14 +407,29 @@ pub fn order_procinfo(rel: &Relation<'_>, attno: usize) -> PgResult<FmgrInfo> {
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn missing_support_function(
+fn missing_cross_type_support_function(
     rel: &Relation<'_>,
     lefttype: Oid,
     righttype: Oid,
     attno: usize,
 ) -> Box<PgError> {
+    // C: _bt_first's cross-type get_opfamily_proc elog (nbtutils.c) — the
+    // typed spelling stays for cross-type probes only.
     Box::new(PgError::error(format!(
         "missing support function {BTORDER_PROC}({lefttype},{righttype}) for attribute {attno} of index \"{}\"",
+        rel.name()
+    )))
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn missing_support_function(rel: &Relation<'_>, attno: usize) -> Box<PgError> {
+    // C: index_getprocinfo's elog (indexam.c) — the same-type rd_support
+    // path carries no argtype parenthetical (that spelling belongs to the
+    // cross-type get_opfamily_proc probes only).
+    Box::new(PgError::error(format!(
+        "missing support function {BTORDER_PROC} for attribute {attno} of index \"{}\"",
         rel.name()
     )))
 }
@@ -711,7 +726,7 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
                 BTORDER_PROC as i16,
             )?;
             if cmp_proc == 0 {
-                return Err(missing_support_function(
+                return Err(missing_cross_type_support_function(
                     rel,
                     rel.rd_opcintype[i],
                     bkey.sk_subtype,

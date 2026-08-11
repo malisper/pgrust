@@ -1,7 +1,7 @@
 use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_fmgr::PGFunction;
 use ::lsyscache::COMPARE_GT;
 use ::types_nbtree::{BTORDER_PROC, BTSORTSUPPORT_PROC};
@@ -539,8 +539,9 @@ fn abbrev_arm_for(comparator: SortComparator) -> Option<AbbrevArm> {
 }
 
 /// The MJExamineQuals (nodeMergejoin.c) comparator resolve: BTSORTSUPPORT_PROC
-/// for (lefttype,righttype), else the BTORDER_PROC shim — which, like every
-/// out-of-enum sortsupport routine, panics loudly.
+/// for (lefttype,righttype), else the BTORDER_PROC shim — a missing shim proc
+/// ereports as C does; an out-of-enum sortsupport routine panics loudly
+/// (invariant tripwire, not a user-reachable state).
 pub fn comparator_for_opfamily(
     opfamily: Oid,
     lefttype: Oid,
@@ -576,10 +577,11 @@ pub fn comparator_for_opfamily(
             let sort_function =
                 lsyscache::get_opfamily_proc(opfamily, lefttype, righttype, BTORDER_PROC as i16)?;
             if sort_function == 0 {
-                panic!(
-                    "missing support function {}({lefttype},{righttype}) in opfamily {opfamily}",
-                    BTORDER_PROC
-                );
+                // C: MJExamineQuals's elog(ERROR) (nodeMergejoin.c).
+                return Err(Box::new(PgError::error(format!(
+                    "missing support function {BTORDER_PROC}({lefttype},{righttype}) \
+                     in opfamily {opfamily}"
+                ))));
             }
             if sort_function == F_INTERVAL_CMP {
                 SortComparator::Interval
@@ -632,10 +634,11 @@ pub fn comparator_for_gist_index_col(opfamily: Oid, opcintype: Oid) -> PgResult<
                 fn_oid: F_RANGE_CMP,
             }))
         }
-        0 => panic!(
+        // C: PrepareSortSupportFromGistIndexRel's elog(ERROR) (sortsupport.c).
+        0 => Err(Box::new(PgError::error(format!(
             "missing support function {GIST_SORTSUPPORT_PROC_NUM}({opcintype},{opcintype}) \
              in opfamily {opfamily}"
-        ),
+        )))),
         // Extension opclass (btree_gist): invoke the proc once with a shim
         // "SortSupport"; it installs a leaf-key comparator fn.
         other => {
@@ -713,10 +716,13 @@ pub fn comparator_for_index_col(
             let sort_function =
                 lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTORDER_PROC as i16)?;
             if sort_function == 0 {
-                panic!(
-                    "missing support function {}({opcintype},{opcintype}) in opfamily {opfamily}",
-                    BTORDER_PROC
-                );
+                // C: FinishSortSupportFunction's elog(ERROR) (sortsupport.c);
+                // normally shadowed by the _bt_mkscankey-order check in
+                // begin_index_btree/begin_cluster, exactly as in C.
+                return Err(Box::new(PgError::error(format!(
+                    "missing support function {BTORDER_PROC}({opcintype},{opcintype}) \
+                     in opfamily {opfamily}"
+                ))));
             }
             if sort_function == F_INTERVAL_CMP {
                 SortComparator::Interval
