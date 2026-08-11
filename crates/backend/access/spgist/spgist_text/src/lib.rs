@@ -39,6 +39,9 @@ fn is_collation_aware(strategy: u16) -> bool {
 }
 
 // VARDATA_ANY/VARSIZE_ANY_EXHDR over an untoasted (possibly short) text datum.
+// Only for datums this opclass itself formed (reconstructed values), which are
+// never toasted or compressed. Everything that arrives from the outside goes
+// through text_bytes_pp below, mirroring C's DatumGetTextPP.
 // SAFETY: datum points at a live, untoasted varlena (opclass protocol).
 unsafe fn text_bytes<'a>(d: Datum) -> &'a [u8] {
     let p = d.as_usize() as *const u8;
@@ -49,6 +52,35 @@ unsafe fn text_bytes<'a>(d: Datum) -> &'a [u8] {
         let len = ::types_tuple::varatt::varsize_4b(p);
         core::slice::from_raw_parts(p.add(VARHDRSZ), len - VARHDRSZ)
     }
+}
+
+// DatumGetTextPP: the datum may be toasted or inline-compressed — e.g.
+// spgChooseIn.datum is the raw column value during build/insert (spgdoinsert
+// passes datums[spgKeyColumn] through untouched, and FormIndexDatum does not
+// guarantee an untoasted value), and scankey arguments are arbitrary query
+// datums. C detoasts at every read site via pg_detoast_datum_packed and reads
+// with VARDATA_ANY; mirror that exactly. Short-header values are read in
+// place; compressed/external values are detoasted into `mcx` (per-call temp
+// context, outlives all uses within the support-function call).
+// SAFETY: datum points at a live varlena image (fmgr protocol).
+unsafe fn text_bytes_pp<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
+    let p = d.as_usize() as *const u8;
+    let b0 = *p;
+    if b0 == 0x01 || (b0 & 0x03) == 0x02 {
+        // external toast pointer or inline-compressed: detoast
+        let total = ::types_tuple::varatt::varsize_any(p);
+        let image = core::slice::from_raw_parts(p, total);
+        let v = ::detoast_seams::detoast_attr::call(mcx, image)?;
+        let ptr = v.as_ptr();
+        let len = v.len();
+        core::mem::forget(v); // arena-owned; lives as long as mcx
+        debug_assert!(len >= VARHDRSZ);
+        return Ok(core::slice::from_raw_parts(ptr.add(VARHDRSZ), len - VARHDRSZ));
+    }
+    // plain 1B- or 4B-header value: read in place. The bytes live at least as
+    // long as the datum (page item or arena allocation), which outlives the
+    // support-function call; 'm is the per-call context so this is sound.
+    Ok(text_bytes(d))
 }
 
 // formTextDatum: short header when possible, allocated in `mcx` (arena-owned).
@@ -133,8 +165,8 @@ fn fc_spg_text_choose(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     let out = unsafe { &mut *(fcinfo.arg(1).as_usize() as *mut spgChooseOut) };
     let mcx = fcinfo.result_mcx();
 
-    // SAFETY: untoasted text datums per protocol.
-    let in_str = unsafe { text_bytes(input.datum) };
+    // SAFETY: live text datum; may be toasted/compressed (C: DatumGetTextPP).
+    let in_str = unsafe { text_bytes_pp(mcx, input.datum) }?;
     let in_size = in_str.len();
     let level = input.level as usize;
 
@@ -143,8 +175,8 @@ fn fc_spg_text_choose(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     let mut node_char: i16 = 0;
 
     if input.hasPrefix {
-        // SAFETY: prefix datum is a live text value.
-        let prefix = unsafe { text_bytes(input.prefixDatum) };
+        // SAFETY: prefix datum is a live text value (C: DatumGetTextPP).
+        let prefix = unsafe { text_bytes_pp(mcx, input.prefixDatum) }?;
         common_len = common_prefix(&in_str[level..], prefix);
 
         if common_len == prefix.len() {
@@ -232,8 +264,8 @@ fn fc_spg_text_choose(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
 }
 
 #[derive(Clone, Copy)]
-struct SpgNodePtr {
-    d: Datum,
+struct SpgNodePtr<'a> {
+    t: &'a [u8],
     i: i32,
     c: i16,
 }
@@ -248,15 +280,20 @@ fn fc_spg_text_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     // SAFETY: nTuples datums per protocol.
     let datums = unsafe { core::slice::from_raw_parts(input.datums, n) };
 
-    // SAFETY: untoasted text values.
-    let text0 = unsafe { text_bytes(datums[0]) };
+    // Open every input datum once, DatumGetTextPP-style (C re-opens at each
+    // read site; identical bytes either way).
+    let mut texts: ::mcx::PgVec<'_, &[u8]> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    for &d in datums {
+        // SAFETY: live text datums (C: DatumGetTextPP).
+        texts.push(unsafe { text_bytes_pp(mcx, d) }?);
+    }
+
+    let text0 = texts[0];
     let mut common_len = text0.len();
-    for &d in datums.iter().skip(1) {
+    for &ti in texts.iter().skip(1) {
         if common_len == 0 {
             break;
         }
-        // SAFETY: untoasted text values.
-        let ti = unsafe { text_bytes(d) };
         let tmp = common_prefix(text0, ti);
         if tmp < common_len {
             common_len = tmp;
@@ -271,16 +308,14 @@ fn fc_spg_text_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
         out.prefixDatum = form_text_datum(mcx, &text0[..common_len])?;
     }
 
-    let mut nodes: ::mcx::PgVec<'_, SpgNodePtr> = ::mcx::vec_with_capacity_in(mcx, n)?;
-    for (i, &d) in datums.iter().enumerate() {
-        // SAFETY: untoasted text values.
-        let ti = unsafe { text_bytes(d) };
+    let mut nodes: ::mcx::PgVec<'_, SpgNodePtr<'_>> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    for (i, &ti) in texts.iter().enumerate() {
         let c = if common_len < ti.len() {
             ti[common_len] as i16
         } else {
             -1
         };
-        nodes.push(SpgNodePtr { d, i: i as i32, c });
+        nodes.push(SpgNodePtr { t: ti, i: i as i32, c });
     }
 
     // pg_qsort is unstable; keys can tie, but grouping only needs the sort
@@ -297,8 +332,7 @@ fn fc_spg_text_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
 
     let mut n_nodes = 0i32;
     for i in 0..n {
-        // SAFETY: untoasted text values.
-        let ti = unsafe { text_bytes(nodes[i].d) };
+        let ti = nodes[i].t;
         if i == 0 || nodes[i].c != nodes[i - 1].c {
             labels.push(Datum::from_i16(nodes[i].c));
             n_nodes += 1;
@@ -333,14 +367,21 @@ fn fc_spg_text_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     let collate_is_c = pg_locale::pg_newlocale_from_collation(collation)?.collate_is_c;
 
     let level = input.level as usize;
-    debug_assert!(
-        (input.reconstructedValue.as_usize() == 0) == (level == 0)
-    );
+    // C: Assert(reconstructedValue == NULL ? in->level == 0 :
+    //           VARSIZE_ANY_EXHDR(reconstructedValue) == in->level);
+    // A non-NULL zero-length reconstruction at level 0 is legal (e.g. the
+    // dummy-labeled child of a prefix-less allTheSame root).
+    debug_assert!(if input.reconstructedValue.as_usize() == 0 {
+        level == 0
+    } else {
+        // SAFETY: long-format text emitted by this routine.
+        unsafe { text_bytes(input.reconstructedValue) }.len() == level
+    });
 
     let mut max_reconstr_len = level + 1;
     let prefix: &[u8] = if input.hasPrefix {
-        // SAFETY: untoasted text prefix.
-        unsafe { text_bytes(input.prefixDatum) }
+        // SAFETY: live text prefix (C: DatumGetTextPP).
+        unsafe { text_bytes_pp(mcx, input.prefixDatum) }?
     } else {
         &[]
     };
@@ -351,7 +392,8 @@ fn fc_spg_text_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     // SAFETY: max_reconstr_len writable bytes at reconstr_data.
     let reconstr = unsafe { core::slice::from_raw_parts_mut(reconstr_data, max_reconstr_len) };
     if level > 0 {
-        // SAFETY: reconstructedValue is a long-format text of length `level`.
+        // SAFETY: reconstructedValue is a long-format text of length `level`
+        // (always emitted by this routine; C reads it with plain VARDATA).
         let prev = unsafe { text_bytes(input.reconstructedValue) };
         reconstr[..level].copy_from_slice(&prev[..level]);
     }
@@ -389,8 +431,9 @@ fn fc_spg_text_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
                 }
             }
 
-            // SAFETY: scankey argument is an untoasted text (planner detoasts).
-            let in_text = unsafe { text_bytes(key.sk_argument) };
+            // SAFETY: scankey argument is a live text datum, possibly
+            // toasted/compressed (C: DatumGetTextPP).
+            let in_text = unsafe { text_bytes_pp(mcx, key.sk_argument) }?;
             let cmp_len = in_text.len().min(this_len);
             let r = cmp_bytes(&reconstr[..cmp_len], &in_text[..cmp_len]);
 
@@ -448,11 +491,12 @@ fn fc_spg_text_leaf_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
 
     out.recheck = false;
 
-    // SAFETY: untoasted leaf text.
-    let leaf = unsafe { text_bytes(input.leafDatum) };
+    // SAFETY: live leaf text (C: DatumGetTextPP; page-stored leaves are never
+    // compressed, but keep the PP read for exact parity).
+    let leaf = unsafe { text_bytes_pp(mcx, input.leafDatum) }?;
 
     let reconstr: &[u8] = if input.reconstructedValue.as_usize() != 0 {
-        // SAFETY: long-format reconstructed text.
+        // SAFETY: long-format reconstructed text (C reads with plain VARDATA).
         unsafe { text_bytes(input.reconstructedValue) }
     } else {
         &[]
@@ -486,8 +530,9 @@ fn fc_spg_text_leaf_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     let mut res = true;
     for key in scankeys {
         let mut strategy = key.sk_strategy;
-        // SAFETY: untoasted query text.
-        let query = unsafe { text_bytes(key.sk_argument) };
+        // SAFETY: live query text datum, possibly toasted/compressed
+        // (C: DatumGetTextPP).
+        let query = unsafe { text_bytes_pp(mcx, key.sk_argument) }?;
 
         if strategy == RTPrefixStrategyNumber {
             // C: DirectFunctionCall2Coll(text_starts_with, ...) — which raises

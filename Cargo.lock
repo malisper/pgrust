@@ -17102,6 +17102,7 @@ name = "spgist_text"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "detoast_seams",
  "mcx",
  "pg_locale",
  "types_core",
