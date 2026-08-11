@@ -1047,6 +1047,44 @@ fn floorguard_emit_band_admits(
     plan_rows / reltuples <= emit_max_pct / 100.0
 }
 
+/// RUN-CADENCE gate — the funnel is a COMPLETE-DRAIN, FIRST-RUN engine.
+///
+/// Two refusals, one law: a run this engine may serve must be the ONLY run
+/// of its execution, because the funnel drives its own morsel scan from
+/// block 0 and keeps no per-run position that a later run could continue
+/// from. C's contract (`ExecutorRun` on a portal) is the opposite: every
+/// run CONTINUES the same plan state and returns only the remainder.
+///
+/// 1. COUNT-LIMITED (review fix #1): `number_tuples != 0` — the
+///    extended-protocol `Execute(portal, max_rows)` cadence, and any other
+///    suspendable one. The funnel would emit `number_tuples` rows, close
+///    demand and destroy the parallel context; the portal then SUSPENDS.
+///
+/// 2. RESUMED (SOAK3-A XPROTO-PORTAL-RESUME-DUP): `es_total_processed != 0`
+///    — a prior run of THIS execution already emitted rows. Gate 1 alone
+///    was not enough: `Execute(maxrows)` whose result count equals maxrows
+///    exactly leaves the portal suspended-but-not-atEnd (the executor does
+///    not know it is exhausted), and pgrust's fuzz/JDBC-style resume then
+///    arrives as a count-0 `Execute` — a COMPLETE-DRAIN run that passed
+///    gate 1 and re-scanned from block 0, re-delivering every row already
+///    on the wire (2 rows where C returns 1 for a 1-row result at limit 1).
+///    `es_total_processed` is exactly "rows emitted by earlier runs of this
+///    execution": zeroed at `ExecutorStart` and at executor-rearm (both
+///    virgin-execution points) and accumulated per run in
+///    `standard_executor_run`, including the funnel's own emit count. A
+///    suspension implies at least one row was already delivered
+///    (`nprocessed == count >= 1`), so every resume run trips this gate.
+///    A first run whose predecessor emitted ZERO rows cannot exist as a
+///    resume: a run returning fewer rows than its count marks the portal
+///    `atEnd`, and the next `Execute` never reaches the executor
+///    (`PortalRunSelect` sends `NoMovementScanDirection`).
+///
+/// Both are FAIL-CLOSED: refusing runs the serial per-tuple loop, whose
+/// plan state survives suspend/resume byte-identically.
+fn funnel_run_cadence_admits(number_tuples: u64, es_total_processed: u64) -> bool {
+    number_tuples == 0 && es_total_processed == 0
+}
+
 /// World-B gated hook (Stage 3): when the row funnel is armed (default ON
 /// since the GL-FUNNEL-4 flip; `PGRUST_RUNTIME_ROW_FUNNEL=0` kills) and the
 /// plan is a lane-ownable bare passthrough `SeqScan`, run it in parallel through
@@ -1063,15 +1101,9 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     if !super::row_emit::row_funnel_enabled() {
         return Ok(false);
     }
-    // CRITICAL (review fix #1): the funnel is a COMPLETE-DRAIN engine only. A
-    // count-limited run (extended-protocol Execute(portal, max_rows) — and any
-    // suspendable portal cadence) must NOT engage: the funnel would emit
-    // `number_tuples` rows, close demand, and destroy the parallel context;
-    // the portal then SUSPENDS and the next Execute would re-engage a FRESH
-    // funnel that rescans from block 0 → duplicated rows. A resumable funnel
-    // is future work; fail closed to the serial loop, whose per-tuple state
-    // survives suspend/resume.
-    if number_tuples != 0 {
+    // The funnel is a COMPLETE-DRAIN, FIRST-RUN engine only: both halves of
+    // that cadence law live in `funnel_run_cadence_admits` (unit-pinned below).
+    if !funnel_run_cadence_admits(number_tuples, estate.es_total_processed) {
         return Ok(false);
     }
     // W0 funnel-into-writer (parallel-writes design §4; write_funnel.rs): a
@@ -1454,5 +1486,36 @@ mod floorguard_emit_band_tests {
         assert!(!floorguard_emit_band_admits(false, 0.0, T, 10.0));
         // Band disabled skips the stats check (pre-fix behavior, preserved).
         assert!(floorguard_emit_band_admits(false, 100.0, -1.0, 100.0));
+    }
+}
+
+/// Run-cadence gate units — the COMPLETE-DRAIN + FIRST-RUN law
+/// (SOAK3-A XPROTO-PORTAL-RESUME-DUP).
+#[cfg(test)]
+mod funnel_run_cadence_tests {
+    use super::funnel_run_cadence_admits;
+
+    #[test]
+    fn only_a_virgin_complete_drain_admits() {
+        assert!(funnel_run_cadence_admits(0, 0), "first run, no count limit");
+    }
+
+    #[test]
+    fn count_limited_runs_refuse() {
+        // The Execute(portal, max_rows) cadence itself (review fix #1).
+        assert!(!funnel_run_cadence_admits(1, 0));
+        assert!(!funnel_run_cadence_admits(500, 0));
+    }
+
+    #[test]
+    fn resumed_runs_refuse() {
+        // RED WITNESS (SOAK3-A): the resume Execute after an exact-count
+        // suspension arrives count-0 — it passes the count gate and must be
+        // caught by the prior-emission gate, or the funnel rescans from
+        // block 0 and re-delivers the already-sent rows.
+        assert!(!funnel_run_cadence_admits(0, 1), "1-row result at limit 1, resumed");
+        assert!(!funnel_run_cadence_admits(0, 42));
+        // A count-limited resume is refused by both halves.
+        assert!(!funnel_run_cadence_admits(2, 2));
     }
 }

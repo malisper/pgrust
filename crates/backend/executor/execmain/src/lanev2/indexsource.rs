@@ -958,6 +958,19 @@ fn engine_mirror_is(
 mod tests {
     use super::*;
 
+    /// The four knob levers below all mutate PROCESS-GLOBAL cells
+    /// (`INDEXSOURCE`, `INDEXSOURCE_PAR`, `AGG_INDEXFEED`,
+    /// `AGG_INDEXFEED_PAR`) and each asserts on the cells the OTHER tests
+    /// write — so run concurrently (the default harness) they race, and
+    /// the loser reads a sibling's mid-test store. Witnessed as a CI-gate
+    /// FAIL on `aggindexfeed_par_knob_set_for_tests_flips`
+    /// (`assertion failed: !agg_indexfeed_enabled()` — the sibling had just
+    /// armed that cell); order-dependent, so any change to the crate's test
+    /// count can surface it. The independence laws they pin are
+    /// single-threaded statements about the cells, so serializing the
+    /// levers is the fix (the `crate::tests::scanfix::TEST_LOCK` idiom).
+    static KNOB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// dop-1 claim discipline: one whole-range claim, everything else loud.
     #[test]
     fn serial_claim_discipline() {
@@ -1003,6 +1016,7 @@ mod tests {
     /// Knob A/B lever + resolution states (the rowmode idiom).
     #[test]
     fn knob_set_for_tests_flips() {
+        let _knobs = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         indexsource_set_for_tests(false);
         assert!(!indexsource_enabled());
         indexsource_set_for_tests(true);
@@ -1017,6 +1031,7 @@ mod tests {
     /// flipping one must never arm the other).
     #[test]
     fn aggindexfeed_knob_set_for_tests_flips() {
+        let _knobs = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         agg_indexfeed_set_for_tests(false);
         assert!(!agg_indexfeed_enabled());
         agg_indexfeed_set_for_tests(true);
@@ -1038,6 +1053,7 @@ mod tests {
     /// cell — the kill switch restores the AE2 admission set only).
     #[test]
     fn aggindexfeed_par_knob_set_for_tests_flips() {
+        let _knobs = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         agg_indexfeed_par_set_for_tests(false);
         assert!(!agg_indexfeed_par_enabled());
         agg_indexfeed_par_set_for_tests(true);
@@ -1084,6 +1100,7 @@ mod tests {
     /// restores the WS-F inc-1 admission set only).
     #[test]
     fn indexsource_par_knob_set_for_tests_flips() {
+        let _knobs = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         indexsource_par_set_for_tests(false);
         assert!(!indexsource_par_enabled());
         indexsource_par_set_for_tests(true);
