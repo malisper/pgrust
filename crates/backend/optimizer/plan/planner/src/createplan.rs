@@ -535,8 +535,12 @@ fn order_qual_clauses<'mcx>(
     let mut items: mcx::PgVec<'_, (RinfoId, f64, u32)> = mcx::PgVec::new_in(run.mcx);
     items.reserve(clauses.len());
     for &rid in clauses {
-        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
-        let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), clause)?;
+        // C costs the RestrictInfo node itself (cost_qual_eval_walker's
+        // rinfo branch): the eval_cost cache applies, and a pseudoconstant
+        // clause is charged as all-startup (per_tuple 0), so gating quals
+        // keep their original order under the stable sort instead of the
+        // bare-expression costs reordering them.
+        let cost = crate::costsize::cost_qual_eval(&mut *run, &[rid])?;
         let r = run.root.rinfo(rid);
         let security_level =
             if r.leakproof && cost.per_tuple < 10.0 * crate::gucs::cpu_operator_cost() {

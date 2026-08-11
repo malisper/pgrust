@@ -427,11 +427,11 @@ pub fn subquery_planner<'mcx>(
             {
                 new_having.lappend(mcx, hc)?;
             } else if !parse.groupClause.is_nil() && first_gset_nonempty {
-                move_qual_to_where(run, &mut *parse, hc)?;
+                move_qual_to_where(run, &mut *parse, hc, has_sublinks)?;
             } else {
                 // Degenerate grouping: a copy goes to WHERE, the clause stays
                 // in HAVING (C copyObject; the arena share is our copy model).
-                move_qual_to_where(run, &mut *parse, hc)?;
+                move_qual_to_where(run, &mut *parse, hc, has_sublinks)?;
                 new_having.lappend(mcx, hc)?;
             }
         }
@@ -622,17 +622,36 @@ fn preprocess_expression_list<'mcx>(
 }
 
 // The shared FromExpr is rebuilt to carry the lappended implicit-AND list.
+// C first runs "Preprocess the HAVING clause fully" (planner.c:1176-1196):
+// flatten_group_exprs re-introduced unpreprocessed grouping expressions, so
+// the clause must go through preprocess_expression(EXPRKIND_QUAL) again
+// before joining the WHERE list — that's what folds a constant HAVING to
+// Const false (dummy rel, One-Time Filter: false with the child dropped).
 fn move_qual_to_where<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
     havingclause: Node<'mcx>,
+    has_sublinks: bool,
 ) -> PgResult<()> {
+    let whereclause = preprocess_expression(
+        run,
+        &parse.rtable,
+        parse.jointree,
+        Some(havingclause),
+        EXPRKIND_QUAL,
+        has_sublinks,
+    )?;
     let f = parse.jointree.expect("jointree is a FromExpr");
     let mut quals = match f.quals {
         Some(q) => q.as_list().expect("preprocessed quals are a list").clone_in(run.mcx)?,
         None => NodeList::nil(),
     };
-    quals.lappend(run.mcx, havingclause)?;
+    // Constant-true reduces to None (empty list); C's list_concat is a no-op.
+    if let Some(w) = whereclause {
+        for c in w.as_list().expect("EXPRKIND_QUAL yields an implicit-AND list") {
+            quals.lappend(run.mcx, c)?;
+        }
+    }
     parse.jointree = Some(alloc_leak_in(
         run.mcx,
         types_nodes::primnodes::FromExpr {

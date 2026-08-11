@@ -13,7 +13,16 @@ use crate::typefromtl::exec_type_from_tl;
 pub struct ResultState<'mcx> {
     pub ps: PlanStateBase<'mcx>,
     pub outer: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
-    pub resconstantqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    /// One-Time Filter, one compiled qual program PER CLAUSE of the
+    /// implicit-AND list. C's ExecQual evaluates the clause list serially and
+    /// short-circuits at the first false; with the pending-initplan hoist
+    /// being per-program here (not lazy per-Param as in C's
+    /// ExecEvalParamExec), a single program would run initplans that a
+    /// preceding false clause proves unreachable (covdiff CONSTFOLD: C shows
+    /// the InitPlan `never executed`, loops 0). Per-clause programs restore
+    /// the observable order: each clause's owed initplans run only when that
+    /// clause is reached.
+    pub resconstantqual: Option<::mcx::PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>>,
     pub rs_done: bool,
     pub rs_checkqual: bool,
 }
@@ -54,7 +63,16 @@ pub fn exec_init_result<'mcx>(
                             n.node_tag()
                         )
                     });
-                    exec_init_qual_subplans(mcx, list, params, env)?
+                    // One program per clause: see the ResultState field doc.
+                    let mut clauses = ::mcx::PgVec::new_in(mcx);
+                    for clause in list.iter() {
+                        let mut single = ::types_nodes::list::NodeList::nil();
+                        single.lappend(mcx, clause)?;
+                        let state = exec_init_qual_subplans(mcx, &single, params, env.clone())?
+                            .expect("non-empty qual list compiles to a program");
+                        clauses.push(state);
+                    }
+                    (!clauses.is_empty()).then_some(clauses)
                 }
             };
             Ok((proj, qual, resconstantqual))
@@ -151,27 +169,37 @@ pub(crate) fn lane_result_childless_next<'mcx>(
 }
 
 /// `exec_result`'s One-Time Filter arm (`rs_checkqual`): evaluate
-/// `resconstantqual` once — pending-initplan $n params hoisted first, the
-/// subplan-aware qual driver where needed — consuming `rs_checkqual`. False →
-/// the node is done for good (`rs_done`), no row is ever produced.
+/// `resconstantqual` once, clause by clause in list order with C's ExecQual
+/// short-circuit — each clause's pending-initplan $n params are hoisted only
+/// when that clause is reached (C runs them lazily inside ExecEvalParamExec;
+/// a false earlier clause must leave later clauses' initplans un-run) —
+/// consuming `rs_checkqual`. False → the node is done for good (`rs_done`),
+/// no row is ever produced.
 pub(crate) fn lane_result_gate<'mcx>(
     node: &mut ResultState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     debug_assert!(node.rs_checkqual);
     let ecxt = node.ps.ps_ExprContext.expect("ResultState without ExprContext");
-    // C runs pending initplans lazily inside ExecQual (ExecEvalParamExec);
-    // the One-Time Filter's $n params resolve here instead (execscan note).
-    let deps = node.resconstantqual.as_deref().unwrap().param_exec_deps();
-    if !deps.is_empty() {
-        ::executils::exec_eval_param_exec_params(estate, deps)?;
+    let mut qual_result = true;
+    let clauses = node.resconstantqual.as_deref_mut().expect("rs_checkqual without qual");
+    for clause in clauses.iter_mut() {
+        let deps = clause.param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+        let passes = if clause.has_subplan() {
+            ::executils::exec_qual_with_subplans(Some(&mut **clause), estate, ecxt)?
+        } else {
+            with_eval_slots(estate, ecxt, None, |slots, _, _| {
+                exec_qual(Some(&mut **clause), slots)
+            })?
+        };
+        if !passes {
+            qual_result = false;
+            break;
+        }
     }
-    let resconstantqual = node.resconstantqual.as_deref_mut();
-    let qual_result = if resconstantqual.as_ref().is_some_and(|q| q.has_subplan()) {
-        ::executils::exec_qual_with_subplans(resconstantqual, estate, ecxt)?
-    } else {
-        with_eval_slots(estate, ecxt, None, |slots, _, _| exec_qual(resconstantqual, slots))?
-    };
     node.rs_checkqual = false;
     if !qual_result {
         node.rs_done = true;
