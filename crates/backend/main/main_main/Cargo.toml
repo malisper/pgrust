@@ -12,7 +12,18 @@ path = "src/lib.rs"
 name = "postgres"
 path = "src/bin/postgres.rs"
 
+[features]
+# Antithesis harness builds only (antithesis/ directory): SDK assertions +
+# sancov coverage instrumentation. OFF by default — product builds compile
+# none of it. The harness image build (root Dockerfile, ARG ANTITHESIS=1)
+# enables it together with the coverage rustflags; the crate and the flags
+# are a single unit (either alone produces an invalid binary).
+antithesis = ["dep:antithesis_sdk", "dep:antithesis-instrumentation"]
+
 [dependencies]
+# Antithesis SDK (assertions/lifecycle); portable, but only compiled under
+# the `antithesis` feature.
+antithesis_sdk = { version = "0.2.9", optional = true }
 ipc = { path = "../../storage/ipc/ipc" }
 libc = "0.2"
 mcx = { path = "../../../_support/mcx" }
@@ -36,6 +47,12 @@ seams_init = { path = "../../../_support/seams_init" }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
+
+# The Antithesis coverage runtime links only on the platform Antithesis runs
+# (linux/amd64); target-scoping keeps macOS/aarch64 dev builds working even
+# under --all-features.
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+antithesis-instrumentation = { version = "0.1.0", optional = true }
 
 # `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
 # in product builds (law 0.1).

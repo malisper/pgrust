@@ -197,7 +197,22 @@ mod alloc_track {
     }
 }
 
+// Antithesis harness builds only: keep the coverage runtime linked. The
+// crate does nothing without the sancov rustflags the harness image build
+// supplies (root Dockerfile, ARG ANTITHESIS=1) — crate and flags are one
+// unit. Target-scoped to the platform Antithesis runs on.
+#[cfg(all(feature = "antithesis", target_os = "linux", target_arch = "x86_64"))]
+use antithesis_instrumentation as _;
+
 fn main() {
+    // Antithesis harness builds: initialize the SDK before anything else so
+    // assertion cataloging and lifecycle output are wired, then emit the
+    // bootstrap reachability property from the one path every run executes.
+    #[cfg(feature = "antithesis")]
+    {
+        antithesis_sdk::antithesis_init();
+        antithesis_sdk::assert_reachable!("pgrust: server process entered main");
+    }
     // ipc::proc_exit ends the process by unwinding a ProcExitThread payload
     // rather than calling exit(2) — a thread must never _exit the shared
     // process. Nothing used to catch it here, so Rust's default panic path
