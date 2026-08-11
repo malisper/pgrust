@@ -2,7 +2,10 @@
 // server with nothing in the log (C's postmaster survives the child and logs
 // "terminated by signal N"). This handler emulates that log line, then
 // restores the pre-existing disposition (Rust's stack-overflow reporter or
-// SIG_DFL) and re-raises, so core/exit behavior is unchanged.
+// SIG_DFL) and re-raises SYNCHRONOUSLY; if the restored disposition
+// handles-and-returns (only possible for a signal with no faulting
+// instruction, e.g. kill-sent), it falls back to SIG_DFL so the process
+// always dies — C3-F3, docs/design/crash-restart-gap.md §3.
 
 use core::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,8 +82,30 @@ extern "C" fn crash_handler(sig: i32, info: *mut libc::siginfo_t, _uctx: *mut li
             libc::backtrace_symbols_fd(frames.as_ptr(), n, 2);
         }
     }
-    // SAFETY: raise(2) is async-signal-safe.
+    // C3-F3: deliver the re-raise NOW (the signal is blocked while this
+    // handler runs, so unblock it first; raise(2) + sigprocmask(2) are
+    // async-signal-safe). A kill(2)-delivered crash signal has no faulting
+    // instruction to re-execute, and a restored disposition that RETURNS —
+    // Rust's stack-overflow reporter returns for any non-guard-page SIGSEGV /
+    // SIGBUS — would swallow a deferred re-raise, leaving a server that
+    // logged FATAL yet kept serving (si_code cannot classify this: Darwin
+    // stamps kill-sent SEGV/BUS with hardware-fault codes). Synchronous
+    // delivery makes the swallow observable: if raise() returns, force
+    // SIG_DFL and re-raise so the process dies as a C backend dies on
+    // delivery. A genuine stack overflow still gets Rust's reporter message
+    // on the first raise (it aborts rather than returning).
+    // SAFETY: all calls are async-signal-safe (sigprocmask/raise/sigaction).
     unsafe {
+        let mut only: libc::sigset_t = core::mem::zeroed();
+        libc::sigemptyset(&mut only);
+        libc::sigaddset(&mut only, sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &only, core::ptr::null_mut());
+        libc::raise(sig);
+        // Still here: the restored disposition handled-and-returned.
+        let mut dfl: libc::sigaction = core::mem::zeroed();
+        dfl.sa_sigaction = libc::SIG_DFL;
+        libc::sigfillset(&mut dfl.sa_mask);
+        libc::sigaction(sig, &dfl, core::ptr::null_mut());
         libc::raise(sig);
     }
 }
