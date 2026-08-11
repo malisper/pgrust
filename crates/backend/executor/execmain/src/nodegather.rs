@@ -311,9 +311,17 @@ pub fn exec_gather<'mcx>(
     estate.ecxt_mut(ecxt).ecxt_outertuple = Some(slot);
     let result_slot = node.ps.ps_ResultTupleSlot.expect("projection without result slot");
     let proj = node.ps.ps_ProjInfo.as_deref_mut().unwrap();
-    with_eval_slots(estate, ecxt, Some(result_slot), |slots, result, mcx| {
-        ::execexpr::exec_project(proj, slots, result.unwrap(), mcx)
-    })?;
+    // The Gather targetlist is exactly where the planner puts
+    // parallel-restricted expressions (SubPlans never ship to workers), so
+    // subplan- and pending-initplan projections ride the suspension driver
+    // (C ExecProject via ExprState->parent -> ExecSubPlan/ExecEvalParamExec).
+    if proj.has_subplan() || !proj.param_exec_deps().is_empty() {
+        ::executils::exec_project_with_subplans(proj, estate, ecxt, result_slot)?;
+    } else {
+        with_eval_slots(estate, ecxt, Some(result_slot), |slots, result, mcx| {
+            ::execexpr::exec_project(proj, slots, result.unwrap(), mcx)
+        })?;
+    }
     Ok(Some(result_slot))
 }
 
