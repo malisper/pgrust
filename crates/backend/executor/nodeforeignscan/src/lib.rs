@@ -166,7 +166,7 @@ pub fn exec_init_foreign_scan<'mcx>(
     }
 
     let ps_ExprContext = estate.exec_assign_expr_context();
-    let rel = estate.exec_get_range_table_relation(node.scan.scanrelid, false)?.alias();
+    let rel = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
     let fdwroutine = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, rel.rd_id)?;
     // C copies the descriptor: FDW rows need not satisfy NOT NULL.
     let scan_tupdesc = tupdesc::CreateTupleDescCopy(mcx, &rel.rd_att)?;

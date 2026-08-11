@@ -222,11 +222,11 @@ pub fn exec_init_tid_range_scan<'mcx>(
     mcx: Mcx<'mcx>,
     node: &TidRangeScan<'mcx>,
     estate: &mut EStateData<'mcx>,
-    _eflags: i32,
+    eflags: i32,
 ) -> PgResult<TidRangeScanState<'mcx>> {
     debug_assert!(node.scan.plan.lefttree.is_none() && node.scan.plan.righttree.is_none());
 
-    let rel = estate.exec_get_range_table_relation(node.scan.scanrelid, false)?.alias();
+    let rel = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
     let ps_ExprContext = estate.exec_assign_expr_context();
     let kind = table_slot_callbacks(&rel);
     let ss_ScanTupleSlot = estate.exec_init_extra_tuple_slot(Some(rel.rd_att.clone()), kind);

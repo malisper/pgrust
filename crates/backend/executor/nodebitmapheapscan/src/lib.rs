@@ -445,14 +445,12 @@ pub fn exec_init_bitmap_heap_scan<'mcx>(
     mcx: Mcx<'mcx>,
     node: &BitmapHeapScan<'mcx>,
     estate: &mut EStateData<'mcx>,
-    _eflags: i32,
+    eflags: i32,
 ) -> PgResult<BitmapHeapScanState<'mcx>> {
     // Decoupled index+heap visits are only sound under MVCC (file-head rule).
     debug_assert!(estate.es_snapshot.as_deref().is_some_and(IsMVCCSnapshot));
 
-    let rel = estate
-        .exec_get_range_table_relation(node.scan.scanrelid, false)?
-        .alias();
+    let rel = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
     exec_init_bitmap_heap_scan_rel(mcx, node, estate, rel)
 }
 

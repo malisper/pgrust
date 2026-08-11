@@ -13,12 +13,10 @@ use ::tableam::{
     table_scan_disarm_adaptive_order, table_scan_getnextslot, table_scan_update_scan_bound,
     table_slot_callbacks, ParallelTableScanDescShared,
 };
-use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
+use ::types_error::{PgError, PgResult};
 use ::types_nodes::plannodes::SeqScan;
 use ::types_rel::Relation;
-use ::types_slot::{
-    SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_MARK, EXEC_FLAG_WITH_NO_DATA,
-};
+use ::types_slot::{SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 
 pub fn init_seams() {}
 
@@ -3635,39 +3633,10 @@ pub fn exec_init_seq_scan<'mcx>(
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<SeqScanState<'mcx>> {
-    let rel = exec_open_scan_relation(estate, node, eflags)?;
+    let rel = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
     let mut state = exec_init_seq_scan_rel(mcx, node, estate, rel)?;
     state.batch_allowed = eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0;
     Ok(state)
-}
-
-/// `ExecOpenScanRelation`.
-fn exec_open_scan_relation<'mcx>(
-    estate: &mut EStateData<'mcx>,
-    node: &SeqScan<'mcx>,
-    eflags: i32,
-) -> PgResult<Relation<'mcx>> {
-    let rel = estate.exec_get_range_table_relation(node.scan.scanrelid, false)?;
-    if eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA) == 0
-        && !rel.rd_rel.relispopulated
-    {
-        return Err(unpopulated_matview(rel));
-    }
-    Ok(rel.alias())
-}
-
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn unpopulated_matview(rel: &Relation<'_>) -> Box<PgError> {
-    Box::new(
-        PgError::error(format!(
-            "materialized view \"{}\" has not been populated",
-            rel.name()
-        ))
-        .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-        .with_hint("Use the REFRESH MATERIALIZED VIEW command."),
-    )
 }
 
 /// C divergence: init over a caller-opened relation (test surface;
@@ -4461,13 +4430,8 @@ pub fn skeleton_rebind<'mcx>(
 ) -> PgResult<()> {
     debug_assert!(node.ss.ss_currentScanDesc.is_none());
     let eflags = estate.es_top_eflags;
-    let rel = estate.exec_get_range_table_relation(node.ss.scanrelid, false)?;
-    if eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA) == 0
-        && !rel.rd_rel.relispopulated
-    {
-        return Err(unpopulated_matview(rel));
-    }
-    node.ss.ss_currentRelation = Some(rel.alias());
+    let rel = estate.exec_open_scan_relation(node.ss.scanrelid, eflags)?;
+    node.ss.ss_currentRelation = Some(rel);
     Ok(())
 }
 

@@ -524,9 +524,7 @@ pub fn exec_init_index_scan<'mcx>(
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<IndexScanState<'mcx>> {
-    let rel = estate
-        .exec_get_range_table_relation(node.scan.scanrelid, false)?
-        .alias();
+    let rel = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
     let index_rel = indexam::index_open(mcx, node.indexid, index_lockmode(estate, node.scan.scanrelid))?;
     let mut state = exec_init_index_scan_rel(mcx, node, estate, rel, index_rel)?;
     // Lane-executor-v2: the batched tidrun drive is forward-only and can't
@@ -1053,9 +1051,10 @@ pub fn skeleton_rebind<'mcx>(
 ) -> PgResult<()> {
     debug_assert!(node.iss_RelationDesc.is_none());
     let mcx = estate.es_query_cxt;
-    let rel = estate
-        .exec_get_range_table_relation(node.ss.scanrelid, false)?
-        .alias();
+    // ExecOpenScanRelation parity: C re-runs ExecInitIndexScan per cached-plan
+    // execution, re-probing relispopulated (REFRESH ... WITH NO DATA between
+    // executions must error, not read an empty heap).
+    let rel = estate.exec_open_scan_relation(node.ss.scanrelid, estate.es_top_eflags)?;
     let index_rel =
         indexam::index_open(mcx, node.iss_IndexOid, index_lockmode(estate, node.ss.scanrelid))?;
     if let Some(scandesc) = node.iss_ScanDesc.as_deref_mut() {

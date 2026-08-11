@@ -19,7 +19,7 @@ use ::types_core::instrument::{
     IncrementalSortInfo, Instrumentation, RuntimeEaPipeline, TuplesortInstrumentation,
 };
 use ::types_core::CommandId;
-use ::types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_nodes::bitmapset::Bitmapset;
 use ::types_nodes::list::NodeList;
 use ::types_nodes::parsenodes::{RTEKind, RangeTblEntry};
@@ -27,7 +27,7 @@ use ::types_portal::params::{ParamBind, ParamExecData, ParamExternData};
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_rel::{AccessShareLock, NoLock, Relation};
 use ::types_scan::ScanDirection;
-use ::types_slot::{SlotData, TupleSlotKind};
+use ::types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_WITH_NO_DATA};
 use ::types_tuple::TupleDescData;
 
 pub fn init_seams() {}
@@ -1613,6 +1613,28 @@ impl<'mcx> EStateData<'mcx> {
         Ok(self.es_relations[idx].as_ref().unwrap())
     }
 
+    /// `ExecOpenScanRelation` (execUtils.c): open the base relation to be
+    /// scanned through the range table and complain about a scan of an
+    /// unscannable (unpopulated-matview) relation, except when the query
+    /// won't actually be run. C funnels EVERY base-relation scan node's
+    /// ExecInit through this one site — seq, sample, index, index-only,
+    /// bitmap heap, TID, TID-range, foreign — so the relispopulated gate
+    /// covers every scan shape; pgrust's per-execution skeleton rebinds
+    /// re-run it with `es_top_eflags` (C re-runs ExecInit itself).
+    pub fn exec_open_scan_relation(
+        &mut self,
+        scanrelid: u32,
+        eflags: i32,
+    ) -> PgResult<Relation<'mcx>> {
+        let rel = self.exec_get_range_table_relation(scanrelid, false)?;
+        if eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA) == 0
+            && !rel.rd_rel.relispopulated
+        {
+            return Err(unpopulated_matview(rel));
+        }
+        Ok(rel.alias())
+    }
+
     pub fn exec_init_result_relation(&mut self, rti: u32) -> PgResult<()> {
         self.exec_get_range_table_relation(rti, true)?;
         if self.es_result_relations.len() < self.es_range_table_size as usize {
@@ -1747,6 +1769,20 @@ unsafe impl mcx::ForgetSafe for WorkerInstr<'_> {}
 #[inline(never)]
 fn pruned_relation_error() -> alloc::boxed::Box<PgError> {
     alloc::boxed::Box::new(PgError::error("trying to open a pruned relation"))
+}
+
+/// C execUtils.c ExecOpenScanRelation's ereport (55000 + REFRESH hint).
+#[cold]
+#[inline(never)]
+fn unpopulated_matview(rel: &Relation<'_>) -> alloc::boxed::Box<PgError> {
+    alloc::boxed::Box::new(
+        PgError::error(alloc::format!(
+            "materialized view \"{}\" has not been populated",
+            rel.name()
+        ))
+        .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .with_hint("Use the REFRESH MATERIALIZED VIEW command."),
+    )
 }
 
 ::mcx::bind!(pub EStateTy => EStateData<'mcx>);

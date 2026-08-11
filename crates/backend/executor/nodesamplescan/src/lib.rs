@@ -14,10 +14,8 @@ use ::tableam::{
 use ::tablesample::{Tsm, TsmState};
 use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_TABLESAMPLE_ARGUMENT, ERRCODE_INVALID_TABLESAMPLE_REPEAT,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
 };
 use ::types_nodes::plannodes::SampleScan;
-use ::types_slot::{EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_WITH_NO_DATA};
 
 pub fn init_seams() {}
 
@@ -92,13 +90,7 @@ pub fn exec_init_sample_scan<'mcx>(
         .as_table_sample_clause()
         .expect("SampleScan tablesample is a TableSampleClause");
 
-    let rel = estate.exec_get_range_table_relation(node.scan.scanrelid, false)?;
-    if eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA) == 0
-        && !rel.rd_rel.relispopulated
-    {
-        return Err(unpopulated_matview(&rel));
-    }
-    let rel = rel.alias();
+    let rel = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
 
     let ps_ExprContext = estate.exec_assign_expr_context();
     let kind = table_slot_callbacks(&rel);
@@ -299,20 +291,6 @@ fn null_repeatable() -> Box<PgError> {
     Box::new(
         PgError::error("TABLESAMPLE REPEATABLE parameter cannot be null")
             .with_sqlstate(ERRCODE_INVALID_TABLESAMPLE_REPEAT),
-    )
-}
-
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn unpopulated_matview(rel: &::types_rel::Relation<'_>) -> Box<PgError> {
-    Box::new(
-        PgError::error(format!(
-            "materialized view \"{}\" has not been populated",
-            rel.name()
-        ))
-        .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-        .with_hint("Use the REFRESH MATERIALIZED VIEW command."),
     )
 }
 

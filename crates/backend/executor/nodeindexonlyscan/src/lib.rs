@@ -431,9 +431,7 @@ pub fn exec_init_index_only_scan<'mcx>(
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<IndexOnlyScanState<'mcx>> {
-    let rel = estate
-        .exec_get_range_table_relation(node.scan.scanrelid, false)?
-        .alias();
+    let rel = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
     // C nodeIndexonlyscan.c:608: rellockmode unconditionally — a reused generic
     // plan gets no planner locks and AcquireExecutorLocks covers tables only.
     let index_rel = indexam::index_open(
@@ -599,9 +597,10 @@ pub fn skeleton_rebind<'mcx>(
 ) -> PgResult<()> {
     debug_assert!(node.ioss_RelationDesc.is_none());
     let mcx = estate.es_query_cxt;
-    let rel = estate
-        .exec_get_range_table_relation(node.ss.scanrelid, false)?
-        .alias();
+    // ExecOpenScanRelation parity: C re-runs ExecInitIndexOnlyScan per
+    // cached-plan execution, re-probing relispopulated (REFRESH ... WITH NO
+    // DATA between executions must error, not read an empty heap).
+    let rel = estate.exec_open_scan_relation(node.ss.scanrelid, estate.es_top_eflags)?;
     let index_rel = indexam::index_open(
         mcx,
         node.ioss_IndexOid,
