@@ -858,6 +858,7 @@ members = [
     "crates/backend/utils/adt/waitfuncs",
     "crates/backend/utils/adt/pseudorandomfuncs",
     "crates/backend/utils/adt/pg_upgrade_support",
+    "crates/bin/fuzzgen",
 ]
 
 [workspace.package]

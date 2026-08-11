@@ -1,0 +1,13 @@
+[package]
+name = "fuzzgen"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fuzzgen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fuzzgen"
+path = "src/main.rs"
