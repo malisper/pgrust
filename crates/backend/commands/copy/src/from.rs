@@ -608,6 +608,14 @@ pub fn CopyFrom<'mcx>(
     };
     let mut trig_fmgr = trigger::TriggerFmgrCache::default();
     let mut trig_when = trigger::TriggerWhenCache::default();
+    // C CopyFrom runs ExecOpenIndices(resultRelInfo, false) at setup, BEFORE
+    // ExecBSInsertTriggers (copyfrom.c:924 vs 1102): the open pins the
+    // target's (for a partitioned target: the root's partitioned) index
+    // relations for the whole load, so a BS-trigger DROP INDEX fails
+    // CheckTableNotInUse exactly as in C, and the index list is read
+    // pre-trigger (stale-held-rd_rel audit). A partitioned root's state is
+    // only held — routed inserts use the per-leaf opens below.
+    let root_index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
     if let Some(td) = &trigdesc {
         let mut when =
             trigger::TriggerWhenEval { mcx, cache: &mut trig_when, modified_cols: None };
@@ -633,7 +641,7 @@ pub fn CopyFrom<'mcx>(
             when: &mut trig_when,
             fmgr: &mut trig_fmgr,
         });
-        copy_from_body(mcx, cstate, rel, ti_options, trig.as_mut())
+        copy_from_body(mcx, cstate, rel, ti_options, trig.as_mut(), root_index_state)
     };
     match body {
         Ok(n) => {
@@ -654,7 +662,7 @@ pub fn CopyFrom<'mcx>(
 // The row-trigger slice of C's resultRelInfo that the insert loop and
 // CopyMultiInsertBufferFlush touch.
 struct CopyTrig<'a, 'mcx> {
-    td: &'a types_trigger::TriggerDesc<'static>,
+    td: &'a std::rc::Rc<types_trigger::TriggerDesc<'static>>,
     tc: Option<&'a trigger::TransitionCaptureState>,
     when: &'a mut trigger::TriggerWhenCache<'mcx>,
     fmgr: &'a mut trigger::TriggerFmgrCache,
@@ -666,10 +674,12 @@ fn copy_from_body<'mcx>(
     rel: &Relation<'mcx>,
     ti_options: i32,
     mut trig: Option<&mut CopyTrig<'_, 'mcx>>,
+    // Opened by the caller BEFORE the BS triggers fired (C copyfrom.c:924).
+    index_state: execindexing::ResultRelIndexState<'mcx>,
 ) -> PgResult<u64> {
     let mycid = xact::GetCurrentCommandId(true)?;
 
-    let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
+    let mut index_state = index_state;
 
     // The DoCopy perminfo's insertedCols (copy.c): constraint-error DETAILs
     // always include the columns the user provided data for (execMain.c
@@ -756,7 +766,7 @@ fn copy_from_body<'mcx>(
             let t = trig.as_deref_mut().expect("has_br implies trig");
             let mut when =
                 trigger::TriggerWhenEval { mcx, cache: &mut *t.when, modified_cols: None };
-            if !trigger::ExecBRInsertTriggers(mcx, rel, t.td, t.fmgr, &mut when, slot)? {
+            if !trigger::ExecBRInsertTriggers(mcx, rel, &**t.td, t.fmgr, &mut when, slot)? {
                 continue;
             }
         }
@@ -767,7 +777,7 @@ fn copy_from_body<'mcx>(
             let t = trig.as_deref_mut().expect("has_ir implies trig");
             let mut when =
                 trigger::TriggerWhenEval { mcx, cache: &mut *t.when, modified_cols: None };
-            trigger::ExecIRInsertTriggers(mcx, rel, t.td, t.fmgr, &mut when, slot)?;
+            trigger::ExecIRInsertTriggers(mcx, rel, &**t.td, t.fmgr, &mut when, slot)?;
             processed += 1;
             flushed += 1;
             pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
@@ -1082,6 +1092,14 @@ fn copy_from_partitioned_body<'mcx>(
                 vnn: None,
                 use_multi,
             });
+            // C ExecInitPartitionInfo opens the leaf's indexes when the leaf
+            // ResultRelInfo is built — BEFORE the leaf's BR triggers fire
+            // (execPartition.c): the open pins the index relations, so a
+            // trigger-run DROP INDEX fails CheckTableNotInUse as in C, and
+            // the list is read pre-trigger (stale-held-rd_rel audit).
+            if leaf_indexes[leaf].is_none() {
+                leaf_indexes[leaf] = Some(execindexing::ExecOpenIndices(mcx, lrel, false)?);
+            }
         }
         let leaf_use_multi = !single_insert
             && leaf_trig[leaf].as_ref().expect("leaf initialized").use_multi;
@@ -1211,7 +1229,7 @@ fn copy_from_partitioned_body<'mcx>(
                 trigger::ExecARInsertTriggers(
                     mcx,
                     lrel,
-                    td.as_deref(),
+                    td.as_ref(),
                     use_slot.base().tts_tid,
                     &recheck_indexes,
                     transition_capture,
@@ -1354,7 +1372,7 @@ fn flush_part_buffers<'mcx>(
         let LeafTrig { td, fmgr, when, .. } =
             leaf_trig[buf.leaf].as_mut().expect("leaf initialized");
         let mut trig =
-            td.as_deref().map(|td| CopyTrig { td, tc: transition_capture, when, fmgr });
+            td.as_ref().map(|td| CopyTrig { td, tc: transition_capture, when, fmgr });
         flush_multi_insert(
             mcx,
             cstate,

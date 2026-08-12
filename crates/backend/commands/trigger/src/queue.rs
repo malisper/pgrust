@@ -5,6 +5,7 @@
 // Transition tables: per-depth AfterTriggersTableData with tuplestores in the
 // hold registry; events reference them by index (C ats_table).
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use mcx::Mcx;
 use ri_triggers_seams::RiTriggerData;
@@ -58,6 +59,17 @@ struct AfterTriggerEvent {
     // ExecGetAllUpdatedCols), owned so it survives to deferred firing time.
     // None for INSERT/DELETE (tg_updatedcols is NULL there).
     modifiedcols: Option<Box<[i32]>>,
+    // The queuing statement's trigger-descriptor snapshot. C's
+    // AfterTriggerExecute resolves the trigger through the estate's
+    // ResultRelInfo ri_TrigDesc — a CopyTriggerDesc taken at executor init —
+    // so a trigger replaced or dropped mid-statement (CREATE OR REPLACE
+    // TRIGGER / DROP TRIGGER from a BR trigger) still fires its QUEUING-TIME
+    // definition at query end. Our relcache handles are replaced on
+    // invalidation, so a fresh-by-relid read here would see the post-DDL
+    // descriptor instead (stale-held-rd_rel audit, inverse class). None for
+    // events moved to the xact list: C fires those through a dummy estate
+    // whose trig-target relation opens the CURRENT descriptor.
+    desc: Option<Rc<TriggerDesc<'static>>>,
 }
 
 pub(crate) struct TransTable {
@@ -472,6 +484,9 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> PgResu
                         rolid: ev.rolid,
                         // Source is marked DONE; the deferred copy owns the set.
                         modifiedcols: ev.modifiedcols.take(),
+                        // Deferred firing resolves the descriptor fresh, as
+                        // C's dummy-estate trig-target open does.
+                        desc: None,
                     });
                     ev.flags |= AFTER_TRIGGER_DONE;
                 }
@@ -516,6 +531,7 @@ fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult
                         ev.ctid1, ev.ctid2, ev.event, ev.tgoid, ev.relid, ev.table_idx,
                         ev.src_part, ev.dst_part, ev.rolid,
                         ev.modifiedcols.clone(),
+                        ev.desc.clone(),
                     ));
                 }
                 i += 1;
@@ -524,13 +540,14 @@ fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult
         });
         let Some((
             ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part, rolid, modifiedcols,
+            desc,
         )) = next
         else {
             break;
         };
         AfterTriggerExecute(
             mcx, ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part, rolid,
-            modifiedcols.as_deref(),
+            modifiedcols.as_deref(), desc.as_ref(),
         )?;
         with_list(sel, |evs| {
             let ev = &mut evs[i];
@@ -765,9 +782,24 @@ fn AfterTriggerExecute<'mcx>(
     dst_part: Oid,
     rolid: Oid,
     modifiedcols: Option<&[i32]>,
+    // The queuing statement's descriptor snapshot (see AfterTriggerEvent.desc);
+    // None = deferred/xact firing, which resolves fresh as C's dummy-estate
+    // trig-target open does.
+    desc: Option<&Rc<TriggerDesc<'static>>>,
 ) -> PgResult<()> {
-    let Some(trigdesc) = relcache::RelationGetTriggerDesc(relid)? else {
-        return Ok(());
+    let fresh_desc;
+    let trigdesc: &TriggerDesc<'static> = match desc {
+        Some(d) => d,
+        None => {
+            fresh_desc = relcache::RelationGetTriggerDesc(relid)?;
+            match fresh_desc.as_deref() {
+                Some(d) => d,
+                // C AfterTriggerExecute: "It's possible the trigger got
+                // dropped since the event was queued. In that case, silently
+                // do nothing."
+                None => return Ok(()),
+            }
+        }
     };
     // Rebuild the UPDATE's ats_modifiedcols in the firing mcx; the pointer
     // rides tg_updatedcols for the trigger's bms_is_member tests. Empty for
@@ -783,6 +815,9 @@ fn AfterTriggerExecute<'mcx>(
         None => 0,
     };
     let Some(trigger) = trigdesc.triggers.iter().find(|t| t.tgoid == tgoid) else {
+        // C AfterTriggerExecute: trigger dropped since the event was queued —
+        // silently do nothing. (With a queuing-time `desc` snapshot this arm
+        // is only reachable via the fresh-resolve path or concurrent drops.)
         return Ok(());
     };
     let rel = table::table_open(mcx, relid, NoLock)?;
@@ -936,7 +971,7 @@ fn trigger_type_matches(tgtype: i16, event: i16) -> bool {
 fn after_trigger_save_event<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    trigdesc: &TriggerDesc<'static>,
+    trigdesc: &Rc<TriggerDesc<'static>>,
     event: u32,
     tgtype_event: i16,
     ctid1: ItemPointerData,
@@ -1068,6 +1103,7 @@ fn after_trigger_save_event<'mcx>(
                 rolid: miscinit::GetUserId(),
                 modifiedcols: modified_cols
                     .map(|b| b.iter().collect::<Vec<i32>>().into_boxed_slice()),
+                desc: Some(trigdesc.clone()),
             });
         });
     }
@@ -1119,7 +1155,7 @@ fn cancel_prior_stmt_triggers(relid: Oid, op: u32) {
 // both ctids invalid. TRUNCATE never cancels a prior set (C's switch).
 fn save_stmt_event<'mcx>(
     rel: &Relation<'mcx>,
-    trigdesc: &TriggerDesc<'static>,
+    trigdesc: &Rc<TriggerDesc<'static>>,
     event: u32,
     tgtype_event: i16,
     transition_capture: Option<&TransitionCaptureState>,
@@ -1180,6 +1216,7 @@ fn save_stmt_event<'mcx>(
                 rolid: miscinit::GetUserId(),
                 // Statement-level arm keeps tg_updatedcols unset (see fn doc).
                 modifiedcols: None,
+                desc: Some(trigdesc.clone()),
             });
         });
     }
@@ -1188,7 +1225,7 @@ fn save_stmt_event<'mcx>(
 
 pub fn ExecASInsertTriggers<'mcx>(
     rel: &Relation<'mcx>,
-    trigdesc: &TriggerDesc<'static>,
+    trigdesc: &Rc<TriggerDesc<'static>>,
     transition_capture: Option<&TransitionCaptureState>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
@@ -1200,7 +1237,7 @@ pub fn ExecASInsertTriggers<'mcx>(
 
 pub fn ExecASDeleteTriggers<'mcx>(
     rel: &Relation<'mcx>,
-    trigdesc: &TriggerDesc<'static>,
+    trigdesc: &Rc<TriggerDesc<'static>>,
     transition_capture: Option<&TransitionCaptureState>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
@@ -1212,7 +1249,7 @@ pub fn ExecASDeleteTriggers<'mcx>(
 
 pub fn ExecASUpdateTriggers<'mcx>(
     rel: &Relation<'mcx>,
-    trigdesc: &TriggerDesc<'static>,
+    trigdesc: &Rc<TriggerDesc<'static>>,
     transition_capture: Option<&TransitionCaptureState>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
@@ -1225,7 +1262,7 @@ pub fn ExecASUpdateTriggers<'mcx>(
 // ExecASTruncateTriggers (trigger.c).
 pub fn ExecASTruncateTriggers<'mcx>(
     rel: &Relation<'mcx>,
-    trigdesc: &TriggerDesc<'static>,
+    trigdesc: &Rc<TriggerDesc<'static>>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
 ) -> PgResult<()> {
     if !trigdesc.trig_truncate_after_statement {
@@ -1238,7 +1275,7 @@ pub fn ExecASTruncateTriggers<'mcx>(
 pub fn ExecARInsertTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    trigdesc: Option<&TriggerDesc<'static>>,
+    trigdesc: Option<&Rc<TriggerDesc<'static>>>,
     new_tid: ItemPointerData,
     recheck_indexes: &[Oid],
     transition_capture: Option<&TransitionCaptureState>,
@@ -1302,7 +1339,7 @@ pub fn ExecARInsertTriggers<'mcx>(
 pub fn ExecARDeleteTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    trigdesc: Option<&TriggerDesc<'static>>,
+    trigdesc: Option<&Rc<TriggerDesc<'static>>>,
     old_tid: ItemPointerData,
     transition_capture: Option<&TransitionCaptureState>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
@@ -1371,7 +1408,7 @@ pub fn ExecARDeleteTriggers<'mcx>(
 pub fn ExecARUpdateTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    trigdesc: Option<&TriggerDesc<'static>>,
+    trigdesc: Option<&Rc<TriggerDesc<'static>>>,
     src_rel: Option<&Relation<'mcx>>,
     dst_rel: Option<&Relation<'mcx>>,
     old_tid: Option<ItemPointerData>,
@@ -1533,6 +1570,7 @@ mod tests {
                 dst_part: Oid::default(),
                 rolid: 10,
                 modifiedcols: Some(vec![9, 11].into_boxed_slice()),
+                desc: None,
             });
         });
         AfterTriggerEndQuery().unwrap();

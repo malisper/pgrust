@@ -2685,6 +2685,9 @@ fn exec_merge_matched_scan<'mcx>(
             }
             CmdType::CMD_UPDATE => {
                 merge_project_update(mt, estate, ai, by_source, plan_slot)?;
+                // C ExecUpdatePrologue opens the target's indexes before the
+                // BR triggers.
+                open_target_indexes(mt, estate, false)?;
                 // ExecUpdatePrologue: BEFORE ROW UPDATE triggers; a NULL
                 // return is C's "do nothing" (goto out, no count). A
                 // concurrent update seen by the trigger fetch breaks to the
@@ -3286,7 +3289,7 @@ fn merge_delete_act<'mcx>(
             modified_cols: None,
         };
         ::trigger::ExecARDeleteTriggers(
-            *es_query_cxt, rel, td.as_deref(), *tupleid, transition_capture.as_ref(),
+            *es_query_cxt, rel, td.as_ref(), *tupleid, transition_capture.as_ref(),
             Some(&mut when), false, conv.as_ref(),
         )?;
     }
@@ -3929,6 +3932,9 @@ fn exec_update<'mcx>(
     let mut tmfd = TM_FailureData::default();
     let mut lockmode = LockTupleMode::LockTupleExclusive;
 
+    // C ExecUpdatePrologue opens the target's indexes before the BR triggers.
+    open_target_indexes(mt, estate, false)?;
+
     if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_update_before_row) {
         let (old_slot, epq) = match get_tuple_for_trigger(mt, estate, tupleid, epq_eval)? {
             TrigFetch::Skip => return Ok(UpdateResult::NotModified),
@@ -4232,7 +4238,7 @@ fn exec_update<'mcx>(
         });
         let conv = child_to_root_spec(&r.child_to_root, rel, root_rel);
         ::trigger::ExecARUpdateTriggers(
-            mcx, rel, td.as_deref(), None, None, Some(*tupleid), Some(ar_new_tid),
+            mcx, rel, td.as_ref(), None, None, Some(*tupleid), Some(ar_new_tid),
             &recheck_indexes, tc, Some(&mut when), false, conv.as_ref(), conv.as_ref(),
             modified_cols,
         )?;
@@ -4863,14 +4869,14 @@ fn exec_delete<'mcx>(
             // New-only transition capture on a partition-move DELETE — no
             // real UPDATE trigger fires here, so tg_updatedcols is moot.
             ::trigger::ExecARUpdateTriggers(
-                *es_query_cxt, rel, td.as_deref(), None, None, Some(*tupleid), None,
+                *es_query_cxt, rel, td.as_ref(), None, None, Some(*tupleid), None,
                 &[], transition_capture.as_ref(), Some(&mut when), false, conv.as_ref(), None,
                 None,
             )?;
         }
         let ar_tcs = if moved_capture { None } else { transition_capture.as_ref() };
         ::trigger::ExecARDeleteTriggers(
-            *es_query_cxt, rel, td.as_deref(), *tupleid, ar_tcs, Some(&mut when),
+            *es_query_cxt, rel, td.as_ref(), *tupleid, ar_tcs, Some(&mut when),
             changing_part, conv.as_ref(),
         )?;
     }
@@ -6024,7 +6030,7 @@ fn ar_insert_triggers<'mcx>(
         // New-only capture (CP-update INSERT half): no row event is queued
         // (old/new one-sided), so tg_updatedcols is moot.
         ::trigger::ExecARUpdateTriggers(
-            mcx, rel, td.as_deref(), None, None, None, Some(new_tid), &[],
+            mcx, rel, td.as_ref(), None, None, None, Some(new_tid), &[],
             transition_capture.as_ref(), Some(&mut when), false, None, conv.as_ref(),
             None,
         )?;
@@ -6033,13 +6039,40 @@ fn ar_insert_triggers<'mcx>(
     ::trigger::ExecARInsertTriggers(
         mcx,
         rel,
-        td.as_deref(),
+        td.as_ref(),
         new_tid,
         recheck_indexes,
         ar_tcs,
         Some(&mut when),
         conv.as_ref(),
     )
+}
+
+/// C opens the write target's indexes BEFORE firing BEFORE ROW triggers
+/// (ExecInsert / ExecUpdatePrologue, nodeModifyTable.c): the open pins the
+/// index relations, so trigger-run DROP INDEX fails CheckTableNotInUse
+/// exactly as in C, and the index list is read pre-trigger. Our relcache
+/// invalidation replaces the entry Rc instead of rebuilding in place, so an
+/// after-the-trigger open would additionally observe post-trigger catalog
+/// state through a fresh list while gating on the stale held rd_rel
+/// (stale-held-rd_rel audit, docs/fuzzing/relcache-staleness-audit.md).
+fn open_target_indexes<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    speculative: bool,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    if mt.rel().indexes.is_some() {
+        return Ok(());
+    }
+    let rel = estate.es_relations[(mt.rel().rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    if rel.rd_rel.relhasindex {
+        let opened = execindexing::ExecOpenIndices(mcx, rel, speculative)?;
+        mt.rel_mut().indexes = Some(opened);
+    }
+    Ok(())
 }
 
 fn exec_insert<'mcx>(
@@ -6091,6 +6124,12 @@ fn exec_insert<'mcx>(
     }
 
     let partitioned_target = mt.rel().relkind == types_rel::RELKIND_PARTITIONED_TABLE;
+    // C ExecInsert opens the (unrouted) target's indexes before the BR
+    // trigger block; a partitioned target opens per routed leaf instead
+    // (ExecInitPartitionInfo, below).
+    if !partitioned_target {
+        open_target_indexes(mt, estate, onconflict != 0)?;
+    }
     if !partitioned_target
         && mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_insert_before_row)
     {
@@ -6193,6 +6232,19 @@ fn exec_insert<'mcx>(
                         mt.router.as_ref().expect("router built above").leaf_rel(idx),
                         CmdType::CMD_UPDATE,
                     )?;
+                }
+                // C ExecInitPartitionInfo opens the leaf's indexes when the
+                // leaf ResultRelInfo is built — BEFORE the leaf's BR triggers
+                // fire (execPartition.c): the open pins the index relations
+                // (trigger-run DROP INDEX errors, as in C) and reads the list
+                // pre-trigger (stale-held-rd_rel audit).
+                if mt.leaf_indexes[idx].is_none() {
+                    let lrel = mt.router.as_ref().expect("router built above").leaf_rel(idx);
+                    if lrel.rd_rel.relhasindex {
+                        let opened =
+                            execindexing::ExecOpenIndices(mcx, lrel, onconflict != 0)?;
+                        mt.leaf_indexes[idx] = Some(opened);
+                    }
                 }
             }
             Some(idx)
@@ -7508,7 +7560,7 @@ fn exec_leaf_conflict_update<'mcx>(
         ::trigger::ExecARUpdateTriggers(
             mcx,
             rel,
-            td.as_deref(),
+            td.as_ref(),
             None,
             None,
             Some(*tupleid),
@@ -8496,6 +8548,9 @@ pub fn mt_ins_br_triggers<'mcx>(
         mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_insert_before_row),
         "BR seam driven without BR-row triggers (mask drift)"
     );
+    // C ExecInsert opens the target's indexes before the BR trigger block
+    // (mirrors exec_insert; mt_ins_write's open is then a no-op).
+    open_target_indexes(mt, estate, false)?;
     br_row_triggers(
         mt,
         estate,
