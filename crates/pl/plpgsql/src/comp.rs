@@ -210,16 +210,14 @@ impl CompState {
         let (typinput, typioparam) = lsyscache::typ::getTypeInputInfo(typoid)?;
         let elem = lsyscache::typ::get_element_type(typoid)?;
         const RECORDOID: Oid = 2249;
-        if typtype == TYPTYPE_DOMAIN
-            && lsyscache::typ::get_typtype(lsyscache::typ::getBaseType(typoid)?)?
-                == TYPTYPE_COMPOSITE
-        {
-            panic!(
-                "plpgsql build_datatype (pl_comp.c:1998-2005): domain-over-composite \
-                 variables (PLPGSQL_TTYPE_REC) unported — unit backend-pl-plpgsql-comp"
-            );
-        }
+        // pl_comp.c:1990-2016 typtype switch: composite (and RECORD) are
+        // TTYPE_REC; a domain is TTYPE_REC iff its base type is a rowtype
+        // (type_is_rowtype on typbasetype), else scalar.
         let ttype = if typoid == RECORDOID || typtype == TYPTYPE_COMPOSITE {
+            TypeKind::Rec
+        } else if typtype == TYPTYPE_DOMAIN
+            && lsyscache::typ::type_is_rowtype(lsyscache::typ::getBaseType(typoid)?)?
+        {
             TypeKind::Rec
         } else if typtype == TYPTYPE_PSEUDO {
             TypeKind::Pseudo
@@ -302,6 +300,9 @@ impl CompState {
             lineno,
             rectypeid,
             datatype,
+            isconst: false,
+            notnull: false,
+            default_val: None,
         }));
         if add2namespace {
             self.ns_additem(NsType::Rec, dno, refname);

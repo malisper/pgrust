@@ -86,6 +86,11 @@ pub struct PlRec {
     /// RECORDOID unless declared with a named composite type (%ROWTYPE etc.).
     pub rectypeid: Oid,
     pub datatype: Option<PlType>,
+    /// C PLpgSQL_variable common fields (pl_gram.y decl_statement sets them
+    /// on rec variables exactly as on scalars).
+    pub isconst: bool,
+    pub notnull: bool,
+    pub default_val: Option<PlExpr>,
 }
 
 #[derive(Debug)]

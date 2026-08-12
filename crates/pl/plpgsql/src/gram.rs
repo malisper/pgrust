@@ -860,13 +860,24 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 notnull_loc,
             ));
         }
-        if let PlDatum::Var(v) = &mut self.comp.datums[dno as usize] {
-            v.isconst = isconst;
-            v.notnull = notnull;
-            if let Some(mut e) = default_val {
-                e.target_param = dno;
-                v.default_val = Some(e);
+        // C decl_statement sets the PLpgSQL_variable common fields on every
+        // variable kind; mark_expr_as_assignment_source stamps target_param
+        // only for scalar vars.
+        match &mut self.comp.datums[dno as usize] {
+            PlDatum::Var(v) => {
+                v.isconst = isconst;
+                v.notnull = notnull;
+                if let Some(mut e) = default_val {
+                    e.target_param = dno;
+                    v.default_val = Some(e);
+                }
             }
+            PlDatum::Rec(r) => {
+                r.isconst = isconst;
+                r.notnull = notnull;
+                r.default_val = default_val;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1588,7 +1599,19 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 }
                 Ok(())
             }
-            PlDatum::Rec(_) | PlDatum::Row(_) => Ok(()),
+            PlDatum::Rec(r) => {
+                // C plpgsql_check_assignable treats REC like VAR (the
+                // isconst field is in the PLpgSQL_variable common header).
+                if r.isconst {
+                    return Err(self.gram_err_pos(
+                        types_error::ERRCODE_ERROR_IN_ASSIGNMENT,
+                        format!("variable \"{}\" is declared CONSTANT", r.refname),
+                        location,
+                    ));
+                }
+                Ok(())
+            }
+            PlDatum::Row(_) => Ok(()),
             PlDatum::RecField(f) => self.check_assignable(f.recparentno, location),
         }
     }

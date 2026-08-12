@@ -1076,7 +1076,11 @@ impl<'a> Estate<'a> {
         let mcx = self.eval_ctx.mcx();
         let mut td = tupdesc::CreateTupleDescCopy(mcx, &src)?;
         if rectypeid != RECORDOID {
-            td.tdtypeid = rectypeid;
+            // C: the expanded record's tupdesc carries er_typeid = the BASE
+            // rowtype for a composite-domain rec; the flattened composite
+            // datum's header says the base type, while the declared (domain)
+            // type is what exec_eval_datum reports.
+            td.tdtypeid = Self::rec_base_typeid(rectypeid)?;
             td.tdtypmod = -1;
         } else if td.tdtypeid == RECORDOID {
             if td.tdtypmod < 0 {
@@ -1101,6 +1105,45 @@ impl<'a> Estate<'a> {
         }
     }
 
+    // A rec declared with a domain-over-composite type (PLPGSQL_TTYPE_REC
+    // via pl_comp.c's TYPTYPE_DOMAIN arm) keeps the domain oid in rectypeid;
+    // its tupdesc is the base type's (C expandedrecord DOMAIN_BASE_INFO).
+    fn rec_typeid_is_domain(rectypeid: Oid) -> PgResult<bool> {
+        if rectypeid == RECORDOID {
+            return Ok(false);
+        }
+        Ok(lsyscache::typ::get_typtype(rectypeid)? == TYPTYPE_DOMAIN)
+    }
+
+    // C getBaseType via lookup_type_cache DOMAIN_BASE_INFO: the rowtype the
+    // rec's tuples physically carry (identity for a plain composite).
+    fn rec_base_typeid(rectypeid: Oid) -> PgResult<Oid> {
+        if Self::rec_typeid_is_domain(rectypeid)? {
+            lsyscache::typ::getBaseType(rectypeid)
+        } else {
+            Ok(rectypeid)
+        }
+    }
+
+    // C expandedrecord.c check_domain_on_current_fields /
+    // check_domain_for_new_field: materialize the (prospective) field set as
+    // a tuple over the base tupdesc and run domain_check against the
+    // DECLARED domain type. The tuple lives in the eval scratch (freed by
+    // exec_eval_cleanup), like rec_as_composite_datum's materialization.
+    fn rec_domain_check_fields(
+        &mut self,
+        rectypeid: Oid,
+        td: &types_tuple::TupleDescData<'static>,
+        values: &[Datum],
+        nulls: &[bool],
+    ) -> PgResult<()> {
+        let mcx = self.eval_ctx.mcx();
+        let tup = heaptuple::heap_form_tuple(mcx, td, values, nulls)?;
+        let img = tup.header_ptr();
+        core::mem::forget(tup);
+        adt_domains::domain_check(Datum::from_usize(img as usize), false, rectypeid)
+    }
+
     // instantiate_empty_record_variable (pl_exec.c:7810).
     pub(crate) fn instantiate_empty_rec(&mut self, recno: Dno) -> PgResult<()> {
         let rec = self.rec_meta(recno);
@@ -1116,7 +1159,10 @@ impl<'a> Estate<'a> {
             ));
         }
         let rectypeid = rec.rectypeid;
-        let td = typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), rectypeid, -1)?;
+        // C make_expanded_record_from_typeid: a composite-domain rec gets its
+        // BASE type's tupdesc (typcache DOMAIN_BASE_INFO).
+        let base = Self::rec_base_typeid(rectypeid)?;
+        let td = typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), base, -1)?;
         let desc = RecDesc::from_tupdesc(&td);
         let n = desc.types.len();
         self.datums[recno as usize] = DatumVal::Rec(Some(RecValue {
@@ -2379,8 +2425,19 @@ impl<'a> Estate<'a> {
                         }
                     }
                 }
-                PlDatum::Rec(_) => {
+                PlDatum::Rec(r) => {
                     self.datums[dno as usize] = DatumVal::Rec(None);
+                    if let Some(default_val) = &r.default_val {
+                        self.exec_assign_expr(dno, default_val)?;
+                    } else if Self::rec_typeid_is_domain(r.rectypeid)? {
+                        // C pl_exec.c:1737-1748: a defaultless rec runs
+                        // exec_move_row(NULL, NULL); for a composite-domain
+                        // rec that makes an empty expanded record and
+                        // domain-checks the NULL, so a NULL-rejecting domain
+                        // errors during block local variable initialization.
+                        adt_domains::domain_check(Datum::null(), true, r.rectypeid)?;
+                        self.instantiate_empty_rec(dno)?;
+                    }
                 }
                 _ => {}
             }
@@ -2616,6 +2673,24 @@ impl<'a> Estate<'a> {
                 let newvalue =
                     self.exec_cast_value(value, &mut isnull, valtype, valtypmod, ftype, ftypmod)?;
                 let stored = self.assign_copy_to_datum_ctx(newvalue, isnull, flen, fbyval)?;
+                // C expanded_record_set_field → check_domain_for_new_field:
+                // the PROSPECTIVE tuple (current fields with the new value
+                // swapped in) must satisfy the composite domain before the
+                // field is committed; a violation leaves the rec unchanged.
+                let rectypeid = self.rec_meta(recno).rectypeid;
+                if Self::rec_typeid_is_domain(rectypeid)? {
+                    let (src, mut pv, mut pn) = match &self.datums[recno as usize] {
+                        DatumVal::Rec(Some(rv)) => (
+                            rv.src_desc.clone().expect("RecValue carries its source tupdesc"),
+                            rv.values.clone(),
+                            rv.nulls.clone(),
+                        ),
+                        _ => unreachable!("instantiated above"),
+                    };
+                    pv[i] = stored;
+                    pn[i] = isnull;
+                    self.rec_domain_check_fields(rectypeid, &src, &pv, &pn)?;
+                }
                 if let DatumVal::Rec(Some(rv)) = &mut self.datums[recno as usize] {
                     rv.values[i] = stored;
                     rv.nulls[i] = isnull;
@@ -2623,11 +2698,28 @@ impl<'a> Estate<'a> {
                 }
                 Ok(())
             }
-            PlDatum::Rec(_) => {
+            PlDatum::Rec(r) => {
                 if isnull {
+                    // pl_exec.c:5178-5184: NOT NULL rec rejects the NULL
+                    // before exec_move_row runs.
+                    if r.notnull {
+                        return Err(exec_err(
+                            types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                            format!(
+                                "null value cannot be assigned to variable \"{}\" declared NOT NULL",
+                                r.refname
+                            ),
+                        ));
+                    }
                     // C exec_move_row(rec, NULL, NULL): an empty record of
-                    // the rec's own type.
-                    if self.rec_meta(target).rectypeid != RECORDOID {
+                    // the rec's own type. For a composite-domain rec C makes
+                    // the empty record via expanded_record_set_tuple(NULL),
+                    // which domain-checks the NULL (pl_exec.c:6923-6937).
+                    let rectypeid = self.rec_meta(target).rectypeid;
+                    if rectypeid != RECORDOID {
+                        if Self::rec_typeid_is_domain(rectypeid)? {
+                            adt_domains::domain_check(Datum::null(), true, rectypeid)?;
+                        }
                         self.instantiate_empty_rec(target)?;
                     } else if let DatumVal::Rec(Some(rv)) = &mut self.datums[target as usize] {
                         for i in 0..rv.values.len() {
@@ -2645,7 +2737,7 @@ impl<'a> Estate<'a> {
                     ));
                 }
                 let (desc, src, values, nulls) = self.deconstruct_composite(value)?;
-                self.move_rec_from_values(target, &desc, src, &values, &nulls, true)
+                self.move_rec_from_values(target, &desc, src, &values, &nulls, true, true)
             }
             PlDatum::Row(r) => {
                 let varnos = r.varnos.clone();
@@ -2895,14 +2987,16 @@ impl<'a> Estate<'a> {
             PlDatum::Rec(_) => {
                 let (desc, src_desc) = self.rec_desc_of(tuptab)?;
                 let n = desc.types.len();
-                // C's NULL-tuple arm passes tupdesc=NULL to
-                // exec_move_row_from_fields: no strict_multi_assignment.
+                // C's NULL-tuple arm (exec_move_row !HeapTupleIsValid):
+                // deconstruct_expanded_record makes a row of NULLs with no
+                // strict_multi_assignment and NO composite-domain check.
                 self.move_rec_from_values(
                     var,
                     &desc,
                     src_desc,
                     &vec![Datum::null(); n],
                     &vec![true; n],
+                    false,
                     false,
                 )
             }
@@ -2933,7 +3027,7 @@ impl<'a> Estate<'a> {
                         nulls[f] = isnull;
                     }
                 });
-                self.move_rec_from_values(var, &desc, src_desc, &values, &nulls, true)
+                self.move_rec_from_values(var, &desc, src_desc, &values, &nulls, true, true)
             }
             PlDatum::Row(r) => {
                 let varnos = r.varnos.clone();
@@ -2975,6 +3069,11 @@ impl<'a> Estate<'a> {
         values: &[Datum],
         nulls: &[bool],
         sma_check: bool,
+        // C: assignments through expanded_record_set_fields/set_tuple run
+        // check_domain_on_current_fields; the row-of-NULLs arm (source
+        // tupdesc but no tuple: INTO with no rows, FOR over zero rows) goes
+        // through deconstruct_expanded_record instead and is NOT checked.
+        domain_check: bool,
     ) -> PgResult<()> {
         let rectypeid = self.rec_meta(recno).rectypeid;
         if rectypeid == RECORDOID {
@@ -3000,7 +3099,8 @@ impl<'a> Estate<'a> {
             return Ok(());
         }
 
-        let var_td = typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), rectypeid, -1)?;
+        let base = Self::rec_base_typeid(rectypeid)?;
+        let var_td = typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), base, -1)?;
         let dst = RecDesc::from_tupdesc(&var_td);
         let vtd_natts = dst.types.len();
         let td_natts = srcdesc.types.len();
@@ -3053,6 +3153,12 @@ impl<'a> Estate<'a> {
             if anum < td_natts {
                 self.strict_multiassignment_report(level)?;
             }
+        }
+        // Domain check BEFORE committing: C builds/checks the new expanded
+        // record first and only then assign_record_var's it, so a violation
+        // leaves the variable's old value intact.
+        if domain_check && base != rectypeid {
+            self.rec_domain_check_fields(rectypeid, &var_td, &newvalues, &newnulls)?;
         }
         self.datums[recno as usize] = DatumVal::Rec(Some(RecValue {
             desc: dst,
@@ -3819,7 +3925,16 @@ impl<'a> Estate<'a> {
                 }
                 Ok(())
             }
-            PlDatum::Rec(_) | PlDatum::Row(_) => Ok(()),
+            PlDatum::Rec(r) => {
+                if r.isconst {
+                    return Err(exec_err(
+                        types_error::ERRCODE_ERROR_IN_ASSIGNMENT,
+                        format!("variable \"{}\" is declared CONSTANT", r.refname),
+                    ));
+                }
+                Ok(())
+            }
+            PlDatum::Row(_) => Ok(()),
             PlDatum::RecField(f) => self.exec_check_assignable(f.recparentno),
         }
     }
