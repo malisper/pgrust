@@ -25,6 +25,7 @@ dependencies = [
  "datum",
  "dbcommands_seams",
  "dependency_seams",
+ "detoast_seams",
  "elog",
  "event_trigger_seams",
  "fmgr_seams",
@@ -615,6 +616,7 @@ dependencies = [
  "mcx",
  "nodes_core",
  "pg_prng",
+ "postgres_seams",
  "pqformat",
  "stringinfo",
  "types_core",
@@ -1328,6 +1330,7 @@ name = "autovacuum_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
  "types_error",
 ]
 
@@ -1639,6 +1642,7 @@ dependencies = [
 name = "brin"
 version = "0.1.0"
 dependencies = [
+ "autovacuum_seams",
  "brin_bloom",
  "brin_inclusion",
  "brin_minmax",
@@ -2331,6 +2335,7 @@ dependencies = [
  "lmgr_proc",
  "mcx",
  "pgstat",
+ "postgres_seams",
  "smgr",
  "storage_xlog",
  "transam_xlog",
@@ -2757,6 +2762,7 @@ dependencies = [
 name = "commands_amcmds"
 version = "0.0.0"
 dependencies = [
+ "amapi",
  "cache_syscache",
  "catalog",
  "catalog_indexing",
@@ -3540,6 +3546,7 @@ dependencies = [
  "types_tuple",
  "varlena",
  "vars",
+ "wait_error",
  "wchar",
  "xact",
 ]
@@ -3831,6 +3838,7 @@ dependencies = [
  "adt_tsrank",
  "adt_tsvector_core",
  "adt_uuid",
+ "adt_varbit",
  "archive",
  "array_userfuncs",
  "arrayfuncs",
@@ -4065,6 +4073,7 @@ name = "dsm_core"
 version = "0.0.0"
 dependencies = [
  "elog",
+ "guc_seams",
  "guc_tables",
  "init_small",
  "ipc_seams",
@@ -4108,6 +4117,7 @@ dependencies = [
  "elog_seams",
  "error_small_seams",
  "guc_tables",
+ "init_small",
  "init_small_seams",
  "ipc_seams",
  "libc",
@@ -4187,6 +4197,7 @@ dependencies = [
  "pgstat",
  "plancache",
  "snapmgr",
+ "stack_depth_core",
  "superuser",
  "table",
  "types_core",
@@ -4252,6 +4263,7 @@ dependencies = [
  "numutils",
  "pgstat",
  "sequence_seams",
+ "stack_depth_core",
  "syscache_seams",
  "tupdesc",
  "typcache",
@@ -4438,6 +4450,7 @@ dependencies = [
  "shm_mq",
  "snapmgr",
  "spillset",
+ "stack_depth_core",
  "syscache_seams",
  "table",
  "tableam",
@@ -4986,7 +4999,9 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "namespace_seams",
+ "nbt_compare",
  "syscache_seams",
+ "types_array",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -5280,6 +5295,7 @@ dependencies = [
  "gin_vocab",
  "guc_tables",
  "init_small",
+ "lmgr",
  "lsyscache",
  "mcx",
  "miscinit",
@@ -6379,6 +6395,14 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_guc",
+]
+
+[[package]]
+name = "janitor_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -8786,6 +8810,7 @@ dependencies = [
  "execexpr",
  "format_type",
  "funcapi",
+ "hashfn",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -8861,6 +8886,7 @@ name = "partprune"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "hashfn",
  "mcx",
  "partbounds",
  "types_core",
@@ -9833,6 +9859,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "pgstat_seams",
+ "pgsync",
  "rustc-hash",
  "slot_seams",
  "syscache_seams",
@@ -10234,6 +10261,7 @@ dependencies = [
 name = "portalcmds"
 version = "0.1.0"
 dependencies = [
+ "copyfuncs",
  "elog",
  "execmain",
  "execmain_seams",
@@ -10322,6 +10350,7 @@ dependencies = [
  "ipc",
  "ipc_seams",
  "ipci_seams",
+ "janitor_seams",
  "latch",
  "libc",
  "libpq_pqsignal",
@@ -10419,6 +10448,7 @@ dependencies = [
  "init_small",
  "inval_seams",
  "ipc_seams",
+ "janitor_seams",
  "latch",
  "libc",
  "lmgr",
@@ -10788,6 +10818,7 @@ dependencies = [
  "catalog",
  "catalog_indexing",
  "datum",
+ "fmgr_core",
  "heaptuple",
  "lsyscache",
  "mcx",
@@ -10795,6 +10826,7 @@ dependencies = [
  "parse_func",
  "pg_depend",
  "superuser",
+ "syscache_seams",
  "table",
  "types_core",
  "types_error",
@@ -13508,6 +13540,7 @@ dependencies = [
  "catalog_namespace",
  "clauses",
  "datum",
+ "dbcommands_seams",
  "dependency_seams",
  "elog_seams",
  "execexpr",
@@ -13531,6 +13564,7 @@ dependencies = [
  "parse_relation",
  "parser_small1",
  "partdesc",
+ "pg_class",
  "pg_constraint",
  "pg_depend",
  "pg_inherits",
@@ -14478,6 +14512,7 @@ dependencies = [
  "seam_core",
  "seclabel",
  "sequence",
+ "stack_depth_core",
  "statscmds",
  "subscriptioncmds",
  "tablecmds",

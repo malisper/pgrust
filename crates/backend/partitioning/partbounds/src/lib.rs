@@ -530,14 +530,11 @@ pub fn partition_hash_bsearch(
     lo
 }
 
-// src/include/common/hashfn.h hash_combine64.
-#[inline]
-pub fn hash_combine64(a: u64, b: u64) -> u64 {
-    a ^ (b
-        .wrapping_add(0x49a0f4dd15e5a8e3)
-        .wrapping_add(a << 54)
-        .wrapping_add(a >> 7))
-}
+// src/include/common/hashfn.h hash_combine64 — single canonical copy in
+// crates/common/hashfn (mutation pilot #58: duplicated local copies made
+// the canonical one SQL-unreachable, so a broken hashfn::hash_combine64
+// was invisible to the differential).
+pub use ::hashfn::hash_combine64;
 
 pub fn compute_partition_hash_value(
     mcx: Mcx<'_>,

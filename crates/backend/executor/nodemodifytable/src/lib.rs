@@ -2808,9 +2808,14 @@ fn exec_merge_matched_scan<'mcx>(
                 return Ok(MergeMatchedOutcome::NotMatched);
             }
             TM_Result::TM_Updated => {
-                if xact::IsolationUsesXactSnapshot() {
-                    return Err(serialization_conflict("update"));
-                }
+                // NO IsolationUsesXactSnapshot check here: C's
+                // ExecMergeMatched raises 40001 for TM_Deleted only; on
+                // TM_Updated it unconditionally locks the latest version
+                // (TUPLE_LOCK_FLAG_FIND_LAST_VERSION hardcoded, C 3376)
+                // and rechecks — even under REPEATABLE READ, where the
+                // MERGE then applies on the chain-followed version
+                // (witness: ssidiff rr-serialization-sweep s2-merge,
+                // C 18.3 = MERGE 1, hand-verified).
                 // Concurrent update: lock the latest version. A MATCHED
                 // action then rechecks the join via EvalPlanQual; a NOT
                 // MATCHED BY SOURCE action relocks in place and restarts

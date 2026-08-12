@@ -878,6 +878,20 @@ pub use tsrank_diff::tsrank_diff;
 pub mod int_diff;
 pub use int_diff::int_diff;
 
+// VENDOR lane: bit_in/varbit_in text-parser differential (the un-vendored
+// hand-rolled-parser bug class — ST3/Q8 surface).
+pub mod varbit_io_diff;
+pub use varbit_io_diff::varbit_io_diff;
+
+// edge: shared adversarial edge-value bank + cross-cutting injection harness
+// (INT_MIN/MAX / wraparound / empty / length-extreme). See edge.rs.
+pub mod edge;
+
+// parser: adversarial TEXT-input bank + campaign for the HAND-ROLLED `*_in`
+// type input parsers (tid / geo / net / range / array / record / bytea /
+// temporal / contrib). See parser.rs.
+pub mod parser;
+
 // network_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-network_diff.md.
 pub mod network_diff;
 pub use network_diff::network_diff;

@@ -1343,6 +1343,12 @@ pub fn deck() -> Vec<Scenario> {
         probes: vec![probe_ssi_t()],
     });
 
+    // CONCUR lane: EPQ recheck / MERGE re-check / ON CONFLICT races /
+    // lock-mode matrix / CIC-REINDEX CONCURRENTLY waits / DETACH
+    // CONCURRENTLY cancel — the SQL-reachable concurrency arms from the
+    // Antithesis fault-only inventory (see crate::concur).
+    v.extend(crate::concur::deck());
+
     v
 }
 

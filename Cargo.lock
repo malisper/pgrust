@@ -11513,6 +11513,7 @@ dependencies = [
  "execexpr",
  "format_type",
  "funcapi",
+ "hashfn",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -11603,6 +11604,7 @@ name = "partprune"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "hashfn",
  "mcx",
  "partbounds",
  "types_core",

@@ -45,6 +45,7 @@ use crate::objddl::{gen_objddl_module, ObjState};
 use crate::numx::gen_numx_module;
 use crate::objid::gen_objid_module;
 use crate::obs::gen_obs_module;
+use crate::cfgm::gen_cfgm_module;
 use crate::opt2::gen_opt2_module;
 use crate::par::{gen_par_module, ParState};
 use crate::part::{gen_part_module, PartState};
@@ -262,6 +263,7 @@ pub const STMT_MODULES: &[StmtModuleDef] = &[
     StmtModuleDef { name: "ddldeep", generate: gen_ddldeep_module },
     StmtModuleDef { name: "pgram", generate: gen_pgram_module },
     StmtModuleDef { name: "opt2", generate: gen_opt2_module },
+    StmtModuleDef { name: "cfgm", generate: gen_cfgm_module },
 ];
 
 /// Produce one statement group from the named module (the toggle vector

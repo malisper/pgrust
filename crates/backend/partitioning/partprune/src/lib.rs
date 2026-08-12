@@ -55,13 +55,9 @@ pub trait BoundInfo {
 
 pub const HASH_PARTITION_SEED: u64 = 0x7A5B22367996DCFD;
 
-#[inline]
-pub fn hash_combine64(a: u64, b: u64) -> u64 {
-    a ^ (b
-        .wrapping_add(0x49a0f4dd15e5a8e3)
-        .wrapping_add(a << 54)
-        .wrapping_add(a >> 7))
-}
+// Single canonical copy in crates/common/hashfn (see partbounds; mutation
+// pilot #58 — local duplicates hid the canonical copy from the oracle).
+pub use ::hashfn::hash_combine64;
 
 impl BoundInfo for types_pathnodes::PartitionBoundInfoData<'_> {
     fn strategy(&self) -> u8 {

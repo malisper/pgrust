@@ -598,6 +598,17 @@ impl Gen<'_> {
     /// boundary values well represented. Random spellings are built from
     /// integer draws only so the text is platform-deterministic.
     pub fn gen_literal(&mut self, ty: SqlType) -> String {
+        // Boundary-biased draw (mutation pilot: the mid-range-only random
+        // stream killed zero mutants the fixed deck missed; bugs live at
+        // boundaries). Weighted lit:mid vs lit:boundary — default 2:1, so
+        // a third of literals come from the per-type boundary banks.
+        let bank = crate::boundary::bank(ty);
+        if !bank.is_empty()
+            && self.weights.pick(self.rng, &["lit:mid", "lit:boundary"]) == "lit:boundary"
+        {
+            self.fire2("lit:boundary:", ty.name());
+            return (*self.rng.pick(bank)).to_string();
+        }
         match ty {
             SqlType::Int2 => match self.rng.below(6) {
                 0 => "(0)::int2".to_string(),
@@ -890,6 +901,52 @@ mod tests {
 
     fn rels(cat: &Catalog) -> Vec<ScopeRel> {
         vec![ScopeRel::from_table(&cat.tables[0], "t0".to_string())]
+    }
+
+    #[test]
+    fn boundary_bank_emission_rate_is_meaningful() {
+        // Mutation-pilot regression guard: the generator must EMIT
+        // boundary values with meaningful frequency, not merely list
+        // them. At default weights (lit:mid=2, lit:boundary=1) the
+        // boundary share of literals must be well above noise for every
+        // banked type, and the emission must cover the whole bank.
+        let cat = catalog();
+        let w = WeightTable::defaults();
+        for &ty in crate::catalog::ALL_TYPES {
+            let bank = crate::boundary::bank(ty);
+            if bank.is_empty() {
+                continue;
+            }
+            let mut rng = Rng::new(4242);
+            let mut prods = Vec::new();
+            let mut g = Gen::new(&mut rng, &cat, &w, &mut prods, 5);
+            let mut hits = 0usize;
+            let mut seen: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
+            const N: usize = 3000;
+            for _ in 0..N {
+                let lit = g.gen_literal(ty);
+                if let Some(&b) = bank.iter().find(|&&b| b == lit) {
+                    hits += 1;
+                    seen.insert(b);
+                }
+            }
+            // Expected boundary share is 1/3; require at least 20%.
+            assert!(
+                hits * 5 >= N,
+                "{:?}: boundary share too low ({}/{})",
+                ty,
+                hits,
+                N
+            );
+            assert_eq!(
+                seen.len(),
+                bank.len(),
+                "{:?}: bank entries never emitted: {:?}",
+                ty,
+                bank.iter().filter(|b| !seen.contains(*b)).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

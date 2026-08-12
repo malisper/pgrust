@@ -36,3 +36,7 @@ mutants.out.old/
 .snouty.toml
 # accidental build-log commits
 /cpg-build.log
+cpg-ref-install/
+target-mut/
+# cfg-sampler evidence output (summaries live in docs/fuzzing/findings-cfg*.md)
+cfgfindings/

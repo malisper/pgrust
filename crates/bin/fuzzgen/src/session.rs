@@ -372,7 +372,7 @@ mod tests {
              ddl=off,types=off,explain=off,util=off,part=off,\
              objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
              nodes=off,obs=off,objid=off,einterp=off,exd=off,spill=off,\
-             earm=off,plansel=off,earm2=off,exr=off,numx=off,pubsub=off,pgram=off,opt2=off",
+             earm=off,plansel=off,earm2=off,exr=off,numx=off,pubsub=off,pgram=off,opt2=off,cfgm=off",
         )
         .unwrap();
         c.weights = WeightTable::parse(
@@ -506,8 +506,9 @@ mod tests {
         // registry grew (par/coll/mbconv/xnum, then the einterp/exd/earm
         // drain groups, then the LD10 pubsub module dilute per-module
         // traffic); the >=50 idx-statement floor below stays meaningful at
-        // this budget.
-        c.budget = 5000;
+        // this budget. Re-bumped 5000 -> 5800 when the CFG-lane cfgm
+        // module joined the registry.
+        c.budget = 5800;
         let outp = run_session_probed(&c, &cat);
         let idx_windows: Vec<_> = outp
             .ddl_windows

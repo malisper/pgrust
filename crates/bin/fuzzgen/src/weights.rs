@@ -29,6 +29,11 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "colref", default: 5.0 },
     ProdWeight { name: "lit", default: 4.0 },
     ProdWeight { name: "null", default: 1.0 },
+    // Within "lit": mid-range random spelling vs boundary-bank draw
+    // (boundary.rs; mutation-pilot corpus fix — keep boundary weight
+    // meaningful or the random stream regresses to mid-range-only).
+    ProdWeight { name: "lit:mid", default: 2.0 },
+    ProdWeight { name: "lit:boundary", default: 1.0 },
     // Typed composite productions.
     ProdWeight { name: "case", default: 1.0 },
     ProdWeight { name: "cast", default: 1.0 },
@@ -1868,6 +1873,20 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "opt2:uniq", default: 0.8 },
     ProdWeight { name: "opt2:refute", default: 1.2 },
     ProdWeight { name: "opt2:gucmatrix", default: 1.0 },
+    // cfgm (CFG lane): config-machinery shape selection. set/local/sweep
+    // carry the guc.c drain mass; conv/clienc carry the encoding-conv
+    // chunk; the ok/err knob prices the matched-error SET arms.
+    ProdWeight { name: "cfgm:set", default: 2.0 },
+    ProdWeight { name: "cfgm:local", default: 1.5 },
+    ProdWeight { name: "cfgm:setcfg", default: 1.2 },
+    ProdWeight { name: "cfgm:custom", default: 1.0 },
+    ProdWeight { name: "cfgm:sweep", default: 1.2 },
+    ProdWeight { name: "cfgm:tz", default: 1.2 },
+    ProdWeight { name: "cfgm:txniso", default: 1.0 },
+    ProdWeight { name: "cfgm:conv", default: 1.5 },
+    ProdWeight { name: "cfgm:clienc", default: 1.0 },
+    ProdWeight { name: "cfgm:ok", default: 6.0 },
+    ProdWeight { name: "cfgm:err", default: 1.0 },
 ];
 
 /// Resolved weight vector, parallel to `PROD_WEIGHTS`.

@@ -276,6 +276,9 @@ fn main() {
         // numutils_diff oracle (p1-laneaj): verbatim 18.3 numutils.c
         .file("csrc/pg_numutils.c")
         .file("csrc/pg_int_io.c")
+        // VENDOR lane: verbatim varbit.c bit_in/varbit_in text-input parsers
+        // — the un-vendored hand-rolled-parser bug class (varbit_io_diff).
+        .file("csrc/pg_varbit_io.c")
         .file("csrc/pg_network_io.c")
         .file("csrc/pg_uuid_io.c")
         .file("csrc/pg_mac_io.c")
