@@ -1811,6 +1811,63 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "tsfx:analyze", default: 1.0 },
     ProdWeight { name: "tsfx:likesup", default: 1.5 },
     ProdWeight { name: "tsfx:errlit", default: 0.8 },
+    // ddldeep (SQLcov-A): verbatim hand-verified DDL-deep sections;
+    // weights price the per-section drain mass (atpass/fkpart/typec are
+    // the big tablecmds/typecmds lifecycles; wmin is the wal-minimal
+    // pending-sync fuel and runs cheap).
+    ProdWeight { name: "ddldeep:atpass", default: 1.5 },
+    ProdWeight { name: "ddldeep:atmulti", default: 1.0 },
+    ProdWeight { name: "ddldeep:fkpart", default: 1.5 },
+    ProdWeight { name: "ddldeep:constr", default: 1.2 },
+    ProdWeight { name: "ddldeep:typec", default: 1.3 },
+    ProdWeight { name: "ddldeep:funcs", default: 1.1 },
+    ProdWeight { name: "ddldeep:idxc", default: 1.3 },
+    ProdWeight { name: "ddldeep:seqview", default: 1.1 },
+    ProdWeight { name: "ddldeep:trigpol", default: 1.2 },
+    ProdWeight { name: "ddldeep:stats", default: 0.9 },
+    ProdWeight { name: "ddldeep:tblspc", default: 0.9 },
+    ProdWeight { name: "ddldeep:wmin", default: 1.0 },
+    // pgram (SQLcov-B): parser rare-grammar shape selection. The
+    // transform-heavy DDL-ish shapes carry slightly more weight than the
+    // pure-expression ones (the parser-arms chunk is dominated by
+    // parse_utilcmd/parse_coerce/parse_func residue).
+    ProdWeight { name: "pgram:ordinality", default: 1.0 },
+    ProdWeight { name: "pgram:xmltab", default: 1.0 },
+    ProdWeight { name: "pgram:jsontab", default: 1.2 },
+    ProdWeight { name: "pgram:gsets", default: 1.2 },
+    ProdWeight { name: "pgram:lateral", default: 1.0 },
+    ProdWeight { name: "pgram:frame", default: 1.2 },
+    ProdWeight { name: "pgram:merge", default: 1.2 },
+    ProdWeight { name: "pgram:copyopt", default: 1.2 },
+    ProdWeight { name: "pgram:stats", default: 1.0 },
+    ProdWeight { name: "pgram:partbound", default: 1.2 },
+    ProdWeight { name: "pgram:castcoll", default: 1.0 },
+    ProdWeight { name: "pgram:opagg", default: 1.2 },
+    ProdWeight { name: "pgram:rowarr", default: 1.2 },
+    ProdWeight { name: "pgram:poly", default: 1.5 },
+    ProdWeight { name: "pgram:cte", default: 1.2 },
+    ProdWeight { name: "pgram:like", default: 1.5 },
+    ProdWeight { name: "pgram:coldef", default: 1.5 },
+    ProdWeight { name: "pgram:idxcon", default: 1.5 },
+    ProdWeight { name: "pgram:funcsel", default: 1.2 },
+    ProdWeight { name: "pgram:colref", default: 1.0 },
+    ProdWeight { name: "pgram:exprkind", default: 1.2 },
+    ProdWeight { name: "pgram:lockrows", default: 1.2 },
+    ProdWeight { name: "pgram:plassign", default: 1.0 },
+    // opt2 (SQLcov-B): optimizer round-2 shape selection. The
+    // reparameterization shapes lead (the top residue rows of the
+    // optimizer-arms chunk are pathnode.c reparameterize arms).
+    ProdWeight { name: "opt2:lateralrp", default: 1.8 },
+    ProdWeight { name: "opt2:tsrp", default: 1.5 },
+    ProdWeight { name: "opt2:apprel", default: 1.5 },
+    ProdWeight { name: "opt2:joinrm", default: 1.2 },
+    ProdWeight { name: "opt2:eclass", default: 1.2 },
+    ProdWeight { name: "opt2:constfold", default: 1.2 },
+    ProdWeight { name: "opt2:indexmatch", default: 1.2 },
+    ProdWeight { name: "opt2:pullup", default: 1.0 },
+    ProdWeight { name: "opt2:uniq", default: 0.8 },
+    ProdWeight { name: "opt2:refute", default: 1.2 },
+    ProdWeight { name: "opt2:gucmatrix", default: 1.0 },
 ];
 
 /// Resolved weight vector, parallel to `PROD_WEIGHTS`.

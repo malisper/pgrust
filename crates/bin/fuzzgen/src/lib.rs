@@ -150,6 +150,18 @@
 //! generated columns, inlinable SQL functions) — the result set must be
 //! identical across every forced plan, draining the line-drain-queue
 //! `optimizer-arms` chunk.
+//! SQLcov-B adds the parser rare-grammar module (`pgram` — rarer gram.y
+//! productions + transform*.c success/error arms: WITH ORDINALITY,
+//! XMLTABLE/JSON_TABLE column defs, grouping-set nesting, LATERAL,
+//! frame clauses, MERGE arms, COPY options, CREATE STATISTICS kinds,
+//! partition bounds, typecast/collate, operator/aggregate definition,
+//! row/array/subscript grammar, polymorphic resolution — draining
+//! `parser-arms`) and the optimizer round-2 module (`opt2` —
+//! reparameterize_path lateral/tablesample arms, appendrel common
+//! parameterization, join removal + PG18 self-join elimination, EC
+//! merging/full-join reconsideration, eval_const_expressions deep arms,
+//! rare index-clause matches, and a broadened GUC matrix — draining the
+//! `optimizer-arms` residue LD7 left).
 
 pub mod admin;
 pub mod adtmisc;
@@ -169,6 +181,7 @@ pub mod dtmdec;
 pub mod einterp;
 pub mod exd;
 pub mod earm;
+pub mod ddldeep;
 pub mod earm2;
 pub mod explain;
 pub mod exr;
@@ -185,8 +198,10 @@ pub mod numx;
 pub mod objddl;
 pub mod objid;
 pub mod obs;
+pub mod opt2;
 pub mod par;
 pub mod part;
+pub mod pgram;
 pub mod plansel;
 pub mod plpg;
 pub mod pubsub;

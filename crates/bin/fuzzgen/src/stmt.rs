@@ -31,6 +31,7 @@ use crate::dtm::gen_dtm_module;
 use crate::einterp::gen_einterp_module;
 use crate::exd::gen_exd_module;
 use crate::earm::gen_earm_module;
+use crate::ddldeep::gen_ddldeep_module;
 use crate::earm2::gen_earm2_module;
 use crate::explain::gen_explain_module;
 use crate::exr::{gen_exr_module, ExrState};
@@ -44,8 +45,10 @@ use crate::objddl::{gen_objddl_module, ObjState};
 use crate::numx::gen_numx_module;
 use crate::objid::gen_objid_module;
 use crate::obs::gen_obs_module;
+use crate::opt2::gen_opt2_module;
 use crate::par::{gen_par_module, ParState};
 use crate::part::{gen_part_module, PartState};
+use crate::pgram::gen_pgram_module;
 use crate::plansel::{gen_plansel_module, PlanState};
 use crate::plpg::{gen_plpg_module, PlpgState};
 use crate::pubsub::gen_pubsub_module;
@@ -256,6 +259,9 @@ pub const STMT_MODULES: &[StmtModuleDef] = &[
     StmtModuleDef { name: "exr", generate: gen_exr_module },
     StmtModuleDef { name: "numx", generate: gen_numx_module },
     StmtModuleDef { name: "pubsub", generate: gen_pubsub_module },
+    StmtModuleDef { name: "ddldeep", generate: gen_ddldeep_module },
+    StmtModuleDef { name: "pgram", generate: gen_pgram_module },
+    StmtModuleDef { name: "opt2", generate: gen_opt2_module },
 ];
 
 /// Produce one statement group from the named module (the toggle vector

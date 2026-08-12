@@ -309,7 +309,11 @@ mod tests {
         // (600 since the 28th module, admin/Q5, joined the all-on mix.)
         // 600 -> 800 with the 32-module registry (exd, LD4): the sparse
         // types module needs the larger budget to fire at this seed.
-        let long = run_session(&SessionConfig { budget: 800, ..cfg(12) }, &cat);
+        // 800 -> 1400 with the 40-module registry (pgram/opt2, SQLcov-B):
+        // the two new battery modules emit chunky groups that dilute the
+        // per-module draw further; explain needs the longer stream to
+        // reliably fire at this seed.
+        let long = run_session(&SessionConfig { budget: 1400, ..cfg(12) }, &cat);
         let all: Vec<String> = long.iter().flat_map(|s| s.productions.clone()).collect();
         for prefix in [
             "colref",
@@ -368,7 +372,7 @@ mod tests {
              ddl=off,types=off,explain=off,util=off,part=off,\
              objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
              nodes=off,obs=off,objid=off,einterp=off,exd=off,spill=off,\
-             earm=off,plansel=off,earm2=off,exr=off,numx=off",
+             earm=off,plansel=off,earm2=off,exr=off,numx=off,pubsub=off,pgram=off,opt2=off",
         )
         .unwrap();
         c.weights = WeightTable::parse(

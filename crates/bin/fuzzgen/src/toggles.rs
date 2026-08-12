@@ -171,6 +171,20 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // LD10: publication/subscription DDL drain (never-connecting; see
     // crate::pubsub module docs).
     ModuleSpec { name: "pubsub", default_weight: 0.3 },
+    // ddldeep (SQLcov-A) emits whole VERBATIM hand-verified DDL-deep
+    // sections (15-75 statements per pick: AT_* pass lifecycles,
+    // FK-bearing partition trees, partitioned-index attach, in-place
+    // tablespaces); like earm2 the groups are large, so the weight
+    // sits low.
+    ModuleSpec { name: "ddldeep", default_weight: 0.2 },
+    // pgram (SQLcov-B) emits self-contained parser rare-grammar batteries
+    // (fixtures + valid-rare probes + deliberate analysis errors +
+    // drops, ~20-60 statements per pick); earm-like low weight.
+    ModuleSpec { name: "pgram", default_weight: 0.3 },
+    // opt2 (SQLcov-B) emits optimizer round-2 sweep groups (in-group
+    // fixture create + forced-profile query sweeps + drop, ~40-90
+    // statements per pick); plansel-like low weight.
+    ModuleSpec { name: "opt2", default_weight: 0.3 },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -334,7 +348,8 @@ mod tests {
                  objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
                  dtm=off,adtmisc=off,sqljson=off,plpg=off,coll=off,mbconv=off,\
              xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,\
-                 plansel=off,earm2=off,exr=off,numx=off,pubsub=off"
+                 plansel=off,earm2=off,exr=off,numx=off,pubsub=off,ddldeep=off,\
+                 pgram=off,opt2=off"
             )
             .is_err()
         );
@@ -348,7 +363,8 @@ mod tests {
              objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
              dtm=off,adtmisc=off,sqljson=off,plpg=off,coll=off,mbconv=off,\
              xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,\
-             plansel=off,earm2=off,exr=off,numx=off,pubsub=off",
+             plansel=off,earm2=off,exr=off,numx=off,pubsub=off,ddldeep=off,\
+             pgram=off,opt2=off",
         )
         .unwrap();
         let mut rng = Rng::new(5);
