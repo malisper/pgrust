@@ -621,7 +621,17 @@ pub fn add_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId, new_id: PathId)
         );
 
         if costcmp != PathCostComparison::Different {
-            let keyscmp = compare_pathkeys(&new_path.pathkeys, &old_path.pathkeys);
+            // C add_path: "Pretend parameterized paths have no pathkeys" —
+            // a parameterized path's ordering never survives to the final
+            // plan choice, so it must not defend the path in dominance
+            // checks (Q1-F1B: a disabled parameterized index path kept
+            // alive by its pathkeys poisoned cheapest_parameterized_paths
+            // and blocked the partial hash join C plans).
+            let new_keys: &[PathKey] =
+                if new_path.param_info.is_some() { &[] } else { &new_path.pathkeys };
+            let old_keys: &[PathKey] =
+                if old_path.param_info.is_some() { &[] } else { &old_path.pathkeys };
+            let keyscmp = compare_pathkeys(new_keys, old_keys);
             if keyscmp != PathKeysComparison::Different {
                 let outercmp = || {
                     relids_subset_compare(path_req_outer(new_path), path_req_outer(old_path))
@@ -3349,6 +3359,9 @@ pub fn add_path_precheck(
     pathkeys: &[PathKey],
     required_outer: &Relids<'_>,
 ) -> bool {
+    // C: "Pretend parameterized paths have no pathkeys, per add_path policy".
+    let new_keys: &[PathKey] =
+        if types_pathnodes::relids::relids_is_empty(required_outer) { pathkeys } else { &[] };
     let consider_startup = if types_pathnodes::relids::relids_is_empty(required_outer) {
         run.root.rel(joinrel).consider_startup
     } else {
@@ -3364,7 +3377,9 @@ pub fn add_path_precheck(
             break;
         }
         if startup_cost > old.startup_cost * STD_FUZZ_FACTOR || !consider_startup {
-            let keyscmp = compare_pathkeys(pathkeys, &old.pathkeys);
+            let old_keys: &[PathKey] =
+                if old.param_info.is_some() { &[] } else { &old.pathkeys };
+            let keyscmp = compare_pathkeys(new_keys, old_keys);
             if (keyscmp == PathKeysComparison::Equal || keyscmp == PathKeysComparison::Better2)
                 && types_pathnodes::relids::relids_equal(required_outer, path_req_outer(old))
             {

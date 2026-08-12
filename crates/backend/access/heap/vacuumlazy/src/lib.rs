@@ -229,6 +229,14 @@ pub fn heap_vacuum_rel<'mcx>(
 
     let indrels = vac_open_indexes(mcx, rel, RowExclusiveLock)?;
     let nindexes = indrels.len();
+    // C vacuumlazy.c: under `instrument`, pstrdup the index names up front —
+    // the verbose/log report runs AFTER vac_close_indexes has released the
+    // relations (Q1-F3: reading vacrel->indrels there printed `index ""`).
+    let indnames: Vec<String> = if instrument_vac {
+        indrels.iter().map(|r| r.name().to_string()).collect()
+    } else {
+        Vec::new()
+    };
     let mut indstats = ::mcx::PgVec::with_capacity_in(nindexes, mcx);
     for _ in 0..nindexes {
         indstats.push(None);
@@ -484,6 +492,7 @@ pub fn heap_vacuum_rel<'mcx>(
         {
             vacuum_instrument_report(
                 &vacrel,
+                &indnames,
                 params,
                 verbose,
                 &dbname,
@@ -514,6 +523,7 @@ pub fn heap_vacuum_rel<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn vacuum_instrument_report(
     vacrel: &LVRelState<'_, '_>,
+    indnames: &[String],
     params: &VacuumParams,
     verbose: bool,
     dbname: &str,
@@ -672,7 +682,7 @@ fn vacuum_instrument_report(
         let _ = writeln!(
             buf,
             "index \"{}\": pages: {} in total, {} newly deleted, {} currently deleted, {} reusable",
-            vacrel.indrels.get(i).map(|r| r.name()).unwrap_or(""),
+            indnames.get(i).map(String::as_str).unwrap_or(""),
             istat.num_pages,
             istat.pages_newly_deleted,
             istat.pages_deleted,
@@ -755,6 +765,7 @@ fn dead_items_alloc(vacrel: &mut LVRelState<'_, '_>, nworkers: i32) -> PgResult<
                 &vacrel.indrels,
                 nworkers,
                 vac_work_mem,
+                if vacrel.verbose { ::types_error::INFO } else { ::types_error::DEBUG2 },
                 &vacrel.bstrategy,
                 vacrel.rel.rd_id,
             )?;

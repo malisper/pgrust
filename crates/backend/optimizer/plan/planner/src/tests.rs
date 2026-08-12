@@ -7429,7 +7429,7 @@ mod appendrel_ec {
         let child = mk_rel(&mut run, 2, RELOPT_OTHER_MEMBER_REL);
         run.root.rel_mut(child).parent = Some(parent);
         run.root.rel_mut(child).top_parent = Some(parent);
-        run.root.rel_mut(child).top_parent_relids = relids_singleton(mcx, 1);
+        run.root.rel_mut(child).top_parent_relids = relids_singleton(mcx, 1u32);
 
         let parent_var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
         let child_var = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
@@ -7447,7 +7447,7 @@ mod appendrel_ec {
             em_parent: None,
         });
         let mut ec = EquivalenceClass::new(mcx);
-        ec.ec_relids = relids_singleton(mcx, 1);
+        ec.ec_relids = relids_singleton(mcx, 1u32);
         ec.ec_members.push(em);
         let ec_id = run.root.alloc_ec(ec);
         run.root.rel_mut(parent).eclass_indexes = relids_singleton(mcx, ec_id.0);
@@ -7891,4 +7891,113 @@ fn replace_rte_variables_recurses_into_a_bare_query() {
     inner2.jointree = Some(jointree);
     let qnode2 = Node::mk(mcx, inner2).unwrap();
     assert!(replace_var_expr_su(mcx, qnode2, 1, &tlist, false, None, 0).unwrap().is_none());
+}
+
+// Q1-F1B pinning law (fix-q1-parallel-family): add_path's dominance checks
+// must PRETEND PARAMETERIZED PATHS HAVE NO PATHKEYS (C pathnode.c add_path /
+// add_path_precheck). Before the fix, a disabled parameterized index path
+// kept alive by its pathkeys poisoned cheapest_parameterized_paths and
+// blocked the partial hash join C plans (serial Hash-Join-over-Gathers vs
+// C's Parallel Hash Join under identical GUCs/stats).
+mod add_path_param_pathkeys_masking {
+    use super::*;
+    use mcx::PgVec;
+    use types_pathnodes::{
+        ParamPathInfo, Path, PathKey, PathNode, RelOptInfo, COMPARE_LT,
+    };
+
+    fn pk<'mcx>(run: &mut crate::run::PlannerRun<'mcx>) -> PathKey {
+        let ec = types_pathnodes::EquivalenceClass::new(run.mcx);
+        let id = run.root.alloc_ec(ec);
+        PathKey { pk_eclass: Some(id), pk_opfamily: 1976, pk_cmptype: COMPARE_LT, pk_nulls_first: false }
+    }
+
+    fn mk_path<'mcx>(
+        run: &mut crate::run::PlannerRun<'mcx>,
+        rel: types_pathnodes::RelId,
+        total: f64,
+        disabled: i32,
+        param_rel: Option<u32>,
+        keys: &[PathKey],
+    ) -> types_pathnodes::PathId {
+        let mut pathkeys: PgVec<'mcx, PathKey> = PgVec::new_in(run.mcx);
+        pathkeys.extend(keys.iter().copied());
+        let param_info = param_rel.map(|r| mcx::alloc_in(run.mcx, ParamPathInfo {
+            ppi_req_outer: types_pathnodes::relids::relids_singleton(run.mcx, r),
+            ppi_rows: 10.0,
+            ppi_clauses: PgVec::new_in(run.mcx),
+            ppi_serials: types_pathnodes::relids::relids_empty(),
+        }).unwrap());
+        let path = Path {
+            type_: types_pathnodes::tag16(types_nodes::NodeTag::T_Path),
+            pathtype: types_pathnodes::tag16(types_nodes::NodeTag::T_SeqScan),
+            parent: rel,
+            pathtarget_id: None,
+            param_info,
+            parallel_aware: false,
+            parallel_safe: true,
+            parallel_workers: 0,
+            rows: 10.0,
+            disabled_nodes: disabled,
+            startup_cost: 0.0,
+            total_cost: total,
+            pathkeys,
+        };
+        run.root.alloc_path(PathNode::Path(path))
+    }
+
+    #[test]
+    fn enabled_param_path_evicts_disabled_param_path_despite_its_pathkeys() {
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let rel = run.root.alloc_rel(RelOptInfo::new(mcx));
+        let key = pk(&mut run);
+        // Old: cheap but DISABLED parameterized path carrying pathkeys (the
+        // enable_indexscan=off index scan of the Q1-F1B stream state).
+        let old = mk_path(&mut run, rel, 1.0, 1, Some(1), &[key]);
+        crate::pathnode::add_path(&mut run, rel, old);
+        // New: costlier but ENABLED path of the same parameterization, no
+        // pathkeys (the bitmap heap path). C evicts old: parameterized
+        // pathkeys must not defend it.
+        let new = mk_path(&mut run, rel, 5.0, 0, Some(1), &[]);
+        crate::pathnode::add_path(&mut run, rel, new);
+        let list = &run.root.rel(rel).pathlist;
+        assert_eq!(list.len(), 1, "disabled parameterized path must be evicted");
+        assert_eq!(list[0], new);
+    }
+
+    #[test]
+    fn unparameterized_pathkeys_still_defend_a_path() {
+        // Control: for UNparameterized paths the pathkeys DO defend the
+        // sorted path (C keeps a costlier-but-sorted unparameterized path).
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let rel = run.root.alloc_rel(RelOptInfo::new(mcx));
+        let key = pk(&mut run);
+        let sorted = mk_path(&mut run, rel, 5.0, 0, None, &[key]);
+        crate::pathnode::add_path(&mut run, rel, sorted);
+        let cheap = mk_path(&mut run, rel, 1.0, 0, None, &[]);
+        crate::pathnode::add_path(&mut run, rel, cheap);
+        assert_eq!(run.root.rel(rel).pathlist.len(), 2, "sorted unparameterized path survives");
+    }
+
+    #[test]
+    fn precheck_rejects_param_path_with_pathkeys_against_dominating_plain_path() {
+        // add_path_precheck masks the NEW side by required_outer: a
+        // parameterized candidate whose only virtue is its pathkeys must be
+        // rejected when an existing same-parameterization path dominates it
+        // on cost.
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let rel = run.root.alloc_rel(RelOptInfo::new(mcx));
+        let key = pk(&mut run);
+        let existing = mk_path(&mut run, rel, 1.0, 0, Some(1), &[]);
+        crate::pathnode::add_path(&mut run, rel, existing);
+        let req = types_pathnodes::relids::relids_singleton(mcx, 1u32);
+        let ok = crate::pathnode::add_path_precheck(&run, rel, 0, 10.0, 10.0, &[key], &req);
+        assert!(!ok, "parameterized candidate's pathkeys must not save it in precheck");
+    }
 }

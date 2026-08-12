@@ -87,6 +87,11 @@ pub struct ParallelVacuumState {
     /// M4.1: binder target + standing driver installed on the pcxt at init
     /// — index passes may engage the pool channel (pool_engage_pass).
     pool_armed: bool,
+    /// C PVShared.elevel: INFO under VACUUM VERBOSE, DEBUG2 otherwise —
+    /// the level of the leader's "launched N parallel vacuum workers ..."
+    /// line (Q1-F3: never emitted before; C prints it at INFO under
+    /// VERBOSE).
+    elevel: ::types_error::ErrorLevel,
 }
 
 fn index_am_kind(indrel: &RelationData<'_>) -> IndexAmKind {
@@ -98,6 +103,7 @@ pub fn parallel_vacuum_init(
     indrels: &[Relation<'_>],
     nrequested_workers: i32,
     vac_work_mem: i32,
+    elevel: ::types_error::ErrorLevel,
     bstrategy: &BufferAccessStrategy,
     rel_id: Oid,
 ) -> PgResult<Option<ParallelVacuumState>> {
@@ -212,6 +218,7 @@ pub fn parallel_vacuum_init(
         nindexes_parallel_cleanup,
         nindexes_parallel_condcleanup,
         pool_armed,
+        elevel,
     }))
 }
 
@@ -1472,6 +1479,24 @@ fn launch_gang(
     Ok(())
 }
 
+/// C vacuumparallel.c parallel_vacuum_process_all_indexes tail: after
+/// LaunchParallelWorkers, report how many workers launched vs planned, at
+/// shared->elevel (INFO under VERBOSE — Q1-F3 parity; ngettext on the
+/// launched count). The pool channel (default-off divergence) never
+/// launches a gang, so its passes deliberately skip this line.
+fn report_launched(pvs: &ParallelVacuumState, nworkers: i32, vacuum: bool) {
+    report_launched_n(pvs, parallel::nworkers_launched(pvs.pcxt), nworkers, vacuum);
+}
+
+fn report_launched_n(pvs: &ParallelVacuumState, launched: i32, nworkers: i32, vacuum: bool) {
+    let noun = if launched == 1 { "worker" } else { "workers" };
+    let phase = if vacuum { "index vacuuming" } else { "index cleanup" };
+    let _ = elog::elog(
+        pvs.elevel,
+        format!("launched {launched} parallel vacuum {noun} for {phase} (planned: {nworkers})"),
+    );
+}
+
 fn parallel_vacuum_process_all_indexes(
     pvs: &mut ParallelVacuumState,
     mcx: Mcx<'_>,
@@ -1517,12 +1542,22 @@ fn parallel_vacuum_process_all_indexes(
     let mut pool: Option<PoolEngaged> = None;
     if nworkers > 0 && pvs.pool_armed {
         pool = pool_engage_pass(pvs, nworkers);
+        if pool.is_some() {
+            // C's launched-workers line for the pool channel: the
+            // engagement publishes `nworkers` claim tickets on the standing
+            // pool (workers are pre-existing threads, not forked), so the
+            // engaged dop is the launched count this channel can report
+            // honestly.
+            report_launched_n(pvs, nworkers, nworkers, vacuum);
+        }
     }
 
     if nworkers > 0 && pool.is_none() {
         launch_gang(pvs, nworkers, num_index_scans, /* carry_in */ true)?;
-        // "launched %d parallel vacuum workers ..." at elevel: DEBUG2 without
-        // VERBOSE (loud upstream), so not emitted.
+        // C vacuumparallel.c: "launched %d parallel vacuum worker(s) for
+        // index vacuuming/cleanup (planned: %d)" at shared->elevel — INFO
+        // under VACUUM VERBOSE (Q1-F3), DEBUG2 otherwise.
+        report_launched(pvs, nworkers, vacuum);
     }
 
     parallel_vacuum_process_unsafe_indexes(pvs, mcx, heaprel, indrels, bstrategy)?;
@@ -1538,6 +1573,9 @@ fn parallel_vacuum_process_all_indexes(
                 // the shared balance already holds it plus the leader's
                 // unsafe-index accrual from the engaged window.
                 census_channel = "pool-fallback-launched";
+                // No second launched-workers line here: this pass already
+                // reported its parallel channel when the pool engaged (C
+                // prints exactly one line per pass).
                 launch_gang(pvs, nworkers, num_index_scans, /* carry_in */ false)?;
                 parallel_vacuum_process_safe_indexes(
                     &pvs.shared,
