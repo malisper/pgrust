@@ -521,7 +521,12 @@ fn drive_first<'mcx>(
         let crate::procnode::PlanStateNode::Sort(s) = &mut w.outer else {
             unreachable!("memoized window admission requires a Sort child")
         };
-        let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
+        let crate::procnode::SortNode {
+            state: sstate,
+            outer: souter,
+            outer_desc,
+            ..
+        } = s;
         debug_assert!(!sstate.sort_done(), "fresh window node over a fed sort");
         if !super::sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
             // Feed-time refuse before any lane tuple: the Volcano fallback
@@ -544,7 +549,9 @@ fn drive_first<'mcx>(
     // sort-feed event; a rescan re-feeds and re-ticks).
     stats::tick_owned(ShapeClass::WindowAgg);
     super::lane_trace("windows drive armed (W1 over sort breaker)");
-    w.lane = Some(wlane::LaneWindowDrive::new(::init_small::globals::work_mem()));
+    w.lane = Some(wlane::LaneWindowDrive::new(
+        ::init_small::globals::work_mem(),
+    ));
     drive(w, estate).map(Some)
 }
 
@@ -568,7 +575,12 @@ fn drive<'mcx>(
     let crate::procnode::PlanStateNode::Sort(s) = &mut w.outer else {
         unreachable!("lane-owned WindowAgg lost its Sort child")
     };
-    let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
+    let crate::procnode::SortNode {
+        state: sstate,
+        outer: souter,
+        outer_desc,
+        ..
+    } = s;
     if !sstate.sort_done() {
         // Post-rescan re-feed. A feed-time refuse here would strand the
         // sticky drive; it is unreachable BY CONSTRUCTION because inc-1
@@ -694,7 +706,14 @@ pub fn try_own_window_agg_t2<'mcx>(
     // clearing the result slot.
     let mut op = PassthroughOp;
     let mut root = RootAdapter::new(None);
-    pull_step_rows(&mut **w, &mut WindowAggRowSource, &mut op, &mut root, estate).map(Some)
+    pull_step_rows(
+        &mut **w,
+        &mut WindowAggRowSource,
+        &mut op,
+        &mut root,
+        estate,
+    )
+    .map(Some)
 }
 
 // ===========================================================================
@@ -949,7 +968,12 @@ fn framed_drive_first<'mcx>(
         let crate::procnode::PlanStateNode::Sort(s) = &mut w.outer else {
             unreachable!("memoized framed admission requires a Sort child")
         };
-        let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
+        let crate::procnode::SortNode {
+            state: sstate,
+            outer: souter,
+            outer_desc,
+            ..
+        } = s;
         debug_assert!(!sstate.sort_done(), "fresh window node over a fed sort");
         if !super::sort_feed_if_needed(sstate, souter, outer_desc, None, estate)? {
             // Feed-time refuse before any lane tuple: the Volcano fallback
@@ -991,7 +1015,12 @@ fn framed_drive<'mcx>(
     let crate::procnode::PlanStateNode::Sort(s) = &mut w.outer else {
         unreachable!("lane-owned WindowAgg lost its Sort child")
     };
-    let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
+    let crate::procnode::SortNode {
+        state: sstate,
+        outer: souter,
+        outer_desc,
+        ..
+    } = s;
     if !sstate.sort_done() {
         // Post-rescan re-feed; a feed-time refuse is unreachable BY
         // CONSTRUCTION (scan-fed sorts only — W1's drive() argument holds

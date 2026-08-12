@@ -9,14 +9,16 @@ use std::sync::{Mutex, Once};
 use ::datum::Datum;
 use ::mcx::MemoryContext;
 use ::tcop_dest::DestReceiver;
+use ::types_core::InvalidOid;
 use ::types_dest::CommandDest;
+use ::types_error::PgResult;
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::nodes_enums::CmdType;
-use ::types_nodes::plannodes::{Gather, GatherMerge, PlannedStmt, Result as ResultPlan, ValuesScan};
+use ::types_nodes::plannodes::{
+    Gather, GatherMerge, PlannedStmt, Result as ResultPlan, ValuesScan,
+};
 use ::types_nodes::primnodes::OUTER_VAR;
-use ::types_core::InvalidOid;
-use ::types_error::PgResult;
 use ::types_portal::{ParamListHandle, QueryEnvHandle};
 use ::types_scan::sdir::ForwardScanDirection;
 use ::types_slot::{SlotData, TupleSlotKind};
@@ -202,7 +204,10 @@ fn stub_seams() {
         Ok(v)
     });
     syscache_seams::lookup_pg_amproc::set(|opfamily, left, right, procnum| {
-        assert_eq!((opfamily, left, right, procnum), (INTEGER_BTREE_FAM, INT4OID, INT4OID, 2));
+        assert_eq!(
+            (opfamily, left, right, procnum),
+            (INTEGER_BTREE_FAM, INT4OID, INT4OID, 2)
+        );
         Ok(F_BTINT4SORTSUPPORT)
     });
 }
@@ -354,8 +359,12 @@ fn boot_xlog_ctl() {
     let ctl = transam_xlog::ctl::XLogCtl();
     ctl.InsertTimeLineID.store(1, Relaxed);
     ctl.PrevTimeLineID.store(1, Relaxed);
-    ctl.Insert.CurrBytePos.store(XLogRecPtrToBytePos(end_of_log), Relaxed);
-    ctl.Insert.PrevBytePos.store(XLogRecPtrToBytePos(prev_rec), Relaxed);
+    ctl.Insert
+        .CurrBytePos
+        .store(XLogRecPtrToBytePos(end_of_log), Relaxed);
+    ctl.Insert
+        .PrevBytePos
+        .store(XLogRecPtrToBytePos(prev_rec), Relaxed);
     ctl.Insert.fullPageWrites.store(true, Relaxed);
     ctl.Insert.RedoRecPtr.store(prev_rec, Relaxed);
     ctl.RedoRecPtr.store(prev_rec, Relaxed);
@@ -365,7 +374,8 @@ fn boot_xlog_ctl() {
     ctl.logFlushResult.store(end_of_log, Relaxed);
     ctl.LogwrtRqstWrite.store(end_of_log, Relaxed);
     ctl.LogwrtRqstFlush.store(end_of_log, Relaxed);
-    ctl.SharedRecoveryState.store(transam_xlog::RECOVERY_STATE_DONE, Relaxed);
+    ctl.SharedRecoveryState
+        .store(transam_xlog::RECOVERY_STATE_DONE, Relaxed);
     ctl.InstallXLogFileSegmentActive.store(true, Relaxed);
     xlogutils::set_in_recovery(false);
 }
@@ -396,15 +406,15 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
                 waiteventset::InitializeWaitEventSupport().unwrap();
                 miscinit::InitProcessLocalLatch();
                 latch::InitializeLatchWaitSet().unwrap();
-                let sd = StartupData::BgWorker(types_startup::BgWorkerStartupData {
-                    slot,
-                    generation,
-                });
+                let sd =
+                    StartupData::BgWorker(types_startup::BgWorkerStartupData { slot, generation });
                 let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     bgworker::BackgroundWorkerMain(&sd)
                 }))
                 .unwrap_err();
-                let code = payload.downcast_ref::<ipc::ProcExitThread>().map(|p| p.code);
+                let code = payload
+                    .downcast_ref::<ipc::ProcExitThread>()
+                    .map(|p| p.code);
                 // proc_exit defers the exit-callback drain to the thread top
                 // (run_child_task in the real server; this rig is that top).
                 if let Some(code) = code {
@@ -849,7 +859,12 @@ mod heapfix {
             rd_newRelfilelocatorSubid: std::cell::Cell::new(0),
             rd_firstRelfilelocatorSubid: std::cell::Cell::new(0),
             rd_droppedSubid: std::cell::Cell::new(0),
-            rd_lockInfo: LockInfoData { lockRelId: LockRelId { relId: relid, dbId: 5 } },
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId {
+                    relId: relid,
+                    dbId: 5,
+                },
+            },
             rd_rel,
             rd_att: int4_tupdesc(mcx),
             rd_index: None,
@@ -889,7 +904,14 @@ fn seqscan_node(mcx: ::mcx::Mcx<'_>, parallel_aware: bool, node_id: i32) -> Node
         parallel_aware,
         ..Default::default()
     };
-    Node::mk(mcx, SeqScan { scan: Scan { plan, scanrelid: 1 }, cb_scan_cols: None }).unwrap()
+    Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan { plan, scanrelid: 1 },
+            cb_scan_cols: None,
+        },
+    )
+    .unwrap()
 }
 
 fn seqscan_tables<'m>(
@@ -928,7 +950,11 @@ fn seqscan_tables<'m>(
     pstmt.unprunableRelids = unpruned;
 }
 
-fn run_pstmt(pstmt: &'static PlannedStmt<'static>, tag: &'static str, parallel: bool) -> (u64, Vec<i32>) {
+fn run_pstmt(
+    pstmt: &'static PlannedStmt<'static>,
+    tag: &'static str,
+    parallel: bool,
+) -> (u64, Vec<i32>) {
     begin_xact();
     let qd = execmain_seams::create_query_desc::call(
         pstmt,
@@ -1001,7 +1027,10 @@ fn gather_parallel_seqscan_matches_serial_scan() {
     let pstmt = pstmt.seal_ref();
 
     let (processed, mut values) = run_pstmt(pstmt, "select a (parallel seqscan)", true);
-    assert_eq!(processed, 15, "each block scanned by exactly one participant");
+    assert_eq!(
+        processed, 15,
+        "each block scanned by exactly one participant"
+    );
     values.sort_unstable();
     assert_eq!(values, serial_values);
     assert!(!parallel::ParallelContextActive());
@@ -1033,9 +1062,11 @@ fn gather_merge_merges_sorted_streams() {
     vs.scan.plan.parallel_safe = true;
     vs.values_lists = values_lists;
     let var1 = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
-    vs.scan.plan.targetlist =
-        NodeList::make1(mcx, Node::mk_target_entry(mcx, var1, 1, Some("x"), false).unwrap())
-            .unwrap();
+    vs.scan.plan.targetlist = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, var1, 1, Some("x"), false).unwrap(),
+    )
+    .unwrap();
     let child = vs.seal();
 
     let mut gm = Node::build::<GatherMerge>(mcx).unwrap();
@@ -1274,8 +1305,14 @@ fn funnel_seqscan_pstmt_frag<'m>(
     if let Some(q) = qual {
         plan.qual = q;
     }
-    let scan =
-        Node::mk(mcx, SeqScan { scan: Scan { plan, scanrelid: 1 }, cb_scan_cols: None }).unwrap();
+    let scan = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan { plan, scanrelid: 1 },
+            cb_scan_cols: None,
+        },
+    )
+    .unwrap();
     let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
     pstmt.commandType = CmdType::CMD_SELECT;
     pstmt.canSetTag = true;
@@ -1306,8 +1343,14 @@ fn funnel_seqscan_pstmt_exec_marked<'m>(
     if let Some(q) = qual {
         plan.qual = q;
     }
-    let scan =
-        Node::mk(mcx, SeqScan { scan: Scan { plan, scanrelid: 1 }, cb_scan_cols: None }).unwrap();
+    let scan = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan { plan, scanrelid: 1 },
+            cb_scan_cols: None,
+        },
+    )
+    .unwrap();
     let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
     pstmt.commandType = CmdType::CMD_SELECT;
     pstmt.canSetTag = true;
@@ -1319,10 +1362,7 @@ fn funnel_seqscan_pstmt_exec_marked<'m>(
 
 /// `run_once` with an explicit executor count (0 = complete drain; N = the
 /// count-limited/suspendable cadence the funnel must REFUSE).
-fn funnel_run_once(
-    qd: types_portal::QueryDescHandle,
-    count: u64,
-) -> PgResult<(u64, Vec<i32>)> {
+fn funnel_run_once(qd: types_portal::QueryDescHandle, count: u64) -> PgResult<(u64, Vec<i32>)> {
     let store = tuplestore::Tuplestore::begin_heap(false, false, 1024);
     let h = tuplestore::hold::register(store);
     let mut dest = DestReceiver::Tuplestore(tstore_receiver::tstore_create_DR());
@@ -1478,15 +1518,22 @@ fn funnel_smoke_byte_identical_on_vs_off() {
     // fix), so this is the SERIAL loop — engagement counters must not move.
     let (e0, c0) = execmain::funnel_engagements();
     let mcx = leaked_mcx();
-    let pstmt_off =
-        funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 55_000)), 5000.0);
+    let pstmt_off = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 55_000)), 5000.0);
     let t0 = std::time::Instant::now();
-    let (processed_off, mut values_off) =
-        funnel_run_pstmt(pstmt_off, "select a where a>55000 (serial baseline)", 100_000, false)
-            .unwrap();
+    let (processed_off, mut values_off) = funnel_run_pstmt(
+        pstmt_off,
+        "select a where a>55000 (serial baseline)",
+        100_000,
+        false,
+    )
+    .unwrap();
     let serial_ms = t0.elapsed().as_millis();
     let (e1, c1) = execmain::funnel_engagements();
-    assert_eq!((e1, c1), (e0, c0), "count-limited run must NOT engage the funnel");
+    assert_eq!(
+        (e1, c1),
+        (e0, c0),
+        "count-limited run must NOT engage the funnel"
+    );
     assert_eq!(processed_off, expected.len() as u64);
     values_off.sort_unstable();
     assert_eq!(values_off, expected);
@@ -1494,18 +1541,24 @@ fn funnel_smoke_byte_identical_on_vs_off() {
     // ON: complete-drain run — the funnel engages, bgworkers produce, the
     // leader drains concurrently to the tuplestore dest.
     let mcx = leaked_mcx();
-    let pstmt_on =
-        funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 55_000)), 5000.0);
+    let pstmt_on = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 55_000)), 5000.0);
     let t1 = std::time::Instant::now();
     let (processed_on, mut values_on) =
         funnel_run_pstmt(pstmt_on, "select a where a>55000 (funnel)", 0, true).unwrap();
     let funnel_ms = t1.elapsed().as_millis();
     let (e2, c2) = execmain::funnel_engagements();
     assert_eq!(e2, e1 + 1, "complete-drain run must engage the funnel");
-    assert_eq!(c2, c1 + 1, "the funnel must complete the run (not fall back)");
+    assert_eq!(
+        c2,
+        c1 + 1,
+        "the funnel must complete the run (not fall back)"
+    );
     assert_eq!(processed_on, expected.len() as u64);
     values_on.sort_unstable();
-    assert_eq!(values_on, expected, "funnel rows must equal the serial rows");
+    assert_eq!(
+        values_on, expected,
+        "funnel rows must equal the serial rows"
+    );
     eprintln!(
         "funnel smoke: rows={} serial_ms={serial_ms} funnel_ms={funnel_ms}",
         expected.len()
@@ -1532,8 +1585,9 @@ fn funnel_limit_refusal_stays_serial_no_hang() {
     funnel_runtime_boot();
 
     const RELID: u32 = 93002;
-    let pages: Vec<Vec<i32>> =
-        (0..8).map(|p| ((p * 5 + 1)..=(p * 5 + 5)).collect()).collect();
+    let pages: Vec<Vec<i32>> = (0..8)
+        .map(|p| ((p * 5 + 1)..=(p * 5 + 5)).collect())
+        .collect();
     let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
     heapfix::register_table(RELID, &page_refs);
 
@@ -1555,9 +1609,7 @@ fn funnel_limit_refusal_stays_serial_no_hang() {
 #[test]
 fn funnel_worker_error_mid_scan_surfaces() {
     if !funnel_armed() {
-        eprintln!(
-            "SKIP: funnel_worker_error_mid_scan_surfaces (PGRUST_RUNTIME_ROW_FUNNEL unset)"
-        );
+        eprintln!("SKIP: funnel_worker_error_mid_scan_surfaces (PGRUST_RUNTIME_ROW_FUNNEL unset)");
         return;
     }
     let _s = serial();
@@ -1567,8 +1619,9 @@ fn funnel_worker_error_mid_scan_surfaces() {
     funnel_runtime_boot();
 
     const RELID: u32 = 93003;
-    let pages: Vec<Vec<i32>> =
-        (0..12).map(|p| ((p * 10 + 1)..=(p * 10 + 10)).collect()).collect();
+    let pages: Vec<Vec<i32>> = (0..12)
+        .map(|p| ((p * 10 + 1)..=(p * 10 + 10)).collect())
+        .collect();
     let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
     heapfix::register_table(RELID, &page_refs);
 
@@ -1607,8 +1660,9 @@ fn funnel_statsless_table_fail_closes_to_serial() {
 
     // 12 pages x 100 rows, registered UNANALYZED (reltuples = -1).
     const RELID: u32 = 93004;
-    let pages: Vec<Vec<i32>> =
-        (0..12).map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect()).collect();
+    let pages: Vec<Vec<i32>> = (0..12)
+        .map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect())
+        .collect();
     let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
     heapfix::register_table_unanalyzed(RELID, &page_refs);
     let expected: Vec<i32> = (1101..=1200).collect();
@@ -1628,7 +1682,10 @@ fn funnel_statsless_table_fail_closes_to_serial() {
     );
     assert_eq!(processed, expected.len() as u64);
     values.sort_unstable();
-    assert_eq!(values, expected, "serial fallback rows must be byte-correct");
+    assert_eq!(
+        values, expected,
+        "serial fallback rows must be byte-correct"
+    );
 }
 
 // In-parallel-mode refusal: a shape that passes every other gate must REFUSE
@@ -1658,8 +1715,9 @@ fn funnel_refuses_inside_parallel_mode() {
     // parallel-mode one admits, so the refusal below is attributable to
     // parallel mode alone.
     const RELID: u32 = 93005;
-    let pages: Vec<Vec<i32>> =
-        (0..60).map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect()).collect();
+    let pages: Vec<Vec<i32>> = (0..60)
+        .map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect())
+        .collect();
     let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
     heapfix::register_table(RELID, &page_refs);
     let expected: Vec<i32> = (5701..=6000).collect();
@@ -1697,7 +1755,10 @@ fn funnel_refuses_inside_parallel_mode() {
     );
     assert_eq!(processed, expected.len() as u64);
     values.sort_unstable();
-    assert_eq!(values, expected, "serial fallback rows must be byte-correct");
+    assert_eq!(
+        values, expected,
+        "serial fallback rows must be byte-correct"
+    );
 
     // Leg 2 — the identical shape OUTSIDE parallel mode engages (the refusal
     // above is not vacuous).
@@ -1707,7 +1768,11 @@ fn funnel_refuses_inside_parallel_mode() {
         funnel_run_pstmt(pstmt_ctl, "select a where a>5700 (control)", 0, true).unwrap();
     let (e2, c2) = execmain::funnel_engagements();
     assert_eq!(e2, e1 + 1, "the control leg must engage the funnel");
-    assert_eq!(c2, c1 + 1, "the control leg must complete through the funnel");
+    assert_eq!(
+        c2,
+        c1 + 1,
+        "the control leg must complete through the funnel"
+    );
     assert_eq!(processed_ctl, expected.len() as u64);
     values_ctl.sort_unstable();
     assert_eq!(values_ctl, expected);
@@ -1751,8 +1816,9 @@ fn funnel_band_boundary_tracks_true_fraction_across_dop() {
     // tick and nothing ever launches, which is why a 60-page variant passed
     // every local run and failed every CI cluster pod.
     const RELID: u32 = 93006;
-    let pages: Vec<Vec<i32>> =
-        (0..600).map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect()).collect();
+    let pages: Vec<Vec<i32>> = (0..600)
+        .map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect())
+        .collect();
     let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
     heapfix::register_table(RELID, &page_refs);
 
@@ -1762,25 +1828,61 @@ fn funnel_band_boundary_tracks_true_fraction_across_dop() {
         // Planned DOP 1 (serial whole-plan shapes): admission tracks the
         // true fraction across the 10% boundary — 9.9% engages, 10.3%
         // refuses.
-        ("dop1 true 9.9% whole-plan (engage)", 54060, 5940.0, false, true),
-        ("dop1 true 10.3% whole-plan (refuse)", 53820, 6180.0, false, false),
+        (
+            "dop1 true 9.9% whole-plan (engage)",
+            54060,
+            5940.0,
+            false,
+            true,
+        ),
+        (
+            "dop1 true 10.3% whole-plan (refuse)",
+            53820,
+            6180.0,
+            false,
+            false,
+        ),
         // Planned DOP 2 fragment, true 33% (divisor 2.4 -> apparent 13.75%):
         // refuse — pre-fix also refused; the clean side of the measured
         // boundary.
-        ("dop2 fragment true 33% (refuse)", 40200, 8250.0, true, false),
+        (
+            "dop2 fragment true 33% (refuse)",
+            40200,
+            8250.0,
+            true,
+            false,
+        ),
         // Planned DOP 4 fragment, true 33% (divisor 4.0 -> apparent 8.25%,
         // INSIDE the band): RED WITNESS — the pre-fix expression admitted
         // this cell.
-        ("dop4 fragment true 33% (refuse; red witness)", 40200, 4950.0, true, false),
+        (
+            "dop4 fragment true 33% (refuse; red witness)",
+            40200,
+            4950.0,
+            true,
+            false,
+        ),
         // Planned DOP 4 fragment, true 9.9% (apparent 2.475%): refuses too —
         // fragments fail closed even when the true fraction is in-band,
         // because the divisor is not recoverable from the Plan node.
-        ("dop4 fragment true 9.9% (refuse; fail-closed)", 54060, 1485.0, true, false),
+        (
+            "dop4 fragment true 9.9% (refuse; fail-closed)",
+            54060,
+            1485.0,
+            true,
+            false,
+        ),
         // Positive control for the red-witness cell: the SAME 8.25% estimate
         // on a whole-plan shape engages — the fragment refusals above are
         // attributable to the per-participant marker alone, not any other
         // gate.
-        ("whole-plan 8.25% estimate control (engage)", 40200, 4950.0, false, true),
+        (
+            "whole-plan 8.25% estimate control (engage)",
+            40200,
+            4950.0,
+            false,
+            true,
+        ),
     ];
 
     for &(tag, k, plan_rows, parallel_aware, expect_engage) in cells {
@@ -1839,8 +1941,9 @@ fn funnel_refuses_param_plans_to_serial() {
     // (pod-class sizing for the engaged control leg; see the band-boundary
     // test's doom-band note).
     const RELID: u32 = 93007;
-    let pages: Vec<Vec<i32>> =
-        (0..600).map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect()).collect();
+    let pages: Vec<Vec<i32>> = (0..600)
+        .map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect())
+        .collect();
     let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
     heapfix::register_table(RELID, &page_refs);
 
@@ -1862,9 +1965,14 @@ fn funnel_refuses_param_plans_to_serial() {
     }];
     // SAFETY: `bound` outlives the run; freed right after.
     let ph = unsafe { ::types_portal::params::register(&bound) };
-    let (processed, values) =
-        funnel_run_pstmt_params(pstmt_ext, "select a where a=$1 (extern param)", 0, false, ph)
-            .unwrap();
+    let (processed, values) = funnel_run_pstmt_params(
+        pstmt_ext,
+        "select a where a=$1 (extern param)",
+        0,
+        false,
+        ph,
+    )
+    .unwrap();
     ::types_portal::params::free(ph);
     let (e1, c1) = execmain::funnel_engagements();
     assert_eq!(
@@ -1872,7 +1980,10 @@ fn funnel_refuses_param_plans_to_serial() {
         (e0, c0),
         "a bound-extern-param run must NOT engage the funnel"
     );
-    assert_eq!(processed, 1, "the point lookup must return its row, not ERROR");
+    assert_eq!(
+        processed, 1,
+        "the point lookup must return its row, not ERROR"
+    );
     assert_eq!(values, vec![55_500]);
 
     // Leg 2 — PARAM_EXEC-marked plan (const qual, paramExecTypes non-nil):
@@ -1881,9 +1992,13 @@ fn funnel_refuses_param_plans_to_serial() {
     let pstmt_exec =
         funnel_seqscan_pstmt_exec_marked(mcx, RELID, Some(funnel_qual_gt(mcx, 55_000)), 5000.0);
     let expected: Vec<i32> = (55_001..=60_000).collect();
-    let (processed, mut values) =
-        funnel_run_pstmt(pstmt_exec, "select a where a>55000 (exec-param marked)", 0, false)
-            .unwrap();
+    let (processed, mut values) = funnel_run_pstmt(
+        pstmt_exec,
+        "select a where a>55000 (exec-param marked)",
+        0,
+        false,
+    )
+    .unwrap();
     let (e2, c2) = execmain::funnel_engagements();
     assert_eq!(
         (e2, c2),
@@ -1892,7 +2007,10 @@ fn funnel_refuses_param_plans_to_serial() {
     );
     assert_eq!(processed, expected.len() as u64);
     values.sort_unstable();
-    assert_eq!(values, expected, "serial fallback rows must be byte-correct");
+    assert_eq!(
+        values, expected,
+        "serial fallback rows must be byte-correct"
+    );
 
     // Leg 3 — control: the identical unparameterized shape ENGAGES (the
     // refusals above are not vacuous).
@@ -1902,7 +2020,11 @@ fn funnel_refuses_param_plans_to_serial() {
         funnel_run_pstmt(pstmt_ctl, "select a where a>55000 (control)", 0, true).unwrap();
     let (e3, c3) = execmain::funnel_engagements();
     assert_eq!(e3, e2 + 1, "the control leg must engage the funnel");
-    assert_eq!(c3, c2 + 1, "the control leg must complete through the funnel");
+    assert_eq!(
+        c3,
+        c2 + 1,
+        "the control leg must complete through the funnel"
+    );
     assert_eq!(processed_ctl, expected.len() as u64);
     values_ctl.sort_unstable();
     assert_eq!(values_ctl, expected);

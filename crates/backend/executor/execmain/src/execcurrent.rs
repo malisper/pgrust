@@ -236,9 +236,7 @@ fn search_plan_tree<'a, 'mcx>(
         PlanStateNode::TidScan(s) => scanning(&s.ss, table_oid).map(Found::Scan),
         PlanStateNode::TidRangeScan(s) => scanning(&s.ss, table_oid).map(Found::Scan),
         PlanStateNode::BitmapHeapScan(s) => scanning(&s.scan.ss, table_oid).map(Found::Scan),
-        PlanStateNode::IndexOnlyScan(s) => {
-            scanning(&s.ss, table_oid).map(|_| Found::IndexOnly(s))
-        }
+        PlanStateNode::IndexOnlyScan(s) => scanning(&s.ss, table_oid).map(|_| Found::IndexOnly(s)),
         // Append: only the input that produced the current output row can be
         // positioned on a tuple; reject multiple matches (UNION ALL).
         PlanStateNode::Append(a) => {
@@ -255,9 +253,10 @@ fn search_plan_tree<'a, 'mcx>(
             result
         }
         // Result and Limit always return their input's current row.
-        PlanStateNode::Result(rs) => {
-            rs.outer.as_deref().and_then(|o| search_plan_tree(o, table_oid))
-        }
+        PlanStateNode::Result(rs) => rs
+            .outer
+            .as_deref()
+            .and_then(|o| search_plan_tree(o, table_oid)),
         PlanStateNode::Limit(l) => search_plan_tree(&l.outer, table_oid),
         PlanStateNode::SubqueryScan(s) => search_plan_tree(&s.subplan, table_oid),
         _ => None,
@@ -357,12 +356,14 @@ fn capture_positioned<'mcx>(
                 .unwrap_or_else(ItemPointerData::invalid);
             Some((rel.rd_id, tid))
         }
-        PlanStateNode::Append(a) => {
-            a.substates.iter().find_map(|c| capture_positioned(c, estate))
-        }
-        PlanStateNode::Result(rs) => {
-            rs.outer.as_deref().and_then(|o| capture_positioned(o, estate))
-        }
+        PlanStateNode::Append(a) => a
+            .substates
+            .iter()
+            .find_map(|c| capture_positioned(c, estate)),
+        PlanStateNode::Result(rs) => rs
+            .outer
+            .as_deref()
+            .and_then(|o| capture_positioned(o, estate)),
         PlanStateNode::Limit(l) => capture_positioned(&l.outer, estate),
         PlanStateNode::SubqueryScan(s) => capture_positioned(&s.subplan, estate),
         _ => None,
@@ -437,11 +438,11 @@ fn plan_has_capturable_scan(
         | NodeTag::T_BitmapHeapScan => true,
         NodeTag::T_Append => {
             let a = node.as_append().expect("T_Append");
-            a.appendplans.iter().any(|p| plan_has_capturable_scan(Some(p), rtable))
+            a.appendplans
+                .iter()
+                .any(|p| plan_has_capturable_scan(Some(p), rtable))
         }
-        NodeTag::T_Result | NodeTag::T_Limit => {
-            plan_has_capturable_scan(plan.lefttree, rtable)
-        }
+        NodeTag::T_Result | NodeTag::T_Limit => plan_has_capturable_scan(plan.lefttree, rtable),
         NodeTag::T_SubqueryScan => plan_has_capturable_scan(
             node.as_subquery_scan().expect("T_SubqueryScan").subplan,
             rtable,
@@ -516,7 +517,9 @@ pub(crate) fn cursor_capture_current_seam(
             // direction is the tid_store.is_null() debug_assert in
             // exec_current_of's store-armed arm.
             debug_assert!(
-                d.planstate.as_ref().is_some_and(|root| has_capturable_scan(root)),
+                d.planstate
+                    .as_ref()
+                    .is_some_and(|root| has_capturable_scan(root)),
                 "cursor_capture_current: §4.1 plan-shape probe disagrees with the planstate spine"
             );
             let hit = d
@@ -540,7 +543,9 @@ fn invalid_cursor_state(msg: String) -> Box<PgError> {
 #[cold]
 #[inline(never)]
 fn not_positioned(cursor_name: &str) -> Box<PgError> {
-    invalid_cursor_state(format!("cursor \"{cursor_name}\" is not positioned on a row"))
+    invalid_cursor_state(format!(
+        "cursor \"{cursor_name}\" is not positioned on a row"
+    ))
 }
 
 #[track_caller]

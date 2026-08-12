@@ -121,7 +121,10 @@ impl PassthroughShared {
     }
 
     fn leader_stash_empty(&self) -> bool {
-        self.leader_stash.lock().unwrap_or_else(|p| p.into_inner()).is_empty()
+        self.leader_stash
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty()
     }
 
     /// Drain the leader stash (pump side; leader thread only).
@@ -272,7 +275,9 @@ impl PassthroughShared {
         self.ensure_worker_exec(worker)?;
         WORKER_EXEC_PT.with(|cell| {
             let mut b = cell.borrow_mut();
-            let ex = b.as_mut().expect("passthrough morsel without a bound executor");
+            let ex = b
+                .as_mut()
+                .expect("passthrough morsel without a bound executor");
             let qd = ex.qd;
             let sink = &mut ex.sink;
             let write = &mut ex.write;
@@ -290,8 +295,8 @@ impl PassthroughShared {
                     let mut src = SeqScanSource::new(&mut *ss);
                     // Leader-producer mode: the leader's claims emit into the
                     // stash (non-parking); workers emit through their rings.
-                    let stash = (self.leader_lane.get() == Some(&worker))
-                        .then_some(&self.leader_stash);
+                    let stash =
+                        (self.leader_lane.get() == Some(&worker)).then_some(&self.leader_stash);
                     // Heap sources have no interior boundaries → one positioned
                     // range (`Segments::whole`); the segment loop matches the
                     // fold arm's `drive_claim_segments` shape.
@@ -308,8 +313,8 @@ impl PassthroughShared {
                             // Demand closed (LIMIT): stop this claim.
                             break;
                         }
-                        if segs.more() && (self.failed.load(Ordering::SeqCst)
-                            || self.funnel.demand_closed())
+                        if segs.more()
+                            && (self.failed.load(Ordering::SeqCst) || self.funnel.demand_closed())
                         {
                             break;
                         }
@@ -396,7 +401,9 @@ fn emit_drain<'a, 'mcx>(
 /// the agg arm's `teardown_worker_exec` discipline.
 fn teardown_worker_exec_pt(clean: bool) -> PgResult<()> {
     WORKER_EXEC_PT.with(|cell| -> PgResult<()> {
-        let Some(mut ex) = cell.borrow_mut().take() else { return Ok(()) };
+        let Some(mut ex) = cell.borrow_mut().take() else {
+            return Ok(());
+        };
         // Block-run SEAL half (W2a inc-2): the clean path flushes the W1
         // tail into this worker's run and publishes the count — a seal error
         // is a worker error (the leader re-checks after the gang join, so a
@@ -436,7 +443,9 @@ fn teardown_worker_exec_pt(clean: bool) -> PgResult<()> {
 /// recorded payload-side (the leader rethrows PLAIN). Mirrors the agg arm's
 /// `helper_drive_entry` minus the fold/instrument specifics.
 fn helper_drive_entry_pt(payload: &Arc<PassthroughShared>) -> PgResult<()> {
-    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return Ok(()) };
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else {
+        return Ok(());
+    };
     let Some(lane) = payload.rt.acquire_external_lane() else {
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return Ok(());
@@ -464,8 +473,12 @@ fn helper_drive_entry_pt(payload: &Arc<PassthroughShared>) -> PgResult<()> {
 
 /// Registered bgworker entrypoint (`pgrust_runtime_passthrough_main`).
 fn runtime_passthrough_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
-    let Some(private) = shared.private() else { return Ok(()) };
-    let Ok(payload) = private.downcast::<PassthroughShared>() else { return Ok(()) };
+    let Some(private) = shared.private() else {
+        return Ok(());
+    };
+    let Ok(payload) = private.downcast::<PassthroughShared>() else {
+        return Ok(());
+    };
     // Every launched helper bumps `exited` exactly once on every exit path
     // (the leader's liveness reap counts these against `launched`).
     let _exit = super::runtime_agg::ExitBump(&payload.exited);
@@ -599,8 +612,9 @@ pub(super) fn engage_passthrough(
     // UNWIND aborts the transaction, which destroys live contexts and resets
     // the mode (AtEOXact_Parallel — the Gather discipline).
     ::xact::EnterParallelMode();
-    let r =
-        engage_passthrough_inner(rt, &funnel, &payload, dop, source, limit, pure_drain, emit_row);
+    let r = engage_passthrough_inner(
+        rt, &funnel, &payload, dop, source, limit, pure_drain, emit_row,
+    );
     ::xact::ExitParallelMode();
     r
 }
@@ -660,7 +674,11 @@ fn engage_passthrough_inner(
         let (rg, waiter) = rt.submit_pinned_with_affinity(
             runtime::QuerySpec {
                 query_id: NEXT_QID.fetch_add(1, Ordering::SeqCst) as u64,
-                tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
+                tasksets: vec![runtime::TaskSetSpec {
+                    source,
+                    work,
+                    deps: vec![],
+                }],
             },
             0,
         );
@@ -796,13 +814,7 @@ fn engage_passthrough_inner(
                     };
                     let mut idle_park =
                         || -> PgResult<()> { parallel::wait_parallel_finish_quantum() };
-                    cw.drive_with_duties_parked(
-                        rt,
-                        &rg,
-                        &mut duty,
-                        &mut claim_duty,
-                        &mut idle_park,
-                    )
+                    cw.drive_with_duties_parked(rt, &rg, &mut duty, &mut claim_duty, &mut idle_park)
                 };
                 let outcome = match drive {
                     Ok(o) => o,
@@ -908,7 +920,10 @@ fn engage_passthrough_inner(
         }
         if outcome == runtime::RgOutcome::Aborted {
             ::postgres_seams::check_for_interrupts::call()?;
-            return Err(Box::new(PgError::new(ERROR, "passthrough pipeline aborted")));
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "passthrough pipeline aborted",
+            )));
         }
         if payload.started.load(Ordering::SeqCst) == 0 {
             return Ok(PassthroughEngageOutcome::Fallback);
@@ -1144,7 +1159,9 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
         return Ok(false);
     }
     // The runtime pool must be live.
-    let Some(rt) = runtime::global() else { return Ok(false) };
+    let Some(rt) = runtime::global() else {
+        return Ok(false);
+    };
     if !runtime::runtime_enabled() {
         return Ok(false);
     }
@@ -1154,9 +1171,15 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     }
     // Plan + result descriptor (immutable planstate borrow, released before the
     // mutable scan-source build below).
-    let Some(pstmt_ref) = estate.es_plannedstmt else { return Ok(false) };
-    let Some(plan_node) = pstmt_ref.planTree else { return Ok(false) };
-    let Some(plan) = plan_node.as_plan() else { return Ok(false) };
+    let Some(pstmt_ref) = estate.es_plannedstmt else {
+        return Ok(false);
+    };
+    let Some(plan_node) = pstmt_ref.planTree else {
+        return Ok(false);
+    };
+    let Some(plan) = plan_node.as_plan() else {
+        return Ok(false);
+    };
     if !plan.parallel_safe {
         return Ok(false);
     }
@@ -1341,8 +1364,9 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
                         &mut *(&mut wire_slot as *mut ::types_slot::SlotData<'mcx>)
                             .cast::<::types_slot::SlotData<'d>>()
                     };
-                    let slot_mcx: ::mcx::Mcx<'d> =
-                        unsafe { std::mem::transmute::<::mcx::Mcx<'mcx>, ::mcx::Mcx<'d>>(wire_mcx) };
+                    let slot_mcx: ::mcx::Mcx<'d> = unsafe {
+                        std::mem::transmute::<::mcx::Mcx<'mcx>, ::mcx::Mcx<'d>>(wire_mcx)
+                    };
                     super::write_funnel::flush_write_batch(&mut batch, dest, slot, slot_mcx)?;
                 }
                 return Ok(true);
@@ -1350,7 +1374,11 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
             // SAFETY: `wire_slot` is a Minimal slot; `img` owns the bytes and
             // outlives this store+receive (dropped at the end of the call).
             unsafe {
-                ::exectuples::exec_store_minimal_tuple_ptr(&mut wire_slot, wire_mcx, img.as_mtup_ptr());
+                ::exectuples::exec_store_minimal_tuple_ptr(
+                    &mut wire_slot,
+                    wire_mcx,
+                    img.as_mtup_ptr(),
+                );
             }
             // Lifetime bridge at the dest seam (as in TuplestoreBatchSink): the
             // receiver only reads datums out during the call and retains no
@@ -1464,7 +1492,10 @@ mod floorguard_emit_band_tests {
         let dop4 = whole / 4.0; // divisor 4.0 -> apparent  8.25%
         let dop3 = whole / 3.1; // divisor 3.1 -> apparent 10.65%
         let dop2 = whole / 2.4; // divisor 2.4 -> apparent 13.75%
-        assert!(dop4 / T <= 0.10, "red-witness cell must sit inside the band mis-scaled");
+        assert!(
+            dop4 / T <= 0.10,
+            "red-witness cell must sit inside the band mis-scaled"
+        );
         assert!(!floorguard_emit_band_admits(true, dop4, T, 10.0));
         assert!(!floorguard_emit_band_admits(true, dop3, T, 10.0));
         assert!(!floorguard_emit_band_admits(true, dop2, T, 10.0));
@@ -1472,7 +1503,12 @@ mod floorguard_emit_band_tests {
         // the divisor is not recoverable from the Plan node, so no exact
         // true fraction exists to admit on — fail-closed to the serial loop.
         let under_whole = 0.05 * T;
-        assert!(!floorguard_emit_band_admits(true, under_whole / 4.0, T, 10.0));
+        assert!(!floorguard_emit_band_admits(
+            true,
+            under_whole / 4.0,
+            T,
+            10.0
+        ));
         // Categorical: the band-disabling knob setting does not re-admit
         // fragments.
         assert!(!floorguard_emit_band_admits(true, dop4, T, 100.0));
@@ -1513,7 +1549,10 @@ mod funnel_run_cadence_tests {
         // suspension arrives count-0 — it passes the count gate and must be
         // caught by the prior-emission gate, or the funnel rescans from
         // block 0 and re-delivers the already-sent rows.
-        assert!(!funnel_run_cadence_admits(0, 1), "1-row result at limit 1, resumed");
+        assert!(
+            !funnel_run_cadence_admits(0, 1),
+            "1-row result at limit 1, resumed"
+        );
         assert!(!funnel_run_cadence_admits(0, 42));
         // A count-limited resume is refused by both halves.
         assert!(!funnel_run_cadence_admits(2, 2));

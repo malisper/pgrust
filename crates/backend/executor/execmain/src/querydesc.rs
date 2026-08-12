@@ -37,9 +37,7 @@ impl Drop for ExecData<'_> {
             // only after the state's drop_in_place returns. The take-out
             // protocol guarantees no aliasing &mut: an unwound consumer's
             // taken node was dropped with its stack frame, leaving None.
-            let slot = unsafe {
-                &mut *cell.0.cast::<Option<PlanStateNode<'_>>>().as_ptr()
-            };
+            let slot = unsafe { &mut *cell.0.cast::<Option<PlanStateNode<'_>>>().as_ptr() };
             drop(slot.take());
         }
         while let Some((p, dropper)) = self.estate.es_subplan_expr_states.pop() {
@@ -145,7 +143,11 @@ fn register(qd: QueryDescData) -> QueryDescHandle {
         g.set(v);
         v
     });
-    let entry = Box::new(Entry { generation, in_use: Cell::new(false), qd });
+    let entry = Box::new(Entry {
+        generation,
+        in_use: Cell::new(false),
+        qd,
+    });
     let idx = match FREE.with(|f| f.borrow_mut().pop()) {
         Some(i) => {
             ENTRIES.with(|e| e.borrow_mut()[i as usize] = Some(entry));
@@ -232,7 +234,10 @@ fn remove(h: QueryDescHandle) -> QueryDescData {
         match v.get_mut(idx as usize) {
             Some(slot) if slot.as_ref().map(|en| en.generation) == Some(generation) => {
                 let en = slot.take().unwrap();
-                assert!(!en.in_use.get(), "execmain: remove of in-use QueryDescHandle {h:?}");
+                assert!(
+                    !en.in_use.get(),
+                    "execmain: remove of in-use QueryDescHandle {h:?}"
+                );
                 en
             }
             _ => panic!("execmain: stale QueryDescHandle {h:?} (already freed)"),
@@ -415,7 +420,13 @@ pub(crate) fn query_desc_runtime_ea_pipeline_seam(
 pub(crate) fn query_desc_engine_events_seam(
     h: QueryDescHandle,
     plan_node_id: i32,
-) -> Option<Vec<(types_core::instrument::EngineKindWire, &'static str, &'static str)>> {
+) -> Option<
+    Vec<(
+        types_core::instrument::EngineKindWire,
+        &'static str,
+        &'static str,
+    )>,
+> {
     use types_core::instrument::EngineKindWire;
     with_qd(h, |qd| {
         let exec = qd.exec.as_mut()?;
@@ -574,7 +585,9 @@ pub(crate) fn query_desc_foreign_explain_seam(
     emit: &mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> types_error::PgResult<()>,
 ) -> types_error::PgResult<()> {
     with_qd(h, |qd| {
-        let Some(exec) = qd.exec.as_mut() else { return Ok(()) };
+        let Some(exec) = qd.exec.as_mut() else {
+            return Ok(());
+        };
         exec.with_mut(|d| {
             let estate = &mut d.estate;
             if let Some(ps) = d.planstate.as_mut() {
@@ -647,10 +660,7 @@ pub(crate) fn query_desc_bitmap_instrument_seam(
     }
 }
 
-pub(crate) fn query_desc_index_searches_seam(
-    h: QueryDescHandle,
-    plan_node_id: i32,
-) -> Option<u64> {
+pub(crate) fn query_desc_index_searches_seam(h: QueryDescHandle, plan_node_id: i32) -> Option<u64> {
     match query_desc_instr_extra(h, plan_node_id)? {
         crate::procnode::InstrExtra::IndexSearches(n) => Some(n),
         _ => None,

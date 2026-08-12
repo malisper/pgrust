@@ -60,7 +60,10 @@ use super::{
 fn exprkey_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_LANE_V2_EXPRKEY").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_EXPRKEY").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -81,7 +84,10 @@ fn exprkey_enabled() -> bool {
 fn codedkey_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_LANE_V2_CODEDKEY").as_deref(), Ok("1") | Ok("on"))
+        matches!(
+            std::env::var("PGRUST_LANE_V2_CODEDKEY").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
@@ -103,7 +109,10 @@ pub(super) fn dictkey_sink_enabled() -> bool {
         // DEFAULT ON since the A-on-top-of-B ruling (Michael, 2026-07-22;
         // flipped-kill idiom, same spelling as the m5 half — knob-coherence
         // law): OFF iff exactly `0`/`off`.
-        !matches!(std::env::var("PGRUST_LANE_V2_AGG_DICTKEY").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_AGG_DICTKEY").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -112,7 +121,10 @@ pub(super) fn dictkey_sink_enabled() -> bool {
 fn redkey_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_LANE_V2_REDKEY").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_REDKEY").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -369,7 +381,10 @@ pub enum ExprKeyKind {
     /// Stitcher-vocabulary int arithmetic: a single-output lanestitch
     /// program over the staged base lanes (interpreter tier — the parity
     /// oracle; error identity by refuse-and-replay).
-    Arith { prog: ::lanestitch::Program, ncols: usize },
+    Arith {
+        prog: ::lanestitch::Program,
+        ncols: usize,
+    },
     /// Strict fmgr chain over one dict-coded text column, evaluated once
     /// per (epoch, code) by the dicteval memo (per selected row on Raw
     /// windows). `gather_input` = some transition/spill column reads the
@@ -573,17 +588,25 @@ pub(super) fn decide_exprkey<'mcx>(
                     computed = Some(j as u16);
                     map.push(None);
                     ncols = ncols.max(a.max(b) as usize + 1);
-                    prog.steps.push(::lanestitch::Step::LoadLane { col: a, out: 0 });
-                    prog.steps.push(::lanestitch::Step::LoadLane { col: b, out: 1 });
+                    prog.steps
+                        .push(::lanestitch::Step::LoadLane { col: a, out: 0 });
+                    prog.steps
+                        .push(::lanestitch::Step::LoadLane { col: b, out: 1 });
                     prog.steps.push(::lanestitch::Step::Arith {
                         op: proj_arith(op),
                         a: 0,
                         b: 1,
                         out: 2,
                     });
-                    prog.steps.push(::lanestitch::Step::StoreOut { a: 2, out: 0 });
+                    prog.steps
+                        .push(::lanestitch::Step::StoreOut { a: 2, out: 0 });
                 }
-                ::execexpr::ScanProjCol::ArithVK { op, attnum, konst, var_is_arg0 } => {
+                ::execexpr::ScanProjCol::ArithVK {
+                    op,
+                    attnum,
+                    konst,
+                    var_is_arg0,
+                } => {
                     if computed.is_some() || attnum as usize >= ::lanestitch::MAX_COLS {
                         return refused();
                     }
@@ -591,10 +614,16 @@ pub(super) fn decide_exprkey<'mcx>(
                     map.push(None);
                     ncols = ncols.max(attnum as usize + 1);
                     let k = proj_arith_konst(op, konst);
-                    let kix =
-                        prog.push_const(::datum::NullableDatum { value: k, isnull: false });
-                    prog.steps.push(::lanestitch::Step::LoadLane { col: attnum, out: 0 });
-                    prog.steps.push(::lanestitch::Step::LoadConst { k: kix, out: 1 });
+                    let kix = prog.push_const(::datum::NullableDatum {
+                        value: k,
+                        isnull: false,
+                    });
+                    prog.steps.push(::lanestitch::Step::LoadLane {
+                        col: attnum,
+                        out: 0,
+                    });
+                    prog.steps
+                        .push(::lanestitch::Step::LoadConst { k: kix, out: 1 });
                     let (a, b) = if var_is_arg0 { (0u8, 1u8) } else { (1u8, 0u8) };
                     prog.steps.push(::lanestitch::Step::Arith {
                         op: proj_arith(op),
@@ -602,7 +631,8 @@ pub(super) fn decide_exprkey<'mcx>(
                         b,
                         out: 2,
                     });
-                    prog.steps.push(::lanestitch::Step::StoreOut { a: 2, out: 0 });
+                    prog.steps
+                        .push(::lanestitch::Step::StoreOut { a: 2, out: 0 });
                 }
             }
         }
@@ -616,8 +646,12 @@ pub(super) fn decide_exprkey<'mcx>(
         }
         // The computed chain's result type must be the grouping key's
         // column type (defense in depth — the tupledesc is plan authority).
-        let keytype = estate.slot(result_slot).base().tts_tupleDescriptor.as_ref()?.attrs
-            [key_out as usize]
+        let keytype = estate
+            .slot(result_slot)
+            .base()
+            .tts_tupleDescriptor
+            .as_ref()?
+            .attrs[key_out as usize]
             .atttypid;
         // Ts-trunc class first (date_trunc-keyed class): `date_trunc(const, ts)` for
         // uniform-microsecond units — a non-erroring arithmetic key lane,
@@ -626,7 +660,10 @@ pub(super) fn decide_exprkey<'mcx>(
             for j in 0..natts {
                 map.push(xk.cols[j]);
             }
-            ExprKeyKind::TsTrunc { input_col: xk.input_col, unit }
+            ExprKeyKind::TsTrunc {
+                input_col: xk.input_col,
+                unit,
+            }
         } else {
             // Dict class: pgrcolumnar text column, IMMUTABLE internal builtins
             // (dicteval's fail-closed compile owns the catalog gate).
@@ -651,7 +688,10 @@ pub(super) fn decide_exprkey<'mcx>(
             if calls.last().is_some_and(|c| c.rettype != keytype) {
                 return refused();
             }
-            let spec = ::laneexec::DictExprSpec { col: xk.input_col, calls };
+            let spec = ::laneexec::DictExprSpec {
+                col: xk.input_col,
+                calls,
+            };
             let prog = match ::laneexec::dicteval_compile_value(&spec) {
                 Ok(p) => p,
                 Err(reason) => {
@@ -662,14 +702,22 @@ pub(super) fn decide_exprkey<'mcx>(
             for j in 0..natts {
                 map.push(xk.cols[j]);
             }
-            ExprKeyKind::Dict { input_col: xk.input_col, prog, gather_input: false }
+            ExprKeyKind::Dict {
+                input_col: xk.input_col,
+                prog,
+                gather_input: false,
+            }
         }
     } else {
         return refused();
     };
     // Coordinate map: every fold column and every spill-needed column except
     // the key must be a bare-Var tlist entry.
-    if plan.cols.iter().any(|&c| map.get(c as usize).is_none_or(|m| m.is_none())) {
+    if plan
+        .cols
+        .iter()
+        .any(|&c| map.get(c as usize).is_none_or(|m| m.is_none()))
+    {
         return refused();
     }
     let (colnos_needed, _max) = ::nodeagg::agg_hash_needed_cols(agg);
@@ -746,9 +794,13 @@ pub(super) fn decide_exprkey<'mcx>(
         return refused();
     }
     let kind = match kind {
-        ExprKeyKind::Dict { input_col, prog, .. } => {
-            ExprKeyKind::Dict { input_col, prog, gather_input }
-        }
+        ExprKeyKind::Dict {
+            input_col, prog, ..
+        } => ExprKeyKind::Dict {
+            input_col,
+            prog,
+            gather_input,
+        },
         k => k,
     };
     trace_feed(match &kind {
@@ -825,7 +877,9 @@ fn decide_exprkey_mk<'mcx>(
         .as_ref()?
         .attrs
         .len();
-    let Some(xk) = proj.pi_state.scan_proj_expr_key() else { return refused() };
+    let Some(xk) = proj.pi_state.scan_proj_expr_key() else {
+        return refused();
+    };
     if xk.n as usize != natts {
         return refused();
     }
@@ -901,8 +955,12 @@ fn decide_exprkey_mk<'mcx>(
     }
     // The chain's result type must be the grouping key column's type
     // (defense in depth — the tupledesc is plan authority).
-    let keytype = estate.slot(result_slot).base().tts_tupleDescriptor.as_ref()?.attrs
-        [key_out as usize]
+    let keytype = estate
+        .slot(result_slot)
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()?
+        .attrs[key_out as usize]
         .atttypid;
     if calls.last().is_none_or(|c| c.rettype != keytype) {
         return refused();
@@ -920,7 +978,11 @@ fn decide_exprkey_mk<'mcx>(
     for j in 0..natts {
         map.push(xk.cols[j]);
     }
-    if plan.cols.iter().any(|&c| map.get(c as usize).is_none_or(|m| m.is_none())) {
+    if plan
+        .cols
+        .iter()
+        .any(|&c| map.get(c as usize).is_none_or(|m| m.is_none()))
+    {
         return refused();
     }
     let (colnos_needed, _max) = ::nodeagg::agg_hash_needed_cols(agg);
@@ -1092,7 +1154,12 @@ fn decide_reduced<'mcx>(
     for (j, col) in cols.cols[..natts].iter().enumerate() {
         match *col {
             ::execexpr::ScanProjCol::Var { attnum } => map.push(Some(attnum)),
-            ::execexpr::ScanProjCol::ArithVK { op, attnum, konst, var_is_arg0 } => {
+            ::execexpr::ScanProjCol::ArithVK {
+                op,
+                attnum,
+                konst,
+                var_is_arg0,
+            } => {
                 let Some(k) = key_ord(j as u16) else {
                     return refused();
                 };
@@ -1118,7 +1185,11 @@ fn decide_reduced<'mcx>(
                     4 => proj_arith_konst(op, konst).as_i32() as i64,
                     _ => proj_arith_konst(op, konst).as_i64(),
                 };
-                red_keys[k] = Some(RedDerived { op: rop, konst: k64, var_is_arg0 });
+                red_keys[k] = Some(RedDerived {
+                    op: rop,
+                    konst: k64,
+                    var_is_arg0,
+                });
                 map.push(None);
             }
             ::execexpr::ScanProjCol::ArithVV { .. } => return refused(),
@@ -1131,7 +1202,11 @@ fn decide_reduced<'mcx>(
         return refused();
     }
     // Every fold column a mapped bare Var (count(*) plans read none).
-    if plan.cols.iter().any(|&c| map.get(c as usize).is_none_or(|m| m.is_none())) {
+    if plan
+        .cols
+        .iter()
+        .any(|&c| map.get(c as usize).is_none_or(|m| m.is_none()))
+    {
         return refused();
     }
     // Needed (spill-replay) columns: mapped bare Vars, or key columns —
@@ -1181,7 +1256,10 @@ fn decide_reduced<'mcx>(
     if lo > hi {
         return refused();
     }
-    let (lo, hi) = (lo.max(i64::MIN as i128) as i64, hi.min(i64::MAX as i128) as i64);
+    let (lo, hi) = (
+        lo.max(i64::MIN as i128) as i64,
+        hi.min(i64::MAX as i128) as i64,
+    );
     // Compact-table admissibility (read-only precheck; the feed installs
     // the real table per build — same gates, same verdict).
     match ::nodeagg::agg_hash_compact_reduced_admissible(agg) {
@@ -1206,7 +1284,10 @@ fn decide_reduced<'mcx>(
         key_out,
         prefix,
         kind: ExprKeyKind::Reduced {
-            shape: ::nodeagg::RedShape { width, keys: red_keys },
+            shape: ::nodeagg::RedShape {
+                width,
+                keys: red_keys,
+            },
             rep_att,
             lo,
             hi,
@@ -1307,7 +1388,11 @@ fn case_dict_recognize(
     if ce.arg.is_some() || !matches!(ce.casetype, TEXTOID) || ce.args.len() != 1 {
         return None;
     }
-    let when = ce.args.iter().next()?.as_variant::<::types_nodes::primnodes::CaseWhen>()?;
+    let when = ce
+        .args
+        .iter()
+        .next()?
+        .as_variant::<::types_nodes::primnodes::CaseWhen>()?;
     // Condition: one int-eq OpExpr, or an AND of them.
     let cond = when.expr?;
     let mut preds: Vec<(u16, i64, u8)> = Vec::new();
@@ -1386,7 +1471,11 @@ fn decide_exprkey_mk_case<'mcx>(
         .attrs
         .len();
     // The scan PLAN tlist: bare Vars everywhere except ONE CaseDict entry.
-    let Some(scan_plan) = agg.plan.plan.lefttree.and_then(::types_nodes::Node::as_seq_scan)
+    let Some(scan_plan) = agg
+        .plan
+        .plan
+        .lefttree
+        .and_then(::types_nodes::Node::as_seq_scan)
     else {
         trace_feed("expr-key case-dict: refused (agg child is not a SeqScan node)");
         return None;
@@ -1471,11 +1560,19 @@ fn decide_exprkey_mk_case<'mcx>(
     }
     // Dict-answered windows leave value lanes stale: the fold must not
     // read the THEN column (its cells ride the extra dict registration).
-    if plan.cols.iter().any(|&c| map.get(c as usize).copied().flatten() == Some(then_base)) {
+    if plan
+        .cols
+        .iter()
+        .any(|&c| map.get(c as usize).copied().flatten() == Some(then_base))
+    {
         return refused_at("fold reads the THEN column");
     }
     // The fold/spill coordinate rules (decide_exprkey_mk's exact checks).
-    if plan.cols.iter().any(|&c| map.get(c as usize).is_none_or(|m| m.is_none())) {
+    if plan
+        .cols
+        .iter()
+        .any(|&c| map.get(c as usize).is_none_or(|m| m.is_none()))
+    {
         return refused_at("fold column unmapped");
     }
     let (colnos_needed, _max) = ::nodeagg::agg_hash_needed_cols(agg);
@@ -1569,7 +1666,10 @@ fn decide_exprkey_mk_case<'mcx>(
 fn case_dict_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_LANE_V2_CASEDICT").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_CASEDICT").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -1647,8 +1747,10 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
             tick_arm(::nodeagg::agg_hash_compact_try_arm(agg))
         }
         ExprKeyKind::Reduced { shape, .. } if !has_resid => {
-            let armed =
-                tick_arm(::nodeagg::agg_hash_compact_try_arm_reduced(agg, shape.clone()));
+            let armed = tick_arm(::nodeagg::agg_hash_compact_try_arm_reduced(
+                agg,
+                shape.clone(),
+            ));
             if !armed {
                 xk.refused = true;
             }
@@ -1668,7 +1770,10 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
     // migration path (see `coded_drop_caches`).
     let mut coded = match &xk.kind {
         ExprKeyKind::Dict { .. } if !has_resid && codedkey_enabled() => {
-            let armed = tick_arm(::nodeagg::agg_hash_compact_try_arm_mk1(agg, Some(xk.key_out)));
+            let armed = tick_arm(::nodeagg::agg_hash_compact_try_arm_mk1(
+                agg,
+                Some(xk.key_out),
+            ));
             if armed {
                 trace_feed("expr-key coded-group feed engaged (intern key)");
             }
@@ -1746,8 +1851,7 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
     let mut ch: Option<CodeHistState> = if codehist_enabled() {
         match &xk.kind {
             ExprKeyKind::Dict { input_col, .. } if !has_resid => {
-                let plan =
-                    ::nodeagg::agg_lanefold_plan(agg).expect("expr-key feed without a plan");
+                let plan = ::nodeagg::agg_lanefold_plan(agg).expect("expr-key feed without a plan");
                 let icol = *input_col;
                 let ntrans = plan.trans.len();
                 let has_str = plan.trans.iter().any(|t| {
@@ -1799,8 +1903,19 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
             let latemat = super::batch_source::k1_latemat_enabled();
             let mut src = super::batch_source::HeapBatchSource::new(ss);
             let drove = exprkey_fold_drain(
-                agg, &mut src, xk, stage_slot, compact, &mut coded, mk_shape.as_ref(),
-                &mut idxs, &mut groups, &mut mm, &mut ch, latemat, estate,
+                agg,
+                &mut src,
+                xk,
+                stage_slot,
+                compact,
+                &mut coded,
+                mk_shape.as_ref(),
+                &mut idxs,
+                &mut groups,
+                &mut mm,
+                &mut ch,
+                latemat,
+                estate,
             );
             let settled = src.end_claim(estate);
             drove?;
@@ -1808,8 +1923,19 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
         } else {
             let mut src = super::batch_source::SeqScanSource::new(ss);
             let drove = exprkey_fold_drain(
-                agg, &mut src, xk, stage_slot, compact, &mut coded, mk_shape.as_ref(),
-                &mut idxs, &mut groups, &mut mm, &mut ch, false, estate,
+                agg,
+                &mut src,
+                xk,
+                stage_slot,
+                compact,
+                &mut coded,
+                mk_shape.as_ref(),
+                &mut idxs,
+                &mut groups,
+                &mut mm,
+                &mut ch,
+                false,
+                estate,
             );
             let settled = src.end_claim(estate);
             drove?;
@@ -1987,7 +2113,10 @@ fn exprkey_k1_latemat_arm<'mcx>(
 fn codehist_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_LANE_V2_CODEHIST").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_CODEHIST").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -2235,8 +2364,7 @@ fn ch_batch<'mcx>(
                 debug_assert!(!xk.knull[k], "coded batches were null-checked above");
                 // SAFETY: memo outputs are live non-null text varlenas for
                 // the staged window (dicteval arena contract).
-                let v =
-                    unsafe { ::types_fmgr::datum_varlena_packed(key, estate.es_query_cxt) }?;
+                let v = unsafe { ::types_fmgr::datum_varlena_packed(key, estate.es_query_cxt) }?;
                 xk.dg_slots[c] = Some(::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?);
                 continue;
             }
@@ -2294,7 +2422,10 @@ pub(super) fn exprkey_sink_batch<'mcx>(
 ) -> PgResult<bool> {
     let mut mm = xk.take_sink_mm(agg);
     let mut ch: Option<CodeHistState> = None;
-    debug_assert!(xk.sink_build, "the sink drain adapter requires the armed sink decide");
+    debug_assert!(
+        xk.sink_build,
+        "the sink drain adapter requires the armed sink decide"
+    );
     // GL-DICTDRAIN-1: the Dict kind drains through the CODED arm — the
     // dicteval memo derives once per (epoch, code) and the resolve probes
     // the 1-Intern compact table by the output value's canonical bytes.
@@ -2350,7 +2481,9 @@ impl ExprKeyState {
                 // multi-text tails, so the two tails decode unambiguously.
                 // The leader's `mk_shape_sink_ok` still owns the component
                 // gates (and the two-text kill switch).
-                Some(SinkXkKind::Multi { dict_input_att: m.dict_input_att })
+                Some(SinkXkKind::Multi {
+                    dict_input_att: m.dict_input_att,
+                })
             }
             ExprKeyKind::Dict { .. } if dictkey_sink_enabled() => Some(SinkXkKind::DictCoded),
             ExprKeyKind::Dict { .. } => None,
@@ -2673,7 +2806,11 @@ fn exprkey_batch<'mcx>(
                 }
             }
         }
-        ExprKeyKind::Dict { input_col, prog, gather_input } => {
+        ExprKeyKind::Dict {
+            input_col,
+            prog,
+            gather_input,
+        } => {
             let col = *input_col as usize;
             {
                 let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
@@ -2772,7 +2909,9 @@ fn exprkey_batch<'mcx>(
     // Probe. Compact first (int keys, no resid), then the dictgroup-style
     // per-epoch code map (dict windows), then the batched staged probe.
     if compact && ::nodeagg::agg_hash_compact_armed(agg) {
-        let ExprKeyState { keys, knull, rows, .. } = &mut *xk;
+        let ExprKeyState {
+            keys, knull, rows, ..
+        } = &mut *xk;
         if ::nodeagg::agg_hash_compact_batch(agg, estate, keys, knull, groups)? {
             idxs.clear();
             idxs.extend_from_slice(rows);
@@ -2788,7 +2927,10 @@ fn exprkey_batch<'mcx>(
             return unsafe {
                 agg_fold_staged_mm(
                     agg,
-                    &CodesCols { inner: &MapCols { soa, map: &xk.map }, codes: &mm.codes },
+                    &CodesCols {
+                        inner: &MapCols { soa, map: &xk.map },
+                        codes: &mm.codes,
+                    },
                     idxs,
                     groups,
                     Some(&mut mm.scratch),
@@ -2928,7 +3070,12 @@ fn exprkey_batch<'mcx>(
         // histogram counts (always sound; see CodeHistState).
         ch_flush(agg, xk, ch, &mut mm.scratch)?;
         {
-            let ExprKeyState { keys, knull, hashes, .. } = &mut *xk;
+            let ExprKeyState {
+                keys,
+                knull,
+                hashes,
+                ..
+            } = &mut *xk;
             ::nodeagg::agg_hash_hash_staged(agg, keys, knull, hashes)?;
         }
         for k in 0..xk.rows.len() {
@@ -2974,7 +3121,10 @@ fn exprkey_batch<'mcx>(
     unsafe {
         agg_fold_staged_mm(
             agg,
-            &CodesCols { inner: &MapCols { soa, map: &xk.map }, codes: &mm.codes },
+            &CodesCols {
+                inner: &MapCols { soa, map: &xk.map },
+                codes: &mm.codes,
+            },
             idxs,
             groups,
             Some(&mut mm.scratch),
@@ -3013,18 +3163,30 @@ fn exprkey_mk_batch<'mcx>(
     let Some(shape) = mk_shape.filter(|_| armed) else {
         return per_row_batch(agg, ss, n, estate);
     };
-    debug_assert!(!shape.nullable, "the expr-key multi-key arm is pgrcolumnar-only (no null byte)");
+    debug_assert!(
+        !shape.nullable,
+        "the expr-key multi-key arm is pgrcolumnar-only (no null byte)"
+    );
     // Derive the computed key over the survivors. Errors: refuse-and-replay.
     let mut derive_err = false;
     let mut null_key = false;
     // CaseDict shapes skip the derive entirely: their computed component
     // evaluates inside the pack pre-pass (an intern id, not a datum lane).
     if !matches!(&xk.kind, ExprKeyKind::Multi(m) if m.case_dict.is_some()) {
-        let ExprKeyState { kind, rows, key_vals, key_null, .. } = &mut *xk;
+        let ExprKeyState {
+            kind,
+            rows,
+            key_vals,
+            key_null,
+            ..
+        } = &mut *xk;
         let ExprKeyKind::Multi(m) = kind else {
             unreachable!("mk batch requires the Multi kind")
         };
-        let chain = m.chain.as_mut().expect("non-CaseDict Multi shapes carry the chain");
+        let chain = m
+            .chain
+            .as_mut()
+            .expect("non-CaseDict Multi shapes carry the chain");
         chain.reset();
         key_vals.clear();
         key_vals.resize(n as usize, ::datum::Datum::null());
@@ -3054,7 +3216,10 @@ fn exprkey_mk_batch<'mcx>(
         } else {
             for &i in rows.iter() {
                 let i = i as usize;
-                let input = ::datum::NullableDatum { value: values[i], isnull: isnull[i] };
+                let input = ::datum::NullableDatum {
+                    value: values[i],
+                    isnull: isnull[i],
+                };
                 match chain.eval(input) {
                     Ok(nd) => {
                         key_vals[i] = nd.value;
@@ -3086,13 +3251,26 @@ fn exprkey_mk_batch<'mcx>(
     // through `map`, the computed component from the derived lane).
     let mut unpackable = false;
     {
-        let ExprKeyState { kind, rows, key_vals, map, key_out, .. } = &mut *xk;
+        let ExprKeyState {
+            kind,
+            rows,
+            key_vals,
+            map,
+            key_out,
+            ..
+        } = &mut *xk;
         let ExprKeyKind::Multi(m) = kind else {
             unreachable!("mk batch requires the Multi kind")
         };
         let fast_kernel = m.fast.is_some();
         let MultiKeyChain { case_dict, mks, .. } = &mut **m;
-        let super::MkScratch { packbuf, keys1, epoch, code_ids, .. } = mks;
+        let super::MkScratch {
+            packbuf,
+            keys1,
+            epoch,
+            code_ids,
+            ..
+        } = mks;
         packbuf.clear();
         packbuf.resize(rows.len(), 0u128);
         'comps: for comp in shape.comps.iter() {
@@ -3147,7 +3325,11 @@ fn exprkey_mk_batch<'mcx>(
                     let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
                         .expect("expr-key batched route requires the armed SoA");
                     let (values, isnull) = (soa.col_values(base), soa.col_isnull(base));
-                    let mask = if width == 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 };
+                    let mask = if width == 8 {
+                        u64::MAX
+                    } else {
+                        (1u64 << (width * 8)) - 1
+                    };
                     for (k, &i) in rows.iter().enumerate() {
                         let i = i as usize;
                         debug_assert!(
@@ -3194,8 +3376,7 @@ fn exprkey_mk_batch<'mcx>(
                     let else_id = match cd.else_id {
                         Some(id) => id,
                         None => {
-                            let id =
-                                ::nodeagg::agg_hash_compact_intern(agg, &cd.else_bytes);
+                            let id = ::nodeagg::agg_hash_compact_intern(agg, &cd.else_bytes);
                             cd.else_id = Some(id);
                             id
                         }
@@ -3237,10 +3418,8 @@ fn exprkey_mk_batch<'mcx>(
                                             let v = unsafe {
                                                 ::types_fmgr::datum_varlena_packed(d, mcx)
                                             }?;
-                                            let id = ::nodeagg::agg_hash_compact_intern(
-                                                agg,
-                                                v.data(),
-                                            );
+                                            let id =
+                                                ::nodeagg::agg_hash_compact_intern(agg, v.data());
                                             debug_assert!(id != u32::MAX, "id+1 encoding");
                                             cd.cd_code_ids[code] = id + 1;
                                             id
@@ -3263,9 +3442,7 @@ fn exprkey_mk_batch<'mcx>(
                                     // SAFETY: staged non-null live text
                                     // varlena (columnar fill; admission
                                     // proved the column type).
-                                    let v = unsafe {
-                                        ::types_fmgr::datum_varlena_packed(d, mcx)
-                                    }?;
+                                    let v = unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
                                     ::nodeagg::agg_hash_compact_intern(agg, v.data())
                                 } else {
                                     else_id
@@ -3278,8 +3455,8 @@ fn exprkey_mk_batch<'mcx>(
                 ::nodeagg::MkCompKind::Intern => {
                     let base = map[att as usize].expect("Var keys map to base lanes") as usize;
                     let mcx = estate.es_query_cxt;
-                    let lane = ::nodeseqscan::seq_scan_batch_soa(ss)
-                        .and_then(|soa| soa.dict_lane(base));
+                    let lane =
+                        ::nodeseqscan::seq_scan_batch_soa(ss).and_then(|soa| soa.dict_lane(base));
                     match lane {
                         Some(lane) => {
                             // Code → intern-id resolve (the scan feed's
@@ -3319,13 +3496,9 @@ fn exprkey_mk_batch<'mcx>(
                                         // staged window (dict lane
                                         // contract; kernel selection proved
                                         // the column type).
-                                        let v = unsafe {
-                                            ::types_fmgr::datum_varlena_packed(d, mcx)
-                                        }?;
-                                        let id = ::nodeagg::agg_hash_compact_intern(
-                                            agg,
-                                            v.data(),
-                                        );
+                                        let v =
+                                            unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
+                                        let id = ::nodeagg::agg_hash_compact_intern(agg, v.data());
                                         debug_assert!(id != u32::MAX, "id+1 encoding");
                                         code_ids[code] = id + 1;
                                         id
@@ -3349,8 +3522,7 @@ fn exprkey_mk_batch<'mcx>(
                                 // SAFETY: staged non-null live text varlena
                                 // (columnar fill stages decoded datums;
                                 // kernel selection proved the column type).
-                                let v =
-                                    unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
+                                let v = unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
                                 let id = ::nodeagg::agg_hash_compact_intern(agg, v.data());
                                 packbuf[k] |= (id as u128) << off_bits;
                             }
@@ -3420,7 +3592,13 @@ fn reduced_batch<'mcx>(
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let ExprKeyKind::Reduced { ref shape, rep_att, lo, hi } = xk.kind else {
+    let ExprKeyKind::Reduced {
+        ref shape,
+        rep_att,
+        lo,
+        hi,
+    } = xk.kind
+    else {
         unreachable!("reduced_batch requires the Reduced kind")
     };
     let width = shape.width;
@@ -3655,11 +3833,15 @@ mod ts_trunc_tests {
         // values are skipped when the oracle refuses them (not storable).
         let mut x: u64 = 0x9e3779b97f4a7c15;
         for _ in 0..20_000 {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             cases.push(x as i64);
             // Bias half the sweep into the valid timestamp band (±~9e15 µs
             // covers 1715-2285 AD) so most samples exercise the kernel.
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             cases.push((x as i64) % 9_000_000_000_000_000);
         }
         for &(name, usecs) in &units {
@@ -3703,8 +3885,10 @@ mod ts_extract_tests {
     /// nodeagg's compact tests).
     #[test]
     fn ts_extract_matches_timestamp_part() {
-        let fields: [(&[u8], TsPartField); 2] =
-            [(b"minute", TsPartField::Minute), (b"hour", TsPartField::Hour)];
+        let fields: [(&[u8], TsPartField); 2] = [
+            (b"minute", TsPartField::Minute),
+            (b"hour", TsPartField::Hour),
+        ];
         let mut cases: Vec<i64> = vec![
             0,
             1,
@@ -3728,10 +3912,14 @@ mod ts_extract_tests {
         ];
         let mut x: u64 = 0x9e3779b97f4a7c15;
         for _ in 0..20_000 {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             cases.push(x as i64);
             // Bias half the sweep into the valid timestamp band.
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             cases.push((x as i64) % 9_000_000_000_000_000);
         }
         for &(name, field) in &fields {

@@ -986,7 +986,10 @@ pub(super) fn stats_dir() -> Option<&'static PathBuf> {
 pub(super) fn coverage_armed() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_LANE_V2_COVERAGE").as_deref(), Ok("1") | Ok("on"))
+        matches!(
+            std::env::var("PGRUST_LANE_V2_COVERAGE").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
@@ -1056,7 +1059,9 @@ pub(super) const fn n_reasons() -> usize {
 /// the derived-count tests' enumeration source).
 #[cfg(test)]
 pub(super) fn reason_names() -> Vec<&'static str> {
-    (0..N_REASONS).map(|i| RefuseReason::from_index(i).name()).collect()
+    (0..N_REASONS)
+        .map(|i| RefuseReason::from_index(i).name())
+        .collect()
 }
 
 /// Every (class, owned-count) cell, zeros included.

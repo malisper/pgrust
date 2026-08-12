@@ -48,7 +48,9 @@ pub fn plan_implicit_scroll_ok(node: Option<Node<'_>>) -> bool {
             let a = node.as_append().expect("T_Append");
             // With async, tuples may be interleaved, so can't back up.
             a.nasyncplans == 0
-                && a.appendplans.iter().all(|p| plan_implicit_scroll_ok(Some(p)))
+                && a.appendplans
+                    .iter()
+                    .all(|p| plan_implicit_scroll_ok(Some(p)))
         }
         NodeTag::T_SubqueryScan => {
             plan_implicit_scroll_ok(node.as_subquery_scan().expect("T_SubqueryScan").subplan)
@@ -71,9 +73,7 @@ pub fn exec_re_scan<'mcx>(
         // C ExecReScan's InstrEndLoop: close the finished cycle, then the
         // recursion runs inner's ecxt reset + node rescan.
         PlanStateNode::Instrumented(w) => {
-            ::instrument::instr_end_loop(
-                &mut estate.es_instrumentation[w.instr_idx as usize],
-            );
+            ::instrument::instr_end_loop(&mut estate.es_instrumentation[w.instr_idx as usize]);
             exec_re_scan(&mut w.inner, estate)
         }
         PlanStateNode::Result(rs) => exec_re_scan_result(rs, estate),
@@ -89,9 +89,7 @@ pub fn exec_re_scan<'mcx>(
             ::nodefunctionscan::exec_rescan_function_scan(fs, estate)
         }
         PlanStateNode::ValuesScan(vs) => ::nodevaluesscan::exec_rescan_values_scan(vs, estate),
-        PlanStateNode::ForeignScan(fs) => {
-            ::nodeforeignscan::exec_rescan_foreign_scan(fs, estate)
-        }
+        PlanStateNode::ForeignScan(fs) => ::nodeforeignscan::exec_rescan_foreign_scan(fs, estate),
         PlanStateNode::TableFuncScan(ts) => {
             ::nodetablefuncscan::exec_rescan_table_func_scan(ts, estate)
         }
@@ -249,11 +247,8 @@ pub fn exec_re_scan<'mcx>(
                 exec_re_scan(&mut hj.outer, estate)?;
                 return Ok(());
             }
-            let inner = ::nodehashjoin::exec_rescan_hash_join(
-                &mut hj.state,
-                &mut hj.hash.state,
-                estate,
-            )?;
+            let inner =
+                ::nodehashjoin::exec_rescan_hash_join(&mut hj.state, &mut hj.hash.state, estate)?;
             if inner == ::nodehashjoin::RescanInner::Rescan {
                 exec_re_scan(&mut hj.hash.child, estate)?;
             }
@@ -447,7 +442,12 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
             rs.rs_done = false;
             rs.rs_checkqual = rs.resconstantqual.is_some();
             if let Some(outer) = rs.outer.as_deref_mut() {
-                exec_re_scan_with_chg(outer, base.lefttree.expect("Result outer plan"), estate, chg)?;
+                exec_re_scan_with_chg(
+                    outer,
+                    base.lefttree.expect("Result outer plan"),
+                    estate,
+                    chg,
+                )?;
             }
         }
         PlanStateNode::ProjectSet(ps) => {
@@ -465,16 +465,12 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
             ::nodefunctionscan::exec_rescan_function_scan_chg(fs, estate, chg)?
         }
         PlanStateNode::ValuesScan(vs) => ::nodevaluesscan::exec_rescan_values_scan(vs, estate)?,
-        PlanStateNode::ForeignScan(fs) => {
-            ::nodeforeignscan::exec_rescan_foreign_scan(fs, estate)?
-        }
+        PlanStateNode::ForeignScan(fs) => ::nodeforeignscan::exec_rescan_foreign_scan(fs, estate)?,
         // C drops the tuplestore whenever chgParam is non-NULL.
         PlanStateNode::TableFuncScan(ts) => {
             ::nodetablefuncscan::exec_rescan_table_func_scan_chg(ts, estate)?
         }
-        PlanStateNode::CteScan(cs) => {
-            ::nodectescan::exec_rescan_cte_scan_chg(cs, estate, chg)?
-        }
+        PlanStateNode::CteScan(cs) => ::nodectescan::exec_rescan_cte_scan_chg(cs, estate, chg)?,
         PlanStateNode::WorkTableScan(wts) => {
             ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate)?
         }
@@ -506,7 +502,12 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
         }
         PlanStateNode::Agg(aps) => {
             ::nodeagg::exec_rescan_agg_chg(&mut aps.agg, estate);
-            exec_re_scan_with_chg(&mut aps.outer, base.lefttree.expect("Agg outer plan"), estate, chg)?;
+            exec_re_scan_with_chg(
+                &mut aps.outer,
+                base.lefttree.expect("Agg outer plan"),
+                estate,
+                chg,
+            )?;
         }
         PlanStateNode::WindowAgg(w) => {
             ::nodewindowagg::exec_rescan_window_agg(&mut w.state, estate);
@@ -525,12 +526,22 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
                 }
             }
             // --- end WS-R T2-B ---
-            exec_re_scan_with_chg(&mut w.outer, base.lefttree.expect("WindowAgg outer plan"), estate, chg)?;
+            exec_re_scan_with_chg(
+                &mut w.outer,
+                base.lefttree.expect("WindowAgg outer plan"),
+                estate,
+                chg,
+            )?;
         }
         PlanStateNode::Material(m) => {
             let m = &mut **m;
             ::nodematerial::exec_rescan_material_chg(&mut m.state, estate);
-            exec_re_scan_with_chg(&mut m.outer, base.lefttree.expect("Material outer plan"), estate, chg)?;
+            exec_re_scan_with_chg(
+                &mut m.outer,
+                base.lefttree.expect("Material outer plan"),
+                estate,
+                chg,
+            )?;
         }
         PlanStateNode::Memoize(m) => {
             let m = &mut **m;
@@ -561,7 +572,12 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
         }
         PlanStateNode::Sort(s) => {
             ::nodesort::exec_rescan_sort_chg(&mut s.state, estate);
-            exec_re_scan_with_chg(&mut s.outer, base.lefttree.expect("Sort outer plan"), estate, chg)?;
+            exec_re_scan_with_chg(
+                &mut s.outer,
+                base.lefttree.expect("Sort outer plan"),
+                estate,
+                chg,
+            )?;
         }
         PlanStateNode::IncrementalSort(s) => {
             let s = &mut **s;
@@ -575,11 +591,21 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
         }
         PlanStateNode::Unique(u) => {
             ::nodeunique::exec_rescan_unique(&mut u.state, estate);
-            exec_re_scan_with_chg(&mut u.outer, base.lefttree.expect("Unique outer plan"), estate, chg)?;
+            exec_re_scan_with_chg(
+                &mut u.outer,
+                base.lefttree.expect("Unique outer plan"),
+                estate,
+                chg,
+            )?;
         }
         PlanStateNode::Group(g) => {
             ::nodegroup::exec_rescan_group(&mut g.state, estate);
-            exec_re_scan_with_chg(&mut g.outer, base.lefttree.expect("Group outer plan"), estate, chg)?;
+            exec_re_scan_with_chg(
+                &mut g.outer,
+                base.lefttree.expect("Group outer plan"),
+                estate,
+                chg,
+            )?;
         }
         PlanStateNode::Limit(l) => {
             let crate::procnode::LimitNode { state, outer } = l;
@@ -622,8 +648,18 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
             }
         }
         PlanStateNode::NestLoop(nl) => {
-            exec_re_scan_with_chg(&mut nl.outer, base.lefttree.expect("NestLoop outer plan"), estate, chg)?;
-            exec_re_scan_with_chg(&mut nl.inner, base.righttree.expect("NestLoop inner plan"), estate, chg)?;
+            exec_re_scan_with_chg(
+                &mut nl.outer,
+                base.lefttree.expect("NestLoop outer plan"),
+                estate,
+                chg,
+            )?;
+            exec_re_scan_with_chg(
+                &mut nl.inner,
+                base.righttree.expect("NestLoop inner plan"),
+                estate,
+                chg,
+            )?;
             ::nodenestloop::exec_rescan_nest_loop(&mut nl.state);
         }
         PlanStateNode::HashJoin(hj) => {
@@ -631,9 +667,18 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
             hj.probe_batch.reset_staged();
             let inner_plan = base.righttree.expect("HashJoin Hash plan");
             let inner_chg = chg.overlap(&inner_plan.as_plan().expect("plan node").allParam);
-            exec_re_scan_with_chg(&mut hj.outer, base.lefttree.expect("HashJoin outer plan"), estate, chg)?;
+            exec_re_scan_with_chg(
+                &mut hj.outer,
+                base.lefttree.expect("HashJoin outer plan"),
+                estate,
+                chg,
+            )?;
             if inner_chg {
-                ::nodehashjoin::exec_rescan_hash_join_chg(&mut hj.state, &mut hj.hash.state, estate)?;
+                ::nodehashjoin::exec_rescan_hash_join_chg(
+                    &mut hj.state,
+                    &mut hj.hash.state,
+                    estate,
+                )?;
                 let hash_child_plan = inner_plan
                     .as_plan()
                     .unwrap()
@@ -656,8 +701,18 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
             // MJSORT adopted state: see the exec_re_scan arm.
             mj.mjsort = None;
             mj.mjsort_probed = false;
-            exec_re_scan_with_chg(&mut mj.outer, base.lefttree.expect("MergeJoin outer plan"), estate, chg)?;
-            exec_re_scan_with_chg(&mut mj.inner, base.righttree.expect("MergeJoin inner plan"), estate, chg)?;
+            exec_re_scan_with_chg(
+                &mut mj.outer,
+                base.lefttree.expect("MergeJoin outer plan"),
+                estate,
+                chg,
+            )?;
+            exec_re_scan_with_chg(
+                &mut mj.inner,
+                base.righttree.expect("MergeJoin inner plan"),
+                estate,
+                chg,
+            )?;
             ::nodemergejoin::exec_rescan_merge_join(&mut mj.state, estate);
         }
         PlanStateNode::Append(a) => {
@@ -690,8 +745,18 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
         PlanStateNode::SetOp(s) => {
             let s = &mut **s;
             ::nodesetop::exec_rescan_set_op_chg(&mut s.state, estate);
-            exec_re_scan_with_chg(&mut s.outer, base.lefttree.expect("SetOp outer plan"), estate, chg)?;
-            exec_re_scan_with_chg(&mut s.inner, base.righttree.expect("SetOp inner plan"), estate, chg)?;
+            exec_re_scan_with_chg(
+                &mut s.outer,
+                base.lefttree.expect("SetOp outer plan"),
+                estate,
+                chg,
+            )?;
+            exec_re_scan_with_chg(
+                &mut s.inner,
+                base.righttree.expect("SetOp inner plan"),
+                estate,
+                chg,
+            )?;
         }
         // ExecReScanGather: chg lands on the child via UpdateChangedParamSet
         // (∩ its allParam) plus rescan_param (no intersection); a non-empty
@@ -771,10 +836,16 @@ fn epq_markrestore_noop(estate: &EStateData<'_>, scanrelid: u32, what: &str) -> 
         return false;
     }
     assert!(scanrelid > 0);
-    let subs = estate.es_epq.as_ref().expect("EPQ active with installed relsubs");
+    let subs = estate
+        .es_epq
+        .as_ref()
+        .expect("EPQ active with installed relsubs");
     let idx = (scanrelid - 1) as usize;
     if subs.relsubs_slot[idx].is_some() {
-        assert!(subs.relsubs_done[idx], "unexpected {what} call in EPQ recheck");
+        assert!(
+            subs.relsubs_done[idx],
+            "unexpected {what} call in EPQ recheck"
+        );
         return true;
     }
     false

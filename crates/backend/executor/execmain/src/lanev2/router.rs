@@ -419,7 +419,11 @@ pub(super) fn arm_counter_snapshot() -> Vec<(&'static str, &'static str, u64)> {
     ));
     for class in ArmClass::ALL {
         for c in ArmCounter::ALL {
-            v.push((class.name(), c.name(), ARM[class as usize][c as usize].load(Relaxed)));
+            v.push((
+                class.name(),
+                c.name(),
+                ARM[class as usize][c as usize].load(Relaxed),
+            ));
         }
     }
     v
@@ -464,7 +468,9 @@ fn arm_dump_on_thread_exit() {
 ///   `router\t<arm>\t<counter>\t<count>`       (every arm × counter, zeros kept)
 ///   `router-refused\t<arm>\t<reason>\t<count>` (nonzero only — the taxonomy)
 fn dump() {
-    let Some(dir) = super::stats::stats_dir() else { return };
+    let Some(dir) = super::stats::stats_dir() else {
+        return;
+    };
     static DUMP_LOCK: Mutex<()> = Mutex::new(());
     let _guard = match DUMP_LOCK.lock() {
         Ok(g) => g,
@@ -565,8 +571,9 @@ mod tests {
             }
             rows += 1;
             assert_eq!(cols.len(), 9, "row width: {line}");
-            let (class, arm, spill, topn, adopt, status, route_to, probe_key) =
-                (cols[0], cols[1], cols[2], cols[3], cols[4], cols[5], cols[6], cols[7]);
+            let (class, arm, spill, topn, adopt, status, route_to, probe_key) = (
+                cols[0], cols[1], cols[2], cols[3], cols[4], cols[5], cols[6], cols[7],
+            );
             assert!(!class.is_empty());
             assert!(
                 ArmClass::ALL.iter().any(|a| a.name() == arm) || arm == "none",
@@ -604,8 +611,7 @@ mod tests {
             // shapes an arm walk admits (probe ⊂ walk). The key↔route
             // agreement is pinned crate-side by m5_suppress's drift test.
             assert!(
-                probe_key == "-"
-                    || probe_key.chars().all(|c| c.is_ascii_alphanumeric()),
+                probe_key == "-" || probe_key.chars().all(|c| c.is_ascii_alphanumeric()),
                 "bad probe_key {probe_key} in {class}"
             );
             if probe_key != "-" {

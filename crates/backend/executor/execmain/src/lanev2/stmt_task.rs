@@ -185,7 +185,10 @@ fn stmt_standing_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
         !matches!(
-            std::env::var("PGRUST_STMT_TASK_STANDING").ok().as_deref().map(str::trim),
+            std::env::var("PGRUST_STMT_TASK_STANDING")
+                .ok()
+                .as_deref()
+                .map(str::trim),
             Some("0") | Some("off")
         )
     })
@@ -198,7 +201,10 @@ fn stmt_ptrpass_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
         !matches!(
-            std::env::var("PGRUST_STMT_TASK_PTRPASS").ok().as_deref().map(str::trim),
+            std::env::var("PGRUST_STMT_TASK_PTRPASS")
+                .ok()
+                .as_deref()
+                .map(str::trim),
             Some("0") | Some("off")
         )
     })
@@ -210,7 +216,10 @@ fn stmt_inline_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
         !matches!(
-            std::env::var("PGRUST_STMT_TASK_INLINE").ok().as_deref().map(str::trim),
+            std::env::var("PGRUST_STMT_TASK_INLINE")
+                .ok()
+                .as_deref()
+                .map(str::trim),
             Some("0") | Some("off")
         )
     })
@@ -253,7 +262,10 @@ fn stmt_yield_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
         matches!(
-            std::env::var("PGRUST_STMT_TASK_YIELD").ok().as_deref().map(str::trim),
+            std::env::var("PGRUST_STMT_TASK_YIELD")
+                .ok()
+                .as_deref()
+                .map(str::trim),
             Some("1") | Some("on")
         )
     })
@@ -354,9 +366,7 @@ const YIELD_STALL_MS: u64 = 500;
 fn yield_sweeper() {
     let quantum_ms = (stmt_yield_quantum().as_millis() as u64).max(1);
     loop {
-        let _ = waiter::park_timeout(std::time::Duration::from_millis(
-            (quantum_ms / 2).max(1),
-        ));
+        let _ = waiter::park_timeout(std::time::Duration::from_millis((quantum_ms / 2).max(1)));
         let now = yield_now_ms();
         let slots = pgsync::lock(&YIELD_SLOTS);
         for slot in slots.iter() {
@@ -400,7 +410,9 @@ pub fn stmt_task_yield_count() -> u64 {
 /// span: ONE Relaxed flag load (the survey's Concord shape). The clock is
 /// read only on the yield/reset path.
 fn stmt_yield_tick() {
-    let Some(slot) = MY_YIELD_SLOT.with(|c| c.get()) else { return };
+    let Some(slot) = MY_YIELD_SLOT.with(|c| c.get()) else {
+        return;
+    };
     // Debug-profile enforcement (Seastar precedent, throttled): every
     // 1024th tick forces the yield path so the batteries exercise
     // donate/reacquire at every CFI-bearing shape — resume bugs cannot
@@ -425,7 +437,9 @@ fn stmt_yield_tick() {
     }
     slot.pending.store(false, Ordering::Release);
     slot.stall_reported.store(false, Ordering::Release);
-    let Some(rt) = YIELD_RT.with(|c| c.get()) else { return };
+    let Some(rt) = YIELD_RT.with(|c| c.get()) else {
+        return;
+    };
     if runtime::in_blocking_section() {
         slot.since_ms.store(yield_now_ms(), Ordering::Release);
         return; // permit already donated (spill section) — never double
@@ -510,12 +524,8 @@ fn try_take_inline_slot(rt: &Arc<runtime::Runtime>) -> Option<StmtActiveSlot> {
         if cur >= bound {
             return None;
         }
-        match STMT_INLINE_ACTIVE.compare_exchange(
-            cur,
-            cur + 1,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
+        match STMT_INLINE_ACTIVE.compare_exchange(cur, cur + 1, Ordering::SeqCst, Ordering::SeqCst)
+        {
             Ok(_) => return Some(StmtActiveSlot(())),
             Err(now) => cur = now,
         }
@@ -865,8 +875,9 @@ impl StmtTaskShared {
             let x = q.exec.as_mut().expect("statement task executor state");
             x.with_mut(|d| -> PgResult<()> {
                 let crate::querydesc::ExecData { estate, planstate } = d;
-                let planstate =
-                    planstate.as_mut().expect("statement task run without a plan state");
+                let planstate = planstate
+                    .as_mut()
+                    .expect("statement task run without a plan state");
                 estate.es_direction = ScanDirection::ForwardScanDirection;
                 let mut sink = RowEmitSink::new(self.funnel.producer(0));
                 loop {
@@ -918,8 +929,12 @@ fn stmt_task_cancel_disposition() {
 /// and lock-grouped by serve_ticket; owns the eager binder wrap + the
 /// pinned drive + payload error routing.
 fn stmt_task_standing_driver(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
-    let Ok(payload) = private.downcast::<StmtTaskShared>() else { return };
+    let Some(private) = shared.private() else {
+        return;
+    };
+    let Ok(payload) = private.downcast::<StmtTaskShared>() else {
+        return;
+    };
     helper_drive_stmt(&payload);
 }
 
@@ -974,7 +989,9 @@ fn helper_drive_stmt(payload: &Arc<StmtTaskShared>) {
             procsignal::ThreadSignalHandler::Simple(stmt_task_cancel_disposition),
         );
         init_small::globals::SetQueryCancelPending(false);
-        payload.worker_pid.store(init_small::globals::MyProcPid(), Ordering::SeqCst);
+        payload
+            .worker_pid
+            .store(init_small::globals::MyProcPid(), Ordering::SeqCst);
         let r = drive_bound_stmt(payload, &mut local, &rg, &mut lane.borrow_mut());
         // A chase signal that landed after the statement finished must not
         // leak into this thread's next serve.
@@ -1019,8 +1036,8 @@ fn helper_drive_stmt_sticky(
     target: &Arc<parallel::ParallelShared>,
     rg: &runtime::RgHandle,
 ) {
-    let sticky = !parallel::standing::serving_on_pool()
-        || parallel::standing::pool_sticky_enabled();
+    let sticky =
+        !parallel::standing::serving_on_pool() || parallel::standing::pool_sticky_enabled();
     let binding = match parallel::DeferredQueryTaskBinding::new(target, sticky) {
         Ok(b) => b,
         Err(e) => {
@@ -1064,7 +1081,9 @@ fn helper_drive_stmt_sticky(
         procsignal::ThreadSignalHandler::Simple(stmt_task_cancel_disposition),
     );
     init_small::globals::SetQueryCancelPending(false);
-    payload.worker_pid.store(init_small::globals::MyProcPid(), Ordering::SeqCst);
+    payload
+        .worker_pid
+        .store(init_small::globals::MyProcPid(), Ordering::SeqCst);
     let r = catch_unwind(AssertUnwindSafe(|| {
         drive_bound_stmt(payload, &mut local, rg, &mut lane)
     }));
@@ -1113,7 +1132,10 @@ fn drive_bound_stmt(
     lane: &mut Option<runtime::ExternalLane>,
 ) -> PgResult<()> {
     let _end = super::standing_channel::drive_pool_serve(payload.rt, local, rg, lane);
-    debug_assert!(payload.rt.debug_pin_settled(local), "pin unsettled after statement drive");
+    debug_assert!(
+        payload.rt.debug_pin_settled(local),
+        "pin unsettled after statement drive"
+    );
     if payload.failed.load(Ordering::SeqCst) {
         // The morsel body recorded the real error (fail() is first-wins);
         // this marker routes the binder through its transaction-abort
@@ -1131,7 +1153,9 @@ fn stmt_task_worker_main(_shared: &parallel::ParallelShared) -> PgResult<()> {
 }
 
 fn stmt_task_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
-    let Some(payload) = private.downcast_ref::<StmtTaskShared>() else { return };
+    let Some(payload) = private.downcast_ref::<StmtTaskShared>() else {
+        return;
+    };
     let rg = payload.rg.get().and_then(|w| w.upgrade());
     if let Some(rg) = &rg {
         rg.abort();
@@ -1145,7 +1169,10 @@ fn stmt_task_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
 fn ensure_hooks_registered() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
-        parallel::register_parallel_worker_entrypoint("pgrust_stmt_task_main", stmt_task_worker_main);
+        parallel::register_parallel_worker_entrypoint(
+            "pgrust_stmt_task_main",
+            stmt_task_worker_main,
+        );
         parallel::register_parallel_private_shutdown(stmt_task_private_shutdown);
     });
 }
@@ -1325,8 +1352,13 @@ pub(super) fn engage_stmt_task(
     emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>,
 ) -> PgResult<StmtTaskOutcome> {
     let funnel = stmt_funnel();
-    let payload =
-        StmtTaskShared::new(rt, pstmt, query_text.to_string(), eflags, Arc::clone(&funnel));
+    let payload = StmtTaskShared::new(
+        rt,
+        pstmt,
+        query_text.to_string(),
+        eflags,
+        Arc::clone(&funnel),
+    );
 
     // EnterParallelMode brackets the engagement (the pcxt ceremony's
     // CreateParallelContext asserts it; the fast path keeps the leader-side
@@ -1363,8 +1395,11 @@ impl Drop for StmtJoinGuard {
         // Abort + demand close + join only when something is actually
         // left to reap.
         let incomplete = rg.as_ref().is_some_and(|rg| rg.try_outcome().is_none());
-        let slot_held =
-            payload.standing.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+        let slot_held = payload
+            .standing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some();
         if incomplete || slot_held {
             if let Some(rg) = &rg {
                 rg.abort();
@@ -1411,8 +1446,7 @@ fn engage_ceremony_fast(
     payload: &Arc<StmtTaskShared>,
     emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>,
 ) -> PgResult<StmtTaskOutcome> {
-    let Some(shared) = parallel::statement_task_shared(parallel::query_task_policy_probe())?
-    else {
+    let Some(shared) = parallel::statement_task_shared(parallel::query_task_policy_probe())? else {
         return Ok(StmtTaskOutcome::CeremonyRefused);
     };
     payload
@@ -1424,7 +1458,9 @@ fn engage_ceremony_fast(
     // Armed BEFORE the submission so every exit — `?`, panic, completion —
     // completes the RG and joins the board before this frame (and with it
     // the leader arena the SendConst pstmt lives in) unwinds.
-    let _join = StmtJoinGuard { payload: Arc::clone(payload) };
+    let _join = StmtJoinGuard {
+        payload: Arc::clone(payload),
+    };
     run_channel_ladder(rt, funnel, payload, emit_row)
 }
 
@@ -1440,21 +1476,21 @@ fn engage_ceremony_pcxt(
     ensure_hooks_registered();
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_stmt_task_main", 1)?;
 
-    let body = (|emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>|
-     -> PgResult<StmtTaskOutcome> {
-        parallel::InitializeParallelDSM(pcxt)?;
-        // The REAL session policy: the leader gates refused any set flag, so
-        // an install that still carries one is a late state change — the
-        // binder's validate() refuses fail-closed on the worker.
-        parallel::InstallQueryTaskBinding(pcxt, parallel::query_task_policy_probe())?;
-        payload
-            .pcxt_shared
-            .set(parallel::shared_for(pcxt))
-            .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
-        parallel::set_private(pcxt, Arc::clone(payload) as _);
-        parallel::set_standing_driver(pcxt, stmt_driver());
-        run_channel_ladder(rt, funnel, payload, emit_row)
-    })(emit_row);
+    let body =
+        (|emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>| -> PgResult<StmtTaskOutcome> {
+            parallel::InitializeParallelDSM(pcxt)?;
+            // The REAL session policy: the leader gates refused any set flag, so
+            // an install that still carries one is a late state change — the
+            // binder's validate() refuses fail-closed on the worker.
+            parallel::InstallQueryTaskBinding(pcxt, parallel::query_task_policy_probe())?;
+            payload
+                .pcxt_shared
+                .set(parallel::shared_for(pcxt))
+                .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
+            parallel::set_private(pcxt, Arc::clone(payload) as _);
+            parallel::set_standing_driver(pcxt, stmt_driver());
+            run_channel_ladder(rt, funnel, payload, emit_row)
+        })(emit_row);
 
     // Teardown tail: a submitted RG must be COMPLETE before
     // DestroyParallelContext (the private-shutdown hook covers unwinds;
@@ -1489,15 +1525,21 @@ fn run_channel_ladder(
     );
 
     let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(payload) as _;
-    let source: Arc<dyn runtime::MorselSource> =
-        Arc::new(runtime::SyntheticMorselSource::new(1));
+    let source: Arc<dyn runtime::MorselSource> = Arc::new(runtime::SyntheticMorselSource::new(1));
     static NEXT_QID: AtomicUsize = AtomicUsize::new(1);
     let spec = runtime::QuerySpec {
         query_id: NEXT_QID.fetch_add(1, Ordering::SeqCst) as u64,
-        tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
+        tasksets: vec![runtime::TaskSetSpec {
+            source,
+            work,
+            deps: vec![],
+        }],
     };
     let set_rg = |rg: &runtime::RgHandle| {
-        payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
+        payload
+            .rg
+            .set(rg.downgrade())
+            .unwrap_or_else(|_| unreachable!("rg set once"));
     };
     let (rg, waiter) = match &pool {
         Some((_, descriptor)) => rt.submit_pinned_bound(
@@ -1526,7 +1568,15 @@ fn run_channel_ladder(
     if let Some((entry, _)) = &pool {
         *payload.standing.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(entry));
         match wait_pump(
-            payload, rt, funnel, entry, "pooldb", &rg, &waiter, emit_row, &mut emitted,
+            payload,
+            rt,
+            funnel,
+            entry,
+            "pooldb",
+            &rg,
+            &waiter,
+            emit_row,
+            &mut emitted,
             &mut stopped,
         )? {
             StmtWait::Done(o) => {
@@ -1545,7 +1595,15 @@ fn run_channel_ladder(
     if let Some(entry) = engaged {
         *payload.standing.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&entry));
         match wait_pump(
-            payload, rt, funnel, &entry, "standing", &rg, &waiter, emit_row, &mut emitted,
+            payload,
+            rt,
+            funnel,
+            &entry,
+            "standing",
+            &rg,
+            &waiter,
+            emit_row,
+            &mut emitted,
             &mut stopped,
         )? {
             StmtWait::Done(o) => {
@@ -1633,7 +1691,11 @@ fn wait_pump(
     stopped: &mut bool,
 ) -> PgResult<StmtWait> {
     let take_slot = || {
-        payload.standing.lock().unwrap_or_else(|p| p.into_inner()).take();
+        payload
+            .standing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
     };
     let mut drain = funnel.drain();
     let t0 = pg_clock::MonoStamp::now();
@@ -1651,13 +1713,19 @@ fn wait_pump(
             parallel::standing::close_and_await(entry);
             // Interrupt/error-exit witness (the completion path prints
             // "engaged"; chased statements never reach it).
-            lane_trace(&format!("stmt-task: chased {channel} dop={}", entry.claimed()));
+            lane_trace(&format!(
+                "stmt-task: chased {channel} dop={}",
+                entry.claimed()
+            ));
             return Err(e);
         }
         if let Some(o) = waiter.try_wait() {
             take_slot();
             parallel::standing::close_and_await(entry);
-            lane_trace(&format!("stmt-task: engaged {channel} dop={}", entry.claimed()));
+            lane_trace(&format!(
+                "stmt-task: engaged {channel} dop={}",
+                entry.claimed()
+            ));
             return Ok(StmtWait::Done(o));
         }
         // Session-thread interrupts (pg_cancel_backend, statement_timeout,
@@ -1671,13 +1739,18 @@ fn wait_pump(
             parallel::standing::close_and_await(entry);
             // Interrupt/error-exit witness (the completion path prints
             // "engaged"; chased statements never reach it).
-            lane_trace(&format!("stmt-task: chased {channel} dop={}", entry.claimed()));
+            lane_trace(&format!(
+                "stmt-task: chased {channel} dop={}",
+                entry.claimed()
+            ));
             return Err(e);
         }
         let started = payload.started.load(Ordering::SeqCst);
         let refused = entry.refused() + payload.refused.load(Ordering::SeqCst);
         if started == 0 && refused >= entry.tickets() {
-            lane_trace(&format!("stmt-task: {channel} refused ({refused} refusals)"));
+            lane_trace(&format!(
+                "stmt-task: {channel} refused ({refused} refusals)"
+            ));
             take_slot();
             parallel::standing::close_and_await(entry);
             return Ok(StmtWait::Fallback);
@@ -1701,7 +1774,10 @@ fn wait_pump(
             if let Some(o) = waiter.try_wait() {
                 take_slot();
                 parallel::standing::close_and_await(entry);
-                lane_trace(&format!("stmt-task: engaged {channel} dop={}", entry.claimed()));
+                lane_trace(&format!(
+                    "stmt-task: engaged {channel} dop={}",
+                    entry.claimed()
+                ));
                 return Ok(StmtWait::Done(o));
             }
             if let Some(e) = payload.take_error() {
@@ -1717,7 +1793,10 @@ fn wait_pump(
             parallel::standing::close_and_await(entry);
             // Interrupt/error-exit witness (the completion path prints
             // "engaged"; chased statements never reach it).
-            lane_trace(&format!("stmt-task: chased {channel} dop={}", entry.claimed()));
+            lane_trace(&format!(
+                "stmt-task: chased {channel} dop={}",
+                entry.claimed()
+            ));
             return Err(Box::new(PgError::new(
                 ERROR,
                 "statement task worker died before completing the statement",
@@ -1733,7 +1812,10 @@ fn wait_pump(
             parallel::standing::close_and_await(entry);
             // Interrupt/error-exit witness (the completion path prints
             // "engaged"; chased statements never reach it).
-            lane_trace(&format!("stmt-task: chased {channel} dop={}", entry.claimed()));
+            lane_trace(&format!(
+                "stmt-task: chased {channel} dop={}",
+                entry.claimed()
+            ));
             return Err(e);
         }
     }
@@ -1843,14 +1925,14 @@ pub(crate) fn try_stmt_task<'mcx, 'd>(
     }
     // Binder policy: shapes validate() would refuse must not publish.
     let policy = parallel::query_task_policy_probe();
-    if policy.has_params
-        || policy.temp_state
-        || policy.serializable
-        || policy.pending_invalidations
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
     {
         return refuse(StmtTaskRefusal::BinderPolicy);
     }
-    debug_assert!(::snapmgr::ActiveSnapshotSet(), "portal run without an active snapshot");
+    debug_assert!(
+        ::snapmgr::ActiveSnapshotSet(),
+        "portal run without an active snapshot"
+    );
 
     // GL-STMTTASK-2 change 3 — INLINE-EXECUTE (run-on-arrival, the survey's
     // Cilk work-first / Go doctrine): if a pool seat is free WITHOUT a
@@ -1934,7 +2016,11 @@ pub(crate) fn try_stmt_task<'mcx, 'd>(
             // SAFETY: `wire_slot` is a Minimal slot; `img` owns the bytes
             // and outlives this store+receive (dropped after).
             unsafe {
-                ::exectuples::exec_store_minimal_tuple_ptr(&mut wire_slot, wire_mcx, img.as_mtup_ptr());
+                ::exectuples::exec_store_minimal_tuple_ptr(
+                    &mut wire_slot,
+                    wire_mcx,
+                    img.as_mtup_ptr(),
+                );
             }
             // Lifetime bridge at the dest seam (the funnel emit_row
             // precedent): the receiver only copies datums out during the

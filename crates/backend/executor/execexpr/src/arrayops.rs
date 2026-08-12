@@ -150,7 +150,10 @@ pub fn eval_array_expr(st: &mut ArrayExprState) -> PgResult<NullableDatum> {
         }
         let arr = datum_array_image(e.value, &st.resmcx)?;
         if st.elemtype != arrayfuncs::arr_elemtype(arr) {
-            return Err(array_merge_error(st.elemtype, arrayfuncs::arr_elemtype(arr)));
+            return Err(array_merge_error(
+                st.elemtype,
+                arrayfuncs::arr_elemtype(arr),
+            ));
         }
         let this_ndims = arrayfuncs::arr_ndim(arr);
         if this_ndims <= 0 {
@@ -280,7 +283,10 @@ pub fn eval_array_expr(st: &mut ArrayExprState) -> PgResult<NullableDatum> {
         iitem += sub.nitems;
     }
 
-    Ok(NullableDatum { value: Datum::from_usize(out.leak().as_ptr() as usize), isnull: false })
+    Ok(NullableDatum {
+        value: Datum::from_usize(out.leak().as_ptr() as usize),
+        isnull: false,
+    })
 }
 
 // SubscriptingRefState + ArraySubWorkspace, one flat struct (the handler set
@@ -379,7 +385,10 @@ pub fn sbsref_fetch_slice(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<
         st.refelemlength,
         st.refelemalign,
     )?;
-    Ok(NullableDatum { value: Datum::from_usize(img.leak().as_ptr() as usize), isnull: false })
+    Ok(NullableDatum {
+        value: Datum::from_usize(img.leak().as_ptr() as usize),
+        isnull: false,
+    })
 }
 
 pub fn sbsref_assign(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<NullableDatum> {
@@ -420,7 +429,10 @@ pub fn sbsref_assign(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<Nulla
         st.refelembyval,
         st.refelemalign,
     )?;
-    Ok(NullableDatum { value: Datum::from_usize(img.leak().as_ptr() as usize), isnull: false })
+    Ok(NullableDatum {
+        value: Datum::from_usize(img.leak().as_ptr() as usize),
+        isnull: false,
+    })
 }
 
 pub fn sbsref_assign_slice(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<NullableDatum> {
@@ -467,12 +479,18 @@ pub fn sbsref_assign_slice(st: &mut SbsRefState, cur: NullableDatum) -> PgResult
         st.refelembyval,
         st.refelemalign,
     )?;
-    Ok(NullableDatum { value: Datum::from_usize(img.leak().as_ptr() as usize), isnull: false })
+    Ok(NullableDatum {
+        value: Datum::from_usize(img.leak().as_ptr() as usize),
+        isnull: false,
+    })
 }
 
 pub fn sbsref_fetch_old(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<()> {
     if cur.isnull {
-        st.prev = NullableDatum { value: Datum::null(), isnull: true };
+        st.prev = NullableDatum {
+            value: Datum::null(),
+            isnull: true,
+        };
     } else if st.numlower != 0 {
         // Slices of non-null arrays are never null.
         st.prev = sbsref_fetch_slice(st, cur)?;
@@ -556,7 +574,10 @@ pub fn eval_array_coerce(st: &mut ArrayCoerceState, arrd: Datum) -> PgResult<Nul
     for i in 0..n {
         // SAFETY: slot is a live compile-mcx cell owned by this step.
         unsafe {
-            elem.slot.write(NullableDatum { value: values[i], isnull: nulls[i] });
+            elem.slot.write(NullableDatum {
+                value: values[i],
+                isnull: nulls[i],
+            });
         }
         let mut slots = crate::interp::EvalSlots::default();
         let r = crate::interp::exec_eval_expr(sub, &mut slots)?;
@@ -576,8 +597,7 @@ pub fn eval_array_coerce(st: &mut ArrayCoerceState, arrd: Datum) -> PgResult<Nul
                 if ::types_tuple::varatt::varatt_is_4b_u(p) {
                     ::adt_scalar::datum_copy(mcx, r.value, false, -1)?
                 } else {
-                    let raw =
-                        core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
+                    let raw = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
                     let flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
                     Datum::from_usize(flat.leak().as_ptr() as usize)
                 }
@@ -593,7 +613,11 @@ pub fn eval_array_coerce(st: &mut ArrayCoerceState, arrd: Datum) -> PgResult<Nul
     let result = arrayfuncs::construct_md_array(
         mcx,
         &out_values,
-        if hasnulls { Some(&out_nulls) } else { Option::None },
+        if hasnulls {
+            Some(&out_nulls)
+        } else {
+            Option::None
+        },
         ndim,
         &dims[..ndim as usize],
         &lbs[..ndim as usize],

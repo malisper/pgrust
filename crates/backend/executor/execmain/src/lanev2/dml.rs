@@ -286,7 +286,11 @@ impl<'mcx> TupleOp<'mcx> for DmlInsertOp<'_, 'mcx> {
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<OpStatus> {
         debug_assert!(self.loop_top_owed);
-        let Self { mt, epq, loop_top_owed } = self;
+        let Self {
+            mt,
+            epq,
+            loop_top_owed,
+        } = self;
         loop {
             ::nodemodifytable::mt_row_prologue(mt, estate);
             if !::nodemodifytable::mt_pending(mt) {
@@ -295,10 +299,11 @@ impl<'mcx> TupleOp<'mcx> for DmlInsertOp<'_, 'mcx> {
             }
             // The ONE epq_eval recheck-driver closure (contract §4.2),
             // spelled exactly as modify_table_arm's fallback spells it.
-            let rslot = ::nodemodifytable::mt_resume(mt, estate, &mut |subs, e, inputslot, rti| {
-                epq.result_rti = rti;
-                crate::epq::eval_plan_qual(epq, subs, e, inputslot)
-            })?;
+            let rslot =
+                ::nodemodifytable::mt_resume(mt, estate, &mut |subs, e, inputslot, rti| {
+                    epq.result_rti = rti;
+                    crate::epq::eval_plan_qual(epq, subs, e, inputslot)
+                })?;
             if let Some(rslot) = rslot {
                 // Row emitted from the deferred action; the loop top stays
                 // owed for the next round (mt_step returns Some here and its
@@ -338,7 +343,10 @@ impl<'mcx> TupleOp<'mcx> for DmlInsertOp<'_, 'mcx> {
         out: &mut dyn Sink<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<OpStatus> {
-        debug_assert!(!self.loop_top_owed, "child pulled without the loop-top seams");
+        debug_assert!(
+            !self.loop_top_owed,
+            "child pulled without the loop-top seams"
+        );
         self.loop_top_owed = true;
         let Self { mt, epq, .. } = self;
         // The ONE epq_eval closure again — TM_Updated rechecks initiated by
@@ -408,11 +416,9 @@ pub fn try_own_modify_table<'mcx>(
     // per §2's preference; knob machinery in the wave-5 append region
     // below). The probe's detail string carries mechanism attribution
     // (contract §1).
-    if let Some(detail) = ::nodemodifytable::mt_lane_shape_refusal(
-        &node.mt,
-        dml_ud_enabled(),
-        dml_oc_enabled(),
-    ) {
+    if let Some(detail) =
+        ::nodemodifytable::mt_lane_shape_refusal(&node.mt, dml_ud_enabled(), dml_oc_enabled())
+    {
         stats::tick_refused(ShapeClass::ModifyTable, RefuseReason::DmlShape);
         if super::lane_trace_enabled() {
             super::lane_trace(&format!("dml: shape refused ({detail})"));
@@ -443,7 +449,11 @@ pub fn try_own_modify_table<'mcx>(
     // mt + epq, the driver holds the subplan. No clear-on-finish:
     // exec_modify_table returns end-of-set without clearing any result slot.
     let crate::procnode::ModifyTablePlanState { mt, subplan, epq } = node;
-    let mut op = DmlInsertOp { mt, epq, loop_top_owed: true };
+    let mut op = DmlInsertOp {
+        mt,
+        epq,
+        loop_top_owed: true,
+    };
     let mut root = RootAdapter::new(None);
     match subplan {
         // Lane-fed INSERT..SELECT (and, under the UD stretch, the
@@ -575,7 +585,14 @@ pub fn try_own_lock_rows_dml<'mcx>(
     let mut op = LockRowsOp { lr: state, epq };
     // No clear-on-finish: exec_lock_rows returns end-of-set bare.
     let mut root = RootAdapter::new(None);
-    pull_step_rows(&mut **outer, &mut LockRowsChildSource, &mut op, &mut root, estate).map(Some)
+    pull_step_rows(
+        &mut **outer,
+        &mut LockRowsChildSource,
+        &mut op,
+        &mut root,
+        estate,
+    )
+    .map(Some)
 }
 
 // ===== WAVE-5 APPEND REGION — do not edit above =====
@@ -668,4 +685,3 @@ pub(crate) fn dml_oc_set_for_tests(on: bool) {
 // Oracle corpus KEPT: scripts/dualexec/corpus-dml-rowchain.sql prices the
 // post-deletion world. The DmlInsertOp leaf (dmlleaf) is untouched — a
 // different, letter-flat surface.
-

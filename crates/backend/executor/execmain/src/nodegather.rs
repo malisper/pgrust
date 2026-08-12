@@ -111,10 +111,7 @@ pub(crate) fn lease_gather_width(
 
 /// Post-launch settle: charge only the gang's ACTIVE width (launched may
 /// be below the grant — registration slots, bgworker limits).
-pub(crate) fn settle_gather_width(
-    lease: &mut Option<runtime::ParallelWidthLease>,
-    launched: i32,
-) {
+pub(crate) fn settle_gather_width(lease: &mut Option<runtime::ParallelWidthLease>, launched: i32) {
     if let Some(l) = lease.as_mut() {
         l.settle(launched.max(0) as u32);
     }
@@ -154,7 +151,10 @@ pub(crate) fn mirror_gather_width(
 fn width_mirror_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
+        matches!(
+            std::env::var("PGRUST_LANE_V2_TRACE").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
@@ -183,8 +183,12 @@ pub fn exec_init_gather<'mcx>(
     let mcx = estate.es_query_cxt;
     let ecxt = estate.exec_assign_expr_context();
 
-    let outer_plan =
-        node.plan.lefttree.expect("Gather without an outer plan").as_plan().unwrap();
+    let outer_plan = node
+        .plan
+        .lefttree
+        .expect("Gather without an outer plan")
+        .as_plan()
+        .unwrap();
     let tup_desc = outer.exec_get_result_type(outer_plan)?;
 
     let proj = ::execscan::exec_conditional_assign_projection_info(
@@ -264,7 +268,12 @@ fn gather_startup<'mcx>(
         parallel::LaunchParallelWorkers(pei.pcxt)?;
         node.nworkers_launched = parallel::nworkers_launched(pei.pcxt);
         settle_gather_width(&mut node.width_lease, node.nworkers_launched);
-        mirror_gather_width(face, gather.num_workers, &node.width_lease, node.nworkers_launched);
+        mirror_gather_width(
+            face,
+            gather.num_workers,
+            &node.width_lease,
+            node.nworkers_launched,
+        );
         execparallel::account_workers(estate, pei.pcxt);
 
         if node.nworkers_launched > 0 {
@@ -299,7 +308,10 @@ pub fn exec_gather<'mcx>(
         gather_startup(node, outer, estate)?;
     }
 
-    let ecxt = node.ps.ps_ExprContext.expect("GatherState without ExprContext");
+    let ecxt = node
+        .ps
+        .ps_ExprContext
+        .expect("GatherState without ExprContext");
     estate.reset_expr_context(ecxt);
 
     let Some(slot) = gather_getnext(node, outer, estate)? else {
@@ -309,7 +321,10 @@ pub fn exec_gather<'mcx>(
         return Ok(Some(slot));
     }
     estate.ecxt_mut(ecxt).ecxt_outertuple = Some(slot);
-    let result_slot = node.ps.ps_ResultTupleSlot.expect("projection without result slot");
+    let result_slot = node
+        .ps
+        .ps_ResultTupleSlot
+        .expect("projection without result slot");
     let proj = node.ps.ps_ProjInfo.as_deref_mut().unwrap();
     // The Gather targetlist is exactly where the planner puts
     // parallel-restricted expressions (SubPlans never ship to workers), so
@@ -350,7 +365,10 @@ fn gather_getnext<'mcx>(
             apply_pending_outer_chg(
                 &mut node.outer_chg,
                 outer,
-                node.plan.plan.lefttree.expect("Gather without an outer plan"),
+                node.plan
+                    .plan
+                    .lefttree
+                    .expect("Gather without an outer plan"),
                 estate,
             )?;
             if let Some(id) = exec_proc_node(outer, estate)? {
@@ -377,11 +395,13 @@ fn gather_readnext(
 
         debug_assert!(node.nextreader < node.nreaders);
         let mut done = false;
-        let tup = node.reader[node.nextreader].next(true, &mut done)?.map(|bytes| {
-            core::ptr::NonNull::new(bytes.as_ptr().cast_mut())
-                .expect("queue payload is non-null")
-                .cast::<::types_tuple::MinimalTupleData>()
-        });
+        let tup = node.reader[node.nextreader]
+            .next(true, &mut done)?
+            .map(|bytes| {
+                core::ptr::NonNull::new(bytes.as_ptr().cast_mut())
+                    .expect("queue payload is non-null")
+                    .cast::<::types_tuple::MinimalTupleData>()
+            });
 
         if done {
             debug_assert!(tup.is_none());
@@ -435,7 +455,12 @@ fn gather_readnext(
 pub(crate) fn wait_on_my_latch(wait_event: u32) -> PgResult<()> {
     let latch = init_small::globals::MyLatch().expect("gather leader without MyLatch");
     ::parallel::gtrace("l.wait.begin");
-    latch::WaitLatch(Some(latch), WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0, wait_event)?;
+    latch::WaitLatch(
+        Some(latch),
+        WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
+        0,
+        wait_event,
+    )?;
     ::parallel::gtrace("l.wait.end");
     latch::ResetLatch(latch);
     Ok(())

@@ -111,9 +111,7 @@ pub(super) struct InstrumentMerged {
     pub morsel_max_ns: u64,
 }
 
-pub(super) fn merge<'a>(
-    parts: impl Iterator<Item = &'a InstrumentPartial>,
-) -> InstrumentMerged {
+pub(super) fn merge<'a>(parts: impl Iterator<Item = &'a InstrumentPartial>) -> InstrumentMerged {
     let mut m = InstrumentMerged::default();
     for p in parts {
         if p.is_empty() {
@@ -127,20 +125,14 @@ pub(super) fn merge<'a>(
             *a += b;
         }
         m.busy_ns += p.busy_ns;
-        if p.first_start_ns != 0
-            && (m.first_start_ns == 0 || p.first_start_ns < m.first_start_ns)
-        {
+        if p.first_start_ns != 0 && (m.first_start_ns == 0 || p.first_start_ns < m.first_start_ns) {
             m.first_start_ns = p.first_start_ns;
         }
         m.last_end_ns = m.last_end_ns.max(p.last_end_ns);
-        if p.last_end_ns != 0
-            && (m.min_last_end_ns == 0 || p.last_end_ns < m.min_last_end_ns)
-        {
+        if p.last_end_ns != 0 && (m.min_last_end_ns == 0 || p.last_end_ns < m.min_last_end_ns) {
             m.min_last_end_ns = p.last_end_ns;
         }
-        if p.morsel_min_ns != 0
-            && (m.morsel_min_ns == 0 || p.morsel_min_ns < m.morsel_min_ns)
-        {
+        if p.morsel_min_ns != 0 && (m.morsel_min_ns == 0 || p.morsel_min_ns < m.morsel_min_ns) {
             m.morsel_min_ns = p.morsel_min_ns;
         }
         m.morsel_max_ns = m.morsel_max_ns.max(p.morsel_max_ns);
@@ -206,13 +198,13 @@ pub(super) fn ea_mode_refuse_reason(estate: &EStateData<'_>) -> &'static str {
 /// crossed them). Post-EndLoop fields written directly with running=false,
 /// so the explain seam's forced InstrEndLoop is a no-op. TIMING OFF leaves
 /// every timing field zero — exactly INSTRUMENT_ROWS output.
-pub(super) fn ea_fill_scan_node(
-    estate: &mut EStateData<'_>,
-    plan_node_id: i32,
-    rows: &EaRowTally,
-) {
-    let Ok(ix) = usize::try_from(plan_node_id) else { return };
-    let Some(i) = estate.es_instrumentation.get_mut(ix) else { return };
+pub(super) fn ea_fill_scan_node(estate: &mut EStateData<'_>, plan_node_id: i32, rows: &EaRowTally) {
+    let Ok(ix) = usize::try_from(plan_node_id) else {
+        return;
+    };
+    let Some(i) = estate.es_instrumentation.get_mut(ix) else {
+        return;
+    };
     i.ntuples += rows.survived as f64;
     i.nfiltered1 += rows.scanned.saturating_sub(rows.survived) as f64;
     i.nloops += 1.0;
@@ -226,8 +218,12 @@ pub(super) fn ea_fill_passthrough_node(
     plan_node_id: i32,
     rows_out: u64,
 ) {
-    let Ok(ix) = usize::try_from(plan_node_id) else { return };
-    let Some(i) = estate.es_instrumentation.get_mut(ix) else { return };
+    let Ok(ix) = usize::try_from(plan_node_id) else {
+        return;
+    };
+    let Some(i) = estate.es_instrumentation.get_mut(ix) else {
+        return;
+    };
     i.ntuples += rows_out as f64;
     i.nloops += 1.0;
 }

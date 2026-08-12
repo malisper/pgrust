@@ -116,8 +116,7 @@ pub(crate) fn epq_recheck_admission<'mcx>(
     for &(class, _verdict) in cache.as_ref().expect("just ensured").entries.iter() {
         stats::tick_refused(class, RefuseReason::Epq);
         #[cfg(test)]
-        super::EPQ_ADMISSION_REFUSED_FOR_TESTS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        super::EPQ_ADMISSION_REFUSED_FOR_TESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -283,7 +282,12 @@ impl EpqCapturedSource {
             // (join-source), which is NOT this source's shape.
             return None;
         }
-        Some(EpqCapturedSource { idx, feed, positioned: false, staged: None })
+        Some(EpqCapturedSource {
+            idx,
+            feed,
+            positioned: false,
+            staged: None,
+        })
     }
 }
 
@@ -376,11 +380,7 @@ impl<'mcx> BatchGranuleSource<'mcx> for EpqCapturedSource {
         }
     }
 
-    fn emit(
-        &mut self,
-        _estate: &mut EStateData<'mcx>,
-        i: u32,
-    ) -> PgResult<Option<ExecSlotId>> {
+    fn emit(&mut self, _estate: &mut EStateData<'mcx>, i: u32) -> PgResult<Option<ExecSlotId>> {
         if i != 0 {
             return Err(epq_capture_misuse("emit past the singleton row"));
         }
@@ -426,11 +426,17 @@ pub(crate) fn epq_captured_probe_for_tests<'mcx>(
     let Some(mut src) = EpqCapturedSource::for_recheck(estate, scanrelid, feed) else {
         return Ok(None);
     };
-    let map = src.granule_map(estate)?.expect("captured source has geometry");
+    let map = src
+        .granule_map(estate)?
+        .expect("captured source has geometry");
     let empty_claim_refused = src.position(estate, 0..0).is_err();
     src.position(estate, 0..1)?;
     let first_batch = src.next_batch(estate)?;
-    let emitted = if first_batch > 0 { src.emit(estate, 0)? } else { None };
+    let emitted = if first_batch > 0 {
+        src.emit(estate, 0)?
+    } else {
+        None
+    };
     let second_batch = src.next_batch(estate)?;
     src.end_claim(estate)?;
     let reemit_refused = src.emit(estate, 0).is_err();

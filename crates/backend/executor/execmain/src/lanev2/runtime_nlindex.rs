@@ -201,7 +201,10 @@ impl RuntimeNlIndexShared {
                 )));
             };
             crate::querydesc::with_qd(ex.qd, |q| {
-                let x = q.exec.as_mut().expect("runtime nlindex worker executor state");
+                let x = q
+                    .exec
+                    .as_mut()
+                    .expect("runtime nlindex worker executor state");
                 x.with_mut(|d| -> PgResult<()> {
                     let estate = &mut d.estate;
                     let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut()
@@ -212,14 +215,18 @@ impl RuntimeNlIndexShared {
                         )));
                     };
                     let aps = &mut **aps;
-                    let crate::procnode::PlanStateNode::NestLoop(nlnode) = &mut aps.outer
-                    else {
+                    let crate::procnode::PlanStateNode::NestLoop(nlnode) = &mut aps.outer else {
                         return Err(Box::new(PgError::new(
                             ERROR,
                             "runtime nlindex worker outer node is not a NestLoop",
                         )));
                     };
-                    let crate::procnode::NestLoopNode { state: nls, outer, inner, .. } = nlnode;
+                    let crate::procnode::NestLoopNode {
+                        state: nls,
+                        outer,
+                        inner,
+                        ..
+                    } = nlnode;
                     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut **outer else {
                         return Err(Box::new(PgError::new(
                             ERROR,
@@ -234,19 +241,20 @@ impl RuntimeNlIndexShared {
                     // report (the runtime_scan discipline verbatim).
                     if heapfeed_v2_enabled() && ::nodeseqscan::seq_scan_is_heap(ss) {
                         let mut src = HeapBatchSource::new(&mut *ss);
-                        let drove = drive_claim(
-                            &mut src, nls, inner, agg, estate, &range, &interrupted,
-                        );
+                        let drove =
+                            drive_claim(&mut src, nls, inner, agg, estate, &range, &interrupted);
                         let settled = src.end_claim(estate);
                         drove?;
                         settled?;
                     } else {
                         let mut src = SeqScanSource::new(&mut *ss);
-                        let drove = drive_claim(
-                            &mut src, nls, inner, agg, estate, &range, &interrupted,
-                        );
-                        let settled =
-                            if heapfeed_v2_enabled() { src.end_claim(estate) } else { Ok(()) };
+                        let drove =
+                            drive_claim(&mut src, nls, inner, agg, estate, &range, &interrupted);
+                        let settled = if heapfeed_v2_enabled() {
+                            src.end_claim(estate)
+                        } else {
+                            Ok(())
+                        };
                         drove?;
                         settled?;
                     }
@@ -254,7 +262,9 @@ impl RuntimeNlIndexShared {
                     // the worker's last export precedes its settle, and
                     // therefore RG completion (the runtime_scan discipline).
                     let slot = worker - self.pins_base;
-                    let mut g = self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
+                    let mut g = self.partials[slot]
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     if poly_mode(&aps.agg) {
                         agg_poly_export_partial_into(
                             &aps.agg,
@@ -294,7 +304,13 @@ where
     S: BatchGranuleSource<'mcx>,
     F: Fn() -> bool,
 {
-    src.position(estate, runtime::MorselRange { start: range.start, end: range.end })?;
+    src.position(
+        estate,
+        runtime::MorselRange {
+            start: range.start,
+            end: range.end,
+        },
+    )?;
     let clear_inline = !heapfeed_v2_enabled();
     loop {
         let n = src.next_batch(estate)?;
@@ -341,8 +357,12 @@ where
 // ---------------------------------------------------------------------------
 
 fn runtime_nlindex_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
-    let Some(private) = shared.private() else { return Ok(()) };
-    let Ok(payload) = private.downcast::<RuntimeNlIndexShared>() else { return Ok(()) };
+    let Some(private) = shared.private() else {
+        return Ok(());
+    };
+    let Ok(payload) = private.downcast::<RuntimeNlIndexShared>() else {
+        return Ok(());
+    };
     parallel::gtrace("wn.entry.drive.begin");
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive_entry(&payload)));
     let outcome = match r {
@@ -371,7 +391,9 @@ fn runtime_nlindex_worker_main(shared: &parallel::ParallelShared) -> PgResult<()
 }
 
 fn helper_drive_entry(payload: &Arc<RuntimeNlIndexShared>) -> PgResult<()> {
-    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return Ok(()) };
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else {
+        return Ok(());
+    };
     let Some(lane) = payload.rt.acquire_external_lane() else {
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return Ok(());
@@ -426,7 +448,10 @@ fn build_worker_exec(payload: &RuntimeNlIndexShared) -> PgResult<()> {
         let armed = (|| -> PgResult<()> {
             crate::execmain::executor_start_seam(qd, payload.eflags)?;
             crate::querydesc::with_qd(qd, |q| {
-                let x = q.exec.as_mut().expect("runtime nlindex worker ExecutorStart");
+                let x = q
+                    .exec
+                    .as_mut()
+                    .expect("runtime nlindex worker ExecutorStart");
                 x.with_mut(|d| -> PgResult<()> {
                     let estate = &mut d.estate;
                     let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut()
@@ -450,8 +475,7 @@ fn build_worker_exec(payload: &RuntimeNlIndexShared) -> PgResult<()> {
                     // attach; its scan desc opens lazily on the first
                     // per-outer-row rescan, exactly the serial first-row
                     // path.
-                    let crate::procnode::PlanStateNode::NestLoop(nlnode) = &mut aps.outer
-                    else {
+                    let crate::procnode::PlanStateNode::NestLoop(nlnode) = &mut aps.outer else {
                         return Err(Box::new(PgError::new(
                             ERROR,
                             "runtime nlindex worker outer node diverged from the leader's",
@@ -492,7 +516,9 @@ fn build_worker_exec(payload: &RuntimeNlIndexShared) -> PgResult<()> {
 /// up).
 fn teardown_worker_exec(clean: bool) -> PgResult<()> {
     WORKER_NLEXEC.with(|cell| -> PgResult<()> {
-        let Some(ex) = cell.borrow_mut().take() else { return Ok(()) };
+        let Some(ex) = cell.borrow_mut().take() else {
+            return Ok(());
+        };
         if clean {
             let r = crate::execmain::executor_finish_seam(ex.qd)
                 .and_then(|()| crate::execmain::executor_end_seam(ex.qd));
@@ -518,7 +544,9 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 /// completion and exits (idempotent on completed RGs). No standing channel
 /// on this arm (stage 1: launched only).
 fn runtime_nlindex_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
-    let Some(payload) = private.downcast_ref::<RuntimeNlIndexShared>() else { return };
+    let Some(payload) = private.downcast_ref::<RuntimeNlIndexShared>() else {
+        return;
+    };
     if let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) {
         rg.abort();
     }
@@ -624,7 +652,10 @@ fn exprs_parallel_safe_nl<'mcx>(
     nodes: impl Iterator<Item = Node<'mcx>>,
     allowed_params: &::types_nodes::bitmapset::Bitmapset<'mcx>,
 ) -> PgResult<bool> {
-    let mut cx = NlSafetyCx { safe: true, allowed_params };
+    let mut cx = NlSafetyCx {
+        safe: true,
+        allowed_params,
+    };
     for n in nodes {
         use ::nodes_core::NodeWalker as _;
         cx.visit(n)?;
@@ -672,15 +703,21 @@ pub(crate) fn try_own_plain_agg_runtime_nl_index<'mcx>(
     // the census family (tiny post-qual driver, big scan) the route exists
     // for. The block floor below governs both.
     let forced = runtime_nlindex_pool_dop() > 0;
-    let Some(rt) = runtime::global() else { return Ok(None) };
+    let Some(rt) = runtime::global() else {
+        return Ok(None);
+    };
 
     // --- Plan shape (pointer chases only before the floor).
     let nlplan = nl.state.plan;
-    let Some(outer_plan_node) = nlplan.join.plan.lefttree else { return Ok(None) };
+    let Some(outer_plan_node) = nlplan.join.plan.lefttree else {
+        return Ok(None);
+    };
     let Some(outer_plan) = outer_plan_node.as_seq_scan() else {
         return refused("outer-not-seqscan", RefuseReason::NonScanChild);
     };
-    let Some(inner_plan_node) = nlplan.join.plan.righttree else { return Ok(None) };
+    let Some(inner_plan_node) = nlplan.join.plan.righttree else {
+        return Ok(None);
+    };
     let Some(inner_plan) = inner_plan_node.as_index_scan() else {
         return refused("inner-not-indexscan", RefuseReason::NonScanChild);
     };
@@ -728,7 +765,9 @@ pub(crate) fn try_own_plain_agg_runtime_nl_index<'mcx>(
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
         return refused("extern-params", RefuseReason::SubplanParam);
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        return Ok(None);
+    };
     // Subplans refuse outright (initplan outputs are PARAM_EXEC slots this
     // arm does not transfer; the nestParams widening below is the ONLY
     // admitted exec-param source).
@@ -737,7 +776,9 @@ pub(crate) fn try_own_plain_agg_runtime_nl_index<'mcx>(
     }
     // The Agg must be the plan root (workers ExecutorStart the whole worker
     // pstmt; a deeper Agg would drag unrelated plan into every helper).
-    let Some(root) = leader_pstmt.planTree else { return Ok(None) };
+    let Some(root) = leader_pstmt.planTree else {
+        return Ok(None);
+    };
     let Some(root_agg) = root.as_agg() else {
         return refused("agg-not-plan-root", RefuseReason::JoinShape);
     };
@@ -863,7 +904,10 @@ fn engage<'mcx>(
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
 
-    let agg_node = estate.es_plannedstmt.and_then(|p| p.planTree).expect("gated above");
+    let agg_node = estate
+        .es_plannedstmt
+        .and_then(|p| p.planTree)
+        .expect("gated above");
     let pstmt = crate::execparallel::build_worker_pstmt(estate, agg_node)?;
 
     let payload = Arc::new(RuntimeNlIndexShared {
@@ -884,7 +928,9 @@ fn engage<'mcx>(
         started: AtomicUsize::new(0),
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
-        partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
+        partials: (0..runtime::MAX_EXTERNAL_LANES)
+            .map(|_| Mutex::new(None))
+            .collect(),
     });
 
     parallel::gtrace("ln.engage.begin");
@@ -905,10 +951,15 @@ fn engage<'mcx>(
                 .filter_map(|m| m.lock().unwrap_or_else(|p| p.into_inner()).take())
                 .collect();
             stats::tick_owned(ShapeClass::NestLoop);
-            lane_trace(&format!("runtime-nlindex: complete, partials={}", parts.len()));
+            lane_trace(&format!(
+                "runtime-nlindex: complete, partials={}",
+                parts.len()
+            ));
             if poly_mode(agg) {
                 let combined = agg_poly_runtime_combine(agg, &parts)?;
-                Ok(Some(exec_agg_poly_runtime_partials(agg, estate, &combined)?))
+                Ok(Some(exec_agg_poly_runtime_partials(
+                    agg, estate, &combined,
+                )?))
             } else {
                 let combined = agg_runtime_combine(agg, &parts)?;
                 Ok(Some(::nodeagg::runtime_partial::exec_agg_runtime_partials(
@@ -959,7 +1010,11 @@ fn engage_ceremony(
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64 | (1 << 61),
-            tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
+            tasksets: vec![runtime::TaskSetSpec {
+                source,
+                work,
+                deps: vec![],
+            }],
         });
         payload
             .rg
@@ -1039,7 +1094,10 @@ fn engage_ceremony(
         }
         if outcome == runtime::RgOutcome::Aborted {
             ::postgres_seams::check_for_interrupts::call()?;
-            return Err(Box::new(PgError::new(ERROR, "runtime nlindex pipeline aborted")));
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "runtime nlindex pipeline aborted",
+            )));
         }
         if payload.started.load(Ordering::SeqCst) == 0 {
             return Ok(EngageOutcome::Fallback);

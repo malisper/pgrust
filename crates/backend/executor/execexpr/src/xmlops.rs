@@ -8,9 +8,7 @@ use core::ptr::NonNull;
 
 use ::datum::{Datum, NullableDatum};
 use ::mcx::Mcx;
-use ::types_core::catalog::{
-    BOOLOID, BYTEAOID, DATEOID, TIMESTAMPOID, TIMESTAMPTZOID, XMLOID,
-};
+use ::types_core::catalog::{BOOLOID, BYTEAOID, DATEOID, TIMESTAMPOID, TIMESTAMPTZOID, XMLOID};
 use ::types_core::{InvalidOid, Oid};
 use ::types_error::{PgError, PgResult, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE};
 use ::types_nodes::primnodes::{XmlExpr, XmlExprOp};
@@ -45,7 +43,10 @@ fn varlena_payload<'a>(d: Datum, slot: &ResMcx) -> PgResult<&'a [u8]> {
     unsafe {
         if varatt::varatt_is_4b_u(p) {
             let total = varatt::varsize_any(p);
-            Ok(core::slice::from_raw_parts(p.add(::datum::VARHDRSZ), total - ::datum::VARHDRSZ))
+            Ok(core::slice::from_raw_parts(
+                p.add(::datum::VARHDRSZ),
+                total - ::datum::VARHDRSZ,
+            ))
         } else if varatt::varatt_is_1b(p) && !varatt::varatt_is_1b_e(p) {
             let total = varatt::varsize_1b(p);
             Ok(core::slice::from_raw_parts(p.add(1), total - 1))
@@ -96,8 +97,7 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
                     .expect("arg_names cell is String")
                     .sval;
                 let argtype = crate::compile::expr_type(x.named_args.nth(i));
-                let mapped =
-                    map_sql_value_to_xml_value(nd.value, argtype, true, &st.resmcx)?;
+                let mapped = map_sql_value_to_xml_value(nd.value, argtype, true, &st.resmcx)?;
                 ::mcx::vec_append_bytes(&mut buf, b"<")?;
                 ::mcx::vec_append_bytes(&mut buf, argname.as_bytes())?;
                 ::mcx::vec_append_bytes(&mut buf, b">")?;
@@ -113,8 +113,7 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
             Ok((xml_datum(mcx, &buf)?, false))
         }
         XmlExprOp::IS_XMLELEMENT => {
-            let mut named_strs: Vec<(String, Option<String>)> =
-                Vec::with_capacity(named.len());
+            let mut named_strs: Vec<(String, Option<String>)> = Vec::with_capacity(named.len());
             for (i, nd) in named.iter().enumerate() {
                 let argname = x
                     .arg_names
@@ -127,7 +126,9 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
                     None
                 } else {
                     let argtype = crate::compile::expr_type(x.named_args.nth(i));
-                    Some(map_sql_value_to_xml_value(nd.value, argtype, false, &st.resmcx)?)
+                    Some(map_sql_value_to_xml_value(
+                        nd.value, argtype, false, &st.resmcx,
+                    )?)
                 };
                 named_strs.push((argname, v));
             }
@@ -137,7 +138,9 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
                     continue;
                 }
                 let argtype = crate::compile::expr_type(x.args.nth(i));
-                content.push(map_sql_value_to_xml_value(nd.value, argtype, true, &st.resmcx)?);
+                content.push(map_sql_value_to_xml_value(
+                    nd.value, argtype, true, &st.resmcx,
+                )?);
             }
             let out = adt_xml::xmlelement(
                 x.name.expect("XMLELEMENT carries a name"),
@@ -162,8 +165,7 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
                 // No-argument form: adt_xml::xmlpi validates the target but
                 // conflates it with the NULL argument; build "<?name?>" here.
                 let _ = adt_xml::xmlpi(name, None)?;
-                let mut buf: ::mcx::PgVec<u8> =
-                    ::mcx::vec_with_capacity_in(mcx, name.len() + 4)?;
+                let mut buf: ::mcx::PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, name.len() + 4)?;
                 ::mcx::vec_append_bytes(&mut buf, b"<?")?;
                 ::mcx::vec_append_bytes(&mut buf, name.as_bytes())?;
                 ::mcx::vec_append_bytes(&mut buf, b"?>")?;
@@ -234,8 +236,14 @@ pub fn map_sql_value_to_xml_value(
     if elmtype != InvalidOid {
         let (elmlen, elmbyval, elmalign) = ::lsyscache::typ::get_typlenbyvalalign(elmtype)?;
         let img = array_image(value, resmcx)?;
-        let (elems, nulls) =
-            ::arrayfuncs::construct::deconstruct_array(mcx, img, elmlen as i32, elmbyval, elmalign as u8, true)?;
+        let (elems, nulls) = ::arrayfuncs::construct::deconstruct_array(
+            mcx,
+            img,
+            elmlen as i32,
+            elmbyval,
+            elmalign as u8,
+            true,
+        )?;
         let mut buf = String::new();
         for (elem, isnull) in elems.iter().zip(nulls.iter()) {
             if *isnull {
@@ -252,7 +260,11 @@ pub fn map_sql_value_to_xml_value(
 
     match type_ {
         BOOLOID => {
-            return Ok(if value.as_bool() { "true".to_string() } else { "false".to_string() })
+            return Ok(if value.as_bool() {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            })
         }
         DATEOID => {
             let date = value.as_i32();
@@ -272,7 +284,9 @@ pub fn map_sql_value_to_xml_value(
                 ::adt_datetime::consts::USE_XSD_DATES,
                 &mut buf,
             );
-            return Ok(core::str::from_utf8(&buf[..n]).expect("date encodes ASCII").to_string());
+            return Ok(core::str::from_utf8(&buf[..n])
+                .expect("date encodes ASCII")
+                .to_string());
         }
         TIMESTAMPOID => {
             let ts = value.as_i64();
@@ -294,7 +308,9 @@ pub fn map_sql_value_to_xml_value(
                 ::adt_datetime::consts::USE_XSD_DATES,
                 &mut buf,
             );
-            return Ok(core::str::from_utf8(&buf[..n]).expect("ts encodes ASCII").to_string());
+            return Ok(core::str::from_utf8(&buf[..n])
+                .expect("ts encodes ASCII")
+                .to_string());
         }
         TIMESTAMPTZOID => {
             let ts = value.as_i64();
@@ -327,7 +343,9 @@ pub fn map_sql_value_to_xml_value(
                 ::adt_datetime::consts::USE_XSD_DATES,
                 &mut buf,
             );
-            return Ok(core::str::from_utf8(&buf[..n]).expect("ts encodes ASCII").to_string());
+            return Ok(core::str::from_utf8(&buf[..n])
+                .expect("ts encodes ASCII")
+                .to_string());
         }
         BYTEAOID => {
             let payload = varlena_payload(value, resmcx)?;
@@ -393,7 +411,9 @@ fn ts_out_of_range() -> Box<PgError> {
 
 fn xml_opt(v: types_nodes::XmlOptionType) -> adt_xml::XmlOptionType {
     match v {
-        types_nodes::XmlOptionType::XMLOPTION_DOCUMENT => adt_xml::XmlOptionType::XMLOPTION_DOCUMENT,
+        types_nodes::XmlOptionType::XMLOPTION_DOCUMENT => {
+            adt_xml::XmlOptionType::XMLOPTION_DOCUMENT
+        }
         types_nodes::XmlOptionType::XMLOPTION_CONTENT => adt_xml::XmlOptionType::XMLOPTION_CONTENT,
     }
 }

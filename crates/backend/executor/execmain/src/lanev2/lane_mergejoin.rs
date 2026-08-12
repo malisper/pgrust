@@ -161,7 +161,12 @@ impl<'mcx> MergeJoinInner<'mcx> for LaneSortInner<'_, 'mcx> {
                 // drain leg on the finished tuplesort — no dispatch, no
                 // lane ceremony. `fetch_outer` is dead post-done (the
                 // sort_arm fallback's own closure shape, kept verbatim).
-                let SortNode { state, outer, outer_desc, .. } = s;
+                let SortNode {
+                    state,
+                    outer,
+                    outer_desc,
+                    ..
+                } = s;
                 let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
                 return ::nodesort::exec_sort(state, estate, outer_desc, |es| {
                     crate::procnode::exec_proc_node(outer, es)
@@ -219,10 +224,23 @@ pub(super) fn lane_merge_join_drive<'mcx>(
 ) -> PgResult<Option<ExecSlotId>> {
     #[cfg(test)]
     MJ_NATIVE_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
-    let MergeJoinNode { state, outer, inner, .. } = mj;
-    debug_assert!(matches!(&**inner, PlanStateNode::Sort(_)), "admitted at the surface");
+    let MergeJoinNode {
+        state,
+        outer,
+        inner,
+        ..
+    } = mj;
+    debug_assert!(
+        matches!(&**inner, PlanStateNode::Sort(_)),
+        "admitted at the surface"
+    );
     let skip_mark_restore = state.plan.skip_mark_restore;
-    let mut o = LaneMergeOuter { child: &mut **outer };
-    let mut i = LaneSortInner { child: &mut **inner, skip_mark_restore };
+    let mut o = LaneMergeOuter {
+        child: &mut **outer,
+    };
+    let mut i = LaneSortInner {
+        child: &mut **inner,
+        skip_mark_restore,
+    };
     ::nodemergejoin::exec_merge_join(state, &mut o, &mut i, estate)
 }

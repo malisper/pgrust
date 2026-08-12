@@ -273,7 +273,11 @@ pub(super) struct IndexOnlyScanSource<'a, 'mcx> {
 impl<'a, 'mcx> IndexOnlyScanSource<'a, 'mcx> {
     #[inline]
     pub(super) fn new(ios: &'a mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>) -> Self {
-        IndexOnlyScanSource { ios, total: None, positioned: false }
+        IndexOnlyScanSource {
+            ios,
+            total: None,
+            positioned: false,
+        }
     }
 
     /// Inc-1 bridge for the seam→operator-pull adapter: the staged tuple is
@@ -426,8 +430,7 @@ pub fn try_own_agg_over_index_only_source<'mcx>(
     // Child refuse-set (per-pull cadence, the IOS class's documented tick
     // semantics). SE-AGGIOS: parallel-aware admitted when the increment is
     // armed — every other row applies identically.
-    if let Some(r) =
-        super::index_only_scan_refuse_reason_ex(ios, estate, indexsource_par_enabled())
+    if let Some(r) = super::index_only_scan_refuse_reason_ex(ios, estate, indexsource_par_enabled())
     {
         stats::tick_refused(ShapeClass::IndexOnlyScan, r);
         engine_mirror(ios, estate, Some(r));
@@ -485,8 +488,14 @@ pub fn try_own_agg_over_index_only_source<'mcx>(
             ));
         }
     }
-    let result =
-        ::nodeagg::exec_agg_batched(agg, estate, SeamAggSource { src: &mut src, outer_slot })?;
+    let result = ::nodeagg::exec_agg_batched(
+        agg,
+        estate,
+        SeamAggSource {
+            src: &mut src,
+            outer_slot,
+        },
+    )?;
     if !hashed_emit {
         // Claim settle (ownership ABI R3: slot hygiene; zero pins held).
         src.end_claim(estate)?;
@@ -712,7 +721,11 @@ pub(super) struct IndexScanFeedSource<'a, 'mcx> {
 impl<'a, 'mcx> IndexScanFeedSource<'a, 'mcx> {
     #[inline]
     pub(super) fn new(is: &'a mut ::nodeindexscan::IndexScanState<'mcx>) -> Self {
-        IndexScanFeedSource { is, total: None, positioned: false }
+        IndexScanFeedSource {
+            is,
+            total: None,
+            positioned: false,
+        }
     }
 
     /// Inc-1 bridge for the seam→operator-pull adapter (the
@@ -925,7 +938,10 @@ pub fn try_own_agg_over_index_source<'mcx>(
     let result = ::nodeagg::exec_agg_batched(
         agg,
         estate,
-        SeamIndexAggSource { src: &mut src, outer_slot },
+        SeamIndexAggSource {
+            src: &mut src,
+            outer_slot,
+        },
     )?;
     if !hashed_emit {
         // Claim settle (ownership ABI R3: slot hygiene; zero pins held).

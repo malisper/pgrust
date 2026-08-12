@@ -111,7 +111,10 @@ impl PartwiseCtx {
     /// (zero-granule partitions) are tolerated as duplicate entries — they
     /// own no granules and are never resolved.
     pub(super) fn new(child_starts: Vec<u64>) -> PartwiseCtx {
-        debug_assert!(child_starts.len() >= 2, "a partwise directory needs >=1 child");
+        debug_assert!(
+            child_starts.len() >= 2,
+            "a partwise directory needs >=1 child"
+        );
         debug_assert_eq!(child_starts.first(), Some(&0));
         debug_assert!(child_starts.windows(2).all(|w| w[0] <= w[1]));
         PartwiseCtx { child_starts }
@@ -174,7 +177,9 @@ pub(super) fn try_own_plain_agg_partwise<'mcx>(
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
-    let Some(rt) = runtime::global() else { return Ok(None) };
+    let Some(rt) = runtime::global() else {
+        return Ok(None);
+    };
     if !::nodeagg::agg_is_done(agg) {
         router::tick(ArmClass::Scan, ArmCounter::Offered);
     }
@@ -194,13 +199,17 @@ pub(super) fn try_own_plain_agg_partwise<'mcx>(
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
         return refused("partwise-params");
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        return Ok(None);
+    };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
         return refused("partwise-params");
     }
     // The Agg must be the plan root (workers ExecutorStart the whole worker
     // pstmt — Agg over Append over the child scans, transferred verbatim).
-    let Some(root) = leader_pstmt.planTree else { return Ok(None) };
+    let Some(root) = leader_pstmt.planTree else {
+        return Ok(None);
+    };
     let Some(root_agg) = root.as_agg() else {
         return refused("partwise-agg-not-plan-root");
     };
@@ -221,7 +230,9 @@ pub(super) fn try_own_plain_agg_partwise<'mcx>(
     }
 
     // --- Append structural walk (plan side).
-    let Some(outer_node) = agg.plan.plan.lefttree else { return Ok(None) };
+    let Some(outer_node) = agg.plan.plan.lefttree else {
+        return Ok(None);
+    };
     if outer_node.node_tag() != NodeTag::T_Append {
         return refused("partwise-outer-not-append");
     }
@@ -279,10 +290,7 @@ pub(super) fn try_own_plain_agg_partwise<'mcx>(
     }
     // Binder policy sources must be empty (every helper bind would refuse).
     let policy = parallel::query_task_policy_probe();
-    if policy.has_params
-        || policy.temp_state
-        || policy.serializable
-        || policy.pending_invalidations
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
     {
         return refused("partwise-binder-policy");
     }
@@ -376,7 +384,11 @@ pub(super) fn try_own_plain_agg_partwise<'mcx>(
     // --- Engage on the scan-arm ceremony (same worker binder, same
     // combine); the partition directory rides the payload.
     let dop = elastic_dop(dop, total_granules);
-    let class = if is_cb { ArmClass::Scan } else { ArmClass::Heap };
+    let class = if is_cb {
+        ArmClass::Scan
+    } else {
+        ArmClass::Heap
+    };
     router::tick(class, ArmCounter::Engaged);
     if super::lane_trace_enabled() {
         lane_trace(&format!(
@@ -402,7 +414,11 @@ pub(super) fn try_own_plain_agg_partwise<'mcx>(
     )?;
     router::tick(
         class,
-        if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+        if r.is_some() {
+            ArmCounter::Completed
+        } else {
+            ArmCounter::Fallback
+        },
     );
     Ok(r)
 }

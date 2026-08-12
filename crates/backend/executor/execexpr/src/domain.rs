@@ -53,8 +53,9 @@ fn with_state<R>(f: impl FnOnce(&mut EngineState) -> R) -> R {
             // reset() through it (as_mut below). session_root's shared
             // &'static only grants SharedReadOnly — the _mut variant is the
             // reset-per-use scratch-holder shape (regexp's RegexpExecScratch).
-            let scratch =
-                NonNull::from(::mcx::session_root_mut(MemoryContext::new("DomainCheckScratch")));
+            let scratch = NonNull::from(::mcx::session_root_mut(MemoryContext::new(
+                "DomainCheckScratch",
+            )));
             ManuallyDrop::new(EngineState {
                 mcx,
                 scratch,
@@ -95,7 +96,11 @@ impl<'mcx> DomainCheckExpr<'mcx> {
     pub fn eval(&mut self, value: Datum, isnull: bool) -> PgResult<NullableDatum> {
         // SAFETY: slot lives in the program's mcx alongside the state.
         unsafe { self.slot.as_ptr().write(NullableDatum { value, isnull }) };
-        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: None,
+            inner: None,
+            outer: None,
+        };
         exec_eval_expr(&mut self.state, &mut slots)
     }
 }
@@ -124,7 +129,9 @@ fn rebuild_memo(memo: &mut DomainMemo, mcx: Mcx<'static>) -> PgResult<()> {
     memo.checks.clear();
     for con in memo.cref.constraints() {
         if con.constrainttype == typcache::DomConstraintType::Check {
-            let expr = con.check_expr.expect("CHECK DomainConstraintState carries check_expr");
+            let expr = con
+                .check_expr
+                .expect("CHECK DomainConstraintState carries check_expr");
             memo.checks.push(compile_check(mcx, expr, con.name)?);
         }
     }
@@ -143,8 +150,12 @@ pub fn domain_check_input(
     let present = with_state(|st| st.memos.contains_key(&domain_type));
     if !present {
         let cref = typcache::DomainConstraintRef::init(domain_type)?;
-        let mut memo =
-            DomainMemo { cref, dcc_addr: usize::MAX, typlen: 0, checks: Vec::new() };
+        let mut memo = DomainMemo {
+            cref,
+            dcc_addr: usize::MAX,
+            typlen: 0,
+            checks: Vec::new(),
+        };
         let mcx = with_state(|st| st.mcx);
         rebuild_memo(&mut memo, mcx)?;
         with_state(|st| st.memos.insert(domain_type, memo));
@@ -176,7 +187,14 @@ pub fn domain_check_input(
     let _ = depth;
     // SAFETY: the leaked scratch context is 'static; reset only at depth 0.
     let scratch_mcx = unsafe { scratch.as_ref() }.mcx();
-    let result = run_checks(&mut memo, scratch_mcx, value, isnull, domain_type, escontext);
+    let result = run_checks(
+        &mut memo,
+        scratch_mcx,
+        value,
+        isnull,
+        domain_type,
+        escontext,
+    );
     with_state(|st| {
         st.depth -= 1;
         st.memos.insert(domain_type, memo)
@@ -213,7 +231,9 @@ fn run_checks(
                     // SAFETY: non-null datum of the domain's own typlen class.
                     unsafe {
                         ::datum::expandeddatum::make_expanded_object_read_only(
-                            value, isnull, memo.typlen,
+                            value,
+                            isnull,
+                            memo.typlen,
                         )
                     }
                 };

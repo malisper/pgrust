@@ -33,83 +33,218 @@ pub struct OutRef(pub(crate) NonNull<NullableDatum>);
 pub enum Step {
     DoneReturn,
     DoneNoReturn,
-    ScanFetchSome { last_var: u16 },
-    InnerFetchSome { last_var: u16 },
-    OuterFetchSome { last_var: u16 },
-    ScanVar { attnum: u16, vartype: Oid, out: OutRef },
-    InnerVar { attnum: u16, vartype: Oid, out: OutRef },
-    OuterVar { attnum: u16, vartype: Oid, out: OutRef },
-    ScanSysVar { attnum: i16, out: OutRef },
-    InnerSysVar { attnum: i16, out: OutRef },
-    OuterSysVar { attnum: i16, out: OutRef },
-    AssignScanVar { attnum: u16, resultnum: u16 },
-    AssignInnerVar { attnum: u16, resultnum: u16 },
-    AssignOuterVar { attnum: u16, resultnum: u16 },
-    AssignTmp { resultnum: u16 },
-    AssignTmpMakeRo { resultnum: u16 },
-    Const { value: Datum, isnull: bool, out: OutRef },
+    ScanFetchSome {
+        last_var: u16,
+    },
+    InnerFetchSome {
+        last_var: u16,
+    },
+    OuterFetchSome {
+        last_var: u16,
+    },
+    ScanVar {
+        attnum: u16,
+        vartype: Oid,
+        out: OutRef,
+    },
+    InnerVar {
+        attnum: u16,
+        vartype: Oid,
+        out: OutRef,
+    },
+    OuterVar {
+        attnum: u16,
+        vartype: Oid,
+        out: OutRef,
+    },
+    ScanSysVar {
+        attnum: i16,
+        out: OutRef,
+    },
+    InnerSysVar {
+        attnum: i16,
+        out: OutRef,
+    },
+    OuterSysVar {
+        attnum: i16,
+        out: OutRef,
+    },
+    AssignScanVar {
+        attnum: u16,
+        resultnum: u16,
+    },
+    AssignInnerVar {
+        attnum: u16,
+        resultnum: u16,
+    },
+    AssignOuterVar {
+        attnum: u16,
+        resultnum: u16,
+    },
+    AssignTmp {
+        resultnum: u16,
+    },
+    AssignTmpMakeRo {
+        resultnum: u16,
+    },
+    Const {
+        value: Datum,
+        isnull: bool,
+        out: OutRef,
+    },
     // Param pointers resolve at compile into address-stable params arrays.
-    ParamExtern { prm: NonNull<::types_portal::params::ParamExternData>, out: OutRef },
+    ParamExtern {
+        prm: NonNull<::types_portal::params::ParamExternData>,
+        out: OutRef,
+    },
     // Unbound PARAM_EXTERN: C errors at evaluation (ExecEvalParamExtern),
     // not at init — EXPLAIN (GENERIC_PLAN) inits but never evaluates.
-    ParamExternMissing { paramid: i32 },
+    ParamExternMissing {
+        paramid: i32,
+    },
     // paramid rides along for the pending-initplan lane: a fetch that finds
     // exec_plan set suspends so the driver can run ExecSetParamPlan for this
     // param on demand (C ExecEvalParamExec, execExprInterp.c).
-    ParamExec { prm: NonNull<::types_portal::params::ParamExecData>, out: OutRef, paramid: u32 },
-    FuncExpr { call: FuncCall, out: OutRef },
-    FuncExprStrict1 { call: FuncCall, out: OutRef },
-    FuncExprStrict2 { call: FuncCall, out: OutRef },
-    FuncExprStrict { call: FuncCall, out: OutRef },
+    ParamExec {
+        prm: NonNull<::types_portal::params::ParamExecData>,
+        out: OutRef,
+        paramid: u32,
+    },
+    FuncExpr {
+        call: FuncCall,
+        out: OutRef,
+    },
+    FuncExprStrict1 {
+        call: FuncCall,
+        out: OutRef,
+    },
+    FuncExprStrict2 {
+        call: FuncCall,
+        out: OutRef,
+    },
+    FuncExprStrict {
+        call: FuncCall,
+        out: OutRef,
+    },
     // EEOP_FUNCEXPR_FUSAGE / EEOP_FUNCEXPR_STRICT_FUSAGE: compiled only when
     // track_functions covers fn_stats, so counting never touches the
     // default-off path.
-    FuncExprFusage { call: FuncCall, out: OutRef },
-    FuncExprStrictFusage { call: FuncCall, out: OutRef },
+    FuncExprFusage {
+        call: FuncCall,
+        out: OutRef,
+    },
+    FuncExprStrictFusage {
+        call: FuncCall,
+        out: OutRef,
+    },
     // EEOP_IOCOERCE: out fn of the arg type then in fn of the result type;
     // incall args 1/2 (typioparam, typmod -1) are compile-time consts. The
     // pair lives in the state's mcx (fcinfo-image precedent) to keep Step
     // <= 64B; one deref per eval on a cast step.
-    IoCoerce { calls: NonNull<IoCoerceCalls>, out: OutRef },
+    IoCoerce {
+        calls: NonNull<IoCoerceCalls>,
+        out: OutRef,
+    },
 
-    Qual { jumpdone: u32 },
-    Jump { jumpdone: u32 },
-    JumpIfNotTrue { jumpdone: u32, out: OutRef },
-    JumpIfNotNull { jumpdone: u32, out: OutRef },
+    Qual {
+        jumpdone: u32,
+    },
+    Jump {
+        jumpdone: u32,
+    },
+    JumpIfNotTrue {
+        jumpdone: u32,
+        out: OutRef,
+    },
+    JumpIfNotNull {
+        jumpdone: u32,
+        out: OutRef,
+    },
     // slot: the owning CASE's compile-allocated testval workspace
     // (C d.casetest.value/isnull); the EXT econtext forms point slot at the
     // state's ext_case_test/ext_domain_test cell instead.
-    CaseTestVal { slot: NonNull<NullableDatum>, out: OutRef },
+    CaseTestVal {
+        slot: NonNull<NullableDatum>,
+        out: OutRef,
+    },
     // EEOP_CURRENTOFEXPR: unconditionally errors at eval — the planner
     // converts WHERE CURRENT OF into a TidScan qual for heap tables; only
     // other table types reach a compiled CurrentOfExpr.
     CurrentOfExpr,
     // C EEOP_MAKE_READONLY, in place on the CASE testval workspace
     // (source and target alias there in C too).
-    MakeReadonly { slot: NonNull<NullableDatum> },
+    MakeReadonly {
+        slot: NonNull<NullableDatum>,
+    },
     // anynull: per-BoolExpr compile-allocated scratch (C d.boolexpr.anynull);
     // FIRST/STEP short-circuit to jumpdone, LAST resolves the NULL outcome.
-    BoolAndStepFirst { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
-    BoolAndStep { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
-    BoolAndStepLast { anynull: NonNull<bool>, out: OutRef },
-    BoolOrStepFirst { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
-    BoolOrStep { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
-    BoolOrStepLast { anynull: NonNull<bool>, out: OutRef },
-    BoolNotStep { out: OutRef },
-    NullTestIsNull { out: OutRef },
-    NullTestIsNotNull { out: OutRef },
+    BoolAndStepFirst {
+        anynull: NonNull<bool>,
+        jumpdone: u32,
+        out: OutRef,
+    },
+    BoolAndStep {
+        anynull: NonNull<bool>,
+        jumpdone: u32,
+        out: OutRef,
+    },
+    BoolAndStepLast {
+        anynull: NonNull<bool>,
+        out: OutRef,
+    },
+    BoolOrStepFirst {
+        anynull: NonNull<bool>,
+        jumpdone: u32,
+        out: OutRef,
+    },
+    BoolOrStep {
+        anynull: NonNull<bool>,
+        jumpdone: u32,
+        out: OutRef,
+    },
+    BoolOrStepLast {
+        anynull: NonNull<bool>,
+        out: OutRef,
+    },
+    BoolNotStep {
+        out: OutRef,
+    },
+    NullTestIsNull {
+        out: OutRef,
+    },
+    NullTestIsNotNull {
+        out: OutRef,
+    },
     // C EEOP_BOOLTEST_IS_*; IS [NOT] UNKNOWN reuses the NullTest steps.
-    BoolTestIsTrue { out: OutRef },
-    BoolTestIsNotTrue { out: OutRef },
-    BoolTestIsFalse { out: OutRef },
-    BoolTestIsNotFalse { out: OutRef },
+    BoolTestIsTrue {
+        out: OutRef,
+    },
+    BoolTestIsNotTrue {
+        out: OutRef,
+    },
+    BoolTestIsFalse {
+        out: OutRef,
+    },
+    BoolTestIsNotFalse {
+        out: OutRef,
+    },
     // C EEOP_DISTINCT: the resolved "=" call with DISTINCT null semantics.
-    Distinct { call: FuncCall, out: OutRef },
+    Distinct {
+        call: FuncCall,
+        out: OutRef,
+    },
     // C EEOP_NULLIF: the resolved "=" call; equal non-null args -> NULL,
     // else the first arg unchanged.
-    NullIf { call: FuncCall, out: OutRef },
+    NullIf {
+        call: FuncCall,
+        out: OutRef,
+    },
     // Agg pointers resolve at build into once-allocated never-moved AggState arrays.
-    AggrefEval { value: NonNull<Datum>, null: NonNull<bool>, out: OutRef },
+    AggrefEval {
+        value: NonNull<Datum>,
+        null: NonNull<bool>,
+        out: OutRef,
+    },
     // C EEOP_GROUPING_FUNC: bit per clause col, 1 = ungrouped in the
     // current set (None cell: no grouping sets, result 0).
     GroupingFuncEval {
@@ -133,11 +268,24 @@ pub enum Step {
     // (RECORD/subquery whole-row and OLD/NEW are compile louds). The var's
     // typcache tupdesc resolves at compile; the slot-compat check runs once
     // at first eval, per C.
-    WholeRow { src: SlotSrc, wr: NonNull<WholeRowState>, frame: u32, out: OutRef },
+    WholeRow {
+        src: SlotSrc,
+        wr: NonNull<WholeRowState>,
+        frame: u32,
+        out: OutRef,
+    },
     // EEOP_NULLTEST_ROWISNULL/ROWISNOTNULL; `frame` is an argless FuncFrame
     // carried only for its armed per-eval mcx (detoast scratch).
-    NullTestRowIsNull { rn: NonNull<RowNullState>, frame: u32, out: OutRef },
-    NullTestRowIsNotNull { rn: NonNull<RowNullState>, frame: u32, out: OutRef },
+    NullTestRowIsNull {
+        rn: NonNull<RowNullState>,
+        frame: u32,
+        out: OutRef,
+    },
+    NullTestRowIsNotNull {
+        rn: NonNull<RowNullState>,
+        frame: u32,
+        out: OutRef,
+    },
     // EEOP_HASHED_SCALARARRAYOP: array operand is a non-null Const; the
     // element table (and its hash FuncCall) lives in state.saop_tables.
     HashedScalarArrayOp {
@@ -178,10 +326,16 @@ pub enum Step {
         out: OutRef,
     },
     // C EEOP_AGG_STRICT_INPUT_CHECK_ARGS(_1): args = fcinfo args[1..].
-    AggStrictInputCheck { args: NonNull<NullableDatum>, nargs: u16, jumpnull: u32 },
+    AggStrictInputCheck {
+        args: NonNull<NullableDatum>,
+        nargs: u16,
+        jumpnull: u32,
+    },
     // Ordered/DISTINCT agg row survived filter+strict checks: flag it for
     // nodeagg's tuplesort feed (scratch already holds the evaluated args).
-    AggOrderedMark { flag: NonNull<bool> },
+    AggOrderedMark {
+        flag: NonNull<bool>,
+    },
     // C "set up aggstate->curpertrans for AggGetAggref()" (execExprInterp.c);
     // pushed only for ordered-set aggs.
     AggSetCurrent {
@@ -189,21 +343,56 @@ pub enum Step {
         aggref: NonNull<()>,
         shared: bool,
     },
-    AggStrictInputCheck1 { arg: NonNull<NullableDatum>, jumpnull: u32 },
+    AggStrictInputCheck1 {
+        arg: NonNull<NullableDatum>,
+        jumpnull: u32,
+    },
     // C EEOP_AGG_[STRICT_]DESERIALIZE: args[0] holds the serialized input;
     // the result lands in the combine fcinfo's args[1] slot (`out`).
-    AggDeserialize { call: FuncCall, out: OutRef },
-    AggStrictDeserialize { call: FuncCall, out: OutRef, jumpnull: u32 },
-    AggPlainTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
-    AggPlainTransStrictByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
+    AggDeserialize {
+        call: FuncCall,
+        out: OutRef,
+    },
+    AggStrictDeserialize {
+        call: FuncCall,
+        out: OutRef,
+        jumpnull: u32,
+    },
+    AggPlainTransByVal {
+        call: FuncCall,
+        pergroup: NonNull<AggPerGroup>,
+    },
+    AggPlainTransStrictByVal {
+        call: FuncCall,
+        pergroup: NonNull<AggPerGroup>,
+    },
     // C EEOP_AGG_PLAIN_TRANS_[INIT_][STRICT_]BYREF.
-    AggPlainTransInitStrictByRef { call: FuncCall, pergroup: NonNull<AggPerGroup>, byref: AggByRef },
-    AggPlainTransStrictByRef { call: FuncCall, pergroup: NonNull<AggPerGroup>, byref: AggByRef },
-    AggPlainTransByRef { call: FuncCall, pergroup: NonNull<AggPerGroup>, byref: AggByRef },
-    AggPlainTransInitStrictByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
+    AggPlainTransInitStrictByRef {
+        call: FuncCall,
+        pergroup: NonNull<AggPerGroup>,
+        byref: AggByRef,
+    },
+    AggPlainTransStrictByRef {
+        call: FuncCall,
+        pergroup: NonNull<AggPerGroup>,
+        byref: AggByRef,
+    },
+    AggPlainTransByRef {
+        call: FuncCall,
+        pergroup: NonNull<AggPerGroup>,
+        byref: AggByRef,
+    },
+    AggPlainTransInitStrictByVal {
+        call: FuncCall,
+        pergroup: NonNull<AggPerGroup>,
+    },
     // Hashed-agg trans: pergroup resolves per tuple through a cell nodeAgg
     // repoints after each hash lookup (C's setoff into all_pergroups).
-    AggTransByValIndirect { call: FuncCall, base: NonNull<NonNull<AggPerGroup>>, transno: u16 },
+    AggTransByValIndirect {
+        call: FuncCall,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+    },
     AggTransStrictByValIndirect {
         call: FuncCall,
         base: NonNull<NonNull<AggPerGroup>>,
@@ -232,32 +421,61 @@ pub enum Step {
         base: NonNull<NonNull<AggPerGroup>>,
         transno: u16,
     },
-    HashDatumSetInitVal { init_value: Datum, out: OutRef },
-    HashDatumFirst { call: FuncCall, out: OutRef },
+    HashDatumSetInitVal {
+        init_value: Datum,
+        out: OutRef,
+    },
+    HashDatumFirst {
+        call: FuncCall,
+        out: OutRef,
+    },
     // iresult: build-owned intermediate hash slot the rotate-xor chain reads.
-    HashDatumNext32 { call: FuncCall, iresult: NonNull<NullableDatum>, out: OutRef },
+    HashDatumNext32 {
+        call: FuncCall,
+        iresult: NonNull<NullableDatum>,
+        out: OutRef,
+    },
     // EEOP_HASHDATUM_FIRST_STRICT / EEOP_HASHDATUM_NEXT32_STRICT: a NULL key
     // writes (0, isnull=true) to THIS step's out and jumps to jumpdone (the
     // DoneReturn step). C-verbatim, including the consequence that an
     // intermediate-key abort writes iresult — not the result cell — so
     // DoneReturn returns the PREVIOUS evaluation's result (observed C 18.3/
     // 18.4 behavior; see docs/fuzzing/findings-hj-counters.md).
-    HashDatumFirstStrict { call: FuncCall, jumpdone: u32, out: OutRef },
+    HashDatumFirstStrict {
+        call: FuncCall,
+        jumpdone: u32,
+        out: OutRef,
+    },
     HashDatumNext32Strict {
         call: FuncCall,
         iresult: NonNull<NullableDatum>,
         jumpdone: u32,
         out: OutRef,
     },
-    NotDistinct { call: FuncCall, out: OutRef },
-    ParamSet { prm: NonNull<::types_portal::params::ParamExecData>, out: OutRef },
+    NotDistinct {
+        call: FuncCall,
+        out: OutRef,
+    },
+    ParamSet {
+        prm: NonNull<::types_portal::params::ParamExecData>,
+        out: OutRef,
+    },
     // EEOP_SUBPLAN: the interpreter suspends; the caller's driver runs
     // ExecSubPlan (nodeSubplan.c in execmain) with the full estate and
     // resumes with the result (see interp::EvalOutcome).
-    SubPlan { sstate: NonNull<()>, out: OutRef },
+    SubPlan {
+        sstate: NonNull<()>,
+        out: OutRef,
+    },
     // EEOP_MAKE_READONLY: emitted only for typlen -1 domain-check inputs.
-    MakeReadonlyOut { src: OutRef, out: OutRef },
-    DomainTestval { src: OutRef, out: OutRef },
+    MakeReadonlyOut {
+        src: OutRef,
+        out: OutRef,
+    },
+    DomainTestval {
+        src: OutRef,
+        out: OutRef,
+    },
     // escontext: C d.domaincheck.escontext — behavior-expr domain checks
     // under a JsonExprState errsave instead of throwing.
     DomainNotNull {
@@ -272,30 +490,83 @@ pub enum Step {
         check: NonNull<NullableDatum>,
         escontext: Option<NonNull<::types_fmgr::ErrorSaveNode>>,
     },
-    JumpIfNull { jumpdone: u32, out: OutRef },
-    ArrayExprEval { state: NonNull<crate::arrayops::ArrayExprState>, out: OutRef },
-    XmlExprEval { state: NonNull<crate::xmlops::XmlExprState>, out: OutRef },
-    SbsrefSubscripts { state: NonNull<crate::arrayops::SbsRefState>, jumpdone: u32, out: OutRef },
-    SbsrefFetch { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
-    SbsrefOld { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
-    SbsrefAssign { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
+    JumpIfNull {
+        jumpdone: u32,
+        out: OutRef,
+    },
+    ArrayExprEval {
+        state: NonNull<crate::arrayops::ArrayExprState>,
+        out: OutRef,
+    },
+    XmlExprEval {
+        state: NonNull<crate::xmlops::XmlExprState>,
+        out: OutRef,
+    },
+    SbsrefSubscripts {
+        state: NonNull<crate::arrayops::SbsRefState>,
+        jumpdone: u32,
+        out: OutRef,
+    },
+    SbsrefFetch {
+        state: NonNull<crate::arrayops::SbsRefState>,
+        slice: bool,
+        out: OutRef,
+    },
+    SbsrefOld {
+        state: NonNull<crate::arrayops::SbsRefState>,
+        out: OutRef,
+    },
+    SbsrefAssign {
+        state: NonNull<crate::arrayops::SbsRefState>,
+        slice: bool,
+        out: OutRef,
+    },
     JsonbSbsrefSubscripts {
         state: NonNull<crate::jsonbsubs::JsonbSbsState>,
         jumpdone: u32,
         out: OutRef,
     },
-    JsonbSbsrefFetch { state: NonNull<crate::jsonbsubs::JsonbSbsState>, out: OutRef },
-    JsonbSbsrefOld { state: NonNull<crate::jsonbsubs::JsonbSbsState>, out: OutRef },
-    JsonbSbsrefAssign { state: NonNull<crate::jsonbsubs::JsonbSbsState>, out: OutRef },
-    HstoreSbsrefFetch { state: NonNull<crate::hstoresubs::HstoreSbsState>, out: OutRef },
-    HstoreSbsrefAssign { state: NonNull<crate::hstoresubs::HstoreSbsState>, out: OutRef },
+    JsonbSbsrefFetch {
+        state: NonNull<crate::jsonbsubs::JsonbSbsState>,
+        out: OutRef,
+    },
+    JsonbSbsrefOld {
+        state: NonNull<crate::jsonbsubs::JsonbSbsState>,
+        out: OutRef,
+    },
+    JsonbSbsrefAssign {
+        state: NonNull<crate::jsonbsubs::JsonbSbsState>,
+        out: OutRef,
+    },
+    HstoreSbsrefFetch {
+        state: NonNull<crate::hstoresubs::HstoreSbsState>,
+        out: OutRef,
+    },
+    HstoreSbsrefAssign {
+        state: NonNull<crate::hstoresubs::HstoreSbsState>,
+        out: OutRef,
+    },
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
-    MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u32, least: bool, out: OutRef },
-    NextValueExpr { seqid: Oid, seqtypid: Oid, out: OutRef },
+    MinMax {
+        call: FuncCall,
+        slots: NonNull<NullableDatum>,
+        nelems: u32,
+        least: bool,
+        out: OutRef,
+    },
+    NextValueExpr {
+        seqid: Oid,
+        seqtypid: Oid,
+        out: OutRef,
+    },
     // C EEOP_JSON_CONSTRUCTOR: arg subexprs write jcstate's slots; constant
     // metadata + split scratch behind one plan-mcx pointer.
-    JsonConstructor { jcstate: NonNull<JsonConstructorState>, frame: u32, out: OutRef },
+    JsonConstructor {
+        jcstate: NonNull<JsonConstructorState>,
+        frame: u32,
+        out: OutRef,
+    },
     // C EEOP_IS_JSON: reads the arg value already in `out`, rewrites it.
     IsJson {
         exprtype: Oid,
@@ -323,11 +594,36 @@ pub enum Step {
         out: OutRef,
     },
     // Ready-time fused pairs (fuse_program): the two source steps back-to-back.
-    ScanVarFuncStrict2 { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
-    FuncFuncStrict2 { call1: Call2, argno: u8, call2: Call2, out: OutRef },
-    FuncStrict2Qual { call: Call2, jumpdone: u32, out: OutRef },
-    OuterVarNotDistinct { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
-    NotDistinctQual { call: Call2, jumpdone: u32, out: OutRef },
+    ScanVarFuncStrict2 {
+        attnum: u16,
+        argno: u8,
+        vartype: Oid,
+        call: Call2,
+        out: OutRef,
+    },
+    FuncFuncStrict2 {
+        call1: Call2,
+        argno: u8,
+        call2: Call2,
+        out: OutRef,
+    },
+    FuncStrict2Qual {
+        call: Call2,
+        jumpdone: u32,
+        out: OutRef,
+    },
+    OuterVarNotDistinct {
+        attnum: u16,
+        argno: u8,
+        vartype: Oid,
+        call: Call2,
+        out: OutRef,
+    },
+    NotDistinctQual {
+        call: Call2,
+        jumpdone: u32,
+        out: OutRef,
+    },
     OuterVarAggTransByValIndirect {
         attnum: u16,
         argno: u8,
@@ -336,15 +632,51 @@ pub enum Step {
         base: NonNull<NonNull<AggPerGroup>>,
         transno: u16,
     },
-    AssignScanVar2 { attnum1: u16, resultnum1: u16, attnum2: u16, resultnum2: u16 },
+    AssignScanVar2 {
+        attnum1: u16,
+        resultnum1: u16,
+        attnum2: u16,
+        resultnum2: u16,
+    },
     // Thin-ABI twins (fmgr_thin_builtin rows), selected at ready time.
-    FuncExprStrict1Thin { call: CallThin, out: OutRef },
-    FuncExprStrict2Thin { call: CallThin, out: OutRef },
-    ScanVarFuncStrict2Thin { attnum: u16, argno: u8, vartype: Oid, call: CallThin, out: OutRef },
-    FuncFuncStrict2Thin { call1: CallThin, argno: u8, call2: CallThin, out: OutRef },
-    FuncStrict2QualThin { call: CallThin, jumpdone: u32, out: OutRef },
-    OuterVarNotDistinctThin { attnum: u16, argno: u8, vartype: Oid, call: CallThin, out: OutRef },
-    NotDistinctQualThin { call: CallThin, jumpdone: u32, out: OutRef },
+    FuncExprStrict1Thin {
+        call: CallThin,
+        out: OutRef,
+    },
+    FuncExprStrict2Thin {
+        call: CallThin,
+        out: OutRef,
+    },
+    ScanVarFuncStrict2Thin {
+        attnum: u16,
+        argno: u8,
+        vartype: Oid,
+        call: CallThin,
+        out: OutRef,
+    },
+    FuncFuncStrict2Thin {
+        call1: CallThin,
+        argno: u8,
+        call2: CallThin,
+        out: OutRef,
+    },
+    FuncStrict2QualThin {
+        call: CallThin,
+        jumpdone: u32,
+        out: OutRef,
+    },
+    OuterVarNotDistinctThin {
+        attnum: u16,
+        argno: u8,
+        vartype: Oid,
+        call: CallThin,
+        out: OutRef,
+    },
+    NotDistinctQualThin {
+        call: CallThin,
+        jumpdone: u32,
+        out: OutRef,
+    },
     AggTransStrictByValIndirectThin {
         call: CallThin,
         base: NonNull<NonNull<AggPerGroup>>,
@@ -354,43 +686,114 @@ pub enum Step {
     // field back to `out`. Per-eval registry tupdesc copy stands in for C's
     // rowcache (cold path; see interp). Kept last: appending preserves the
     // hot variants' discriminants.
-    FieldSelect { fieldnum: i16, resulttype: Oid, frame: u32, out: OutRef },
+    FieldSelect {
+        fieldnum: i16,
+        resulttype: Oid,
+        frame: u32,
+        out: OutRef,
+    },
     // C EEOP_ROWCOMPARE_STEP: per-column btree ORDER proc; strict-NULL input
     // or NULL result jumps past the expression, nonzero result to FINAL.
     // Appended last: preserves the hot variants' discriminants.
-    RowCompareStep { call: Call2, strict: bool, jumpnull: u32, jumpdone: u32, out: OutRef },
+    RowCompareStep {
+        call: Call2,
+        strict: bool,
+        jumpnull: u32,
+        jumpdone: u32,
+        out: OutRef,
+    },
     // C EEOP_ROWCOMPARE_FINAL; cmptype is CompareType (EQ/NE never appear).
-    RowCompareFinal { cmptype: i32, out: OutRef },
+    RowCompareFinal {
+        cmptype: i32,
+        out: OutRef,
+    },
     // C EEOP_ARRAYCOERCE: reads the array datum from `out`, rewrites it.
     // Appended last: preserves the hot variants' discriminants.
-    ArrayCoerce { state: NonNull<crate::arrayops::ArrayCoerceState>, out: OutRef },
+    ArrayCoerce {
+        state: NonNull<crate::arrayops::ArrayCoerceState>,
+        out: OutRef,
+    },
     // C EEOP_CONVERT_ROWTYPE; the argless frame supplies the per-eval mcx.
-    ConvertRowtype { state: NonNull<ConvertRowtypeState>, frame: u32, out: OutRef },
+    ConvertRowtype {
+        state: NonNull<ConvertRowtypeState>,
+        frame: u32,
+        out: OutRef,
+    },
     // C EEOP_FIELDSTORE_DEFORM/FORM; DEFORM reads the composite datum from
     // `out` into the column workspace, FORM writes the re-formed composite
     // back to `out`. The argless frame supplies the per-eval mcx. Appended
     // last: preserves the hot variants' discriminants.
-    FieldStoreDeForm { fs: NonNull<FieldStoreState>, frame: u32, out: OutRef },
-    FieldStoreForm { fs: NonNull<FieldStoreState>, frame: u32, out: OutRef },
+    FieldStoreDeForm {
+        fs: NonNull<FieldStoreState>,
+        frame: u32,
+        out: OutRef,
+    },
+    FieldStoreForm {
+        fs: NonNull<FieldStoreState>,
+        frame: u32,
+        out: OutRef,
+    },
     // C EEOP_JSONEXPR_PATH: a jumping step — evaluation returns the next step
     // address (one of the state's jump_* fields).
-    JsonExprPath { jsestate: NonNull<JsonExprState>, frame: u32, out: OutRef },
-    JsonCoercion { jc: NonNull<JsonCoercionState>, frame: u32, out: OutRef },
-    JsonCoercionFinish { jsestate: NonNull<JsonExprState>, out: OutRef },
+    JsonExprPath {
+        jsestate: NonNull<JsonExprState>,
+        frame: u32,
+        out: OutRef,
+    },
+    JsonCoercion {
+        jc: NonNull<JsonCoercionState>,
+        frame: u32,
+        out: OutRef,
+    },
+    JsonCoercionFinish {
+        jsestate: NonNull<JsonExprState>,
+        out: OutRef,
+    },
     // C EEOP_IOCOERCE_SAFE: input-fn errors save into the fcinfo-armed
     // ErrorSaveNode instead of throwing.
-    IoCoerceSafe { calls: NonNull<IoCoerceCalls>, out: OutRef },
+    IoCoerceSafe {
+        calls: NonNull<IoCoerceCalls>,
+        out: OutRef,
+    },
     // C EEOP_OLD_/NEW_FETCHSOME/VAR/SYSVAR + EEOP_RETURNINGEXPR (RETURNING
     // OLD/NEW). Appended last: preserves the hot variants' discriminants.
-    OldFetchSome { last_var: u16 },
-    NewFetchSome { last_var: u16 },
-    OldVar { attnum: u16, vartype: Oid, out: OutRef },
-    NewVar { attnum: u16, vartype: Oid, out: OutRef },
-    OldSysVar { attnum: i16, out: OutRef },
-    NewSysVar { attnum: i16, out: OutRef },
-    AssignOldVar { attnum: u16, resultnum: u16 },
-    AssignNewVar { attnum: u16, resultnum: u16 },
-    ReturningExprStep { nullflag: u8, jumpdone: u32, out: OutRef },
+    OldFetchSome {
+        last_var: u16,
+    },
+    NewFetchSome {
+        last_var: u16,
+    },
+    OldVar {
+        attnum: u16,
+        vartype: Oid,
+        out: OutRef,
+    },
+    NewVar {
+        attnum: u16,
+        vartype: Oid,
+        out: OutRef,
+    },
+    OldSysVar {
+        attnum: i16,
+        out: OutRef,
+    },
+    NewSysVar {
+        attnum: i16,
+        out: OutRef,
+    },
+    AssignOldVar {
+        attnum: u16,
+        resultnum: u16,
+    },
+    AssignNewVar {
+        attnum: u16,
+        resultnum: u16,
+    },
+    ReturningExprStep {
+        nullflag: u8,
+        jumpdone: u32,
+        out: OutRef,
+    },
 }
 
 // C JsonExprState (execnodes.h): resolve-once carrier for EEOP_JSONEXPR_*.
@@ -578,7 +981,12 @@ pub struct ScanContainsClause {
 
 impl ScanContainsClause {
     pub(crate) fn new(attnum: u16, collation: Oid, needle: NonNull<u8>, needle_len: u32) -> Self {
-        ScanContainsClause { attnum, collation, needle, needle_len }
+        ScanContainsClause {
+            attnum,
+            collation,
+            needle,
+            needle_len,
+        }
     }
 
     /// The contains literal. Valid while the owning plan (the pattern
@@ -722,7 +1130,12 @@ pub enum ScanProjCol {
     ArithVV { op: ProjArithOp, a: u16, b: u16 },
     /// int arith over one scan Var and one compile-time non-null Const;
     /// `var_is_arg0` = the Var is the left operand.
-    ArithVK { op: ProjArithOp, attnum: u16, konst: Datum, var_is_arg0: bool },
+    ArithVK {
+        op: ProjArithOp,
+        attnum: u16,
+        konst: Datum,
+        var_is_arg0: bool,
+    },
 }
 
 /// Whole-projection census for the lane-v2 stitched-projection tier: the
@@ -834,7 +1247,10 @@ pub struct CallThin {
 impl From<FuncCall> for Call2 {
     fn from(c: FuncCall) -> Call2 {
         debug_assert!(c.nargs == 2);
-        Call2 { fcinfo: c.fcinfo, flinfo: c.flinfo }
+        Call2 {
+            fcinfo: c.fcinfo,
+            flinfo: c.flinfo,
+        }
     }
 }
 
@@ -893,10 +1309,17 @@ fn fcinfo_layout(nargs: usize) -> Layout {
 }
 
 impl<'mcx> FuncFrame<'mcx> {
-    pub(crate) fn new_in(mcx: Mcx<'mcx>, flinfo: FmgrInfo, nargs: u16, collation: Oid) -> PgResult<Self> {
+    pub(crate) fn new_in(
+        mcx: Mcx<'mcx>,
+        flinfo: FmgrInfo,
+        nargs: u16,
+        collation: Oid,
+    ) -> PgResult<Self> {
         let fl_layout = Layout::new::<FmgrInfo>();
-        let fl: NonNull<FmgrInfo> =
-            mcx.allocate(fl_layout).map_err(|_| mcx.oom(fl_layout.size()))?.cast();
+        let fl: NonNull<FmgrInfo> = mcx
+            .allocate(fl_layout)
+            .map_err(|_| mcx.oom(fl_layout.size()))?
+            .cast();
         // SAFETY: fresh exclusive allocation; fn_extra released via
         // release_frames, never by arena drop (C fn_mcxt shape).
         unsafe { fl.write(flinfo) };
@@ -907,7 +1330,8 @@ impl<'mcx> FuncFrame<'mcx> {
         // SAFETY: fresh allocation of fcinfo_layout(nargs) bytes; header is a
         // POD LocalFcinfo<0> prefix and the args tail is zeroed NullableDatum.
         unsafe {
-            base.cast::<LocalFcinfo<0>>().write(LocalFcinfo::<0>::new(collation));
+            base.cast::<LocalFcinfo<0>>()
+                .write(LocalFcinfo::<0>::new(collation));
             (*base.as_ptr().cast::<LocalFcinfo<0>>()).nargs = nargs as i16;
             core::ptr::write_bytes(
                 base.as_ptr().add(FCINFO_ARGS_OFFSET),
@@ -972,10 +1396,9 @@ pub(crate) unsafe fn fcinfo_mut<'a>(
     base: NonNull<u8>,
     nargs: u16,
 ) -> &'a mut FunctionCallInfoBaseData {
-    let fat = core::ptr::slice_from_raw_parts_mut(
-        base.as_ptr().cast::<NullableDatum>(),
-        nargs as usize,
-    ) as *mut FunctionCallInfoBaseData;
+    let fat =
+        core::ptr::slice_from_raw_parts_mut(base.as_ptr().cast::<NullableDatum>(), nargs as usize)
+            as *mut FunctionCallInfoBaseData;
     unsafe { &mut *fat }
 }
 
@@ -1318,7 +1741,11 @@ fn f4_eq(a: f32, b: f32) -> bool {
 }
 #[inline(always)]
 fn f4_ne(a: f32, b: f32) -> bool {
-    if a.is_nan() { !b.is_nan() } else { b.is_nan() || a != b }
+    if a.is_nan() {
+        !b.is_nan()
+    } else {
+        b.is_nan() || a != b
+    }
 }
 #[inline(always)]
 fn f4_lt(a: f32, b: f32) -> bool {
@@ -1342,7 +1769,11 @@ fn f8_eq(a: f64, b: f64) -> bool {
 }
 #[inline(always)]
 fn f8_ne(a: f64, b: f64) -> bool {
-    if a.is_nan() { !b.is_nan() } else { b.is_nan() || a != b }
+    if a.is_nan() {
+        !b.is_nan()
+    } else {
+        b.is_nan() || a != b
+    }
 }
 #[inline(always)]
 fn f8_lt(a: f64, b: f64) -> bool {
@@ -1480,12 +1911,7 @@ pub fn qual_bitmap_cmp_const(
 }
 
 #[inline(always)]
-fn bitmap_loop(
-    values: &[Datum],
-    isnull: &[bool],
-    sel: &mut [u64],
-    pred: impl Fn(Datum) -> bool,
-) {
+fn bitmap_loop(values: &[Datum], isnull: &[bool], sel: &mut [u64], pred: impl Fn(Datum) -> bool) {
     for (w, (vch, nch)) in values.chunks(64).zip(isnull.chunks(64)).enumerate() {
         let mut word = 0u64;
         for i in 0..vch.len() {
@@ -1501,22 +1927,71 @@ fn bitmap_loop(
 #[derive(Clone, Copy, Debug)]
 pub enum Kernel {
     Program,
-    JustConst { value: Datum, isnull: bool },
-    JustConstAssign { value: Datum, isnull: bool, resultnum: u16 },
-    JustVar { src: SlotSrc, attnum: u16 },
-    JustVarVirt { src: SlotSrc, attnum: u16 },
-    JustAssignVar { src: SlotSrc, attnum: u16, resultnum: u16 },
-    JustAssignVarVirt { src: SlotSrc, attnum: u16, resultnum: u16 },
-    QualScanVarCmpConst { attnum: u16, konst: Datum, cmp: CmpOp },
-    QualVarCmpVar { a_src: SlotSrc, a_attnum: u16, b_src: SlotSrc, b_attnum: u16, cmp: CmpOp },
+    JustConst {
+        value: Datum,
+        isnull: bool,
+    },
+    JustConstAssign {
+        value: Datum,
+        isnull: bool,
+        resultnum: u16,
+    },
+    JustVar {
+        src: SlotSrc,
+        attnum: u16,
+    },
+    JustVarVirt {
+        src: SlotSrc,
+        attnum: u16,
+    },
+    JustAssignVar {
+        src: SlotSrc,
+        attnum: u16,
+        resultnum: u16,
+    },
+    JustAssignVarVirt {
+        src: SlotSrc,
+        attnum: u16,
+        resultnum: u16,
+    },
+    QualScanVarCmpConst {
+        attnum: u16,
+        konst: Datum,
+        cmp: CmpOp,
+    },
+    QualVarCmpVar {
+        a_src: SlotSrc,
+        a_attnum: u16,
+        b_src: SlotSrc,
+        b_attnum: u16,
+        cmp: CmpOp,
+    },
     // strict: EEOP_HASHDATUM_FIRST_STRICT single-key cover — a NULL key
     // returns SQL NULL (the caller skips the tuple, nodeHash.c C parity).
-    Hash32Var { src: SlotSrc, attnum: u16, frame: u32, strict: bool },
-    JustFunc { fn_addr: PGFunction, frame: u32, nargs: u16, strict: bool },
+    Hash32Var {
+        src: SlotSrc,
+        attnum: u16,
+        frame: u32,
+        strict: bool,
+    },
+    JustFunc {
+        fn_addr: PGFunction,
+        frame: u32,
+        nargs: u16,
+        strict: bool,
+    },
     // Argless byval transition (count(*)-class 2-step programs): the whole
     // per-row program without the interpreter loop (ExecJust* precedent).
-    AggTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup>, strict: bool },
-    AggTransByValThin { call: CallThin, pergroup: NonNull<AggPerGroup>, strict: bool },
+    AggTransByVal {
+        call: FuncCall,
+        pergroup: NonNull<AggPerGroup>,
+        strict: bool,
+    },
+    AggTransByValThin {
+        call: CallThin,
+        pergroup: NonNull<AggPerGroup>,
+        strict: bool,
+    },
 }
 
 const _: () = assert!(core::mem::size_of::<Kernel>() <= 48);
@@ -1593,7 +2068,12 @@ impl<'mcx> ExprState<'mcx> {
         // EEOP_HASHDATUM_*_STRICT abort on an intermediate key, whose out is
         // the iresult) — the first evaluation then returns this initial
         // value, and C's is not-null zero.
-        unsafe { resnd.write(NullableDatum { value: Datum::from_u32(0), isnull: false }) };
+        unsafe {
+            resnd.write(NullableDatum {
+                value: Datum::from_u32(0),
+                isnull: false,
+            })
+        };
         // On steps-alloc failure the header chunk stays until reset (C's palloc-then-throw shape).
         let steps = ::mcx::vec_with_capacity_in(mcx, 16)?;
         // SAFETY: fresh exclusive layout-sized allocation from `mcx`; written once, then box-owned.
@@ -1640,7 +2120,13 @@ impl<'mcx> ExprState<'mcx> {
     /// (hashint4/hashoid: hash_bytes_uint32 of the datum's low 32 bits,
     /// never errors) — the columnar precompute cover; 0-based key attnum.
     pub fn hash32var_low32(&self, src: SlotSrc) -> Option<u16> {
-        let Kernel::Hash32Var { src: s, attnum, frame, .. } = self.kernel else {
+        let Kernel::Hash32Var {
+            src: s,
+            attnum,
+            frame,
+            ..
+        } = self.kernel
+        else {
             return None;
         };
         if s != src {
@@ -1693,10 +2179,18 @@ impl<'mcx> ExprState<'mcx> {
             | Kernel::AggTransByValThin { .. }
             | Kernel::JustConst { .. }
             | Kernel::JustConstAssign { .. } => Some(0),
-            Kernel::QualScanVarCmpConst { attnum, .. } => {
-                Some(if src == SlotSrc::Scan { attnum as i32 + 1 } else { 0 })
-            }
-            Kernel::QualVarCmpVar { a_src, a_attnum, b_src, b_attnum, .. } => {
+            Kernel::QualScanVarCmpConst { attnum, .. } => Some(if src == SlotSrc::Scan {
+                attnum as i32 + 1
+            } else {
+                0
+            }),
+            Kernel::QualVarCmpVar {
+                a_src,
+                a_attnum,
+                b_src,
+                b_attnum,
+                ..
+            } => {
                 let mut m = 0i32;
                 if a_src == src {
                     m = a_attnum as i32 + 1;

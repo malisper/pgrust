@@ -37,8 +37,8 @@ mod execparallel;
 mod lanev2;
 mod nodegather;
 mod nodegathermerge;
-mod noderesult;
 mod nodeprojectset;
+mod noderesult;
 mod nodesubplan;
 mod procnode;
 mod querydesc;
@@ -57,12 +57,12 @@ pub use execmain::{
 pub use execparallel::{parallel_query_main, register_parallel_query_main};
 // Serial-lease v2 boot surface (GL-SLEASE-2): seams_init installs the armed
 // wait-seam wrappers + the ProcessInterrupts admission tap through these.
+pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE};
 pub use slease::{
     admission_tap as serial_lease_admission_tap, armed as serial_lease_armed,
-    donation_enabled as serial_lease_donation_enabled,
-    wait_hook_end as serial_lease_wait_hook_end, wait_hook_start as serial_lease_wait_hook_start,
+    donation_enabled as serial_lease_donation_enabled, wait_hook_end as serial_lease_wait_hook_end,
+    wait_hook_start as serial_lease_wait_hook_start,
 };
-pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE};
 // WS-CB wave-10 (cursors inc-2 contract §8; worklog notes/se-wave10-cb.md
 // EX-CB-1): the CA-facing portal seam — pquery must not link lanev2
 // internals. Knob face for store arming (§7.3), the §6 assert-arming note,
@@ -76,11 +76,10 @@ pub use lanev2::{
 pub use lanev2::stmt_task_engagements;
 pub use nodegather::GatherState;
 pub use nodegathermerge::GatherMergeState;
-pub use noderesult::ResultState;
 pub use nodeprojectset::ProjectSetState;
+pub use noderesult::ResultState;
 pub use procnode::{
-    exec_end_node, exec_init_node, exec_proc_node, exec_shutdown_node, PlanStateBase,
-    PlanStateNode,
+    exec_end_node, exec_init_node, exec_proc_node, exec_shutdown_node, PlanStateBase, PlanStateNode,
 };
 pub use querydesc::{registry_len, with_qd, ExecData, ExecutorHandle, QueryDescData};
 pub use typefromtl::{exec_clean_type_from_tl, exec_type_from_tl, expr_collation, expr_typmod};
@@ -126,22 +125,14 @@ pub fn init_seams() {
     execmain_seams::query_desc_memoize_instrument::set(
         querydesc::query_desc_memoize_instrument_seam,
     );
-    execmain_seams::query_desc_bitmap_instrument::set(
-        querydesc::query_desc_bitmap_instrument_seam,
-    );
+    execmain_seams::query_desc_bitmap_instrument::set(querydesc::query_desc_bitmap_instrument_seam);
     execmain_seams::query_desc_index_searches::set(querydesc::query_desc_index_searches_seam);
     execmain_seams::exec_clean_type_from_tl::set(typefromtl::exec_clean_type_from_tl_seam);
     execmain_seams::exec_check_permissions::set(execmain::exec_check_permissions_over_perminfos);
     execmain_seams::exec_current_of::set(execcurrent::exec_current_of_seam);
-    execmain_seams::query_desc_workers_launched::set(
-        querydesc::query_desc_workers_launched_seam,
-    );
-    execmain_seams::query_desc_merge_instrument::set(
-        querydesc::query_desc_merge_instrument_seam,
-    );
-    execmain_seams::query_desc_worker_instrument::set(
-        querydesc::query_desc_worker_instrument_seam,
-    );
+    execmain_seams::query_desc_workers_launched::set(querydesc::query_desc_workers_launched_seam);
+    execmain_seams::query_desc_merge_instrument::set(querydesc::query_desc_merge_instrument_seam);
+    execmain_seams::query_desc_worker_instrument::set(querydesc::query_desc_worker_instrument_seam);
     execmain_seams::query_desc_worker_sort_instrument::set(
         querydesc::query_desc_worker_sort_instrument_seam,
     );
@@ -171,7 +162,12 @@ pub fn init_seams() {
     // --- end SE-R41 ---
     execparallel::register_parallel_query_main();
     {
-        guc_tables::session_guc_bool!(PLP, parallel_leader_participation_stand_in, set_parallel_leader_participation_stand_in, true);
+        guc_tables::session_guc_bool!(
+            PLP,
+            parallel_leader_participation_stand_in,
+            set_parallel_leader_participation_stand_in,
+            true
+        );
         guc_tables::vars::parallel_leader_participation.install_if_absent(
             guc_tables::GucVarAccessors {
                 get: parallel_leader_participation_stand_in,
@@ -196,8 +192,7 @@ pub(crate) fn desc_mcx() -> Mcx<'static> {
         let m = match c.get() {
             Some(m) => m,
             None => {
-                let m: &'static MemoryContext =
-                    ::mcx::session_root("ExecutorResultTypes");
+                let m: &'static MemoryContext = ::mcx::session_root("ExecutorResultTypes");
                 c.set(Some(m));
                 m
             }

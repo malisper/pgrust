@@ -51,7 +51,9 @@ use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
 use super::router::{self, ArmClass, ArmCounter};
-use super::{drain_pipeline, BatchEmit, BatchSink, SeqScanFilterProject, SeqScanSource, Sink, SinkFeed};
+use super::{
+    drain_pipeline, BatchEmit, BatchSink, SeqScanFilterProject, SeqScanSource, Sink, SinkFeed,
+};
 use super::{lane_trace, seq_scan_fusible, trace_feed};
 
 // ---------------------------------------------------------------------------
@@ -222,9 +224,7 @@ fn sort_keys_and_map<'mcx>(
             Some(OidLt) => (KeyWidth::U32, false, false),
             Some(OidGt) => (KeyWidth::U32, true, false),
             _ => {
-                if !(opfn == F_TEXT_LT || opfn == F_TEXT_GT)
-                    || !runtime_sort_dictcode_enabled()
-                {
+                if !(opfn == F_TEXT_LT || opfn == F_TEXT_GT) || !runtime_sort_dictcode_enabled() {
                     return None;
                 }
                 // Order via byte-rank codes is `varstr_cmp` order only
@@ -272,7 +272,11 @@ fn topn_spec<'mcx>(
         return None;
     }
     let (keys, tlist_map) = sort_keys_and_map(state, ss, outer_desc)?;
-    Some(TopnSpec { keys, tlist_map, bound: state.bound as usize })
+    Some(TopnSpec {
+        keys,
+        tlist_map,
+        bound: state.bound as usize,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -353,7 +357,9 @@ fn topn_direct_spec(
             return None;
         }
     }
-    Some(DirectSpec { pay_cols: spec.tlist_map.clone() })
+    Some(DirectSpec {
+        pay_cols: spec.tlist_map.clone(),
+    })
 }
 
 /// Shape-(b) full-sort spec: UNBOUNDED forward-only sorts; the shared key
@@ -404,7 +410,10 @@ fn full_spec_ex<'mcx>(
         if !a.attbyval && a.attlen != -1 && a.attlen <= 0 {
             return None; // cstring / unknown copy law
         }
-        cols.push(::nodesort::fullsort::RunCol { byval: a.attbyval, len: a.attlen });
+        cols.push(::nodesort::fullsort::RunCol {
+            byval: a.attbyval,
+            len: a.attlen,
+        });
     }
     Some(FullSpec { keys, natts, cols })
 }
@@ -537,7 +546,8 @@ pub(super) enum TopnLocal {
     Wide(TopnWideHeap),
     /// GL-TOPNHEAP-1 direct feed: single-key entries carrying the captured
     /// output row (adopt = pure copy).
-    #[allow(private_interfaces)] // visibility is deliberate API shape; widening is a design decision deferred
+    #[allow(private_interfaces)]
+    // visibility is deliberate API shape; widening is a design decision deferred
     Direct(BoundedTopnHeap<PayEntry>),
     Full(FullLocal),
 }
@@ -562,7 +572,8 @@ pub(super) enum TopnSealed {
     Narrow(Vec<TopnEntry>),
     Wide(Vec<WideEntry>),
     /// GL-TOPNHEAP-1 direct feed: sealed payload-carrying run.
-    #[allow(private_interfaces)] // visibility is deliberate API shape; widening is a design decision deferred
+    #[allow(private_interfaces)]
+    // visibility is deliberate API shape; widening is a design decision deferred
     Direct(Vec<PayEntry>),
     /// Sealed full-sort run (sorted entries + fixed-up buf) — Arc so the
     /// finalize publish clones pointers, never row data.
@@ -597,7 +608,10 @@ impl RuntimeSortShared {
     }
 
     fn take_winners(&self) -> Option<Vec<u64>> {
-        self.winners.lock().unwrap_or_else(|p| p.into_inner()).take()
+        self.winners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
     }
 }
 
@@ -629,7 +643,10 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
     fn accept_local(&self, local: &mut TopnLocal, _worker: usize, range: runtime::MorselRange) {
         if self.failed.load(Ordering::SeqCst)
             || self.broke.load(Ordering::SeqCst)
-            || self.full.as_ref().is_some_and(|f| f.budget_refused.load(Ordering::SeqCst))
+            || self
+                .full
+                .as_ref()
+                .is_some_and(|f| f.budget_refused.load(Ordering::SeqCst))
         {
             return; // aborting: drain the claim without work
         }
@@ -678,7 +695,10 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
     fn combine(&self, part: u64, sealed: &[TopnSealed]) {
         if self.failed.load(Ordering::SeqCst)
             || self.broke.load(Ordering::SeqCst)
-            || self.full.as_ref().is_some_and(|f| f.budget_refused.load(Ordering::SeqCst))
+            || self
+                .full
+                .as_ref()
+                .is_some_and(|f| f.budget_refused.load(Ordering::SeqCst))
         {
             return;
         }
@@ -745,7 +765,10 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
                     }
                 })
                 .collect();
-            topn_merge(&runs, self.bound).iter().map(|e| e.rowref()).collect()
+            topn_merge(&runs, self.bound)
+                .iter()
+                .map(|e| e.rowref())
+                .collect()
         } else {
             let runs: Vec<Vec<WideEntry>> = sealed
                 .iter()
@@ -761,7 +784,10 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
                     }
                 })
                 .collect();
-            topn_merge(&runs, self.bound).iter().map(|e| e.rowref()).collect()
+            topn_merge(&runs, self.bound)
+                .iter()
+                .map(|e| e.rowref())
+                .collect()
         };
         *self.winners.lock().unwrap_or_else(|p| p.into_inner()) = Some(rowrefs);
     }
@@ -845,7 +871,7 @@ struct TopnAcceptSink<'a> {
     /// contract break (RG abort, serial rerun; nothing was emitted).
     dictcode: bool,
     /// Per-row multi-key scratch (avoids a per-row alloc).
-    obs: [( i64, bool); ::nodesort::sink::TOPN_MAX_KEYS],
+    obs: [(i64, bool); ::nodesort::sink::TOPN_MAX_KEYS],
     flags: [(bool, bool); ::nodesort::sink::TOPN_MAX_KEYS],
     /// GCUT (inc-2): the payload's shared cutoff. Read once per staged
     /// batch and pruned/published against in the COLSTAGE tight loop only
@@ -886,7 +912,11 @@ impl<'a> TopnAcceptSink<'a> {
                 h.push(TopnEntry::encode(k, n, key.desc, key.nulls_first, rowref));
             }
             TopnLocal::Wide(h) => {
-                h.push(WideEntry::encode(&self.obs[..nk], &self.flags[..nk], rowref));
+                h.push(WideEntry::encode(
+                    &self.obs[..nk],
+                    &self.flags[..nk],
+                    rowref,
+                ));
             }
             TopnLocal::Full(_) => unreachable!("full locals feed FullAcceptSink"),
             TopnLocal::Direct(_) => {
@@ -939,8 +969,8 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
         let fast = {
             let mut fb = [0u64; ::exectuples::SOA_BM_WORDS];
             let mut selw: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
-            let mut dlanes: [Option<::exectuples::SoaDictLane>;
-                ::nodesort::sink::TOPN_MAX_KEYS] = [None; ::nodesort::sink::TOPN_MAX_KEYS];
+            let mut dlanes: [Option<::exectuples::SoaDictLane>; ::nodesort::sink::TOPN_MAX_KEYS] =
+                [None; ::nodesort::sink::TOPN_MAX_KEYS];
             let mut ok = true;
             for (ki, key) in self.keys.iter().enumerate() {
                 if key.dictcode {
@@ -1032,22 +1062,22 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
         if runtime_sort_colstage_enabled() {
             if let Some((fb, _, dlanes)) = &fast {
                 let nwords = ((n as usize) + 63) / 64;
-                let fallback_free = fb[..nwords.min(fb.len())]
-                    .iter()
-                    .enumerate()
-                    .all(|(w, &word)| {
-                        // Mask off bits at and past `n` in the last word.
-                        let hi = (n as usize).saturating_sub(w * 64).min(64);
-                        let mask = if hi >= 64 { !0u64 } else { (1u64 << hi) - 1 };
-                        word & mask == 0
-                    });
+                let fallback_free =
+                    fb[..nwords.min(fb.len())]
+                        .iter()
+                        .enumerate()
+                        .all(|(w, &word)| {
+                            // Mask off bits at and past `n` in the last word.
+                            let hi = (n as usize).saturating_sub(w * 64).min(64);
+                            let mask = if hi >= 64 { !0u64 } else { (1u64 << hi) - 1 };
+                            word & mask == 0
+                        });
                 if fallback_free {
                     // Hoist per-key batch views once (batch-stable — the
                     // fast-leg availability check above proved each key
                     // serves this window).
                     let mut kv: [Option<(&[::datum::Datum], &[bool])>;
-                        ::nodesort::sink::TOPN_MAX_KEYS] =
-                        [None; ::nodesort::sink::TOPN_MAX_KEYS];
+                        ::nodesort::sink::TOPN_MAX_KEYS] = [None; ::nodesort::sink::TOPN_MAX_KEYS];
                     for (ki, key) in self.keys.iter().enumerate() {
                         if !key.dictcode {
                             let (vals, nulls, _, _) = emit
@@ -1067,8 +1097,11 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                     // the COLSTAGE loop stays exactly the inc-1 shape.
                     let gcut = runtime_sort_gcut_enabled();
                     let cutoff = self.cutoff;
-                    let mut cut =
-                        if gcut { cutoff.load(Ordering::Relaxed) } else { u64::MAX };
+                    let mut cut = if gcut {
+                        cutoff.load(Ordering::Relaxed)
+                    } else {
+                        u64::MAX
+                    };
                     match &mut *self.heap {
                         TopnLocal::Narrow(h) => {
                             let key = keys[0];
@@ -1091,8 +1124,7 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                                             rowref,
                                         )
                                     } else {
-                                        let (vals, nulls) =
-                                            kv[0].expect("int key view hoisted");
+                                        let (vals, nulls) = kv[0].expect("int key view hoisted");
                                         TopnEntry::encode(
                                             key_i64(vals[i as usize], key.width),
                                             nulls[i as usize],
@@ -1111,8 +1143,7 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                                                 let c = f.cut64();
                                                 if c < cut {
                                                     cut = c;
-                                                    cutoff
-                                                        .fetch_min(c, Ordering::Relaxed);
+                                                    cutoff.fetch_min(c, Ordering::Relaxed);
                                                 }
                                             }
                                         }
@@ -1148,8 +1179,7 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                                         }
                                     }
                                     let rowref = ((rg as u64) << 32) | (row0 + i) as u64;
-                                    let e =
-                                        WideEntry::encode(&obs[..nk], &flags[..nk], rowref);
+                                    let e = WideEntry::encode(&obs[..nk], &flags[..nk], rowref);
                                     if e.cut64() > cut {
                                         return Ok(());
                                     }
@@ -1160,8 +1190,7 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                                                 let c = f.cut64();
                                                 if c < cut {
                                                     cut = c;
-                                                    cutoff
-                                                        .fetch_min(c, Ordering::Relaxed);
+                                                    cutoff.fetch_min(c, Ordering::Relaxed);
                                                 }
                                             }
                                         }
@@ -1221,15 +1250,19 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                     return Ok(());
                 }
             }
-            let Some(id) = emit.emit(i, estate)? else { return Ok(()) };
+            let Some(id) = emit.emit(i, estate)? else {
+                return Ok(());
+            };
             {
                 let slot = estate.slot_mut(id);
                 ::exectuples::slot_getsomeattrs(slot, max_resno as i32 + 1);
                 let base = slot.base();
                 for ki in 0..nk {
                     let key = self.keys[ki];
-                    let (d, isnull) =
-                        (base.tts_values[key.resno_outer], base.tts_isnull[key.resno_outer]);
+                    let (d, isnull) = (
+                        base.tts_values[key.resno_outer],
+                        base.tts_isnull[key.resno_outer],
+                    );
                     self.obs[ki] = (key_i64(d, key.width), isnull);
                 }
             }
@@ -1321,7 +1354,9 @@ impl<'mcx> BatchSink<'mcx> for FullAcceptSink<'_> {
         ::exectuples::for_each_live(live.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
             // The per-row emit leg: qual verdict + projection + detoast —
             // C semantics, C's errors on C's row. None = qual-filtered.
-            let Some(id) = emit.emit(i, estate)? else { return Ok(()) };
+            let Some(id) = emit.emit(i, estate)? else {
+                return Ok(());
+            };
             let bufrow = self.local.buf.nrows as u32;
             {
                 let slot = estate.slot_mut(id);
@@ -1329,8 +1364,10 @@ impl<'mcx> BatchSink<'mcx> for FullAcceptSink<'_> {
                 let base = slot.base();
                 for ki in 0..nk {
                     let key = self.keys[ki];
-                    let (d, isnull) =
-                        (base.tts_values[key.resno_outer], base.tts_isnull[key.resno_outer]);
+                    let (d, isnull) = (
+                        base.tts_values[key.resno_outer],
+                        base.tts_isnull[key.resno_outer],
+                    );
                     self.obs[ki] = (key_i64(d, key.width), isnull);
                 }
                 // SAFETY: outer-format slot cells are live, fully-detoasted
@@ -1378,7 +1415,10 @@ impl RuntimeSortShared {
         estate: &mut EStateData<'mcx>,
         range: runtime::MorselRange,
     ) -> PgResult<bool> {
-        let ds = self.direct.as_ref().expect("direct local under a direct spec");
+        let ds = self
+            .direct
+            .as_ref()
+            .expect("direct local under a direct spec");
         let key = self.keys[0];
         let kc = key.attno_scan as usize;
         let gcut = runtime_sort_gcut_enabled();
@@ -1390,8 +1430,7 @@ impl RuntimeSortShared {
         // Chunk scratch (reused across granules): pruned-in candidates +
         // their captured rows.
         let mut cand: Vec<(u32, TopnEntry)> = Vec::with_capacity(TOPN_DIRECT_CHUNK as usize);
-        let mut pays: Vec<[usize; TOPN_PAY_MAX]> =
-            Vec::with_capacity(TOPN_DIRECT_CHUNK as usize);
+        let mut pays: Vec<[usize; TOPN_PAY_MAX]> = Vec::with_capacity(TOPN_DIRECT_CHUNK as usize);
         let mut g = range.start;
         while g < range.end {
             // Zone-skip segmentation: identical to the staged arm (the
@@ -1410,8 +1449,7 @@ impl RuntimeSortShared {
             g = match zone {
                 Some(best) => {
                     let mut e = g;
-                    while e < range.end && best.get(e as usize).copied().unwrap_or(0) <= segcut
-                    {
+                    while e < range.end && best.get(e as usize).copied().unwrap_or(0) <= segcut {
                         e += 1;
                     }
                     e
@@ -1420,8 +1458,7 @@ impl RuntimeSortShared {
             };
             ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, s0, g)?;
             loop {
-                let Some((nrows, base)) =
-                    ::nodeseqscan::seq_scan_topn_direct_next_granule(ss)?
+                let Some((nrows, base)) = ::nodeseqscan::seq_scan_topn_direct_next_granule(ss)?
                 else {
                     break;
                 };
@@ -1436,16 +1473,14 @@ impl RuntimeSortShared {
                 } else {
                     u64::MAX
                 };
-                let mut floor_cut =
-                    heap.floor().map_or(u64::MAX, |f| f.e.cut64());
+                let mut floor_cut = heap.floor().map_or(u64::MAX, |f| f.e.cut64());
                 let mut i: u32 = 0;
                 while i < nrows {
                     ::postgres_seams::check_for_interrupts::call()?;
                     let hi = (i + TOPN_DIRECT_CHUNK).min(nrows);
                     cand.clear();
                     {
-                        let Some(lane) = ::nodeseqscan::seq_scan_topn_direct_lane(ss, kc)
-                        else {
+                        let Some(lane) = ::nodeseqscan::seq_scan_topn_direct_lane(ss, kc) else {
                             return Ok(true); // contract break: R5 rerun
                         };
                         let eff = cut.min(floor_cut);
@@ -1540,8 +1575,7 @@ impl RuntimeSortShared {
                                 range.start,
                                 range.end,
                             )?;
-                            let full =
-                                self.full.as_ref().expect("full local under a full spec");
+                            let full = self.full.as_ref().expect("full local under a full spec");
                             let mut sink = FullAcceptSink::new(l, &self.keys, full);
                             let fed = drain_pipeline(
                                 ss,
@@ -1588,8 +1622,7 @@ impl RuntimeSortShared {
                                     Some(best) => {
                                         let mut e = g;
                                         while e < range.end
-                                            && best.get(e as usize).copied().unwrap_or(0)
-                                                <= cut
+                                            && best.get(e as usize).copied().unwrap_or(0) <= cut
                                         {
                                             e += 1;
                                         }
@@ -1598,11 +1631,8 @@ impl RuntimeSortShared {
                                     None => range.end,
                                 };
                                 ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, s0, g)?;
-                                let mut sink = TopnAcceptSink::new(
-                                    &mut *local,
-                                    &self.keys,
-                                    &self.cutoff,
-                                );
+                                let mut sink =
+                                    TopnAcceptSink::new(&mut *local, &self.keys, &self.cutoff);
                                 let fed = drain_pipeline(
                                     ss,
                                     &mut SeqScanSource,
@@ -1626,7 +1656,9 @@ impl RuntimeSortShared {
                         }
                         self.abort_rg();
                     } else if broke {
-                        trace_feed("runtime sort worker contract break; aborting to serial fallback");
+                        trace_feed(
+                            "runtime sort worker contract break; aborting to serial fallback",
+                        );
                         self.break_contract();
                     }
                     Ok(())
@@ -1662,8 +1694,12 @@ fn runtime_sort_worker_main(_shared: &parallel::ParallelShared) -> PgResult<()> 
 }
 
 fn runtime_sort_post_task_park(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
-    let Ok(payload) = private.downcast::<RuntimeSortShared>() else { return };
+    let Some(private) = shared.private() else {
+        return;
+    };
+    let Ok(payload) = private.downcast::<RuntimeSortShared>() else {
+        return;
+    };
     // Every LAUNCHED helper bumps `exited` exactly once, on EVERY exit path
     // (the leader's liveness reap counts these against `launched`;
     // m35-spill inc-2c port). HOOK-frame placement (the scan arm's law):
@@ -1683,8 +1719,12 @@ fn runtime_sort_post_task_park(shared: &parallel::ParallelShared) {
 /// POST_TASK_PARK body minus the ExitBump; exit-committed unwinds (FATAL)
 /// rethrow to the gang glue (a terminated worker must die).
 fn runtime_sort_standing_driver(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
-    let Ok(payload) = private.downcast::<RuntimeSortShared>() else { return };
+    let Some(private) = shared.private() else {
+        return;
+    };
+    let Ok(payload) = private.downcast::<RuntimeSortShared>() else {
+        return;
+    };
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if let Err(unwind) = r {
         // #70: report the claimant death on the board (count-then-wake)
@@ -1758,7 +1798,10 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeSortShar
                     let _ = payload.rt.drive_pinned(&mut local, &rg);
                 }
             } else {
-                lane_trace(&format!("runtime-sort: helper bind refused: {}", e.message()));
+                lane_trace(&format!(
+                    "runtime-sort: helper bind refused: {}",
+                    e.message()
+                ));
                 payload.refused.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -1847,9 +1890,8 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                                 .max()
                                 .unwrap_or(0);
                             if ss.ss.qual.is_some() {
-                                let _ = ::nodeseqscan::seq_scan_cb_prewhere_arm(
-                                    ss, estate, int_ask,
-                                )?;
+                                let _ =
+                                    ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, int_ask)?;
                             } else {
                                 let _ = ::nodeseqscan::seq_scan_cb_columnar_arm(
                                     ss,
@@ -1893,9 +1935,7 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                                 .max()
                                 .unwrap_or(0);
                             let armed = if ss.ss.qual.is_some() {
-                                ::nodeseqscan::seq_scan_cb_prewhere_arm(
-                                    ss, estate, int_ask,
-                                )?
+                                ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, int_ask)?
                             } else {
                                 ::nodeseqscan::seq_scan_cb_columnar_arm(
                                     ss,
@@ -1905,9 +1945,7 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                                 )
                             };
                             if armed {
-                                lane_trace(
-                                    "runtime-sort: colstage armed (staged int-key accept)",
-                                );
+                                lane_trace("runtime-sort: colstage armed (staged int-key accept)");
                             }
                         }
                     }
@@ -1924,8 +1962,10 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
         })();
         match armed {
             Ok(()) => {
-                *cell.borrow_mut() =
-                    Some(WorkerExec { qd, errored: std::cell::Cell::new(false) });
+                *cell.borrow_mut() = Some(WorkerExec {
+                    qd,
+                    errored: std::cell::Cell::new(false),
+                });
                 Ok(())
             }
             Err(e) => {
@@ -1938,7 +1978,9 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
 
 fn teardown_worker_exec(clean: bool) -> PgResult<()> {
     WORKER_EXEC.with(|cell| -> PgResult<()> {
-        let Some(ex) = cell.borrow_mut().take() else { return Ok(()) };
+        let Some(ex) = cell.borrow_mut().take() else {
+            return Ok(());
+        };
         if clean {
             let r = crate::execmain::executor_finish_seam(ex.qd)
                 .and_then(|()| crate::execmain::executor_end_seam(ex.qd));
@@ -1960,7 +2002,9 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 }
 
 fn runtime_sort_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
-    let Some(payload) = private.downcast_ref::<RuntimeSortShared>() else { return };
+    let Some(payload) = private.downcast_ref::<RuntimeSortShared>() else {
+        return;
+    };
     let rg = payload.rg.get().and_then(|w| w.upgrade());
     if let Some(rg) = &rg {
         rg.abort();
@@ -1989,7 +2033,10 @@ fn ensure_hooks_registered() {
 fn runtime_sort_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_RUNTIME_SORT").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_SORT").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -2012,7 +2059,10 @@ fn refused(reason: &'static str) {
 fn runtime_sort_full_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_RUNTIME_SORT_FULL").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_SORT_FULL").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -2183,7 +2233,10 @@ const ZONE_FRIENDLY_MIN_SKIP_FRAC: f64 = 0.5;
 fn runtime_sort_dictcode_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_RUNTIME_SORT_DICTCODE").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_SORT_DICTCODE").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -2210,7 +2263,9 @@ pub(super) fn try_own_sort<'mcx>(
     if !state.bounded && !runtime_sort_full_enabled() {
         return Ok(false);
     }
-    let Some(rt) = runtime::global() else { return Ok(false) };
+    let Some(rt) = runtime::global() else {
+        return Ok(false);
+    };
     router::tick(ArmClass::Sort, ArmCounter::Offered);
     lane_trace("runtime-sort: probed");
 
@@ -2298,7 +2353,11 @@ pub(super) fn try_own_sort<'mcx>(
         refused("parallel-unsafe scan exprs");
         return Ok(false);
     }
-    if !estate.es_snapshot.as_deref().is_some_and(::types_snapshot::IsMVCCSnapshot) {
+    if !estate
+        .es_snapshot
+        .as_deref()
+        .is_some_and(::types_snapshot::IsMVCCSnapshot)
+    {
         refused("non-MVCC snapshot");
         return Ok(false);
     }
@@ -2358,8 +2417,7 @@ pub(super) fn try_own_sort<'mcx>(
     // proven winner and the arm refuses; below it the arm engages and the
     // same stats seed the shared cutoff + granule skip (computed once,
     // passed through to the payload).
-    let zone: Option<(Arc<Vec<u64>>, Option<u64>)> = match (&spec, runtime_sort_gcut_enabled())
-    {
+    let zone: Option<(Arc<Vec<u64>>, Option<u64>)> = match (&spec, runtime_sort_gcut_enabled()) {
         (ArmSpec::Topn(s), true) if !s.keys[0].dictcode => {
             if total_granules > runtime_sort_zonestats_cap() {
                 // Fail-conservative: without stats the friendly band cannot
@@ -2426,8 +2484,7 @@ pub(super) fn try_own_sort<'mcx>(
                         let mut words = t64.clone();
                         words.sort_unstable();
                         words.dedup();
-                        if earlyexit_band_takes(s.bound, total_granules, words.len(), t64.len())
-                        {
+                        if earlyexit_band_takes(s.bound, total_granules, words.len(), t64.len()) {
                             lane_trace(&format!(
                                 "runtime-sort: band predicate — expected-early-exit \
                                  ({}/{} distinct granule best words, {} granules)",
@@ -2454,8 +2511,17 @@ pub(super) fn try_own_sort<'mcx>(
     // Router counter choke point (M5-1): Engaged = ceremony entered;
     // Completed = the runtime answered; Fallback = R5 serial rerun.
     router::tick(ArmClass::Sort, ArmCounter::Engaged);
-    let outcome =
-        engage(estate, rt, dop, total_granules, starts, &spec, scan_node, zone, direct)?;
+    let outcome = engage(
+        estate,
+        rt,
+        dop,
+        total_granules,
+        starts,
+        &spec,
+        scan_node,
+        zone,
+        direct,
+    )?;
     // Adoption (the emit-face install) happens HERE, outside the ceremony
     // frame, so the MJSORT consumer (`full_sort_engage_publish`) can share
     // the whole engagement and take the published result un-adopted.
@@ -2463,10 +2529,7 @@ pub(super) fn try_own_sort<'mcx>(
         (EngageOutcome::Fallback, _) => {
             // M2 inc-3 rung-2 fallback-floor accounting rides the moved
             // match (the ceremony returns the raw outcome since mjsort).
-            super::stats::tick_engaged(
-                STANDING_ARM.label,
-                super::stats::EngageChannel::Serial,
-            );
+            super::stats::tick_engaged(STANDING_ARM.label, super::stats::EngageChannel::Serial);
             lane_trace("runtime-sort: fallback to serial arm");
             false
         }
@@ -2485,11 +2548,20 @@ pub(super) fn try_own_sort<'mcx>(
             ));
             true
         }
-        _ => return Err(Box::new(PgError::new(ERROR, "runtime sort outcome/arm mismatch"))),
+        _ => {
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "runtime sort outcome/arm mismatch",
+            )))
+        }
     };
     router::tick(
         ArmClass::Sort,
-        if r { ArmCounter::Completed } else { ArmCounter::Fallback },
+        if r {
+            ArmCounter::Completed
+        } else {
+            ArmCounter::Fallback
+        },
     );
     Ok(r)
 }
@@ -2538,7 +2610,9 @@ fn engage<'mcx>(
                 budget: *budget,
                 parts: FULLSORT_PARTS,
                 splitters: OnceLock::new(),
-                out_parts: (0..FULLSORT_PARTS).map(|_| UnsafeCell::new(Vec::new())).collect(),
+                out_parts: (0..FULLSORT_PARTS)
+                    .map(|_| UnsafeCell::new(Vec::new()))
+                    .collect(),
                 budget_refused: AtomicBool::new(false),
                 published: Mutex::new(None),
             }),
@@ -2612,12 +2686,11 @@ enum EngageOutcome {
 
 /// This arm's standing-channel constants (M2 inc-1; see
 /// standing_channel::StandingArm — sinks_gate: PGRUST_RUNTIME_POOLBIND_SINKS).
-static STANDING_ARM: super::standing_channel::StandingArm =
-    super::standing_channel::StandingArm {
-        label: "runtime-sort",
-        died: "runtime sort standing executors exited before completing the sort",
-        sinks_gate: true,
-    };
+static STANDING_ARM: super::standing_channel::StandingArm = super::standing_channel::StandingArm {
+    label: "runtime-sort",
+    died: "runtime sort standing executors exited before completing the sort",
+    sinks_gate: true,
+};
 
 /// Shared post-outcome tail (standing and launched channels): worker-phase
 /// errors rethrow PLAIN; budget/contract refusals take the R5 whole-attempt
@@ -2629,7 +2702,10 @@ fn finish_outcome(
     outcome: runtime::RgOutcome,
 ) -> PgResult<EngageOutcome> {
     if let Some(e) = payload.take_error() {
-        lane_trace(&format!("runtime-sort: worker-phase error: {}", e.message()));
+        lane_trace(&format!(
+            "runtime-sort: worker-phase error: {}",
+            e.message()
+        ));
         return Err(e);
     }
     if outcome == runtime::RgOutcome::Aborted {
@@ -2647,13 +2723,20 @@ fn finish_outcome(
             return Ok(EngageOutcome::Fallback);
         }
         ::postgres_seams::check_for_interrupts::call()?;
-        return Err(Box::new(PgError::new(ERROR, "runtime sort pipeline aborted")));
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime sort pipeline aborted",
+        )));
     }
     if payload.started.load(Ordering::SeqCst) == 0 {
         return Ok(EngageOutcome::Fallback);
     }
     if let Some(full) = &payload.full {
-        let Some(publish) = full.published.lock().unwrap_or_else(|p| p.into_inner()).take()
+        let Some(publish) = full
+            .published
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
         else {
             // Completed with participants but nothing published: a
             // protocol violation, never silently wrong output.
@@ -2733,10 +2816,13 @@ fn engage_ceremony(
         // Standing driver dispatch (M2 inc-1): deferred_bind false — this
         // arm binds EAGERLY (with_query_task_binding); the standing serve
         // re-establishes visibility up front and evicts parked sticky.
-        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
-            drive: runtime_sort_standing_driver,
-            deferred_bind: false,
-        });
+        parallel::set_standing_driver(
+            pcxt,
+            parallel::standing::StandingDriver {
+                drive: runtime_sort_standing_driver,
+                deferred_bind: false,
+            },
+        );
         // M2 inc-2: the POOL-DB channel — built BEFORE submit (the bound
         // descriptor must ride the submission: publication keys the
         // pool-visible active bit off it); sinks_gate: POOLBIND_SINKS=0
@@ -2748,7 +2834,6 @@ fn engage_ceremony(
             /* sinks_gate */ true,
         );
 
-
         // Submit the pinned RG (accept → seal → combine) before launch.
         let source = Arc::new(super::runtime_scan::PgrcolumnarGranuleSource {
             starts: Arc::new(starts),
@@ -2757,13 +2842,17 @@ fn engage_ceremony(
             // claims — never coalesce.
             coalesce: false,
         });
-        let runtime::SealedSinkTaskSets { accept, freeze, combine, probe: _probe } =
-            runtime::sealed_sink_tasksets(
-                Arc::clone(payload),
-                source,
-                rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
-                0,
-            );
+        let runtime::SealedSinkTaskSets {
+            accept,
+            freeze,
+            combine,
+            probe: _probe,
+        } = runtime::sealed_sink_tasksets(
+            Arc::clone(payload),
+            source,
+            rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
+            0,
+        );
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let qspec = runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
@@ -2773,7 +2862,10 @@ fn engage_ceremony(
         // on_rg before the bound submission can become pool-visible — no
         // "rg gone" refusal churn window.
         let set_rg = |rg: &runtime::RgHandle| {
-            payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
+            payload
+                .rg
+                .set(rg.downgrade())
+                .unwrap_or_else(|_| unreachable!("rg set once"));
         };
         let (rg, waiter) = match &pool {
             Some((_, descriptor)) => rt.submit_pinned_bound(
@@ -2798,7 +2890,11 @@ fn engage_ceremony(
             ArmSpec::Topn(s) => format!(
                 "bound={}{}",
                 s.bound,
-                if payload.direct.is_some() { " heap=direct" } else { "" }
+                if payload.direct.is_some() {
+                    " heap=direct"
+                } else {
+                    ""
+                }
             ),
             ArmSpec::Full(..) => "full".to_string(),
         };
@@ -2886,7 +2982,9 @@ fn adopt_winners<'mcx>(
                 // projected cell means the column was outside the scan's
                 // needed set — fall back before any output escapes.
                 if isnull[j] {
-                    lane_trace("runtime-sort: gathered cell outside the needed set; serial fallback");
+                    lane_trace(
+                        "runtime-sort: gathered cell outside the needed set; serial fallback",
+                    );
                     ::nodesort::sort_lane_reset_for_refeed(state);
                     return Ok(false);
                 }
@@ -2982,7 +3080,9 @@ pub(super) fn full_sort_probe_for_mjsort<'mcx>(
         return Ok(Err("scan not fusible"));
     }
     let Some(spec) = full_spec_ex(state, ss, outer_desc, true) else {
-        return Ok(Err("full-sort shape spec (key vocabulary/tlist/column census)"));
+        return Ok(Err(
+            "full-sort shape spec (key vocabulary/tlist/column census)",
+        ));
     };
     // Per-participant budget: work_mem per Local (design §7) — the
     // try_own_sort full-arm estimate, verbatim.
@@ -2992,7 +3092,9 @@ pub(super) fn full_sort_probe_for_mjsort<'mcx>(
         + (spec.natts * 9) as f64;
     let est_per_local = state.plan.plan.plan_rows.max(0.0) * est_row / dop.max(1) as f64;
     if est_per_local > budget as f64 {
-        return Ok(Err("full-sort admission estimate exceeds work_mem per participant"));
+        return Ok(Err(
+            "full-sort admission estimate exceeds work_mem per participant",
+        ));
     }
     let Some(scan_node) = state.plan.plan.lefttree else {
         return Ok(Err("sort child missing"));
@@ -3015,7 +3117,15 @@ pub(super) fn full_sort_probe_for_mjsort<'mcx>(
     }
     let dop = super::runtime_scan::elastic_dop(dop, total_granules);
     let spec_keys = spec.keys.clone();
-    Ok(Ok(MjSortSideProbe { spec_keys, spec, budget, total_granules, starts, scan_node, dop }))
+    Ok(Ok(MjSortSideProbe {
+        spec_keys,
+        spec,
+        budget,
+        total_granules,
+        starts,
+        scan_node,
+        dop,
+    }))
 }
 
 /// Engage one probed side in PUBLISH mode: the whole `engage` ceremony
@@ -3031,15 +3141,32 @@ pub(super) fn full_sort_engage_publish<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     probe: MjSortSideProbe<'mcx>,
 ) -> PgResult<Option<FullPublish>> {
-    let MjSortSideProbe { spec_keys: _, spec, budget, total_granules, starts, scan_node, dop } =
-        probe;
+    let MjSortSideProbe {
+        spec_keys: _,
+        spec,
+        budget,
+        total_granules,
+        starts,
+        scan_node,
+        dop,
+    } = probe;
     let spec = ArmSpec::Full(spec, budget);
-    match engage(estate, rt, dop, total_granules, starts, &spec, scan_node, None, None)? {
+    match engage(
+        estate,
+        rt,
+        dop,
+        total_granules,
+        starts,
+        &spec,
+        scan_node,
+        None,
+        None,
+    )? {
         EngageOutcome::Fallback => Ok(None),
         EngageOutcome::CompletedFull(publish) => Ok(Some(publish)),
-        EngageOutcome::Completed(_) | EngageOutcome::CompletedDirect(_) => {
-            Err(Box::new(PgError::new(ERROR, "runtime sort outcome/arm mismatch")))
-        }
+        EngageOutcome::Completed(_) | EngageOutcome::CompletedDirect(_) => Err(Box::new(
+            PgError::new(ERROR, "runtime sort outcome/arm mismatch"),
+        )),
     }
 }
 
@@ -3101,7 +3228,7 @@ mod earlyexit_band_tests {
         assert!(!earlyexit_band_takes(10, 12_210, 1, 12_210));
         assert!(!earlyexit_band_takes(10, 12_210, 6_104, 12_210)); // 49.99%
         assert!(earlyexit_band_takes(10, 12_210, 6_105, 12_210)); // 50%
-        // Degenerate word census never divides by zero.
+                                                                  // Degenerate word census never divides by zero.
         assert!(!earlyexit_band_takes(10, 12_210, 0, 0));
     }
 

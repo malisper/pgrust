@@ -92,10 +92,9 @@ use ::nodehashjoin::shared_build::{
     JoinBuildLocal, SharedBuildDir, PARTITIONS,
 };
 use ::nodehashjoin::shared_exec::{
-    shared_build_accept, shared_build_accept_keyed, shared_build_hash_tuple,
-    shared_fill_partition, shared_join_admissible, shared_probe_outer, shared_probe_outer_dense,
-    shared_probe_outer_hash, shared_probe_outer_hashed,
-    shared_saved_outer_slot,
+    shared_build_accept, shared_build_accept_keyed, shared_build_hash_tuple, shared_fill_partition,
+    shared_join_admissible, shared_probe_outer, shared_probe_outer_dense, shared_probe_outer_hash,
+    shared_probe_outer_hashed, shared_saved_outer_slot,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
@@ -256,7 +255,10 @@ fn hj_singlepass_enabled() -> bool {
 fn hj_mbshared_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_LANE_V2_MBSHARED").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_MBSHARED").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -282,7 +284,10 @@ fn hj_mbshared_enabled() -> bool {
 fn hj_mbseat_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_LANE_V2_MBSEAT").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_MBSEAT").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -314,7 +319,10 @@ fn hj_groupsink_enabled() -> bool {
 fn hj_decoroot_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_LANE_V2_DECOROOT").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DECOROOT").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -358,7 +366,10 @@ fn hj_aggjoin_numeric_enabled() -> bool {
 fn hj_cbkeys_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_LANE_V2_CBKEYS").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_CBKEYS").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -396,9 +407,8 @@ fn decorated_agg_plan_node<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     decorated_ok: bool,
 ) -> Option<::types_nodes::Node<'mcx>> {
-    let is_this_agg = |n: ::types_nodes::Node<'mcx>| {
-        n.as_agg().is_some_and(|a| std::ptr::eq(a, agg.plan))
-    };
+    let is_this_agg =
+        |n: ::types_nodes::Node<'mcx>| n.as_agg().is_some_and(|a| std::ptr::eq(a, agg.plan));
     if is_this_agg(root) {
         return Some(root);
     }
@@ -730,7 +740,9 @@ struct DeferredSource {
 
 impl DeferredSource {
     fn new() -> Arc<DeferredSource> {
-        Arc::new(DeferredSource { total: AtomicU64::new(0) })
+        Arc::new(DeferredSource {
+            total: AtomicU64::new(0),
+        })
     }
 }
 
@@ -900,9 +912,8 @@ fn read_extent_aligned(
     let mut words = vec![0u64; total.div_ceil(8)];
     {
         // SAFETY: writing into the owned word backing's byte view.
-        let bytes = unsafe {
-            std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), total)
-        };
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), total) };
         let mut filled = 0usize;
         while filled < total {
             let n = rd.read(&mut bytes[filled..])?;
@@ -1044,13 +1055,19 @@ impl JoinBuildSink {
     }
 
     fn failed(&self) -> bool {
-        self.shared.upgrade().is_none_or(|s| s.failed.load(Ordering::SeqCst))
+        self.shared
+            .upgrade()
+            .is_none_or(|s| s.failed.load(Ordering::SeqCst))
     }
 
     fn demoted(&self) -> bool {
         self.shared
             .upgrade()
-            .and_then(|s| s.spill.as_ref().map(|sp| sp.batch0_demoted.load(Ordering::SeqCst)))
+            .and_then(|s| {
+                s.spill
+                    .as_ref()
+                    .map(|sp| sp.batch0_demoted.load(Ordering::SeqCst))
+            })
             .unwrap_or(false)
     }
 
@@ -1105,9 +1122,12 @@ impl runtime::ParallelSink for JoinBuildSink {
         if self.failed() {
             return;
         }
-        let Some(shared) = self.shared.upgrade() else { return };
-        let r =
-            catch_unwind(AssertUnwindSafe(|| build_morsel_body(&shared, local, worker, range)));
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            build_morsel_body(&shared, local, worker, range)
+        }));
         match r {
             Ok(Ok(true)) => {}
             Ok(Ok(false)) => {
@@ -1145,8 +1165,12 @@ impl runtime::ParallelSink for JoinBuildSink {
         if self.failed() {
             return;
         }
-        let Some(shared) = self.shared.upgrade() else { return };
-        let Some(spill) = shared.spill.as_ref() else { return };
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let Some(spill) = shared.spill.as_ref() else {
+            return;
+        };
         let mut demote = spill.batch0_demoted.load(Ordering::SeqCst);
         if !demote {
             let total: u64 = locals.iter().map(|l| l.tuples()).sum();
@@ -1183,9 +1207,8 @@ impl runtime::ParallelSink for JoinBuildSink {
         match r {
             Ok(Ok(())) => {}
             Ok(Err(e)) => self.fail(e),
-            Err(_panic) => self.fail(
-                PgError::new(ERROR, "runtime hash-join batch-0 demote dump panicked").into(),
-            ),
+            Err(_panic) => self
+                .fail(PgError::new(ERROR, "runtime hash-join batch-0 demote dump panicked").into()),
         }
     }
 
@@ -1230,7 +1253,9 @@ impl runtime::ParallelSink for JoinBuildSink {
             // Zero-granule inner side: no combine morsel ran (empty partition
             // space never happens — PARTITIONS is fixed — but a fully-refused
             // plan slot can be absent after refuse_budget).
-            let Some(plan) = self.plan_for(locals) else { return };
+            let Some(plan) = self.plan_for(locals) else {
+                return;
+            };
             plan
         };
         let table = freeze(plan, locals);
@@ -1312,7 +1337,14 @@ fn with_join_tree<'a, 'mcx, R>(
             "runtime hash-join worker build child is not a SeqScan",
         )));
     };
-    f(estate, &mut aps.agg, &mut hjn.state, outer_ss, &mut hash.state, inner_ss)
+    f(
+        estate,
+        &mut aps.agg,
+        &mut hjn.state,
+        outer_ss,
+        &mut hash.state,
+        inner_ss,
+    )
 }
 
 fn with_worker_exec<R>(
@@ -1328,7 +1360,10 @@ fn with_worker_exec<R>(
             return Err(Box::new(PgError::new(ERROR, ctx)));
         };
         crate::querydesc::with_qd(ex.qd, |q| {
-            let x = q.exec.as_mut().expect("runtime hash-join worker executor state");
+            let x = q
+                .exec
+                .as_mut()
+                .expect("runtime hash-join worker executor state");
             x.with_mut(|d| f(&mut d.estate, &mut d.planstate))
         })
     })
@@ -1378,9 +1413,7 @@ fn build_claim_heap_seam<'mcx>(
                 };
                 let accepted = match dense_col {
                     // HJPROBE-V2: key-tracked accept (the dense-seat feed).
-                    Some(col) => {
-                        shared_build_accept_keyed(hstate, estate, slot_id, local, col)
-                    }
+                    Some(col) => shared_build_accept_keyed(hstate, estate, slot_id, local, col),
                     None => shared_build_accept(hstate, estate, slot_id, local),
                 };
                 if accepted.map_err(Some)?.is_err() {
@@ -1439,13 +1472,23 @@ fn probe_claim_heap_seam<'mcx>(
             // HJPROBE-V2 dispatch: the seat's existence IS the toggle
             // (knob OFF ⇒ no seat ⇒ the v1 walk, bytes and ticks intact).
             if table.has_seat() {
-                shared_probe_outer_dense(hj, hstate, estate, table, slot_id, &mut |_hj, estate, out| {
-                    ::nodeagg::agg_plain_build_accept(agg, estate, out)
-                })
+                shared_probe_outer_dense(
+                    hj,
+                    hstate,
+                    estate,
+                    table,
+                    slot_id,
+                    &mut |_hj, estate, out| ::nodeagg::agg_plain_build_accept(agg, estate, out),
+                )
             } else {
-                shared_probe_outer(hj, hstate, estate, table, slot_id, &mut |_hj, estate, out| {
-                    ::nodeagg::agg_plain_build_accept(agg, estate, out)
-                })
+                shared_probe_outer(
+                    hj,
+                    hstate,
+                    estate,
+                    table,
+                    slot_id,
+                    &mut |_hj, estate, out| ::nodeagg::agg_plain_build_accept(agg, estate, out),
+                )
             }
         })?;
     }
@@ -1463,15 +1506,17 @@ fn build_morsel_body(
 ) -> PgResult<bool> {
     let spill = shared.spill.clone();
     let slot = shared.worker_slot(worker);
-    with_worker_exec("runtime hash-join build morsel without a bound executor", |es, ps| {
-        with_join_tree(es, ps, |estate, _agg, hj, _outer_ss, hstate, inner_ss| {
-            // HJPROBE-V2 dense-seat arming (knob default ON since the
-            // GL-HJSEAT-2 flip, =0|off kills; single-join
-            // UNBATCHED engagements only): every worker computes the same
-            // deterministic gate from its own executor state, so all
-            // tuple-bearing Locals arm identically (the seat's all-or-none
-            // law). Armed accepts record the int4 build key in lockstep.
-            let dense_col = if spill.is_none()
+    with_worker_exec(
+        "runtime hash-join build morsel without a bound executor",
+        |es, ps| {
+            with_join_tree(es, ps, |estate, _agg, hj, _outer_ss, hstate, inner_ss| {
+                // HJPROBE-V2 dense-seat arming (knob default ON since the
+                // GL-HJSEAT-2 flip, =0|off kills; single-join
+                // UNBATCHED engagements only): every worker computes the same
+                // deterministic gate from its own executor state, so all
+                // tuple-bearing Locals arm identically (the seat's all-or-none
+                // law). Armed accepts record the int4 build key in lockstep.
+                let dense_col = if spill.is_none()
                 && shared.chain.get().is_none()
                 && hjprobe_v2_enabled()
                 // GL-HJSEAT-2 economics: only arm when the probe estimate
@@ -1482,89 +1527,84 @@ fn build_morsel_body(
                 // order is not reproducible — the seat's byte-identity proof
                 // does not hold). The Local's attached-dir state is the gate.
                 && !local.single_pass()
-            {
-                ::nodehashjoin::shared_exec::dense_seat_build_col(hj, hstate)
-            } else {
-                None
-            };
-            if dense_col.is_some() {
-                local.arm_dense_keys();
-            }
-            // K2 inc-1 invariant: this arm admits pgrcolumnar scans and —
-            // behind PGRUST_LANE_V2_HEAPFEED + PGRUST_LANE_V2_K2_PROBE —
-            // heap scans. Heap claims ride the storage seam
-            // (HeapBatchSource, R3/R3v pin-holding rails); admission
-            // guarantees heap-fed engagements are UNBATCHED, so the spill
-            // routers never see a heap-fed row.
-            if ::nodeseqscan::seq_scan_is_heap(inner_ss) {
-                debug_assert!(
-                    spill.is_none(),
-                    "k2 heap feed admits only unbatched engagements"
-                );
-                local.begin_run(range.start);
-                let mut src = HeapBatchSource::new(inner_ss);
-                // WS-O claim-settle guard (the K1 scan-arm discipline):
-                // end_claim runs on the ERROR path too — a failed claim
-                // must not carry its page pin into the abort drain; the
-                // drive error wins the report.
-                let drove =
-                    build_claim_heap_seam(&mut src, estate, hstate, local, &range, dense_col);
-                let settled = src.end_claim(estate);
-                let crossed = drove?;
-                settled?;
-                local.end_run();
-                return Ok(!crossed);
-            }
-            // train-12 composition: AM-dispatched positioner (heap lane
-            // rename); pgrcolumnar claims keep today's direct drive.
-            ::nodeseqscan::seq_scan_set_morsel_range(
-                inner_ss,
-                estate,
-                range.start,
-                range.end,
-            )?;
-            local.begin_run(range.start);
-            // Batched: the worker's inner router, held across the morsel
-            // (uncontended — this slot's single writer is this worker).
-            let mut router_guard = spill.as_ref().map(|sp| lockm(&sp.inner[slot]));
-            let mut crossed = false;
-            loop {
-                let n = ::nodeseqscan::seq_scan_next_pagebatch(inner_ss, estate)?;
-                if n == 0 {
-                    let mcx = estate.es_query_cxt;
-                    ::exectuples::exec_clear_tuple(
-                        estate.slot_mut(inner_ss.ss.ss_ScanTupleSlot),
-                        mcx,
-                    );
-                    break;
-                }
-                ::postgres_seams::check_for_interrupts::call()?;
-                // Emit-dead word skip over the staged qual bitmap (see the
-                // probe morsel): the surviving build stream is identical.
-                let skip = {
-                    let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-                    ::nodeseqscan::seq_scan_batch_skip_sel(inner_ss).map(|s| {
-                        w[..s.len()].copy_from_slice(s);
-                        w
-                    })
+                {
+                    ::nodehashjoin::shared_exec::dense_seat_build_col(hj, hstate)
+                } else {
+                    None
                 };
-                // Walk error carrier: `Some(e)` = a real error (rethrown);
-                // `None` = the local build crossed its envelope (the loop's
-                // former `break`).
-                let walk = ::exectuples::for_each_live(
-                    skip.as_ref().map(|w| &w[..]),
-                    0,
-                    n,
-                    |i| -> Result<(), Option<Box<::types_error::PgError>>> {
-                        let Some(slot_id) =
-                            ::nodeseqscan::seq_scan_batch_emit(inner_ss, estate, i)
-                                .map_err(Some)?
-                        else {
-                            return Ok(());
-                        };
-                        match (&spill, router_guard.as_mut()) {
-                            (Some(sp), Some(guard)) => {
-                                shared_build_hash_tuple(hstate, estate, slot_id, |h, bytes| {
+                if dense_col.is_some() {
+                    local.arm_dense_keys();
+                }
+                // K2 inc-1 invariant: this arm admits pgrcolumnar scans and —
+                // behind PGRUST_LANE_V2_HEAPFEED + PGRUST_LANE_V2_K2_PROBE —
+                // heap scans. Heap claims ride the storage seam
+                // (HeapBatchSource, R3/R3v pin-holding rails); admission
+                // guarantees heap-fed engagements are UNBATCHED, so the spill
+                // routers never see a heap-fed row.
+                if ::nodeseqscan::seq_scan_is_heap(inner_ss) {
+                    debug_assert!(
+                        spill.is_none(),
+                        "k2 heap feed admits only unbatched engagements"
+                    );
+                    local.begin_run(range.start);
+                    let mut src = HeapBatchSource::new(inner_ss);
+                    // WS-O claim-settle guard (the K1 scan-arm discipline):
+                    // end_claim runs on the ERROR path too — a failed claim
+                    // must not carry its page pin into the abort drain; the
+                    // drive error wins the report.
+                    let drove =
+                        build_claim_heap_seam(&mut src, estate, hstate, local, &range, dense_col);
+                    let settled = src.end_claim(estate);
+                    let crossed = drove?;
+                    settled?;
+                    local.end_run();
+                    return Ok(!crossed);
+                }
+                // train-12 composition: AM-dispatched positioner (heap lane
+                // rename); pgrcolumnar claims keep today's direct drive.
+                ::nodeseqscan::seq_scan_set_morsel_range(inner_ss, estate, range.start, range.end)?;
+                local.begin_run(range.start);
+                // Batched: the worker's inner router, held across the morsel
+                // (uncontended — this slot's single writer is this worker).
+                let mut router_guard = spill.as_ref().map(|sp| lockm(&sp.inner[slot]));
+                let mut crossed = false;
+                loop {
+                    let n = ::nodeseqscan::seq_scan_next_pagebatch(inner_ss, estate)?;
+                    if n == 0 {
+                        let mcx = estate.es_query_cxt;
+                        ::exectuples::exec_clear_tuple(
+                            estate.slot_mut(inner_ss.ss.ss_ScanTupleSlot),
+                            mcx,
+                        );
+                        break;
+                    }
+                    ::postgres_seams::check_for_interrupts::call()?;
+                    // Emit-dead word skip over the staged qual bitmap (see the
+                    // probe morsel): the surviving build stream is identical.
+                    let skip = {
+                        let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                        ::nodeseqscan::seq_scan_batch_skip_sel(inner_ss).map(|s| {
+                            w[..s.len()].copy_from_slice(s);
+                            w
+                        })
+                    };
+                    // Walk error carrier: `Some(e)` = a real error (rethrown);
+                    // `None` = the local build crossed its envelope (the loop's
+                    // former `break`).
+                    let walk = ::exectuples::for_each_live(
+                        skip.as_ref().map(|w| &w[..]),
+                        0,
+                        n,
+                        |i| -> Result<(), Option<Box<::types_error::PgError>>> {
+                            let Some(slot_id) =
+                                ::nodeseqscan::seq_scan_batch_emit(inner_ss, estate, i)
+                                    .map_err(Some)?
+                            else {
+                                return Ok(());
+                            };
+                            match (&spill, router_guard.as_mut()) {
+                                (Some(sp), Some(guard)) => {
+                                    shared_build_hash_tuple(hstate, estate, slot_id, |h, bytes| {
                                     let b = batch_of(h, sp.log2n);
                                     if b == 0 && !sp.batch0_demoted.load(Ordering::Relaxed) {
                                         match local.push(h, bytes) {
@@ -1590,43 +1630,44 @@ fn build_morsel_body(
                                     router.put(b, h, bytes)
                                 })
                                 .map_err(Some)?;
-                            }
-                            _ => {
-                                let accepted = match dense_col {
-                                    // HJPROBE-V2: key-tracked accept.
-                                    Some(col) => shared_build_accept_keyed(
-                                        hstate, estate, slot_id, local, col,
-                                    ),
-                                    None => shared_build_accept(hstate, estate, slot_id, local),
-                                };
-                                if accepted.map_err(Some)?.is_err() {
-                                    return Err(None);
+                                }
+                                _ => {
+                                    let accepted = match dense_col {
+                                        // HJPROBE-V2: key-tracked accept.
+                                        Some(col) => shared_build_accept_keyed(
+                                            hstate, estate, slot_id, local, col,
+                                        ),
+                                        None => shared_build_accept(hstate, estate, slot_id, local),
+                                    };
+                                    if accepted.map_err(Some)?.is_err() {
+                                        return Err(None);
+                                    }
                                 }
                             }
-                        }
-                        Ok(())
-                    },
-                );
-                match walk {
-                    Ok(()) => {}
-                    Err(Some(e)) => return Err(e),
-                    Err(None) => crossed = true,
+                            Ok(())
+                        },
+                    );
+                    match walk {
+                        Ok(()) => {}
+                        Err(Some(e)) => return Err(e),
+                        Err(None) => crossed = true,
+                    }
+                    if crossed {
+                        break;
+                    }
                 }
-                if crossed {
-                    break;
+                // Frozen-before-read: PLAN-BATCHES reads the directory right
+                // after this set completes — commit staged bytes per morsel.
+                if let Some(mut guard) = router_guard {
+                    if let Some(router) = guard.as_mut() {
+                        router.flush()?;
+                    }
                 }
-            }
-            // Frozen-before-read: PLAN-BATCHES reads the directory right
-            // after this set completes — commit staged bytes per morsel.
-            if let Some(mut guard) = router_guard {
-                if let Some(router) = guard.as_mut() {
-                    router.flush()?;
-                }
-            }
-            local.end_run();
-            Ok(!crossed)
-        })
-    })
+                local.end_run();
+                Ok(!crossed)
+            })
+        },
+    )
 }
 
 /// Fetch one row's minimal-tuple bytes (outer side routing).
@@ -1664,7 +1705,10 @@ fn probe_morsel_body(
     let spill = payload.spill.clone();
     let frozen = match &spill {
         Some(sp) => Some(Arc::clone(sp.frozen.get().ok_or_else(|| {
-            Box::new(PgError::new(ERROR, "runtime hash-join probe without a frozen batch plan"))
+            Box::new(PgError::new(
+                ERROR,
+                "runtime hash-join probe without a frozen batch plan",
+            ))
         })?)),
         None => None,
     };
@@ -1682,163 +1726,162 @@ fn probe_morsel_body(
         }
     }
     let slot = payload.worker_slot(worker);
-    with_worker_exec("runtime hash-join probe morsel without a bound executor", |es, ps| {
-        with_join_tree(es, ps, |estate, agg, hj, outer_ss, hstate, _inner_ss| {
-            // K2 inc-1 invariant: this arm admits pgrcolumnar scans and —
-            // behind PGRUST_LANE_V2_HEAPFEED + PGRUST_LANE_V2_K2_PROBE —
-            // heap scans. Heap claims ride the storage seam
-            // (HeapBatchSource, R3/R3v pin-holding rails); admission
-            // guarantees heap-fed engagements are UNBATCHED (no spill, no
-            // frozen leaf map, no batch-0 demotion), so the heap branch
-            // probes the batch-0 table directly and the only
-            // batch-outliving values are the plain agg's transition
-            // copies (aggcontext — consumers copy at the consumer).
-            if ::nodeseqscan::seq_scan_is_heap(outer_ss) {
-                debug_assert!(
-                    spill.is_none(),
-                    "k2 heap feed admits only unbatched engagements"
-                );
-                let table = table
-                    .as_deref()
-                    .expect("heap-fed probe requires the batch-0 table (no demotion without spill)");
-                let mut src = HeapBatchSource::new(outer_ss);
-                // WS-O claim-settle guard (the K1 scan-arm discipline):
-                // end_claim runs on the ERROR path too; the drive error
-                // wins the report.
-                let drove =
-                    probe_claim_heap_seam(&mut src, estate, agg, hj, hstate, table, &range);
-                let settled = src.end_claim(estate);
-                drove?;
-                settled?;
+    with_worker_exec(
+        "runtime hash-join probe morsel without a bound executor",
+        |es, ps| {
+            with_join_tree(es, ps, |estate, agg, hj, outer_ss, hstate, _inner_ss| {
+                // K2 inc-1 invariant: this arm admits pgrcolumnar scans and —
+                // behind PGRUST_LANE_V2_HEAPFEED + PGRUST_LANE_V2_K2_PROBE —
+                // heap scans. Heap claims ride the storage seam
+                // (HeapBatchSource, R3/R3v pin-holding rails); admission
+                // guarantees heap-fed engagements are UNBATCHED (no spill, no
+                // frozen leaf map, no batch-0 demotion), so the heap branch
+                // probes the batch-0 table directly and the only
+                // batch-outliving values are the plain agg's transition
+                // copies (aggcontext — consumers copy at the consumer).
+                if ::nodeseqscan::seq_scan_is_heap(outer_ss) {
+                    debug_assert!(
+                        spill.is_none(),
+                        "k2 heap feed admits only unbatched engagements"
+                    );
+                    let table = table.as_deref().expect(
+                        "heap-fed probe requires the batch-0 table (no demotion without spill)",
+                    );
+                    let mut src = HeapBatchSource::new(outer_ss);
+                    // WS-O claim-settle guard (the K1 scan-arm discipline):
+                    // end_claim runs on the ERROR path too; the drive error
+                    // wins the report.
+                    let drove =
+                        probe_claim_heap_seam(&mut src, estate, agg, hj, hstate, table, &range);
+                    let settled = src.end_claim(estate);
+                    drove?;
+                    settled?;
+                    let pslot = worker - payload.pins_base;
+                    {
+                        // Same export-into tail as the pgrcolumnar drive below
+                        // (overwrite discipline preserved).
+                        let mut g = lockm(&payload.partials[pslot]);
+                        agg_runtime_export_partial_into(
+                            agg,
+                            g.get_or_insert_with(Default::default),
+                        )?;
+                    }
+                    return Ok(());
+                }
+                // train-12 composition: AM-dispatched positioner (heap lane
+                // rename); pgrcolumnar claims keep today's direct drive.
+                ::nodeseqscan::seq_scan_set_morsel_range(outer_ss, estate, range.start, range.end)?;
+                let mut router_guard = spill.as_ref().map(|sp| lockm(&sp.outer[slot]));
+                loop {
+                    let n = ::nodeseqscan::seq_scan_next_pagebatch(outer_ss, estate)?;
+                    if n == 0 {
+                        let mcx = estate.es_query_cxt;
+                        ::exectuples::exec_clear_tuple(
+                            estate.slot_mut(outer_ss.ss.ss_ScanTupleSlot),
+                            mcx,
+                        );
+                        break;
+                    }
+                    ::postgres_seams::check_for_interrupts::call()?;
+                    // Emit-dead word skip over the staged qual bitmap: a cleared
+                    // skip-sel bit is a row `seq_scan_batch_emit` rejects with no
+                    // observable effect (definitive even under requal), so the
+                    // surviving probe stream is identical. Snapshot the words —
+                    // the emit below re-borrows the scan mutably.
+                    let skip = {
+                        let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                        ::nodeseqscan::seq_scan_batch_skip_sel(outer_ss).map(|s| {
+                            w[..s.len()].copy_from_slice(s);
+                            w
+                        })
+                    };
+                    let skip = skip.as_ref().map(|w| &w[..]);
+                    ::exectuples::for_each_live(skip, 0, n, |i| -> PgResult<()> {
+                        let Some(slot_id) =
+                            ::nodeseqscan::seq_scan_batch_emit(outer_ss, estate, i)?
+                        else {
+                            return Ok(());
+                        };
+                        match (&spill, &frozen, router_guard.as_mut()) {
+                            (Some(sp), Some(fp), Some(guard)) => {
+                                let h = shared_probe_outer_hash(hj, estate, slot_id)?;
+                                let leaf = fp.map.resolve(h);
+                                if leaf == LEAF_INMEM {
+                                    shared_probe_outer_hashed(
+                                        hj,
+                                        hstate,
+                                        estate,
+                                        table.as_ref().expect("in-memory leaf requires table 0"),
+                                        slot_id,
+                                        h,
+                                        &mut |_hj, estate, out| {
+                                            ::nodeagg::agg_plain_build_accept(agg, estate, out)
+                                        },
+                                    )?;
+                                } else {
+                                    let ecxt = hj.ps_ExprContext;
+                                    fetch_outer_tuple_bytes(ecxt, estate, slot_id, |bytes| {
+                                        let router = guard.get_or_insert_with(|| {
+                                            BatchRouter::new(
+                                                &sp.set,
+                                                ::spillset::SpillSet::file_name("hj-out", 0, slot),
+                                                sp.leaf_cap as u32,
+                                            )
+                                        });
+                                        router.put(leaf as u32, h, bytes)
+                                    })?;
+                                }
+                            }
+                            _ => {
+                                let t = table.as_ref().expect("unbatched probe requires the table");
+                                // HJPROBE-V2 dispatch: seat existence IS the
+                                // toggle (knob OFF ⇒ no seat ⇒ v1 verbatim).
+                                if t.has_seat() {
+                                    shared_probe_outer_dense(
+                                        hj,
+                                        hstate,
+                                        estate,
+                                        t,
+                                        slot_id,
+                                        &mut |_hj, estate, out| {
+                                            ::nodeagg::agg_plain_build_accept(agg, estate, out)
+                                        },
+                                    )?;
+                                } else {
+                                    shared_probe_outer(
+                                        hj,
+                                        hstate,
+                                        estate,
+                                        t,
+                                        slot_id,
+                                        &mut |_hj, estate, out| {
+                                            ::nodeagg::agg_plain_build_accept(agg, estate, out)
+                                        },
+                                    )?;
+                                }
+                            }
+                        }
+                        Ok(())
+                    })?;
+                }
+                // Frozen-before-read for the leaf probe sets.
+                if let Some(mut guard) = router_guard {
+                    if let Some(router) = guard.as_mut() {
+                        router.flush()?;
+                    }
+                }
                 let pslot = worker - payload.pins_base;
                 {
-                    // Same export-into tail as the pgrcolumnar drive below
-                    // (overwrite discipline preserved).
+                    // train-12 composition: export-into (retained capacity);
+                    // overwrite discipline preserved — the export rewrites the
+                    // slot's partial in place.
                     let mut g = lockm(&payload.partials[pslot]);
-                    agg_runtime_export_partial_into(
-                        agg,
-                        g.get_or_insert_with(Default::default),
-                    )?;
+                    agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
                 }
-                return Ok(());
-            }
-            // train-12 composition: AM-dispatched positioner (heap lane
-            // rename); pgrcolumnar claims keep today's direct drive.
-            ::nodeseqscan::seq_scan_set_morsel_range(
-                outer_ss,
-                estate,
-                range.start,
-                range.end,
-            )?;
-            let mut router_guard = spill.as_ref().map(|sp| lockm(&sp.outer[slot]));
-            loop {
-                let n = ::nodeseqscan::seq_scan_next_pagebatch(outer_ss, estate)?;
-                if n == 0 {
-                    let mcx = estate.es_query_cxt;
-                    ::exectuples::exec_clear_tuple(
-                        estate.slot_mut(outer_ss.ss.ss_ScanTupleSlot),
-                        mcx,
-                    );
-                    break;
-                }
-                ::postgres_seams::check_for_interrupts::call()?;
-                // Emit-dead word skip over the staged qual bitmap: a cleared
-                // skip-sel bit is a row `seq_scan_batch_emit` rejects with no
-                // observable effect (definitive even under requal), so the
-                // surviving probe stream is identical. Snapshot the words —
-                // the emit below re-borrows the scan mutably.
-                let skip = {
-                    let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-                    ::nodeseqscan::seq_scan_batch_skip_sel(outer_ss).map(|s| {
-                        w[..s.len()].copy_from_slice(s);
-                        w
-                    })
-                };
-                let skip = skip.as_ref().map(|w| &w[..]);
-                ::exectuples::for_each_live(skip, 0, n, |i| -> PgResult<()> {
-                    let Some(slot_id) = ::nodeseqscan::seq_scan_batch_emit(outer_ss, estate, i)?
-                    else {
-                        return Ok(());
-                    };
-                    match (&spill, &frozen, router_guard.as_mut()) {
-                        (Some(sp), Some(fp), Some(guard)) => {
-                            let h = shared_probe_outer_hash(hj, estate, slot_id)?;
-                            let leaf = fp.map.resolve(h);
-                            if leaf == LEAF_INMEM {
-                                shared_probe_outer_hashed(
-                                    hj,
-                                    hstate,
-                                    estate,
-                                    table.as_ref().expect("in-memory leaf requires table 0"),
-                                    slot_id,
-                                    h,
-                                    &mut |_hj, estate, out| {
-                                        ::nodeagg::agg_plain_build_accept(agg, estate, out)
-                                    },
-                                )?;
-                            } else {
-                                let ecxt = hj.ps_ExprContext;
-                                fetch_outer_tuple_bytes(ecxt, estate, slot_id, |bytes| {
-                                    let router = guard.get_or_insert_with(|| {
-                                        BatchRouter::new(
-                                            &sp.set,
-                                            ::spillset::SpillSet::file_name("hj-out", 0, slot),
-                                            sp.leaf_cap as u32,
-                                        )
-                                    });
-                                    router.put(leaf as u32, h, bytes)
-                                })?;
-                            }
-                        }
-                        _ => {
-                            let t = table.as_ref().expect("unbatched probe requires the table");
-                            // HJPROBE-V2 dispatch: seat existence IS the
-                            // toggle (knob OFF ⇒ no seat ⇒ v1 verbatim).
-                            if t.has_seat() {
-                                shared_probe_outer_dense(
-                                    hj,
-                                    hstate,
-                                    estate,
-                                    t,
-                                    slot_id,
-                                    &mut |_hj, estate, out| {
-                                        ::nodeagg::agg_plain_build_accept(agg, estate, out)
-                                    },
-                                )?;
-                            } else {
-                                shared_probe_outer(
-                                    hj,
-                                    hstate,
-                                    estate,
-                                    t,
-                                    slot_id,
-                                    &mut |_hj, estate, out| {
-                                        ::nodeagg::agg_plain_build_accept(agg, estate, out)
-                                    },
-                                )?;
-                            }
-                        }
-                    }
-                    Ok(())
-                })?;
-            }
-            // Frozen-before-read for the leaf probe sets.
-            if let Some(mut guard) = router_guard {
-                if let Some(router) = guard.as_mut() {
-                    router.flush()?;
-                }
-            }
-            let pslot = worker - payload.pins_base;
-            {
-                // train-12 composition: export-into (retained capacity);
-                // overwrite discipline preserved — the export rewrites the
-                // slot's partial in place.
-                let mut g = lockm(&payload.partials[pslot]);
-                agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
-            }
-            Ok(())
-        })
-    })
+                Ok(())
+            })
+        },
+    )
 }
 
 impl runtime::TaskSetWork for RuntimeHjShared {
@@ -1848,7 +1891,9 @@ impl runtime::TaskSetWork for RuntimeHjShared {
         }
         let payload = HJ_PAYLOAD.with(|c| c.borrow().clone());
         let Some(payload) = payload else {
-            self.fail(PgError::new(ERROR, "runtime hash-join probe without a bound payload").into());
+            self.fail(
+                PgError::new(ERROR, "runtime hash-join probe without a bound payload").into(),
+            );
             return;
         };
         let r = catch_unwind(AssertUnwindSafe(|| {
@@ -1878,7 +1923,9 @@ impl runtime::TaskSetWork for RuntimeHjShared {
     /// outer files are now frozen — build the outer claim schedule and, when
     /// no fill set follows, retire table 0 (one live table).
     fn finalize(&self) {
-        let Some(spill) = self.spill.as_ref() else { return };
+        let Some(spill) = self.spill.as_ref() else {
+            return;
+        };
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
@@ -1938,30 +1985,33 @@ fn fill_morsel_body(
     worker: usize,
     range: runtime::MorselRange,
 ) -> PgResult<()> {
-    with_worker_exec("runtime hash-join fill morsel without a bound executor", |es, ps| {
-        with_join_tree(es, ps, |estate, agg, hj, _outer_ss, hstate, _inner_ss| {
-            for part in range.clone() {
-                ::postgres_seams::check_for_interrupts::call()?;
-                shared_fill_partition(
-                    hj,
-                    hstate,
-                    estate,
-                    table,
-                    part,
-                    &mut |_hj, estate, out| ::nodeagg::agg_plain_build_accept(agg, estate, out),
-                )?;
-            }
-            // Cumulative partial export (same slot as the probe morsels —
-            // the worker's agg accumulates across phases; overwrite
-            // discipline keeps the last export authoritative).
-            let slot = worker - payload.pins_base;
-            {
-                let mut g = lockm(&payload.partials[slot]);
-                agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
-            }
-            Ok(())
-        })
-    })
+    with_worker_exec(
+        "runtime hash-join fill morsel without a bound executor",
+        |es, ps| {
+            with_join_tree(es, ps, |estate, agg, hj, _outer_ss, hstate, _inner_ss| {
+                for part in range.clone() {
+                    ::postgres_seams::check_for_interrupts::call()?;
+                    shared_fill_partition(
+                        hj,
+                        hstate,
+                        estate,
+                        table,
+                        part,
+                        &mut |_hj, estate, out| ::nodeagg::agg_plain_build_accept(agg, estate, out),
+                    )?;
+                }
+                // Cumulative partial export (same slot as the probe morsels —
+                // the worker's agg accumulates across phases; overwrite
+                // discipline keeps the last export authoritative).
+                let slot = worker - payload.pins_base;
+                {
+                    let mut g = lockm(&payload.partials[slot]);
+                    agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
+                }
+                Ok(())
+            })
+        },
+    )
 }
 
 impl runtime::TaskSetWork for FillWork {
@@ -1989,15 +2039,19 @@ impl runtime::TaskSetWork for FillWork {
             });
             if !demoted_b0 && !unused_leaf {
                 self.payload.fail(
-                    PgError::new(ERROR, "runtime hash-join fill ran without a published table")
-                        .into(),
+                    PgError::new(
+                        ERROR,
+                        "runtime hash-join fill ran without a published table",
+                    )
+                    .into(),
                 );
             }
             return;
         };
         let payload = &self.payload;
-        let r =
-            catch_unwind(AssertUnwindSafe(|| fill_morsel_body(payload, &table, worker, range)));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            fill_morsel_body(payload, &table, worker, range)
+        }));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
@@ -2118,7 +2172,12 @@ fn resolve_node(
     spill
         .max_round
         .fetch_max(next_round as u64 + 1, Ordering::Relaxed);
-    st.pending.push(PendingSplit { consumed, jbits, child_base, claims });
+    st.pending.push(PendingSplit {
+        consumed,
+        jbits,
+        child_base,
+        claims,
+    });
     true
 }
 
@@ -2135,7 +2194,9 @@ fn arm_round_or_freeze(payload: &RuntimeHjShared, spill: &HjSpill, round: usize)
                 .total
                 .store(claims.len() as u64, Ordering::SeqCst);
         }
-        spill.leaves_used.store(leaves.len() as u64, Ordering::SeqCst);
+        spill
+            .leaves_used
+            .store(leaves.len() as u64, Ordering::SeqCst);
         let _ = spill.frozen.set(Arc::new(FrozenPlan { map, leaves }));
         return;
     }
@@ -2178,7 +2239,10 @@ fn level0_batch_claims(spill: &HjSpill, part: u32) -> (Vec<InnerClaim>, u64, u64
         let g = lockm(&spill.inner[slot]);
         if let Some(router) = g.as_ref() {
             for x in router.file.part_extents(part) {
-                claims.push(InnerClaim { src: InnerSrc::Accept { slot }, extent: x });
+                claims.push(InnerClaim {
+                    src: InnerSrc::Accept { slot },
+                    extent: x,
+                });
             }
             bytes += router.file.part_len(part);
             tuples += router.counts[part as usize];
@@ -2199,7 +2263,9 @@ impl runtime::TaskSetWork for PlanBatchesWork {
         if payload.failed.load(Ordering::SeqCst) {
             return;
         }
-        let Some(spill) = payload.spill.as_ref() else { return };
+        let Some(spill) = payload.spill.as_ref() else {
+            return;
+        };
         let r = catch_unwind(AssertUnwindSafe(|| {
             let demoted = spill.batch0_demoted.load(Ordering::SeqCst);
             {
@@ -2212,7 +2278,16 @@ impl runtime::TaskSetWork for PlanBatchesWork {
                     }
                     let (claims, bytes, tuples) = level0_batch_claims(spill, b);
                     if !resolve_node(
-                        payload, spill, &mut st, b, spill.log2n, true, claims, bytes, tuples, 0,
+                        payload,
+                        spill,
+                        &mut st,
+                        b,
+                        spill.log2n,
+                        true,
+                        claims,
+                        bytes,
+                        tuples,
+                        0,
                     ) {
                         return;
                     }
@@ -2243,7 +2318,9 @@ impl runtime::TaskSetWork for SplitRoundWork {
         if payload.failed.load(Ordering::SeqCst) {
             return;
         }
-        let Some(spill) = payload.spill.as_ref() else { return };
+        let Some(spill) = payload.spill.as_ref() else {
+            return;
+        };
         let Some(plan) = spill.round_plans[self.round].get() else {
             payload.fail(PgError::new(ERROR, "split round ran without a round plan").into());
             return;
@@ -2276,8 +2353,9 @@ impl runtime::TaskSetWork for SplitRoundWork {
         match r {
             Ok(Ok(())) => {}
             Ok(Err(e)) => payload.fail(e),
-            Err(_panic) => payload
-                .fail(PgError::new(ERROR, "runtime hash-join split round panicked").into()),
+            Err(_panic) => {
+                payload.fail(PgError::new(ERROR, "runtime hash-join split round panicked").into())
+            }
         }
     }
 
@@ -2286,7 +2364,9 @@ impl runtime::TaskSetWork for SplitRoundWork {
         if payload.failed.load(Ordering::SeqCst) {
             return;
         }
-        let Some(spill) = payload.spill.as_ref() else { return };
+        let Some(spill) = payload.spill.as_ref() else {
+            return;
+        };
         let Some(plan) = spill.round_plans[self.round].get() else {
             // Unarmed round (no splits reached this depth): nothing to do;
             // the freeze already happened upstream.
@@ -2305,7 +2385,10 @@ impl runtime::TaskSetWork for SplitRoundWork {
                             if let Some(router) = g.as_ref() {
                                 for x in router.file.part_extents(node) {
                                     claims.push(InnerClaim {
-                                        src: InnerSrc::Round { round: self.round, slot },
+                                        src: InnerSrc::Round {
+                                            round: self.round,
+                                            slot,
+                                        },
                                         extent: x,
                                     });
                                 }
@@ -2333,8 +2416,7 @@ impl runtime::TaskSetWork for SplitRoundWork {
             arm_round_or_freeze(payload, spill, self.round + 1);
         }));
         if r.is_err() {
-            payload
-                .fail(PgError::new(ERROR, "runtime hash-join split finalize panicked").into());
+            payload.fail(PgError::new(ERROR, "runtime hash-join split finalize panicked").into());
         }
     }
 }
@@ -2351,7 +2433,9 @@ struct LeafBatchSink {
 
 impl LeafBatchSink {
     fn failed(&self) -> bool {
-        self.shared.upgrade().is_none_or(|s| s.failed.load(Ordering::SeqCst))
+        self.shared
+            .upgrade()
+            .is_none_or(|s| s.failed.load(Ordering::SeqCst))
     }
 
     /// Leaf slots beyond the frozen plan's count are declared-but-unused
@@ -2403,12 +2487,21 @@ impl runtime::ParallelSink for LeafBatchSink {
         JoinBuildLocal::with_chunk_cap(worker, Arc::clone(&self.budget), cap_words)
     }
 
-    fn accept_local(&self, local: &mut JoinBuildLocal, _worker: usize, range: runtime::MorselRange) {
+    fn accept_local(
+        &self,
+        local: &mut JoinBuildLocal,
+        _worker: usize,
+        range: runtime::MorselRange,
+    ) {
         if self.failed() {
             return;
         }
-        let Some(shared) = self.shared.upgrade() else { return };
-        let Some(spill) = shared.spill.as_ref() else { return };
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let Some(spill) = shared.spill.as_ref() else {
+            return;
+        };
         let Some(frozen) = spill.frozen.get() else {
             shared.fail(PgError::new(ERROR, "leaf accept without a frozen batch plan").into());
             return;
@@ -2444,9 +2537,7 @@ impl runtime::ParallelSink for LeafBatchSink {
             }
             Err(_panic) => {
                 mark_self_errored();
-                shared.fail(
-                    PgError::new(ERROR, "runtime hash-join leaf build panicked").into(),
-                );
+                shared.fail(PgError::new(ERROR, "runtime hash-join leaf build panicked").into());
             }
         }
     }
@@ -2468,8 +2559,12 @@ impl runtime::ParallelSink for LeafBatchSink {
         if self.failed() || self.unused() {
             return;
         }
-        let Some(shared) = self.shared.upgrade() else { return };
-        let Some(plan) = self.plan_for(locals) else { return };
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let Some(plan) = self.plan_for(locals) else {
+            return;
+        };
         *lockm(&shared.leaf_tables[self.leaf]) = Some(Arc::new(freeze(plan, locals)));
     }
 }
@@ -2490,62 +2585,74 @@ fn leaf_probe_morsel_body(
 ) -> PgResult<()> {
     let spill = payload.spill.as_ref().expect("leaf probe requires spill");
     let outer_plan = Arc::clone(spill.outer_plan.get().ok_or_else(|| {
-        Box::new(PgError::new(ERROR, "leaf probe without an outer claim plan"))
+        Box::new(PgError::new(
+            ERROR,
+            "leaf probe without an outer claim plan",
+        ))
     })?);
     let table = lockm(&payload.leaf_tables[leaf]).clone().ok_or_else(|| {
-        Box::new(PgError::new(ERROR, "leaf probe without a published leaf table"))
+        Box::new(PgError::new(
+            ERROR,
+            "leaf probe without a published leaf table",
+        ))
     })?;
-    with_worker_exec("runtime hash-join leaf probe without a bound executor", |es, ps| {
-        with_join_tree(es, ps, |estate, agg, hj, _outer_ss, hstate, _inner_ss| {
-            let saved = shared_saved_outer_slot(hj);
-            let mcx = estate.es_query_cxt;
-            for ordinal in range.clone() {
-                ::postgres_seams::check_for_interrupts::call()?;
-                let (slot, extent) = outer_plan.leaves[leaf][ordinal as usize];
-                let g = lockm(&spill.outer[slot]);
-                let Some(router) = g.as_ref() else {
-                    return Err(Box::new(PgError::new(
-                        ERROR,
-                        "leaf probe claim without an outer file",
-                    )));
-                };
-                let buf = read_extent_aligned(&router.file, extent)?;
-                drop(g);
-                let mut it = BatchRecords::new(buf.bytes());
-                while let Some((h, tuple)) = it.next_rec()? {
-                    // SAFETY: the aligned buffer's record layout keeps the
-                    // tuple image MAXALIGNed and live across this probe (the
-                    // buffer outlives the loop; the slot is cleared below
-                    // before the buffer drops).
-                    unsafe {
-                        let mtup = NonNull::new_unchecked(tuple.as_ptr() as *mut MinimalTupleData);
-                        ::exectuples::exec_store_minimal_tuple_ptr(
-                            &mut estate.es_tupleTable[saved.0 as usize],
-                            mcx,
-                            mtup,
-                        );
+    with_worker_exec(
+        "runtime hash-join leaf probe without a bound executor",
+        |es, ps| {
+            with_join_tree(es, ps, |estate, agg, hj, _outer_ss, hstate, _inner_ss| {
+                let saved = shared_saved_outer_slot(hj);
+                let mcx = estate.es_query_cxt;
+                for ordinal in range.clone() {
+                    ::postgres_seams::check_for_interrupts::call()?;
+                    let (slot, extent) = outer_plan.leaves[leaf][ordinal as usize];
+                    let g = lockm(&spill.outer[slot]);
+                    let Some(router) = g.as_ref() else {
+                        return Err(Box::new(PgError::new(
+                            ERROR,
+                            "leaf probe claim without an outer file",
+                        )));
+                    };
+                    let buf = read_extent_aligned(&router.file, extent)?;
+                    drop(g);
+                    let mut it = BatchRecords::new(buf.bytes());
+                    while let Some((h, tuple)) = it.next_rec()? {
+                        // SAFETY: the aligned buffer's record layout keeps the
+                        // tuple image MAXALIGNed and live across this probe (the
+                        // buffer outlives the loop; the slot is cleared below
+                        // before the buffer drops).
+                        unsafe {
+                            let mtup =
+                                NonNull::new_unchecked(tuple.as_ptr() as *mut MinimalTupleData);
+                            ::exectuples::exec_store_minimal_tuple_ptr(
+                                &mut estate.es_tupleTable[saved.0 as usize],
+                                mcx,
+                                mtup,
+                            );
+                        }
+                        shared_probe_outer_hashed(
+                            hj,
+                            hstate,
+                            estate,
+                            &table,
+                            saved,
+                            h,
+                            &mut |_hj, estate, out| {
+                                ::nodeagg::agg_plain_build_accept(agg, estate, out)
+                            },
+                        )?;
                     }
-                    shared_probe_outer_hashed(
-                        hj,
-                        hstate,
-                        estate,
-                        &table,
-                        saved,
-                        h,
-                        &mut |_hj, estate, out| ::nodeagg::agg_plain_build_accept(agg, estate, out),
-                    )?;
+                    // The saved slot must not outlive the claim's buffer.
+                    ::exectuples::exec_clear_tuple(estate.slot_mut(saved), mcx);
                 }
-                // The saved slot must not outlive the claim's buffer.
-                ::exectuples::exec_clear_tuple(estate.slot_mut(saved), mcx);
-            }
-            let pslot = worker - payload.pins_base;
-            {
-                let mut g = lockm(&payload.partials[pslot]);
-                agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
-            }
-            Ok(())
-        })
-    })
+                let pslot = worker - payload.pins_base;
+                {
+                    let mut g = lockm(&payload.partials[pslot]);
+                    agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
+                }
+                Ok(())
+            })
+        },
+    )
 }
 
 impl runtime::TaskSetWork for LeafProbeWork {
@@ -2567,8 +2674,7 @@ impl runtime::TaskSetWork for LeafProbeWork {
             Err(_panic) => {
                 mark_self_errored();
                 payload.fail(
-                    PgError::new(ERROR, "runtime hash-join worker panicked in a leaf probe")
-                        .into(),
+                    PgError::new(ERROR, "runtime hash-join worker panicked in a leaf probe").into(),
                 );
             }
         }
@@ -2592,8 +2698,12 @@ fn runtime_hj_worker_main(_shared: &parallel::ParallelShared) -> PgResult<()> {
 }
 
 fn runtime_hj_post_task_park(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
-    let Ok(payload) = private.downcast::<RuntimeHjShared>() else { return };
+    let Some(private) = shared.private() else {
+        return;
+    };
+    let Ok(payload) = private.downcast::<RuntimeHjShared>() else {
+        return;
+    };
     // Every LAUNCHED helper bumps `exited` exactly once, on EVERY exit path
     // (the leader's liveness reap counts these against `launched`).
     // HOOK-frame placement (the scan arm's law): the standing driver reuses
@@ -2613,8 +2723,12 @@ fn runtime_hj_post_task_park(shared: &parallel::ParallelShared) {
 /// POST_TASK_PARK body minus the ExitBump; exit-committed unwinds (FATAL)
 /// rethrow to the gang glue (a terminated worker must die).
 fn runtime_hj_standing_driver(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
-    let Ok(payload) = private.downcast::<RuntimeHjShared>() else { return };
+    let Some(private) = shared.private() else {
+        return;
+    };
+    let Ok(payload) = private.downcast::<RuntimeHjShared>() else {
+        return;
+    };
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if let Err(unwind) = r {
         // #70: report the claimant death on the board (count-then-wake)
@@ -2622,8 +2736,7 @@ fn runtime_hj_standing_driver(shared: &parallel::ParallelShared) {
         // reap counts deaths like refusals; without it a die-pre-bind storm
         // parks the leader forever.
         parallel::standing::note_predrive_death();
-        payload
-            .fail(PgError::new(ERROR, "runtime hash-join standing executor panicked").into());
+        payload.fail(PgError::new(ERROR, "runtime hash-join standing executor panicked").into());
         latch::SetLatch(::types_storage::latch::LatchHandle::proc(
             shared.parallel_leader_proc_number,
         ));
@@ -2738,58 +2851,67 @@ fn build_worker_exec(payload: &Arc<RuntimeHjShared>) -> PgResult<()> {
         let armed = (|| -> PgResult<()> {
             crate::execmain::executor_start_seam(qd, payload.eflags)?;
             crate::querydesc::with_qd(qd, |q| {
-                let x = q.exec.as_mut().expect("runtime hash-join worker ExecutorStart");
+                let x = q
+                    .exec
+                    .as_mut()
+                    .expect("runtime hash-join worker ExecutorStart");
                 x.with_mut(|d| {
                     if let Some(chain) = payload.chain.get() {
                         // m5p1 multibuild: congruence verify + arm every
                         // scan's staging + begin the plain-agg build.
                         return mb_arm_worker(&mut d.estate, &mut d.planstate, chain);
                     }
-                    with_join_tree(&mut d.estate, &mut d.planstate, |estate, agg, hj, outer_ss, hstate, inner_ss| {
-                        if !agg_runtime_partial_admissible(agg)
-                            && !(hj_aggjoin_numeric_enabled()
-                                && ::nodeagg::runtime_partial::agg_poly_partial_admissible(agg))
-                        {
-                            return Err(Box::new(PgError::new(
-                                ERROR,
-                                "runtime hash-join worker fold plan diverged from the leader's",
-                            )));
-                        }
-                        if !shared_join_admissible(hj, hstate) {
-                            return Err(Box::new(PgError::new(
+                    with_join_tree(
+                        &mut d.estate,
+                        &mut d.planstate,
+                        |estate, agg, hj, outer_ss, hstate, inner_ss| {
+                            if !agg_runtime_partial_admissible(agg)
+                                && !(hj_aggjoin_numeric_enabled()
+                                    && ::nodeagg::runtime_partial::agg_poly_partial_admissible(agg))
+                            {
+                                return Err(Box::new(PgError::new(
+                                    ERROR,
+                                    "runtime hash-join worker fold plan diverged from the leader's",
+                                )));
+                            }
+                            if !shared_join_admissible(hj, hstate) {
+                                return Err(Box::new(PgError::new(
                                 ERROR,
                                 "runtime hash-join worker join shape diverged from the leader's",
                             )));
-                        }
-                        // Per-row drive staging on both scans (the census
-                        // RowFeed shape: PREWHERE bitmap when kernel-shaped,
-                        // stitched tiers on; per-row emits re-check quals).
-                        super::arm_scan_staging(
-                            outer_ss,
-                            estate,
-                            super::ScanFeedShape::RowFeed {
-                                ctx: "runtime hash-join probe feed",
-                                stitch: true,
-                            },
-                        )?;
-                        super::arm_scan_staging(
-                            inner_ss,
-                            estate,
-                            super::ScanFeedShape::RowFeed {
-                                ctx: "runtime hash-join build feed",
-                                stitch: true,
-                            },
-                        )?;
-                        ::nodeagg::agg_plain_build_begin(agg, estate)?;
-                        Ok(())
-                    })
+                            }
+                            // Per-row drive staging on both scans (the census
+                            // RowFeed shape: PREWHERE bitmap when kernel-shaped,
+                            // stitched tiers on; per-row emits re-check quals).
+                            super::arm_scan_staging(
+                                outer_ss,
+                                estate,
+                                super::ScanFeedShape::RowFeed {
+                                    ctx: "runtime hash-join probe feed",
+                                    stitch: true,
+                                },
+                            )?;
+                            super::arm_scan_staging(
+                                inner_ss,
+                                estate,
+                                super::ScanFeedShape::RowFeed {
+                                    ctx: "runtime hash-join build feed",
+                                    stitch: true,
+                                },
+                            )?;
+                            ::nodeagg::agg_plain_build_begin(agg, estate)?;
+                            Ok(())
+                        },
+                    )
                 })
             })
         })();
         match armed {
             Ok(()) => {
-                *cell.borrow_mut() =
-                    Some(WorkerExec { qd, errored: std::cell::Cell::new(false) });
+                *cell.borrow_mut() = Some(WorkerExec {
+                    qd,
+                    errored: std::cell::Cell::new(false),
+                });
                 Ok(())
             }
             Err(e) => {
@@ -2802,7 +2924,9 @@ fn build_worker_exec(payload: &Arc<RuntimeHjShared>) -> PgResult<()> {
 
 fn teardown_worker_exec(clean: bool) -> PgResult<()> {
     HJ_WORKER_EXEC.with(|cell| -> PgResult<()> {
-        let Some(ex) = cell.borrow_mut().take() else { return Ok(()) };
+        let Some(ex) = cell.borrow_mut().take() else {
+            return Ok(());
+        };
         if clean {
             let r = crate::execmain::executor_finish_seam(ex.qd)
                 .and_then(|()| crate::execmain::executor_end_seam(ex.qd));
@@ -2824,7 +2948,9 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 }
 
 fn runtime_hj_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
-    let Some(payload) = private.downcast_ref::<RuntimeHjShared>() else { return };
+    let Some(payload) = private.downcast_ref::<RuntimeHjShared>() else {
+        return;
+    };
     payload.abort_rg();
     // Standing channel (M2 inc-1): complete the standing join on leader
     // unwind paths (standing_channel::shutdown_standing_join).
@@ -2985,10 +3111,7 @@ fn outer_rows_of(info: &MbPlanInfo, j: usize) -> f64 {
 /// (refuse — Gather-suppression never keyed it, so this is the walk's own
 /// fail-closed gate). Preorder: reserve this join's slot, then the outer
 /// subtree, then the build subtree.
-fn mb_plan_walk(
-    node: ::types_nodes::Node<'_>,
-    info: &mut MbPlanInfo,
-) -> PgResult<Option<MbChild>> {
+fn mb_plan_walk(node: ::types_nodes::Node<'_>, info: &mut MbPlanInfo) -> PgResult<Option<MbChild>> {
     match node.node_tag() {
         NodeTag::T_SeqScan => {
             let scan = node.as_seq_scan().expect("SeqScan tag");
@@ -3014,8 +3137,7 @@ fn mb_plan_walk(
             {
                 return Ok(None);
             }
-            let (Some(outer), Some(hash_node)) =
-                (hj.join.plan.lefttree, hj.join.plan.righttree)
+            let (Some(outer), Some(hash_node)) = (hj.join.plan.lefttree, hj.join.plan.righttree)
             else {
                 return Ok(None);
             };
@@ -3023,7 +3145,9 @@ fn mb_plan_walk(
                 return Ok(None);
             }
             let hash = hash_node.as_hash().expect("Hash tag");
-            let Some(inner) = hash.plan.lefttree else { return Ok(None) };
+            let Some(inner) = hash.plan.lefttree else {
+                return Ok(None);
+            };
             let j = info.jointypes.len();
             if j >= MB_MAX_JOINS {
                 return Ok(None);
@@ -3032,9 +3156,14 @@ fn mb_plan_walk(
             info.hash_rows.push(hash.plan.plan_rows);
             info.hash_widths.push(hash.plan.plan_width);
             info.join_rows.push(hj.join.plan.plan_rows);
-            info.children.push((MbChild::Scan(usize::MAX), MbChild::Scan(usize::MAX)));
-            let Some(oc) = mb_plan_walk(outer, info)? else { return Ok(None) };
-            let Some(ic) = mb_plan_walk(inner, info)? else { return Ok(None) };
+            info.children
+                .push((MbChild::Scan(usize::MAX), MbChild::Scan(usize::MAX)));
+            let Some(oc) = mb_plan_walk(outer, info)? else {
+                return Ok(None);
+            };
+            let Some(ic) = mb_plan_walk(inner, info)? else {
+                return Ok(None);
+            };
             info.children[j] = (oc, ic);
             Ok(Some(MbChild::Join(j)))
         }
@@ -3057,7 +3186,11 @@ fn mb_decompose(info: &MbPlanInfo) -> Vec<MbPipeline> {
             MbChild::Scan(k) => {
                 let mut probes = probes_topdown.clone();
                 probes.reverse(); // execute bottom-up (deepest join first)
-                out.push(MbPipeline { scan: k, probes, sink });
+                out.push(MbPipeline {
+                    scan: k,
+                    probes,
+                    sink,
+                });
             }
             MbChild::Join(j) => {
                 let (ref oc, ref ic) = info.children[j];
@@ -3118,7 +3251,9 @@ fn mb_state_walk<'mcx>(
                 return Ok(None);
             }
             info.heap_fed |= ::nodeseqscan::seq_scan_is_heap(ss);
-            let Some(src) = k2_task_source(ss, estate)? else { return Ok(None) };
+            let Some(src) = k2_task_source(ss, estate)? else {
+                return Ok(None);
+            };
             info.sources.push(src);
             Ok(Some(()))
         }
@@ -3147,7 +3282,9 @@ pub(super) struct MbBuildSink {
 
 impl MbBuildSink {
     fn failed(&self) -> bool {
-        self.shared.upgrade().is_none_or(|s| s.failed.load(Ordering::SeqCst))
+        self.shared
+            .upgrade()
+            .is_none_or(|s| s.failed.load(Ordering::SeqCst))
     }
 
     fn table_clone(&self) -> Option<Arc<FrozenJoinTable>> {
@@ -3199,7 +3336,9 @@ impl runtime::ParallelSink for MbBuildSink {
         if self.failed() {
             return;
         }
-        let Some(shared) = self.shared.upgrade() else { return };
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
         let r = catch_unwind(AssertUnwindSafe(|| {
             mb_accept_morsel_body(&shared, self.join, local, worker, range)
         }));
@@ -3218,8 +3357,11 @@ impl runtime::ParallelSink for MbBuildSink {
             Err(_panic) => {
                 mark_self_errored();
                 shared.fail(
-                    PgError::new(ERROR, "runtime hash-join worker panicked in a multibuild morsel")
-                        .into(),
+                    PgError::new(
+                        ERROR,
+                        "runtime hash-join worker panicked in a multibuild morsel",
+                    )
+                    .into(),
                 );
             }
         }
@@ -3266,7 +3408,9 @@ impl runtime::ParallelSink for MbBuildSink {
                 }
             }
         } else {
-            let Some(plan) = self.plan_for(locals) else { return };
+            let Some(plan) = self.plan_for(locals) else {
+                return;
+            };
             plan
         };
         let table = freeze(plan, locals);
@@ -3327,8 +3471,10 @@ fn mb_collect<'a, 'mcx>(
 /// borrows of the Agg plan-state node.
 fn mb_split_root<'a, 'mcx>(
     planstate: &'a mut Option<crate::procnode::PlanStateNode<'mcx>>,
-) -> PgResult<(&'a mut ::nodeagg::AggStateData<'mcx>, &'a mut crate::procnode::PlanStateNode<'mcx>)>
-{
+) -> PgResult<(
+    &'a mut ::nodeagg::AggStateData<'mcx>,
+    &'a mut crate::procnode::PlanStateNode<'mcx>,
+)> {
     let Some(crate::procnode::PlanStateNode::Agg(aps)) = planstate.as_mut() else {
         return Err(Box::new(PgError::new(
             ERROR,
@@ -3356,11 +3502,15 @@ enum MbTerm<'x, 'mcx> {
         /// tracks `(ref, key)` pairs for the order-free seat.
         key_col: Option<u16>,
     },
-    Agg { agg: &'x mut ::nodeagg::AggStateData<'mcx> },
+    Agg {
+        agg: &'x mut ::nodeagg::AggStateData<'mcx>,
+    },
     /// SE-AGGJOIN grouped terminal: the worker's OWN hashed build (C's
     /// checked per-row transition program; spill-mode entries are caught by
     /// the post-morsel export, which refuses the engagement fail-closed).
-    AggHash { agg: &'x mut ::nodeagg::AggStateData<'mcx> },
+    AggHash {
+        agg: &'x mut ::nodeagg::AggStateData<'mcx>,
+    },
 }
 
 /// One emitted source row through the pipeline's probe levels (depth-first;
@@ -3410,9 +3560,14 @@ fn mb_row<'mcx>(
         // SE-MBSEAT dispatch: seat existence IS the toggle (the single-join
         // arm's law) — a seat only ever builds on knob-armed engagements.
         if table.has_seat() {
-            return shared_probe_outer_dense(hj, hs, estate, table, slot, &mut |_hj, estate, out| {
-                mb_row(rest, term, crossed, true, estate, out)
-            });
+            return shared_probe_outer_dense(
+                hj,
+                hs,
+                estate,
+                table,
+                slot,
+                &mut |_hj, estate, out| mb_row(rest, term, crossed, true, estate, out),
+            );
         }
         // Field-disjoint borrows of `first`: the table rides as `&` while
         // the join/hash states ride as `&mut` — the walk, probe order and
@@ -3461,7 +3616,9 @@ fn mb_drive_claim<'mcx>(
                     0,
                     n,
                     |i| -> PgResult<()> {
-                        let Some(slot_id) = src.emit(estate, i)? else { return Ok(()) };
+                        let Some(slot_id) = src.emit(estate, i)? else {
+                            return Ok(());
+                        };
                         mb_row(probes, &mut term, &crossed, shared1a, estate, slot_id)
                     },
                 )?;
@@ -3527,10 +3684,18 @@ fn mb_take_pipeline<'a, 'mcx>(
             "runtime hash-join multibuild pipeline refers outside the worker tree",
         ))
     };
-    let scan = refs.scans.get_mut(p.scan).and_then(|c| c.take()).ok_or_else(stale)?;
+    let scan = refs
+        .scans
+        .get_mut(p.scan)
+        .and_then(|c| c.take())
+        .ok_or_else(stale)?;
     let mut probes = Vec::with_capacity(p.probes.len());
     for &j in &p.probes {
-        let (hj, hs) = refs.joins.get_mut(j).and_then(|c| c.take()).ok_or_else(stale)?;
+        let (hj, hs) = refs
+            .joins
+            .get_mut(j)
+            .and_then(|c| c.take())
+            .ok_or_else(stale)?;
         let table = chain
             .sinks
             .get(j)
@@ -3546,7 +3711,11 @@ fn mb_take_pipeline<'a, 'mcx>(
     let target = match p.sink {
         None => None,
         Some(j) => {
-            let (hj, hs) = refs.joins.get_mut(j).and_then(|c| c.take()).ok_or_else(stale)?;
+            let (hj, hs) = refs
+                .joins
+                .get_mut(j)
+                .and_then(|c| c.take())
+                .ok_or_else(stale)?;
             Some((hj, hs))
         }
     };
@@ -3562,44 +3731,52 @@ fn mb_accept_morsel_body(
     _worker: usize,
     range: runtime::MorselRange,
 ) -> PgResult<bool> {
-    let chain = Arc::clone(shared.chain.get().expect("multibuild accept without a chain"));
+    let chain = Arc::clone(
+        shared
+            .chain
+            .get()
+            .expect("multibuild accept without a chain"),
+    );
     let p = chain
         .pipelines
         .iter()
         .find(|p| p.sink == Some(join))
         .expect("every build table has exactly one pipeline");
-    with_worker_exec("runtime hash-join multibuild morsel without a bound executor", |es, ps| {
-        let (_agg, tree) = mb_split_root(ps)?;
-        let mut refs = MbRefs::default();
-        mb_collect(tree, &mut refs)?;
-        let (scan, mut probes, target) = mb_take_pipeline(&chain, p, &mut refs)?;
-        let (t_hj, hs) = target.expect("build pipeline has a target table");
-        // SE-MBSEAT: knob + per-table economics + the per-plan int4-equality
-        // introspection — deterministic from this worker's own executor
-        // state, so every tuple-bearing Local arms identically (the
-        // all-or-none seat law); armed on the FIRST morsel, idempotent
-        // after (armed-or-never).
-        let key_col = if chain.mbseat && chain.seat_ok[join] {
-            ::nodehashjoin::shared_exec::dense_seat_build_col(t_hj, hs)
-        } else {
-            None
-        };
-        if key_col.is_some() && local.single_pass() {
-            local.arm_singlepass_keys();
-        }
-        let key_col = key_col.filter(|_| local.singlepass_keys_armed());
-        local.begin_run(range.start);
-        let clean = mb_drive_claim(
-            scan,
-            &mut probes,
-            MbTerm::Build { hs, local, key_col },
-            chain.shared1a,
-            es,
-            &range,
-        )?;
-        local.end_run();
-        Ok(clean)
-    })
+    with_worker_exec(
+        "runtime hash-join multibuild morsel without a bound executor",
+        |es, ps| {
+            let (_agg, tree) = mb_split_root(ps)?;
+            let mut refs = MbRefs::default();
+            mb_collect(tree, &mut refs)?;
+            let (scan, mut probes, target) = mb_take_pipeline(&chain, p, &mut refs)?;
+            let (t_hj, hs) = target.expect("build pipeline has a target table");
+            // SE-MBSEAT: knob + per-table economics + the per-plan int4-equality
+            // introspection — deterministic from this worker's own executor
+            // state, so every tuple-bearing Local arms identically (the
+            // all-or-none seat law); armed on the FIRST morsel, idempotent
+            // after (armed-or-never).
+            let key_col = if chain.mbseat && chain.seat_ok[join] {
+                ::nodehashjoin::shared_exec::dense_seat_build_col(t_hj, hs)
+            } else {
+                None
+            };
+            if key_col.is_some() && local.single_pass() {
+                local.arm_singlepass_keys();
+            }
+            let key_col = key_col.filter(|_| local.singlepass_keys_armed());
+            local.begin_run(range.start);
+            let clean = mb_drive_claim(
+                scan,
+                &mut probes,
+                MbTerm::Build { hs, local, key_col },
+                chain.shared1a,
+                es,
+                &range,
+            )?;
+            local.end_run();
+            Ok(clean)
+        },
+    )
 }
 
 /// The final PROBE-pipeline morsel (chain branch of the probe task set):
@@ -3610,48 +3787,69 @@ fn mb_probe_morsel_body(
     worker: usize,
     range: runtime::MorselRange,
 ) -> PgResult<()> {
-    let chain = Arc::clone(payload.chain.get().expect("multibuild probe without a chain"));
-    let p = chain.pipelines.last().expect("decomposition emits the final pipeline last");
-    debug_assert!(p.sink.is_none(), "the last pipeline is the agg-terminal one");
-    with_worker_exec("runtime hash-join multibuild probe without a bound executor", |es, ps| {
-        let (agg, tree) = mb_split_root(ps)?;
-        let mut refs = MbRefs::default();
-        mb_collect(tree, &mut refs)?;
-        let (scan, mut probes, target) = mb_take_pipeline(&chain, p, &mut refs)?;
-        debug_assert!(target.is_none());
-        if chain.grouped {
-            // SE-AGGJOIN grouped terminal: hashed build per row, then the
-            // cumulative-overwrite grouped export (the M1 partial-export
-            // discipline, grouped twin). An unexportable table (spill entry
-            // or group-cap crossing) refuses the WHOLE engagement to the
-            // serial arm — R5, exactly the build-envelope posture.
-            let clean = mb_drive_claim(scan, &mut probes, MbTerm::AggHash { agg }, chain.shared1a, es, &range)?;
-            debug_assert!(clean, "the hashed agg terminal has no envelope to cross");
-            let pslot = worker - payload.pins_base;
-            let mut g = lockm(&payload.grouped_partials[pslot]);
-            let out = g.get_or_insert_with(Default::default);
-            if !::nodeagg::agg_hash_export_grouped_into(agg, es, mbg_max_groups(), out)? {
-                drop(g);
-                payload.refuse_budget_traced("grouped export envelope crossed");
+    let chain = Arc::clone(
+        payload
+            .chain
+            .get()
+            .expect("multibuild probe without a chain"),
+    );
+    let p = chain
+        .pipelines
+        .last()
+        .expect("decomposition emits the final pipeline last");
+    debug_assert!(
+        p.sink.is_none(),
+        "the last pipeline is the agg-terminal one"
+    );
+    with_worker_exec(
+        "runtime hash-join multibuild probe without a bound executor",
+        |es, ps| {
+            let (agg, tree) = mb_split_root(ps)?;
+            let mut refs = MbRefs::default();
+            mb_collect(tree, &mut refs)?;
+            let (scan, mut probes, target) = mb_take_pipeline(&chain, p, &mut refs)?;
+            debug_assert!(target.is_none());
+            if chain.grouped {
+                // SE-AGGJOIN grouped terminal: hashed build per row, then the
+                // cumulative-overwrite grouped export (the M1 partial-export
+                // discipline, grouped twin). An unexportable table (spill entry
+                // or group-cap crossing) refuses the WHOLE engagement to the
+                // serial arm — R5, exactly the build-envelope posture.
+                let clean = mb_drive_claim(
+                    scan,
+                    &mut probes,
+                    MbTerm::AggHash { agg },
+                    chain.shared1a,
+                    es,
+                    &range,
+                )?;
+                debug_assert!(clean, "the hashed agg terminal has no envelope to cross");
+                let pslot = worker - payload.pins_base;
+                let mut g = lockm(&payload.grouped_partials[pslot]);
+                let out = g.get_or_insert_with(Default::default);
+                if !::nodeagg::agg_hash_export_grouped_into(agg, es, mbg_max_groups(), out)? {
+                    drop(g);
+                    payload.refuse_budget_traced("grouped export envelope crossed");
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-        let clean = mb_drive_claim(
-            scan,
-            &mut probes,
-            MbTerm::Agg { agg },
-            chain.shared1a,
-            es,
-            &range,
-        )?;
-        debug_assert!(clean, "the agg terminal has no envelope to cross");
-        let pslot = worker - payload.pins_base;
-        {
-            let mut g = lockm(&payload.partials[pslot]);
-            agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
-        }
-        Ok(())
-    })
+            let clean = mb_drive_claim(
+                scan,
+                &mut probes,
+                MbTerm::Agg { agg },
+                chain.shared1a,
+                es,
+                &range,
+            )?;
+            debug_assert!(clean, "the agg terminal has no envelope to cross");
+            let pslot = worker - payload.pins_base;
+            {
+                let mut g = lockm(&payload.partials[pslot]);
+                agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
+            }
+            Ok(())
+        },
+    )
 }
 
 /// Chain-mode worker arming (`build_worker_exec` branch): verify the rebuilt
@@ -3715,7 +3913,10 @@ fn mb_arm_worker<'mcx>(
         super::arm_scan_staging(
             ss,
             estate,
-            super::ScanFeedShape::RowFeed { ctx: "runtime hash-join multibuild feed", stitch: true },
+            super::ScanFeedShape::RowFeed {
+                ctx: "runtime hash-join multibuild feed",
+                stitch: true,
+            },
         )?;
     }
     if !chain.grouped {
@@ -3746,8 +3947,7 @@ fn k2_task_source<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<(u64, Arc<dyn runtime::MorselSource>)>> {
     if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
-        let Some((granules, starts)) =
-            ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+        let Some((granules, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
         else {
             return Ok(None);
         };
@@ -3790,7 +3990,9 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
-    let Some(rt) = runtime::global() else { return Ok(None) };
+    let Some(rt) = runtime::global() else {
+        return Ok(None);
+    };
     // M5-1 refusal funnel: every admission exit names its gate for the
     // router's consolidated taxonomy (previously silent early returns).
     fn refuse(reason: &'static str) {
@@ -3885,8 +4087,8 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         return Ok(None);
     }
     // K2 heap-fed engagement marker (false = the pgrcolumnar arm verbatim).
-    let heap_fed = ::nodeseqscan::seq_scan_is_heap(outer_ss)
-        || ::nodeseqscan::seq_scan_is_heap(inner_ss);
+    let heap_fed =
+        ::nodeseqscan::seq_scan_is_heap(outer_ss) || ::nodeseqscan::seq_scan_is_heap(inner_ss);
     if heap_fed && !k2_heap_jointype_admits(hj.state.plan.join.jointype) {
         // Envelope (hard): INNER/LEFT/SEMI/ANTI only on the heap feed; the
         // right-fill family + RIGHT_SEMI ride the runtime/pgrcolumnar arm
@@ -3917,25 +4119,35 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     }
     // Agg must be the plan root; its child the HashJoin; the join's children
     // the two scans (the worker pstmt transfers the whole root subtree).
-    let Some(root) = leader_pstmt.planTree else { return Ok(None) };
-    let Some(root_agg) = root.as_agg() else { return Ok(None) };
+    let Some(root) = leader_pstmt.planTree else {
+        return Ok(None);
+    };
+    let Some(root_agg) = root.as_agg() else {
+        return Ok(None);
+    };
     if !std::ptr::eq(root_agg, agg.plan) {
         return Ok(None);
     }
-    let Some(join_node) = agg.plan.plan.lefttree else { return Ok(None) };
+    let Some(join_node) = agg.plan.plan.lefttree else {
+        return Ok(None);
+    };
     if join_node.node_tag() != NodeTag::T_HashJoin {
         return Ok(None);
     }
     let join_plan = join_node.as_hash_join().expect("HashJoin tag");
-    let Some(outer_plan) = join_plan.join.plan.lefttree else { return Ok(None) };
-    let Some(hash_plan_node) = join_plan.join.plan.righttree else { return Ok(None) };
-    if outer_plan.node_tag() != NodeTag::T_SeqScan
-        || hash_plan_node.node_tag() != NodeTag::T_Hash
-    {
+    let Some(outer_plan) = join_plan.join.plan.lefttree else {
+        return Ok(None);
+    };
+    let Some(hash_plan_node) = join_plan.join.plan.righttree else {
+        return Ok(None);
+    };
+    if outer_plan.node_tag() != NodeTag::T_SeqScan || hash_plan_node.node_tag() != NodeTag::T_Hash {
         return Ok(None);
     }
     let hash_plan = hash_plan_node.as_hash().expect("Hash tag");
-    let Some(inner_plan) = hash_plan.plan.lefttree else { return Ok(None) };
+    let Some(inner_plan) = hash_plan.plan.lefttree else {
+        return Ok(None);
+    };
     if inner_plan.node_tag() != NodeTag::T_SeqScan {
         return Ok(None);
     }
@@ -3963,10 +4175,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         return Ok(None);
     }
     let policy = parallel::query_task_policy_probe();
-    if policy.has_params
-        || policy.temp_state
-        || policy.serializable
-        || policy.pending_invalidations
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
     {
         refuse("binder-policy");
         return Ok(None);
@@ -4157,7 +4366,11 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     )?;
     router::tick(
         ArmClass::HashJoin,
-        if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+        if r.is_some() {
+            ArmCounter::Completed
+        } else {
+            ArmCounter::Fallback
+        },
     );
     Ok(r)
 }
@@ -4182,7 +4395,9 @@ pub(super) fn try_fill_grouped_agg_over_join_runtime<'mcx>(
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(false);
     }
-    let Some(rt) = runtime::global() else { return Ok(false) };
+    let Some(rt) = runtime::global() else {
+        return Ok(false);
+    };
     // Grouped shapes only; a filled/done table is the drain phase (the
     // caller's emit paths own it — never re-engage).
     if !::nodeagg::agg_is_hashed(agg)
@@ -4196,8 +4411,10 @@ pub(super) fn try_fill_grouped_agg_over_join_runtime<'mcx>(
         router::tick_refused(ArmClass::HashJoin, "groupsink-disabled");
         return Ok(false);
     }
-    Ok(try_own_multibuild(agg, hj, estate, rt, dop, /*grouped=*/ true, /*fill_only=*/ true)?
-        .is_some())
+    Ok(try_own_multibuild(
+        agg, hj, estate, rt, dop, /*grouped=*/ true, /*fill_only=*/ true,
+    )?
+    .is_some())
 }
 
 /// m5p1 multibuild admission (the dispatch gate above verified a nested
@@ -4273,11 +4490,15 @@ fn try_own_multibuild<'mcx>(
     // whitelisted `[Limit] -> [Sort]` decoration below it; the resolved Agg
     // NODE seeds the worker pstmt (workers run the Agg subtree, never the
     // decoration).
-    let Some(root) = leader_pstmt.planTree else { return Ok(None) };
+    let Some(root) = leader_pstmt.planTree else {
+        return Ok(None);
+    };
     let Some(worker_root) = decorated_agg_plan_node(root, agg, grouped) else {
         return Ok(None);
     };
-    let Some(join_node) = agg.plan.plan.lefttree else { return Ok(None) };
+    let Some(join_node) = agg.plan.plan.lefttree else {
+        return Ok(None);
+    };
     // Pass A: plan-tree walk (shape, probe-local join types, parallel
     // safety, per-build sizing inputs, preorder topology).
     let mut pinfo = MbPlanInfo {
@@ -4323,10 +4544,7 @@ fn try_own_multibuild<'mcx>(
         return Ok(None);
     }
     let policy = parallel::query_task_policy_probe();
-    if policy.has_params
-        || policy.temp_state
-        || policy.serializable
-        || policy.pending_invalidations
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
     {
         refuse("binder-policy");
         return Ok(None);
@@ -4355,7 +4573,11 @@ fn try_own_multibuild<'mcx>(
     // Pass B: state-tree walk, preorder-congruent with pass A — per-join
     // admissibility/untouched/type, per-scan fusibility + AM + geometry.
     let k2_heap = k2_probe_enabled() && heapfeed_v2_enabled();
-    let mut sinfo = MbStateInfo { sources: Vec::new(), heap_fed: false, njoins: 0 };
+    let mut sinfo = MbStateInfo {
+        sources: Vec::new(),
+        heap_fed: false,
+        njoins: 0,
+    };
     if !shared_join_admissible(&hj.state, &hj.hash.state)
         || !::nodehashjoin::lane_join_untouched(&hj.state, &hj.hash.state)
         || !mb_jointype_admits(hj.state.plan.join.jointype)
@@ -4387,7 +4609,10 @@ fn try_own_multibuild<'mcx>(
     let pipelines = mb_decompose(&pinfo);
     let last_scan = {
         let last = pipelines.last().expect("root pipeline");
-        debug_assert!(last.sink.is_none(), "decomposition emits the agg pipeline last");
+        debug_assert!(
+            last.sink.is_none(),
+            "decomposition emits the agg pipeline last"
+        );
         last.scan
     };
     let probe_granules = sinfo.sources[last_scan].0;
@@ -4468,7 +4693,11 @@ fn try_own_multibuild<'mcx>(
     )?;
     router::tick(
         ArmClass::HashJoin,
-        if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+        if r.is_some() {
+            ArmCounter::Completed
+        } else {
+            ArmCounter::Fallback
+        },
     );
     Ok(r)
 }
@@ -4519,11 +4748,7 @@ fn engage<'mcx>(
     let spill = match spill_batches {
         Some(n) => match ::spillset::SpillSet::create() {
             Ok(set) => Some(Arc::new(HjSpill::new(
-                set,
-                n,
-                envelope,
-                dop as u64,
-                fill_inner,
+                set, n, envelope, dop as u64, fill_inner,
             ))),
             Err(_) => {
                 lane_trace(
@@ -4560,8 +4785,12 @@ fn engage<'mcx>(
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         budget_refused: AtomicBool::new(false),
-        partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
-        grouped_partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
+        partials: (0..runtime::MAX_EXTERNAL_LANES)
+            .map(|_| Mutex::new(None))
+            .collect(),
+        grouped_partials: (0..runtime::MAX_EXTERNAL_LANES)
+            .map(|_| Mutex::new(None))
+            .collect(),
         sink: OnceLock::new(),
         chain: OnceLock::new(),
         // GL-HJSEAT-2: the seat's O(build) construction must be amortized by
@@ -4697,12 +4926,11 @@ enum EngageOutcome {
 
 /// This arm's standing-channel constants (M2 inc-1; see
 /// standing_channel::StandingArm — sinks_gate: PGRUST_RUNTIME_POOLBIND_SINKS).
-static STANDING_ARM: super::standing_channel::StandingArm =
-    super::standing_channel::StandingArm {
-        label: "runtime-hashjoin",
-        died: "runtime hash-join standing executors exited before completing the join",
-        sinks_gate: true,
-    };
+static STANDING_ARM: super::standing_channel::StandingArm = super::standing_channel::StandingArm {
+    label: "runtime-hashjoin",
+    died: "runtime hash-join standing executors exited before completing the join",
+    sinks_gate: true,
+};
 
 /// Shared post-outcome tail (standing and launched channels): the §6/R5
 /// envelope refusal takes the whole-attempt serial rerun (secondary errors
@@ -4724,7 +4952,10 @@ fn finish_outcome(
     }
     if outcome == runtime::RgOutcome::Aborted {
         ::postgres_seams::check_for_interrupts::call()?;
-        return Err(Box::new(PgError::new(ERROR, "runtime hash-join pipeline aborted")));
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime hash-join pipeline aborted",
+        )));
     }
     if payload.started.load(Ordering::SeqCst) == 0 {
         return Ok(EngageOutcome::Fallback);
@@ -4750,9 +4981,9 @@ fn standing_first(
     match super::standing_channel::standing_wait(
         &STANDING_ARM,
         super::standing_channel::StandingLeader {
-                // M2 inc-2: the pool-db board attached at submit (None =
-                // gang-first, inc-1 exactly).
-                pool,
+            // M2 inc-2: the pool-db board attached at submit (None =
+            // gang-first, inc-1 exactly).
+            pool,
             shared: payload.pcxt_shared.get().expect("pcxt shared set above"),
             slot: &payload.standing,
             started: &payload.started,
@@ -4806,10 +5037,13 @@ fn engage_ceremony<'mcx>(
         // Standing driver dispatch (M2 inc-1): deferred_bind false — this
         // arm binds EAGERLY (with_query_task_binding); the standing serve
         // re-establishes visibility up front and evicts parked sticky.
-        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
-            drive: runtime_hj_standing_driver,
-            deferred_bind: false,
-        });
+        parallel::set_standing_driver(
+            pcxt,
+            parallel::standing::StandingDriver {
+                drive: runtime_hj_standing_driver,
+                deferred_bind: false,
+            },
+        );
 
         // m5p1 multibuild ladder: per pipeline in emission order — build
         // pipelines as ACCEPT/COMBINE sink pairs (accept deps = the
@@ -4830,13 +5064,16 @@ fn engage_ceremony<'mcx>(
                 match p.sink {
                     Some(j) => {
                         let accept_idx = tasksets.len();
-                        let runtime::SinkTaskSets { mut accept, combine, probe: _p } =
-                            runtime::sink_tasksets(
-                                Arc::clone(&mb.sinks[j]),
-                                Arc::clone(&mb.sources[p.scan]),
-                                rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
-                                accept_idx,
-                            );
+                        let runtime::SinkTaskSets {
+                            mut accept,
+                            combine,
+                            probe: _p,
+                        } = runtime::sink_tasksets(
+                            Arc::clone(&mb.sinks[j]),
+                            Arc::clone(&mb.sources[p.scan]),
+                            rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
+                            accept_idx,
+                        );
                         accept.deps = deps;
                         tasksets.push(accept);
                         combine_idx[j] = tasksets.len();
@@ -4867,7 +5104,10 @@ fn engage_ceremony<'mcx>(
             // by on_rg before the bound submission can become pool-visible
             // — no "rg gone" refusal churn window.
             let set_rg = |rg: &runtime::RgHandle| {
-                payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
+                payload
+                    .rg
+                    .set(rg.downgrade())
+                    .unwrap_or_else(|_| unreachable!("rg set once"));
             };
             let (rg, waiter) = match &pool {
                 Some((_, descriptor)) => rt.submit_pinned_bound(
@@ -4921,13 +5161,16 @@ fn engage_ceremony<'mcx>(
         // coalesce); heap = the seam's boundary-free GranuleMap, same
         // never-coalesce posture.
         let (sink, inner_source) = single.take().expect("single-join ceremony");
-        let runtime::SinkTaskSets { accept, combine, probe: _sink_probe } =
-            runtime::sink_tasksets(
-                sink,
-                inner_source,
-                rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
-                0,
-            );
+        let runtime::SinkTaskSets {
+            accept,
+            combine,
+            probe: _sink_probe,
+        } = runtime::sink_tasksets(
+            sink,
+            inner_source,
+            rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
+            0,
+        );
         let mut tasksets = vec![accept, combine];
         // M3.5 ladder: PLAN-BATCHES + split rounds precede PROBE(0).
         let mut probe0_deps = vec![1usize];
@@ -4943,7 +5186,10 @@ fn engage_ceremony<'mcx>(
                 let idx = tasksets.len();
                 tasksets.push(runtime::TaskSetSpec {
                     source: Arc::clone(&sp.round_sources[r]) as Arc<dyn runtime::MorselSource>,
-                    work: Arc::new(SplitRoundWork { payload: Arc::clone(payload), round: r }),
+                    work: Arc::new(SplitRoundWork {
+                        payload: Arc::clone(payload),
+                        round: r,
+                    }),
                     deps: vec![prev],
                 });
                 prev = idx;
@@ -4964,7 +5210,10 @@ fn engage_ceremony<'mcx>(
             let idx = tasksets.len();
             tasksets.push(runtime::TaskSetSpec {
                 source: Arc::new(FillPartitionSource),
-                work: Arc::new(FillWork { payload: Arc::clone(payload), leaf: None }),
+                work: Arc::new(FillWork {
+                    payload: Arc::clone(payload),
+                    leaf: None,
+                }),
                 deps: vec![tail],
             });
             tail = idx;
@@ -4980,13 +5229,16 @@ fn engage_ceremony<'mcx>(
                     plan: Mutex::new(None),
                 });
                 let accept_idx = tasksets.len();
-                let runtime::SinkTaskSets { mut accept, combine, probe: _p } =
-                    runtime::sink_tasksets(
-                        leaf_sink,
-                        Arc::clone(&sp.leaf_in_sources[leaf]) as Arc<dyn runtime::MorselSource>,
-                        rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
-                        accept_idx,
-                    );
+                let runtime::SinkTaskSets {
+                    mut accept,
+                    combine,
+                    probe: _p,
+                } = runtime::sink_tasksets(
+                    leaf_sink,
+                    Arc::clone(&sp.leaf_in_sources[leaf]) as Arc<dyn runtime::MorselSource>,
+                    rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
+                    accept_idx,
+                );
                 accept.deps = vec![tail];
                 tasksets.push(accept);
                 let combine_idx = tasksets.len();
@@ -4995,7 +5247,10 @@ fn engage_ceremony<'mcx>(
                 tasksets.push(runtime::TaskSetSpec {
                     source: Arc::clone(&sp.leaf_out_sources[leaf])
                         as Arc<dyn runtime::MorselSource>,
-                    work: Arc::new(LeafProbeWork { payload: Arc::clone(payload), leaf }),
+                    work: Arc::new(LeafProbeWork {
+                        payload: Arc::clone(payload),
+                        leaf,
+                    }),
                     deps: vec![combine_idx],
                 });
                 tail = probe_idx;
@@ -5029,7 +5284,10 @@ fn engage_ceremony<'mcx>(
         // on_rg before the bound submission can become pool-visible — no
         // "rg gone" refusal churn window.
         let set_rg = |rg: &runtime::RgHandle| {
-            payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
+            payload
+                .rg
+                .set(rg.downgrade())
+                .unwrap_or_else(|_| unreachable!("rg set once"));
         };
         let (rg, waiter) = match &pool {
             Some((_, descriptor)) => rt.submit_pinned_bound(
@@ -5145,7 +5403,10 @@ fn engage_ceremony<'mcx>(
                     sp.max_round.load(Ordering::Relaxed),
                 ));
             }
-            lane_trace(&format!("runtime-hashjoin: complete, partials={}", parts.len()));
+            lane_trace(&format!(
+                "runtime-hashjoin: complete, partials={}",
+                parts.len()
+            ));
             Ok(Some(exec_agg_runtime_partials(agg, estate, &combined)?))
         }
     }
@@ -5191,10 +5452,22 @@ mod mb_tests {
     #[test]
     fn conversion_car_executor_knob_defaults() {
         // conversion-flips: DECOROOT is DEFAULT ON (GL-DECOROOT-1; =0|off kills).
-        assert!(hj_decoroot_enabled(), "conversion-flips: unset => ON (GL-DECOROOT-1)");
-        assert!(hj_aggjoin_numeric_enabled(), "conversion-flips: unset => ON (GL-NUMJOIN-1)");
-        assert!(hj_cbkeys_enabled(), "conversion-flips: unset => ON (GL-CBKEYS-1)");
-        assert!(hj_bpchar_keys_enabled(), "conversion-flips: unset => ON (GL-BPCHAR-1)");
+        assert!(
+            hj_decoroot_enabled(),
+            "conversion-flips: unset => ON (GL-DECOROOT-1)"
+        );
+        assert!(
+            hj_aggjoin_numeric_enabled(),
+            "conversion-flips: unset => ON (GL-NUMJOIN-1)"
+        );
+        assert!(
+            hj_cbkeys_enabled(),
+            "conversion-flips: unset => ON (GL-CBKEYS-1)"
+        );
+        assert!(
+            hj_bpchar_keys_enabled(),
+            "conversion-flips: unset => ON (GL-BPCHAR-1)"
+        );
     }
 
     /// Decomposition invariants on a SNOWFLAKE topology
@@ -5219,10 +5492,22 @@ mod mb_tests {
         };
         let ps = mb_decompose(&info);
         assert_eq!(ps.len(), 4);
-        assert_eq!((ps[0].scan, &ps[0].probes[..], ps[0].sink), (3, &[][..], Some(2)));
-        assert_eq!((ps[1].scan, &ps[1].probes[..], ps[1].sink), (2, &[2usize][..], Some(0)));
-        assert_eq!((ps[2].scan, &ps[2].probes[..], ps[2].sink), (1, &[][..], Some(1)));
-        assert_eq!((ps[3].scan, &ps[3].probes[..], ps[3].sink), (0, &[1usize, 0][..], None));
+        assert_eq!(
+            (ps[0].scan, &ps[0].probes[..], ps[0].sink),
+            (3, &[][..], Some(2))
+        );
+        assert_eq!(
+            (ps[1].scan, &ps[1].probes[..], ps[1].sink),
+            (2, &[2usize][..], Some(0))
+        );
+        assert_eq!(
+            (ps[2].scan, &ps[2].probes[..], ps[2].sink),
+            (1, &[][..], Some(1))
+        );
+        assert_eq!(
+            (ps[3].scan, &ps[3].probes[..], ps[3].sink),
+            (0, &[1usize, 0][..], None)
+        );
         let mut built = std::collections::BTreeSet::new();
         for p in &ps {
             for j in &p.probes {
@@ -5232,7 +5517,10 @@ mod mb_tests {
                 built.insert(j);
             }
         }
-        assert!(ps.last().unwrap().sink.is_none(), "agg pipeline emitted last");
+        assert!(
+            ps.last().unwrap().sink.is_none(),
+            "agg pipeline emitted last"
+        );
     }
 
     /// The multibuild kill switch A/B (OnceLock — one state per process, so
@@ -5285,8 +5573,14 @@ mod mb_tests {
         };
         let ps = mb_decompose(&info);
         assert_eq!(ps.len(), 2);
-        assert_eq!((ps[0].scan, &ps[0].probes[..], ps[0].sink), (1, &[][..], Some(0)));
-        assert_eq!((ps[1].scan, &ps[1].probes[..], ps[1].sink), (0, &[0usize][..], None));
+        assert_eq!(
+            (ps[0].scan, &ps[0].probes[..], ps[0].sink),
+            (1, &[][..], Some(0))
+        );
+        assert_eq!(
+            (ps[1].scan, &ps[1].probes[..], ps[1].sink),
+            (0, &[0usize][..], None)
+        );
     }
 }
 

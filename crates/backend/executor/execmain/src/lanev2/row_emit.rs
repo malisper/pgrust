@@ -63,9 +63,7 @@ use runtime::{DrainStep, FunnelProducer, PushOutcome, RowFunnel};
 /// engagement evidence at every point.
 pub(super) fn row_funnel_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        !std::env::var("PGRUST_RUNTIME_ROW_FUNNEL").is_ok_and(|v| v.trim() == "0")
-    })
+    *ON.get_or_init(|| !std::env::var("PGRUST_RUNTIME_ROW_FUNNEL").is_ok_and(|v| v.trim() == "0"))
 }
 
 /// Default per-worker ring capacity (rows). Bounded = the back-pressure knob
@@ -185,7 +183,10 @@ impl RowEmitSink {
         // tail): the eligibility gates carve these out; assert the invariant.
         debug_assert!(!estate.es_epq_active, "RowEmitSink inside an EPQ drive");
         let img = self.materialize(tuple, estate)?;
-        match self.producer.push_blocking(img, ::runtime::blocking_io_section) {
+        match self
+            .producer
+            .push_blocking(img, ::runtime::blocking_io_section)
+        {
             PushOutcome::Pushed => {
                 estate.es_processed += 1;
                 Ok(true)

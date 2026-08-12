@@ -72,16 +72,16 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use ::executils::{EStateData, ExecSlotId};
-use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 use ::nodesort::fullsort::FullRun;
 use ::nodesort::mjmerge::{self, MjPair, MjPrefix, PairBudget};
 use ::types_error::{PgError, PgResult, ERROR};
+use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 
+use super::lane_trace;
 use super::router::{self, ArmClass};
 use super::runtime_sort::{
     full_sort_engage_publish, full_sort_probe_for_mjsort, FullPublish, MjSortSideProbe,
 };
-use super::lane_trace;
 use crate::procnode::{MergeJoinNode, PlanStateNode};
 
 /// Partition-parallel merge width (the FULLSORT_PARTS / sink-bucket
@@ -180,7 +180,10 @@ mod knob_tests {
     /// (the flipped-kill exact-spelling law).
     #[test]
     fn mjsort_flipped_kill_spelling() {
-        assert!(mjsort_spelling_on(None), "unset must be ON (flipped default)");
+        assert!(
+            mjsort_spelling_on(None),
+            "unset must be ON (flipped default)"
+        );
         for v in ["1", "on", "", "true", "ON", "OFF", "yes"] {
             assert!(mjsort_spelling_on(Some(v)), "spelling {v:?} must stay ON");
         }
@@ -192,7 +195,10 @@ mod knob_tests {
     /// (the t35 exact-spelling law — no other spelling arms).
     #[test]
     fn mjfold_default_off_spelling() {
-        assert!(!mjfold_spelling_on(None), "unset must be OFF (default-OFF lever)");
+        assert!(
+            !mjfold_spelling_on(None),
+            "unset must be OFF (default-OFF lever)"
+        );
         for v in ["0", "off", "", "true", "ON", "yes", "2", "On"] {
             assert!(!mjfold_spelling_on(Some(v)), "spelling {v:?} must stay OFF");
         }
@@ -289,8 +295,12 @@ fn emit_next<'mcx>(
         return Ok(None);
     };
     let (oslot, islot) = {
-        let PlanStateNode::Sort(o) = &*mj.outer else { unreachable!("admitted Sort outer") };
-        let PlanStateNode::Sort(i) = &*mj.inner else { unreachable!("admitted Sort inner") };
+        let PlanStateNode::Sort(o) = &*mj.outer else {
+            unreachable!("admitted Sort outer")
+        };
+        let PlanStateNode::Sort(i) = &*mj.inner else {
+            unreachable!("admitted Sort inner")
+        };
         (o.state.ps_ResultTupleSlot, i.state.ps_ResultTupleSlot)
     };
     // Materialize both child rows as virtual tuples in the Sort children's
@@ -327,7 +337,9 @@ fn probe_and_engage<'mcx>(
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(false);
     }
-    let Some(rt) = runtime::global() else { return Ok(false) };
+    let Some(rt) = runtime::global() else {
+        return Ok(false);
+    };
     lane_trace("runtime-mjsort: probed");
 
     // --- Session / dynamic gates (the sort arm's battery, probed once).
@@ -355,7 +367,11 @@ fn probe_and_engage<'mcx>(
         refused("exec params");
         return Ok(false);
     }
-    if !estate.es_snapshot.as_deref().is_some_and(::types_snapshot::IsMVCCSnapshot) {
+    if !estate
+        .es_snapshot
+        .as_deref()
+        .is_some_and(::types_snapshot::IsMVCCSnapshot)
+    {
         refused("non-MVCC snapshot");
         return Ok(false);
     }
@@ -409,7 +425,10 @@ fn probe_and_engage<'mcx>(
             return Ok(false);
         }
     }
-    let nulls_first: Vec<bool> = oprobe.spec_keys[..nkeys].iter().map(|k| k.nulls_first).collect();
+    let nulls_first: Vec<bool> = oprobe.spec_keys[..nkeys]
+        .iter()
+        .map(|k| k.nulls_first)
+        .collect();
 
     // --- Pair budget (work_mem-scaled; admission estimate first).
     let pair_bytes = core::mem::size_of::<MjPair>() as u64; // 12 B
@@ -440,7 +459,13 @@ fn probe_and_engage<'mcx>(
         refused("pair budget crossed / merge fell back");
         return Ok(false);
     };
-    let adopted = MjSortAdopted { oruns: opub.runs, iruns: ipub.runs, pairs, part: 0, pos: 0 };
+    let adopted = MjSortAdopted {
+        oruns: opub.runs,
+        iruns: ipub.runs,
+        pairs,
+        part: 0,
+        pos: 0,
+    };
     lane_trace(&format!(
         "runtime-mjsort: complete, pairs={} parts={MJSORT_PARTS}",
         adopted.total_pairs()
@@ -621,7 +646,9 @@ fn merge_phase(
         nkeys,
         nulls_first: nulls_first.to_vec(),
         budget: PairBudget::new(cap),
-        out: (0..MJSORT_PARTS).map(|_| UnsafeCell::new(Vec::new())).collect(),
+        out: (0..MJSORT_PARTS)
+            .map(|_| UnsafeCell::new(Vec::new()))
+            .collect(),
         broke: AtomicBool::new(false),
         rg: std::sync::OnceLock::new(),
         claimed: AtomicUsize::new(0),
@@ -631,14 +658,19 @@ fn merge_phase(
         runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst),
             tasksets: vec![runtime::TaskSetSpec {
-                source: Arc::new(PartsSource { parts: MJSORT_PARTS as u64 }),
+                source: Arc::new(PartsSource {
+                    parts: MJSORT_PARTS as u64,
+                }),
                 work: Arc::clone(&shared) as _,
                 deps: vec![],
             }],
         },
         router::session_affinity_token(),
     );
-    shared.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
+    shared
+        .rg
+        .set(rg.downgrade())
+        .unwrap_or_else(|_| unreachable!("rg set once"));
     // Submit-and-park with the CFI cadence. The RG is UN-PINNED: pool
     // threads (which exist — runtime::global() gated admission) claim and
     // finish it; aborts settle at morsel boundaries, so both the error
@@ -665,7 +697,10 @@ fn merge_phase(
             return Ok(None);
         }
         ::postgres_seams::check_for_interrupts::call()?;
-        return Err(Box::new(PgError::new(ERROR, "runtime mjsort merge aborted")));
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime mjsort merge aborted",
+        )));
     }
     lane_trace(&format!(
         "runtime-mjsort: merge complete ({} partition claims)",
@@ -710,8 +745,7 @@ fn merge_phase(
 // ---------------------------------------------------------------------------
 
 use ::nodeagg::runtime_partial::{
-    agg_mjfold_recognize, exec_agg_explicit_partials, MjFoldKind, MjFoldTrans,
-    RuntimePartialTrans,
+    agg_mjfold_recognize, exec_agg_explicit_partials, MjFoldKind, MjFoldTrans, RuntimePartialTrans,
 };
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::primnodes::{INNER_VAR, OUTER_VAR};
@@ -756,7 +790,12 @@ enum FoldArg {
     /// CHECKED two-column int arithmetic (int4pl/int4mi/int8pl/int8mi):
     /// either side NULL => arg NULL (strict operators); overflow BREAKS
     /// the fold into the per-tuple rerun.
-    Op { sub: bool, wide: bool, a: FoldSrc, b: FoldSrc },
+    Op {
+        sub: bool,
+        wide: bool,
+        a: FoldSrc,
+        b: FoldSrc,
+    },
 }
 
 /// One transition's whole fold program.
@@ -780,9 +819,19 @@ enum FoldAcc {
 fn acc_init(kind: MjFoldKind) -> FoldAcc {
     match kind {
         MjFoldKind::CountStar | MjFoldKind::CountAny => FoldAcc::Count(0),
-        MjFoldKind::Sum => FoldAcc::Sum { v: 0, present: false },
-        MjFoldKind::Int128 => FoldAcc::Int128 { n: 0, sum: 0, present: false },
-        MjFoldKind::Min | MjFoldKind::Max => FoldAcc::MinMax { v: 0, present: false },
+        MjFoldKind::Sum => FoldAcc::Sum {
+            v: 0,
+            present: false,
+        },
+        MjFoldKind::Int128 => FoldAcc::Int128 {
+            n: 0,
+            sum: 0,
+            present: false,
+        },
+        MjFoldKind::Min | MjFoldKind::Max => FoldAcc::MinMax {
+            v: 0,
+            present: false,
+        },
     }
 }
 
@@ -796,8 +845,16 @@ fn acc_combine(kind: MjFoldKind, dst: &mut FoldAcc, src: FoldAcc) {
             *px = *px || py;
         }
         (
-            FoldAcc::Int128 { n: nx, sum: sx, present: px },
-            FoldAcc::Int128 { n: ny, sum: sy, present: py },
+            FoldAcc::Int128 {
+                n: nx,
+                sum: sx,
+                present: px,
+            },
+            FoldAcc::Int128 {
+                n: ny,
+                sum: sy,
+                present: py,
+            },
         ) => {
             *nx += ny;
             *sx += sy;
@@ -840,10 +897,7 @@ fn fold_refused(reason: &'static str) {
 
 /// MJ tlist entry k (1-based Var attno) — setrefs keeps the tlist in resno
 /// order; the resno equality is the belt.
-fn tlist_expr<'mcx>(
-    tlist: &::types_nodes::list::NodeList<'mcx>,
-    attno: i32,
-) -> Option<Node<'mcx>> {
+fn tlist_expr<'mcx>(tlist: &::types_nodes::list::NodeList<'mcx>, attno: i32) -> Option<Node<'mcx>> {
     if attno < 1 {
         return None;
     }
@@ -904,7 +958,15 @@ fn classify_op<'mcx>(
     if at != want || bt != want {
         return None;
     }
-    Some((FoldArg::Op { sub, wide, a: asrc, b: bsrc }, want))
+    Some((
+        FoldArg::Op {
+            sub,
+            wide,
+            a: asrc,
+            b: bsrc,
+        },
+        want,
+    ))
 }
 
 /// GL-MJSORT-3 §3.1 seam 3 — resolve one agg argument against the MJ
@@ -987,7 +1049,11 @@ fn resolve_fold_args<'mcx>(
         if !arg_ok(&arg) {
             return None;
         }
-        out.push(FoldSpec { transno: t.transno, kind: t.kind, arg });
+        out.push(FoldSpec {
+            transno: t.transno,
+            kind: t.kind,
+            arg,
+        });
     }
     Some(out)
 }
@@ -1032,9 +1098,7 @@ fn fold_partition(
         for (spec, acc) in prog.iter().zip(accs.iter_mut()) {
             let v = match spec.arg {
                 FoldArg::None => Some(0),
-                FoldArg::Col { src, width } => {
-                    read_col(src, width, ovals, onulls, ivals, inulls)
-                }
+                FoldArg::Col { src, width } => read_col(src, width, ovals, onulls, ivals, inulls),
                 FoldArg::Op { sub, wide, a, b } => {
                     let w = if wide { FoldWidth::I64 } else { FoldWidth::I32 };
                     match (
@@ -1046,11 +1110,18 @@ fn fold_partition(
                         (Some(av), Some(bv)) => {
                             // C's exact checked arithmetic at the op's width.
                             let r = if wide {
-                                if sub { av.checked_sub(bv) } else { av.checked_add(bv) }
+                                if sub {
+                                    av.checked_sub(bv)
+                                } else {
+                                    av.checked_add(bv)
+                                }
                             } else {
                                 let (a32, b32) = (av as i32, bv as i32);
-                                let r32 =
-                                    if sub { a32.checked_sub(b32) } else { a32.checked_add(b32) };
+                                let r32 = if sub {
+                                    a32.checked_sub(b32)
+                                } else {
+                                    a32.checked_add(b32)
+                                };
                                 r32.map(|r| r as i64)
                             };
                             match r {
@@ -1173,12 +1244,20 @@ fn fold_phase(
     adopted: Box<MjSortAdopted>,
     prog: &[FoldSpec],
 ) -> PgResult<FoldOutcome> {
-    let MjSortAdopted { oruns, iruns, pairs, .. } = *adopted;
+    let MjSortAdopted {
+        oruns,
+        iruns,
+        pairs,
+        ..
+    } = *adopted;
     let shared = Arc::new(MjFoldShared {
         oruns,
         iruns,
         prog: prog.to_vec(),
-        parts: pairs.into_iter().map(|p| UnsafeCell::new((p, Vec::new()))).collect(),
+        parts: pairs
+            .into_iter()
+            .map(|p| UnsafeCell::new((p, Vec::new())))
+            .collect(),
         broke: AtomicBool::new(false),
         rg: std::sync::OnceLock::new(),
         claimed: AtomicUsize::new(0),
@@ -1188,14 +1267,19 @@ fn fold_phase(
         runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst),
             tasksets: vec![runtime::TaskSetSpec {
-                source: Arc::new(PartsSource { parts: shared.parts.len() as u64 }),
+                source: Arc::new(PartsSource {
+                    parts: shared.parts.len() as u64,
+                }),
                 work: Arc::clone(&shared) as _,
                 deps: vec![],
             }],
         },
         router::session_affinity_token(),
     );
-    shared.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
+    shared
+        .rg
+        .set(rg.downgrade())
+        .unwrap_or_else(|_| unreachable!("rg set once"));
     // Submit-and-park with the CFI cadence (the merge RG's own loop; both
     // the error and interrupt paths wait for the completion to land).
     let outcome = loop {
@@ -1298,7 +1382,9 @@ pub(crate) fn try_own_agg_over_merge_join<'mcx>(
     if router::arm_dop(ArmClass::Sort) <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
-    let Some(rt) = runtime::global() else { return Ok(None) };
+    let Some(rt) = runtime::global() else {
+        return Ok(None);
+    };
     // (b) Done-repulls are not offers (the post-completion pull exits via
     // exec_agg's own agg_done guard, byte-identically).
     if ::nodeagg::agg_is_done(agg) {
@@ -1360,7 +1446,9 @@ pub(crate) fn try_own_agg_over_merge_join<'mcx>(
     match fold_phase(rt, adopted, &prog)? {
         FoldOutcome::Folded(combined) => {
             let r = exec_agg_explicit_partials(agg, estate, &combined)?;
-            lane_trace(&format!("runtime-mjsort-fold: complete pairs={total_pairs}"));
+            lane_trace(&format!(
+                "runtime-mjsort-fold: complete pairs={total_pairs}"
+            ));
             Ok(Some(r))
         }
         FoldOutcome::Broke(adopted) => {

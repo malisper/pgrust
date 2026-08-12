@@ -101,8 +101,12 @@ pub fn exec_init_gather_merge<'mcx>(
     let mcx = estate.es_query_cxt;
     let ecxt = estate.exec_assign_expr_context();
 
-    let outer_plan =
-        node.plan.lefttree.expect("GatherMerge without an outer plan").as_plan().unwrap();
+    let outer_plan = node
+        .plan
+        .lefttree
+        .expect("GatherMerge without an outer plan")
+        .as_plan()
+        .unwrap();
     let tup_desc = outer.exec_get_result_type(outer_plan)?;
 
     let proj = ::execscan::exec_conditional_assign_projection_info(
@@ -130,7 +134,10 @@ pub fn exec_init_gather_merge<'mcx>(
             ssup_attno: node.sortColIdx[i],
         };
         // abbreviate = false, as MergeAppend.
-        gm_sortkeys.push(prepare_sort_support_from_ordering_op(node.sortOperators[i], &init)?);
+        gm_sortkeys.push(prepare_sort_support_from_ordering_op(
+            node.sortOperators[i],
+            &init,
+        )?);
     }
 
     let nreaders = node.num_workers.max(0) as usize;
@@ -139,8 +146,8 @@ pub fn exec_init_gather_merge<'mcx>(
     let mut worker_slots = mcx::vec_with_capacity_in(mcx, nreaders)?;
     let mut tuple_buffers = Vec::with_capacity(nreaders);
     for _ in 0..nreaders {
-        let slot = estate
-            .exec_init_extra_tuple_slot(Some(tup_desc.clone()), TupleSlotKind::MinimalTuple);
+        let slot =
+            estate.exec_init_extra_tuple_slot(Some(tup_desc.clone()), TupleSlotKind::MinimalTuple);
         worker_slots.push(slot);
         gm_slots.push(None);
         let mut buf = GmTupleBuffer::default();
@@ -189,7 +196,10 @@ pub fn exec_gather_merge<'mcx>(
 
     gather_merge_ensure_launched(node, outer, estate)?;
 
-    let ecxt = node.ps.ps_ExprContext.expect("GatherMergeState without ExprContext");
+    let ecxt = node
+        .ps
+        .ps_ExprContext
+        .expect("GatherMergeState without ExprContext");
     estate.reset_expr_context(ecxt);
 
     let Some(slot) = gather_merge_getnext(node, outer, estate)? else {
@@ -199,7 +209,10 @@ pub fn exec_gather_merge<'mcx>(
         return Ok(Some(slot));
     }
     estate.ecxt_mut(ecxt).ecxt_outertuple = Some(slot);
-    let result_slot = node.ps.ps_ResultTupleSlot.expect("projection without result slot");
+    let result_slot = node
+        .ps
+        .ps_ResultTupleSlot
+        .expect("projection without result slot");
     let proj = node.ps.ps_ProjInfo.as_deref_mut().unwrap();
     // The GatherMerge targetlist is exactly where the planner puts
     // parallel-restricted expressions (SubPlans never ship to workers), so
@@ -247,8 +260,7 @@ pub(crate) fn gather_merge_ensure_launched<'mcx>(
         // WS-O width lease (default-OFF knob; fail-open paths leave the
         // launch untouched) — the Gather seam, shared.
         debug_assert!(node.width_lease.is_none(), "lease survived a shutdown");
-        let (lease, face) =
-            crate::nodegather::lease_gather_width(pei.pcxt, gm.num_workers);
+        let (lease, face) = crate::nodegather::lease_gather_width(pei.pcxt, gm.num_workers);
         node.width_lease = lease;
         parallel::LaunchParallelWorkers(pei.pcxt)?;
         node.nworkers_launched = parallel::nworkers_launched(pei.pcxt);
@@ -415,7 +427,10 @@ fn gather_merge_readnext<'mcx>(
             crate::nodegather::apply_pending_outer_chg(
                 &mut node.outer_chg,
                 outer,
-                node.plan.plan.lefttree.expect("GatherMerge without an outer plan"),
+                node.plan
+                    .plan
+                    .lefttree
+                    .expect("GatherMerge without an outer plan"),
                 estate,
             )?;
             if let Some(id) = exec_proc_node(outer, estate)? {
@@ -493,7 +508,11 @@ fn heap_compare_slots<'mcx>(
         let datum2 = ::exectuples::slot_getattr(s2, attno, &mut isnull2);
         let compare = apply_sort_comparator_in(mcx, datum1, isnull1, datum2, isnull2, key);
         if compare != 0 {
-            return if compare < 0 { 1 } else { compare.wrapping_neg() };
+            return if compare < 0 {
+                1
+            } else {
+                compare.wrapping_neg()
+            };
         }
     }
     0
@@ -509,11 +528,11 @@ fn binaryheap_build<'mcx>(node: &mut GatherMergeState<'mcx>, estate: &mut EState
     }
 }
 
-fn binaryheap_remove_first<'mcx>(
-    node: &mut GatherMergeState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-) {
-    let last = node.gm_heap.pop().expect("binaryheap_remove_first on empty heap");
+fn binaryheap_remove_first<'mcx>(node: &mut GatherMergeState<'mcx>, estate: &mut EStateData<'mcx>) {
+    let last = node
+        .gm_heap
+        .pop()
+        .expect("binaryheap_remove_first on empty heap");
     if !node.gm_heap.is_empty() {
         node.gm_heap[0] = last;
         sift_down(node, 0, estate);

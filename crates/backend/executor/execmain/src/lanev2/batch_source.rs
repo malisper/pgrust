@@ -196,7 +196,11 @@ pub(crate) fn k1_latemat_set_for_tests(on: bool) {
 fn k1_sel_threshold() -> f64 {
     static THR: OnceLock<f64> = OnceLock::new();
     crate::once_val(&THR, || {
-        parse_k1_sel_threshold(std::env::var("PGRUST_LANE_V2_K1_SEL_THRESHOLD").ok().as_deref())
+        parse_k1_sel_threshold(
+            std::env::var("PGRUST_LANE_V2_K1_SEL_THRESHOLD")
+                .ok()
+                .as_deref(),
+        )
     })
 }
 
@@ -310,10 +314,7 @@ pub(super) fn k1_latemat_sel_admits(
 /// numbers. Callers that cannot state `needed` for the build pass `None`
 /// and get the pre-inc-3 behavior (`now` = the whole deferred set,
 /// `publish` empty) — strictly the landed wave-9 completion bytes.
-pub(super) fn k1_latemat_split(
-    deferred: Vec<u16>,
-    needed: Option<&[u16]>,
-) -> (Vec<u16>, Vec<u16>) {
+pub(super) fn k1_latemat_split(deferred: Vec<u16>, needed: Option<&[u16]>) -> (Vec<u16>, Vec<u16>) {
     match needed {
         None => (deferred, Vec::new()),
         Some(nd) => {
@@ -348,7 +349,11 @@ pub(super) fn k1_latemat_split(
 fn heap_gagg_floor() -> f64 {
     static FLOOR: OnceLock<f64> = OnceLock::new();
     crate::once_val(&FLOOR, || {
-        parse_gagg_floor(std::env::var("PGRUST_LANE_V2_HEAP_GAGG_FLOOR").ok().as_deref())
+        parse_gagg_floor(
+            std::env::var("PGRUST_LANE_V2_HEAP_GAGG_FLOOR")
+                .ok()
+                .as_deref(),
+        )
     })
 }
 
@@ -489,11 +494,7 @@ pub(super) trait BatchGranuleSource<'mcx> {
     /// fail-closed PgError (never a panic): sources without a per-row emit
     /// face refuse at runtime, and their admission gates must keep this
     /// unreachable.
-    fn emit(
-        &mut self,
-        _estate: &mut EStateData<'mcx>,
-        _i: u32,
-    ) -> PgResult<Option<ExecSlotId>> {
+    fn emit(&mut self, _estate: &mut EStateData<'mcx>, _i: u32) -> PgResult<Option<ExecSlotId>> {
         Err(seam_not_wired("emit (source has no per-row emit face)"))
     }
 
@@ -596,8 +597,7 @@ impl<'mcx> BatchGranuleSource<'mcx> for SeqScanSource<'_, 'mcx> {
             return Ok(None);
         }
         if ::nodeseqscan::seq_scan_is_pgrcolumnar(self.ss) {
-            let Some((_, starts)) =
-                ::nodeseqscan::seq_scan_cb_granule_geometry(self.ss, estate)?
+            let Some((_, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(self.ss, estate)?
             else {
                 return Ok(None); // empty part
             };
@@ -611,7 +611,10 @@ impl<'mcx> BatchGranuleSource<'mcx> for SeqScanSource<'_, 'mcx> {
             else {
                 return Ok(None); // empty relation
             };
-            return Ok(Some(runtime::GranuleMap::unbounded(nblocks, HEAP_STARTUP_C0)));
+            return Ok(Some(runtime::GranuleMap::unbounded(
+                nblocks,
+                HEAP_STARTUP_C0,
+            )));
         }
         Ok(None)
     }
@@ -673,11 +676,7 @@ impl<'mcx> BatchGranuleSource<'mcx> for SeqScanSource<'_, 'mcx> {
     }
 
     #[inline(always)]
-    fn emit(
-        &mut self,
-        estate: &mut EStateData<'mcx>,
-        i: u32,
-    ) -> PgResult<Option<ExecSlotId>> {
+    fn emit(&mut self, estate: &mut EStateData<'mcx>, i: u32) -> PgResult<Option<ExecSlotId>> {
         ::nodeseqscan::seq_scan_batch_emit(self.ss, estate, i)
     }
 
@@ -752,7 +751,10 @@ impl<'a, 'mcx> HeapBatchSource<'a, 'mcx> {
             ::snapmgr::ActiveSnapshotSet(),
             "heap batch source on a thread without an active snapshot"
         );
-        HeapBatchSource { ss, readahead: heapfeed_readahead_depth() }
+        HeapBatchSource {
+            ss,
+            readahead: heapfeed_readahead_depth(),
+        }
     }
 }
 
@@ -770,11 +772,13 @@ impl<'mcx> BatchGranuleSource<'mcx> for HeapBatchSource<'_, 'mcx> {
         if ::nodeseqscan::seq_scan_is_parallel(self.ss) {
             return Ok(None);
         }
-        let Some(nblocks) = ::nodeseqscan::seq_scan_heap_block_geometry(self.ss, estate)?
-        else {
+        let Some(nblocks) = ::nodeseqscan::seq_scan_heap_block_geometry(self.ss, estate)? else {
             return Ok(None); // empty relation
         };
-        Ok(Some(runtime::GranuleMap::unbounded(nblocks, HEAP_STARTUP_C0)))
+        Ok(Some(runtime::GranuleMap::unbounded(
+            nblocks,
+            HEAP_STARTUP_C0,
+        )))
     }
 
     /// Positions on the block-range claim (`heap_set_block_range` below the
@@ -860,11 +864,7 @@ impl<'mcx> BatchGranuleSource<'mcx> for HeapBatchSource<'_, 'mcx> {
     }
 
     #[inline(always)]
-    fn emit(
-        &mut self,
-        estate: &mut EStateData<'mcx>,
-        i: u32,
-    ) -> PgResult<Option<ExecSlotId>> {
+    fn emit(&mut self, estate: &mut EStateData<'mcx>, i: u32) -> PgResult<Option<ExecSlotId>> {
         ::nodeseqscan::seq_scan_batch_emit(self.ss, estate, i)
     }
 
@@ -1031,7 +1031,10 @@ mod tests {
     #[test]
     fn k1_sel_threshold_parse() {
         let d = parse_k1_sel_threshold(None);
-        assert!(d > 0.0 && d < 0.5, "default must sit below the measured crossover: {d}");
+        assert!(
+            d > 0.0 && d < 0.5,
+            "default must sit below the measured crossover: {d}"
+        );
         assert_eq!(parse_k1_sel_threshold(Some("")), d);
         assert_eq!(parse_k1_sel_threshold(Some("banana")), d);
         assert_eq!(parse_k1_sel_threshold(Some("0.35")), 0.35);
@@ -1112,17 +1115,26 @@ mod tests {
     #[test]
     fn k1_latemat_split_partition() {
         // No census: pre-inc-3 bytes.
-        assert_eq!(k1_latemat_split(vec![0, 2, 4], None), (vec![0, 2, 4], vec![]));
+        assert_eq!(
+            k1_latemat_split(vec![0, 2, 4], None),
+            (vec![0, 2, 4], vec![])
+        );
         // Census: agg-needed completes now, the rest defers to publish legs.
         assert_eq!(
             k1_latemat_split(vec![0, 2, 4], Some(&[1, 2, 3, 4])),
             (vec![2, 4], vec![0])
         );
         // Nothing needed beyond the staged set: everything is publish-only.
-        assert_eq!(k1_latemat_split(vec![0, 2], Some(&[1, 3])), (vec![], vec![0, 2]));
+        assert_eq!(
+            k1_latemat_split(vec![0, 2], Some(&[1, 3])),
+            (vec![], vec![0, 2])
+        );
         // Needed covers the whole deferred set: publish empty (kernel legs
         // complete everything — behavior == pre-inc-3 with one fewer pass).
-        assert_eq!(k1_latemat_split(vec![5, 6], Some(&[5, 6, 7])), (vec![5, 6], vec![]));
+        assert_eq!(
+            k1_latemat_split(vec![5, 6], Some(&[5, 6, 7])),
+            (vec![5, 6], vec![])
+        );
         // Empty deferred set never arms (the arm refuses all-staged), but
         // the pure half stays total.
         assert_eq!(k1_latemat_split(vec![], Some(&[1])), (vec![], vec![]));

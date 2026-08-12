@@ -89,7 +89,7 @@ use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
 
 use super::push::{
-    Batch, Operator, OpStatus, RootAdapter, RowSource, Sink, SinkFeed, Source, pull_step,
+    pull_step, Batch, OpStatus, Operator, RootAdapter, RowSource, Sink, SinkFeed, Source,
 };
 use super::stats::{self, RefuseReason, ShapeClass};
 
@@ -157,8 +157,7 @@ fn scans_t3_resolve() -> bool {
 /// (`any_flipped`), so the substrate commit — ledger all-`false` — leaves
 /// the unset default OFF bit-for-bit.
 fn facility_state_rule(explicit: Option<&str>, hatch: Option<&str>, any_flipped: bool) -> u8 {
-    let on =
-        super::tier_b_flip_default(explicit, hatch) && (explicit.is_some() || any_flipped);
+    let on = super::tier_b_flip_default(explicit, hatch) && (explicit.is_some() || any_flipped);
     if !on {
         1
     } else if matches!(explicit, Some("1") | Some("on")) {
@@ -177,7 +176,6 @@ pub(crate) fn scans_t3_set_for_tests(on: bool) {
     SCANS_T3_SHAPES.store(0, Relaxed);
     SCANS_T3_FORCED.store(0, Relaxed);
 }
-
 
 /// The six T3-hostable tail leaf shapes, in inc-0 population-rank order
 /// (worklog: regress+dualexec grep census; the CI cluster coverage-counter
@@ -405,7 +403,11 @@ pub(super) struct T3Feed<'a, 'mcx, S: RowSource<'mcx>> {
 impl<'a, 'mcx, S: RowSource<'mcx>> T3Feed<'a, 'mcx, S> {
     #[inline]
     fn new(node: &'a mut S::Node, src: S) -> Self {
-        T3Feed { node, src, staged: None }
+        T3Feed {
+            node,
+            src,
+            staged: None,
+        }
     }
 }
 
@@ -416,7 +418,9 @@ pub(super) struct T3Stage<'a, 'mcx, S: RowSource<'mcx>> {
 impl<'a, 'mcx, S: RowSource<'mcx>> T3Stage<'a, 'mcx, S> {
     #[inline]
     fn new() -> Self {
-        T3Stage { _p: std::marker::PhantomData }
+        T3Stage {
+            _p: std::marker::PhantomData,
+        }
     }
 }
 
@@ -433,7 +437,10 @@ impl<'a, 'mcx, S: RowSource<'mcx>> Source<'mcx> for T3Stage<'a, 'mcx, S> {
         node: &mut Self::Node,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<Batch>> {
-        debug_assert!(node.staged.is_none(), "T3 batch-size-1: prior row not consumed");
+        debug_assert!(
+            node.staged.is_none(),
+            "T3 batch-size-1: prior row not consumed"
+        );
         match node.src.next_row(node.node, estate)? {
             Some(slot) => {
                 node.staged = Some(slot);
@@ -451,7 +458,9 @@ pub(super) struct T3Emit<'a, 'mcx, S: RowSource<'mcx>> {
 impl<'a, 'mcx, S: RowSource<'mcx>> T3Emit<'a, 'mcx, S> {
     #[inline]
     fn new() -> Self {
-        T3Emit { _p: std::marker::PhantomData }
+        T3Emit {
+            _p: std::marker::PhantomData,
+        }
     }
 }
 
@@ -574,7 +583,12 @@ pub(super) fn try_own_function_scan_t3<'mcx>(
     fs: &mut ::nodefunctionscan::FunctionScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    t3_drive(T3Shape::FunctionScan, fs, super::rowmode_tail::FunctionScanSource, estate)
+    t3_drive(
+        T3Shape::FunctionScan,
+        fs,
+        super::rowmode_tail::FunctionScanSource,
+        estate,
+    )
 }
 
 #[inline]
@@ -582,7 +596,12 @@ pub(super) fn try_own_table_func_scan_t3<'mcx>(
     ts: &mut ::nodetablefuncscan::TableFuncScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    t3_drive(T3Shape::TableFuncScan, ts, super::rowmode_tail::TableFuncScanSource, estate)
+    t3_drive(
+        T3Shape::TableFuncScan,
+        ts,
+        super::rowmode_tail::TableFuncScanSource,
+        estate,
+    )
 }
 
 #[inline]
@@ -590,7 +609,12 @@ pub(super) fn try_own_sample_scan_t3<'mcx>(
     ss: &mut ::nodesamplescan::SampleScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    t3_drive(T3Shape::SampleScan, ss, super::rowmode_tail::SampleScanSource, estate)
+    t3_drive(
+        T3Shape::SampleScan,
+        ss,
+        super::rowmode_tail::SampleScanSource,
+        estate,
+    )
 }
 
 #[inline]
@@ -598,7 +622,12 @@ pub(super) fn try_own_tid_scan_t3<'mcx>(
     ts: &mut ::nodetidscan::TidScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    t3_drive(T3Shape::TidScan, ts, super::rowmode_tail::TidScanSource, estate)
+    t3_drive(
+        T3Shape::TidScan,
+        ts,
+        super::rowmode_tail::TidScanSource,
+        estate,
+    )
 }
 
 #[inline]
@@ -606,7 +635,12 @@ pub(super) fn try_own_tid_range_scan_t3<'mcx>(
     ts: &mut ::nodetidrangescan::TidRangeScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    t3_drive(T3Shape::TidRangeScan, ts, super::rowmode_tail::TidRangeScanSource, estate)
+    t3_drive(
+        T3Shape::TidRangeScan,
+        ts,
+        super::rowmode_tail::TidRangeScanSource,
+        estate,
+    )
 }
 
 #[inline]
@@ -747,8 +781,14 @@ mod flip_ledger_tests {
         // Explicit spellings: permanent, hatch- and ledger-independent.
         for any_flipped in [false, true] {
             for hatch in [None, Some("legacy"), Some("new")] {
-                assert_eq!(facility_state_rule(Some("1"), hatch, any_flipped), T3_ON_EXPLICIT);
-                assert_eq!(facility_state_rule(Some("on"), hatch, any_flipped), T3_ON_EXPLICIT);
+                assert_eq!(
+                    facility_state_rule(Some("1"), hatch, any_flipped),
+                    T3_ON_EXPLICIT
+                );
+                assert_eq!(
+                    facility_state_rule(Some("on"), hatch, any_flipped),
+                    T3_ON_EXPLICIT
+                );
                 assert_eq!(facility_state_rule(Some("0"), hatch, any_flipped), 1);
                 assert_eq!(facility_state_rule(Some("off"), hatch, any_flipped), 1);
                 // A typo never silently arms a lane (tier_b_precedence 1c).
@@ -763,7 +803,10 @@ mod flip_ledger_tests {
         // the Tier-B hatch says legacy (exact spelling only).
         assert_eq!(facility_state_rule(None, None, true), T3_ON_DEFAULT);
         assert_eq!(facility_state_rule(None, Some("new"), true), T3_ON_DEFAULT);
-        assert_eq!(facility_state_rule(None, Some("Legacy"), true), T3_ON_DEFAULT);
+        assert_eq!(
+            facility_state_rule(None, Some("Legacy"), true),
+            T3_ON_DEFAULT
+        );
         assert_eq!(facility_state_rule(None, Some("legacy"), true), 1);
     }
 

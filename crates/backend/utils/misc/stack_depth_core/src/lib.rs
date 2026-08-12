@@ -78,6 +78,25 @@ pub fn check_stack_depth() -> PgResult<()> {
     Ok(())
 }
 
+/// Runs `f` in its own, never-inlined stack frame.
+///
+/// Recursive giant-`match` dispatchers (ExecInitNode's plan-node match,
+/// ExecInitExprRec's expression match) are the C recursion sites this
+/// crate's guard bounds. In Rust, every arm's by-value temporaries get a
+/// distinct stack slot in the DISPATCHER's frame — at opt-level 0 LLVM
+/// does not merge the mutually-exclusive arm slots, so the frame is the
+/// SUM over all ~40 arms (measured 380kB for exec_init_node, 84kB for
+/// init_expr_rec on arm64 dev builds). Five plan levels then trip the
+/// C-parity max_stack_depth=2048kB guard on plans C inits in a few kB
+/// (the LD7-F1 / TGT-F5/F7/F8 family). Wrapping each arm body in this
+/// trampoline moves the arm's temporaries into a per-arm callee frame,
+/// so the recursion's per-level cost is one arm, not the sum of all —
+/// in every build profile (`inline(never)` is release-effective).
+#[inline(never)]
+pub fn with_own_frame<R>(f: impl FnOnce() -> R) -> R {
+    f()
+}
+
 #[cold]
 #[inline(never)]
 fn stack_depth_exceeded() -> Box<types_error::PgError> {

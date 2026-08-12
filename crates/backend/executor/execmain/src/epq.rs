@@ -59,7 +59,12 @@ pub fn eval_plan_qual<'mcx>(
             estate.es_query_cxt,
         );
     }
-    ::executils::ensure_epq_subs(subs, estate.es_query_cxt, estate.epq_rtsize(), epq.result_rti);
+    ::executils::ensure_epq_subs(
+        subs,
+        estate.es_query_cxt,
+        estate.epq_rtsize(),
+        epq.result_rti,
+    );
     let saved_subs = core::mem::replace(&mut estate.es_epq, subs.take());
     let saved_active = estate.es_epq_active;
     estate.es_epq_active = true;
@@ -97,12 +102,19 @@ fn eval_plan_qual_guts<'mcx>(
     if let Some(s) = slot {
         // A projection-less recheck would hand back the test slot, which the
         // clear below destroys (real subplans project: junk ctid).
-        assert_ne!(s, testslot, "EvalPlanQual (execMain.c): recheck returned the test slot");
+        assert_ne!(
+            s, testslot,
+            "EvalPlanQual (execMain.c): recheck returned the test slot"
+        );
         exectuples::exec_materialize_slot(estate.slot_mut(s), mcx)?;
     }
 
     exectuples::exec_clear_tuple(estate.slot_mut(testslot), mcx);
-    estate.es_epq.as_mut().expect("EPQ state installed").relsubs_blocked[idx] = true;
+    estate
+        .es_epq
+        .as_mut()
+        .expect("EPQ state installed")
+        .relsubs_blocked[idx] = true;
 
     Ok(slot)
 }
@@ -116,17 +128,33 @@ pub(crate) fn eval_plan_qual_slot<'mcx>(
 ) -> PgResult<ExecSlotId> {
     let mcx = estate.es_query_cxt;
     let idx = (epq.result_rti - 1) as usize;
-    if estate.es_epq.as_ref().expect("EPQ state installed").relsubs_slot[idx].is_none() {
+    if estate
+        .es_epq
+        .as_ref()
+        .expect("EPQ state installed")
+        .relsubs_slot[idx]
+        .is_none()
+    {
         let (kind, desc) = {
-            let rel = estate.es_relations[idx].as_ref().expect("EPQ relation opened");
+            let rel = estate.es_relations[idx]
+                .as_ref()
+                .expect("EPQ relation opened");
             (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
         };
         let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
         let id = ExecSlotId(estate.es_tupleTable.len() as u32);
         estate.es_tupleTable.push(slot);
-        estate.es_epq.as_mut().expect("EPQ state installed").relsubs_slot[idx] = Some(id);
+        estate
+            .es_epq
+            .as_mut()
+            .expect("EPQ state installed")
+            .relsubs_slot[idx] = Some(id);
     }
-    Ok(estate.es_epq.as_ref().expect("EPQ state installed").relsubs_slot[idx]
+    Ok(estate
+        .es_epq
+        .as_ref()
+        .expect("EPQ state installed")
+        .relsubs_slot[idx]
         .expect("just ensured"))
 }
 
@@ -168,7 +196,10 @@ pub(crate) fn eval_plan_qual_start<'mcx>(
 ) -> PgResult<()> {
     let plan = epq.plan.expect("ModifyTable has a subplan");
     check_epq_plan(plan);
-    debug_assert!(estate.es_epq.is_some(), "EvalPlanQualSlot precedes EvalPlanQual");
+    debug_assert!(
+        estate.es_epq.is_some(),
+        "EvalPlanQualSlot precedes EvalPlanQual"
+    );
     // Recheck planstates are never reported: init uninstrumented so EPQ
     // reruns don't double-count into the main tree's es_instrumentation
     // (C gives the child estate throwaway per-planstate Instrumentation).
@@ -387,7 +418,10 @@ fn slot_pair_mut<'a, 'mcx>(
     estate: &'a mut EStateData<'mcx>,
     a: ExecSlotId,
     b: ExecSlotId,
-) -> (&'a mut types_slot::SlotData<'mcx>, &'a mut types_slot::SlotData<'mcx>) {
+) -> (
+    &'a mut types_slot::SlotData<'mcx>,
+    &'a mut types_slot::SlotData<'mcx>,
+) {
     let (i, j) = (a.0 as usize, b.0 as usize);
     debug_assert_ne!(i, j);
     let slots = &mut estate.es_tupleTable[..];

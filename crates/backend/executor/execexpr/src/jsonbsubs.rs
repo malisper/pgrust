@@ -94,5 +94,8 @@ pub fn assign(st: &mut JsonbSbsState, cur: NullableDatum) -> PgResult<NullableDa
     // SAFETY: as check_subscripts.
     let index = unsafe { core::slice::from_raw_parts(st.index.as_ptr(), st.nupper as usize) };
     let d = adt_jsonb::subs::subscript_assign(mcx, cur, st.expect_array, index, st.replace)?;
-    Ok(NullableDatum { value: d, isnull: false })
+    Ok(NullableDatum {
+        value: d,
+        isnull: false,
+    })
 }

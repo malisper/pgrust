@@ -320,9 +320,7 @@ impl runtime::TaskSetWork for RuntimeScanShared {
             }
             Err(_panic) => {
                 mark_self_errored();
-                self.fail(
-                    PgError::new(ERROR, "runtime scan worker panicked in a morsel").into(),
-                );
+                self.fail(PgError::new(ERROR, "runtime scan worker panicked in a morsel").into());
             }
         }
     }
@@ -418,8 +416,7 @@ impl RuntimeScanShared {
                     // bitmap and exports the frozen partial; no agg rows,
                     // no agg partial export (the fetch phase does those).
                     if let Some(bctx) = self.bitmap_build.as_ref() {
-                        let crate::procnode::PlanStateNode::BitmapHeapScan(b) =
-                            &mut aps.outer
+                        let crate::procnode::PlanStateNode::BitmapHeapScan(b) = &mut aps.outer
                         else {
                             return Err(Box::new(PgError::new(
                                 ERROR,
@@ -454,8 +451,9 @@ impl RuntimeScanShared {
                             range.start..range.end,
                         )?;
                         let slot = worker - self.pins_base;
-                        let mut g =
-                            self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
+                        let mut g = self.partials[slot]
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
                         return agg_runtime_export_partial_into(
                             &aps.agg,
                             g.get_or_insert_with(Default::default),
@@ -543,8 +541,9 @@ impl RuntimeScanShared {
                             }
                         }
                         let slot = worker - self.pins_base;
-                        let mut g =
-                            self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
+                        let mut g = self.partials[slot]
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
                         return agg_runtime_export_partial_into(
                             &aps.agg,
                             g.get_or_insert_with(Default::default),
@@ -625,8 +624,11 @@ impl RuntimeScanShared {
                             range.start..range.end,
                             interrupted,
                         );
-                        let settled =
-                            if heapfeed_v2_enabled() { src.end_claim(estate) } else { Ok(()) };
+                        let settled = if heapfeed_v2_enabled() {
+                            src.end_claim(estate)
+                        } else {
+                            Ok(())
+                        };
                         drove?;
                         settled?;
                     }
@@ -661,8 +663,9 @@ impl RuntimeScanShared {
                     // a malloc+free pair on the engaged path —
                     // m2-integration audit).
                     let slot = worker - self.pins_base;
-                    let mut g =
-                        self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
+                    let mut g = self.partials[slot]
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     if mode == DriveMode::PerRowPoly {
                         agg_poly_export_partial_into(
                             &aps.agg,
@@ -704,8 +707,12 @@ impl RuntimeScanShared {
 /// covered the session gates, and the body itself established db/leader/
 /// worker-number; the only per-helper refusal left is lane exhaustion.
 fn runtime_scan_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
-    let Some(private) = shared.private() else { return Ok(()) };
-    let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return Ok(()) };
+    let Some(private) = shared.private() else {
+        return Ok(());
+    };
+    let Ok(payload) = private.downcast::<RuntimeScanShared>() else {
+        return Ok(());
+    };
     if !payload.drive_at_entry {
         return Ok(());
     }
@@ -768,7 +775,9 @@ fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
     // exit — panic before binding or driving; the reap must convert it into
     // a prompt error (scripts/runtime-liveness-e2e.sh).
     super::test_helper_panic("scan");
-    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return Ok(()) };
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else {
+        return Ok(());
+    };
     // Process-wide lane lease: exhaustion = fail-closed non-participation
     // (the leader's all-refused fallback counts it exactly like a bind
     // refusal on the hook path).
@@ -787,13 +796,16 @@ fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
     // WS-O inc-2 pin-board assert (debug-only accessor, contract-approved):
     // a drive that returned settled its pin — anything else is a stranded
     // finalization obligation.
-    debug_assert!(payload.rt.debug_pin_settled(&local), "pin unsettled after entry drive");
+    debug_assert!(
+        payload.rt.debug_pin_settled(&local),
+        "pin unsettled after entry drive"
+    );
     emit_wfin("entry", lane.ordinal(), &local, &rg);
     // Teardown mode per drive_bound: self-error takes the release path;
     // the abort discipline is the transaction-level Err below (the hook
     // path gets the same via the binder's finish(false)).
-    let self_errored = WORKER_EXEC
-        .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
+    let self_errored =
+        WORKER_EXEC.with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
     let teardown = teardown_worker_exec(!self_errored);
     if let Err(e) = teardown {
         payload.fail(e);
@@ -867,7 +879,9 @@ fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
         lane_trace("runtime-scan: post-task-park without a private payload");
         return;
     };
-    let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return };
+    let Ok(payload) = private.downcast::<RuntimeScanShared>() else {
+        return;
+    };
     if payload.drive_at_entry {
         // inc-2: the entry task already drove this engagement — a second
         // bind+drive here would rebuild the executor against a completed
@@ -973,10 +987,12 @@ fn helper_drive_lazy(
             bind_failed: false,
         });
     });
-    let _end =
-        super::standing_channel::drive_pool_serve(&payload.rt, &mut local, rg, &mut lane);
+    let _end = super::standing_channel::drive_pool_serve(&payload.rt, &mut local, rg, &mut lane);
     // WS-O inc-2 pin-board assert (as the entry drive's).
-    debug_assert!(payload.rt.debug_pin_settled(&local), "pin unsettled after lazy drive");
+    debug_assert!(
+        payload.rt.debug_pin_settled(&local),
+        "pin unsettled after lazy drive"
+    );
     parallel::gtrace("w.qtb.body.end");
     emit_wfin("bound", lane_ordinal, &local, rg);
     let ctx = LAZY_CTX
@@ -989,8 +1005,7 @@ fn helper_drive_lazy(
         // Teardown mode per drive_bound: self-error takes the release path
         // and the binder's transaction-ABORT unbind cleans up.
         let self_errored = ctx.bind_failed
-            || WORKER_EXEC
-                .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
+            || WORKER_EXEC.with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
         let teardown = catch_unwind(AssertUnwindSafe(|| teardown_worker_exec(!self_errored)));
         let commit = !self_errored && matches!(teardown, Ok(Ok(())));
         // The binding ALWAYS completes here (sticky park on the clean path,
@@ -1040,7 +1055,13 @@ fn helper_drive_eager(
     let bound = parallel::with_query_task_binding(target, || {
         entered.set(true);
         payload.started.fetch_add(1, Ordering::SeqCst);
-        drive_bound(payload, lane_ordinal, &mut local, rg, &mut lane.borrow_mut())
+        drive_bound(
+            payload,
+            lane_ordinal,
+            &mut local,
+            rg,
+            &mut lane.borrow_mut(),
+        )
     });
     match bound {
         Ok(()) => {}
@@ -1087,15 +1108,18 @@ fn drive_bound(
     build_worker_exec(payload)?;
     let _end = super::standing_channel::drive_pool_serve(&payload.rt, local, rg, lane);
     // WS-O inc-2 pin-board assert (as the entry drive's).
-    debug_assert!(payload.rt.debug_pin_settled(local), "pin unsettled after bound drive");
+    debug_assert!(
+        payload.rt.debug_pin_settled(local),
+        "pin unsettled after bound drive"
+    );
     emit_wfin("bound", ordinal, local, rg);
     // Teardown mode is per-HELPER: a foreign worker's error (or a cancel)
     // leaves THIS executor consistent — finish/end/free releases resources
     // cleanly under the about-to-commit binder unbind. Only a self-error
     // (executor possibly mid-batch) takes the release path and lets the
     // binder's transaction abort clean up.
-    let self_errored = WORKER_EXEC
-        .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
+    let self_errored =
+        WORKER_EXEC.with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
     let teardown = teardown_worker_exec(!self_errored);
     if self_errored {
         // Route the binder through its transaction-ABORT unbind: a released
@@ -1104,11 +1128,7 @@ fn drive_bound(
         // scan arm shares the teardown shape). The morsel body recorded the
         // real error first (fail() is first-wins).
         teardown?;
-        return Err(PgError::new(
-            ERROR,
-            "runtime scan worker unwound (recorded upstream)",
-        )
-        .into());
+        return Err(PgError::new(ERROR, "runtime scan worker unwound (recorded upstream)").into());
     }
     teardown
 }
@@ -1132,7 +1152,9 @@ fn mark_self_errored() {
 
 pub(super) fn wfin_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    crate::once_val(&ON, || std::env::var("PGRUST_WFIN").map_or(false, |v| v.trim() == "1"))
+    crate::once_val(&ON, || {
+        std::env::var("PGRUST_WFIN").map_or(false, |v| v.trim() == "1")
+    })
 }
 
 /// This worker's pgrcolumnar drive counters (rg_switches, dict_builds,
@@ -1170,7 +1192,11 @@ pub(super) fn emit_wfin(
         return;
     }
     let d = local.drive;
-    let task_avg_us = if d.tasks > 0 { d.busy_ns / d.tasks / 1000 } else { 0 };
+    let task_avg_us = if d.tasks > 0 {
+        d.busy_ns / d.tasks / 1000
+    } else {
+        0
+    };
     let (rgsw, dictb, gscan, wins) = worker_cb_counters().unwrap_or((0, 0, 0, 0));
     eprintln!(
         "MORSEL|WFIN|qid={}|pipe=0|worker={}|t_us={}|tasks={}|task_avg_us={}|first_us={}|busy_us={}|morsels={}|granules={}|chan={}|cb_rgswitch={}|cb_dictbuild={}|cb_granules={}|cb_windows={}",
@@ -1500,7 +1526,9 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
 /// discipline).
 fn teardown_worker_exec(clean: bool) -> PgResult<()> {
     WORKER_EXEC.with(|cell| -> PgResult<()> {
-        let Some(ex) = cell.borrow_mut().take() else { return Ok(()) };
+        let Some(ex) = cell.borrow_mut().take() else {
+            return Ok(());
+        };
         if clean {
             let r = crate::execmain::executor_finish_seam(ex.qd)
                 .and_then(|()| crate::execmain::executor_end_seam(ex.qd));
@@ -1526,7 +1554,9 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 /// parked on. For us: abort the RG (idempotent; a completed RG ignores it)
 /// so every helper's drive loop observes completion and exits the hook.
 fn runtime_scan_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
-    let Some(payload) = private.downcast_ref::<RuntimeScanShared>() else { return };
+    let Some(payload) = private.downcast_ref::<RuntimeScanShared>() else {
+        return;
+    };
     let rg = payload.rg.get().and_then(|w| w.upgrade());
     if let Some(rg) = &rg {
         rg.abort();
@@ -1623,17 +1653,13 @@ where
                     super::agg_plain_fold_drain(agg, src, estate)?
                 }
             }
-            DriveMode::Census => {
-                census_drain(agg, src, estate, ea.then_some(&mut *tally))?
-            }
+            DriveMode::Census => census_drain(agg, src, estate, ea.then_some(&mut *tally))?,
             // rowdrive direct-drive modes (car 1/car 2): heap-only
             // admission (no payload map; EA refuses heap at admission), so
             // the segmentation loop degenerates to one positioned range
             // for these arms and no tally is ever needed.
             DriveMode::StorelessCount => storeless_count_drain(agg, src, estate)?,
-            DriveMode::PerRowFold | DriveMode::PerRowPoly => {
-                perrow_fold_drain(agg, src, estate)?
-            }
+            DriveMode::PerRowFold | DriveMode::PerRowPoly => perrow_fold_drain(agg, src, estate)?,
             // Dispatched to runtime_bitmap::drain_claim before this
             // helper's call site (BitmapHeapScan outer).
             DriveMode::BitmapPerRow => {
@@ -1709,8 +1735,10 @@ fn census_drain<'mcx, S: BatchGranuleSource<'mcx>>(
         if fast {
             if let Some(t) = tally.as_deref_mut() {
                 // Window-grain: selected non-fallback rows all count.
-                t.survived +=
-                    rows[..nwords].iter().map(|w| w.count_ones() as u64).sum::<u64>();
+                t.survived += rows[..nwords]
+                    .iter()
+                    .map(|w| w.count_ones() as u64)
+                    .sum::<u64>();
             }
             // Fallback rows: full per-row program off the stored tuple
             // (qual re-checked inside emit).
@@ -1729,8 +1757,7 @@ fn census_drain<'mcx, S: BatchGranuleSource<'mcx>>(
             if rows[..nwords].iter().any(|w| *w != 0) {
                 let aggcx = ::nodeagg::agg_aggcontext(agg);
                 let soa = src.batch_soa().expect("checked above: SoA staged");
-                let plan =
-                    ::nodeagg::agg_lanefold_plan(agg).expect("census drain requires a plan");
+                let plan = ::nodeagg::agg_lanefold_plan(agg).expect("census drain requires a plan");
                 // SAFETY: pergroup_base is the node's once-allocated
                 // single-group pergroup array covering every transno;
                 // CountStar kernels read no lane columns, so the col
@@ -1758,15 +1785,20 @@ fn census_drain<'mcx, S: BatchGranuleSource<'mcx>>(
                     w
                 })
             };
-            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
-                if let Some(slot) = src.emit(estate, i)? {
-                    if let Some(t) = tally.as_deref_mut() {
-                        t.survived += 1;
+            ::exectuples::for_each_live(
+                skip.as_ref().map(|w| &w[..]),
+                0,
+                n,
+                |i| -> PgResult<()> {
+                    if let Some(slot) = src.emit(estate, i)? {
+                        if let Some(t) = tally.as_deref_mut() {
+                            t.survived += 1;
+                        }
+                        ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                     }
-                    ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
-                }
-                Ok(())
-            })?;
+                    Ok(())
+                },
+            )?;
         }
     }
     Ok(())
@@ -1894,8 +1926,16 @@ impl runtime::MorselSource for PgrcolumnarGranuleSource {
 
     fn next_boundary_after(&self, start: u64) -> u64 {
         match self.starts.binary_search(&start) {
-            Ok(i) => self.starts.get(i + 1).copied().unwrap_or_else(|| self.total_granules()),
-            Err(i) => self.starts.get(i).copied().unwrap_or_else(|| self.total_granules()),
+            Ok(i) => self
+                .starts
+                .get(i + 1)
+                .copied()
+                .unwrap_or_else(|| self.total_granules()),
+            Err(i) => self
+                .starts
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| self.total_granules()),
         }
     }
 
@@ -2166,7 +2206,9 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
-    let Some(rt) = runtime::global() else { return Ok(None) };
+    let Some(rt) = runtime::global() else {
+        return Ok(None);
+    };
     // Armed offer reached the admission walk (heap shapes ride the scan
     // arm's entry; they re-class at engagement). Done-repulls (the post-
     // completion pull that exits via agg_is_done below) are not offers —
@@ -2291,7 +2333,12 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // INSTRUMENT_TIMER (BUFFERS OFF, inc-3 — one clock pair per claim)
     // engage; BUFFERS/WAL combinations refuse until threaded.
     if ea && !runtime_instr::ea_mode_admissible(estate) {
-        return ea_refused(estate, true, node_id, runtime_instr::ea_mode_refuse_reason(estate));
+        return ea_refused(
+            estate,
+            true,
+            node_id,
+            runtime_instr::ea_mode_refuse_reason(estate),
+        );
     }
     // Not from within parallel machinery: helpers of helpers don't exist,
     // and a leader already in parallel mode (Gather in flight) must not
@@ -2304,13 +2351,17 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
         return ea_refused(estate, ea, node_id, "params");
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        return Ok(None);
+    };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
         return ea_refused(estate, ea, node_id, "params");
     }
     // The Agg must be the plan root (workers ExecutorStart the whole worker
     // pstmt; a deeper Agg would drag unrelated plan into every helper).
-    let Some(root) = leader_pstmt.planTree else { return Ok(None) };
+    let Some(root) = leader_pstmt.planTree else {
+        return Ok(None);
+    };
     let Some(root_agg) = root.as_agg() else {
         return ea_refused(estate, ea, node_id, "agg-not-plan-root");
     };
@@ -2318,7 +2369,9 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         return ea_refused(estate, ea, node_id, "agg-not-plan-root");
     }
     // Scan expressions must be parallel-safe (they run on helpers).
-    let Some(scan_node) = agg.plan.plan.lefttree else { return Ok(None) };
+    let Some(scan_node) = agg.plan.plan.lefttree else {
+        return Ok(None);
+    };
     if scan_node.node_tag() != NodeTag::T_SeqScan {
         return ea_refused(estate, ea, node_id, "outer-not-seqscan");
     }
@@ -2339,10 +2392,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // Binder policy sources must be empty — a set flag means every helper
     // bind would refuse; don't launch at all.
     let policy = parallel::query_task_policy_probe();
-    if policy.has_params
-        || policy.temp_state
-        || policy.serializable
-        || policy.pending_invalidations
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
     {
         return ea_refused(estate, ea, node_id, "binder-policy");
     }
@@ -2415,22 +2465,30 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         && meta_band_enabled()
         && super::plain_fold_meta_arm(agg, ss, estate)
             .map(|arm| !arm.sum_cols.is_empty())
-            .map_or(false, |need_sums| {
-                match ::nodeseqscan::seq_scan_cb_zone_meta_census(ss, need_sums) {
+            .map_or(
+                false,
+                |need_sums| match ::nodeseqscan::seq_scan_cb_zone_meta_census(ss, need_sums) {
                     Ok(Some((allpass, total))) => {
                         total > 0 && allpass as f64 / total as f64 >= META_BAND_MIN_ALLPASS
                     }
                     _ => false,
-                }
-            })
+                },
+            )
     {
-        return ea_refused(estate, ea, node_id, "meta-band (footer answers; serial fold retained)");
+        return ea_refused(
+            estate,
+            ea,
+            node_id,
+            "meta-band (footer answers; serial fold retained)",
+        );
     }
     if rowdrive {
         // Observability (e2e tranche; after the done-pull early-return so
         // one engagement traces once): a following "engaged" line at this
         // query is a DIRECT-DRIVE engagement.
-        lane_trace(&format!("runtime-scan: rowdrive admit blocks={total_granules}"));
+        lane_trace(&format!(
+            "runtime-scan: rowdrive admit blocks={total_granules}"
+        ));
     } else if perrow {
         lane_trace(&format!(
             "runtime-scan: rowdrive admit perrow blocks={total_granules}"
@@ -2438,7 +2496,9 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     } else if poly {
         // SE-AGGPOLY observability: the poly manifest admitted this
         // engagement (per-row drive + numeric-state export).
-        lane_trace(&format!("runtime-scan: aggpoly admit blocks={total_granules}"));
+        lane_trace(&format!(
+            "runtime-scan: aggpoly admit blocks={total_granules}"
+        ));
     }
 
     // --- Engage.
@@ -2451,7 +2511,11 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // and its refusals are the scan arm's, the engagement is per-source.
     // Counter algebra at this single choke point: Engaged = ceremony
     // entered; Completed = the runtime answered; Fallback = serial rerun.
-    let class = if is_cb { ArmClass::Scan } else { ArmClass::Heap };
+    let class = if is_cb {
+        ArmClass::Scan
+    } else {
+        ArmClass::Heap
+    };
     router::tick(class, ArmCounter::Engaged);
     // q2box diagnosis channel (trace-armed only, sibling of the refusal
     // line above): one line per engagement ceremony with the resolved DOP
@@ -2478,7 +2542,11 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     )?;
     router::tick(
         class,
-        if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+        if r.is_some() {
+            ArmCounter::Completed
+        } else {
+            ArmCounter::Fallback
+        },
     );
     Ok(r)
 }
@@ -2532,7 +2600,10 @@ pub(super) fn engage<'mcx>(
     crate::execparallel::register_parallel_query_main();
 
     // Worker plan: the serial Agg root, execparallel's transfer shape.
-    let agg_node = estate.es_plannedstmt.and_then(|p| p.planTree).expect("gated above");
+    let agg_node = estate
+        .es_plannedstmt
+        .and_then(|p| p.planTree)
+        .expect("gated above");
     let pstmt = crate::execparallel::build_worker_pstmt(estate, agg_node)?;
 
     let payload = Arc::new(RuntimeScanShared {
@@ -2555,12 +2626,16 @@ pub(super) fn engage<'mcx>(
         exited: AtomicUsize::new(0),
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
-        partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
+        partials: (0..runtime::MAX_EXTERNAL_LANES)
+            .map(|_| Mutex::new(None))
+            .collect(),
         map: OnceLock::new(),
         drive_at_entry: entry_drive_enabled(),
         standing: Mutex::new(None),
         instr: ea_scan_node.map(|_| {
-            (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect()
+            (0..runtime::MAX_EXTERNAL_LANES)
+                .map(|_| Mutex::new(None))
+                .collect()
         }),
         ea_timer,
         ea_epoch: std::time::Instant::now(),
@@ -2628,10 +2703,7 @@ fn engage_ceremony<'mcx>(
         if nworkers <= 0 {
             return Ok(EngageOutcome::Fallback);
         }
-        parallel::InstallQueryTaskBinding(
-            pcxt,
-            parallel::QueryTaskBindingPolicy::default(),
-        )?;
+        parallel::InstallQueryTaskBinding(pcxt, parallel::QueryTaskBindingPolicy::default())?;
         payload
             .pcxt_shared
             .set(parallel::shared_for(pcxt))
@@ -2641,10 +2713,13 @@ fn engage_ceremony<'mcx>(
         // rides its ParallelShared. deferred_bind: this driver binds
         // through the DEFERRED binder (ceremony-v2 lazy first-touch), so
         // the standing serve may defer the visibility bracket to bind_now.
-        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
-            drive: runtime_scan_standing_driver,
-            deferred_bind: true,
-        });
+        parallel::set_standing_driver(
+            pcxt,
+            parallel::standing::StandingDriver {
+                drive: runtime_scan_standing_driver,
+                deferred_bind: true,
+            },
+        );
 
         // M2 inc-2: the POOL-DB channel — built BEFORE submit because the
         // bound descriptor must ride the submission (publication sets the
@@ -2661,7 +2736,11 @@ fn engage_ceremony<'mcx>(
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let spec = runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
-            tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
+            tasksets: vec![runtime::TaskSetSpec {
+                source,
+                work,
+                deps: vec![],
+            }],
         };
         // rg-set-BEFORE-publish (M2 inc-3 rung 3): the bound submission's
         // serve resolves the RG through payload.rg — the on_rg callback
@@ -2809,15 +2888,17 @@ fn engage_ceremony<'mcx>(
                 runtime_instr::ea_fill_scan_node(estate, scan_node, &merged.rows);
                 // Pipeline report for the inc-2 EXPLAIN block (one task
                 // set on this arm; partials = non-empty result exports).
-                estate.es_runtime_ea_pipelines.push(runtime_instr::ea_pipeline_report(
-                    "scan",
-                    agg.plan.plan.plan_node_id,
-                    scan_node,
-                    -1,
-                    1,
-                    parts.len() as u64,
-                    &merged,
-                ));
+                estate
+                    .es_runtime_ea_pipelines
+                    .push(runtime_instr::ea_pipeline_report(
+                        "scan",
+                        agg.plan.plan.plan_node_id,
+                        scan_node,
+                        -1,
+                        1,
+                        parts.len() as u64,
+                        &merged,
+                    ));
                 lane_trace(&format!(
                     "runtime-scan: EA merged workers={} claims={} granules={} \
                      scanned={} survived={}",
@@ -2833,7 +2914,9 @@ fn engage_ceremony<'mcx>(
                 parts.len()
             ));
             if poly {
-                Ok(Some(exec_agg_poly_runtime_partials(agg, estate, &combined)?))
+                Ok(Some(exec_agg_poly_runtime_partials(
+                    agg, estate, &combined,
+                )?))
             } else {
                 Ok(Some(exec_agg_runtime_partials(agg, estate, &combined)?))
             }
@@ -2884,12 +2967,11 @@ fn finish_outcome(
 /// This arm's standing-channel constants (see standing_channel::StandingArm).
 /// sinks_gate false: the scan arm's standing channel predates inc-1 and is
 /// governed by PGRUST_RUNTIME_POOLBIND alone.
-static STANDING_ARM: super::standing_channel::StandingArm =
-    super::standing_channel::StandingArm {
-        label: "runtime-scan",
-        died: "runtime scan standing executors exited before completing the scan",
-        sinks_gate: false,
-    };
+static STANDING_ARM: super::standing_channel::StandingArm = super::standing_channel::StandingArm {
+    label: "runtime-scan",
+    died: "runtime scan standing executors exited before completing the scan",
+    sinks_gate: false,
+};
 
 /// The standing driver (parallel::standing::register_standing_driver):
 /// runs ON a standing executor, already impersonated (worker number +
@@ -2897,8 +2979,12 @@ static STANDING_ARM: super::standing_channel::StandingArm =
 /// bind around lane lease + executor build + pinned drive, errors
 /// payload-side, leader latch wake on exit.
 fn runtime_scan_standing_driver(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
-    let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return };
+    let Some(private) = shared.private() else {
+        return;
+    };
+    let Ok(payload) = private.downcast::<RuntimeScanShared>() else {
+        return;
+    };
     // sticky: standing GANG workers may retain the session bind between
     // same-session engagements (ceremony-v2; launched/wpool helpers must
     // always park boundary-clean, hence false above). POOL serves retain
@@ -2907,8 +2993,8 @@ fn runtime_scan_standing_driver(shared: &parallel::ParallelShared) {
     // (unbound) work can run on the thread, so the parked session view
     // spans only idle time and same/cross-session serves — the gang
     // envelope. PGRUST_RUNTIME_POOL_STICKY=0 restores the eager rebind.
-    let sticky = !parallel::standing::serving_on_pool()
-        || parallel::standing::pool_sticky_enabled();
+    let sticky =
+        !parallel::standing::serving_on_pool() || parallel::standing::pool_sticky_enabled();
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload, sticky)));
     if let Err(unwind) = r {
         // #70: report the claimant death on the board (count-then-wake)

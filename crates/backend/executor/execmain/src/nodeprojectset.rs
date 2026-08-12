@@ -10,8 +10,8 @@ use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_error::{PgError, PgResult, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED};
 use ::types_fmgr::{
-    ExprDoneCond, FmgrInfo, LocalFcinfo, ReturnSetInfo, SetFunctionReturnMode, SFRM_Materialize,
-    SFRM_ValuePerCall, TRACK_FUNC_ALL,
+    ExprDoneCond, FmgrInfo, LocalFcinfo, ReturnSetInfo, SFRM_Materialize, SFRM_ValuePerCall,
+    SetFunctionReturnMode, TRACK_FUNC_ALL,
 };
 use ::types_nodes::plannodes::ProjectSet;
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
@@ -65,114 +65,114 @@ pub fn exec_init_project_set<'mcx>(
     debug_assert!(node.plan.qual.is_nil());
     let mcx = estate.es_query_cxt;
     let ecxt = estate.exec_assign_expr_context();
-    let outer = exec_init_node(node.plan.lefttree, estate, eflags)?
-        .expect("ProjectSet has an outer plan");
+    let outer =
+        exec_init_node(node.plan.lefttree, estate, eflags)?.expect("ProjectSet has an outer plan");
 
     let desc = exec_type_from_tl(&node.plan.targetlist)?;
     let slot = estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
 
     let params = estate.param_bind();
     let (elems, elemdone) = ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
-    let mut elems: PgVec<'mcx, Elem<'mcx>> = PgVec::new_in(mcx);
-    let mut elemdone: PgVec<'mcx, ExprDoneCond> = PgVec::new_in(mcx);
-    for tle_node in &node.plan.targetlist {
-        let tle = tle_node
-            .as_target_entry()
-            .expect("targetlist cell is a TargetEntry");
-        let expr = tle.expr;
-        // C ExecInitFunctionResultSet (execSRF.c) takes FuncExpr and OpExpr
-        // alike: (funcid, args, inputcollid) feed the same init_sexpr.
-        let srf_parts = if let Some(fe) = expr.as_func_expr() {
-            fe.funcretset.then(|| (fe.funcid, &fe.args, fe.inputcollid))
-        } else if let Some(oe) = expr.as_op_expr() {
-            oe.opretset.then(|| (oe.opfuncid, &oe.args, oe.inputcollid))
-        } else {
-            None
-        };
-        let elem = match srf_parts {
-            Some((srf_funcid, srf_args, srf_inputcollid)) => {
-                if srf_args.len() > PROJECT_SET_MAX_ARGS {
-                    panic!(
-                        "ExecInitFunctionResultSet: {}-argument SRF — widen the fcinfo \
+        let mut elems: PgVec<'mcx, Elem<'mcx>> = PgVec::new_in(mcx);
+        let mut elemdone: PgVec<'mcx, ExprDoneCond> = PgVec::new_in(mcx);
+        for tle_node in &node.plan.targetlist {
+            let tle = tle_node
+                .as_target_entry()
+                .expect("targetlist cell is a TargetEntry");
+            let expr = tle.expr;
+            // C ExecInitFunctionResultSet (execSRF.c) takes FuncExpr and OpExpr
+            // alike: (funcid, args, inputcollid) feed the same init_sexpr.
+            let srf_parts = if let Some(fe) = expr.as_func_expr() {
+                fe.funcretset.then(|| (fe.funcid, &fe.args, fe.inputcollid))
+            } else if let Some(oe) = expr.as_op_expr() {
+                oe.opretset.then(|| (oe.opfuncid, &oe.args, oe.inputcollid))
+            } else {
+                None
+            };
+            let elem = match srf_parts {
+                Some((srf_funcid, srf_args, srf_inputcollid)) => {
+                    if srf_args.len() > PROJECT_SET_MAX_ARGS {
+                        panic!(
+                            "ExecInitFunctionResultSet: {}-argument SRF — widen the fcinfo \
                          frame",
-                        srf_args.len()
-                    );
-                }
-                let mut args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
-                for arg in srf_args {
-                    // Query-context args replace C's argContext: by-ref arg
-                    // datums must outlive per-tuple resets between rows.
-                    let mut state = exec_init_expr_subplans(mcx, Some(arg), params, env)?
-                        .expect("non-NULL arg expression");
-                    state.arm_result_mcx(mcx);
-                    args.push(state);
-                }
-                let mut flinfo = fmgr_core::fmgr_info(srf_funcid)?;
-                // C init_sexpr: fmgr_info_set_expr — get_fn_expr_argtype
-                // consumers read arg types off the call expression.
-                flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, expr)?);
-                debug_assert!(flinfo.fn_retset);
-                let mut fcinfo = LocalFcinfo::<PROJECT_SET_MAX_ARGS>::new(srf_inputcollid);
-                fcinfo.nargs = srf_args.len() as i16;
-                let resolved = funcapi::get_expr_result_type(mcx, Some(expr))?;
-                let (result_desc, returns_tuple) = match resolved.class {
-                    funcapi::TypeFuncClass::Composite
-                    | funcapi::TypeFuncClass::CompositeDomain => (
-                        Some(Rc::new(resolved.result_tuple_desc.unwrap_or_else(|| {
-                            panic!("init_sexpr (execSRF.c): composite result without tupdesc")
-                        }))),
-                        true,
-                    ),
-                    funcapi::TypeFuncClass::Scalar => {
-                        let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
-                        tupdesc::TupleDescInitEntry(
-                            &mut d,
-                            1,
-                            None,
-                            resolved.result_type_id,
-                            -1,
-                            0,
-                        )?;
-                        tupdesc::TupleDescInitEntryCollation(
-                            &mut d,
-                            1,
-                            ::execscan::expr_collation(expr),
+                            srf_args.len()
                         );
-                        (Some(Rc::new(d)), false)
                     }
-                    // C funcReturnsTuple: RECORD is a rowtype; the read
-                    // slot builds lazily from rsinfo.setDesc (execSRF.c).
-                    funcapi::TypeFuncClass::Record => (None, true),
-                    _ => (None, false),
-                };
-                let result_slot = result_desc.as_ref().map(|d| {
-                    ::exectuples::make_tuple_table_slot(
-                        mcx,
-                        TupleSlotKind::MinimalTuple,
-                        Some(d.clone()),
-                    )
-                });
-                Elem::Srf(SrfElem {
-                    flinfo,
-                    args,
-                    fcinfo,
-                    rsinfo: ReturnSetInfo::new(SFRM_ValuePerCall | SFRM_Materialize),
-                    args_valid: false,
-                    result_desc,
-                    returns_tuple,
-                    result_slot,
-                    result_store: None,
-                })
-            }
-            _ => Elem::Scalar(
-                exec_init_expr_subplans(mcx, Some(expr), params, env)?
-                    .expect("non-NULL tlist expression"),
-            ),
-        };
-        elems.push(elem);
-        elemdone.push(ExprDoneCond::ExprSingleResult);
-    }
-    Ok((elems, elemdone))
+                    let mut args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
+                    for arg in srf_args {
+                        // Query-context args replace C's argContext: by-ref arg
+                        // datums must outlive per-tuple resets between rows.
+                        let mut state = exec_init_expr_subplans(mcx, Some(arg), params, env)?
+                            .expect("non-NULL arg expression");
+                        state.arm_result_mcx(mcx);
+                        args.push(state);
+                    }
+                    let mut flinfo = fmgr_core::fmgr_info(srf_funcid)?;
+                    // C init_sexpr: fmgr_info_set_expr — get_fn_expr_argtype
+                    // consumers read arg types off the call expression.
+                    flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, expr)?);
+                    debug_assert!(flinfo.fn_retset);
+                    let mut fcinfo = LocalFcinfo::<PROJECT_SET_MAX_ARGS>::new(srf_inputcollid);
+                    fcinfo.nargs = srf_args.len() as i16;
+                    let resolved = funcapi::get_expr_result_type(mcx, Some(expr))?;
+                    let (result_desc, returns_tuple) = match resolved.class {
+                        funcapi::TypeFuncClass::Composite
+                        | funcapi::TypeFuncClass::CompositeDomain => (
+                            Some(Rc::new(resolved.result_tuple_desc.unwrap_or_else(|| {
+                                panic!("init_sexpr (execSRF.c): composite result without tupdesc")
+                            }))),
+                            true,
+                        ),
+                        funcapi::TypeFuncClass::Scalar => {
+                            let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
+                            tupdesc::TupleDescInitEntry(
+                                &mut d,
+                                1,
+                                None,
+                                resolved.result_type_id,
+                                -1,
+                                0,
+                            )?;
+                            tupdesc::TupleDescInitEntryCollation(
+                                &mut d,
+                                1,
+                                ::execscan::expr_collation(expr),
+                            );
+                            (Some(Rc::new(d)), false)
+                        }
+                        // C funcReturnsTuple: RECORD is a rowtype; the read
+                        // slot builds lazily from rsinfo.setDesc (execSRF.c).
+                        funcapi::TypeFuncClass::Record => (None, true),
+                        _ => (None, false),
+                    };
+                    let result_slot = result_desc.as_ref().map(|d| {
+                        ::exectuples::make_tuple_table_slot(
+                            mcx,
+                            TupleSlotKind::MinimalTuple,
+                            Some(d.clone()),
+                        )
+                    });
+                    Elem::Srf(SrfElem {
+                        flinfo,
+                        args,
+                        fcinfo,
+                        rsinfo: ReturnSetInfo::new(SFRM_ValuePerCall | SFRM_Materialize),
+                        args_valid: false,
+                        result_desc,
+                        returns_tuple,
+                        result_slot,
+                        result_store: None,
+                    })
+                }
+                _ => Elem::Scalar(
+                    exec_init_expr_subplans(mcx, Some(expr), params, env)?
+                        .expect("non-NULL tlist expression"),
+                ),
+            };
+            elems.push(elem);
+            elemdone.push(ExprDoneCond::ExprSingleResult);
+        }
+        Ok((elems, elemdone))
     })?;
 
     Ok(ProjectSetState {
@@ -200,7 +200,10 @@ pub fn exec_project_set<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     crate::cfi()?;
-    let ecxt = node.ps.ps_ExprContext.expect("ProjectSetState without ExprContext");
+    let ecxt = node
+        .ps
+        .ps_ExprContext
+        .expect("ProjectSetState without ExprContext");
     estate.reset_expr_context(ecxt);
 
     let (mut view, outer) = lane_project_set_split(node);
@@ -239,9 +242,26 @@ pub fn exec_project_set<'mcx>(
 /// Split a ProjectSetState into (op view, child node).
 pub(crate) fn lane_project_set_split<'a, 'mcx>(
     node: &'a mut ProjectSetState<'mcx>,
-) -> (LaneProjectSet<'a, 'mcx>, &'a mut PgBox<'mcx, PlanStateNode<'mcx>>) {
-    let ProjectSetState { ps, outer, elems, elemdone, pending_srf_tuples } = node;
-    (LaneProjectSet { base: ps, elems, elemdone, pending: pending_srf_tuples }, outer)
+) -> (
+    LaneProjectSet<'a, 'mcx>,
+    &'a mut PgBox<'mcx, PlanStateNode<'mcx>>,
+) {
+    let ProjectSetState {
+        ps,
+        outer,
+        elems,
+        elemdone,
+        pending_srf_tuples,
+    } = node;
+    (
+        LaneProjectSet {
+            base: ps,
+            elems,
+            elemdone,
+            pending: pending_srf_tuples,
+        },
+        outer,
+    )
 }
 
 /// The disjoint-borrow op view (everything but `outer`); `Elem` stays
@@ -268,7 +288,10 @@ impl<'mcx> LaneProjectSet<'_, 'mcx> {
         estate: &mut EStateData<'mcx>,
         outer: ExecSlotId,
     ) -> PgResult<Option<ExecSlotId>> {
-        let ecxt = self.base.ps_ExprContext.expect("ProjectSetState without ExprContext");
+        let ecxt = self
+            .base
+            .ps_ExprContext
+            .expect("ProjectSetState without ExprContext");
         estate.ecxt_mut(ecxt).ecxt_outertuple = Some(outer);
         if exec_project_srf(self, estate, false)? {
             return Ok(self.base.ps_ResultTupleSlot);
@@ -300,8 +323,14 @@ fn exec_project_srf<'mcx>(
     estate: &mut EStateData<'mcx>,
     continuing: bool,
 ) -> PgResult<bool> {
-    let ecxt = node.base.ps_ExprContext.expect("ProjectSetState without ExprContext");
-    let result = node.base.ps_ResultTupleSlot.expect("ProjectSetState without result slot");
+    let ecxt = node
+        .base
+        .ps_ExprContext
+        .expect("ProjectSetState without ExprContext");
+    let result = node
+        .base
+        .ps_ResultTupleSlot
+        .expect("ProjectSetState without result slot");
     // RESIDUAL eager arm: SRF args and scalar tlist elems evaluate inside
     // the with_eval_slots closure below with no suspension driver in reach,
     // so their pending initplan params are still force-run up front rather
@@ -449,7 +478,9 @@ fn exec_make_function_result_set<'mcx>(
     let fcu = if srf.flinfo.fn_stats < TRACK_FUNC_ALL
         && ::pgstat::function::pgstat_track_functions() > srf.flinfo.fn_stats as i32
     {
-        Some(::pgstat::function::pgstat_init_function_usage(srf.flinfo.fn_oid)?)
+        Some(::pgstat::function::pgstat_init_function_usage(
+            srf.flinfo.fn_oid,
+        )?)
     } else {
         None
     };
@@ -499,9 +530,8 @@ fn exec_make_function_result_set<'mcx>(
                         };
                         // SAFETY: setDesc contract — live for this call; the
                         // copy owns its storage in the query context.
-                        let src = unsafe {
-                            set_desc.cast::<::types_tuple::TupleDescData<'_>>().as_ref()
-                        };
+                        let src =
+                            unsafe { set_desc.cast::<::types_tuple::TupleDescData<'_>>().as_ref() };
                         let d = Rc::new(::tupdesc::CreateTupleDescCopy(query_mcx, src)?);
                         srf.result_slot = Some(::exectuples::make_tuple_table_slot(
                             query_mcx,
@@ -578,7 +608,9 @@ fn shutdown_srf_elems(node: &mut ProjectSetState<'_>) -> PgResult<()> {
 pub fn exec_re_scan_project_set_local(node: &mut ProjectSetState<'_>) -> PgResult<()> {
     shutdown_srf_elems(node)?;
     node.pending_srf_tuples = false;
-    let ProjectSetState { elems, elemdone, .. } = node;
+    let ProjectSetState {
+        elems, elemdone, ..
+    } = node;
     for (i, elem) in elems.iter_mut().enumerate() {
         if let Elem::Srf(srf) = elem {
             srf.args_valid = false;

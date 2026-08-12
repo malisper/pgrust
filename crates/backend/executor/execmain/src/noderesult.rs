@@ -1,4 +1,7 @@
-use ::execexpr::{exec_build_projection_info_subplans, exec_init_qual_subplans, exec_project, exec_qual, ExprState};
+use ::execexpr::{
+    exec_build_projection_info_subplans, exec_init_qual_subplans, exec_project, exec_qual,
+    ExprState,
+};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{alloc_in, PgBox};
 use ::types_error::PgResult;
@@ -46,13 +49,8 @@ pub fn exec_init_result<'mcx>(
     let params = estate.param_bind();
     let (proj, qual, resconstantqual) =
         ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
-            let proj = exec_build_projection_info_subplans(
-                mcx,
-                &node.plan.targetlist,
-                None,
-                params,
-                env,
-            )?;
+            let proj =
+                exec_build_projection_info_subplans(mcx, &node.plan.targetlist, None, params, env)?;
             let qual = exec_init_qual_subplans(mcx, &node.plan.qual, params, env)?;
             let resconstantqual = match node.resconstantqual {
                 None => None,
@@ -105,7 +103,10 @@ pub fn exec_result<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     crate::cfi()?;
-    let ecxt = node.ps.ps_ExprContext.expect("ResultState without ExprContext");
+    let ecxt = node
+        .ps
+        .ps_ExprContext
+        .expect("ResultState without ExprContext");
 
     if node.rs_checkqual && !lane_result_gate(node, estate)? {
         return Ok(None);
@@ -159,7 +160,10 @@ pub(crate) fn lane_result_childless_next<'mcx>(
     if node.rs_checkqual && !lane_result_gate(node, estate)? {
         return Ok(None);
     }
-    let ecxt = node.ps.ps_ExprContext.expect("ResultState without ExprContext");
+    let ecxt = node
+        .ps
+        .ps_ExprContext
+        .expect("ResultState without ExprContext");
     estate.reset_expr_context(ecxt);
     if node.rs_done {
         return Ok(None);
@@ -180,9 +184,15 @@ pub(crate) fn lane_result_gate<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     debug_assert!(node.rs_checkqual);
-    let ecxt = node.ps.ps_ExprContext.expect("ResultState without ExprContext");
+    let ecxt = node
+        .ps
+        .ps_ExprContext
+        .expect("ResultState without ExprContext");
     let mut qual_result = true;
-    let clauses = node.resconstantqual.as_deref_mut().expect("rs_checkqual without qual");
+    let clauses = node
+        .resconstantqual
+        .as_deref_mut()
+        .expect("rs_checkqual without qual");
     for clause in clauses.iter_mut() {
         // Subplan and pending-initplan param clauses ride the suspension
         // driver: a clause's $n initplans run lazily at first fetch (C
@@ -216,8 +226,13 @@ pub(crate) fn lane_result_project<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<ExecSlotId> {
     let ecxt = ps.ps_ExprContext.expect("ResultState without ExprContext");
-    let result_slot = ps.ps_ResultTupleSlot.expect("ResultState without result slot");
-    let proj = ps.ps_ProjInfo.as_deref_mut().expect("ResultState without projection");
+    let result_slot = ps
+        .ps_ResultTupleSlot
+        .expect("ResultState without result slot");
+    let proj = ps
+        .ps_ProjInfo
+        .as_deref_mut()
+        .expect("ResultState without projection");
     // Subplan and pending-initplan param projections ride the suspension
     // driver (lazy PARAM_EXEC fetch, C ExecEvalParamExec): an initplan in a
     // never-taken COALESCE/CASE arm stays un-run.

@@ -279,8 +279,7 @@ fn try_parallel_build<'mcx>(
         lane_trace("runtime-bitmap: buildC refused (runtime keys)");
         return Ok(None);
     }
-    let Some((clamp, lo, hi)) = ::nodebitmapindexscan::clampable_range(&biss.biss_ScanKeys)
-    else {
+    let Some((clamp, lo, hi)) = ::nodebitmapindexscan::clampable_range(&biss.biss_ScanKeys) else {
         lane_trace("runtime-bitmap: buildC refused (non-clampable scankeys)");
         return Ok(None);
     };
@@ -308,8 +307,7 @@ fn try_parallel_build<'mcx>(
         partials: pgsync::Mutex::new(Vec::new()),
         ntuples: pgsync::atomic::AtomicU64::new(0),
     });
-    let source: Arc<dyn runtime::MorselSource> =
-        Arc::new(BitmapBuildSource { ngranules });
+    let source: Arc<dyn runtime::MorselSource> = Arc::new(BitmapBuildSource { ngranules });
     lane_trace(&format!(
         "runtime-bitmap: buildC admit granules={ngranules} range=[{lo},{hi}] \
          width_per_granule={granule_width}"
@@ -341,9 +339,7 @@ fn try_parallel_build<'mcx>(
     // tbm_union's, so exact/lossy folding and the final lossify guard
     // behave as if one bitmap had been built serially.
     let mut tbm = ::tidbitmap::TIDBitmap::new(estate.es_query_cxt, work_mem_bytes);
-    let parts = std::mem::take(
-        &mut *pgsync::lock(&ctx.partials),
-    );
+    let parts = std::mem::take(&mut *pgsync::lock(&ctx.partials));
     for f in parts.iter() {
         tbm.union_frozen(f)?;
     }
@@ -404,8 +400,7 @@ fn drain_window<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     loop {
-        let Some(slot) = ::nodebitmapheapscan::exec_bitmap_heap_scan(&mut b.scan, estate)?
-        else {
+        let Some(slot) = ::nodebitmapheapscan::exec_bitmap_heap_scan(&mut b.scan, estate)? else {
             return Ok(());
         };
         ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
@@ -426,7 +421,9 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
-    let Some(rt) = runtime::global() else { return Ok(None) };
+    let Some(rt) = runtime::global() else {
+        return Ok(None);
+    };
 
     // --- Shape + session gates (fail-closed; every refusal is the serial
     // arm, byte-identically — nothing consumed before the build step).
@@ -460,18 +457,26 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
         return Ok(None);
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        return Ok(None);
+    };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
         return Ok(None);
     }
     // The Agg must be the plan root (workers ExecutorStart the whole worker
     // pstmt) and its outer node this BitmapHeapScan.
-    let Some(root) = leader_pstmt.planTree else { return Ok(None) };
-    let Some(root_agg) = root.as_agg() else { return Ok(None) };
+    let Some(root) = leader_pstmt.planTree else {
+        return Ok(None);
+    };
+    let Some(root_agg) = root.as_agg() else {
+        return Ok(None);
+    };
     if !std::ptr::eq(root_agg, agg.plan) {
         return Ok(None);
     }
-    let Some(scan_node) = agg.plan.plan.lefttree else { return Ok(None) };
+    let Some(scan_node) = agg.plan.plan.lefttree else {
+        return Ok(None);
+    };
     if scan_node.node_tag() != NodeTag::T_BitmapHeapScan {
         return Ok(None);
     }
@@ -493,10 +498,7 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
         return Ok(None);
     }
     let policy = parallel::query_task_policy_probe();
-    if policy.has_params
-        || policy.temp_state
-        || policy.serializable
-        || policy.pending_invalidations
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
     {
         return Ok(None);
     }
@@ -513,8 +515,7 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
     let mode = bitmap_mode();
     let mut tbm = match mode {
         BitmapMode::TwoStage => {
-            match try_parallel_build(agg, b, estate, rt, dop, scan_plan.scan.plan.plan_rows)?
-            {
+            match try_parallel_build(agg, b, estate, rt, dop, scan_plan.scan.plan.plan_rows)? {
                 Some(tbm) => tbm,
                 None => crate::procnode::multi_exec_bitmap_node(&mut b.bitmapqual, estate)?,
             }
@@ -545,13 +546,13 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
     let order = match mode {
         // Mode C's fetch phase = mode A's contiguous claims.
         BitmapMode::Contiguous | BitmapMode::TwoStage => None,
-        BitmapMode::Strided => {
-            Some(build_strided_order(nentries as usize, bitmap_stride()))
-        }
+        BitmapMode::Strided => Some(build_strided_order(nentries as usize, bitmap_stride())),
     };
-    let ctx = Arc::new(BitmapMorselCtx { frozen: Arc::clone(&frozen), order });
-    let source: Arc<dyn runtime::MorselSource> =
-        Arc::new(BitmapEntrySource { nentries });
+    let ctx = Arc::new(BitmapMorselCtx {
+        frozen: Arc::clone(&frozen),
+        order,
+    });
+    let source: Arc<dyn runtime::MorselSource> = Arc::new(BitmapEntrySource { nentries });
     lane_trace(&format!(
         "runtime-bitmap: admit mode={mode:?} entries={nentries} \
          (pages={npages} chunks={nchunks} lossy={})",
@@ -578,11 +579,7 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
         // shared iterator — C's merged block order, so the serial drain
         // that now runs is byte-identical to the classic path.
         lane_trace("runtime-bitmap: engage fallback, classic serial drain");
-        ::nodebitmapheapscan::bitmap_scan_attach_shared_fallback(
-            &mut b.scan,
-            estate,
-            frozen,
-        )?;
+        ::nodebitmapheapscan::bitmap_scan_attach_shared_fallback(&mut b.scan, estate, frozen)?;
     }
     Ok(r)
 }
@@ -625,8 +622,8 @@ mod build_cover_tests {
             (0i64, 999i64),
             (-500, 499),
             (1_500_000, 4_400_000),
-            (7, 7),               // single key
-            (0, 6),               // fewer keys than target granules
+            (7, 7),                      // single key
+            (0, 6),                      // fewer keys than target granules
             (i64::MAX - 1000, i64::MAX), // pre-clamp top overflow rung
             (i64::MIN, i64::MIN + 1000),
         ] {

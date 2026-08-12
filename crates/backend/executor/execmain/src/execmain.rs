@@ -10,9 +10,7 @@ use ::types_nodes::parsenodes::RTEPermissionInfo;
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_portal::{ParamListHandle, QueryDescHandle};
 use ::types_scan::sdir::{ScanDirection, ScanDirectionIsNoMovement};
-use ::types_slot::{
-    SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_SKIP_TRIGGERS,
-};
+use ::types_slot::{SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_SKIP_TRIGGERS};
 use ::types_tuple::TupleDescData;
 
 use crate::procnode::{
@@ -112,7 +110,8 @@ mod exec_skeleton {
         }
         // SAFETY: parked via Box::into_raw below; slot nulled before the box
         // leaves this module.
-        let matches = unsafe { (*p).pstmt == pstmt && (*p).cplan == cplan && (*p).eflags == eflags };
+        let matches =
+            unsafe { (*p).pstmt == pstmt && (*p).cplan == cplan && (*p).eflags == eflags };
         if !matches {
             return None;
         }
@@ -167,12 +166,14 @@ fn skeleton_parkable(node: &PlanStateNode<'_>) -> bool {
         PlanStateNode::Result(rs) => rs.outer.as_deref().is_none_or(skeleton_parkable),
         PlanStateNode::Limit(l) => skeleton_parkable(&l.outer),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::skeleton_parkable(ss),
-        PlanStateNode::IndexScan(is) => {
-            is.iss_RelationDesc.as_ref().is_some_and(|r| r.rd_rel.relam == BTREE_AM_OID)
-        }
-        PlanStateNode::IndexOnlyScan(ios) => {
-            ios.ioss_RelationDesc.as_ref().is_some_and(|r| r.rd_rel.relam == BTREE_AM_OID)
-        }
+        PlanStateNode::IndexScan(is) => is
+            .iss_RelationDesc
+            .as_ref()
+            .is_some_and(|r| r.rd_rel.relam == BTREE_AM_OID),
+        PlanStateNode::IndexOnlyScan(ios) => ios
+            .ioss_RelationDesc
+            .as_ref()
+            .is_some_and(|r| r.rd_rel.relam == BTREE_AM_OID),
         _ => false,
     }
 }
@@ -265,7 +266,10 @@ pub(crate) fn executor_rearm_seam(
         // snapshot for the life of this execution.
         qd.snapshot = snapmgr::RegisterSnapshot(snapshot.as_ref())?;
         qd.params = params;
-        let mut exec = qd.exec.take().expect("executor_rearm on a QueryDesc with no executor");
+        let mut exec = qd
+            .exec
+            .take()
+            .expect("executor_rearm on a QueryDesc with no executor");
         let reused = skeleton_rearm_exec(qd, &mut exec);
         qd.exec = Some(exec);
         if let Ok(false) = reused {
@@ -377,7 +381,9 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
     {
         return Ok(None);
     }
-    let Some(exec) = qd.exec.as_mut() else { return Ok(None) };
+    let Some(exec) = qd.exec.as_mut() else {
+        return Ok(None);
+    };
     // Retention growth bound: a parked estate's bump arena is never reset
     // while the skeleton lives (the planstate is allocated in it), so any
     // per-execution allocation routed through es_query_cxt accumulates
@@ -491,10 +497,15 @@ pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
 pub(crate) fn executor_rewind_seam(h: QueryDescHandle) -> PgResult<()> {
     querydesc::with_qd(h, |qd| {
         debug_assert_eq!(qd.operation, CmdType::CMD_SELECT);
-        let exec = qd.exec.as_mut().expect("ExecutorRewind before ExecutorStart");
+        let exec = qd
+            .exec
+            .as_mut()
+            .expect("ExecutorRewind before ExecutorStart");
         exec.with_mut(|data| {
             let ExecData { estate, planstate } = data;
-            let ps = planstate.as_mut().expect("ExecutorRewind without a plan state");
+            let ps = planstate
+                .as_mut()
+                .expect("ExecutorRewind without a plan state");
             crate::execami::exec_re_scan(ps, estate)
         })
     })
@@ -779,9 +790,11 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         && qd.crosscheck_snapshot.is_none();
 
     if skeleton_candidate {
-        if let Some(sk) =
-            exec_skeleton::take_if_match(qd.plannedstmt() as *const _ as *const (), qd.cplan, eflags)
-        {
+        if let Some(sk) = exec_skeleton::take_if_match(
+            qd.plannedstmt() as *const _ as *const (),
+            qd.cplan,
+            eflags,
+        ) {
             let mut exec = sk.exec;
             let reused = skeleton_rearm_exec(qd, &mut exec)?;
             if reused {
@@ -822,21 +835,18 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
             || (plancache_portal_seams::is_source_generic_plan::is_installed()
                 && plancache_portal_seams::is_source_generic_plan::call(qd.cplan)));
 
-    let ctx = exec_ctx_pool::take()
-        .unwrap_or_else(|| Box::new(MemoryContext::new_bump("ExecutorState")));
-    let mut exec = McxOwned::<ExecTy>::try_new_in_place_boxed(
-        ctx,
-        |mcx, slot| {
-            let d = slot.as_mut_ptr();
-            // SAFETY: field-wise init of the whole uninit slot; sret lands
-            // EStateData directly in the arena (no ~1.2KB stack round trip).
-            unsafe {
-                (&raw mut (*d).estate).write(EStateData::new_in(mcx));
-                (&raw mut (*d).planstate).write(None);
-            }
-            Ok(())
-        },
-    )?;
+    let ctx =
+        exec_ctx_pool::take().unwrap_or_else(|| Box::new(MemoryContext::new_bump("ExecutorState")));
+    let mut exec = McxOwned::<ExecTy>::try_new_in_place_boxed(ctx, |mcx, slot| {
+        let d = slot.as_mut_ptr();
+        // SAFETY: field-wise init of the whole uninit slot; sret lands
+        // EStateData directly in the arena (no ~1.2KB stack round trip).
+        unsafe {
+            (&raw mut (*d).estate).write(EStateData::new_in(mcx));
+            (&raw mut (*d).planstate).write(None);
+        }
+        Ok(())
+    })?;
     let tup_desc = exec.with_mut_mcx(|_mcx, data| {
         // SAFETY: lifetime shortening of the read-only plan tree (PlannedStmt
         // is invariant only through its lists' GAT pointers); the retention
@@ -865,12 +875,15 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
             es.es_param_exec_vals
                 .try_reserve_exact(n_exec)
                 .map_err(|_| _mcx.oom(n_exec))?;
-            es.es_param_exec_vals
-                .extend(core::iter::repeat_n(types_portal::params::ParamExecData::EMPTY, n_exec));
+            es.es_param_exec_vals.extend(core::iter::repeat_n(
+                types_portal::params::ParamExecData::EMPTY,
+                n_exec,
+            ));
             es.es_param_subplans
                 .try_reserve_exact(n_exec)
                 .map_err(|_| _mcx.oom(n_exec))?;
-            es.es_param_subplans.extend(core::iter::repeat_n(None, n_exec));
+            es.es_param_subplans
+                .extend(core::iter::repeat_n(None, n_exec));
         }
         if !query_env.is_null() {
             // SAFETY: the registrant keeps the environment alive across this
@@ -943,9 +956,7 @@ pub(crate) fn init_plan<'mcx>(
 ) -> PgResult<Rc<TupleDescData<'static>>> {
     exec_check_permissions(pstmt)?;
     // C's bms_copy: the estate owns its pruning set (extended by ExecDoInitialPruning).
-    let unpruned = pstmt
-        .unprunableRelids
-        .clone_in(data.estate.es_query_cxt)?;
+    let unpruned = pstmt.unprunableRelids.clone_in(data.estate.es_query_cxt)?;
     data.estate
         .exec_init_range_table(&pstmt.rtable, &pstmt.permInfos, unpruned)?;
     data.estate.es_plannedstmt = Some(pstmt);
@@ -958,7 +969,9 @@ pub(crate) fn init_plan<'mcx>(
         estate.es_rowmarks.reserve(n);
         estate.es_rowmarks.extend(core::iter::repeat_n(None, n));
         for rc_node in &pstmt.rowMarks {
-            let rc = rc_node.as_plan_row_mark().expect("rowMarks cell is a PlanRowMark");
+            let rc = rc_node
+                .as_plan_row_mark()
+                .expect("rowMarks cell is a PlanRowMark");
             if rc.isParent {
                 continue;
             }
@@ -970,8 +983,11 @@ pub(crate) fn init_plan<'mcx>(
             }
             use types_nodes::plannodes::RowMarkType::*;
             match rc.markType {
-                ROW_MARK_EXCLUSIVE | ROW_MARK_NOKEYEXCLUSIVE | ROW_MARK_SHARE
-                | ROW_MARK_KEYSHARE | ROW_MARK_REFERENCE => {
+                ROW_MARK_EXCLUSIVE
+                | ROW_MARK_NOKEYEXCLUSIVE
+                | ROW_MARK_SHARE
+                | ROW_MARK_KEYSHARE
+                | ROW_MARK_REFERENCE => {
                     let rel = estate.exec_get_range_table_relation(rc.rti, false)?;
                     check_valid_row_mark_rel(rel, rc.markType)?;
                 }
@@ -1006,9 +1022,7 @@ pub(crate) fn init_plan<'mcx>(
         data.estate.es_subplan_eval_hook = Some(crate::nodesubplan::subplan_expr_eval_hook);
         for (i, subplan) in pstmt.subplans.iter().enumerate() {
             let mut sp_eflags = eflags
-                & !(types_slot::EXEC_FLAG_REWIND
-                    | EXEC_FLAG_BACKWARD
-                    | types_slot::EXEC_FLAG_MARK);
+                & !(types_slot::EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | types_slot::EXEC_FLAG_MARK);
             if pstmt.rewindPlanIDs.is_member((i + 1) as i32) {
                 sp_eflags |= types_slot::EXEC_FLAG_REWIND;
             }
@@ -1077,12 +1091,8 @@ pub(crate) fn init_plan<'mcx>(
                 .exec_init_extra_tuple_slot(None, types_slot::TupleSlotKind::Virtual);
             let clean = crate::exec_clean_type_from_tl(&plan.targetlist)?;
             tup_type = clean.clone();
-            let j = execjunk::exec_init_junk_filter(
-                &mut data.estate,
-                &plan.targetlist,
-                clean,
-                slot,
-            )?;
+            let j =
+                execjunk::exec_init_junk_filter(&mut data.estate, &plan.targetlist, clean, slot)?;
             data.estate.es_junkFilter = Some(j);
         }
     }
@@ -1108,8 +1118,11 @@ pub fn standard_executor_run<'m>(
     let use_parallel_mode = if no_movement {
         false
     } else {
-        let upm =
-            if qd.already_executed || count != 0 { false } else { pstmt.parallelModeNeeded };
+        let upm = if qd.already_executed || count != 0 {
+            false
+        } else {
+            pstmt.parallelModeNeeded
+        };
         qd.already_executed = true;
         upm
     };
@@ -1122,11 +1135,21 @@ pub fn standard_executor_run<'m>(
         debug_assert!(data.estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0);
         data.estate.es_processed = 0;
         if send_tuples {
-            let desc = tup_desc.as_deref().expect("sendTuples without a result tupdesc");
+            let desc = tup_desc
+                .as_deref()
+                .expect("sendTuples without a result tupdesc");
             dest.startup(operation as i32, desc)?;
         }
         if !no_movement {
-            execute_plan(data, operation, send_tuples, count, direction, use_parallel_mode, dest)?;
+            execute_plan(
+                data,
+                operation,
+                send_tuples,
+                count,
+                direction,
+                use_parallel_mode,
+                dest,
+            )?;
         }
         data.estate.es_total_processed += data.estate.es_processed;
         if send_tuples {
@@ -1151,7 +1174,9 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     dest: &mut DestReceiver<'m>,
 ) -> PgResult<()> {
     let ExecData { estate, planstate } = data;
-    let planstate = planstate.as_mut().expect("ExecutorRun without a plan state");
+    let planstate = planstate
+        .as_mut()
+        .expect("ExecutorRun without a plan state");
     estate.es_direction = direction;
     estate.es_use_parallel_mode = use_parallel_mode;
     // === wave-9 shared-file marker (contract §7; sub-regions AG, AH, AI, AJ) ===
@@ -1312,15 +1337,13 @@ pub(crate) fn execute_plan<'m, 'mcx>(
         }
     }
     let mut cursor_capture_sidecar: Option<::types_portal::TuplestoreHandle> = None;
-    let cursor_fill_engaged = if estate.es_cursor_run_budget.is_some()
-        && send_tuples
-        && estate.es_junkFilter.is_none()
-    {
-        cursor_capture_sidecar = dest.tuplestore_capture_sidecar();
-        crate::lanev2::cursor_store_batch_fill(planstate, estate, dest, cursor_capture_sidecar)?
-    } else {
-        false
-    };
+    let cursor_fill_engaged =
+        if estate.es_cursor_run_budget.is_some() && send_tuples && estate.es_junkFilter.is_none() {
+            cursor_capture_sidecar = dest.tuplestore_capture_sidecar();
+            crate::lanev2::cursor_store_batch_fill(planstate, estate, dest, cursor_capture_sidecar)?
+        } else {
+            false
+        };
     // --- end WS-CB wave-10 ----------------------------------------------------------
     // --- WS-CC wave-10 sub-region (reserved) ------------------------------------
     // --- end WS-CC wave-10 --------------------------------------------------------
@@ -1480,7 +1503,10 @@ pub fn standard_executor_finish(qd: &mut QueryDescData) -> PgResult<bool> {
     if let Some(t) = qd.totaltime.as_deref_mut() {
         ::instrument::instr_start_node(t);
     }
-    let exec = qd.exec.as_mut().expect("ExecutorFinish before ExecutorStart");
+    let exec = qd
+        .exec
+        .as_mut()
+        .expect("ExecutorFinish before ExecutorStart");
     let fire = exec.with_mut(|data| {
         let es = &mut data.estate;
         debug_assert!(es.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0);
@@ -1505,8 +1531,7 @@ fn exec_postprocess_plan(estate: &mut EStateData<'_>) -> PgResult<()> {
         let cell = estate.es_auxmodifytables[i];
         // SAFETY: an es_subplanstates cell installed by InitPlan on this
         // estate; same take-out protocol as cte_proc_hook.
-        let slot =
-            unsafe { &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr() };
+        let slot = unsafe { &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr() };
         let mut ps = slot
             .take()
             .unwrap_or_else(|| panic!("recursive CTE plan execution (nodeCtescan.c)"));
@@ -1587,9 +1612,7 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
 
     exec.with_mut(|data| -> PgResult<()> {
         let ExecData { estate, planstate } = data;
-        debug_assert!(
-            estate.es_finished || estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY != 0
-        );
+        debug_assert!(estate.es_finished || estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY != 0);
         if let Some(ps) = planstate.as_mut() {
             exec_end_node(ps, estate)?;
         }
@@ -1597,9 +1620,7 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
             let cell = estate.es_subplanstates[i];
             // SAFETY: init_plan created this arena cell; exclusive here (no
             // subplan can be mid-run during ExecutorEnd).
-            let slot = unsafe {
-                &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr()
-            };
+            let slot = unsafe { &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr() };
             if let Some(mut ps) = slot.take() {
                 exec_end_node(&mut ps, estate)?;
                 // Dropping runs the Rc releases arena reset can't (no-drop rule).
@@ -1671,6 +1692,10 @@ fn cannot_lock_rows_in(what: &str, rel: &::types_rel::Relation<'_>) -> Box<PgErr
     Box::new(
         PgError::error(format!("cannot lock rows in {what} \"{relname}\""))
             .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "CheckValidRowMarkRel")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "CheckValidRowMarkRel",
+            )),
     )
 }

@@ -260,18 +260,21 @@ fn install_seams() {
             })
         });
         syscache_seams::lookup_pg_operator_shape::set(|opno| {
-            Ok((opno == INT4_EQ).then_some(syscache_seams::PgOperatorShape { oprnamespace: 11,
-                oprleft: INT4OID,
-                oprright: INT4OID,
-                oprresult: BOOLOID,
-                oprcom: INT4_EQ,
-                oprnegate: 518,
-                oprcode: F_INT4EQ,
-                oprrest: 101,
-                oprjoin: 105,
-                oprcanmerge: true,
-                oprcanhash: true,
-            }))
+            Ok(
+                (opno == INT4_EQ).then_some(syscache_seams::PgOperatorShape {
+                    oprnamespace: 11,
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: BOOLOID,
+                    oprcom: INT4_EQ,
+                    oprnegate: 518,
+                    oprcode: F_INT4EQ,
+                    oprrest: 101,
+                    oprjoin: 105,
+                    oprcanmerge: true,
+                    oprcanhash: true,
+                }),
+            )
         });
         if !guc_tables::vars::work_mem.installed() {
             init_small::init_seams();
@@ -331,8 +334,8 @@ fn mk_select1_pstmt<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     resconstantqual: Option<Node<'mcx>>,
 ) -> &'mcx PlannedStmt<'mcx> {
-    let tle = Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false)
-        .unwrap();
+    let tle =
+        Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false).unwrap();
     let tlist = NodeList::make1(mcx, tle).unwrap();
     let mut result = Node::build::<ResultPlan>(mcx).unwrap();
     result.plan.targetlist = tlist;
@@ -445,14 +448,16 @@ fn tap_executor_start_counts_start_and_parked_rearm_reuse() {
 
     // Park (no C counterpart): ExecutorFinish + in-place skeleton disarm.
     let parked = execmain_seams::executor_finish_and_park::call(qd).unwrap();
-    assert!(parked, "select1 over a generic cached plan must be park-eligible");
+    assert!(
+        parked,
+        "select1 over a generic cached plan must be park-eligible"
+    );
 
     // Two more Binds against the parked portal, each a rearm reuse — neither
     // passes through executor_start_seam, so only the ratified tap call
     // inside executor_rearm_seam can see them.
     for n in 2..=3 {
-        let reused =
-            execmain_seams::executor_rearm::call(qd, None, ParamListHandle::NULL).unwrap();
+        let reused = execmain_seams::executor_rearm::call(qd, None, ParamListHandle::NULL).unwrap();
         assert!(reused, "rearm {n} should reuse the parked executor");
         assert_eq!(REARM_TAP_COUNT.with(std::cell::Cell::get), n);
     }
@@ -500,7 +505,17 @@ fn plan_implicit_scroll_ok_arms() {
 
     let mcx = leaked_mcx();
     let seqscan = || {
-        Node::mk(mcx, SeqScan { scan: Scan { plan: Plan::default(), scanrelid: 1 }, cb_scan_cols: None }).unwrap()
+        Node::mk(
+            mcx,
+            SeqScan {
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 1,
+                },
+                cb_scan_cols: None,
+            },
+        )
+        .unwrap()
     };
 
     assert!(!crate::plan_implicit_scroll_ok(None));
@@ -522,7 +537,9 @@ fn plan_implicit_scroll_ok_arms() {
     assert!(!crate::plan_implicit_scroll_ok(Some(parallel.seal())));
 
     // Agg: C's default arm.
-    let agg = Node::build::<::types_nodes::plannodes::Agg>(mcx).unwrap().seal();
+    let agg = Node::build::<::types_nodes::plannodes::Agg>(mcx)
+        .unwrap()
+        .seal();
     assert!(!crate::plan_implicit_scroll_ok(Some(agg)));
 }
 
@@ -570,8 +587,11 @@ fn result_node_projects_const_datum() {
 fn false_constant_qual_yields_zero_rows() {
     install_seams();
     let mcx = leaked_mcx();
-    let qual = Node::mk_list(mcx, NodeList::make1(mcx, mk_bool_const(mcx, false)).unwrap())
-        .unwrap();
+    let qual = Node::mk_list(
+        mcx,
+        NodeList::make1(mcx, mk_bool_const(mcx, false)).unwrap(),
+    )
+    .unwrap();
     let pstmt = mk_select1_pstmt(mcx, Some(qual));
     with_exec_data(pstmt, |data, pstmt| {
         let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
@@ -586,8 +606,7 @@ fn false_constant_qual_yields_zero_rows() {
 fn true_constant_qual_yields_one_row() {
     install_seams();
     let mcx = leaked_mcx();
-    let qual = Node::mk_list(mcx, NodeList::make1(mcx, mk_bool_const(mcx, true)).unwrap())
-        .unwrap();
+    let qual = Node::mk_list(mcx, NodeList::make1(mcx, mk_bool_const(mcx, true)).unwrap()).unwrap();
     let pstmt = mk_select1_pstmt(mcx, Some(qual));
     with_exec_data(pstmt, |data, pstmt| {
         let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
@@ -725,8 +744,7 @@ mod scanfix {
         // nodeindexscan test-fixture set, verbatim semantics).
         bufmgr_seams::release_and_read_buffer::set(|buf, rel, blkno| {
             if buf != ::types_core::InvalidBuffer {
-                let same =
-                    with_fake(|f| f.tables[&rel.rd_id].get(blkno as usize) == Some(&buf));
+                let same = with_fake(|f| f.tables[&rel.rd_id].get(blkno as usize) == Some(&buf));
                 if same {
                     return Ok(buf);
                 }
@@ -799,15 +817,12 @@ mod scanfix {
         let mut img = vec![0u8; 24 + 4 + 1 + v.len()];
         img[0..4].copy_from_slice(&10u32.to_ne_bytes());
         img[18..20].copy_from_slice(&2u16.to_ne_bytes());
-        img[20..22].copy_from_slice(
-            &(HEAP_XMAX_INVALID | ::types_tuple::HEAP_HASVARWIDTH).to_ne_bytes(),
-        );
+        img[20..22]
+            .copy_from_slice(&(HEAP_XMAX_INVALID | ::types_tuple::HEAP_HASVARWIDTH).to_ne_bytes());
         img[22] = 24;
         img[24..28].copy_from_slice(&k.to_ne_bytes());
         // SAFETY: in-bounds write of the 1-byte short-varlena header + payload.
-        unsafe {
-            ::types_tuple::varatt::set_varsize_short(img.as_mut_ptr().add(28), 1 + v.len())
-        };
+        unsafe { ::types_tuple::varatt::set_varsize_short(img.as_mut_ptr().add(28), 1 + v.len()) };
         img[29..29 + v.len()].copy_from_slice(v.as_bytes());
         img
     }
@@ -873,8 +888,10 @@ mod scanfix {
         with_fake(|f| {
             let mut bufs = Vec::new();
             for rows in pages {
-                let imgs: Vec<Vec<u8>> =
-                    rows.iter().map(|&(k, v)| tuple_image_kv_text(k, v)).collect();
+                let imgs: Vec<Vec<u8>> = rows
+                    .iter()
+                    .map(|&(k, v)| tuple_image_kv_text(k, v))
+                    .collect();
                 let addr = Box::leak(build_page_imgs(&imgs)).0.as_mut_ptr() as usize;
                 f.pages.push(addr);
                 f.pins.push(0);
@@ -943,11 +960,7 @@ mod scanfix {
     }
 
     // One 16-byte int4 index tuple (t_info alt-TID bits unset).
-    fn add_index_tuple(
-        p: &mut TestPage,
-        tid: ::types_tuple::itemptr::ItemPointerData,
-        value: i32,
-    ) {
+    fn add_index_tuple(p: &mut TestPage, tid: ::types_tuple::itemptr::ItemPointerData, value: i32) {
         let itupsz = 16usize;
         let pd_lower = u16::from_ne_bytes([p.0[12], p.0[13]]) as usize;
         let pd_upper = u16::from_ne_bytes([p.0[14], p.0[15]]) as usize;
@@ -985,10 +998,7 @@ mod scanfix {
             .map(|(i, &(k, _))| (k, (i + 1) as u16))
             .collect();
         keyed.sort_unstable();
-        let mut leaf = new_bt_page(
-            ::types_nbtree::BTP_LEAF | ::types_nbtree::BTP_ROOT,
-            0,
-        );
+        let mut leaf = new_bt_page(::types_nbtree::BTP_LEAF | ::types_nbtree::BTP_ROOT, 0);
         for (k, off) in keyed {
             add_index_tuple(
                 &mut leaf,
@@ -1133,7 +1143,9 @@ mod scanfix {
             relfrozenxid: 3,
             relminmxid: 1,
         };
-        let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+        let data = RelationData {
+            rd_locator: Default::default(),
+            rd_smgr: Default::default(),
             rd_id: relid,
             rd_backend: INVALID_PROC_NUMBER,
             rd_islocaltemp: false,
@@ -1152,7 +1164,14 @@ mod scanfix {
             rd_att: if with_fake(|f| f.kv_text.contains(&relid)) {
                 kv_text_tupdesc(mcx)
             } else {
-                int4_tupdesc(mcx, if with_fake(|f| f.two_col.contains(&relid)) { 2 } else { 1 })
+                int4_tupdesc(
+                    mcx,
+                    if with_fake(|f| f.two_col.contains(&relid)) {
+                        2
+                    } else {
+                        1
+                    },
+                )
             },
             rd_index: None,
             rd_opcintype: PgVec::new_in(mcx),
@@ -1163,13 +1182,16 @@ mod scanfix {
             pgstat_enabled: std::cell::Cell::new(true),
             pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
             rd_amcache: Default::default(),
-            rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
             rd_support: PgVec::new_in(mcx),
             rd_supportinfo: Default::default(),
             rd_opcoptions: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+            rd_hastriggers: false,
+            rd_hasrules: false,
         };
         Ok(Relation::open(data, Some(record_close)))
     }
@@ -1362,7 +1384,10 @@ fn seqscan_end_to_end_through_real_init_path() {
             relid
         );
         assert_eq!(data.estate.es_range_table_size, 1);
-        assert!(data.estate.es_relations[0].is_some(), "scan relation opened");
+        assert!(
+            data.estate.es_relations[0].is_some(),
+            "scan relation opened"
+        );
 
         let ExecData { estate, planstate } = data;
         let ps = planstate.as_mut().unwrap();
@@ -1521,8 +1546,16 @@ fn desc_context_stays_flat_across_statements() {
     for _ in 0..(if cfg!(miri) { 20 } else { 1000 }) {
         cycle();
     }
-    assert_eq!(ctx.used(), used_after_first, "desc context grew across statements");
-    assert_eq!(ctx.peak(), peak_after_first, "desc context peak grew across statements");
+    assert_eq!(
+        ctx.used(),
+        used_after_first,
+        "desc context grew across statements"
+    );
+    assert_eq!(
+        ctx.peak(),
+        peak_after_first,
+        "desc context peak grew across statements"
+    );
 }
 
 #[test]
@@ -1609,7 +1642,10 @@ fn mk_agg_pstmt<'mcx>(
         SeqScan {
             cb_scan_cols: None,
             scan: Scan {
-                plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                plan: Plan {
+                    targetlist: scan_tlist,
+                    ..Default::default()
+                },
                 scanrelid: 1,
             },
         },
@@ -1628,8 +1664,7 @@ fn mk_agg_pstmt<'mcx>(
         let arg_tle = Node::mk_target_entry(mcx, arg_var, 1, None, false).unwrap();
         aggref.args = NodeList::make1(mcx, arg_tle).unwrap();
     }
-    let agg_tle =
-        Node::mk_target_entry(mcx, aggref.seal(), 1, Some("agg"), false).unwrap();
+    let agg_tle = Node::mk_target_entry(mcx, aggref.seal(), 1, Some("agg"), false).unwrap();
     let mut agg = Node::build::<Agg>(mcx).unwrap();
     agg.plan.targetlist = NodeList::make1(mcx, agg_tle).unwrap();
     agg.plan.lefttree = Some(scan_node);
@@ -1690,11 +1725,16 @@ fn run_agg_pstmt(pstmt: &'static PlannedStmt<'static>) -> (Datum, bool) {
             let base = estate.slot_mut(slot_id).base();
             (base.tts_values[0], base.tts_isnull[0])
         };
-        assert!(exec_proc_node(ps, estate).unwrap().is_none(), "agg emits exactly one row");
+        assert!(
+            exec_proc_node(ps, estate).unwrap().is_none(),
+            "agg emits exactly one row"
+        );
 
         // Rescan re-runs the whole aggregation.
         exec_re_scan(ps, estate).unwrap();
-        let again = exec_proc_node(ps, estate).unwrap().expect("one agg row after rescan");
+        let again = exec_proc_node(ps, estate)
+            .unwrap()
+            .expect("one agg row after rescan");
         {
             let base = estate.slot_mut(again).base();
             assert_eq!(base.tts_values[0].as_i64(), v.as_i64());
@@ -1797,8 +1837,11 @@ fn mk_sort_limit_pstmt<'mcx>(
 
     let outer_tle = |mcx| {
         let v = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
-        NodeList::make1(mcx, Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap())
-            .unwrap()
+        NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap(),
+        )
+        .unwrap()
     };
 
     if with_sort {
@@ -1840,7 +1883,11 @@ fn mk_sort_limit_pstmt<'mcx>(
     .unwrap();
     let perminfo = Node::mk(
         mcx,
-        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1,
+            ..Default::default()
+        },
     )
     .unwrap();
     let mut unpruned = Bitmapset::empty();
@@ -1926,7 +1973,10 @@ fn offset_limit_window_over_seqscan() {
     let mcx = leaked_mcx();
     let relid: u32 = 70008;
     scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
-    let runs = drain_int4_rows(mk_sort_limit_pstmt(mcx, relid, false, Some(1), Some(2)), false);
+    let runs = drain_int4_rows(
+        mk_sort_limit_pstmt(mcx, relid, false, Some(1), Some(2)),
+        false,
+    );
     assert_eq!(runs, vec![vec![2, 3]]);
     scanfix::quiesced();
 }
@@ -1939,7 +1989,10 @@ fn rescan_of_sort_under_limit_repeats() {
     let mcx = leaked_mcx();
     let relid: u32 = 70009;
     scanfix::register_table(relid, &[&[3, 1, 2], &[5, 4]]);
-    let runs = drain_int4_rows(mk_sort_limit_pstmt(mcx, relid, true, Some(1), Some(3)), true);
+    let runs = drain_int4_rows(
+        mk_sort_limit_pstmt(mcx, relid, true, Some(1), Some(3)),
+        true,
+    );
     assert_eq!(runs, vec![vec![2, 3, 4], vec![2, 3, 4]]);
     scanfix::quiesced();
 }
@@ -1964,7 +2017,9 @@ fn limit_pushes_bound_into_sort_state() {
         crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
         let ExecData { estate, planstate } = data;
         let ps = planstate.as_mut().unwrap();
-        exec_proc_node(ps, estate).unwrap().expect("first sorted row");
+        exec_proc_node(ps, estate)
+            .unwrap()
+            .expect("first sorted row");
         match ps {
             crate::procnode::PlanStateNode::Limit(l) => match &*l.outer {
                 crate::procnode::PlanStateNode::Sort(s) => {
@@ -2014,9 +2069,10 @@ fn sortfeed_ra_postdone_pull_exits_before_ra_memo() {
 
     let ra_memo_of = |ps: &crate::procnode::PlanStateNode| -> (bool, Option<bool>) {
         match ps {
-            crate::procnode::PlanStateNode::Sort(s) => {
-                (s.state.sort_done(), ::nodesort::sort_lane_ra_fusible(&s.state))
-            }
+            crate::procnode::PlanStateNode::Sort(s) => (
+                s.state.sort_done(),
+                ::nodesort::sort_lane_ra_fusible(&s.state),
+            ),
             _ => panic!("expected Sort root"),
         }
     };
@@ -2032,8 +2088,7 @@ fn sortfeed_ra_postdone_pull_exits_before_ra_memo() {
             ));
         with_exec_data(pstmt, |data, pstmt| {
             data.estate.es_snapshot = Some(snapshot);
-            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, EXEC_FLAG_REWIND)
-                .unwrap();
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, EXEC_FLAG_REWIND).unwrap();
             let ExecData { estate, planstate } = data;
             let ps = planstate.as_mut().unwrap();
 
@@ -2043,7 +2098,9 @@ fn sortfeed_ra_postdone_pull_exits_before_ra_memo() {
                 // exec_sort builds + finalizes the tuplesort and serves the
                 // first sorted row from its own drain leg.
                 estate.es_epq_active = true;
-                let slot_id = exec_proc_node(ps, estate).unwrap().expect("first sorted row");
+                let slot_id = exec_proc_node(ps, estate)
+                    .unwrap()
+                    .expect("first sorted row");
                 let mut isnull = false;
                 let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
                 assert!(!isnull);
@@ -2110,7 +2167,10 @@ fn mk_junk_sort_limit_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Pl
         SeqScan {
             cb_scan_cols: None,
             scan: Scan {
-                plan: Plan { targetlist: mk_tlist(1), ..Default::default() },
+                plan: Plan {
+                    targetlist: mk_tlist(1),
+                    ..Default::default()
+                },
                 scanrelid: 1,
             },
         },
@@ -2147,7 +2207,11 @@ fn mk_junk_sort_limit_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Pl
     .unwrap();
     let perminfo = Node::mk(
         mcx,
-        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1,
+            ..Default::default()
+        },
     )
     .unwrap();
     let mut unpruned = Bitmapset::empty();
@@ -2218,7 +2282,11 @@ fn junk_filter_removes_order_by_column_end_to_end() {
             if !got {
                 break;
             }
-            assert_eq!(slot.base().tts_values.len(), 1, "only column a in output tuples");
+            assert_eq!(
+                slot.base().tts_values.len(),
+                1,
+                "only column a in output tuples"
+            );
             let mut isnull = false;
             let v = exectuples::slot_getattr(&mut slot, 1, &mut isnull);
             assert!(!isnull);
@@ -2301,7 +2369,11 @@ fn mk_hashed_agg_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Planned
     .unwrap();
     let perminfo = Node::mk(
         mcx,
-        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1,
+            ..Default::default()
+        },
     )
     .unwrap();
     let mut unpruned = Bitmapset::empty();
@@ -2392,11 +2464,16 @@ fn mk_hashed_strmax_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Plan
     // shape (a projected scan would route the expr-key decide instead).
     let k_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
     let v_var = Node::mk_var(mcx, 1, 2, TEXTOID, -1, C_COLLATION, 0).unwrap();
-    let mut scan_tlist =
-        NodeList::make1(mcx, Node::mk_target_entry(mcx, k_var, 1, Some("k"), false).unwrap())
-            .unwrap();
+    let mut scan_tlist = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, k_var, 1, Some("k"), false).unwrap(),
+    )
+    .unwrap();
     scan_tlist
-        .lappend(mcx, Node::mk_target_entry(mcx, v_var, 2, Some("v"), false).unwrap())
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, v_var, 2, Some("v"), false).unwrap(),
+        )
         .unwrap();
     let scan_node = Node::mk(
         mcx,
@@ -2461,7 +2538,11 @@ fn mk_hashed_strmax_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Plan
     .unwrap();
     let perminfo = Node::mk(
         mcx,
-        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1,
+            ..Default::default()
+        },
     )
     .unwrap();
     let mut unpruned = Bitmapset::empty();
@@ -2527,7 +2608,10 @@ fn hashed_group_by_str_max_over_fake_heap_end_to_end() {
         while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
             let base = estate.slot_mut(slot_id).base();
             assert!(!base.tts_isnull[0] && !base.tts_isnull[1]);
-            got.push((base.tts_values[0].as_i32(), text_datum_str(base.tts_values[1])));
+            got.push((
+                base.tts_values[0].as_i32(),
+                text_datum_str(base.tts_values[1]),
+            ));
         }
         got.sort();
         assert_eq!(got, vec![(1, "pear".to_string()), (2, "zeta".to_string())]);
@@ -2570,7 +2654,10 @@ fn mk_nestloop_pstmt<'mcx>(
             SeqScan {
                 cb_scan_cols: None,
                 scan: Scan {
-                    plan: Plan { targetlist: scan_tlist(varno), ..Default::default() },
+                    plan: Plan {
+                        targetlist: scan_tlist(varno),
+                        ..Default::default()
+                    },
                     scanrelid,
                 },
             },
@@ -2585,13 +2672,21 @@ fn mk_nestloop_pstmt<'mcx>(
     ) {
         &[(OUTER_VAR, 1), (OUTER_VAR, 2)]
     } else {
-        &[(OUTER_VAR, 1), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)]
+        &[
+            (OUTER_VAR, 1),
+            (OUTER_VAR, 2),
+            (INNER_VAR, 1),
+            (INNER_VAR, 2),
+        ]
     };
     let mut join_tlist = NodeList::nil();
     for (i, &(varno, attno)) in tl_cols.iter().enumerate() {
         let v = Node::mk_var(mcx, varno, attno, INT4OID, -1, 0, 0).unwrap();
         join_tlist
-            .lappend(mcx, Node::mk_target_entry(mcx, v, i as i16 + 1, Some("x"), false).unwrap())
+            .lappend(
+                mcx,
+                Node::mk_target_entry(mcx, v, i as i16 + 1, Some("x"), false).unwrap(),
+            )
             .unwrap();
     }
     let joinqual = {
@@ -2600,8 +2695,8 @@ fn mk_nestloop_pstmt<'mcx>(
         Node::mk(
             mcx,
             ::types_nodes::primnodes::OpExpr {
-                opno: 96,      // int4eq
-                opfuncid: 65,  // pg_proc int4eq
+                opno: 96,     // int4eq
+                opfuncid: 65, // pg_proc int4eq
                 opresulttype: BOOLOID,
                 opretset: false,
                 opcollid: 0,
@@ -2645,7 +2740,11 @@ fn mk_nestloop_pstmt<'mcx>(
     let mk_perm = |relid: u32| {
         Node::mk(
             mcx,
-            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+            RTEPermissionInfo {
+                relid,
+                requiredPerms: 1 << 1,
+                ..Default::default()
+            },
         )
         .unwrap()
     };
@@ -2676,7 +2775,11 @@ fn drain_wide_rows(
         .into_iter()
         .map(|rows| {
             rows.into_iter()
-                .map(|row| row.into_iter().map(|v| v.expect("unexpected NULL")).collect())
+                .map(|row| {
+                    row.into_iter()
+                        .map(|v| v.expect("unexpected NULL"))
+                        .collect()
+                })
                 .collect()
         })
         .collect()
@@ -2802,7 +2905,6 @@ fn nestloop_semi_and_anti_join_over_fake_heaps() {
     scanfix::quiesced();
 }
 
-
 // HashJoin(hashclause a = c) over two fake-heap seqscans, in the post-setrefs
 // shape: outer keys OUTER_VAR, the Hash inner node carries the inner keys
 // (OUTER_VAR of its own child). The equijoin clause is the hashclause, so
@@ -2870,15 +2972,24 @@ fn mk_hashjoin_pstmt_est<'mcx>(
         ::types_nodes::JoinType::JOIN_SEMI | ::types_nodes::JoinType::JOIN_ANTI => {
             &[(OUTER_VAR, 1), (OUTER_VAR, 2)]
         }
-        ::types_nodes::JoinType::JOIN_RIGHT_SEMI
-        | ::types_nodes::JoinType::JOIN_RIGHT_ANTI => &[(INNER_VAR, 1), (INNER_VAR, 2)],
-        _ => &[(OUTER_VAR, 1), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)],
+        ::types_nodes::JoinType::JOIN_RIGHT_SEMI | ::types_nodes::JoinType::JOIN_RIGHT_ANTI => {
+            &[(INNER_VAR, 1), (INNER_VAR, 2)]
+        }
+        _ => &[
+            (OUTER_VAR, 1),
+            (OUTER_VAR, 2),
+            (INNER_VAR, 1),
+            (INNER_VAR, 2),
+        ],
     };
     let mut join_tlist = NodeList::nil();
     for (i, &(varno, attno)) in tl_cols.iter().enumerate() {
         let v = Node::mk_var(mcx, varno, attno, INT4OID, -1, 0, 0).unwrap();
         join_tlist
-            .lappend(mcx, Node::mk_target_entry(mcx, v, i as i16 + 1, Some("x"), false).unwrap())
+            .lappend(
+                mcx,
+                Node::mk_target_entry(mcx, v, i as i16 + 1, Some("x"), false).unwrap(),
+            )
             .unwrap();
     }
     let hashclause = {
@@ -2948,8 +3059,15 @@ fn mk_hashjoin_pstmt_est<'mcx>(
         .unwrap()
     };
     let mk_perm = |relid: u32| {
-        Node::mk(mcx, RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() })
-            .unwrap()
+        Node::mk(
+            mcx,
+            RTEPermissionInfo {
+                relid,
+                requiredPerms: 1 << 1,
+                ..Default::default()
+            },
+        )
+        .unwrap()
     };
     let mut rtable = NodeList::make1(mcx, mk_rte(outer_relid, 1)).unwrap();
     rtable.lappend(mcx, mk_rte(inner_relid, 2)).unwrap();
@@ -2984,7 +3102,11 @@ fn hashjoin_inner_join_matches_nestloop_result() {
     let inner: u32 = 70031;
     scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (3, 30)]]);
     scanfix::register_table_2col(inner, &[&[(2, 200), (3, 300), (3, 301), (4, 400)]]);
-    let mut expected = vec![vec![2, 20, 2, 200], vec![3, 30, 3, 300], vec![3, 30, 3, 301]];
+    let mut expected = vec![
+        vec![2, 20, 2, 200],
+        vec![3, 30, 3, 300],
+        vec![3, 30, 3, 301],
+    ];
     expected.sort();
 
     let runs = drain_wide_rows(
@@ -2995,7 +3117,10 @@ fn hashjoin_inner_join_matches_nestloop_result() {
     for run in &runs {
         let mut got = run.clone();
         got.sort();
-        assert_eq!(got, expected, "hash join result set must equal the nestloop result set");
+        assert_eq!(
+            got, expected,
+            "hash join result set must equal the nestloop result set"
+        );
     }
     assert_eq!(runs.len(), 2);
     scanfix::quiesced();
@@ -3121,7 +3246,12 @@ fn hashjoin_right_semi_and_right_anti_join_over_fake_heaps() {
     scanfix::register_table_2col(empty_outer, &[]);
     let all_inner = vec![vec![2, 200], vec![3, 300], vec![3, 301], vec![4, 400]];
     let runs = drain_wide_rows(
-        mk_hashjoin_pstmt(mcx, empty_outer, inner, ::types_nodes::JoinType::JOIN_RIGHT_ANTI),
+        mk_hashjoin_pstmt(
+            mcx,
+            empty_outer,
+            inner,
+            ::types_nodes::JoinType::JOIN_RIGHT_ANTI,
+        ),
         2,
         1,
     );
@@ -3221,10 +3351,12 @@ fn hashjoin_multibatch_matches_single_batch_results() {
     let saved_work_mem = guc_tables::vars::work_mem.read();
     guc_tables::vars::work_mem.write(64);
     let (_b, nbatch, _s) = ::nodehash::exec_choose_hash_table_size(4000.0, 8, true, false, 0);
-    assert!(nbatch > 1, "fixture must force a multi-batch table, got nbatch={nbatch}");
+    assert!(
+        nbatch > 1,
+        "fixture must force a multi-batch table, got nbatch={nbatch}"
+    );
 
-    let inner_expected: Vec<Vec<i32>> =
-        (3990..=4000).map(|k| vec![k, k, k, k * 10]).collect();
+    let inner_expected: Vec<Vec<i32>> = (3990..=4000).map(|k| vec![k, k, k, k * 10]).collect();
     let runs = drain_wide_rows(
         mk_hashjoin_pstmt_est(
             mcx,
@@ -3261,21 +3393,27 @@ fn hashjoin_multibatch_matches_single_batch_results() {
         let mut got = run;
         got.sort();
         assert_eq!(got.len(), 4010);
-        let unmatched_inner: Vec<_> =
-            got.iter().filter(|r| r[0].is_none()).collect();
+        let unmatched_inner: Vec<_> = got.iter().filter(|r| r[0].is_none()).collect();
         assert_eq!(unmatched_inner.len(), 3989);
         assert!(unmatched_inner.iter().all(|r| {
             let k = r[2].unwrap();
             (1..=3989).contains(&k) && r[3] == Some(k * 10) && r[1].is_none()
         }));
-        let unmatched_outer: Vec<_> =
-            got.iter().filter(|r| r[0].is_some() && r[2].is_none()).collect();
+        let unmatched_outer: Vec<_> = got
+            .iter()
+            .filter(|r| r[0].is_some() && r[2].is_none())
+            .collect();
         assert_eq!(
-            unmatched_outer.iter().map(|r| r[0].unwrap()).collect::<Vec<_>>(),
+            unmatched_outer
+                .iter()
+                .map(|r| r[0].unwrap())
+                .collect::<Vec<_>>(),
             (4001..=4010).collect::<Vec<_>>()
         );
-        let matched: Vec<_> =
-            got.iter().filter(|r| r[0].is_some() && r[2].is_some()).collect();
+        let matched: Vec<_> = got
+            .iter()
+            .filter(|r| r[0].is_some() && r[2].is_some())
+            .collect();
         assert_eq!(matched.len(), 11);
         assert!(matched
             .iter()
@@ -3372,8 +3510,8 @@ fn executor_start_wires_bound_params_to_estate() {
     .unwrap();
     execmain_seams::executor_start::call(qd, 0).unwrap();
     let mut dest = DestReceiver::DoNothing;
-    let err = execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest)
-        .unwrap_err();
+    let err =
+        execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap_err();
     assert_eq!(err.message, "no value found for parameter 1");
     execmain_seams::release_query_desc::call(qd);
 }
@@ -3421,8 +3559,11 @@ fn unique_over_sort_dedups_end_to_end() {
 
     let outer_tle = |mcx| {
         let v = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
-        NodeList::make1(mcx, Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap())
-            .unwrap()
+        NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap(),
+        )
+        .unwrap()
     };
     let mut sort = Node::build::<Sort>(mcx).unwrap();
     sort.plan.targetlist = outer_tle(mcx);
@@ -3456,7 +3597,11 @@ fn unique_over_sort_dedups_end_to_end() {
     .unwrap();
     let perminfo = Node::mk(
         mcx,
-        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1,
+            ..Default::default()
+        },
     )
     .unwrap();
     let mut unpruned = Bitmapset::empty();
@@ -3477,10 +3622,7 @@ fn unique_over_sort_dedups_end_to_end() {
 
 // --- nodeSubplan.c initplan slice ---
 
-fn mk_initplan_sub_seqscan<'mcx>(
-    mcx: ::mcx::Mcx<'mcx>,
-    with_tlist: bool,
-) -> Node<'mcx> {
+fn mk_initplan_sub_seqscan<'mcx>(mcx: ::mcx::Mcx<'mcx>, with_tlist: bool) -> Node<'mcx> {
     use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
     let tlist = if with_tlist {
         let var = Node::mk_var(mcx, 2, 1, INT4OID, -1, 0, 0).unwrap();
@@ -3494,7 +3636,10 @@ fn mk_initplan_sub_seqscan<'mcx>(
         SeqScan {
             cb_scan_cols: None,
             scan: Scan {
-                plan: Plan { targetlist: tlist, ..Default::default() },
+                plan: Plan {
+                    targetlist: tlist,
+                    ..Default::default()
+                },
                 scanrelid: 2,
             },
         },
@@ -3506,7 +3651,11 @@ fn mk_two_rel_pstmt_parts<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     t1: u32,
     t2: u32,
-) -> (NodeList<'mcx>, NodeList<'mcx>, ::types_nodes::bitmapset::Bitmapset<'mcx>) {
+) -> (
+    NodeList<'mcx>,
+    NodeList<'mcx>,
+    ::types_nodes::bitmapset::Bitmapset<'mcx>,
+) {
     use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
     let mk_rte = |relid| {
         Node::mk(
@@ -3524,8 +3673,15 @@ fn mk_two_rel_pstmt_parts<'mcx>(
         .unwrap()
     };
     let mk_pi = |relid| {
-        Node::mk(mcx, RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() })
-            .unwrap()
+        Node::mk(
+            mcx,
+            RTEPermissionInfo {
+                relid,
+                requiredPerms: 1 << 1,
+                ..Default::default()
+            },
+        )
+        .unwrap()
     };
     let mut rtable = NodeList::make1(mcx, mk_rte(t1)).unwrap();
     rtable.lappend(mcx, mk_rte(t2)).unwrap();
@@ -3558,7 +3714,11 @@ fn mk_sub_plan_node<'mcx>(
 }
 
 // `SELECT a FROM t1 WHERE a < (SELECT b FROM t2)` as an initplan PlannedStmt.
-fn mk_expr_initplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, t1: u32, t2: u32) -> &'mcx PlannedStmt<'mcx> {
+fn mk_expr_initplan_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    t1: u32,
+    t2: u32,
+) -> &'mcx PlannedStmt<'mcx> {
     use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
     use ::types_nodes::primnodes::{Param, ParamKind};
 
@@ -3629,7 +3789,11 @@ fn mk_expr_initplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, t1: u32, t2: u32) -> &'mc
 
 // `SELECT a FROM t1 WHERE EXISTS (SELECT 1 FROM t2)`: gating Result with a
 // one-time filter over $0.
-fn mk_exists_initplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, t1: u32, t2: u32) -> &'mcx PlannedStmt<'mcx> {
+fn mk_exists_initplan_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    t1: u32,
+    t2: u32,
+) -> &'mcx PlannedStmt<'mcx> {
     use ::types_nodes::plannodes::{Plan, Result as ResultPlan, Scan, SeqScan};
     use ::types_nodes::primnodes::{Param, ParamKind, OUTER_VAR};
 
@@ -3691,7 +3855,9 @@ fn mk_exists_initplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, t1: u32, t2: u32) -> &'
     pstmt.seal_ref()
 }
 
-fn run_initplan_pstmt(pstmt: &'static PlannedStmt<'static>) -> Result<Vec<i32>, Box<types_error::PgError>> {
+fn run_initplan_pstmt(
+    pstmt: &'static PlannedStmt<'static>,
+) -> Result<Vec<i32>, Box<types_error::PgError>> {
     let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
     let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
         snap_ctx.mcx(),
@@ -3731,9 +3897,7 @@ fn run_initplan_pstmt(pstmt: &'static PlannedStmt<'static>) -> Result<Vec<i32>, 
         for i in 0..estate.es_subplanstates.len() {
             let cell = estate.es_subplanstates[i];
             // SAFETY: init_plan's arena cell (standard_executor_end's shape).
-            let slot = unsafe {
-                &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr()
-            };
+            let slot = unsafe { &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr() };
             if let Some(mut sub) = slot.take() {
                 crate::exec_end_node(&mut sub, estate).unwrap();
             }
@@ -3835,7 +3999,10 @@ fn worker_pstmt_nulls_parallel_unsafe_subplans() {
             SeqScan {
                 cb_scan_cols: None,
                 scan: Scan {
-                    plan: Plan { parallel_safe: safe, ..Default::default() },
+                    plan: Plan {
+                        parallel_safe: safe,
+                        ..Default::default()
+                    },
                     scanrelid: 1,
                 },
             },
@@ -3851,23 +4018,22 @@ fn worker_pstmt_nulls_parallel_unsafe_subplans() {
     pstmt.canSetTag = true;
     pstmt.planTree = Some(mk_sub(true));
     pstmt.subplans = subplans;
-    pstmt.paramExecTypes =
-        ::types_nodes::list::OidList::make2(mcx, INT4OID, INT4OID).unwrap();
+    pstmt.paramExecTypes = ::types_nodes::list::OidList::make2(mcx, INT4OID, INT4OID).unwrap();
     let pstmt = pstmt.seal_ref();
     with_exec_data(pstmt, |data, pstmt| {
         data.estate.es_plannedstmt = Some(pstmt);
-        let worker = crate::execparallel::build_worker_pstmt(
-            &data.estate,
-            pstmt.planTree.unwrap(),
-        )
-        .unwrap();
+        let worker =
+            crate::execparallel::build_worker_pstmt(&data.estate, pstmt.planTree.unwrap()).unwrap();
         // The unsafe subplan is a NULL hole; the safe ones keep their
         // plan_id positions.
         assert_eq!(worker.subplans.len(), 3);
         assert!(worker.subplans.nth(0).is_some());
         assert!(worker.subplans.nth(1).is_none());
         assert!(worker.subplans.nth(2).is_some());
-        assert_eq!(worker.paramExecTypes.as_slice(), pstmt.paramExecTypes.as_slice());
+        assert_eq!(
+            worker.paramExecTypes.as_slice(),
+            pstmt.paramExecTypes.as_slice()
+        );
         assert!(worker.rowMarks.is_nil());
         assert!(worker.resultRelations.is_nil());
         assert!(worker.rewindPlanIDs.is_empty());
@@ -3876,11 +4042,11 @@ fn worker_pstmt_nulls_parallel_unsafe_subplans() {
 
 #[test]
 fn initplan_hole_reference_errors_subplan_not_initialized() {
-    use ::types_nodes::plannodes::{Result as ResultPlan};
+    use ::types_nodes::plannodes::Result as ResultPlan;
     install_seams();
     let mcx = leaked_mcx();
-    let tle = Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false)
-        .unwrap();
+    let tle =
+        Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false).unwrap();
     let mut result = Node::build::<ResultPlan>(mcx).unwrap();
     result.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
     result.plan.initPlan = NodeList::make1(
@@ -3907,10 +4073,10 @@ fn initplan_hole_reference_errors_subplan_not_initialized() {
             ));
             es.es_param_subplans.extend(core::iter::repeat_n(None, n));
         }
-        let err =
-            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap_err();
+        let err = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap_err();
         assert!(
-            err.message().contains("subplan \"InitPlan 1\" was not initialized"),
+            err.message()
+                .contains("subplan \"InitPlan 1\" was not initialized"),
             "{}",
             err.message()
         );
@@ -3959,7 +4125,10 @@ fn mk_windowagg_pstmt_ex<'mcx>(
         SeqScan {
             cb_scan_cols: None,
             scan: Scan {
-                plan: Plan { targetlist: mk_tlist(1), ..Default::default() },
+                plan: Plan {
+                    targetlist: mk_tlist(1),
+                    ..Default::default()
+                },
                 scanrelid: 1,
             },
         },
@@ -3998,10 +4167,16 @@ fn mk_windowagg_pstmt_ex<'mcx>(
 
     let mut tlist = mk_tlist(OUTER_VAR);
     tlist
-        .lappend(mcx, Node::mk_target_entry(mcx, mk_wfunc(3100, false), 3, Some("rn"), false).unwrap())
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, mk_wfunc(3100, false), 3, Some("rn"), false).unwrap(),
+        )
         .unwrap();
     tlist
-        .lappend(mcx, Node::mk_target_entry(mcx, mk_wfunc(3101, false), 4, Some("rank"), false).unwrap())
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, mk_wfunc(3101, false), 4, Some("rank"), false).unwrap(),
+        )
         .unwrap();
     tlist
         .lappend(
@@ -4010,7 +4185,10 @@ fn mk_windowagg_pstmt_ex<'mcx>(
         )
         .unwrap();
     tlist
-        .lappend(mcx, Node::mk_target_entry(mcx, mk_wfunc(2108, true), 6, Some("sum"), false).unwrap())
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, mk_wfunc(2108, true), 6, Some("sum"), false).unwrap(),
+        )
         .unwrap();
 
     let mut wa = Node::build::<WindowAgg>(mcx).unwrap();
@@ -4047,7 +4225,11 @@ fn mk_windowagg_pstmt_ex<'mcx>(
     .unwrap();
     let perminfo = Node::mk(
         mcx,
-        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1,
+            ..Default::default()
+        },
     )
     .unwrap();
     let mut unpruned = Bitmapset::empty();
@@ -4090,7 +4272,10 @@ fn mk_window_over_agg_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Pl
         SeqScan {
             cb_scan_cols: None,
             scan: Scan {
-                plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                plan: Plan {
+                    targetlist: scan_tlist,
+                    ..Default::default()
+                },
                 scanrelid: 1,
             },
         },
@@ -4118,7 +4303,10 @@ fn mk_window_over_agg_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Pl
     )
     .unwrap();
     agg_tlist
-        .lappend(mcx, Node::mk_target_entry(mcx, aggref.seal(), 2, Some("cnt"), false).unwrap())
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, aggref.seal(), 2, Some("cnt"), false).unwrap(),
+        )
         .unwrap();
     let mut agg = Node::build::<Agg>(mcx).unwrap();
     agg.plan.targetlist = agg_tlist;
@@ -4172,10 +4360,16 @@ fn mk_window_over_agg_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Pl
     };
     let mut wa_tlist = mk_out_tlist();
     wa_tlist
-        .lappend(mcx, Node::mk_target_entry(mcx, mk_wfunc(3100), 3, Some("rn"), false).unwrap())
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, mk_wfunc(3100), 3, Some("rn"), false).unwrap(),
+        )
         .unwrap();
     wa_tlist
-        .lappend(mcx, Node::mk_target_entry(mcx, mk_wfunc(3101), 4, Some("rank"), false).unwrap())
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, mk_wfunc(3101), 4, Some("rank"), false).unwrap(),
+        )
         .unwrap();
     let mut wa = Node::build::<WindowAgg>(mcx).unwrap();
     wa.plan.targetlist = wa_tlist;
@@ -4202,7 +4396,11 @@ fn mk_window_over_agg_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Pl
     .unwrap();
     let perminfo = Node::mk(
         mcx,
-        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1,
+            ..Default::default()
+        },
     )
     .unwrap();
     let mut unpruned = Bitmapset::empty();
@@ -4253,7 +4451,10 @@ fn window_agg_rank_family_and_sum_end_to_end() {
     // (g, a) unsorted on purpose: the Sort below the WindowAgg orders them.
     scanfix::register_table_2col(
         relid,
-        &[&[(2, 5), (1, 10), (3, 7), (1, 20)], &[(2, 5), (1, 10), (2, 5)]],
+        &[
+            &[(2, 5), (1, 10), (3, 7), (1, 20)],
+            &[(2, 5), (1, 10), (2, 5)],
+        ],
     );
     let pstmt = mk_windowagg_pstmt(mcx, relid, true);
     let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
@@ -4359,10 +4560,7 @@ fn window_agg_empty_input_end_to_end() {
 }
 
 // mk_seqscan_pstmt over a 2-col rel with qual `a = 1` (int4eq).
-fn mk_epq_update_subplan_pstmt<'mcx>(
-    mcx: ::mcx::Mcx<'mcx>,
-    relid: u32,
-) -> &'mcx PlannedStmt<'mcx> {
+fn mk_epq_update_subplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx> {
     use ::types_nodes::bitmapset::Bitmapset;
     use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
     use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
@@ -4382,10 +4580,8 @@ fn mk_epq_update_subplan_pstmt<'mcx>(
     tlist.lappend(mcx, tle3).unwrap();
 
     let qual_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
-    let qual_const = Node::mk_const(
-        mcx, INT4OID, -1, 0, 4, Datum::from_i32(1), false, true,
-    )
-    .unwrap();
+    let qual_const =
+        Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
     let args = NodeList::make2(mcx, qual_var, qual_const).unwrap();
     let op = Node::mk(
         mcx,
@@ -4408,7 +4604,11 @@ fn mk_epq_update_subplan_pstmt<'mcx>(
         SeqScan {
             cb_scan_cols: None,
             scan: Scan {
-                plan: Plan { targetlist: tlist, qual, ..Default::default() },
+                plan: Plan {
+                    targetlist: tlist,
+                    qual,
+                    ..Default::default()
+                },
                 scanrelid: 1,
             },
         },
@@ -4430,7 +4630,11 @@ fn mk_epq_update_subplan_pstmt<'mcx>(
     .unwrap();
     let perminfo = Node::mk(
         mcx,
-        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1,
+            ..Default::default()
+        },
     )
     .unwrap();
     let mut unpruned = Bitmapset::empty();
@@ -4509,10 +4713,8 @@ fn eval_plan_qual_recheck_over_seqscan() {
         let mut subs = None;
         ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
         let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
-        let test = estate.exec_init_extra_tuple_slot(
-            Some(desc),
-            ::types_slot::TupleSlotKind::Virtual,
-        );
+        let test =
+            estate.exec_init_extra_tuple_slot(Some(desc), ::types_slot::TupleSlotKind::Virtual);
         subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
 
         // Latest version still matches the qual: proceed with (1, 99).
@@ -4521,14 +4723,22 @@ fn eval_plan_qual_recheck_over_seqscan() {
         let got = got.expect("qual passes; EPQ returns the candidate tuple");
         assert_ne!(got, test, "projection result, not the test slot");
         assert_eq!(epq_slot_vals(estate, got), (1, 99));
-        assert!(estate.slot(test).base().is_empty(), "test slot cleared after EPQ");
-        assert!(!estate.es_epq_active, "flag dropped outside the recheck run");
+        assert!(
+            estate.slot(test).base().is_empty(),
+            "test slot cleared after EPQ"
+        );
+        assert!(
+            !estate.es_epq_active,
+            "flag dropped outside the recheck run"
+        );
 
         // Reset path: latest version no longer matches -> skip.
         epq_store_test_tuple(estate, test, 2, 99);
-        assert!(crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
-            .unwrap()
-            .is_none());
+        assert!(
+            crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+                .unwrap()
+                .is_none()
+        );
 
         // And matches again on a third round.
         epq_store_test_tuple(estate, test, 1, 5);
@@ -4639,7 +4849,10 @@ fn run_multiexpr_case(pstmt: &'static PlannedStmt<'static>, expect: Option<i32>)
                 }
                 None => assert!(base.tts_isnull[0], "empty subplan sets the param to NULL"),
             }
-            assert!(base.tts_isnull[1], "MULTIEXPR SubPlan column is a dummy NULL");
+            assert!(
+                base.tts_isnull[1],
+                "MULTIEXPR SubPlan column is a dummy NULL"
+            );
         }
         assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_none());
         data.planstate = Some(ps);
@@ -4657,8 +4870,11 @@ fn correlated_multiexpr_subplan_fills_set_params() {
 fn correlated_multiexpr_empty_subplan_sets_params_null() {
     install_seams();
     let mcx = leaked_mcx();
-    let qual = Node::mk_list(mcx, NodeList::make1(mcx, mk_bool_const(mcx, false)).unwrap())
-        .unwrap();
+    let qual = Node::mk_list(
+        mcx,
+        NodeList::make1(mcx, mk_bool_const(mcx, false)).unwrap(),
+    )
+    .unwrap();
     run_multiexpr_case(mk_multiexpr_pstmt(mcx, Some(qual)), None);
 }
 
@@ -4738,8 +4954,16 @@ fn mk_correlated_initplan_in_subplan_pstmt<'mcx>(
         },
     )
     .unwrap();
-    let limit_var =
-        Node::mk_var(mcx, ::types_nodes::primnodes::OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let limit_var = Node::mk_var(
+        mcx,
+        ::types_nodes::primnodes::OUTER_VAR,
+        1,
+        INT4OID,
+        -1,
+        0,
+        0,
+    )
+    .unwrap();
     let limit_tle = Node::mk_target_entry(mcx, limit_var, 1, Some("f1"), false).unwrap();
     let mut init_limit = Node::build::<::types_nodes::plannodes::Limit>(mcx).unwrap();
     init_limit.plan.targetlist = NodeList::make1(mcx, limit_tle).unwrap();
@@ -4823,9 +5047,7 @@ fn mk_correlated_initplan_in_subplan_pstmt<'mcx>(
     pstmt.seal_ref()
 }
 
-fn run_two_col_pstmt(
-    pstmt: &'static PlannedStmt<'static>,
-) -> Vec<(i32, Option<i32>)> {
+fn run_two_col_pstmt(pstmt: &'static PlannedStmt<'static>) -> Vec<(i32, Option<i32>)> {
     let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
     let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
         snap_ctx.mcx(),
@@ -4849,17 +5071,18 @@ fn run_two_col_pstmt(
         let mut out = Vec::new();
         while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
             let base = estate.slot_mut(slot_id).base();
-            let second =
-                if base.tts_isnull[1] { None } else { Some(base.tts_values[1].as_i32()) };
+            let second = if base.tts_isnull[1] {
+                None
+            } else {
+                Some(base.tts_values[1].as_i32())
+            };
             out.push((base.tts_values[0].as_i32(), second));
         }
         crate::exec_end_node(ps, estate).unwrap();
         for i in 0..estate.es_subplanstates.len() {
             let cell = estate.es_subplanstates[i];
             // SAFETY: init_plan's arena cell (standard_executor_end's shape).
-            let slot = unsafe {
-                &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr()
-            };
+            let slot = unsafe { &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr() };
             if let Some(mut sub) = slot.take() {
                 crate::exec_end_node(&mut sub, estate).unwrap();
             }
@@ -4948,7 +5171,11 @@ mod rowmode_ab {
                             provariadic: 0,
                             prosupport: 0,
                             prolang: 12,
-                            pronargs: if funcid == F_GENERATE_SERIES_INT4 { 2 } else { 3 },
+                            pronargs: if funcid == F_GENERATE_SERIES_INT4 {
+                                2
+                            } else {
+                                3
+                            },
                             prokind: b'f' as i8,
                             provolatile: b'i' as i8,
                             proparallel: b's' as i8,
@@ -5067,21 +5294,16 @@ mod rowmode_ab {
     /// `SELECT <exprs...>` (no FROM, SRF in tlist): ProjectSet over the
     /// childless Result — exactly the plan shape the planner emits and the
     /// only one increment-1 admits.
-    fn mk_ps_pstmt<'mcx>(
-        mcx: ::mcx::Mcx<'mcx>,
-        exprs: &[Node<'mcx>],
-    ) -> &'mcx PlannedStmt<'mcx> {
+    fn mk_ps_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, exprs: &[Node<'mcx>]) -> &'mcx PlannedStmt<'mcx> {
         let rtle =
-            Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false)
-                .unwrap();
+            Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false).unwrap();
         let mut result = Node::build::<ResultPlan>(mcx).unwrap();
         result.plan.targetlist = NodeList::make1(mcx, rtle).unwrap();
 
         let mut tles: Vec<Node<'mcx>> = Vec::new();
         for (i, e) in exprs.iter().enumerate() {
             tles.push(
-                Node::mk_target_entry(mcx, *e, (i + 1) as i16, Some("?column?"), false)
-                    .unwrap(),
+                Node::mk_target_entry(mcx, *e, (i + 1) as i16, Some("?column?"), false).unwrap(),
             );
         }
         let mut tlist = NodeList::make1(mcx, tles[0]).unwrap();
@@ -5160,7 +5382,10 @@ mod rowmode_ab {
         crate::lanev2::rowmode_set_for_tests(false);
         drop(guard);
         assert_eq!(off, on, "knob OFF vs ON must be identical");
-        assert!(owned_after > owned_before, "ON arm never engaged the row-mode drive");
+        assert!(
+            owned_after > owned_before,
+            "ON arm never engaged the row-mode drive"
+        );
         off
     }
 
@@ -5182,8 +5407,11 @@ mod rowmode_ab {
     fn ab_two_srfs_null_padding() {
         // Different lengths: the exhausted SRF pads with NULLs (C's
         // ExecProjectSRF continuing arm).
-        let (rows, err) =
-            ab(|mcx| mk_ps_pstmt(mcx, &[mk_gs(mcx, 1, 3), mk_gs(mcx, 10, 11)]), 2, None);
+        let (rows, err) = ab(
+            |mcx| mk_ps_pstmt(mcx, &[mk_gs(mcx, 1, 3), mk_gs(mcx, 10, 11)]),
+            2,
+            None,
+        );
         assert_eq!(err, None);
         assert_eq!(
             rows,
@@ -5209,8 +5437,7 @@ mod rowmode_ab {
         let (rows, err) = ab(
             |mcx| {
                 let args =
-                    NodeList::make2(mcx, mk_null_int4_const(mcx), mk_int4_const(mcx, 3))
-                        .unwrap();
+                    NodeList::make2(mcx, mk_null_int4_const(mcx), mk_int4_const(mcx, 3)).unwrap();
                 mk_ps_pstmt(mcx, &[mk_srf(mcx, F_GENERATE_SERIES_INT4, args)])
             },
             1,
@@ -5240,7 +5467,8 @@ mod rowmode_ab {
         );
         assert!(rows.is_empty());
         assert!(
-            err.as_deref().is_some_and(|e| e.contains("step size cannot equal zero")),
+            err.as_deref()
+                .is_some_and(|e| e.contains("step size cannot equal zero")),
             "expected the zero-step SRF error, got {err:?}"
         );
     }
@@ -5252,10 +5480,7 @@ mod rowmode_ab {
         // the stream restarts from 1 — identical in both drives.
         let (rows, err) = ab(|mcx| mk_ps_pstmt(mcx, &[mk_gs(mcx, 1, 3)]), 1, Some(1));
         assert_eq!(err, None);
-        assert_eq!(
-            rows,
-            vec![vec![d(1)], vec![d(1)], vec![d(2)], vec![d(3)]]
-        );
+        assert_eq!(rows, vec![vec![d(1)], vec![d(1)], vec![d(2)], vec![d(3)]]);
     }
 
     #[test]
@@ -5274,7 +5499,10 @@ mod rowmode_ab {
                     .unwrap()
                     .unwrap();
                 let slot = exec_proc_node(&mut ps, &mut data.estate).unwrap().unwrap();
-                assert_eq!(data.estate.slot(slot).base().tts_values[0], Datum::from_i32(1));
+                assert_eq!(
+                    data.estate.slot(slot).base().tts_values[0],
+                    Datum::from_i32(1)
+                );
                 // Walk away mid-expansion (pending_srf_tuples = true).
             });
         }
@@ -5302,16 +5530,21 @@ mod rowmode_ab {
                     .unwrap()
                     .unwrap();
                 let slot_id = exec_proc_node(&mut ps, &mut data.estate).unwrap().unwrap();
-                assert_eq!(data.estate.slot(slot_id).base().tts_values[0], Datum::from_i32(1));
+                assert_eq!(
+                    data.estate.slot(slot_id).base().tts_values[0],
+                    Datum::from_i32(1)
+                );
                 assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_none());
                 assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_none());
                 exec_re_scan(&mut ps, &mut data.estate).unwrap();
                 assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_some());
             });
             // One-time filter false: zero rows, stays drained.
-            let qual =
-                Node::mk_list(mcx, NodeList::make1(mcx, mk_bool_const(mcx, false)).unwrap())
-                    .unwrap();
+            let qual = Node::mk_list(
+                mcx,
+                NodeList::make1(mcx, mk_bool_const(mcx, false)).unwrap(),
+            )
+            .unwrap();
             let pstmt = mk_select1_pstmt(mcx, Some(qual));
             with_exec_data(pstmt, |data, pstmt| {
                 let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
@@ -5321,9 +5554,8 @@ mod rowmode_ab {
                 assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_none());
             });
             // One-time filter true: exactly one row.
-            let qual =
-                Node::mk_list(mcx, NodeList::make1(mcx, mk_bool_const(mcx, true)).unwrap())
-                    .unwrap();
+            let qual = Node::mk_list(mcx, NodeList::make1(mcx, mk_bool_const(mcx, true)).unwrap())
+                .unwrap();
             let pstmt = mk_select1_pstmt(mcx, Some(qual));
             with_exec_data(pstmt, |data, pstmt| {
                 let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
@@ -5337,7 +5569,6 @@ mod rowmode_ab {
         drop(guard);
     }
 }
-
 
 // =============================================================================
 // WindowAgg lane A/B corpus (lanev2/windows.rs, PGRUST_LANE_V2_WINDOWS):
@@ -5389,13 +5620,12 @@ mod windows_ab {
     /// additionally demands the ON arm drove the lane (the sticky drive) —
     /// refusal shapes pass `false` and demand it did NOT. Caller holds the
     /// scanfix TEST_LOCK.
-    fn ab(
-        relid: u32,
-        with_order_by: bool,
-        rescan: bool,
-        expect_engaged: bool,
-    ) -> Vec<Vec<WinRow>> {
-        ab_mk(|mcx| mk_windowagg_pstmt(mcx, relid, with_order_by), rescan, expect_engaged)
+    fn ab(relid: u32, with_order_by: bool, rescan: bool, expect_engaged: bool) -> Vec<Vec<WinRow>> {
+        ab_mk(
+            |mcx| mk_windowagg_pstmt(mcx, relid, with_order_by),
+            rescan,
+            expect_engaged,
+        )
     }
 
     fn ab_mk(
@@ -5414,9 +5644,15 @@ mod windows_ab {
         crate::lanev2::windows_set_for_tests(false);
         assert_eq!(off, on, "knob OFF vs ON must be identical");
         if expect_engaged {
-            assert!(owned_after > owned_before, "ON arm never engaged the windows lane");
+            assert!(
+                owned_after > owned_before,
+                "ON arm never engaged the windows lane"
+            );
         } else {
-            assert_eq!(owned_after, owned_before, "refusal shape engaged the windows lane");
+            assert_eq!(
+                owned_after, owned_before,
+                "refusal shape engaged the windows lane"
+            );
         }
         off
     }
@@ -5433,7 +5669,10 @@ mod windows_ab {
         let relid: u32 = 70140;
         scanfix::register_table_2col(
             relid,
-            &[&[(2, 5), (1, 10), (3, 7), (1, 20)], &[(2, 5), (1, 10), (2, 5)]],
+            &[
+                &[(2, 5), (1, 10), (3, 7), (1, 20)],
+                &[(2, 5), (1, 10), (2, 5)],
+            ],
         );
         let runs = ab(relid, true, false, true);
         let want: Vec<WinRow> = vec![
@@ -5507,11 +5746,7 @@ mod windows_ab {
         let relid: u32 = 70144;
         scanfix::register_table_2col(relid, &[&[(3, 1), (1, 2), (2, 3)]]);
         let runs = ab(relid, true, false, true);
-        let want: Vec<WinRow> = vec![
-            (1, 2, 1, 1, 1, 2),
-            (2, 3, 1, 1, 1, 3),
-            (3, 1, 1, 1, 1, 1),
-        ];
+        let want: Vec<WinRow> = vec![(1, 2, 1, 1, 1, 2), (2, 3, 1, 1, 1, 3), (3, 1, 1, 1, 1, 1)];
         assert_eq!(runs, vec![want]);
         scanfix::quiesced();
     }
@@ -5592,8 +5827,7 @@ mod windows_ab {
         }
         let run = |rescan: bool| -> Vec<Vec<AggWinRow>> {
             let pstmt = mk_window_over_agg_pstmt(leaked_mcx(), relid);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -5630,7 +5864,11 @@ mod windows_ab {
             "agg-fed sort shape engaged the windows lane (structural refusal broken)"
         );
         let want: Vec<AggWinRow> = vec![(1, 2, 1, 1), (2, 1, 1, 1), (3, 3, 1, 1)];
-        assert_eq!(off, vec![want.clone(), want], "rescan must replay identically");
+        assert_eq!(
+            off,
+            vec![want.clone(), want],
+            "rescan must replay identically"
+        );
         scanfix::quiesced();
     }
 
@@ -5644,8 +5882,11 @@ mod windows_ab {
         let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let relid: u32 = 70146;
         scanfix::register_table_2col(relid, &[&[(1, 10), (1, 10), (2, 5)]]);
-        let runs =
-            ab_mk(|mcx| mk_windowagg_pstmt_ex(mcx, relid, true, None, false), false, false);
+        let runs = ab_mk(
+            |mcx| mk_windowagg_pstmt_ex(mcx, relid, true, None, false),
+            false,
+            false,
+        );
         let want: Vec<WinRow> = vec![
             (1, 10, 1, 1, 1, 20),
             (1, 10, 2, 1, 1, 20),
@@ -5844,12 +6085,11 @@ mod express_ab {
             'steps: for step in steps {
                 match *step {
                     Step::SetParam(v) => {
-                        estate.es_param_exec_vals[0] =
-                            ::types_portal::params::ParamExecData {
-                                value: v.map_or(Datum::null(), Datum::from_i32),
-                                isnull: v.is_none(),
-                                exec_plan: false,
-                            };
+                        estate.es_param_exec_vals[0] = ::types_portal::params::ParamExecData {
+                            value: v.map_or(Datum::null(), Datum::from_i32),
+                            isnull: v.is_none(),
+                            exec_plan: false,
+                        };
                     }
                     Step::Rescan => exec_re_scan(ps, estate).unwrap(),
                     Step::Drain | Step::PullOne => loop {
@@ -5910,11 +6150,11 @@ mod express_ab {
             let index_oid = relid + 1;
             scanfix::register_indexed_table_2col(relid, index_oid, rows);
             let pstmt = mk_point_pstmt(mcx, relid, index_oid, key);
-            let owned_before = crate::lanev2::EXPRESS_OWNED_FOR_TESTS
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let owned_before =
+                crate::lanev2::EXPRESS_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
             let r = run_point(pstmt, steps);
-            let owned_after = crate::lanev2::EXPRESS_OWNED_FOR_TESTS
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let owned_after =
+                crate::lanev2::EXPRESS_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
             let engaged = owned_after > owned_before;
             match mode {
                 crate::lanev2::EXPRESS_OFF => {
@@ -5929,12 +6169,14 @@ mod express_ab {
         }
         crate::lanev2::express_set_for_tests(crate::lanev2::EXPRESS_OFF);
         assert_eq!(results[0], results[1], "OFF vs EXPRESS must be identical");
-        assert_eq!(results[0], results[2], "OFF vs STRUCTURED must be identical");
+        assert_eq!(
+            results[0], results[2],
+            "OFF vs STRUCTURED must be identical"
+        );
         results.pop().unwrap()
     }
 
-    static NEXT_EXPRESS_OID: std::sync::atomic::AtomicU32 =
-        std::sync::atomic::AtomicU32::new(0);
+    static NEXT_EXPRESS_OID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
     const KV: &[(i32, i32)] = &[(30, 300), (10, 100), (20, 200)];
 
@@ -6030,8 +6272,8 @@ mod express_ab {
             // full EPQ pull can't run here) — express must refuse (None,
             // counter untouched) BEFORE any scan work happens.
             estate.es_epq_active = true;
-            let owned_before = crate::lanev2::EXPRESS_OWNED_FOR_TESTS
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let owned_before =
+                crate::lanev2::EXPRESS_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
             {
                 let crate::procnode::PlanStateNode::IndexScan(is) = &mut *ps else {
                     panic!("point plan did not init an IndexScan node")
@@ -6039,9 +6281,12 @@ mod express_ab {
                 let r = crate::lanev2::try_own_index_scan(is, estate).unwrap();
                 assert!(r.is_none(), "EPQ pull must be refused to the incumbent");
             }
-            let owned_after = crate::lanev2::EXPRESS_OWNED_FOR_TESTS
-                .load(std::sync::atomic::Ordering::Relaxed);
-            assert_eq!(owned_before, owned_after, "EPQ pull must not be express-owned");
+            let owned_after =
+                crate::lanev2::EXPRESS_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                owned_before, owned_after,
+                "EPQ pull must not be express-owned"
+            );
             // The gate is per-pull: dropping the flag re-admits, and the
             // node state is untouched — the same node drains correctly.
             estate.es_epq_active = false;
@@ -6053,9 +6298,12 @@ mod express_ab {
                 vals.push(v.as_i32());
             }
             assert_eq!(vals, vec![200]);
-            let owned_end = crate::lanev2::EXPRESS_OWNED_FOR_TESTS
-                .load(std::sync::atomic::Ordering::Relaxed);
-            assert!(owned_end > owned_after, "post-EPQ pulls must re-engage express");
+            let owned_end =
+                crate::lanev2::EXPRESS_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                owned_end > owned_after,
+                "post-EPQ pulls must re-engage express"
+            );
             crate::exec_end_node(ps, estate).unwrap();
             estate.exec_reset_tuple_table(false);
             estate.exec_close_range_table_relations().unwrap();
@@ -6121,9 +6369,7 @@ mod mergejoin_rowmode_ab {
     ) -> &'mcx PlannedStmt<'mcx> {
         use ::types_nodes::bitmapset::Bitmapset;
         use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
-        use ::types_nodes::plannodes::{
-            Join, Material, MergeJoin, Plan, Scan, SeqScan, Sort,
-        };
+        use ::types_nodes::plannodes::{Join, Material, MergeJoin, Plan, Scan, SeqScan, Sort};
         use ::types_nodes::primnodes::{INNER_VAR, OUTER_VAR};
 
         let scan_tlist = |varno: i32| {
@@ -6142,7 +6388,10 @@ mod mergejoin_rowmode_ab {
                 SeqScan {
                     cb_scan_cols: None,
                     scan: Scan {
-                        plan: Plan { targetlist: scan_tlist(varno), ..Default::default() },
+                        plan: Plan {
+                            targetlist: scan_tlist(varno),
+                            ..Default::default()
+                        },
                         scanrelid,
                     },
                 },
@@ -6187,7 +6436,12 @@ mod mergejoin_rowmode_ab {
         ) {
             &[(OUTER_VAR, 1), (OUTER_VAR, 2)]
         } else {
-            &[(OUTER_VAR, 1), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)]
+            &[
+                (OUTER_VAR, 1),
+                (OUTER_VAR, 2),
+                (INNER_VAR, 1),
+                (INNER_VAR, 2),
+            ]
         };
         let mut join_tlist = NodeList::nil();
         for (i, &(varno, attno)) in tl_cols.iter().enumerate() {
@@ -6255,7 +6509,11 @@ mod mergejoin_rowmode_ab {
         let mk_perm = |relid: u32| {
             Node::mk(
                 mcx,
-                RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+                RTEPermissionInfo {
+                    relid,
+                    requiredPerms: 1 << 1,
+                    ..Default::default()
+                },
             )
             .unwrap()
         };
@@ -6295,11 +6553,11 @@ mod mergejoin_rowmode_ab {
         crate::lanev2::mergejoin_set_for_tests(false);
         let off = drain_wide_rows_nullable(mk(leaked_mcx()), natts, passes);
         crate::lanev2::mergejoin_set_for_tests(true);
-        let owned_before = crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let owned_before =
+            crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
         let on = drain_wide_rows_nullable(mk(leaked_mcx()), natts, passes);
-        let owned_after = crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let owned_after =
+            crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
         crate::lanev2::mergejoin_set_for_tests(false);
         drop(guard);
         assert_eq!(off, on, "knob OFF vs ON must be identical");
@@ -6548,8 +6806,7 @@ mod mergejoin_rowmode_ab {
                 ::types_nodes::JoinType::JOIN_INNER,
                 Inner::Material,
             );
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -6622,8 +6879,11 @@ mod census_tests {
 
         let outer_tle = |mcx| {
             let v = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
-            NodeList::make1(mcx, Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap())
-                .unwrap()
+            NodeList::make1(
+                mcx,
+                Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap(),
+            )
+            .unwrap()
         };
 
         let mut sort = Node::build::<Sort>(mcx).unwrap();
@@ -6641,9 +6901,8 @@ mod census_tests {
         limit.plan.plan_node_id = 0;
         limit.plan.targetlist = outer_tle(mcx);
         limit.plan.lefttree = Some(sort);
-        limit.limitCount = Some(
-            Node::mk_const(mcx, INT8OID, -1, 0, 8, Datum::from_i64(2), false, true).unwrap(),
-        );
+        limit.limitCount =
+            Some(Node::mk_const(mcx, INT8OID, -1, 0, 8, Datum::from_i64(2), false, true).unwrap());
         let tree = limit.seal();
 
         let rte = Node::mk(
@@ -6661,7 +6920,11 @@ mod census_tests {
         .unwrap();
         let perminfo = Node::mk(
             mcx,
-            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+            RTEPermissionInfo {
+                relid,
+                requiredPerms: 1 << 1,
+                ..Default::default()
+            },
         )
         .unwrap();
         let mut unpruned = Bitmapset::empty();
@@ -6704,7 +6967,10 @@ mod census_tests {
                 SeqScan {
                     cb_scan_cols: None,
                     scan: Scan {
-                        plan: Plan { plan_node_id: id, ..Default::default() },
+                        plan: Plan {
+                            plan_node_id: id,
+                            ..Default::default()
+                        },
                         scanrelid: 1,
                     },
                 },
@@ -6747,7 +7013,10 @@ mod census_tests {
                 SeqScan {
                     cb_scan_cols: None,
                     scan: Scan {
-                        plan: Plan { plan_node_id: id, ..Default::default() },
+                        plan: Plan {
+                            plan_node_id: id,
+                            ..Default::default()
+                        },
                         scanrelid: 1,
                     },
                 },
@@ -6792,8 +7061,7 @@ mod census_tests {
         ids.dedup();
         assert_eq!(ids, vec![0, 1, 2], "census ids must be the dense plan ids");
 
-        let snap_ctx: &'static MemoryContext =
-            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
         let snapshot: snapmgr::Snapshot =
             std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                 snap_ctx.mcx(),
@@ -6834,8 +7102,12 @@ mod census_tests {
             let estate = &mut data.estate;
             estate.engine_record(0, ::executils::EngineKind::Spine, "sortfeed", "epq");
             estate.engine_record(0, ::executils::EngineKind::Lane, "aggbuild", "");
-            estate.engine_record(1, ::executils::EngineKind::FusedArm, "aggbuild",
-                "admission-economics-fused-drive");
+            estate.engine_record(
+                1,
+                ::executils::EngineKind::FusedArm,
+                "aggbuild",
+                "admission-economics-fused-drive",
+            );
             let (engine, class, detail) = crate::lanev2::census_attribution_for_tests(estate, 0);
             assert_eq!((engine, class, detail), ("lane", "aggbuild", ""));
             let (engine, class, detail) = crate::lanev2::census_attribution_for_tests(estate, 1);
@@ -6872,10 +7144,7 @@ mod rowmode_tail_ab {
 
     /// Material over a fake-heap seqscan, projecting both columns through
     /// OUTER_VAR — the bare shape the tail hosts as a delegation leaf.
-    fn mk_material_pstmt<'mcx>(
-        mcx: ::mcx::Mcx<'mcx>,
-        relid: u32,
-    ) -> &'mcx PlannedStmt<'mcx> {
+    fn mk_material_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx> {
         use ::types_nodes::bitmapset::Bitmapset;
         use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
         use ::types_nodes::plannodes::{Material, Plan, Scan, SeqScan};
@@ -6896,7 +7165,10 @@ mod rowmode_tail_ab {
             SeqScan {
                 cb_scan_cols: None,
                 scan: Scan {
-                    plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                    plan: Plan {
+                        targetlist: scan_tlist,
+                        ..Default::default()
+                    },
                     scanrelid: 1,
                 },
             },
@@ -6931,7 +7203,11 @@ mod rowmode_tail_ab {
         .unwrap();
         let perm = Node::mk(
             mcx,
-            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+            RTEPermissionInfo {
+                relid,
+                requiredPerms: 1 << 1,
+                ..Default::default()
+            },
         )
         .unwrap();
         let mut unpruned = Bitmapset::empty();
@@ -7025,12 +7301,12 @@ mod rowmode_tail_ab {
         crate::lanev2::mergejoin_set_for_tests(true);
         crate::lanev2::rowmode_set_for_tests(true);
         let mat_before = tail_probe("material");
-        let mj_before = crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let mj_before =
+            crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
         let on = drain_wide_rows_nullable(mk(leaked_mcx()), 4, 2);
         let mat_after = tail_probe("material");
-        let mj_after = crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let mj_after =
+            crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
         crate::lanev2::mergejoin_set_for_tests(false);
         crate::lanev2::rowmode_set_for_tests(false);
         drop(guard);
@@ -7038,7 +7314,10 @@ mod rowmode_tail_ab {
         assert_eq!(off, on, "both-knobs-on must equal the both-off oracle");
         assert_eq!(off, vec![expected.clone(), expected]);
         assert!(mj_after > mj_before, "MergeJoin hosting never engaged");
-        assert!(mat_after > mat_before, "Material tail hosting never engaged under the MJ inner");
+        assert!(
+            mat_after > mat_before,
+            "Material tail hosting never engaged under the MJ inner"
+        );
         scanfix::quiesced();
     }
 }
@@ -7068,16 +7347,14 @@ mod windows_t2_ab {
         FRAMEOPTION_END_OFFSET_FOLLOWING, FRAMEOPTION_END_OFFSET_PRECEDING,
         FRAMEOPTION_END_UNBOUNDED_FOLLOWING, FRAMEOPTION_EXCLUDE_CURRENT_ROW,
         FRAMEOPTION_EXCLUDE_GROUP, FRAMEOPTION_EXCLUDE_TIES, FRAMEOPTION_GROUPS,
-        FRAMEOPTION_NONDEFAULT, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
-        FRAMEOPTION_START_CURRENT_ROW, FRAMEOPTION_START_OFFSET_PRECEDING,
-        FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+        FRAMEOPTION_NONDEFAULT, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS, FRAMEOPTION_START_CURRENT_ROW,
+        FRAMEOPTION_START_OFFSET_PRECEDING, FRAMEOPTION_START_UNBOUNDED_PRECEDING,
     };
 
     /// The shared unit relation: (g, a) registered UNSORTED (the Sort under
     /// the WindowAgg orders by (g, a)). Sorted view:
     /// (1,10) (1,10) (1,20) (1,30) | (2,5) (2,6) | (3,7).
-    const T2_ROWS: &[(i32, i32)] =
-        &[(2, 5), (1, 10), (3, 7), (1, 20), (2, 6), (1, 10), (1, 30)];
+    const T2_ROWS: &[(i32, i32)] = &[(2, 5), (1, 10), (3, 7), (1, 20), (2, 6), (1, 10), (1, 30)];
 
     /// Window-function argument shapes for the plan builder.
     #[derive(Clone, Copy)]
@@ -7152,7 +7429,7 @@ mod windows_t2_ab {
         Null,
         I(i64),
     }
-    use Cell::{I, Null};
+    use Cell::{Null, I};
 
     /// Build WindowAgg(spec) over Sort(g,a) over SeqScan(relid) — the
     /// windows_t2 mirror of `mk_windowagg_pstmt_ex`, generalized to explicit
@@ -7190,7 +7467,10 @@ mod windows_t2_ab {
             SeqScan {
                 cb_scan_cols: None,
                 scan: Scan {
-                    plan: Plan { targetlist: mk_tlist(1), ..Default::default() },
+                    plan: Plan {
+                        targetlist: mk_tlist(1),
+                        ..Default::default()
+                    },
                     scanrelid: 1,
                 },
             },
@@ -7218,9 +7498,7 @@ mod windows_t2_ab {
                 T2Args::None => NodeList::nil(),
                 T2Args::A => NodeList::make1(mcx, a_var()).unwrap(),
                 T2Args::AOff(k) => NodeList::make2(mcx, a_var(), i4(k)).unwrap(),
-                T2Args::AOffDef(k, d) => {
-                    NodeList::make3(mcx, a_var(), i4(k), i4(d)).unwrap()
-                }
+                T2Args::AOffDef(k, d) => NodeList::make3(mcx, a_var(), i4(k), i4(d)).unwrap(),
                 T2Args::N(n) => NodeList::make1(mcx, i4(n)).unwrap(),
             };
             if let Some(k) = f.filter_a_lt {
@@ -7244,8 +7522,7 @@ mod windows_t2_ab {
             tlist
                 .lappend(
                     mcx,
-                    Node::mk_target_entry(mcx, w.seal(), (3 + i) as i16, Some("w"), false)
-                        .unwrap(),
+                    Node::mk_target_entry(mcx, w.seal(), (3 + i) as i16, Some("w"), false).unwrap(),
                 )
                 .unwrap();
         }
@@ -7295,7 +7572,11 @@ mod windows_t2_ab {
         .unwrap();
         let perminfo = Node::mk(
             mcx,
-            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+            RTEPermissionInfo {
+                relid,
+                requiredPerms: 1 << 1,
+                ..Default::default()
+            },
         )
         .unwrap();
         let mut unpruned = Bitmapset::empty();
@@ -7337,7 +7618,10 @@ mod windows_t2_ab {
             SeqScan {
                 cb_scan_cols: None,
                 scan: Scan {
-                    plan: Plan { targetlist: mk_ga(1), ..Default::default() },
+                    plan: Plan {
+                        targetlist: mk_ga(1),
+                        ..Default::default()
+                    },
                     scanrelid: 1,
                 },
             },
@@ -7360,7 +7644,10 @@ mod windows_t2_ab {
         rn.winref = 1;
         let mut bot_tlist = mk_ga(OUTER_VAR);
         bot_tlist
-            .lappend(mcx, Node::mk_target_entry(mcx, rn.seal(), 3, Some("rn"), false).unwrap())
+            .lappend(
+                mcx,
+                Node::mk_target_entry(mcx, rn.seal(), 3, Some("rn"), false).unwrap(),
+            )
             .unwrap();
         let mut bot = Node::build::<WindowAgg>(mcx).unwrap();
         bot.plan.targetlist = bot_tlist;
@@ -7382,9 +7669,11 @@ mod windows_t2_ab {
         sum.wintype = INT8OID;
         sum.winref = 2;
         sum.winagg = true;
-        sum.args =
-            NodeList::make1(mcx, Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap())
-                .unwrap();
+        sum.args = NodeList::make1(
+            mcx,
+            Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap(),
+        )
+        .unwrap();
         let mut top_tlist = mk_ga(OUTER_VAR);
         top_tlist
             .lappend(
@@ -7400,7 +7689,10 @@ mod windows_t2_ab {
             )
             .unwrap();
         top_tlist
-            .lappend(mcx, Node::mk_target_entry(mcx, sum.seal(), 4, Some("s2"), false).unwrap())
+            .lappend(
+                mcx,
+                Node::mk_target_entry(mcx, sum.seal(), 4, Some("s2"), false).unwrap(),
+            )
             .unwrap();
         let mut top = Node::build::<WindowAgg>(mcx).unwrap();
         top.plan.targetlist = top_tlist;
@@ -7427,7 +7719,11 @@ mod windows_t2_ab {
         .unwrap();
         let perminfo = Node::mk(
             mcx,
-            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+            RTEPermissionInfo {
+                relid,
+                requiredPerms: 1 << 1,
+                ..Default::default()
+            },
         )
         .unwrap();
         let mut unpruned = Bitmapset::empty();
@@ -7465,7 +7761,11 @@ mod windows_t2_ab {
                     }
                 });
             }
-            got.push((base.tts_values[0].as_i32(), base.tts_values[1].as_i32(), cells));
+            got.push((
+                base.tts_values[0].as_i32(),
+                base.tts_values[1].as_i32(),
+                cells,
+            ));
         }
         got
     }
@@ -7524,15 +7824,20 @@ mod windows_t2_ab {
         let w1_after = crate::lanev2::WINDOWS_OWNED_FOR_TESTS.load(Relaxed);
         crate::lanev2::windows_t2_set_for_tests(false);
         assert_eq!(off, on, "knob OFF vs ON must be identical");
-        assert!(t2_after > t2_before, "ON arm never engaged the T2 windows lane");
-        assert_eq!(w1_after, w1_before, "T2 arm ticked the W1 probe (W1 knob is OFF)");
+        assert!(
+            t2_after > t2_before,
+            "ON arm never engaged the T2 windows lane"
+        );
+        assert_eq!(
+            w1_after, w1_before,
+            "T2 arm ticked the W1 probe (W1 knob is OFF)"
+        );
         off
     }
 
     /// Sorted-view rows zipped with per-row cells: the shared fixture shape.
     fn want(cells: &[&[Cell]]) -> Vec<(i32, i32, Vec<Cell>)> {
-        let sorted: &[(i32, i32)] =
-            &[(1, 10), (1, 10), (1, 20), (1, 30), (2, 5), (2, 6), (3, 7)];
+        let sorted: &[(i32, i32)] = &[(1, 10), (1, 10), (1, 20), (1, 30), (2, 5), (2, 6), (3, 7)];
         sorted
             .iter()
             .zip(cells.iter())
@@ -7560,7 +7865,15 @@ mod windows_t2_ab {
         spec.start_off_i64 = Some(1);
         spec.end_off_i64 = Some(1);
         let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(20)], &[I(40)], &[I(60)], &[I(50)], &[I(11)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(20)],
+            &[I(40)],
+            &[I(60)],
+            &[I(50)],
+            &[I(11)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -7581,7 +7894,15 @@ mod windows_t2_ab {
                 | FRAMEOPTION_END_UNBOUNDED_FOLLOWING,
         );
         let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(70)], &[I(60)], &[I(50)], &[I(30)], &[I(11)], &[I(6)], &[I(7)]]);
+        let w = want(&[
+            &[I(70)],
+            &[I(60)],
+            &[I(50)],
+            &[I(30)],
+            &[I(11)],
+            &[I(6)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -7605,7 +7926,15 @@ mod windows_t2_ab {
         spec.start_off_i64 = Some(3);
         spec.end_off_i64 = Some(1);
         let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[Null], &[I(10)], &[I(20)], &[I(40)], &[Null], &[I(5)], &[Null]]);
+        let w = want(&[
+            &[Null],
+            &[I(10)],
+            &[I(20)],
+            &[I(40)],
+            &[Null],
+            &[I(5)],
+            &[Null],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -7628,7 +7957,15 @@ mod windows_t2_ab {
         );
         spec.range_off_i32 = Some((2, 2));
         let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(20)], &[I(20)], &[I(20)], &[I(30)], &[I(11)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(20)],
+            &[I(20)],
+            &[I(20)],
+            &[I(30)],
+            &[I(11)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -7651,7 +7988,15 @@ mod windows_t2_ab {
         spec.start_off_i64 = Some(1);
         spec.end_off_i64 = Some(1);
         let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(40)], &[I(40)], &[I(70)], &[I(50)], &[I(11)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(40)],
+            &[I(40)],
+            &[I(70)],
+            &[I(50)],
+            &[I(11)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -7669,7 +8014,15 @@ mod windows_t2_ab {
         spec.start_off_i64 = Some(1);
         spec.end_off_i64 = Some(1);
         let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(10)], &[I(30)], &[I(40)], &[I(20)], &[I(6)], &[I(5)], &[Null]]);
+        let w = want(&[
+            &[I(10)],
+            &[I(30)],
+            &[I(40)],
+            &[I(20)],
+            &[I(6)],
+            &[I(5)],
+            &[Null],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -7692,7 +8045,15 @@ mod windows_t2_ab {
                 | FRAMEOPTION_EXCLUDE_GROUP,
         );
         let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(50)], &[I(50)], &[I(50)], &[I(40)], &[I(6)], &[I(5)], &[Null]]);
+        let w = want(&[
+            &[I(50)],
+            &[I(50)],
+            &[I(50)],
+            &[I(40)],
+            &[I(6)],
+            &[I(5)],
+            &[Null],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -7716,7 +8077,15 @@ mod windows_t2_ab {
                 | FRAMEOPTION_EXCLUDE_TIES,
         );
         let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(10)], &[I(10)], &[I(40)], &[I(70)], &[I(5)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(10)],
+            &[I(10)],
+            &[I(40)],
+            &[I(70)],
+            &[I(5)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -7754,7 +8123,11 @@ mod windows_t2_ab {
                 },
             ],
         };
-        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I32, Ty::I32], false);
+        let runs = ab_t2(
+            |mcx| mk_t2_pstmt(mcx, relid, &spec),
+            &[Ty::I32, Ty::I32],
+            false,
+        );
         let w = want(&[
             &[Null, I(10)],
             &[I(10), I(20)],
@@ -7803,8 +8176,11 @@ mod windows_t2_ab {
                 filter_a_lt: None,
             },
         ];
-        let runs =
-            ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I32, Ty::I32, Ty::I32], false);
+        let runs = ab_t2(
+            |mcx| mk_t2_pstmt(mcx, relid, &spec),
+            &[Ty::I32, Ty::I32, Ty::I32],
+            false,
+        );
         let w = want(&[
             &[I(10), I(10), I(10)],
             &[I(10), I(20), I(10)],
@@ -7844,7 +8220,15 @@ mod windows_t2_ab {
             }],
         };
         let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(20)], &[I(20)], &[I(20)], &[I(20)], &[I(5)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(20)],
+            &[I(20)],
+            &[I(20)],
+            &[I(20)],
+            &[I(5)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -7872,7 +8256,15 @@ mod windows_t2_ab {
             }],
         };
         let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I32], false);
-        let w = want(&[&[I(1)], &[I(1)], &[I(2)], &[I(2)], &[I(1)], &[I(2)], &[I(1)]]);
+        let w = want(&[
+            &[I(1)],
+            &[I(1)],
+            &[I(2)],
+            &[I(2)],
+            &[I(1)],
+            &[I(2)],
+            &[I(1)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -7887,7 +8279,11 @@ mod windows_t2_ab {
         let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let relid: u32 = 70172;
         scanfix::register_table_2col(relid, &[T2_ROWS]);
-        let runs = ab_t2(|mcx| mk_t2_stacked_pstmt(mcx, relid), &[Ty::I64, Ty::I64], false);
+        let runs = ab_t2(
+            |mcx| mk_t2_stacked_pstmt(mcx, relid),
+            &[Ty::I64, Ty::I64],
+            false,
+        );
         let w = want(&[
             &[I(1), I(70)],
             &[I(2), I(70)],
@@ -7948,8 +8344,7 @@ mod windows_t2_ab {
         let relid: u32 = 70175;
         scanfix::register_table_2col(relid, &[T2_ROWS]);
         let run = || {
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -8078,7 +8473,10 @@ mod dml_ab {
             SeqScan {
                 cb_scan_cols: None,
                 scan: Scan {
-                    plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                    plan: Plan {
+                        targetlist: scan_tlist,
+                        ..Default::default()
+                    },
                     scanrelid: 2,
                 },
             },
@@ -8094,8 +8492,7 @@ mod dml_ab {
         mt.nominalRelation = 1;
         mt.resultRelations = ::types_nodes::IntList::make1(mcx, 1).unwrap();
         if on_conflict_nothing {
-            mt.onConflictAction =
-                ::types_nodes::OnConflictAction::ONCONFLICT_NOTHING as u32;
+            mt.onConflictAction = ::types_nodes::OnConflictAction::ONCONFLICT_NOTHING as u32;
         }
 
         let result_rte = Node::mk(
@@ -8164,8 +8561,7 @@ mod dml_ab {
     /// ExecutePlan cadence for a RETURNING-less DML) and return
     /// es_processed. Both knob arms run these identical statements.
     fn run_insert(pstmt: &'static PlannedStmt<'static>) -> u64 {
-        let snap_ctx: &'static MemoryContext =
-            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
         let snapshot: snapmgr::Snapshot =
             std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                 snap_ctx.mcx(),
@@ -8188,8 +8584,7 @@ mod dml_ab {
     fn probes() -> (u64, u64) {
         (
             crate::lanev2::DML_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed),
-            crate::lanev2::DML_SHAPE_REFUSED_FOR_TESTS
-                .load(std::sync::atomic::Ordering::Relaxed),
+            crate::lanev2::DML_SHAPE_REFUSED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed),
         )
     }
 
@@ -8215,7 +8610,10 @@ mod dml_ab {
         let (owned1, refused1) = probes();
         assert_eq!(off, 0);
         assert_eq!(owned1, owned0, "knob OFF must not own");
-        assert_eq!(refused1, refused0, "knob OFF must tick NOTHING (contract §2d)");
+        assert_eq!(
+            refused1, refused0,
+            "knob OFF must tick NOTHING (contract §2d)"
+        );
 
         crate::lanev2::dml_set_for_tests(true);
         let on = run_insert(mk_insert_select_pstmt(leaked_mcx(), target, source, false));
@@ -8223,7 +8621,10 @@ mod dml_ab {
         crate::lanev2::dml_set_for_tests(false);
         assert_eq!(on, off, "knob OFF vs ON must behave identically");
         assert!(owned2 > owned1, "ON arm never engaged the DML drive");
-        assert_eq!(refused2, refused1, "the admitted shape must not tick DmlShape");
+        assert_eq!(
+            refused2, refused1,
+            "the admitted shape must not tick DmlShape"
+        );
 
         drop(guard);
         scanfix::quiesced();
@@ -8296,7 +8697,11 @@ mod scans_t3_ab {
 
     fn mk_gs_expr<'mcx>(mcx: ::mcx::Mcx<'mcx>, lo: i32, hi: i32, step: Option<i32>) -> Node<'mcx> {
         let mut fe = Node::build::<FuncExpr>(mcx).unwrap();
-        fe.funcid = if step.is_some() { F_GENERATE_SERIES_STEP_INT4 } else { F_GENERATE_SERIES_INT4 };
+        fe.funcid = if step.is_some() {
+            F_GENERATE_SERIES_STEP_INT4
+        } else {
+            F_GENERATE_SERIES_INT4
+        };
         fe.funcresulttype = INT4OID;
         fe.funcretset = true;
         let mut args =
@@ -8341,11 +8746,7 @@ mod scans_t3_ab {
         .unwrap()
     }
 
-    fn mk_fscan_pstmt<'mcx>(
-        mcx: ::mcx::Mcx<'mcx>,
-        lo: i32,
-        hi: i32,
-    ) -> &'mcx PlannedStmt<'mcx> {
+    fn mk_fscan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, lo: i32, hi: i32) -> &'mcx PlannedStmt<'mcx> {
         let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
         pstmt.commandType = CmdType::CMD_SELECT;
         pstmt.canSetTag = true;
@@ -8378,10 +8779,7 @@ mod scans_t3_ab {
 
     /// Drain to completion collecting column-1 int4s; `rescan_after` fires
     /// one `exec_re_scan` mid-stream (the delegation-cadence replay probe).
-    fn drain_g(
-        pstmt: &'static PlannedStmt<'static>,
-        rescan_after: Option<usize>,
-    ) -> Vec<i32> {
+    fn drain_g(pstmt: &'static PlannedStmt<'static>, rescan_after: Option<usize>) -> Vec<i32> {
         with_exec_data(pstmt, |data, pstmt| {
             let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
                 .unwrap()
@@ -8396,11 +8794,8 @@ mod scans_t3_ab {
                 match exec_proc_node(&mut ps, &mut data.estate).unwrap() {
                     Some(slot_id) => {
                         let mut isnull = false;
-                        let v = exectuples::slot_getattr(
-                            data.estate.slot_mut(slot_id),
-                            1,
-                            &mut isnull,
-                        );
+                        let v =
+                            exectuples::slot_getattr(data.estate.slot_mut(slot_id), 1, &mut isnull);
                         assert!(!isnull);
                         out.push(v.as_i32());
                     }
@@ -8474,8 +8869,15 @@ mod scans_t3_ab {
         drop(guard);
 
         assert_eq!(off, on, "knob OFF vs ON must be identical");
-        assert_eq!(off, vec![1, 2, 3, 1, 2, 3, 4, 5], "rescan replay from row 3");
-        assert!(t3_after_on > t3_before_on, "ON arm never engaged the T3 source drive");
+        assert_eq!(
+            off,
+            vec![1, 2, 3, 1, 2, 3, 4, 5],
+            "rescan replay from row 3"
+        );
+        assert!(
+            t3_after_on > t3_before_on,
+            "ON arm never engaged the T3 source drive"
+        );
         assert_eq!(
             tail_after_on, tail_before_on,
             "the delegation tail must not tick when the source form owns"
@@ -8510,8 +8912,14 @@ mod scans_t3_ab {
 
         assert_eq!(off, on, "force-off arm must equal the oracle");
         assert_eq!(off, vec![2, 3, 4, 5, 6]);
-        assert_eq!(t3_after, t3_before, "forced-off shape must not source-drive");
-        assert!(tail_after > tail_before, "delegation fallback never engaged");
+        assert_eq!(
+            t3_after, t3_before,
+            "forced-off shape must not source-drive"
+        );
+        assert!(
+            tail_after > tail_before,
+            "delegation fallback never engaged"
+        );
     }
 
     /// inc-final COMPOSITION: Sort over a T3 FunctionScan child. Knob ON,
@@ -8595,11 +9003,7 @@ mod scans_t3_ab {
             let mut out = Vec::new();
             while let Some(slot_id) = exec_proc_node(&mut ps, &mut data.estate).unwrap() {
                 let mut isnull = false;
-                let v = exectuples::slot_getattr(
-                    data.estate.slot_mut(slot_id),
-                    1,
-                    &mut isnull,
-                );
+                let v = exectuples::slot_getattr(data.estate.slot_mut(slot_id), 1, &mut isnull);
                 assert!(!isnull);
                 out.push(v.as_i32());
             }
@@ -8633,16 +9037,14 @@ mod windows_t2b_ab {
         FRAMEOPTION_END_OFFSET_FOLLOWING, FRAMEOPTION_END_OFFSET_PRECEDING,
         FRAMEOPTION_END_UNBOUNDED_FOLLOWING, FRAMEOPTION_EXCLUDE_CURRENT_ROW,
         FRAMEOPTION_EXCLUDE_GROUP, FRAMEOPTION_EXCLUDE_TIES, FRAMEOPTION_GROUPS,
-        FRAMEOPTION_NONDEFAULT, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
-        FRAMEOPTION_START_CURRENT_ROW, FRAMEOPTION_START_OFFSET_PRECEDING,
-        FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+        FRAMEOPTION_NONDEFAULT, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS, FRAMEOPTION_START_CURRENT_ROW,
+        FRAMEOPTION_START_OFFSET_PRECEDING, FRAMEOPTION_START_UNBOUNDED_PRECEDING,
     };
 
     /// The shared unit relation: (g, a) registered UNSORTED (the Sort under
     /// the WindowAgg orders by (g, a)). Sorted view:
     /// (1,10) (1,10) (1,20) (1,30) | (2,5) (2,6) | (3,7).
-    const B_ROWS: &[(i32, i32)] =
-        &[(2, 5), (1, 10), (3, 7), (1, 20), (2, 6), (1, 10), (1, 30)];
+    const B_ROWS: &[(i32, i32)] = &[(2, 5), (1, 10), (3, 7), (1, 20), (2, 6), (1, 10), (1, 30)];
 
     #[derive(Clone, Copy)]
     enum BArgs {
@@ -8712,7 +9114,7 @@ mod windows_t2b_ab {
         Null,
         I(i64),
     }
-    use Cell::{I, Null};
+    use Cell::{Null, I};
 
     /// Build WindowAgg(spec) over Sort(g,a) over SeqScan(relid) — the T2-B
     /// mirror of windows_t2_ab's builder (self-contained per the
@@ -8749,7 +9151,10 @@ mod windows_t2b_ab {
             SeqScan {
                 cb_scan_cols: None,
                 scan: Scan {
-                    plan: Plan { targetlist: mk_tlist(1), ..Default::default() },
+                    plan: Plan {
+                        targetlist: mk_tlist(1),
+                        ..Default::default()
+                    },
                     scanrelid: 1,
                 },
             },
@@ -8777,9 +9182,7 @@ mod windows_t2b_ab {
                 BArgs::NoArgs => NodeList::nil(),
                 BArgs::A => NodeList::make1(mcx, a_var()).unwrap(),
                 BArgs::AOff(k) => NodeList::make2(mcx, a_var(), i4(k)).unwrap(),
-                BArgs::AOffDef(k, d) => {
-                    NodeList::make3(mcx, a_var(), i4(k), i4(d)).unwrap()
-                }
+                BArgs::AOffDef(k, d) => NodeList::make3(mcx, a_var(), i4(k), i4(d)).unwrap(),
                 BArgs::N(n) => NodeList::make1(mcx, i4(n)).unwrap(),
             };
             if let Some(k) = f.filter_a_lt {
@@ -8803,8 +9206,7 @@ mod windows_t2b_ab {
             tlist
                 .lappend(
                     mcx,
-                    Node::mk_target_entry(mcx, w.seal(), (3 + i) as i16, Some("w"), false)
-                        .unwrap(),
+                    Node::mk_target_entry(mcx, w.seal(), (3 + i) as i16, Some("w"), false).unwrap(),
                 )
                 .unwrap();
         }
@@ -8879,7 +9281,11 @@ mod windows_t2b_ab {
         .unwrap();
         let perminfo = Node::mk(
             mcx,
-            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+            RTEPermissionInfo {
+                relid,
+                requiredPerms: 1 << 1,
+                ..Default::default()
+            },
         )
         .unwrap();
         let mut unpruned = Bitmapset::empty();
@@ -8917,7 +9323,11 @@ mod windows_t2b_ab {
                     }
                 });
             }
-            got.push((base.tts_values[0].as_i32(), base.tts_values[1].as_i32(), cells));
+            got.push((
+                base.tts_values[0].as_i32(),
+                base.tts_values[1].as_i32(),
+                cells,
+            ));
         }
         got
     }
@@ -8979,16 +9389,24 @@ mod windows_t2b_ab {
         let w1_after = crate::lanev2::WINDOWS_OWNED_FOR_TESTS.load(Relaxed);
         crate::lanev2::windows_t2b_set_for_tests(false);
         assert_eq!(off, on, "knob OFF vs ON must be identical");
-        assert!(t2b_after > t2b_before, "ON arm never engaged the T2-B framed lane");
-        assert_eq!(t2_after, t2_before, "T2-B arm ticked the T2-A probe (that knob is OFF)");
-        assert_eq!(w1_after, w1_before, "T2-B arm ticked the W1 probe (that knob is OFF)");
+        assert!(
+            t2b_after > t2b_before,
+            "ON arm never engaged the T2-B framed lane"
+        );
+        assert_eq!(
+            t2_after, t2_before,
+            "T2-B arm ticked the T2-A probe (that knob is OFF)"
+        );
+        assert_eq!(
+            w1_after, w1_before,
+            "T2-B arm ticked the W1 probe (that knob is OFF)"
+        );
         off
     }
 
     /// Sorted-view rows zipped with per-row cells: the shared fixture shape.
     fn want(cells: &[&[Cell]]) -> Vec<(i32, i32, Vec<Cell>)> {
-        let sorted: &[(i32, i32)] =
-            &[(1, 10), (1, 10), (1, 20), (1, 30), (2, 5), (2, 6), (3, 7)];
+        let sorted: &[(i32, i32)] = &[(1, 10), (1, 10), (1, 20), (1, 30), (2, 5), (2, 6), (3, 7)];
         sorted
             .iter()
             .zip(cells.iter())
@@ -9016,7 +9434,15 @@ mod windows_t2b_ab {
         spec.start_off_i64 = Some(1);
         spec.end_off_i64 = Some(1);
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(20)], &[I(40)], &[I(60)], &[I(50)], &[I(11)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(20)],
+            &[I(40)],
+            &[I(60)],
+            &[I(50)],
+            &[I(11)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9037,7 +9463,15 @@ mod windows_t2b_ab {
                 | FRAMEOPTION_END_UNBOUNDED_FOLLOWING,
         );
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(70)], &[I(60)], &[I(50)], &[I(30)], &[I(11)], &[I(6)], &[I(7)]]);
+        let w = want(&[
+            &[I(70)],
+            &[I(60)],
+            &[I(50)],
+            &[I(30)],
+            &[I(11)],
+            &[I(6)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9061,7 +9495,15 @@ mod windows_t2b_ab {
         spec.start_off_i64 = Some(3);
         spec.end_off_i64 = Some(1);
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[Null], &[I(10)], &[I(20)], &[I(40)], &[Null], &[I(5)], &[Null]]);
+        let w = want(&[
+            &[Null],
+            &[I(10)],
+            &[I(20)],
+            &[I(40)],
+            &[Null],
+            &[I(5)],
+            &[Null],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9084,7 +9526,15 @@ mod windows_t2b_ab {
         );
         spec.range_off_i32 = Some((2, 2));
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(20)], &[I(20)], &[I(20)], &[I(30)], &[I(11)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(20)],
+            &[I(20)],
+            &[I(20)],
+            &[I(30)],
+            &[I(11)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9108,7 +9558,15 @@ mod windows_t2b_ab {
         spec.start_off_i64 = Some(1);
         spec.end_off_i64 = Some(1);
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(40)], &[I(40)], &[I(70)], &[I(50)], &[I(11)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(40)],
+            &[I(40)],
+            &[I(70)],
+            &[I(50)],
+            &[I(11)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9126,7 +9584,15 @@ mod windows_t2b_ab {
         spec.start_off_i64 = Some(1);
         spec.end_off_i64 = Some(1);
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(10)], &[I(30)], &[I(40)], &[I(20)], &[I(6)], &[I(5)], &[Null]]);
+        let w = want(&[
+            &[I(10)],
+            &[I(30)],
+            &[I(40)],
+            &[I(20)],
+            &[I(6)],
+            &[I(5)],
+            &[Null],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9149,7 +9615,15 @@ mod windows_t2b_ab {
                 | FRAMEOPTION_EXCLUDE_GROUP,
         );
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(50)], &[I(50)], &[I(50)], &[I(40)], &[I(6)], &[I(5)], &[Null]]);
+        let w = want(&[
+            &[I(50)],
+            &[I(50)],
+            &[I(50)],
+            &[I(40)],
+            &[I(6)],
+            &[I(5)],
+            &[Null],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9173,7 +9647,15 @@ mod windows_t2b_ab {
                 | FRAMEOPTION_EXCLUDE_TIES,
         );
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(10)], &[I(10)], &[I(40)], &[I(70)], &[I(5)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(10)],
+            &[I(10)],
+            &[I(40)],
+            &[I(70)],
+            &[I(5)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9213,7 +9695,11 @@ mod windows_t2b_ab {
                 },
             ],
         };
-        let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I32, Ty::I32], false);
+        let runs = ab_t2b(
+            |mcx| mk_t2b_pstmt(mcx, relid, &spec),
+            &[Ty::I32, Ty::I32],
+            false,
+        );
         let w = want(&[
             &[Null, I(10)],
             &[I(10), I(20)],
@@ -9262,8 +9748,11 @@ mod windows_t2b_ab {
                 filter_a_lt: None,
             },
         ];
-        let runs =
-            ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I32, Ty::I32, Ty::I32], false);
+        let runs = ab_t2b(
+            |mcx| mk_t2b_pstmt(mcx, relid, &spec),
+            &[Ty::I32, Ty::I32, Ty::I32],
+            false,
+        );
         let w = want(&[
             &[I(10), I(10), I(10)],
             &[I(10), I(20), I(10)],
@@ -9303,7 +9792,15 @@ mod windows_t2b_ab {
             }],
         };
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(20)], &[I(20)], &[I(20)], &[I(20)], &[I(5)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(20)],
+            &[I(20)],
+            &[I(20)],
+            &[I(20)],
+            &[I(5)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9334,7 +9831,15 @@ mod windows_t2b_ab {
             }],
         };
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I32], false);
-        let w = want(&[&[I(1)], &[I(1)], &[I(2)], &[I(2)], &[I(1)], &[I(2)], &[I(1)]]);
+        let w = want(&[
+            &[I(1)],
+            &[I(1)],
+            &[I(2)],
+            &[I(2)],
+            &[I(1)],
+            &[I(2)],
+            &[I(1)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9360,7 +9865,15 @@ mod windows_t2b_ab {
             fns: SUM_A,
         };
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
-        let w = want(&[&[I(20)], &[I(20)], &[I(40)], &[I(70)], &[I(5)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(20)],
+            &[I(20)],
+            &[I(40)],
+            &[I(70)],
+            &[I(5)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9430,7 +9943,11 @@ mod windows_t2b_ab {
                 filter_a_lt: None,
             },
         ];
-        let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64, Ty::I64], false);
+        let runs = ab_t2b(
+            |mcx| mk_t2b_pstmt(mcx, relid, &spec),
+            &[Ty::I64, Ty::I64],
+            false,
+        );
         let w = want(&[
             &[I(2), I(20)],
             &[I(3), I(40)],
@@ -9479,7 +9996,11 @@ mod windows_t2b_ab {
                 filter_a_lt: None,
             },
         ];
-        let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64, Ty::I64], false);
+        let runs = ab_t2b(
+            |mcx| mk_t2b_pstmt(mcx, relid, &spec),
+            &[Ty::I64, Ty::I64],
+            false,
+        );
         let w = want(&[
             &[I(0), Null],
             &[I(1), I(10)],
@@ -9606,8 +10127,7 @@ mod windows_t2b_ab {
         let run = || {
             scanfix::register_table_2col(relid, &[B_ROWS]);
             let pstmt = mk_t2b_pstmt(leaked_mcx(), relid, &spec);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -9646,7 +10166,10 @@ mod windows_t2b_ab {
         let t2b_after = crate::lanev2::WINDOWS_T2B_OWNED_FOR_TESTS.load(Relaxed);
         crate::lanev2::windows_t2b_set_for_tests(false);
         assert_eq!(off, on, "knob OFF vs ON must be identical");
-        assert!(t2b_after > t2b_before, "ON arm never engaged the T2-B framed lane");
+        assert!(
+            t2b_after > t2b_before,
+            "ON arm never engaged the T2-B framed lane"
+        );
         assert_eq!(off.0, (1, 10, 20), "first drained row");
         assert!(
             off.1.is_empty(),
@@ -9687,7 +10210,15 @@ mod windows_t2b_ab {
             t2b_after, t2b_before,
             "T2-B engaged on a sealed-out qual shape (the seal is broken)"
         );
-        let w = want(&[&[I(20)], &[I(40)], &[I(60)], &[I(50)], &[I(11)], &[I(11)], &[I(7)]]);
+        let w = want(&[
+            &[I(20)],
+            &[I(40)],
+            &[I(60)],
+            &[I(50)],
+            &[I(11)],
+            &[I(11)],
+            &[I(7)],
+        ]);
         assert_eq!(off, vec![w]);
         scanfix::quiesced();
     }
@@ -9710,7 +10241,15 @@ mod windows_t2b_ab {
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
         // One 7-row partition in sort order (a: 10,10,20,30,5,6,7), ROWS
         // BETWEEN 1 PRECEDING AND 1 FOLLOWING.
-        let w = want(&[&[I(20)], &[I(40)], &[I(60)], &[I(55)], &[I(41)], &[I(18)], &[I(13)]]);
+        let w = want(&[
+            &[I(20)],
+            &[I(40)],
+            &[I(60)],
+            &[I(55)],
+            &[I(41)],
+            &[I(18)],
+            &[I(13)],
+        ]);
         assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
@@ -9749,8 +10288,7 @@ mod dml_ab_wave3 {
             let junk = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
             NodeList::make2(
                 mcx,
-                Node::mk_target_entry(mcx, mk_int4_const(mcx, 42), 1, Some("c1"), false)
-                    .unwrap(),
+                Node::mk_target_entry(mcx, mk_int4_const(mcx, 42), 1, Some("c1"), false).unwrap(),
                 Node::mk_target_entry(mcx, junk, 2, Some("ctid"), true).unwrap(),
             )
             .unwrap()
@@ -9767,7 +10305,10 @@ mod dml_ab_wave3 {
             SeqScan {
                 cb_scan_cols: None,
                 scan: Scan {
-                    plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                    plan: Plan {
+                        targetlist: scan_tlist,
+                        ..Default::default()
+                    },
                     scanrelid: 1,
                 },
             },
@@ -9806,7 +10347,11 @@ mod dml_ab_wave3 {
         .unwrap();
         let perm = Node::mk(
             mcx,
-            RTEPermissionInfo { relid: target, requiredPerms: required, ..Default::default() },
+            RTEPermissionInfo {
+                relid: target,
+                requiredPerms: required,
+                ..Default::default()
+            },
         )
         .unwrap();
         let mut unpruned = Bitmapset::empty();
@@ -9840,8 +10385,11 @@ mod dml_ab_wave3 {
                 Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
             )
             .unwrap();
-            tl.lappend(mcx, Node::mk_target_entry(mcx, junk, 3, Some("ctid1"), true).unwrap())
-                .unwrap();
+            tl.lappend(
+                mcx,
+                Node::mk_target_entry(mcx, junk, 3, Some("ctid1"), true).unwrap(),
+            )
+            .unwrap();
             tl
         };
         let scan = Node::mk(
@@ -9849,7 +10397,10 @@ mod dml_ab_wave3 {
             SeqScan {
                 cb_scan_cols: None,
                 scan: Scan {
-                    plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                    plan: Plan {
+                        targetlist: scan_tlist,
+                        ..Default::default()
+                    },
                     scanrelid: 1,
                 },
             },
@@ -9860,7 +10411,12 @@ mod dml_ab_wave3 {
         // inheritance), so no tableoid junk is looked up.
         let rowmark = Node::mk(
             mcx,
-            PlanRowMark { rti: 1, prti: 1, rowmarkId: 1, ..Default::default() },
+            PlanRowMark {
+                rti: 1,
+                prti: 1,
+                rowmarkId: 1,
+                ..Default::default()
+            },
         )
         .unwrap();
         let rowmarks = NodeList::make1(mcx, rowmark).unwrap();
@@ -9910,8 +10466,7 @@ mod dml_ab_wave3 {
     /// these identical statements. The generalized form of dml_ab's
     /// run_insert (operation-parameterized).
     fn run_stmt(pstmt: &'static PlannedStmt<'static>, op: CmdType) -> u64 {
-        let snap_ctx: &'static MemoryContext =
-            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
         let snapshot: snapmgr::Snapshot =
             std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                 snap_ctx.mcx(),
@@ -9934,8 +10489,7 @@ mod dml_ab_wave3 {
     fn probes() -> (u64, u64) {
         (
             crate::lanev2::DML_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed),
-            crate::lanev2::DML_SHAPE_REFUSED_FOR_TESTS
-                .load(std::sync::atomic::Ordering::Relaxed),
+            crate::lanev2::DML_SHAPE_REFUSED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed),
         )
     }
 
@@ -9972,8 +10526,15 @@ mod dml_ab_wave3 {
         let (owned1, refused1) = probes();
         assert_eq!(off, 0);
         assert_eq!(owned1, owned0, "knob OFF must not own");
-        assert_eq!(refused1, refused0, "knob OFF must tick NOTHING (contract §2.2)");
-        assert_eq!(lanefed_probe(), fed0, "knob OFF must not select a lane feed");
+        assert_eq!(
+            refused1, refused0,
+            "knob OFF must tick NOTHING (contract §2.2)"
+        );
+        assert_eq!(
+            lanefed_probe(),
+            fed0,
+            "knob OFF must not select a lane feed"
+        );
 
         crate::lanev2::dml_set_for_tests(true);
         let on = run_stmt(
@@ -9984,8 +10545,14 @@ mod dml_ab_wave3 {
         crate::lanev2::dml_set_for_tests(false);
         assert_eq!(on, off, "knob OFF vs ON must behave identically");
         assert!(owned2 > owned1, "ON arm never engaged the DML drive");
-        assert_eq!(refused2, refused1, "the admitted shape must not tick DmlShape");
-        assert!(lanefed_probe() > fed0, "SeqScan child must take the lane-fed feed");
+        assert_eq!(
+            refused2, refused1,
+            "the admitted shape must not tick DmlShape"
+        );
+        assert!(
+            lanefed_probe() > fed0,
+            "SeqScan child must take the lane-fed feed"
+        );
 
         scanfix::quiesced();
     }
@@ -10077,8 +10644,14 @@ mod dml_ab_wave3 {
         crate::lanev2::dml_set_for_tests(false);
         crate::lanev2::dml_ud_set_for_tests(false);
         assert_eq!(on, off, "knob arms must behave identically");
-        assert!(owned1 > owned0, "UD arm never engaged on the admitted UPDATE");
-        assert_eq!(refused1, refused0, "the admitted UPDATE must not tick DmlShape");
+        assert!(
+            owned1 > owned0,
+            "UD arm never engaged on the admitted UPDATE"
+        );
+        assert_eq!(
+            refused1, refused0,
+            "the admitted UPDATE must not tick DmlShape"
+        );
 
         scanfix::quiesced();
     }
@@ -10111,8 +10684,14 @@ mod dml_ab_wave3 {
         crate::lanev2::dml_set_for_tests(false);
         crate::lanev2::dml_ud_set_for_tests(false);
         assert_eq!(on, off, "knob arms must behave identically");
-        assert!(owned1 > owned0, "UD arm never engaged on the admitted DELETE");
-        assert_eq!(refused1, refused0, "the admitted DELETE must not tick DmlShape");
+        assert!(
+            owned1 > owned0,
+            "UD arm never engaged on the admitted DELETE"
+        );
+        assert_eq!(
+            refused1, refused0,
+            "the admitted DELETE must not tick DmlShape"
+        );
 
         scanfix::quiesced();
     }
@@ -10147,7 +10726,10 @@ mod dml_ab_wave3 {
         let on = run_stmt(mk_lockrows_pstmt(leaked_mcx(), target), CmdType::CMD_SELECT);
         crate::lanev2::dml_set_for_tests(false);
         assert_eq!(on, off, "knob arms must behave identically");
-        assert!(lockrows_probe() > lr0, "ON arm never engaged the LockRows TupleOp");
+        assert!(
+            lockrows_probe() > lr0,
+            "ON arm never engaged the LockRows TupleOp"
+        );
 
         scanfix::quiesced();
     }
@@ -10163,7 +10745,6 @@ mod dml_ab_wave3 {
 // which honor the 76xxx band reserved for them by the B1 flip commit
 // 6b776d09e), W 81001+, X 82001+ (expected unused).
 // ===========================================================================
-
 
 // --- WS-U wave-5 (EPQ inc-1: seam moves + refuse-all knob) --------------------
 // A/B move-equivalence corpus for the epq.rs seam extraction (wave-5
@@ -10212,10 +10793,8 @@ mod epq_seams_w5 {
             let mut subs = None;
             ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
             let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
-            let test = estate.exec_init_extra_tuple_slot(
-                Some(desc),
-                ::types_slot::TupleSlotKind::Virtual,
-            );
+            let test =
+                estate.exec_init_extra_tuple_slot(Some(desc), ::types_slot::TupleSlotKind::Virtual);
             subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
 
             // Arm A: the public entry (routes through the moved seams).
@@ -10250,13 +10829,18 @@ mod epq_seams_w5 {
             estate.es_epq_active = saved_active;
             subs = estate.es_epq.take();
 
-            assert_eq!(b_vals, a_vals, "seam composition == entry (move equivalence)");
+            assert_eq!(
+                b_vals, a_vals,
+                "seam composition == entry (move equivalence)"
+            );
 
             // Skip verdict identical through the entry as before the move.
             epq_store_test_tuple(estate, test, 2, 99);
-            assert!(crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
-                .unwrap()
-                .is_none());
+            assert!(
+                crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+                    .unwrap()
+                    .is_none()
+            );
 
             crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
             assert!(epq.recheck.is_none());
@@ -10311,7 +10895,11 @@ mod epq_seams_w5 {
             assert_eq!(n1, n0 + 1, "first use makes exactly one slot");
             let second = crate::epq::eval_plan_qual_slot(&mut epq, estate).unwrap();
             assert_eq!(second, first, "idempotent per rti");
-            assert_eq!(estate.es_tupleTable.len(), n1, "second call appends nothing");
+            assert_eq!(
+                estate.es_tupleTable.len(),
+                n1,
+                "second call appends nothing"
+            );
             subs = estate.es_epq.take();
 
             crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
@@ -10348,7 +10936,10 @@ mod epq_seams_w5 {
             mcx,
             SeqScan {
                 cb_scan_cols: None,
-                scan: Scan { plan: Plan::default(), scanrelid: 1 },
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 1,
+                },
             },
         )
         .unwrap();
@@ -10359,13 +10950,21 @@ mod epq_seams_w5 {
         // its lefttree (an unadmitted child would still refuse).
         let uniq = Node::mk(
             mcx,
-            Unique { plan: Plan { lefttree: Some(seq), ..Plan::default() }, ..Default::default() },
+            Unique {
+                plan: Plan {
+                    lefttree: Some(seq),
+                    ..Plan::default()
+                },
+                ..Default::default()
+            },
         )
         .unwrap();
         crate::epq::check_epq_plan(uniq);
         // Negative arm: Gather can never appear in a recheck plan (the
         // planner forbids parallel locking/DML plans) — LOUD refuse.
-        let g = Node::build::<::types_nodes::plannodes::Gather>(mcx).unwrap().seal();
+        let g = Node::build::<::types_nodes::plannodes::Gather>(mcx)
+            .unwrap()
+            .seal();
         crate::epq::check_epq_plan(g);
     }
 
@@ -10410,10 +11009,8 @@ mod epq_seams_w5 {
             let mut subs = None;
             ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
             let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
-            let test = estate.exec_init_extra_tuple_slot(
-                Some(desc),
-                ::types_slot::TupleSlotKind::Virtual,
-            );
+            let test =
+                estate.exec_init_extra_tuple_slot(Some(desc), ::types_slot::TupleSlotKind::Virtual);
             subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
 
             // OFF arm: no admission-walk tick, recheck proceeds Volcano.
@@ -10435,7 +11032,10 @@ mod epq_seams_w5 {
                 .expect("qual passes");
             let on_vals = epq_slot_vals(estate, on);
             crate::lanev2::epq_lane_set_for_tests(false);
-            assert!(probe() > p0, "ON arm never ran the refuse-all admission walk");
+            assert!(
+                probe() > p0,
+                "ON arm never ran the refuse-all admission walk"
+            );
             assert_eq!(on_vals, off_vals, "knob arms must behave identically");
 
             crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
@@ -10472,9 +11072,7 @@ mod epq_seams_w5 {
 mod scans_t3_am_ab {
     use super::*;
     use ::types_nodes::bitmapset::Bitmapset;
-    use ::types_nodes::parsenodes::{
-        RTEKind, RTEPermissionInfo, RangeTblEntry, TableSampleClause,
-    };
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry, TableSampleClause};
     use ::types_nodes::plannodes::{
         NamedTuplestoreScan as NtsPlan, SampleScan as SampleScanPlan,
         TableFuncScan as TableFuncScanPlan, TidRangeScan as TidRangeScanPlan,
@@ -10495,8 +11093,7 @@ mod scans_t3_am_ab {
     const TSM_SYSTEM_HANDLER: u32 = 3314;
 
     fn mk_tid_const(mcx: ::mcx::Mcx<'_>, block: u32, off: u16) -> Node<'_> {
-        let tid: &'static ItemPointerData =
-            Box::leak(Box::new(ItemPointerData::new(block, off)));
+        let tid: &'static ItemPointerData = Box::leak(Box::new(ItemPointerData::new(block, off)));
         Node::mk_const(
             mcx,
             TIDOID,
@@ -10519,8 +11116,7 @@ mod scans_t3_am_ab {
         let mut op = Node::build::<OpExpr>(mcx).unwrap();
         op.opno = opno;
         op.opresulttype = BOOLOID;
-        op.args =
-            NodeList::make2(mcx, mk_ctid_var(mcx), mk_tid_const(mcx, block, off)).unwrap();
+        op.args = NodeList::make2(mcx, mk_ctid_var(mcx), mk_tid_const(mcx, block, off)).unwrap();
         op.seal()
     }
 
@@ -10601,12 +11197,8 @@ mod scans_t3_am_ab {
     /// ExecInitRangeTable → relation open) collecting column-1 int4s;
     /// `rescan_after` fires one mid-stream `exec_re_scan` (the delegation-
     /// cadence replay probe). The seqscan_end_to_end teardown shape.
-    fn drain_rel(
-        pstmt: &'static PlannedStmt<'static>,
-        rescan_after: Option<usize>,
-    ) -> Vec<i32> {
-        let snap_ctx: &'static MemoryContext =
-            Box::leak(Box::new(MemoryContext::new("snap")));
+    fn drain_rel(pstmt: &'static PlannedStmt<'static>, rescan_after: Option<usize>) -> Vec<i32> {
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
         let snapshot: snapmgr::Snapshot =
             std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                 snap_ctx.mcx(),
@@ -10627,11 +11219,7 @@ mod scans_t3_am_ab {
                 match exec_proc_node(ps, estate).unwrap() {
                     Some(slot_id) => {
                         let mut isnull = false;
-                        let v = exectuples::slot_getattr(
-                            estate.slot_mut(slot_id),
-                            1,
-                            &mut isnull,
-                        );
+                        let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
                         assert!(!isnull);
                         out.push(v.as_i32());
                     }
@@ -10669,13 +11257,14 @@ mod scans_t3_am_ab {
                 match exec_proc_node(&mut ps, &mut data.estate).unwrap() {
                     Some(slot_id) => {
                         let mut isnull = false;
-                        let v = exectuples::slot_getattr(
-                            data.estate.slot_mut(slot_id),
-                            1,
-                            &mut isnull,
-                        );
+                        let v =
+                            exectuples::slot_getattr(data.estate.slot_mut(slot_id), 1, &mut isnull);
                         assert!(!isnull);
-                        out.push(if as_i64 { v.as_i64() } else { v.as_i32() as i64 });
+                        out.push(if as_i64 {
+                            v.as_i64()
+                        } else {
+                            v.as_i32() as i64
+                        });
                     }
                     None => break,
                 }
@@ -10716,7 +11305,10 @@ mod scans_t3_am_ab {
 
         assert_eq!(off, on, "knob OFF vs ON must be identical ({class})");
         assert_eq!(off, want, "oracle rows mismatch ({class})");
-        assert!(t3_on1 > t3_on0, "ON arm never engaged the T3 source drive ({class})");
+        assert!(
+            t3_on1 > t3_on0,
+            "ON arm never engaged the T3 source drive ({class})"
+        );
         assert_eq!(
             tail_on1, tail_on0,
             "the delegation tail must not tick when the source form owns ({class})"
@@ -10748,10 +11340,10 @@ mod scans_t3_am_ab {
             plan.tidquals = NodeList::from_slice(
                 mcx,
                 &[
-                    mk_tid_op(mcx, TID_EQ_OP, 1, 2),  // (1,2) = 50
-                    mk_tid_op(mcx, TID_EQ_OP, 0, 1),  // (0,1) = 10
-                    mk_tid_op(mcx, TID_EQ_OP, 0, 3),  // (0,3) = 30
-                    mk_tid_op(mcx, TID_EQ_OP, 7, 1),  // AM-invalid: dropped
+                    mk_tid_op(mcx, TID_EQ_OP, 1, 2), // (1,2) = 50
+                    mk_tid_op(mcx, TID_EQ_OP, 0, 1), // (0,1) = 10
+                    mk_tid_op(mcx, TID_EQ_OP, 0, 3), // (0,3) = 30
+                    mk_tid_op(mcx, TID_EQ_OP, 7, 1), // AM-invalid: dropped
                 ],
             )
             .unwrap();
@@ -10760,7 +11352,10 @@ mod scans_t3_am_ab {
 
         // Rescan after row 1: TidListEval re-runs, replay from the top.
         ab_case("tidscan", &[10, 10, 30, 50], || {
-            drain_rel(mk(), Some(1)).into_iter().map(i64::from).collect()
+            drain_rel(mk(), Some(1))
+                .into_iter()
+                .map(i64::from)
+                .collect()
         });
 
         drop(guard);
@@ -10784,13 +11379,15 @@ mod scans_t3_am_ab {
             let mut plan = Node::build::<TidRangeScanPlan>(mcx).unwrap();
             plan.scan.plan.targetlist = mk_scan_tlist(mcx, INT4OID);
             plan.scan.scanrelid = 1;
-            plan.tidrangequals =
-                NodeList::make1(mcx, mk_tid_op(mcx, TID_LE_OP, 1, 1)).unwrap();
+            plan.tidrangequals = NodeList::make1(mcx, mk_tid_op(mcx, TID_LE_OP, 1, 1)).unwrap();
             mk_rel_pstmt(mcx, relid, plan.seal())
         };
 
         ab_case("tidrangescan", &[10, 20, 10, 20, 30, 40], || {
-            drain_rel(mk(), Some(2)).into_iter().map(i64::from).collect()
+            drain_rel(mk(), Some(2))
+                .into_iter()
+                .map(i64::from)
+                .collect()
         });
 
         drop(guard);
@@ -10823,17 +11420,9 @@ mod scans_t3_am_ab {
                 true,
             )
             .unwrap();
-            let repeatable = Node::mk_const(
-                mcx,
-                FLOAT8OID,
-                -1,
-                0,
-                8,
-                Datum::from_f64(0.0),
-                false,
-                true,
-            )
-            .unwrap();
+            let repeatable =
+                Node::mk_const(mcx, FLOAT8OID, -1, 0, 8, Datum::from_f64(0.0), false, true)
+                    .unwrap();
             let tsc = Node::mk(
                 mcx,
                 TableSampleClause {
@@ -10851,7 +11440,10 @@ mod scans_t3_am_ab {
         };
 
         ab_case("samplescan", &[1, 2, 1, 2, 3, 4, 5], || {
-            drain_rel(mk(), Some(2)).into_iter().map(i64::from).collect()
+            drain_rel(mk(), Some(2))
+                .into_iter()
+                .map(i64::from)
+                .collect()
         });
 
         drop(guard);
@@ -10900,13 +11492,8 @@ mod scans_t3_am_ab {
         let store = ::tuplestore::Tuplestore::begin_heap(false, false, 1024);
         let handle = ::tuplestore::hold::register(store);
         for v in [7, 8, 9] {
-            ::tuplestore::hold::putvalues(
-                handle,
-                &tupdesc,
-                &[Datum::from_i32(v)],
-                &[false],
-            )
-            .unwrap();
+            ::tuplestore::hold::putvalues(handle, &tupdesc, &[Datum::from_i32(v)], &[false])
+                .unwrap();
         }
         let env: &'static mut ::queryenvironment::QueryEnvironment<'static> =
             Box::leak(Box::new(::queryenvironment::create_queryEnv(env_mcx)));
@@ -10982,20 +11569,15 @@ mod scans_t3_am_ab {
             let mut tf = Node::build::<TableFunc>(mcx).unwrap();
             tf.docexpr = Some(mk_text_const(mcx, "<r><e>7</e><e>8</e><e>9</e></r>"));
             tf.rowexpr = Some(mk_text_const(mcx, "/r/e"));
-            tf.colnames =
-                NodeList::make1(mcx, Node::mk_string(mcx, "v").unwrap()).unwrap();
+            tf.colnames = NodeList::make1(mcx, Node::mk_string(mcx, "v").unwrap()).unwrap();
             tf.coltypes = ::types_nodes::list::OidList::make1(mcx, INT8OID).unwrap();
             tf.coltypmods = ::types_nodes::list::IntList::make1(mcx, -1).unwrap();
             tf.colcollations = ::types_nodes::list::OidList::make1(mcx, 0).unwrap();
-            tf.colexprs = ::types_nodes::list::OptNodeList::make1(
-                mcx,
-                Some(mk_text_const(mcx, ".")),
-            )
-            .unwrap();
-            tf.coldefexprs =
-                ::types_nodes::list::OptNodeList::make1(mcx, None).unwrap();
-            tf.colvalexprs =
-                ::types_nodes::list::OptNodeList::make1(mcx, None).unwrap();
+            tf.colexprs =
+                ::types_nodes::list::OptNodeList::make1(mcx, Some(mk_text_const(mcx, ".")))
+                    .unwrap();
+            tf.coldefexprs = ::types_nodes::list::OptNodeList::make1(mcx, None).unwrap();
+            tf.colvalexprs = ::types_nodes::list::OptNodeList::make1(mcx, None).unwrap();
             tf.ordinalitycol = -1;
 
             let mut plan = Node::build::<TableFuncScanPlan>(mcx).unwrap();
@@ -11043,8 +11625,7 @@ mod dml_ab_wave5 {
     /// ExecutePlan cadence) and return es_processed (the dml_ab_wave3
     /// run_stmt shape, module-local per the append-region discipline).
     fn run_stmt(pstmt: &'static PlannedStmt<'static>, op: CmdType) -> u64 {
-        let snap_ctx: &'static MemoryContext =
-            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
         let snapshot: snapmgr::Snapshot =
             std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                 snap_ctx.mcx(),
@@ -11067,8 +11648,7 @@ mod dml_ab_wave5 {
     fn probes() -> (u64, u64) {
         (
             crate::lanev2::DML_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed),
-            crate::lanev2::DML_SHAPE_REFUSED_FOR_TESTS
-                .load(std::sync::atomic::Ordering::Relaxed),
+            crate::lanev2::DML_SHAPE_REFUSED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed),
         )
     }
 
@@ -11087,8 +11667,14 @@ mod dml_ab_wave5 {
         let junk = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
         let scan_tlist = NodeList::make2(
             mcx,
-            Node::mk_target_entry(mcx, Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap(), 1, Some("c1"), false)
-                .unwrap(),
+            Node::mk_target_entry(
+                mcx,
+                Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap(),
+                1,
+                Some("c1"),
+                false,
+            )
+            .unwrap(),
             Node::mk_target_entry(mcx, junk, 2, Some("ctid"), true).unwrap(),
         )
         .unwrap();
@@ -11097,7 +11683,10 @@ mod dml_ab_wave5 {
             SeqScan {
                 cb_scan_cols: None,
                 scan: Scan {
-                    plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                    plan: Plan {
+                        targetlist: scan_tlist,
+                        ..Default::default()
+                    },
                     scanrelid: 1,
                 },
             },
@@ -11183,8 +11772,14 @@ mod dml_ab_wave5 {
         crate::lanev2::dml_set_for_tests(false);
         crate::lanev2::dml_oc_set_for_tests(false);
         assert_eq!(on, off, "knob arms must behave identically");
-        assert!(owned1 > owned0, "OC arm never engaged on the admitted ON CONFLICT shape");
-        assert_eq!(refused1, refused0, "the admitted OC shape must not tick DmlShape");
+        assert!(
+            owned1 > owned0,
+            "OC arm never engaged on the admitted ON CONFLICT shape"
+        );
+        assert_eq!(
+            refused1, refused0,
+            "the admitted OC shape must not tick DmlShape"
+        );
 
         scanfix::quiesced();
     }
@@ -11214,7 +11809,10 @@ mod dml_ab_wave5 {
         crate::lanev2::dml_set_for_tests(false);
         assert_eq!(n, 0);
         assert_eq!(owned1, owned0, "ON CONFLICT must not be owned with _OC off");
-        assert!(refused1 > refused0, "ON CONFLICT at _OC-off must tick DmlShape");
+        assert!(
+            refused1 > refused0,
+            "ON CONFLICT at _OC-off must tick DmlShape"
+        );
 
         scanfix::quiesced();
     }
@@ -11267,7 +11865,10 @@ mod dml_ab_wave5 {
         crate::lanev2::dml_set_for_tests(false);
         crate::lanev2::dml_oc_set_for_tests(false);
         assert_eq!(n, 0);
-        assert_eq!(owned1, owned0, "MERGE must never be owned (trace pin outstanding)");
+        assert_eq!(
+            owned1, owned0,
+            "MERGE must never be owned (trace pin outstanding)"
+        );
         assert!(refused1 > refused0, "MERGE under DML+OC must tick DmlShape");
 
         scanfix::quiesced();
@@ -11337,10 +11938,8 @@ mod epq_capture_w7 {
             let mut subs = None;
             ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
             let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
-            let test = estate.exec_init_extra_tuple_slot(
-                Some(desc),
-                ::types_slot::TupleSlotKind::Virtual,
-            );
+            let test =
+                estate.exec_init_extra_tuple_slot(Some(desc), ::types_slot::TupleSlotKind::Virtual);
             subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
 
             // Knob-OFF oracle first: the byte-identity baseline; neither
@@ -11364,8 +11963,15 @@ mod epq_capture_w7 {
                 .expect("qual passes");
             let on1_vals = epq_slot_vals(estate, on1);
             assert_eq!(walks(), w0 + 1, "first initiation classifies the plan");
-            assert_eq!(ticks(), t0 + 1, "one mappable node refuses via the epq carrier");
-            assert!(epq.lane_verdicts.is_some(), "verdicts memoized on the EpqState");
+            assert_eq!(
+                ticks(),
+                t0 + 1,
+                "one mappable node refuses via the epq carrier"
+            );
+            assert!(
+                epq.lane_verdicts.is_some(),
+                "verdicts memoized on the EpqState"
+            );
 
             // ON arm, initiation 2 (same EpqState = same recheck plan): the
             // WALK does not re-run; the tick re-fires from the memo.
@@ -11375,10 +11981,21 @@ mod epq_capture_w7 {
                 .expect("qual passes");
             let on2_vals = epq_slot_vals(estate, on2);
             crate::lanev2::epq_lane_set_for_tests(false);
-            assert_eq!(walks(), w0 + 1, "ONE classification per recheck plan (memo law)");
-            assert_eq!(ticks(), t0 + 2, "ticks stay per-initiation (wave-5 census semantics)");
+            assert_eq!(
+                walks(),
+                w0 + 1,
+                "ONE classification per recheck plan (memo law)"
+            );
+            assert_eq!(
+                ticks(),
+                t0 + 2,
+                "ticks stay per-initiation (wave-5 census semantics)"
+            );
 
-            assert_eq!(on1_vals, off_vals, "knob arms behave identically (drive stays Volcano)");
+            assert_eq!(
+                on1_vals, off_vals,
+                "knob arms behave identically (drive stays Volcano)"
+            );
             assert_eq!(on2_vals, (1, 5));
 
             crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
@@ -11403,13 +12020,22 @@ mod epq_capture_w7 {
 
         let seq = Node::mk(
             mcx,
-            SeqScan { cb_scan_cols: None, scan: Scan { plan: Plan::default(), scanrelid: 1 } },
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 1,
+                },
+            },
         )
         .unwrap();
         let sort = Node::mk(
             mcx,
             Sort {
-                plan: Plan { lefttree: Some(seq), ..Default::default() },
+                plan: Plan {
+                    lefttree: Some(seq),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )
@@ -11426,7 +12052,13 @@ mod epq_capture_w7 {
             "existing engagement classes, walk order == loud-list order"
         );
 
-        let material = Node::mk(mcx, Material { plan: Plan::default() }).unwrap();
+        let material = Node::mk(
+            mcx,
+            Material {
+                plan: Plan::default(),
+            },
+        )
+        .unwrap();
         assert_eq!(
             crate::lanev2::epq::epq_classify_for_tests(Some(material)),
             vec![("material", EpqNodeVerdict::Short)],
@@ -11436,7 +12068,10 @@ mod epq_capture_w7 {
         let tid = Node::mk(
             mcx,
             TidScan {
-                scan: Scan { plan: Plan::default(), scanrelid: 1 },
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 1,
+                },
                 ..Default::default()
             },
         )
@@ -11487,10 +12122,8 @@ mod epq_capture_w7 {
             let mut subs = None;
             ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
             let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
-            let test = estate.exec_init_extra_tuple_slot(
-                Some(desc),
-                ::types_slot::TupleSlotKind::Virtual,
-            );
+            let test =
+                estate.exec_init_extra_tuple_slot(Some(desc), ::types_slot::TupleSlotKind::Virtual);
             subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
             epq_store_test_tuple(estate, test, 1, 99);
 
@@ -11517,10 +12150,20 @@ mod epq_capture_w7 {
             .expect("constructed: knob ON, active recheck, slot parked");
             assert_eq!(p.granule_total, 1, "ONE granule: the captured row");
             assert_eq!(p.first_batch, 1, "the singleton batch stages");
-            assert_eq!(p.emitted, Some(test), "emit(0) hands out the parked test slot");
+            assert_eq!(
+                p.emitted,
+                Some(test),
+                "emit(0) hands out the parked test slot"
+            );
             assert_eq!(p.second_batch, 0, "drained after the handout");
-            assert!(p.done_latched, "relsubs_done latched at the handout (exactly-once)");
-            assert!(p.reemit_refused, "emit after end_claim = loud PgError, never a panic");
+            assert!(
+                p.done_latched,
+                "relsubs_done latched at the handout (exactly-once)"
+            );
+            assert!(
+                p.reemit_refused,
+                "emit after end_claim = loud PgError, never a panic"
+            );
             assert!(
                 p.empty_claim_refused,
                 "empty claim window (0..0) refuses loudly — only the exact \
@@ -11601,10 +12244,8 @@ mod epq_capture_w7 {
             let mut subs = None;
             ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
             let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
-            let test = estate.exec_init_extra_tuple_slot(
-                Some(desc),
-                ::types_slot::TupleSlotKind::Virtual,
-            );
+            let test =
+                estate.exec_init_extra_tuple_slot(Some(desc), ::types_slot::TupleSlotKind::Virtual);
             subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
             epq_store_test_tuple(estate, test, 1, 99);
             estate.es_epq = subs.take();
@@ -11677,7 +12318,10 @@ mod epq_capture_w7 {
             .expect("constructed: origslot parked");
             assert_eq!(po.first_batch, 1);
             assert_eq!(po.emitted, Some(test), "origslot feeds the captured row");
-            assert!(po.done_latched, "rowmark handout latches done too (C 18 semantics)");
+            assert!(
+                po.done_latched,
+                "rowmark handout latches done too (C 18 semantics)"
+            );
 
             crate::lanev2::epq_lane_set_for_tests(false);
             estate.es_epq_active = false;
@@ -11708,7 +12352,13 @@ mod epq_capture_w7 {
         let mcx = leaked_mcx();
         let seq = Node::mk(
             mcx,
-            SeqScan { cb_scan_cols: None, scan: Scan { plan: Plan::default(), scanrelid: 0 } },
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 0,
+                },
+            },
         )
         .unwrap();
         crate::epq::check_epq_plan(seq);
@@ -11725,13 +12375,22 @@ mod epq_capture_w7 {
         let mcx = leaked_mcx();
         let seq = Node::mk(
             mcx,
-            SeqScan { cb_scan_cols: None, scan: Scan { plan: Plan::default(), scanrelid: 1 } },
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 1,
+                },
+            },
         )
         .unwrap();
         let ok = Node::mk(
             mcx,
             SubqueryScan {
-                scan: Scan { plan: Plan::default(), scanrelid: 1 },
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 1,
+                },
                 subplan: Some(seq),
                 scanstatus: 0,
             },
@@ -11742,11 +12401,16 @@ mod epq_capture_w7 {
         // (ProjectSet itself was admitted by the whitelist-completion
         // wave; Gather stays outside the list permanently — structurally
         // unreachable, the panic is the invariant's assertion).
-        let g = Node::build::<::types_nodes::plannodes::Gather>(mcx).unwrap().seal();
+        let g = Node::build::<::types_nodes::plannodes::Gather>(mcx)
+            .unwrap()
+            .seal();
         let bad = Node::mk(
             mcx,
             SubqueryScan {
-                scan: Scan { plan: Plan::default(), scanrelid: 1 },
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 1,
+                },
                 subplan: Some(g),
                 scanstatus: 0,
             },
@@ -11794,15 +12458,35 @@ mod cursors_wave9 {
 
         // Knob OFF (default posture): nothing installs, any shape.
         crate::lanev2::cursors_set_for_tests(false);
-        assert_eq!(install(true, true, 92001, false, 0), None, "knob-OFF installs nothing");
+        assert_eq!(
+            install(true, true, 92001, false, 0),
+            None,
+            "knob-OFF installs nothing"
+        );
         assert_eq!(install(true, true, 1, false, 0), None);
 
         // Knob ON: exactly the count-limited forward serial SELECT shape.
         crate::lanev2::cursors_set_for_tests(true);
-        assert_eq!(install(true, true, 92001, false, 0), Some(92001), "the §3.1 shape installs");
-        assert_eq!(install(true, true, 0, false, 0), None, "count-0 (FETCH_ALL) never installs");
-        assert_eq!(install(false, true, 92001, false, 0), None, "non-SELECT never installs");
-        assert_eq!(install(true, false, 92001, false, 0), None, "non-forward never installs");
+        assert_eq!(
+            install(true, true, 92001, false, 0),
+            Some(92001),
+            "the §3.1 shape installs"
+        );
+        assert_eq!(
+            install(true, true, 0, false, 0),
+            None,
+            "count-0 (FETCH_ALL) never installs"
+        );
+        assert_eq!(
+            install(false, true, 92001, false, 0),
+            None,
+            "non-SELECT never installs"
+        );
+        assert_eq!(
+            install(true, false, 92001, false, 0),
+            None,
+            "non-forward never installs"
+        );
         assert_eq!(
             install(true, true, 92001, true, 0),
             None,
@@ -11837,7 +12521,10 @@ mod cursors_wave9 {
         // lane-ADMITTED; eligible row-chain fills carry these eflags and
         // refuse per-scan via batch_allowed, rolling up as
         // cursor-plan-refused). The classifier ADMITS these shapes now.
-        assert_eq!(name(true, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD, false), None);
+        assert_eq!(
+            name(true, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD, false),
+            None
+        );
         assert_eq!(name(true, EXEC_FLAG_REWIND, false), None);
         assert_eq!(name(true, EXEC_FLAG_MARK, false), None);
 
@@ -11904,8 +12591,7 @@ mod cursors_wave9 {
             scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
             let pstmt = mk_seqscan_pstmt(mcx, relid);
 
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -11915,8 +12601,7 @@ mod cursors_wave9 {
             let mut rows: Vec<i32> = Vec::new();
             with_exec_data(pstmt, |data, pstmt| {
                 data.estate.es_snapshot = Some(snapshot);
-                let desc =
-                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
                 assert_eq!(
                     data.estate.es_cursor_run_budget, None,
                     "fresh estate carries no budget"
@@ -11993,10 +12678,17 @@ mod cursors_wave9 {
                 estate.exec_reset_tuple_table(false);
                 estate.exec_close_range_table_relations().unwrap();
             });
-            assert_eq!(rows, vec![1, 2, 3, 4, 5], "both drives together read the whole table");
+            assert_eq!(
+                rows,
+                vec![1, 2, 3, 4, 5],
+                "both drives together read the whole table"
+            );
             arm_rows.push(rows);
         }
-        assert_eq!(arm_rows[0], arm_rows[1], "knob arms byte-identical (fail-open law)");
+        assert_eq!(
+            arm_rows[0], arm_rows[1],
+            "knob arms byte-identical (fail-open law)"
+        );
         crate::lanev2::cursors_set_for_tests(false);
         scanfix::quiesced();
     }
@@ -12035,8 +12727,7 @@ mod cursors_wave9 {
                     .unwrap()
                     .expect("staged row emits");
                 let mut isnull = false;
-                let v =
-                    exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
+                let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
                 assert!(!isnull);
                 out.push(v.as_i32());
                 pos += 1;
@@ -12050,8 +12741,7 @@ mod cursors_wave9 {
         for (parked_arm, relid) in [(false, 92003u32), (true, 92004u32)] {
             scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
             let pstmt = mk_seqscan_pstmt(mcx, relid);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -12066,8 +12756,7 @@ mod cursors_wave9 {
 
                 // Stage page 0 and consume one row.
                 {
-                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                    else {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                         panic!("bare seqscan plan");
                     };
                     let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate).unwrap();
@@ -12086,8 +12775,7 @@ mod cursors_wave9 {
                     );
                     estate.es_epq_active = false;
                     {
-                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                        else {
+                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                             unreachable!()
                         };
                         assert_eq!(ss.lane_cursor(), (1, 3), "EPQ arm left state untouched");
@@ -12097,11 +12785,13 @@ mod cursors_wave9 {
                     // SUSPENSION 1 (mid-batch): settle releases the staged
                     // claim's pin — R3 zero-pins-at-settle, asserted by the
                     // fixture's pin census.
-                    assert!(crate::lanev2::cursor_run_park(planstate, estate).unwrap(), "parks");
+                    assert!(
+                        crate::lanev2::cursor_run_park(planstate, estate).unwrap(),
+                        "parks"
+                    );
                     scanfix::quiesced(); // R3: ZERO pins while suspended
                     {
-                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                        else {
+                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                             unreachable!()
                         };
                         assert!(::nodeseqscan::seq_scan_cursor_parked(ss));
@@ -12110,8 +12800,7 @@ mod cursors_wave9 {
                     // RESUME: restage + cursor restore, byte-identical set.
                     crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
                     {
-                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                        else {
+                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                             unreachable!()
                         };
                         assert!(!::nodeseqscan::seq_scan_cursor_parked(ss));
@@ -12121,8 +12810,7 @@ mod cursors_wave9 {
 
                 // Drain the rest of page 0.
                 {
-                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                    else {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                         unreachable!()
                     };
                     emit_rows(ss, estate, 3, &mut rows);
@@ -12134,12 +12822,14 @@ mod cursors_wave9 {
                     // staged batch still holds its pin, so it still parks;
                     // the second cycle also pins the resumed-window
                     // remainder arithmetic).
-                    assert!(crate::lanev2::cursor_run_park(planstate, estate).unwrap(), "re-parks");
+                    assert!(
+                        crate::lanev2::cursor_run_park(planstate, estate).unwrap(),
+                        "re-parks"
+                    );
                     scanfix::quiesced();
                     crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
                     {
-                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                        else {
+                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                             unreachable!()
                         };
                         assert_eq!(ss.lane_cursor(), (3, 3), "boundary cursor restored");
@@ -12149,8 +12839,7 @@ mod cursors_wave9 {
                 // Advance to page 1 and drain it (the walk continues from
                 // the restaged position on both arms).
                 {
-                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                    else {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                         unreachable!()
                     };
                     let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate).unwrap();
@@ -12198,8 +12887,7 @@ mod cursors_wave9 {
 
         scanfix::register_table(99301, &[&[7, 8, 9], &[10, 11]]);
         let pstmt = mk_seqscan_pstmt(mcx, 99301);
-        let snap_ctx: &'static MemoryContext =
-            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
         let snapshot: snapmgr::Snapshot =
             std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                 snap_ctx.mcx(),
@@ -12215,8 +12903,7 @@ mod cursors_wave9 {
             // Stage page 0 and emit one row (the suspended run's last
             // emitted tuple — the slot a join probe above still holds).
             let scan_slot_id = {
-                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                else {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                     panic!("bare seqscan plan");
                 };
                 let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate).unwrap();
@@ -12235,7 +12922,10 @@ mod cursors_wave9 {
             assert_eq!(rows, vec![7]);
 
             // Park. R3: zero pins while suspended.
-            assert!(crate::lanev2::cursor_run_park(planstate, estate).unwrap(), "parks");
+            assert!(
+                crate::lanev2::cursor_run_park(planstate, estate).unwrap(),
+                "parks"
+            );
             scanfix::quiesced();
 
             // THE PIN: the emitted slot survived the settle — non-empty,
@@ -12251,14 +12941,17 @@ mod cursors_wave9 {
                 let mut isnull = false;
                 let v = exectuples::slot_getattr(slot, 1, &mut isnull);
                 assert!(!isnull);
-                assert_eq!(v.as_i32(), 7, "materialized slot serves the emitted row's values");
+                assert_eq!(
+                    v.as_i32(),
+                    7,
+                    "materialized slot serves the emitted row's values"
+                );
             }
 
             // Resume and drain the remainder — byte-identical continuation.
             crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
             {
-                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                else {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                     unreachable!()
                 };
                 assert_eq!(ss.lane_cursor(), (1, 3), "consume cursor restored");
@@ -12269,11 +12962,7 @@ mod cursors_wave9 {
                             .unwrap()
                             .expect("staged row emits");
                         let mut isnull = false;
-                        let v = exectuples::slot_getattr(
-                            estate.slot_mut(slot_id),
-                            1,
-                            &mut isnull,
-                        );
+                        let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
                         assert!(!isnull);
                         rows.push(v.as_i32());
                         pos += 1;
@@ -12428,8 +13117,7 @@ mod spi_inc1_aj_w9 {
         .unwrap();
         execmain_seams::executor_start::call(qd, 0).unwrap();
         let mut dest = DestReceiver::DoNothing;
-        execmain_seams::executor_run::call(qd, ForwardScanDirection, tcount, &mut dest)
-            .unwrap();
+        execmain_seams::executor_run::call(qd, ForwardScanDirection, tcount, &mut dest).unwrap();
         let n = execmain_seams::query_desc_es_processed::call(qd);
         execmain_seams::executor_finish::call(qd).unwrap();
         execmain_seams::executor_end::call(qd).unwrap();
@@ -12449,7 +13137,11 @@ mod spi_inc1_aj_w9 {
         scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
         assert_eq!(run_spi_shape(relid, 2), 2, "tcount=2 must emit exactly 2");
         scanfix::quiesced();
-        assert_eq!(run_spi_shape(relid, 4), 4, "tcount=4 crosses the page boundary");
+        assert_eq!(
+            run_spi_shape(relid, 4),
+            4,
+            "tcount=4 crosses the page boundary"
+        );
         scanfix::quiesced();
     }
 
@@ -12510,9 +13202,7 @@ mod spi_stage_a_aj_w95 {
     ) -> ::types_error::PgResult<()> {
         Ok(())
     }
-    fn spi_printtup_stub(
-        _slot: &mut ::types_slot::SlotData<'_>,
-    ) -> ::types_error::PgResult<bool> {
+    fn spi_printtup_stub(_slot: &mut ::types_slot::SlotData<'_>) -> ::types_error::PgResult<bool> {
         Ok(true)
     }
 
@@ -12535,8 +13225,7 @@ mod spi_stage_a_aj_w95 {
         .unwrap();
         execmain_seams::executor_start::call(qd, 0).unwrap();
         let mut dest = DestReceiver::SpiPrintTup;
-        execmain_seams::executor_run::call(qd, ForwardScanDirection, tcount, &mut dest)
-            .unwrap();
+        execmain_seams::executor_run::call(qd, ForwardScanDirection, tcount, &mut dest).unwrap();
         let n = execmain_seams::query_desc_es_processed::call(qd);
         execmain_seams::executor_finish::call(qd).unwrap();
         execmain_seams::executor_end::call(qd).unwrap();
@@ -12555,15 +13244,27 @@ mod spi_stage_a_aj_w95 {
 
         // Knob OFF (default posture): nothing installs, any shape.
         crate::lanev2::spi_set_for_tests(false);
-        assert_eq!(install(true, true, true, 93050, false, 0), None, "knob-OFF installs nothing");
+        assert_eq!(
+            install(true, true, true, 93050, false, 0),
+            None,
+            "knob-OFF installs nothing"
+        );
         assert_eq!(install(true, true, true, 1, false, 0), None);
 
         // Knob ON: exactly the tcount-limited forward serial SELECT into
         // the SPI receiver.
         crate::lanev2::spi_set_for_tests(true);
         assert_eq!(install(true, true, true, 93050, false, 0), Some(93050));
-        assert_eq!(install(true, true, true, 0, false, 0), None, "tcount-0 never installs");
-        assert_eq!(install(false, true, true, 93050, false, 0), None, "non-SELECT never installs");
+        assert_eq!(
+            install(true, true, true, 0, false, 0),
+            None,
+            "tcount-0 never installs"
+        );
+        assert_eq!(
+            install(false, true, true, 93050, false, 0),
+            None,
+            "non-SELECT never installs"
+        );
         assert_eq!(
             install(true, false, true, 93050, false, 0),
             None,
@@ -12649,13 +13350,29 @@ mod spi_stage_a_aj_w95 {
         // Knob-ON arm: budget installed (tcount-limited SPI-dest SELECT),
         // settle at the count-limited stop; identical counts.
         crate::lanev2::spi_set_for_tests(true);
-        assert_eq!(run_spi_shape_spi_dest(relid, 2), 2, "tcount=2 stops exactly, knob-ON");
+        assert_eq!(
+            run_spi_shape_spi_dest(relid, 2),
+            2,
+            "tcount=2 stops exactly, knob-ON"
+        );
         scanfix::quiesced();
-        assert_eq!(run_spi_shape_spi_dest(relid, 4), 4, "tcount=4 crosses the page boundary");
+        assert_eq!(
+            run_spi_shape_spi_dest(relid, 4),
+            4,
+            "tcount=4 crosses the page boundary"
+        );
         scanfix::quiesced();
-        assert_eq!(run_spi_shape_spi_dest(relid, 0), 5, "tcount=0 completeness (no budget)");
+        assert_eq!(
+            run_spi_shape_spi_dest(relid, 0),
+            5,
+            "tcount=0 completeness (no budget)"
+        );
         scanfix::quiesced();
-        assert_eq!(run_spi_shape_spi_dest(relid, 99), 5, "tcount>rows saturates");
+        assert_eq!(
+            run_spi_shape_spi_dest(relid, 99),
+            5,
+            "tcount>rows saturates"
+        );
         scanfix::quiesced();
 
         crate::lanev2::spi_set_for_tests(false);
@@ -12686,8 +13403,7 @@ mod spi_stage_a_aj_w95 {
         let relid: u32 = 93053; // WS-AJ band
         scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
         let pstmt = mk_seqscan_pstmt(mcx, relid);
-        let snap_ctx: &'static MemoryContext =
-            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
         let snapshot: snapmgr::Snapshot =
             std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                 snap_ctx.mcx(),
@@ -12703,8 +13419,7 @@ mod spi_stage_a_aj_w95 {
             // standalone-pipeline shape a lane-engaged scan holds when a
             // tcount-limited fetch stops).
             {
-                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                else {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                     panic!("bare seqscan plan");
                 };
                 let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate).unwrap();
@@ -12729,8 +13444,7 @@ mod spi_stage_a_aj_w95 {
             );
             scanfix::quiesced(); // R3: ZERO pins while suspended
             {
-                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                else {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                     unreachable!()
                 };
                 assert!(::nodeseqscan::seq_scan_cursor_parked(ss));
@@ -12742,8 +13456,7 @@ mod spi_stage_a_aj_w95 {
             // batch restaged, consume cursor restored.
             crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
             {
-                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                else {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                     unreachable!()
                 };
                 assert!(!::nodeseqscan::seq_scan_cursor_parked(ss));
@@ -12832,8 +13545,7 @@ mod cursors_wave10_cb {
             let relid = 95001u32;
             scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
             let pstmt = mk_seqscan_pstmt(mcx, relid);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -12842,8 +13554,7 @@ mod cursors_wave10_cb {
             let mut rows: Vec<i32> = Vec::new();
             with_exec_data(pstmt, |data, pstmt| {
                 data.estate.es_snapshot = Some(snapshot);
-                let desc =
-                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
                 let (h, mut dest) = mk_store_dest();
                 let ExecData { estate, planstate } = data;
                 let planstate = planstate.as_mut().unwrap();
@@ -12862,17 +13573,27 @@ mod cursors_wave10_cb {
                         crate::lanev2::cursor_fill_step_seqscan_for_tests(ss, &mut dest, estate)
                             .unwrap();
                     assert!(!exhausted, "budget exhaustion pauses, source not done");
-                    assert_eq!(estate.es_processed, 4, "the sink carries the loop accounting");
+                    assert_eq!(
+                        estate.es_processed, 4,
+                        "the sink carries the loop accounting"
+                    );
                     assert_eq!(
                         estate.es_cursor_run_budget,
                         Some(0),
                         "per-accept decrement across the batch boundary (3 + 1)"
                     );
-                    assert_eq!(ss.lane_cursor(), (1, 2), "position node-resident mid-batch-2");
+                    assert_eq!(
+                        ss.lane_cursor(),
+                        (1, 2),
+                        "position node-resident mid-batch-2"
+                    );
                 }
                 // Settle at the run seam's park point (the EXISTING inc-1b
                 // walker — no new machinery): R3 zero pins while suspended.
-                assert!(crate::lanev2::cursor_run_park(planstate, estate).unwrap(), "parks");
+                assert!(
+                    crate::lanev2::cursor_run_park(planstate, estate).unwrap(),
+                    "parks"
+                );
                 scanfix::quiesced();
                 // Resume-reposition.
                 crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
@@ -12914,8 +13635,7 @@ mod cursors_wave10_cb {
             let relid = 95002u32;
             scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
             let pstmt = mk_seqscan_pstmt(mcx, relid);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -12924,8 +13644,7 @@ mod cursors_wave10_cb {
             let mut rows: Vec<i32> = Vec::new();
             with_exec_data(pstmt, |data, pstmt| {
                 data.estate.es_snapshot = Some(snapshot);
-                let desc =
-                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
                 let (h, mut dest) = mk_store_dest();
                 for (count, want) in [(4u64, 4u64), (0, 1)] {
                     data.estate.es_processed = 0;
@@ -12977,8 +13696,7 @@ mod cursors_wave10_cb {
             let relid = 95003u32;
             scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
             let pstmt = mk_seqscan_pstmt(mcx, relid);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -13034,8 +13752,7 @@ mod cursors_wave10_cb {
             crate::lanev2::cursors_set_for_tests(arm_on);
             scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
             let pstmt = mk_seqscan_pstmt(mcx, relid);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -13044,8 +13761,7 @@ mod cursors_wave10_cb {
             let mut rows: Vec<i32> = Vec::new();
             with_exec_data(pstmt, |data, pstmt| {
                 data.estate.es_snapshot = Some(snapshot);
-                let desc =
-                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
                 let (h, mut dest) = mk_store_dest();
                 for (count, want) in [(2u64, 2u64), (0, 3)] {
                     data.estate.es_processed = 0;
@@ -13071,7 +13787,10 @@ mod cursors_wave10_cb {
             assert_eq!(rows, vec![1, 2, 3, 4, 5]);
             arm_rows.push(rows);
         }
-        assert_eq!(arm_rows[0], arm_rows[1], "knob arms byte-identical at the seam");
+        assert_eq!(
+            arm_rows[0], arm_rows[1],
+            "knob arms byte-identical at the seam"
+        );
         crate::lanev2::cursors_set_for_tests(false);
         scanfix::quiesced();
     }
@@ -13092,8 +13811,7 @@ mod cursors_wave10_cb {
             let relid = 95006u32;
             scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
             let pstmt = mk_seqscan_pstmt(mcx, relid);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -13101,8 +13819,7 @@ mod cursors_wave10_cb {
                 ));
             with_exec_data(pstmt, |data, pstmt| {
                 data.estate.es_snapshot = Some(snapshot);
-                let desc =
-                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
                 let (h, mut dest) = mk_store_dest();
                 let ExecData { estate, planstate } = data;
                 let planstate = planstate.as_mut().unwrap();
@@ -13132,8 +13849,7 @@ mod cursors_wave10_cb {
             let relid = 95007u32;
             scanfix::register_table(relid, &[&[1, 2, 3]]);
             let pstmt = mk_seqscan_pstmt(mcx, relid);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -13186,7 +13902,10 @@ mod cursors_wave10_cb {
         crate::lanev2::cursors_set_for_tests(false);
         let before = crate::lanev2::run_seam_backward_evidence_count();
         crate::lanev2::run_seam_backward_evidence();
-        assert_eq!(crate::lanev2::run_seam_backward_evidence_count(), before + 1);
+        assert_eq!(
+            crate::lanev2::run_seam_backward_evidence_count(),
+            before + 1
+        );
         // The arming note is monotonic (never clears).
         crate::lanev2::cursor_store_armed_note();
         assert!(crate::lanev2::cursor_store_ever_armed());
@@ -13249,7 +13968,10 @@ mod cursors_wave10_cb {
                 before + 1,
                 "the bake counter must still tick on every refused attempt"
             );
-            assert_eq!(data.estate.es_processed, 0, "no plan work before the refusal");
+            assert_eq!(
+                data.estate.es_processed, 0,
+                "no plan work before the refusal"
+            );
             tuplestore::hold::end(h);
             let ExecData { estate, planstate } = data;
             crate::exec_end_node(planstate.as_mut().unwrap(), estate).unwrap();
@@ -13331,9 +14053,9 @@ mod cursors_r41 {
     #[test]
     fn cursors_r41_capture_probe_admits_bare_seqscan_only() {
         let mcx = leaked_mcx();
-        assert!(crate::execcurrent::cursor_plan_capture_batch_fill_seam(mk_seqscan_pstmt(
-            mcx, 99201
-        )));
+        assert!(crate::execcurrent::cursor_plan_capture_batch_fill_seam(
+            mk_seqscan_pstmt(mcx, 99201)
+        ));
         assert!(!crate::execcurrent::cursor_plan_capture_batch_fill_seam(
             mk_sort_limit_pstmt(mcx, 99201, true, None, Some(3))
         ));
@@ -13369,8 +14091,7 @@ mod cursors_r41 {
         for (relid, fence_eflags) in [(99202u32, 0), (99203u32, EXEC_FLAG_BACKWARD)] {
             scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
             let pstmt = mk_seqscan_pstmt(mcx, relid);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -13416,8 +14137,7 @@ mod cursors_r41 {
                 );
                 {
                     let planstate = data.planstate.as_mut().unwrap();
-                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
-                    else {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
                         panic!("bare seqscan plan");
                     };
                     if fence_eflags == 0 {
@@ -13482,7 +14202,10 @@ mod cursors_r41 {
             arm_packed[0], expect_packed,
             "sink capture reads the genuine (block, lineoff) page tids"
         );
-        assert_eq!(arm_store[0], arm_store[1], "store parity across fill engines");
+        assert_eq!(
+            arm_store[0], arm_store[1],
+            "store parity across fill engines"
+        );
         assert_eq!(
             arm_packed[0], arm_packed[1],
             "sidecar parity: sink capture == capture row loop (fallback-parity teeth)"
@@ -13597,8 +14320,7 @@ mod cursors_r41 {
         for (hold_pin, relid) in [(true, 99205u32), (false, 99206u32)] {
             scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
             let pstmt = mk_seqscan_pstmt(mcx, relid);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -13607,8 +14329,7 @@ mod cursors_r41 {
             let mut rows: Vec<i32> = Vec::new();
             with_exec_data(pstmt, |data, pstmt| {
                 data.estate.es_snapshot = Some(snapshot);
-                let desc =
-                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
                 let (h, mut dest) = mk_store_dest();
                 let ExecData { estate, planstate } = data;
                 let planstate = planstate.as_mut().unwrap();
@@ -13752,7 +14473,10 @@ mod mergejoin_native_ws_mj1 {
                 SeqScan {
                     cb_scan_cols: None,
                     scan: Scan {
-                        plan: Plan { targetlist: scan_tlist(varno), ..Default::default() },
+                        plan: Plan {
+                            targetlist: scan_tlist(varno),
+                            ..Default::default()
+                        },
                         scanrelid,
                     },
                 },
@@ -13781,8 +14505,14 @@ mod mergejoin_native_ws_mj1 {
             sort.seal()
         };
         let mut join_tlist = NodeList::nil();
-        for (i, &(varno, attno)) in
-            [(OUTER_VAR, 1i16), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)].iter().enumerate()
+        for (i, &(varno, attno)) in [
+            (OUTER_VAR, 1i16),
+            (OUTER_VAR, 2),
+            (INNER_VAR, 1),
+            (INNER_VAR, 2),
+        ]
+        .iter()
+        .enumerate()
         {
             let v = Node::mk_var(mcx, varno, attno, INT4OID, -1, 0, 0).unwrap();
             join_tlist
@@ -13848,7 +14578,11 @@ mod mergejoin_native_ws_mj1 {
         let mk_perm = |relid: u32| {
             Node::mk(
                 mcx,
-                RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+                RTEPermissionInfo {
+                    relid,
+                    requiredPerms: 1 << 1,
+                    ..Default::default()
+                },
             )
             .unwrap()
         };
@@ -13937,8 +14671,16 @@ mod mergejoin_native_ws_mj1 {
         );
         assert_eq!(runs, vec![expected.clone(), expected]);
         // Cadence over the ON arm (2 passes): 2 marks + 1 restore per pass.
-        assert_eq!(marks() - m0, 4, "mark cadence: SKIP_TEST cmp==0 only, 2 key groups x 2 passes");
-        assert_eq!(restores() - r0, 2, "restore cadence: TESTOUTER cmp==0 only, 1 dup outer x 2 passes");
+        assert_eq!(
+            marks() - m0,
+            4,
+            "mark cadence: SKIP_TEST cmp==0 only, 2 key groups x 2 passes"
+        );
+        assert_eq!(
+            restores() - r0,
+            2,
+            "restore cadence: TESTOUTER cmp==0 only, 1 dup outer x 2 passes"
+        );
         scanfix::quiesced();
     }
 
@@ -13964,7 +14706,11 @@ mod mergejoin_native_ws_mj1 {
         );
         assert_eq!(runs, vec![expected.clone(), expected]);
         assert_eq!(marks() - m0, 0, "skip_mark_restore: no ExecMarkPos ever");
-        assert_eq!(restores() - r0, 0, "skip_mark_restore: no ExecRestrPos ever");
+        assert_eq!(
+            restores() - r0,
+            0,
+            "skip_mark_restore: no ExecRestrPos ever"
+        );
         scanfix::quiesced();
     }
 
@@ -13982,14 +14728,20 @@ mod mergejoin_native_ws_mj1 {
         // empty inner
         scanfix::register_table_2col(99105, &[&[(1, 10), (2, 20)]]);
         scanfix::register_table_2col(99106, &[]);
-        let runs =
-            ab_mj_native(move |mcx| mk_mj99_pstmt(mcx, 99105, 99106, false, false), 4, 1);
+        let runs = ab_mj_native(
+            move |mcx| mk_mj99_pstmt(mcx, 99105, 99106, false, false),
+            4,
+            1,
+        );
         assert_eq!(runs, vec![none.clone()]);
         // empty outer
         scanfix::register_table_2col(99107, &[]);
         scanfix::register_table_2col(99108, &[&[(1, 100)]]);
-        let runs =
-            ab_mj_native(move |mcx| mk_mj99_pstmt(mcx, 99107, 99108, false, false), 4, 1);
+        let runs = ab_mj_native(
+            move |mcx| mk_mj99_pstmt(mcx, 99107, 99108, false, false),
+            4,
+            1,
+        );
         assert_eq!(runs, vec![none]);
         scanfix::quiesced();
     }
@@ -14011,15 +14763,27 @@ mod mergejoin_native_ws_mj1 {
         scanfix::register_table_2col(99109, &[&[(1, 10), (2, 20)]]);
         scanfix::register_table_2col(99110, &[&[(2, 200)]]);
         let mk_left = move |mcx| {
-            mk_mergejoin_pstmt(mcx, 99109, 99110, ::types_nodes::JoinType::JOIN_LEFT, Inner::Sort)
+            mk_mergejoin_pstmt(
+                mcx,
+                99109,
+                99110,
+                ::types_nodes::JoinType::JOIN_LEFT,
+                Inner::Sort,
+            )
         };
         crate::lanev2::mergejoin_native_set_for_tests(false);
         let off = drain_wide_rows_nullable(mk_left(leaked_mcx()), 4, 1);
         crate::lanev2::mergejoin_native_set_for_tests(true);
         let (o0, j0) = (owned(), refused(3));
         let on = drain_wide_rows_nullable(mk_left(leaked_mcx()), 4, 1);
-        assert_eq!(off, on, "jointype refusal must fall through byte-identically");
-        assert!(refused(3) > j0, "mergejoin-jointype (join-shape) never ticked");
+        assert_eq!(
+            off, on,
+            "jointype refusal must fall through byte-identically"
+        );
+        assert!(
+            refused(3) > j0,
+            "mergejoin-jointype (join-shape) never ticked"
+        );
         assert_eq!(owned(), o0, "refused shape must not be owned");
 
         // (b) INNER jointype, Material inner.
@@ -14037,8 +14801,14 @@ mod mergejoin_native_ws_mj1 {
         crate::lanev2::mergejoin_native_set_for_tests(true);
         let (o1, f0) = (owned(), refused(4));
         let on = drain_wide_rows_nullable(mk_mat(leaked_mcx()), 4, 1);
-        assert_eq!(off, on, "inner-feed refusal must fall through byte-identically");
-        assert!(refused(4) > f0, "mergejoin-inner-feed (child-not-lane-owned) never ticked");
+        assert_eq!(
+            off, on,
+            "inner-feed refusal must fall through byte-identically"
+        );
+        assert!(
+            refused(4) > f0,
+            "mergejoin-inner-feed (child-not-lane-owned) never ticked"
+        );
         assert_eq!(owned(), o1, "refused shape must not be owned");
 
         crate::lanev2::mergejoin_native_set_for_tests(false);
@@ -14066,8 +14836,7 @@ mod mergejoin_native_ws_mj1 {
         let run_recheck = |native_on: bool| -> Vec<i32> {
             crate::lanev2::mergejoin_native_set_for_tests(native_on);
             let pstmt = mk_mj99_pstmt(leaked_mcx(), 99111, 99112, false, false);
-            let snap_ctx: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
             let snapshot: snapmgr::Snapshot =
                 std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
                     snap_ctx.mcx(),
@@ -14092,10 +14861,8 @@ mod mergejoin_native_ws_mj1 {
                     1,
                 );
                 let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
-                let test = estate.exec_init_extra_tuple_slot(
-                    Some(desc),
-                    ::types_slot::TupleSlotKind::Virtual,
-                );
+                let test = estate
+                    .exec_init_extra_tuple_slot(Some(desc), ::types_slot::TupleSlotKind::Virtual);
                 subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
                 // Substituted outer row (5, 77): keyed to match the inner.
                 {
@@ -14135,8 +14902,15 @@ mod mergejoin_native_ws_mj1 {
         let (o0, e0) = (owned(), refused(0));
         let on = run_recheck(true);
         assert_eq!(on, off, "recheck verdict must be knob-invariant (HARD LAW)");
-        assert!(refused(0) > e0, "epq refusal never ticked from the lane surface");
-        assert_eq!(owned(), o0, "the surface must NEVER own inside a recheck pre-Y3");
+        assert!(
+            refused(0) > e0,
+            "epq refusal never ticked from the lane surface"
+        );
+        assert_eq!(
+            owned(),
+            o0,
+            "the surface must NEVER own inside a recheck pre-Y3"
+        );
 
         crate::lanev2::mergejoin_native_set_for_tests(false);
         drop(guard);
@@ -14182,7 +14956,11 @@ mod mergejoin_native_ws_mj1 {
                 let mut isnull = false;
                 keys.push(exectuples::slot_getattr(estate.slot_mut(slot), 1, &mut isnull).as_i32());
             }
-            assert_eq!(keys, vec![1, 2, 3], "handover must neither drop nor replay rows");
+            assert_eq!(
+                keys,
+                vec![1, 2, 3],
+                "handover must neither drop nor replay rows"
+            );
             crate::exec_end_node(ps, estate).unwrap();
             estate.exec_reset_tuple_table(false);
             estate.exec_close_range_table_relations().unwrap();
@@ -14193,3 +14971,123 @@ mod mergejoin_native_ws_mj1 {
     }
 }
 // --- end WS-MJ1 (LANE-MERGEJOIN inc-1) sub-region ----------------------------
+
+// --- planner/executor-init stack-budget regression (LD7-F1, TGT-F5/F7/F8) ----
+// The 54001 "stack depth limit exceeded" family: exec_init_node's and
+// init_expr_rec's giant dispatcher matches used to give every arm's by-value
+// temporaries a distinct slot in the DISPATCHER frame (measured 380kB /
+// 84kB per recursion level on arm64 dev builds), so a five-level plan or a
+// two-dozen-level expression tripped the C-parity max_stack_depth=2048kB
+// guard on SQL C inits in a few kB. The arms now run under
+// stack_depth_core::with_own_frame; these tests arm the real guard (the
+// unit-test default leaves STACK_BASE unset, guard off) at the shipped
+// 2048kB budget and init trees deep enough that the pre-fix frames blow the
+// budget many times over, in EVERY build profile (no debug_assert reliance).
+
+fn mk_const_tlist(mcx: ::mcx::Mcx<'_>) -> NodeList<'_> {
+    let tle =
+        Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false).unwrap();
+    NodeList::make1(mcx, tle).unwrap()
+}
+
+/// depth nested Material nodes over a `SELECT 1` Result leaf; qual (if any)
+/// goes on the leaf as resconstantqual.
+fn mk_deep_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    depth: usize,
+    resconstantqual: Option<Node<'mcx>>,
+) -> &'mcx PlannedStmt<'mcx> {
+    let mut result = Node::build::<ResultPlan>(mcx).unwrap();
+    result.plan.targetlist = mk_const_tlist(mcx);
+    result.resconstantqual = resconstantqual;
+    let mut child = result.seal();
+    for _ in 0..depth {
+        let mut m = Node::build::<::types_nodes::plannodes::Material>(mcx).unwrap();
+        m.plan.targetlist = mk_const_tlist(mcx);
+        m.plan.lefttree = Some(child);
+        child = m.seal();
+    }
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(child);
+    pstmt.seal_ref()
+}
+
+/// NOT(NOT(...(true))) with `depth` NOT levels.
+fn mk_not_chain(mcx: ::mcx::Mcx<'_>, depth: usize) -> Node<'_> {
+    let mut e = mk_bool_const(mcx, true);
+    for _ in 0..depth {
+        let mut b = Node::build::<::types_nodes::primnodes::BoolExpr>(mcx).unwrap();
+        b.boolop = ::types_nodes::primnodes::BoolExprType::NOT_EXPR;
+        b.args = NodeList::make1(mcx, e).unwrap();
+        e = b.seal();
+    }
+    e
+}
+
+/// Runs `f` on a thread whose stack is big enough that only the ARMED guard
+/// can fail (a genuine overflow would SIGSEGV, not error), with the guard
+/// armed at the shipped default budget from the thread entry frame.
+fn with_armed_stack_guard<F: FnOnce() + Send + 'static>(f: F) {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let old = stack_depth_core::set_stack_base();
+            stack_depth_core::assign_max_stack_depth(2048); // shipped default, kB
+            f();
+            stack_depth_core::restore_stack_base(old);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn start_and_end(pstmt: &'static PlannedStmt<'static>) {
+    let qd = execmain_seams::create_query_desc::call(
+        pstmt,
+        "deep init stack-budget probe",
+        None,
+        None,
+        CommandDest::None,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    // EXPLAIN_ONLY still walks the FULL init recursion (the banked repros
+    // fired at plain EXPLAIN) and lets end run without an executor_run.
+    if let Err(e) = execmain_seams::executor_start::call(qd, ::types_slot::EXEC_FLAG_EXPLAIN_ONLY) {
+        panic!(
+            "executor init blew the C-parity 2048kB stack budget \
+             (per-level dispatcher frames regressed?): {:?}",
+            e
+        );
+    }
+    execmain_seams::executor_end::call(qd).unwrap();
+    execmain_seams::free_query_desc::call(qd);
+}
+
+#[test]
+fn deep_plan_tree_inits_within_c_parity_stack_budget() {
+    install_seams();
+    with_armed_stack_guard(|| {
+        let mcx = leaked_mcx();
+        // 10 plan levels: pre-fix exec_init_node frames (380kB/level) blow
+        // 2048kB at level 6; post-fix per-level cost must keep this green.
+        start_and_end(mk_deep_pstmt(mcx, 10, None));
+    });
+}
+
+#[test]
+fn deep_expression_inits_within_c_parity_stack_budget() {
+    install_seams();
+    with_armed_stack_guard(|| {
+        let mcx = leaked_mcx();
+        // 150 NOT levels on the leaf qual: pre-fix init_expr_rec frames
+        // (84kB/level) blow 2048kB at ~24 levels; C compiles thousands.
+        let qual =
+            Node::mk_list(mcx, NodeList::make1(mcx, mk_not_chain(mcx, 150)).unwrap()).unwrap();
+        start_and_end(mk_deep_pstmt(mcx, 0, Some(qual)));
+    });
+}

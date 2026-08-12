@@ -37,5 +37,8 @@ pub fn assign(st: &mut HstoreSbsState, cur: NullableDatum) -> PgResult<NullableD
     }
     let mcx = res_mcx(&st.resmcx);
     let d = hstore_subs_seams::hstore_subs_assign::call(mcx, cur, st.subscript.value, st.replace)?;
-    Ok(NullableDatum { value: d, isnull: false })
+    Ok(NullableDatum {
+        value: d,
+        isnull: false,
+    })
 }

@@ -533,7 +533,11 @@ fn append_rows(dir: &PathBuf, rows: &str) {
     };
     let _ = std::fs::create_dir_all(dir);
     let path = dir.join(format!("lane-v2-census.{}.tsv", std::process::id()));
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = f.write_all(rows.as_bytes());
     }
 }
@@ -846,8 +850,9 @@ mod tests {
     /// EMPTY until the first flip commit (which must edit them together).
     #[test]
     fn manifest_mirror_in_sync() {
-        const MIRROR: &str =
-            include_str!("../../../../../../crates/backend/executor/execmain/src/lanev2/flip-manifest.tsv");
+        const MIRROR: &str = include_str!(
+            "../../../../../../crates/backend/executor/execmain/src/lanev2/flip-manifest.tsv"
+        );
         let data_rows: Vec<&str> = MIRROR
             .lines()
             .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
@@ -995,9 +1000,8 @@ mod tests {
                 !allowed.contains(&RefuseReason::DmlShape),
                 "test invariant: dml-shape must stay outside every wave-4 row"
             );
-            let raised = std::panic::catch_unwind(|| {
-                assert_covered_check(*class, RefuseReason::DmlShape)
-            });
+            let raised =
+                std::panic::catch_unwind(|| assert_covered_check(*class, RefuseReason::DmlShape));
             let err = raised.expect_err("covered class + unallowed reason must raise");
             let msg = err
                 .downcast_ref::<String>()

@@ -245,8 +245,11 @@ pub fn try_own_project_set<'mcx>(
     // this chokepoint under `estate.engine_capture()` only (the emission-
     // gate law — zero records on any default path; dedup first-wins keeps
     // the per-pull cadence honest).
-    let capture_id =
-        if estate.engine_capture() { Some(ps.ps.plan.plan_node_id) } else { None };
+    let capture_id = if estate.engine_capture() {
+        Some(ps.ps.plan.plan_node_id)
+    } else {
+        None
+    };
     let refuse = |estate: &mut EStateData<'mcx>, r: RefuseReason| {
         stats::tick_refused(ShapeClass::ProjectSet, r);
         if let Some(id) = capture_id {
@@ -294,7 +297,10 @@ pub fn try_own_project_set<'mcx>(
     // (the parent consumed them before pulling again) and doubles as C's
     // continuing-call entry reset; resume_expansion therefore does not reset.
     crate::cfi()?;
-    let ecxt = ps.ps.ps_ExprContext.expect("ProjectSetState without ExprContext");
+    let ecxt = ps
+        .ps
+        .ps_ExprContext
+        .expect("ProjectSetState without ExprContext");
     estate.reset_expr_context(ecxt);
     let (view, outer) = crate::nodeprojectset::lane_project_set_split(ps);
     let crate::procnode::PlanStateNode::Result(rs) = &mut **outer else {
@@ -344,10 +350,7 @@ pub fn merge_join_pull_verdict<'mcx>(
 /// GUC-off pulls): the exact pre-SH-F body with the lane master GUC gate
 /// at its head (it rode merge_join_arm's `enabled()` gate before SH-F).
 #[inline(never)]
-fn mj_verdict_slow<'mcx>(
-    mj: &crate::procnode::MergeJoinNode<'mcx>,
-    estate: &mut EStateData<'mcx>,
-) {
+fn mj_verdict_slow<'mcx>(mj: &crate::procnode::MergeJoinNode<'mcx>, estate: &mut EStateData<'mcx>) {
     if !super::enabled() {
         return;
     }
@@ -379,10 +382,7 @@ fn mj_verdict_slow<'mcx>(
 /// the two holds.
 #[cold]
 #[inline(never)]
-fn mj_gate_refused<'mcx>(
-    mj: &crate::procnode::MergeJoinNode<'mcx>,
-    estate: &mut EStateData<'mcx>,
-) {
+fn mj_gate_refused<'mcx>(mj: &crate::procnode::MergeJoinNode<'mcx>, estate: &mut EStateData<'mcx>) {
     let r = if estate.es_epq_active {
         RefuseReason::Epq
     } else {

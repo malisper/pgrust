@@ -13,9 +13,11 @@ use ::types_tuple::{
 };
 
 use crate::compile::{exec_build_projection_info, exec_init_expr, exec_init_qual};
-use ::types_portal::params::ParamBind;
-use crate::interp::{exec_eval_expr, exec_project, exec_project_returning, exec_qual, EvalSlots, RetSlot, RetSlots};
+use crate::interp::{
+    exec_eval_expr, exec_project, exec_project_returning, exec_qual, EvalSlots, RetSlot, RetSlots,
+};
 use crate::steps::{CmpOp, ExprState, Kernel, SlotSrc, Step};
+use ::types_portal::params::ParamBind;
 
 const INT4OID: u32 = 23;
 const INT8OID: u32 = 20;
@@ -77,7 +79,11 @@ fn install_seams() {
                         typbyval: true,
                         typalign: b'i' as i8,
                         typstorage: b'p' as i8,
-                        typtype: if typid == INT4OID { b'b' as i8 } else { b'd' as i8 },
+                        typtype: if typid == INT4OID {
+                            b'b' as i8
+                        } else {
+                            b'd' as i8
+                        },
                         typisdefined: true,
                         typrelid: 0,
                         typsubscript: 0,
@@ -89,25 +95,35 @@ fn install_seams() {
                 _ => None,
             })
         });
-        syscache_seams::syscache_hash_value_typeoid::set(|typid| Ok(typid.wrapping_mul(0x9e3779b1)));
+        syscache_seams::syscache_hash_value_typeoid::set(
+            |typid| Ok(typid.wrapping_mul(0x9e3779b1)),
+        );
         syscache_seams::lookup_pg_opclass_shape::set(|opclass| {
-            Ok((opclass == INT4_BTREE_OPCLASS).then_some(syscache_seams::PgOpclassShape {
-                opcmethod: ::types_core::BTREE_AM_OID,
-                opcfamily: INT_BTREE_FAM,
-                opcintype: INT4OID,
-                // int4_ops stores no separate key type (pg_opclass: 0).
-                opckeytype: ::types_core::InvalidOid,
-            }))
+            Ok(
+                (opclass == INT4_BTREE_OPCLASS).then_some(syscache_seams::PgOpclassShape {
+                    opcmethod: ::types_core::BTREE_AM_OID,
+                    opcfamily: INT_BTREE_FAM,
+                    opcintype: INT4OID,
+                    // int4_ops stores no separate key type (pg_opclass: 0).
+                    opckeytype: ::types_core::InvalidOid,
+                }),
+            )
         });
         syscache_seams::lookup_pg_amproc::set(|opfamily, _l, _r, procnum| {
-            Ok(if opfamily == INT_BTREE_FAM && procnum == 1 { F_BTINT4CMP } else { 0 })
-        });
-        indexcmds_seams::get_default_opclass::set(|type_id, am_id| {
-            Ok(if type_id == INT4OID && am_id == ::types_core::BTREE_AM_OID {
-                INT4_BTREE_OPCLASS
+            Ok(if opfamily == INT_BTREE_FAM && procnum == 1 {
+                F_BTINT4CMP
             } else {
                 0
             })
+        });
+        indexcmds_seams::get_default_opclass::set(|type_id, am_id| {
+            Ok(
+                if type_id == INT4OID && am_id == ::types_core::BTREE_AM_OID {
+                    INT4_BTREE_OPCLASS
+                } else {
+                    0
+                },
+            )
         });
         install_domain_seams();
         install_json_seams();
@@ -132,15 +148,17 @@ fn install_json_seams() {
         })
     });
     syscache_seams::pg_type_base_shape::set(|typid| {
-        Ok(matches!(typid, INT4OID | BOOLOID | TEXTOID_T | JSONBOID_T).then_some(
-            syscache_seams::PgTypeBaseShape {
-                typtype: b'b' as i8,
-                typbasetype: 0,
-                typtypmod: -1,
-                typelem: 0,
-                typsubscript: 0,
-            },
-        ))
+        Ok(
+            matches!(typid, INT4OID | BOOLOID | TEXTOID_T | JSONBOID_T).then_some(
+                syscache_seams::PgTypeBaseShape {
+                    typtype: b'b' as i8,
+                    typbasetype: 0,
+                    typtypmod: -1,
+                    typelem: 0,
+                    typsubscript: 0,
+                },
+            ),
+        )
     });
     syscache_seams::pg_type_io_shape::set(|typid| {
         let mk = |typinput, typoutput, typlen, typbyval| syscache_seams::PgTypeIoShape {
@@ -199,7 +217,10 @@ fn install_domain_seams() {
         if contypid == DOMAIN_OID {
             let mut cn = ::types_tuple::NameData::default();
             cn.namestrcpy("posint_check");
-            rows.push(typcache_seams::DomainCheckRow { conname: cn, conbin: CONBIN_VALUE_GT_0 });
+            rows.push(typcache_seams::DomainCheckRow {
+                conname: cn,
+                conbin: CONBIN_VALUE_GT_0,
+            });
         }
         Ok(rows)
     });
@@ -224,7 +245,11 @@ fn install_domain_seams() {
     namespace_seams::type_is_visible::set(|typid| Ok(typid == DOMAIN_OID));
     syscache_seams::pg_namespace_nspname::set(|nspid| {
         let mut n = ::types_tuple::NameData::default();
-        n.namestrcpy(if nspid == 2200 { "public" } else { "pg_catalog" });
+        n.namestrcpy(if nspid == 2200 {
+            "public"
+        } else {
+            "pg_catalog"
+        });
         Ok(Some(n))
     });
 }
@@ -391,12 +416,18 @@ fn mk_null_if_expr<'mcx>(
 
 fn qual_state<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> PgBox<'mcx, ExprState<'mcx>> {
     let qual = NodeList::make1(mcx, expr).unwrap();
-    exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap()
+    exec_init_qual(mcx, &qual, ParamBind::NONE)
+        .unwrap()
+        .unwrap()
 }
 
 fn run_qual<'mcx>(mcx: Mcx<'mcx>, state: &mut ExprState<'mcx>, values: &[Option<i32>]) -> bool {
     let mut slot = virtual_slot(mcx, values);
-    let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+    let mut slots = EvalSlots {
+        scan: Some(&mut slot),
+        inner: None,
+        outer: None,
+    };
     exec_qual(Some(state), &mut slots).unwrap()
 }
 
@@ -406,7 +437,11 @@ fn run_qual_heap<'mcx>(
     values: &[Option<i32>],
 ) -> bool {
     let mut slot = heap_slot(mcx, values);
-    let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+    let mut slots = EvalSlots {
+        scan: Some(&mut slot),
+        inner: None,
+        outer: None,
+    };
     exec_qual(Some(state), &mut slots).unwrap()
 }
 
@@ -414,7 +449,9 @@ fn run_qual_heap<'mcx>(
 fn empty_qual_is_true() {
     with_mcx(|mcx| {
         let qual = NodeList::default();
-        assert!(exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().is_none());
+        assert!(exec_init_qual(mcx, &qual, ParamBind::NONE)
+            .unwrap()
+            .is_none());
         let mut slots = EvalSlots::default();
         assert!(exec_qual(None, &mut slots).unwrap());
     });
@@ -423,7 +460,9 @@ fn empty_qual_is_true() {
 #[test]
 fn just_const_expr() {
     with_mcx(|mcx| {
-        let mut state = exec_init_expr(mcx, Some(mk_int4_const(mcx, Some(42))), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(mk_int4_const(mcx, Some(42))), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         assert!(matches!(state.kernel(), Kernel::JustConst { .. }));
         assert_eq!(state.steps().len(), 2);
         let mut slots = EvalSlots::default();
@@ -439,7 +478,10 @@ fn select1_projection_fused_kernel() {
         let tle = Node::mk_target_entry(mcx, mk_int4_const(mcx, Some(1)), 1, None, false).unwrap();
         let tlist = NodeList::make1(mcx, tle).unwrap();
         let mut state = exec_build_projection_info(mcx, &tlist, None, ParamBind::NONE).unwrap();
-        assert!(matches!(state.kernel(), Kernel::JustConstAssign { resultnum: 0, .. }));
+        assert!(matches!(
+            state.kernel(),
+            Kernel::JustConstAssign { resultnum: 0, .. }
+        ));
 
         let mut result =
             exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc_int4(mcx, 1)));
@@ -456,12 +498,20 @@ fn select1_projection_fused_kernel() {
 #[test]
 fn fused_qual_kernel_var_eq_const() {
     with_mcx(|mcx| {
-        let args = NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
-            .unwrap();
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, INT4OID),
+            mk_int4_const(mcx, Some(7)),
+        )
+        .unwrap();
         let mut state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
         assert!(matches!(
             state.kernel(),
-            Kernel::QualScanVarCmpConst { attnum: 0, cmp: CmpOp::Int4Eq, .. }
+            Kernel::QualScanVarCmpConst {
+                attnum: 0,
+                cmp: CmpOp::Int4Eq,
+                ..
+            }
         ));
         assert!(run_qual(mcx, &mut state, &[Some(7)]));
         assert!(!run_qual(mcx, &mut state, &[Some(8)]));
@@ -472,12 +522,19 @@ fn fused_qual_kernel_var_eq_const() {
 #[test]
 fn fused_qual_kernel_commuted_const_lt_var() {
     with_mcx(|mcx| {
-        let args = NodeList::make2(mcx, mk_int4_const(mcx, Some(5)), mk_scan_var(mcx, 1, INT4OID))
-            .unwrap();
+        let args = NodeList::make2(
+            mcx,
+            mk_int4_const(mcx, Some(5)),
+            mk_scan_var(mcx, 1, INT4OID),
+        )
+        .unwrap();
         let mut state = qual_state(mcx, mk_opexpr(mcx, 66, BOOLOID, args));
         assert!(matches!(
             state.kernel(),
-            Kernel::QualScanVarCmpConst { cmp: CmpOp::Int4Gt, .. }
+            Kernel::QualScanVarCmpConst {
+                cmp: CmpOp::Int4Gt,
+                ..
+            }
         ));
         assert!(run_qual(mcx, &mut state, &[Some(6)]));
         assert!(!run_qual(mcx, &mut state, &[Some(5)]));
@@ -489,13 +546,19 @@ fn fused_qual_kernel_commuted_const_lt_var() {
 fn interpreter_path_matches_fused_kernel() {
     with_mcx(|mcx| {
         for vals in [Some(7), Some(8), Some(-7), None] {
-            let args =
-                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
-                    .unwrap();
+            let args = NodeList::make2(
+                mcx,
+                mk_scan_var(mcx, 1, INT4OID),
+                mk_int4_const(mcx, Some(7)),
+            )
+            .unwrap();
             let mut fused = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
-            let args =
-                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
-                    .unwrap();
+            let args = NodeList::make2(
+                mcx,
+                mk_scan_var(mcx, 1, INT4OID),
+                mk_int4_const(mcx, Some(7)),
+            )
+            .unwrap();
             let mut interp = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
             interp.force_program_kernel();
             assert_eq!(
@@ -510,11 +573,19 @@ fn interpreter_path_matches_fused_kernel() {
 #[test]
 fn qual_deforms_heap_tuple_through_slot_lanes() {
     with_mcx(|mcx| {
-        let args = NodeList::make2(mcx, mk_scan_var(mcx, 3, INT4OID), mk_int4_const(mcx, Some(9)))
-            .unwrap();
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 3, INT4OID),
+            mk_int4_const(mcx, Some(9)),
+        )
+        .unwrap();
         let mut state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
         assert!(run_qual_heap(mcx, &mut state, &[Some(1), Some(2), Some(9)]));
-        assert!(!run_qual_heap(mcx, &mut state, &[Some(1), Some(2), Some(8)]));
+        assert!(!run_qual_heap(
+            mcx,
+            &mut state,
+            &[Some(1), Some(2), Some(8)]
+        ));
         assert!(!run_qual_heap(mcx, &mut state, &[Some(1), None, None]));
     });
 }
@@ -526,18 +597,28 @@ fn multi_qual_short_circuits() {
             mcx,
             65,
             BOOLOID,
-            NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(1)))
-                .unwrap(),
+            NodeList::make2(
+                mcx,
+                mk_scan_var(mcx, 1, INT4OID),
+                mk_int4_const(mcx, Some(1)),
+            )
+            .unwrap(),
         );
         let q2 = mk_opexpr(
             mcx,
             147,
             BOOLOID,
-            NodeList::make2(mcx, mk_scan_var(mcx, 2, INT4OID), mk_int4_const(mcx, Some(10)))
-                .unwrap(),
+            NodeList::make2(
+                mcx,
+                mk_scan_var(mcx, 2, INT4OID),
+                mk_int4_const(mcx, Some(10)),
+            )
+            .unwrap(),
         );
         let qual = NodeList::make2(mcx, q1, q2).unwrap();
-        let mut state = exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_qual(mcx, &qual, ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         assert!(matches!(state.kernel(), Kernel::Program));
         assert!(run_qual(mcx, &mut state, &[Some(1), Some(11)]));
         assert!(!run_qual(mcx, &mut state, &[Some(1), Some(10)]));
@@ -549,13 +630,27 @@ fn multi_qual_short_circuits() {
 #[test]
 fn just_func_kernel_const_args() {
     with_mcx(|mcx| {
-        let args =
-            NodeList::make2(mcx, mk_int4_const(mcx, Some(40)), mk_int4_const(mcx, Some(2)))
-                .unwrap();
-        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, args)), ParamBind::NONE)
-            .unwrap()
-            .unwrap();
-        assert!(matches!(state.kernel(), Kernel::JustFunc { nargs: 2, strict: true, .. }));
+        let args = NodeList::make2(
+            mcx,
+            mk_int4_const(mcx, Some(40)),
+            mk_int4_const(mcx, Some(2)),
+        )
+        .unwrap();
+        let mut state = exec_init_expr(
+            mcx,
+            Some(mk_opexpr(mcx, 177, INT4OID, args)),
+            ParamBind::NONE,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            state.kernel(),
+            Kernel::JustFunc {
+                nargs: 2,
+                strict: true,
+                ..
+            }
+        ));
         let mut slots = EvalSlots::default();
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert_eq!(r.value.as_i32(), 42);
@@ -566,13 +661,19 @@ fn just_func_kernel_const_args() {
 #[test]
 fn nullif_equal_args_returns_null() {
     with_mcx(|mcx| {
-        let args =
-            NodeList::make2(mcx, mk_int4_const(mcx, Some(1)), mk_int4_const(mcx, Some(1)))
-                .unwrap();
-        let mut state =
-            exec_init_expr(mcx, Some(mk_null_if_expr(mcx, 65, INT4OID, args)), ParamBind::NONE)
-                .unwrap()
-                .unwrap();
+        let args = NodeList::make2(
+            mcx,
+            mk_int4_const(mcx, Some(1)),
+            mk_int4_const(mcx, Some(1)),
+        )
+        .unwrap();
+        let mut state = exec_init_expr(
+            mcx,
+            Some(mk_null_if_expr(mcx, 65, INT4OID, args)),
+            ParamBind::NONE,
+        )
+        .unwrap()
+        .unwrap();
         assert!(matches!(state.steps()[0], Step::NullIf { .. }));
         let mut slots = EvalSlots::default();
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
@@ -583,13 +684,19 @@ fn nullif_equal_args_returns_null() {
 #[test]
 fn nullif_unequal_args_returns_first() {
     with_mcx(|mcx| {
-        let args =
-            NodeList::make2(mcx, mk_int4_const(mcx, Some(1)), mk_int4_const(mcx, Some(2)))
-                .unwrap();
-        let mut state =
-            exec_init_expr(mcx, Some(mk_null_if_expr(mcx, 65, INT4OID, args)), ParamBind::NONE)
-                .unwrap()
-                .unwrap();
+        let args = NodeList::make2(
+            mcx,
+            mk_int4_const(mcx, Some(1)),
+            mk_int4_const(mcx, Some(2)),
+        )
+        .unwrap();
+        let mut state = exec_init_expr(
+            mcx,
+            Some(mk_null_if_expr(mcx, 65, INT4OID, args)),
+            ParamBind::NONE,
+        )
+        .unwrap()
+        .unwrap();
         let mut slots = EvalSlots::default();
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert!(!r.isnull);
@@ -602,10 +709,13 @@ fn nullif_null_arg_returns_first_unevaluated() {
     with_mcx(|mcx| {
         let args =
             NodeList::make2(mcx, mk_int4_const(mcx, None), mk_int4_const(mcx, Some(2))).unwrap();
-        let mut state =
-            exec_init_expr(mcx, Some(mk_null_if_expr(mcx, 65, INT4OID, args)), ParamBind::NONE)
-                .unwrap()
-                .unwrap();
+        let mut state = exec_init_expr(
+            mcx,
+            Some(mk_null_if_expr(mcx, 65, INT4OID, args)),
+            ParamBind::NONE,
+        )
+        .unwrap()
+        .unwrap();
         let mut slots = EvalSlots::default();
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert!(r.isnull);
@@ -617,9 +727,13 @@ fn just_func_kernel_strict_null_const() {
     with_mcx(|mcx| {
         let args =
             NodeList::make2(mcx, mk_int4_const(mcx, Some(40)), mk_int4_const(mcx, None)).unwrap();
-        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, args)), ParamBind::NONE)
-            .unwrap()
-            .unwrap();
+        let mut state = exec_init_expr(
+            mcx,
+            Some(mk_opexpr(mcx, 177, INT4OID, args)),
+            ParamBind::NONE,
+        )
+        .unwrap()
+        .unwrap();
         let mut slots = EvalSlots::default();
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert!(r.isnull);
@@ -637,7 +751,11 @@ fn hash32_var_kernel_arg_write_then_call() {
         assert!(matches!(state.kernel(), Kernel::Hash32Var { .. }));
         fn hash_of<'m>(mcx: Mcx<'m>, state: &mut ExprState<'m>, v: Option<i32>) -> u32 {
             let mut slot = virtual_slot(mcx, &[v]);
-            let mut slots = EvalSlots { scan: None, inner: Some(&mut slot), outer: None };
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: Some(&mut slot),
+                outer: None,
+            };
             let r = exec_eval_expr(state, &mut slots).unwrap();
             assert!(!r.isnull);
             r.value.as_u32()
@@ -652,20 +770,36 @@ fn hash32_var_kernel_arg_write_then_call() {
 #[test]
 fn func_strict2_with_var_arg_null_propagation() {
     with_mcx(|mcx| {
-        let args = NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(2)))
-            .unwrap();
-        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, args)), ParamBind::NONE)
-            .unwrap()
-            .unwrap();
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, INT4OID),
+            mk_int4_const(mcx, Some(2)),
+        )
+        .unwrap();
+        let mut state = exec_init_expr(
+            mcx,
+            Some(mk_opexpr(mcx, 177, INT4OID, args)),
+            ParamBind::NONE,
+        )
+        .unwrap()
+        .unwrap();
         assert!(matches!(state.kernel(), Kernel::Program));
 
         let mut slot = virtual_slot(mcx, &[Some(40)]);
-        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut slot),
+            inner: None,
+            outer: None,
+        };
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert_eq!(r.value.as_i32(), 42);
 
         let mut slot = virtual_slot(mcx, &[None]);
-        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut slot),
+            inner: None,
+            outer: None,
+        };
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert!(r.isnull);
     });
@@ -674,17 +808,28 @@ fn func_strict2_with_var_arg_null_propagation() {
 #[test]
 fn nested_funcexpr_two_frames() {
     with_mcx(|mcx| {
-        let inner_args =
-            NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(1)))
-                .unwrap();
+        let inner_args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, INT4OID),
+            mk_int4_const(mcx, Some(1)),
+        )
+        .unwrap();
         let inner = mk_opexpr(mcx, 177, INT4OID, inner_args);
         let outer_args = NodeList::make2(mcx, inner, mk_int4_const(mcx, Some(2))).unwrap();
-        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, outer_args)), ParamBind::NONE)
-            .unwrap()
-            .unwrap();
+        let mut state = exec_init_expr(
+            mcx,
+            Some(mk_opexpr(mcx, 177, INT4OID, outer_args)),
+            ParamBind::NONE,
+        )
+        .unwrap()
+        .unwrap();
 
         let mut slot = virtual_slot(mcx, &[Some(39)]);
-        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut slot),
+            inner: None,
+            outer: None,
+        };
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert_eq!(r.value.as_i32(), 42);
     });
@@ -696,10 +841,20 @@ fn just_var_kernel_reads_deformed_lane() {
         let mut state = exec_init_expr(mcx, Some(mk_scan_var(mcx, 2, INT4OID)), ParamBind::NONE)
             .unwrap()
             .unwrap();
-        assert!(matches!(state.kernel(), Kernel::JustVar { src: SlotSrc::Scan, attnum: 1 }));
+        assert!(matches!(
+            state.kernel(),
+            Kernel::JustVar {
+                src: SlotSrc::Scan,
+                attnum: 1
+            }
+        ));
 
         let mut slot = heap_slot(mcx, &[Some(5), Some(6)]);
-        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut slot),
+            inner: None,
+            outer: None,
+        };
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert_eq!(r.value.as_i32(), 6);
     });
@@ -711,22 +866,30 @@ fn projection_safe_var_kernel_and_assign_tmp_path() {
         let desc = desc_int4(mcx, 2);
         let tle = Node::mk_target_entry(mcx, mk_scan_var(mcx, 2, INT4OID), 1, None, false).unwrap();
         let tlist = NodeList::make1(mcx, tle).unwrap();
-        let mut state = exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap();
+        let mut state =
+            exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap();
         assert!(matches!(
             state.kernel(),
-            Kernel::JustAssignVar { src: SlotSrc::Scan, attnum: 1, resultnum: 0 }
+            Kernel::JustAssignVar {
+                src: SlotSrc::Scan,
+                attnum: 1,
+                resultnum: 0
+            }
         ));
 
         let mut scan = heap_slot(mcx, &[Some(3), Some(4)]);
         let mut result =
             exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc_int4(mcx, 1)));
-        let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut scan),
+            inner: None,
+            outer: None,
+        };
         exec_project(&mut state, &mut slots, &mut result, mcx).unwrap();
         assert_eq!(result.base().tts_values[0].as_i32(), 4);
 
         // vartype mismatch vs input desc -> generic ASSIGN_TMP path.
-        let tle =
-            Node::mk_target_entry(mcx, mk_scan_var(mcx, 2, INT8OID), 1, None, false).unwrap();
+        let tle = Node::mk_target_entry(mcx, mk_scan_var(mcx, 2, INT8OID), 1, None, false).unwrap();
         let tlist = NodeList::make1(mcx, tle).unwrap();
         let state = exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap();
         assert!(matches!(state.steps()[2], Step::AssignTmp { resultnum: 0 }));
@@ -740,13 +903,22 @@ fn still_valid_check_rejects_type_mismatch() {
             .unwrap()
             .unwrap();
         let mut slot = virtual_slot(mcx, &[Some(1)]);
-        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut slot),
+            inner: None,
+            outer: None,
+        };
         let err = exec_eval_expr(&mut state, &mut slots).unwrap_err();
         // CheckVarSlotCompatibility's C-exact wrong-type message (B5).
-        assert!(err.message().contains("has wrong type"), "got: {}", err.message());
         assert!(
-            err.detail().is_some_and(|d| d.starts_with("Table has type ")
-                && d.contains(", but query expects ")),
+            err.message().contains("has wrong type"),
+            "got: {}",
+            err.message()
+        );
+        assert!(
+            err.detail().is_some_and(
+                |d| d.starts_with("Table has type ") && d.contains(", but query expects ")
+            ),
             "got detail: {:?}",
             err.detail()
         );
@@ -758,8 +930,12 @@ fn step_footprint_and_program_shapes() {
     assert!(core::mem::size_of::<Step>() <= 64);
     assert!(core::mem::size_of::<Kernel>() <= 48);
     with_mcx(|mcx| {
-        let args = NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
-            .unwrap();
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, INT4OID),
+            mk_int4_const(mcx, Some(7)),
+        )
+        .unwrap();
         let mut state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
         assert_eq!(state.steps().len(), 5);
         assert!(matches!(state.steps()[2], Step::FuncExprStrict2 { .. }));
@@ -767,10 +943,17 @@ fn step_footprint_and_program_shapes() {
         let shapes: alloc::vec::Vec<core::mem::Discriminant<Step>> =
             state.steps().iter().map(core::mem::discriminant).collect();
         assert_eq!(state.steps().len(), 4);
-        assert!(matches!(state.steps()[0], Step::ScanFetchSome { last_var: 1 }));
+        assert!(matches!(
+            state.steps()[0],
+            Step::ScanFetchSome { last_var: 1 }
+        ));
         assert!(matches!(
             state.steps()[1],
-            Step::ScanVarFuncStrict2Thin { attnum: 0, argno: 0, .. }
+            Step::ScanVarFuncStrict2Thin {
+                attnum: 0,
+                argno: 0,
+                ..
+            }
         ));
         assert!(matches!(state.steps()[2], Step::Qual { jumpdone: 3 }));
         assert!(matches!(state.steps()[3], Step::DoneReturn));
@@ -864,8 +1047,11 @@ fn agg_trans_and_aggref_eval_steps() {
         let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
         for v in [7i32, 35] {
             let mut outer = virtual_slot(mcx, &[Some(v)]);
-            let mut slots =
-                EvalSlots { scan: None, inner: None, outer: Some(&mut outer) };
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: None,
+                outer: Some(&mut outer),
+            };
             crate::exec_eval_expr(&mut trans, &mut slots).unwrap();
         }
         assert_eq!(pergroup[0].trans_value.as_i64(), 2);
@@ -892,13 +1078,15 @@ fn agg_trans_and_aggref_eval_steps() {
         let tle0 = Node::mk_target_entry(mcx, agg0.seal(), 1, None, false).unwrap();
         let tle1 = Node::mk_target_entry(mcx, agg1.seal(), 2, None, false).unwrap();
         let tlist = NodeList::make2(mcx, tle0, tle1).unwrap();
-        let mut proj = exec_build_agg_projection_info(mcx, &tlist, None, bind, ParamBind::NONE).unwrap();
-        let mut result = exectuples::make_tuple_table_slot(
-            mcx,
-            TupleSlotKind::Virtual,
-            Some(desc_int4(mcx, 2)),
-        );
-        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+        let mut proj =
+            exec_build_agg_projection_info(mcx, &tlist, None, bind, ParamBind::NONE).unwrap();
+        let mut result =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc_int4(mcx, 2)));
+        let mut slots = EvalSlots {
+            scan: None,
+            inner: None,
+            outer: None,
+        };
         crate::exec_project(&mut proj, &mut slots, &mut result, mcx).unwrap();
         let rbase = result.base();
         assert_eq!(rbase.tts_values[0].as_i64(), 2);
@@ -930,13 +1118,17 @@ fn agg_trans_strict_input_check_skips_nulls() {
         ];
         let base = NonNull::new(pergroup.as_mut_ptr()).unwrap();
         let var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
-        let count_args =
-            NodeList::make1(mcx, Node::mk_target_entry(mcx, var, 1, None, false).unwrap())
-                .unwrap();
+        let count_args = NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, var, 1, None, false).unwrap(),
+        )
+        .unwrap();
         let var2 = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
-        let sum_args =
-            NodeList::make1(mcx, Node::mk_target_entry(mcx, var2, 1, None, false).unwrap())
-                .unwrap();
+        let sum_args = NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, var2, 1, None, false).unwrap(),
+        )
+        .unwrap();
         let specs = [
             // count(a): int8inc_any (2804), strict, 1 input, non-null init.
             AggTransSpec {
@@ -975,7 +1167,11 @@ fn agg_trans_strict_input_check_skips_nulls() {
         let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
         for v in [Some(7i32), None, Some(35)] {
             let mut outer = virtual_slot(mcx, &[v]);
-            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut outer) };
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: None,
+                outer: Some(&mut outer),
+            };
             crate::exec_eval_expr(&mut trans, &mut slots).unwrap();
         }
         assert_eq!(pergroup[0].trans_value.as_i64(), 2);
@@ -991,9 +1187,15 @@ fn eval_sysvar<'m>(
     attno: i16,
     typ: u32,
 ) -> ::types_error::PgResult<::datum::NullableDatum> {
-    let mut state = exec_init_expr(mcx, Some(mk_scan_var(mcx, attno, typ)), ParamBind::NONE).unwrap().unwrap();
+    let mut state = exec_init_expr(mcx, Some(mk_scan_var(mcx, attno, typ)), ParamBind::NONE)
+        .unwrap()
+        .unwrap();
     assert!(matches!(state.kernel(), Kernel::Program));
-    let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
+    let mut slots = EvalSlots {
+        scan: Some(slot),
+        inner: None,
+        outer: None,
+    };
     exec_eval_expr(&mut state, &mut slots)
 }
 
@@ -1016,17 +1218,35 @@ fn sysvar_steps_read_slot_and_tuple_header() {
         let tid = unsafe { &*(ctid.value.as_usize() as *const ::types_tuple::ItemPointerData) };
         assert_eq!(*tid, ::types_tuple::ItemPointerData::new(7, 3));
 
-        assert_eq!(eval_sysvar(mcx, &mut slot, -2, 28).unwrap().value.as_u32(), 77);
-        assert_eq!(eval_sysvar(mcx, &mut slot, -3, 29).unwrap().value.as_u32(), 5);
-        assert_eq!(eval_sysvar(mcx, &mut slot, -5, 29).unwrap().value.as_u32(), 5);
-        assert_eq!(eval_sysvar(mcx, &mut slot, -6, 26).unwrap().value.as_oid(), 424242);
+        assert_eq!(
+            eval_sysvar(mcx, &mut slot, -2, 28).unwrap().value.as_u32(),
+            77
+        );
+        assert_eq!(
+            eval_sysvar(mcx, &mut slot, -3, 29).unwrap().value.as_u32(),
+            5
+        );
+        assert_eq!(
+            eval_sysvar(mcx, &mut slot, -5, 29).unwrap().value.as_u32(),
+            5
+        );
+        assert_eq!(
+            eval_sysvar(mcx, &mut slot, -6, 26).unwrap().value.as_oid(),
+            424242
+        );
 
         // Virtual slots surface xmin only through the 0A000 arm.
         let mut vslot = virtual_slot(mcx, &[Some(1)]);
         vslot.base_mut().tts_tableOid = 7;
-        assert_eq!(eval_sysvar(mcx, &mut vslot, -6, 26).unwrap().value.as_oid(), 7);
+        assert_eq!(
+            eval_sysvar(mcx, &mut vslot, -6, 26).unwrap().value.as_oid(),
+            7
+        );
         let err = eval_sysvar(mcx, &mut vslot, -2, 28).unwrap_err();
-        assert_eq!(err.message, "cannot retrieve a system column in this context");
+        assert_eq!(
+            err.message,
+            "cannot retrieve a system column in this context"
+        );
     });
 }
 
@@ -1061,7 +1281,10 @@ fn param_extern_step_is_one_resolved_load() {
             pflags: PARAM_FLAG_CONST,
             ptype: INT4OID,
         }];
-        let bind = ParamBind { extern_params: Some(&externs), ..ParamBind::NONE };
+        let bind = ParamBind {
+            extern_params: Some(&externs),
+            ..ParamBind::NONE
+        };
         let node = mk_param(mcx, ParamKind::PARAM_EXTERN, 1, INT4OID);
         let mut state = exec_init_expr(mcx, Some(node), bind).unwrap().unwrap();
         assert!(matches!(state.steps()[0], Step::ParamExtern { .. }));
@@ -1078,7 +1301,9 @@ fn param_extern_missing_value_errors_42704() {
     with_mcx(|mcx| {
         let node = mk_param(mcx, ParamKind::PARAM_EXTERN, 2, INT4OID);
         // C errors at evaluation, not init (EXPLAIN GENERIC_PLAN inits only).
-        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         assert!(matches!(state.steps()[0], Step::ParamExternMissing { .. }));
         let mut slots = EvalSlots::default();
         let err = exec_eval_expr(&mut state, &mut slots).unwrap_err();
@@ -1096,8 +1321,11 @@ fn param_exec_step_reads_estate_slot() {
         let base = vals.as_mut_ptr();
         // SAFETY: in-bounds writes through the same pointer the steps read.
         unsafe {
-            *base.add(1) =
-                ParamExecData { value: Datum::from_i32(7), isnull: false, exec_plan: false };
+            *base.add(1) = ParamExecData {
+                value: Datum::from_i32(7),
+                isnull: false,
+                exec_plan: false,
+            };
         }
         let bind = ParamBind {
             extern_params: None,
@@ -1135,15 +1363,18 @@ fn param_sublink_is_loud() {
 
 fn mk_minmax<'mcx>(mcx: Mcx<'mcx>, least: bool, vals: &[Option<i32>]) -> Node<'mcx> {
     use ::types_nodes::primnodes::{MinMaxExpr, MinMaxOp};
-    let args: alloc::vec::Vec<Node<'mcx>> =
-        vals.iter().map(|v| mk_int4_const(mcx, *v)).collect();
+    let args: alloc::vec::Vec<Node<'mcx>> = vals.iter().map(|v| mk_int4_const(mcx, *v)).collect();
     Node::mk(
         mcx,
         MinMaxExpr {
             minmaxtype: INT4OID,
             minmaxcollid: 0,
             inputcollid: 0,
-            op: if least { MinMaxOp::IS_LEAST } else { MinMaxOp::IS_GREATEST },
+            op: if least {
+                MinMaxOp::IS_LEAST
+            } else {
+                MinMaxOp::IS_GREATEST
+            },
             args: NodeList::from_slice(mcx, &args).unwrap(),
             location: -1,
         },
@@ -1154,14 +1385,26 @@ fn mk_minmax<'mcx>(mcx: Mcx<'mcx>, least: bool, vals: &[Option<i32>]) -> Node<'m
 #[test]
 fn minmax_greatest_least_and_null_handling() {
     with_mcx(|mcx| {
-        let out = crate::evaluate_expr(mcx, mk_minmax(mcx, false, &[Some(1), Some(2), Some(3)]), INT4OID, -1, 0)
-            .unwrap();
+        let out = crate::evaluate_expr(
+            mcx,
+            mk_minmax(mcx, false, &[Some(1), Some(2), Some(3)]),
+            INT4OID,
+            -1,
+            0,
+        )
+        .unwrap();
         let c = out.as_const().unwrap();
         assert!(!c.constisnull);
         assert_eq!(c.constvalue.as_i32(), 3);
 
-        let out = crate::evaluate_expr(mcx, mk_minmax(mcx, true, &[Some(1), Some(2), Some(3)]), INT4OID, -1, 0)
-            .unwrap();
+        let out = crate::evaluate_expr(
+            mcx,
+            mk_minmax(mcx, true, &[Some(1), Some(2), Some(3)]),
+            INT4OID,
+            -1,
+            0,
+        )
+        .unwrap();
         assert_eq!(out.as_const().unwrap().constvalue.as_i32(), 1);
 
         // NULL inputs are ignored (C ExecEvalMinMax).
@@ -1207,12 +1450,21 @@ fn mk_boolexpr<'mcx>(
     for &a in args {
         list.lappend(mcx, mk_bool_const(mcx, a)).unwrap();
     }
-    Node::mk(mcx, ::types_nodes::primnodes::BoolExpr { boolop: op, args: list, location: -1 })
-        .unwrap()
+    Node::mk(
+        mcx,
+        ::types_nodes::primnodes::BoolExpr {
+            boolop: op,
+            args: list,
+            location: -1,
+        },
+    )
+    .unwrap()
 }
 
 fn eval_bool<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> Option<bool> {
-    let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+    let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
+        .unwrap()
+        .unwrap();
     let mut slots = EvalSlots::default();
     let r = exec_eval_expr(&mut state, &mut slots).unwrap();
     if r.isnull {
@@ -1266,7 +1518,16 @@ fn mk_svf<'mcx>(
     typmod: i32,
 ) -> Node<'mcx> {
     use ::types_nodes::primnodes::SQLValueFunction;
-    Node::mk(mcx, SQLValueFunction { op, r#type: typ, typmod, location: -1 }).unwrap()
+    Node::mk(
+        mcx,
+        SQLValueFunction {
+            op,
+            r#type: typ,
+            typmod,
+            location: -1,
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -1288,7 +1549,9 @@ fn sql_value_function_datetime_ops() {
 
     with_mcx(|mcx| {
         let mut eval = |node| {
-            let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+            let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             let mut slots = EvalSlots::default();
             exec_eval_expr(&mut state, &mut slots).unwrap()
         };
@@ -1303,7 +1566,10 @@ fn sql_value_function_datetime_ops() {
         assert_eq!(r.value.as_i64() % 1_000_000, 0);
 
         let r = eval(mk_svf(mcx, Op::SVFOP_LOCALTIMESTAMP, 1114, -1));
-        assert_eq!(r.value.as_i64(), adt_timestamp::GetSQLLocalTimestamp(-1).unwrap());
+        assert_eq!(
+            r.value.as_i64(),
+            adt_timestamp::GetSQLLocalTimestamp(-1).unwrap()
+        );
 
         let r = eval(mk_svf(mcx, Op::SVFOP_CURRENT_DATE, 1082, -1));
         assert_eq!(r.value.as_i32(), adt_date::GetSQLCurrentDate());
@@ -1316,12 +1582,7 @@ fn sql_value_function_datetime_ops() {
         assert!(!r.isnull);
         let p = r.value.as_usize() as *const u8;
         // SAFETY: step-owned 12-byte image written by the eval above.
-        let (time, zone) = unsafe {
-            (
-                p.cast::<i64>().read(),
-                p.add(8).cast::<i32>().read(),
-            )
-        };
+        let (time, zone) = unsafe { (p.cast::<i64>().read(), p.add(8).cast::<i32>().read()) };
         assert!((0..86_400_000_000).contains(&time));
         // GMT session zone (pg_timezone_initialize default).
         assert_eq!(zone, 0);
@@ -1373,10 +1634,16 @@ fn case_expr_arg_form() {
             },
         )
         .unwrap();
-        let mut state = exec_init_expr(mcx, Some(case), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(case), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         let mut eval = |v: Option<i32>| {
             let mut slot = virtual_slot(mcx, &[v]);
-            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let mut slots = EvalSlots {
+                scan: Some(&mut slot),
+                inner: None,
+                outer: None,
+            };
             exec_eval_expr(&mut state, &mut slots).unwrap()
         };
         assert_eq!(eval(Some(1)).value.as_i32(), 10);
@@ -1421,10 +1688,16 @@ fn case_expr_searched_form() {
             },
         )
         .unwrap();
-        let mut state = exec_init_expr(mcx, Some(case), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(case), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         let mut eval = |v: Option<i32>| {
             let mut slot = virtual_slot(mcx, &[v]);
-            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let mut slots = EvalSlots {
+                scan: Some(&mut slot),
+                inner: None,
+                outer: None,
+            };
             exec_eval_expr(&mut state, &mut slots).unwrap()
         };
         assert_eq!(eval(Some(1)).value.as_i32(), 10);
@@ -1464,12 +1737,23 @@ const INT4ARRAYOID: u32 = 1007;
 const F_INT4EQ: u32 = 65;
 
 fn mk_int4_array_const<'mcx>(mcx: Mcx<'mcx>, elems: &[Option<i32>]) -> Node<'mcx> {
-    let values: Vec<Datum> =
-        elems.iter().map(|v| v.map_or(Datum::null(), Datum::from_i32)).collect();
+    let values: Vec<Datum> = elems
+        .iter()
+        .map(|v| v.map_or(Datum::null(), Datum::from_i32))
+        .collect();
     let nulls: Vec<bool> = elems.iter().map(|v| v.is_none()).collect();
     let dims = [elems.len() as i32];
     let img = arrayfuncs::construct_md_array(
-        mcx, &values, Some(&nulls), 1, &dims, &[1], INT4OID, 4, true, b'i',
+        mcx,
+        &values,
+        Some(&nulls),
+        1,
+        &dims,
+        &[1],
+        INT4OID,
+        4,
+        true,
+        b'i',
     )
     .unwrap();
     let d = Datum::from_usize(img.leak().as_ptr() as usize);
@@ -1504,17 +1788,15 @@ fn eval_domain(value: Option<i32>) -> Result<::datum::NullableDatum, Box<::types
     install_seams();
     with_mcx(|mcx| {
         let expr = mk_domain_coercion(mcx, value);
-        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         state.arm_result_mcx(mcx);
         exec_eval_expr(&mut state, &mut EvalSlots::default())
     })
 }
 
-fn eval_saop(
-    use_or: bool,
-    scalar: Option<i32>,
-    elems: &[Option<i32>],
-) -> Option<bool> {
+fn eval_saop(use_or: bool, scalar: Option<i32>, elems: &[Option<i32>]) -> Option<bool> {
     with_mcx(|mcx| {
         let node = mk_saop(
             mcx,
@@ -1522,7 +1804,9 @@ fn eval_saop(
             mk_int4_const(mcx, scalar),
             mk_int4_array_const(mcx, elems),
         );
-        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         state.arm_result_mcx(mcx);
         let mut slots = EvalSlots::default();
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
@@ -1560,15 +1844,22 @@ fn coerce_to_domain_null_is_23502() {
 fn domain_check_input_engine_matches() {
     install_seams();
     assert!(crate::domain::domain_check_input(Datum::from_i32(7), false, DOMAIN_OID, None).is_ok());
-    let e = crate::domain::domain_check_input(Datum::from_i32(-1), false, DOMAIN_OID, None).unwrap_err();
+    let e = crate::domain::domain_check_input(Datum::from_i32(-1), false, DOMAIN_OID, None)
+        .unwrap_err();
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_CHECK_VIOLATION);
     let e = crate::domain::domain_check_input(Datum::null(), true, DOMAIN_OID, None).unwrap_err();
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
 }
 #[test]
 fn scalar_array_op_any_and_all() {
-    assert_eq!(eval_saop(true, Some(2), &[Some(1), Some(2), Some(3)]), Some(true));
-    assert_eq!(eval_saop(true, Some(5), &[Some(1), Some(2), Some(3)]), Some(false));
+    assert_eq!(
+        eval_saop(true, Some(2), &[Some(1), Some(2), Some(3)]),
+        Some(true)
+    );
+    assert_eq!(
+        eval_saop(true, Some(5), &[Some(1), Some(2), Some(3)]),
+        Some(false)
+    );
     assert_eq!(eval_saop(true, Some(5), &[]), Some(false));
     assert_eq!(eval_saop(false, Some(5), &[]), Some(true));
     assert_eq!(eval_saop(false, Some(2), &[Some(2), Some(2)]), Some(true));
@@ -1584,10 +1875,11 @@ fn scalar_array_op_any_and_all() {
 #[test]
 fn scalar_array_op_null_array_is_null() {
     with_mcx(|mcx| {
-        let arr = Node::mk_const(mcx, INT4ARRAYOID, -1, 0, -1, Datum::null(), true, false)
-            .unwrap();
+        let arr = Node::mk_const(mcx, INT4ARRAYOID, -1, 0, -1, Datum::null(), true, false).unwrap();
         let node = mk_saop(mcx, true, mk_int4_const(mcx, Some(2)), arr);
-        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         state.arm_result_mcx(mcx);
         let mut slots = EvalSlots::default();
         assert!(exec_eval_expr(&mut state, &mut slots).unwrap().isnull);
@@ -1615,7 +1907,9 @@ fn array_expr_builds_array_consumable_by_saop() {
         )
         .unwrap();
         let node = mk_saop(mcx, true, mk_int4_const(mcx, Some(8)), ae);
-        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         state.arm_result_mcx(mcx);
         let mut slots = EvalSlots::default();
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
@@ -1652,7 +1946,9 @@ fn array_expr_element_count_survives_the_16_bit_boundary() {
                 },
             )
             .unwrap();
-            let mut state = exec_init_expr(mcx, Some(ae), ParamBind::NONE).unwrap().unwrap();
+            let mut state = exec_init_expr(mcx, Some(ae), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             // The step must carry the true count, not a wrapped one. Under the
             // old u16 this was 0 for 65536 and 1 for 65537.
             let carried = state
@@ -1663,7 +1959,10 @@ fn array_expr_element_count_survives_the_16_bit_boundary() {
                     _ => None,
                 })
                 .expect("ArrayExpr compiles to an ArrayExprStep");
-            assert_eq!(carried as usize, n, "ArrayExprStep.nelems wrapped at {n} elements");
+            assert_eq!(
+                carried as usize, n,
+                "ArrayExprStep.nelems wrapped at {n} elements"
+            );
 
             // And the evaluated array must actually hold n elements.
             state.arm_result_mcx(mcx);
@@ -1694,15 +1993,31 @@ fn fused_func_chain_evaluates_like_unfused() {
             let args = NodeList::make2(mcx, expr, mk_int4_const(mcx, Some(k))).unwrap();
             expr = mk_opexpr(mcx, 177, INT4OID, args);
         }
-        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         assert_eq!(state.steps().len(), 7);
-        assert!(matches!(state.steps()[1], Step::ScanVarFuncStrict2Thin { attnum: 0, argno: 0, .. }));
-        assert!(matches!(state.steps()[2], Step::FuncFuncStrict2Thin { argno: 0, .. }));
+        assert!(matches!(
+            state.steps()[1],
+            Step::ScanVarFuncStrict2Thin {
+                attnum: 0,
+                argno: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            state.steps()[2],
+            Step::FuncFuncStrict2Thin { argno: 0, .. }
+        ));
         assert!(matches!(state.steps()[4], Step::FuncFuncStrict2Thin { .. }));
         assert!(matches!(state.steps()[5], Step::FuncExprStrict2Thin { .. }));
         for v in [Some(5), Some(-1000), None] {
             let mut slot = virtual_slot(mcx, &[v]);
-            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let mut slots = EvalSlots {
+                scan: Some(&mut slot),
+                inner: None,
+                outer: None,
+            };
             let r = exec_eval_expr(&mut state, &mut slots).unwrap();
             match v {
                 Some(x) => {
@@ -1731,26 +2046,34 @@ fn economy_window_skips_fusion_keeps_thin_and_results() {
         };
         let mut economy_state = {
             let _w = crate::compile::economy_window(true);
-            exec_init_expr(mcx, Some(build(mcx)), ParamBind::NONE).unwrap().unwrap()
+            exec_init_expr(mcx, Some(build(mcx)), ParamBind::NONE)
+                .unwrap()
+                .unwrap()
         };
         // Window restored: a post-window compile fuses again.
-        let fused_state = exec_init_expr(mcx, Some(build(mcx)), ParamBind::NONE).unwrap().unwrap();
-        assert!(fused_state
-            .steps()
-            .iter()
-            .any(|s| matches!(s, Step::ScanVarFuncStrict2Thin { .. } | Step::FuncFuncStrict2Thin { .. })));
+        let fused_state = exec_init_expr(mcx, Some(build(mcx)), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
+        assert!(fused_state.steps().iter().any(|s| matches!(
+            s,
+            Step::ScanVarFuncStrict2Thin { .. } | Step::FuncFuncStrict2Thin { .. }
+        )));
         // Economy program: no pair-fused variants, thin singles retained.
-        assert!(!economy_state
-            .steps()
-            .iter()
-            .any(|s| matches!(s, Step::ScanVarFuncStrict2Thin { .. } | Step::FuncFuncStrict2Thin { .. })));
+        assert!(!economy_state.steps().iter().any(|s| matches!(
+            s,
+            Step::ScanVarFuncStrict2Thin { .. } | Step::FuncFuncStrict2Thin { .. }
+        )));
         assert!(economy_state
             .steps()
             .iter()
             .any(|s| matches!(s, Step::FuncExprStrict2Thin { .. })));
         for v in [Some(5), Some(-1000), None] {
             let mut slot = virtual_slot(mcx, &[v]);
-            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let mut slots = EvalSlots {
+                scan: Some(&mut slot),
+                inner: None,
+                outer: None,
+            };
             let r = exec_eval_expr(&mut economy_state, &mut slots).unwrap();
             match v {
                 Some(x) => {
@@ -1770,24 +2093,34 @@ fn economy_window_skips_qual_census() {
     with_mcx(|mcx| {
         let build_qual = |mcx| {
             let a_lt0 = {
-                let args =
-                    NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
-                        .unwrap();
+                let args = NodeList::make2(
+                    mcx,
+                    mk_scan_var(mcx, 1, INT4OID),
+                    mk_int4_const(mcx, Some(0)),
+                )
+                .unwrap();
                 mk_opexpr(mcx, 66, BOOLOID, args)
             };
             let b_gt5 = {
-                let args =
-                    NodeList::make2(mcx, mk_scan_var(mcx, 2, INT4OID), mk_int4_const(mcx, Some(5)))
-                        .unwrap();
+                let args = NodeList::make2(
+                    mcx,
+                    mk_scan_var(mcx, 2, INT4OID),
+                    mk_int4_const(mcx, Some(5)),
+                )
+                .unwrap();
                 mk_opexpr(mcx, 147, BOOLOID, args)
             };
             NodeList::make2(mcx, a_lt0, b_gt5).unwrap()
         };
-        let control = exec_init_qual(mcx, &build_qual(mcx), ParamBind::NONE).unwrap().unwrap();
+        let control = exec_init_qual(mcx, &build_qual(mcx), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         assert!(control.scan_cmp_const_clauses().is_some());
         let mut state = {
             let _w = crate::compile::economy_window(true);
-            exec_init_qual(mcx, &build_qual(mcx), ParamBind::NONE).unwrap().unwrap()
+            exec_init_qual(mcx, &build_qual(mcx), ParamBind::NONE)
+                .unwrap()
+                .unwrap()
         };
         assert!(state.scan_cmp_const_clauses().is_none());
         assert!(!state
@@ -1810,19 +2143,27 @@ fn economy_window_skips_qual_census() {
 fn fused_two_clause_qual_matches() {
     with_mcx(|mcx| {
         let a_lt0 = {
-            let args =
-                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
-                    .unwrap();
+            let args = NodeList::make2(
+                mcx,
+                mk_scan_var(mcx, 1, INT4OID),
+                mk_int4_const(mcx, Some(0)),
+            )
+            .unwrap();
             mk_opexpr(mcx, 66, BOOLOID, args)
         };
         let b_gt5 = {
-            let args =
-                NodeList::make2(mcx, mk_scan_var(mcx, 2, INT4OID), mk_int4_const(mcx, Some(5)))
-                    .unwrap();
+            let args = NodeList::make2(
+                mcx,
+                mk_scan_var(mcx, 2, INT4OID),
+                mk_int4_const(mcx, Some(5)),
+            )
+            .unwrap();
             mk_opexpr(mcx, 147, BOOLOID, args)
         };
         let qual = NodeList::make2(mcx, a_lt0, b_gt5).unwrap();
-        let mut state = exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_qual(mcx, &qual, ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         assert!(matches!(state.kernel(), Kernel::Program));
         assert!(state
             .steps()
@@ -1850,17 +2191,30 @@ fn thin_fused_chain_overflow_error_intact() {
         )
         .unwrap();
         let expr = mk_opexpr(mcx, 177, INT4OID, args);
-        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         assert!(state
             .steps()
             .iter()
             .any(|s| matches!(s, Step::ScanVarFuncStrict2Thin { .. })));
         let mut slot = virtual_slot(mcx, &[Some(1)]);
-        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut slot),
+            inner: None,
+            outer: None,
+        };
         let e = exec_eval_expr(&mut state, &mut slots).unwrap_err();
-        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        assert_eq!(
+            e.sqlstate(),
+            ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
+        );
         let mut slot = virtual_slot(mcx, &[Some(-1)]);
-        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut slot),
+            inner: None,
+            outer: None,
+        };
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert_eq!((r.isnull, r.value.as_i32()), (false, i32::MAX - 1));
     });
@@ -1871,16 +2225,24 @@ fn thin_qual_matches_general_path() {
     with_mcx(|mcx| {
         // int4lt is thin-registered; the fused qual selects a thin arm and
         // must agree with the kernel path on every null/value combination.
-        let args =
-            NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
-                .unwrap();
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, INT4OID),
+            mk_int4_const(mcx, Some(0)),
+        )
+        .unwrap();
         let mut state = qual_state(mcx, mk_opexpr(mcx, 66, BOOLOID, args));
         state.force_program_kernel();
         assert!(state.steps().iter().any(|s| matches!(
             s,
             Step::FuncStrict2QualThin { .. } | Step::ScanVarFuncStrict2Thin { .. }
         )));
-        for (v, want) in [(Some(-1), true), (Some(0), false), (Some(1), false), (None, false)] {
+        for (v, want) in [
+            (Some(-1), true),
+            (Some(0), false),
+            (Some(1), false),
+            (None, false),
+        ] {
             assert_eq!(run_qual(mcx, &mut state, &[v]), want, "v={v:?}");
         }
     });
@@ -1892,7 +2254,9 @@ fn thin_strict1_single_rewrite() {
         // int4um (212) is thin-registered at arity 1 and errors on INT32_MIN.
         let args = NodeList::make1(mcx, mk_scan_var(mcx, 1, INT4OID)).unwrap();
         let expr = mk_opexpr(mcx, 212, INT4OID, args);
-        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         state.force_program_kernel();
         assert!(state
             .steps()
@@ -1900,7 +2264,11 @@ fn thin_strict1_single_rewrite() {
             .any(|s| matches!(s, Step::FuncExprStrict1Thin { .. })));
         for (v, want) in [(Some(5), Some(-5)), (None, None)] {
             let mut slot = virtual_slot(mcx, &[v]);
-            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let mut slots = EvalSlots {
+                scan: Some(&mut slot),
+                inner: None,
+                outer: None,
+            };
             let r = exec_eval_expr(&mut state, &mut slots).unwrap();
             match want {
                 Some(x) => assert_eq!((r.isnull, r.value.as_i32()), (false, x)),
@@ -1908,9 +2276,16 @@ fn thin_strict1_single_rewrite() {
             }
         }
         let mut slot = virtual_slot(mcx, &[Some(i32::MIN)]);
-        let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut slot),
+            inner: None,
+            outer: None,
+        };
         let e = exec_eval_expr(&mut state, &mut slots).unwrap_err();
-        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        assert_eq!(
+            e.sqlstate(),
+            ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
+        );
     });
 }
 
@@ -1945,7 +2320,10 @@ fn thin_agg_count_star_kernel() {
             cur_agg: None,
         }];
         let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
-        assert!(matches!(trans.kernel(), Kernel::AggTransByValThin { strict: true, .. }));
+        assert!(matches!(
+            trans.kernel(),
+            Kernel::AggTransByValThin { strict: true, .. }
+        ));
         for _ in 0..3 {
             let mut slots = EvalSlots::default();
             crate::exec_eval_expr(&mut trans, &mut slots).unwrap();
@@ -1984,15 +2362,21 @@ fn fusion_skips_jump_targets() {
     with_mcx(|mcx| {
         // CASE arm heads are jump targets; results stay correct across arms.
         let cond = {
-            let args =
-                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
-                    .unwrap();
+            let args = NodeList::make2(
+                mcx,
+                mk_scan_var(mcx, 1, INT4OID),
+                mk_int4_const(mcx, Some(0)),
+            )
+            .unwrap();
             mk_opexpr(mcx, 66, BOOLOID, args)
         };
         let then_expr = {
-            let a1 =
-                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(1)))
-                    .unwrap();
+            let a1 = NodeList::make2(
+                mcx,
+                mk_scan_var(mcx, 1, INT4OID),
+                mk_int4_const(mcx, Some(1)),
+            )
+            .unwrap();
             let inner = mk_opexpr(mcx, 177, INT4OID, a1);
             let a2 = NodeList::make2(mcx, inner, mk_int4_const(mcx, Some(2))).unwrap();
             mk_opexpr(mcx, 177, INT4OID, a2)
@@ -2018,12 +2402,22 @@ fn fusion_skips_jump_targets() {
             },
         )
         .unwrap();
-        let mut state = exec_init_expr(mcx, Some(case), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(case), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         for (v, want) in [(Some(-4), Some(-1)), (Some(3), Some(7)), (None, Some(7))] {
             let mut slot = virtual_slot(mcx, &[v]);
-            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let mut slots = EvalSlots {
+                scan: Some(&mut slot),
+                inner: None,
+                outer: None,
+            };
             let r = exec_eval_expr(&mut state, &mut slots).unwrap();
-            assert_eq!((r.isnull, r.value.as_i32()), (false, want.unwrap()), "v={v:?}");
+            assert_eq!(
+                (r.isnull, r.value.as_i32()),
+                (false, want.unwrap()),
+                "v={v:?}"
+            );
         }
     });
 }
@@ -2089,7 +2483,17 @@ mod json {
     }
 
     fn jsonb_const<'m>(mcx: Mcx<'m>, json: &str) -> Node<'m> {
-        Node::mk_const(mcx, JSONBOID_T, -1, 0, -1, jsonb_datum(mcx, json), false, false).unwrap()
+        Node::mk_const(
+            mcx,
+            JSONBOID_T,
+            -1,
+            0,
+            -1,
+            jsonb_datum(mcx, json),
+            false,
+            false,
+        )
+        .unwrap()
     }
 
     fn path_const<'m>(mcx: Mcx<'m>, path: &str) -> Node<'m> {
@@ -2102,8 +2506,16 @@ mod json {
     }
 
     fn behavior<'m>(mcx: Mcx<'m>, btype: JBT, expr: Node<'m>) -> Node<'m> {
-        Node::mk(mcx, JsonBehavior { btype, expr: Some(expr), coerce: false, location: -1 })
-            .unwrap()
+        Node::mk(
+            mcx,
+            JsonBehavior {
+                btype,
+                expr: Some(expr),
+                coerce: false,
+                location: -1,
+            },
+        )
+        .unwrap()
     }
 
     fn null_const<'m>(mcx: Mcx<'m>, typid: u32) -> Node<'m> {
@@ -2137,7 +2549,11 @@ mod json {
         let returning: &JsonReturning<'_> = ::mcx::leak_in(
             ::mcx::alloc_in(
                 mcx,
-                JsonReturning { format: None, typid: spec.ret_typid, typmod: -1 },
+                JsonReturning {
+                    format: None,
+                    typid: spec.ret_typid,
+                    typmod: -1,
+                },
             )
             .unwrap(),
         );
@@ -2172,7 +2588,9 @@ mod json {
     }
 
     fn eval<'m>(mcx: Mcx<'m>, expr: Node<'m>) -> ::types_error::PgResult<NullableDatum> {
-        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         state.arm_result_mcx(mcx);
         let mut slots = EvalSlots::default();
         exec_eval_expr(&mut state, &mut slots)
@@ -2231,8 +2649,10 @@ mod json {
     fn json_exists_error_suppressed_to_false() {
         with_mcx(|mcx| {
             let on_error = behavior(mcx, JBT::JSON_BEHAVIOR_FALSE, bool_const(mcx, false));
-            let expr =
-                mk_json_expr(mcx, exists_spec(mcx, r#"{"a": 1}"#, "strict $.a.b", on_error));
+            let expr = mk_json_expr(
+                mcx,
+                exists_spec(mcx, r#"{"a": 1}"#, "strict $.a.b", on_error),
+            );
             let r = eval(mcx, expr).unwrap();
             assert_eq!((r.isnull, r.value.as_bool()), (false, false));
         });
@@ -2242,8 +2662,10 @@ mod json {
     fn json_exists_error_on_error_throws() {
         with_mcx(|mcx| {
             let on_error = behavior(mcx, JBT::JSON_BEHAVIOR_ERROR, null_const(mcx, BOOLOID));
-            let expr =
-                mk_json_expr(mcx, exists_spec(mcx, r#"{"a": 1}"#, "strict $.a.b", on_error));
+            let expr = mk_json_expr(
+                mcx,
+                exists_spec(mcx, r#"{"a": 1}"#, "strict $.a.b", on_error),
+            );
             assert!(eval(mcx, expr).is_err());
         });
     }
@@ -2252,8 +2674,9 @@ mod json {
     fn json_exists_passing_vars() {
         with_mcx(|mcx| {
             for (v, want) in [(5, true), (1, false)] {
-                let passing: &[(&str, Node<'_>)] =
-                    ::mcx::leak_in(::mcx::alloc_in(mcx, [("x", mk_int4_const(mcx, Some(v)))]).unwrap());
+                let passing: &[(&str, Node<'_>)] = ::mcx::leak_in(
+                    ::mcx::alloc_in(mcx, [("x", mk_int4_const(mcx, Some(v)))]).unwrap(),
+                );
                 let on_error = behavior(mcx, JBT::JSON_BEHAVIOR_FALSE, bool_const(mcx, false));
                 let mut spec = exists_spec(mcx, "3", "$ ? (@ < $x)", on_error);
                 spec.passing = passing;
@@ -2287,7 +2710,11 @@ mod json {
             use_json: false,
             wrapper,
             omit_quotes: false,
-            on_empty: Some(behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, JSONBOID_T))),
+            on_empty: Some(behavior(
+                mcx,
+                JBT::JSON_BEHAVIOR_NULL,
+                null_const(mcx, JSONBOID_T),
+            )),
             on_error: behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, JSONBOID_T)),
             passing: &[],
         }
@@ -2323,7 +2750,10 @@ mod json {
         with_mcx(|mcx| {
             let r = eval(
                 mcx,
-                mk_json_expr(mcx, query_spec(mcx, r#"{"a": 1}"#, "$.nope", JW::JSW_UNSPEC)),
+                mk_json_expr(
+                    mcx,
+                    query_spec(mcx, r#"{"a": 1}"#, "$.nope", JW::JSW_UNSPEC),
+                ),
             )
             .unwrap();
             assert!(r.isnull);
@@ -2355,7 +2785,11 @@ mod json {
             let mut spec = query_spec(mcx, r#"{"a": 7}"#, "$.a", JW::JSW_UNSPEC);
             spec.ret_typid = INT4OID;
             spec.use_json = true;
-            spec.on_empty = Some(behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, INT4OID)));
+            spec.on_empty = Some(behavior(
+                mcx,
+                JBT::JSON_BEHAVIOR_NULL,
+                null_const(mcx, INT4OID),
+            ));
             spec.on_error = behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, INT4OID));
             let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
             assert_eq!((r.isnull, r.value.as_i32()), (false, 7));
@@ -2383,7 +2817,11 @@ mod json {
             use_json: false,
             wrapper: JW::JSW_UNSPEC,
             omit_quotes: true,
-            on_empty: Some(behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, ret_typid))),
+            on_empty: Some(behavior(
+                mcx,
+                JBT::JSON_BEHAVIOR_NULL,
+                null_const(mcx, ret_typid),
+            )),
             on_error: behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, ret_typid)),
             passing: &[],
         }
@@ -2398,8 +2836,11 @@ mod json {
                 // C boolout: JSON_VALUE of a boolean renders "t"/"f".
                 (r#"{"a": true}"#, "$.a", "t"),
             ] {
-                let r = eval(mcx, mk_json_expr(mcx, value_spec(mcx, doc, path, TEXTOID_T)))
-                    .unwrap();
+                let r = eval(
+                    mcx,
+                    mk_json_expr(mcx, value_spec(mcx, doc, path, TEXTOID_T)),
+                )
+                .unwrap();
                 assert!(!r.isnull, "{path}");
                 assert_eq!(text_datum_string(r.value), want, "{doc} {path}");
             }
@@ -2449,7 +2890,10 @@ mod json {
             let mut spec = value_spec(mcx, r#"{"a": "abc"}"#, "$.a", INT4OID);
             spec.on_error = behavior(mcx, JBT::JSON_BEHAVIOR_ERROR, null_const(mcx, INT4OID));
             let e = eval(mcx, mk_json_expr(mcx, spec)).unwrap_err();
-            assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+            assert_eq!(
+                e.sqlstate(),
+                ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION
+            );
         });
     }
 
@@ -2457,8 +2901,7 @@ mod json {
     fn json_value_on_error_default_expr() {
         with_mcx(|mcx| {
             let mut spec = value_spec(mcx, r#"{"a": "abc"}"#, "$.a", INT4OID);
-            spec.on_error =
-                behavior(mcx, JBT::JSON_BEHAVIOR_DEFAULT, mk_int4_const(mcx, Some(7)));
+            spec.on_error = behavior(mcx, JBT::JSON_BEHAVIOR_DEFAULT, mk_int4_const(mcx, Some(7)));
             let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
             assert_eq!((r.isnull, r.value.as_i32()), (false, 7));
         });
@@ -2486,8 +2929,11 @@ mod json {
     fn json_value_error_on_empty_throws_22035() {
         with_mcx(|mcx| {
             let mut spec = value_spec(mcx, r#"{"a": 1}"#, "$.nope", INT4OID);
-            spec.on_empty =
-                Some(behavior(mcx, JBT::JSON_BEHAVIOR_ERROR, null_const(mcx, INT4OID)));
+            spec.on_empty = Some(behavior(
+                mcx,
+                JBT::JSON_BEHAVIOR_ERROR,
+                null_const(mcx, INT4OID),
+            ));
             let e = eval(mcx, mk_json_expr(mcx, spec)).unwrap_err();
             assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NO_SQL_JSON_ITEM);
             assert_eq!(e.message(), "no SQL/JSON item found for specified path");
@@ -2508,14 +2954,22 @@ mod json {
         with_mcx(|mcx| {
             let ct = Node::mk(
                 mcx,
-                CaseTestExpr { typeId: INT4OID, typeMod: -1, collation: 0 },
+                CaseTestExpr {
+                    typeId: INT4OID,
+                    typeMod: -1,
+                    collation: 0,
+                },
             )
             .unwrap();
-            let mut state =
-                exec_init_expr_with_case_test(mcx, Some(ct), ParamBind::NONE).unwrap().unwrap();
+            let mut state = exec_init_expr_with_case_test(mcx, Some(ct), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             state.arm_result_mcx(mcx);
             for v in [3i32, -8] {
-                state.set_case_test(NullableDatum { value: Datum::from_i32(v), isnull: false });
+                state.set_case_test(NullableDatum {
+                    value: Datum::from_i32(v),
+                    isnull: false,
+                });
                 let mut slots = EvalSlots::default();
                 let r = exec_eval_expr(&mut state, &mut slots).unwrap();
                 assert_eq!((r.isnull, r.value.as_i32()), (false, v));
@@ -2532,17 +2986,25 @@ mod json {
         with_mcx(|mcx| {
             let ct = Node::mk(
                 mcx,
-                CaseTestExpr { typeId: JSONBOID_T, typeMod: -1, collation: 0 },
+                CaseTestExpr {
+                    typeId: JSONBOID_T,
+                    typeMod: -1,
+                    collation: 0,
+                },
             )
             .unwrap();
             let mut spec = value_spec(mcx, "{}", "$.a", TEXTOID_T);
             spec.formatted = ct;
             let expr = mk_json_expr(mcx, spec);
-            let mut state =
-                exec_init_expr_with_case_test(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+            let mut state = exec_init_expr_with_case_test(mcx, Some(expr), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             state.arm_result_mcx(mcx);
-            for (doc, want) in [(r#"{"a": "x"}"#, Some("x")), (r#"{"a": "y"}"#, Some("y")), (r#"{"b": 1}"#, None)]
-            {
+            for (doc, want) in [
+                (r#"{"a": "x"}"#, Some("x")),
+                (r#"{"a": "y"}"#, Some("y")),
+                (r#"{"b": 1}"#, None),
+            ] {
                 state.set_case_test(NullableDatum {
                     value: jsonb_datum(mcx, doc),
                     isnull: false,
@@ -2573,15 +3035,24 @@ mod json {
         with_mcx(|mcx| {
             let ct = Node::mk(
                 mcx,
-                CaseTestExpr { typeId: INT4OID, typeMod: -1, collation: 0 },
+                CaseTestExpr {
+                    typeId: INT4OID,
+                    typeMod: -1,
+                    collation: 0,
+                },
             )
             .unwrap();
-            let mut state = exec_init_expr(mcx, Some(ct), ParamBind::NONE).unwrap().unwrap();
+            let mut state = exec_init_expr(mcx, Some(ct), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             state.arm_result_mcx(mcx);
             let mut slots = EvalSlots::default();
             let r = exec_eval_expr(&mut state, &mut slots).unwrap();
             assert!(r.isnull, "unarmed econtext caseValue reads as NULL");
-            state.set_case_test(NullableDatum { value: Datum::from_i32(41), isnull: false });
+            state.set_case_test(NullableDatum {
+                value: Datum::from_i32(41),
+                isnull: false,
+            });
             let mut slots = EvalSlots::default();
             let r = exec_eval_expr(&mut state, &mut slots).unwrap();
             assert_eq!((r.isnull, r.value.as_i32()), (false, 41));
@@ -2603,12 +3074,17 @@ mod json {
                 },
             )
             .unwrap();
-            let mut state = exec_init_expr(mcx, Some(dv), ParamBind::NONE).unwrap().unwrap();
+            let mut state = exec_init_expr(mcx, Some(dv), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             state.arm_result_mcx(mcx);
             let mut slots = EvalSlots::default();
             let r = exec_eval_expr(&mut state, &mut slots).unwrap();
             assert!(r.isnull, "unarmed econtext domainValue reads as NULL");
-            state.set_domain_test(NullableDatum { value: Datum::from_i32(7), isnull: false });
+            state.set_domain_test(NullableDatum {
+                value: Datum::from_i32(7),
+                isnull: false,
+            });
             let mut slots = EvalSlots::default();
             let r = exec_eval_expr(&mut state, &mut slots).unwrap();
             assert_eq!((r.isnull, r.value.as_i32()), (false, 7));
@@ -2617,8 +3093,17 @@ mod json {
 
     fn text_const<'m>(mcx: Mcx<'m>, s: &str) -> Node<'m> {
         let t = varlena::cstring_to_text(mcx, s.as_bytes()).unwrap();
-        Node::mk_const(mcx, TEXTOID_T, -1, 100, -1, ::types_fmgr::varlena_result(t), false, false)
-            .unwrap()
+        Node::mk_const(
+            mcx,
+            TEXTOID_T,
+            -1,
+            100,
+            -1,
+            ::types_fmgr::varlena_result(t),
+            false,
+            false,
+        )
+        .unwrap()
     }
 
     fn jsonb_sbsref<'m>(
@@ -2654,12 +3139,20 @@ mod json {
         with_mcx(|mcx| {
             let ct = Node::mk(
                 mcx,
-                CaseTestExpr { typeId: JSONBOID_T, typeMod: -1, collation: 0 },
+                CaseTestExpr {
+                    typeId: JSONBOID_T,
+                    typeMod: -1,
+                    collation: 0,
+                },
             )
             .unwrap();
             let inner = jsonb_sbsref(mcx, ct, "b", Some(jsonb_const(mcx, "2")));
-            let outer =
-                jsonb_sbsref(mcx, jsonb_const(mcx, r#"{"a": {"b": 1}}"#), "a", Some(inner));
+            let outer = jsonb_sbsref(
+                mcx,
+                jsonb_const(mcx, r#"{"a": {"b": 1}}"#),
+                "a",
+                Some(inner),
+            );
             let r = eval(mcx, outer).unwrap();
             assert!(!r.isnull);
             assert_eq!(jsonb_datum_string(mcx, r.value), r#"{"a": {"b": 2}}"#);
@@ -2673,14 +3166,21 @@ mod json {
         with_mcx(|mcx| {
             let ct = Node::mk(
                 mcx,
-                CaseTestExpr { typeId: JSONBOID_T, typeMod: -1, collation: 0 },
+                CaseTestExpr {
+                    typeId: JSONBOID_T,
+                    typeMod: -1,
+                    collation: 0,
+                },
             )
             .unwrap();
             let inner = jsonb_sbsref(mcx, ct, "b", Some(jsonb_const(mcx, "7")));
             let outer = jsonb_sbsref(mcx, jsonb_const(mcx, r#"{"x": 1}"#), "a", Some(inner));
             let r = eval(mcx, outer).unwrap();
             assert!(!r.isnull);
-            assert_eq!(jsonb_datum_string(mcx, r.value), r#"{"a": {"b": 7}, "x": 1}"#);
+            assert_eq!(
+                jsonb_datum_string(mcx, r.value),
+                r#"{"a": {"b": 7}, "x": 1}"#
+            );
         });
     }
 }
@@ -2692,8 +3192,8 @@ fn run_stepwise<'mcx>(
     slots: &mut EvalSlots<'_, 'mcx>,
     mut result_slot: Option<&mut SlotData<'mcx>>,
 ) -> ::types_error::PgResult<::datum::NullableDatum> {
-    use ::datum::NullableDatum;
     use crate::interp::StepFlow;
+    use ::datum::NullableDatum;
     let res = state.resnd;
     let mut ix: u32 = 0;
     loop {
@@ -2732,7 +3232,10 @@ fn run_stepwise<'mcx>(
                 let r = unsafe { res.read() };
                 if r.isnull || !r.value.as_bool() {
                     unsafe {
-                        res.write(NullableDatum { value: Datum::from_bool(false), isnull: false })
+                        res.write(NullableDatum {
+                            value: Datum::from_bool(false),
+                            isnull: false,
+                        })
                     };
                     ix = jumpdone;
                     continue;
@@ -2807,7 +3310,11 @@ fn jit_single_step_matches_run_program() {
             };
             let expected = run_qual(mcx, &mut mk_state(), &[vals]);
             let mut slot = virtual_slot(mcx, &[vals]);
-            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let mut slots = EvalSlots {
+                scan: Some(&mut slot),
+                inner: None,
+                outer: None,
+            };
             let r = run_stepwise(&mut mk_state(), &mut slots, None).unwrap();
             assert!(!r.isnull);
             assert_eq!(r.value.as_bool(), expected, "qual {vals:?}");
@@ -2851,8 +3358,9 @@ fn jit_single_step_matches_run_program() {
                     mk_int4_const(mcx, scalar),
                     mk_int4_array_const(mcx, elems),
                 );
-                let mut s =
-                    exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+                let mut s = exec_init_expr(mcx, Some(node), ParamBind::NONE)
+                    .unwrap()
+                    .unwrap();
                 s.arm_result_mcx(mcx);
                 s.force_program_kernel();
                 s
@@ -2868,10 +3376,9 @@ fn jit_single_step_matches_run_program() {
         // Domain family: DomainTestval/DomainNotNull/DomainCheck incl errors.
         for v in [Some(5), Some(0), None] {
             let mk_state = || {
-                let mut s =
-                    exec_init_expr(mcx, Some(mk_domain_coercion(mcx, v)), ParamBind::NONE)
-                        .unwrap()
-                        .unwrap();
+                let mut s = exec_init_expr(mcx, Some(mk_domain_coercion(mcx, v)), ParamBind::NONE)
+                    .unwrap()
+                    .unwrap();
                 s.arm_result_mcx(mcx);
                 s.force_program_kernel();
                 s
@@ -2898,16 +3405,14 @@ fn jit_single_step_matches_run_program() {
         {
             let desc = desc_int4(mcx, 2);
             let mk_state = || {
-                let tle1 =
-                    Node::mk_target_entry(mcx, mk_scan_var(mcx, 2, INT4OID), 1, None, false)
-                        .unwrap();
-                let tle2 =
-                    Node::mk_target_entry(mcx, mk_scan_var(mcx, 1, INT4OID), 2, None, false)
-                        .unwrap();
+                let tle1 = Node::mk_target_entry(mcx, mk_scan_var(mcx, 2, INT4OID), 1, None, false)
+                    .unwrap();
+                let tle2 = Node::mk_target_entry(mcx, mk_scan_var(mcx, 1, INT4OID), 2, None, false)
+                    .unwrap();
                 let mut tlist = NodeList::make1(mcx, tle1).unwrap();
                 tlist.lappend(mcx, tle2).unwrap();
-                let mut s = exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE)
-                    .unwrap();
+                let mut s =
+                    exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap();
                 s.force_program_kernel();
                 s
             };
@@ -2918,7 +3423,11 @@ fn jit_single_step_matches_run_program() {
                 Some(desc_int4(mcx, 2)),
             );
             {
-                let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
+                let mut slots = EvalSlots {
+                    scan: Some(&mut scan),
+                    inner: None,
+                    outer: None,
+                };
                 exec_project(&mut mk_state(), &mut slots, &mut result_a, mcx).unwrap();
             }
             let mut scan2 = heap_slot(mcx, &[Some(3), Some(4)]);
@@ -2928,7 +3437,11 @@ fn jit_single_step_matches_run_program() {
                 Some(desc_int4(mcx, 2)),
             );
             {
-                let mut slots = EvalSlots { scan: Some(&mut scan2), inner: None, outer: None };
+                let mut slots = EvalSlots {
+                    scan: Some(&mut scan2),
+                    inner: None,
+                    outer: None,
+                };
                 let r = run_stepwise(&mut mk_state(), &mut slots, Some(&mut result_b)).unwrap();
                 assert!(r.isnull);
             }
@@ -2958,7 +3471,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 11
     }
 
@@ -2983,7 +3499,11 @@ fn fuzz_i32(rng: &mut Lcg) -> i32 {
 }
 
 fn fuzz_int_expr<'mcx>(mcx: Mcx<'mcx>, rng: &mut Lcg, depth: u32) -> Node<'mcx> {
-    match if depth == 0 { rng.below(2) } else { rng.below(6) } {
+    match if depth == 0 {
+        rng.below(2)
+    } else {
+        rng.below(6)
+    } {
         0 => mk_scan_var(mcx, (rng.below(FUZZ_COLS as u64) + 1) as i16, INT4OID),
         1 => mk_int4_const(mcx, (rng.below(5) != 0).then(|| fuzz_i32(rng))),
         // int4pl/int4mi/int4mul: the emitter's inline-arith stencils with
@@ -2991,8 +3511,10 @@ fn fuzz_int_expr<'mcx>(mcx: Mcx<'mcx>, rng: &mut Lcg, depth: u32) -> Node<'mcx> 
         2 | 3 => {
             let f = [177u32, 181, 141][rng.below(3) as usize];
             let mut args = NodeList::nil();
-            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1)).unwrap();
-            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1)).unwrap();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1))
+                .unwrap();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1))
+                .unwrap();
             mk_opexpr(mcx, f, INT4OID, args)
         }
         // CASE WHEN b THEN x ELSE y (JumpIfNotTrue/Jump skeleton).
@@ -3020,8 +3542,10 @@ fn fuzz_int_expr<'mcx>(mcx: Mcx<'mcx>, rng: &mut Lcg, depth: u32) -> Node<'mcx> 
         // COALESCE(x, y) (JumpIfNotNull skeleton).
         _ => {
             let mut args = NodeList::nil();
-            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1)).unwrap();
-            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1)).unwrap();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1))
+                .unwrap();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1))
+                .unwrap();
             Node::mk(
                 mcx,
                 ::types_nodes::primnodes::CoalesceExpr {
@@ -3038,33 +3562,49 @@ fn fuzz_int_expr<'mcx>(mcx: Mcx<'mcx>, rng: &mut Lcg, depth: u32) -> Node<'mcx> 
 
 fn fuzz_bool_expr<'mcx>(mcx: Mcx<'mcx>, rng: &mut Lcg, depth: u32) -> Node<'mcx> {
     use ::types_nodes::primnodes::BoolExprType::{AND_EXPR, NOT_EXPR, OR_EXPR};
-    match if depth == 0 { rng.below(2) } else { rng.below(6) } {
+    match if depth == 0 {
+        rng.below(2)
+    } else {
+        rng.below(6)
+    } {
         // int4 cmp over int subtrees (CmpOp inline stencils).
         0 | 1 => {
             let f = [65u32, 144, 66, 149, 147, 150][rng.below(6) as usize];
             let mut args = NodeList::nil();
-            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth.saturating_sub(1))).unwrap();
-            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth.saturating_sub(1))).unwrap();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth.saturating_sub(1)))
+                .unwrap();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth.saturating_sub(1)))
+                .unwrap();
             mk_opexpr(mcx, f, BOOLOID, args)
         }
         2 => {
             let op = [AND_EXPR, OR_EXPR][rng.below(2) as usize];
             let mut args = NodeList::nil();
             for _ in 0..2 + rng.below(2) {
-                args.lappend(mcx, fuzz_bool_expr(mcx, rng, depth - 1)).unwrap();
+                args.lappend(mcx, fuzz_bool_expr(mcx, rng, depth - 1))
+                    .unwrap();
             }
             Node::mk(
                 mcx,
-                ::types_nodes::primnodes::BoolExpr { boolop: op, args, location: -1 },
+                ::types_nodes::primnodes::BoolExpr {
+                    boolop: op,
+                    args,
+                    location: -1,
+                },
             )
             .unwrap()
         }
         3 => {
             let mut args = NodeList::nil();
-            args.lappend(mcx, fuzz_bool_expr(mcx, rng, depth - 1)).unwrap();
+            args.lappend(mcx, fuzz_bool_expr(mcx, rng, depth - 1))
+                .unwrap();
             Node::mk(
                 mcx,
-                ::types_nodes::primnodes::BoolExpr { boolop: NOT_EXPR, args, location: -1 },
+                ::types_nodes::primnodes::BoolExpr {
+                    boolop: NOT_EXPR,
+                    args,
+                    location: -1,
+                },
             )
             .unwrap()
         }
@@ -3107,7 +3647,11 @@ fn fuzz_eval<'mcx>(
     row: &[Option<i32>],
 ) -> FuzzOutcome {
     let mut slot = virtual_slot(mcx, row);
-    let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+    let mut slots = EvalSlots {
+        scan: Some(&mut slot),
+        inner: None,
+        outer: None,
+    };
     match exec_eval_expr(state, &mut slots) {
         Ok(nd) => Ok((nd.isnull, if nd.isnull { 0 } else { nd.value.as_usize() })),
         Err(e) => Err((e.message.clone(), format!("{:?}", e.sqlstate))),
@@ -3121,17 +3665,23 @@ fn jit_parity_fuzz() {
         let mut jitted = 0usize;
         for tree in 0..300u32 {
             let expr = fuzz_bool_expr(mcx, &mut rng, 3);
-            let mut interp =
-                exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+            let mut interp = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             interp.arm_result_mcx(mcx);
             crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR);
-            let mut jit = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+            let mut jit = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             jit.arm_result_mcx(mcx);
             // Kernels stay alive for the eval loop (estate-collector analog).
             let col = crate::jit::session_end();
             #[cfg(target_arch = "aarch64")]
             if matches!(jit.kernel(), Kernel::Program) {
-                assert!(jit.jit.is_some(), "tree {tree}: Program shape refused by the emitter");
+                assert!(
+                    jit.jit.is_some(),
+                    "tree {tree}: Program shape refused by the emitter"
+                );
             }
             if jit.jit.is_some() {
                 jitted += 1;
@@ -3189,11 +3739,17 @@ fn old_new_var_projection_reads_ret_slots() {
 
         let mut scan = heap_slot(mcx, &[Some(10)]);
         let mut old = heap_slot(mcx, &[Some(5)]);
-        let mut result =
-            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc));
+        let mut result = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc));
         state.set_old_new_null(false, false);
-        let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
-        let mut ret = RetSlots { old: RetSlot::Slot(&mut old), new: RetSlot::Scan };
+        let mut slots = EvalSlots {
+            scan: Some(&mut scan),
+            inner: None,
+            outer: None,
+        };
+        let mut ret = RetSlots {
+            old: RetSlot::Slot(&mut old),
+            new: RetSlot::Scan,
+        };
         exec_project_returning(&mut state, &mut slots, &mut ret, &mut result, mcx).unwrap();
         assert_eq!(result.base().tts_values[0].as_i32(), 5);
         assert_eq!(result.base().tts_values[1].as_i32(), 10);
@@ -3211,9 +3767,13 @@ fn jit_parity_qual_lists() {
             for _ in 0..1 + rng.below(3) {
                 qual.lappend(mcx, fuzz_bool_expr(mcx, &mut rng, 2)).unwrap();
             }
-            let mut interp = exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap();
+            let mut interp = exec_init_qual(mcx, &qual, ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR);
-            let mut jit = exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap();
+            let mut jit = exec_init_qual(mcx, &qual, ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             let col = crate::jit::session_end();
             for _row in 0..32u32 {
                 let row: alloc::vec::Vec<Option<i32>> = (0..FUZZ_COLS)
@@ -3226,10 +3786,16 @@ fn jit_parity_qual_lists() {
                     row: &[Option<i32>],
                     state: &mut ExprState<'mcx>,
                 ) -> Result<bool, (String, String)> {
-                    let mut slot =
-                        if heap { heap_slot(mcx, row) } else { virtual_slot(mcx, row) };
-                    let mut slots =
-                        EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+                    let mut slot = if heap {
+                        heap_slot(mcx, row)
+                    } else {
+                        virtual_slot(mcx, row)
+                    };
+                    let mut slots = EvalSlots {
+                        scan: Some(&mut slot),
+                        inner: None,
+                        outer: None,
+                    };
                     match exec_qual(Some(state), &mut slots) {
                         Ok(b) => Ok(b),
                         Err(e) => Err((e.message.clone(), format!("{:?}", e.sqlstate))),
@@ -3265,8 +3831,15 @@ fn old_var_reads_all_null_substitute() {
         let mut result =
             exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc_int4(mcx, 1)));
         state.set_old_new_null(true, false);
-        let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
-        let mut ret = RetSlots { old: RetSlot::Slot(&mut allnull), new: RetSlot::Scan };
+        let mut slots = EvalSlots {
+            scan: Some(&mut scan),
+            inner: None,
+            outer: None,
+        };
+        let mut ret = RetSlots {
+            old: RetSlot::Slot(&mut allnull),
+            new: RetSlot::Scan,
+        };
         exec_project_returning(&mut state, &mut slots, &mut ret, &mut result, mcx).unwrap();
         assert!(result.base().tts_isnull[0]);
     });
@@ -3284,7 +3857,9 @@ fn returning_expr_step_null_flag_short_circuits() {
             },
         )
         .unwrap();
-        let mut state = exec_init_expr(mcx, Some(rexpr), ParamBind::NONE).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(rexpr), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
         assert!(state.has_old());
         assert!(state
             .steps()
@@ -3293,12 +3868,20 @@ fn returning_expr_step_null_flag_short_circuits() {
         state.arm_result_mcx(mcx);
 
         state.set_old_new_null(false, false);
-        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: None,
+            inner: None,
+            outer: None,
+        };
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert_eq!((r.isnull, r.value.as_i32()), (false, 7));
 
         state.set_old_new_null(true, false);
-        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: None,
+            inner: None,
+            outer: None,
+        };
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert!(r.isnull);
     });
@@ -3309,31 +3892,44 @@ fn whole_row_record_var_blesses_slot_descriptor() {
     with_mcx(|mcx| {
         // Whole-row Var of RECORD type over the scan slot (subquery shape).
         let var = Node::mk_var(mcx, 1, 0, ::types_core::catalog::RECORDOID, -1, 0, 0).unwrap();
-        let mut state = exec_init_expr(mcx, Some(var), ParamBind::NONE).unwrap().unwrap();
-        assert!(state.steps().iter().any(|s| matches!(s, Step::WholeRow { .. })));
+        let mut state = exec_init_expr(mcx, Some(var), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
+        assert!(state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::WholeRow { .. })));
         state.arm_result_mcx(mcx);
 
         let mut scan = virtual_slot(mcx, &[Some(7), Some(8)]);
-        let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut scan),
+            inner: None,
+            outer: None,
+        };
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert!(!r.isnull);
         // SAFETY: the eval returns a flattened in-memory composite datum.
         let td = unsafe { &*(r.value.as_usize() as *const ::types_tuple::HeapTupleHeaderData) };
         assert_eq!(td.type_id(), ::types_core::catalog::RECORDOID);
         let typmod = td.typmod();
-        assert!(typmod >= 0, "RECORD whole-row output must carry a blessed typmod");
+        assert!(
+            typmod >= 0,
+            "RECORD whole-row output must carry a blessed typmod"
+        );
         // The blessed typmod resolves back to the slot's shape.
-        let desc = ::typcache::lookup_rowtype_tupdesc_copy(
-            mcx,
-            ::types_core::catalog::RECORDOID,
-            typmod,
-        )
-        .unwrap();
+        let desc =
+            ::typcache::lookup_rowtype_tupdesc_copy(mcx, ::types_core::catalog::RECORDOID, typmod)
+                .unwrap();
         assert_eq!(desc.natts, 2);
         assert_eq!(desc.attrs[0].atttypid, INT4OID);
 
         // Second eval reuses the blessed descriptor (first-eval split).
-        let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
+        let mut slots = EvalSlots {
+            scan: Some(&mut scan),
+            inner: None,
+            outer: None,
+        };
         let r2 = exec_eval_expr(&mut state, &mut slots).unwrap();
         // SAFETY: as above.
         let td2 = unsafe { &*(r2.value.as_usize() as *const ::types_tuple::HeapTupleHeaderData) };
@@ -3348,9 +3944,15 @@ fn exec_type_set_col_names_skips_empty_and_dropped() {
         let mut desc = ::tupdesc::CreateTupleDescCopy(mcx, rc.as_ref()).unwrap();
         desc.attr_mut(1).attisdropped = true;
         let mut names = NodeList::nil();
-        names.lappend(mcx, Node::mk_string(mcx, "a").unwrap()).unwrap();
-        names.lappend(mcx, Node::mk_string(mcx, "b").unwrap()).unwrap();
-        names.lappend(mcx, Node::mk_string(mcx, "").unwrap()).unwrap();
+        names
+            .lappend(mcx, Node::mk_string(mcx, "a").unwrap())
+            .unwrap();
+        names
+            .lappend(mcx, Node::mk_string(mcx, "b").unwrap())
+            .unwrap();
+        names
+            .lappend(mcx, Node::mk_string(mcx, "").unwrap())
+            .unwrap();
         let before2 = desc.attrs[2].attname;
         crate::interp::exec_type_set_col_names(&mut desc, &names);
         assert_eq!(desc.attrs[0].attname.name_str(), b"a");
@@ -3414,9 +4016,10 @@ fn multiexpr_subplan_compiles_to_setup_steps_and_dummy_const() {
             },
         )
         .unwrap();
-        let mut state = crate::compile::exec_init_expr_subplans(mcx, Some(subplan), bind, Some(env))
-            .unwrap()
-            .unwrap();
+        let mut state =
+            crate::compile::exec_init_expr_subplans(mcx, Some(subplan), bind, Some(env))
+                .unwrap()
+                .unwrap();
         // Program shape: setup steps run the SubPlan (arg eval + PARAM_SET +
         // SUBPLAN) before the body; the in-tree SubPlan is a dummy NULL const.
         assert!(matches!(state.steps()[0], Step::Const { .. }));
@@ -3570,10 +4173,16 @@ fn for_fn_oid_matches_golden_over_full_oid_sweep() {
 fn jit_inline_arith_matches_golden_set() {
     // The six pre-registry arithmetic OIDs + the censusgaps int2/int4 mixed
     // family (int24/int42 pl/mi/mul, int24div).
-    let golden: &[u32] = &[177, 181, 141, 463, 464, 465, 178, 179, 182, 183, 170, 171, 172];
+    let golden: &[u32] = &[
+        177, 181, 141, 463, 464, 465, 178, 179, 182, 183, 170, 171, 172,
+    ];
     for oid in 0u32..=3000 {
         let admitted = ::lanereg::jit_arith(oid).is_some();
-        assert_eq!(admitted, golden.contains(&oid), "jit arith admission drifted at oid {oid}");
+        assert_eq!(
+            admitted,
+            golden.contains(&oid),
+            "jit arith admission drifted at oid {oid}"
+        );
     }
 }
 
@@ -3583,7 +4192,17 @@ fn jit_inline_arith_matches_golden_set() {
 // so equality here IS C parity for the batch kernels.
 
 fn pool_i16() -> Vec<i16> {
-    vec![i16::MIN, i16::MIN + 1, -7, -1, 0, 1, 7, i16::MAX - 1, i16::MAX]
+    vec![
+        i16::MIN,
+        i16::MIN + 1,
+        -7,
+        -1,
+        0,
+        1,
+        7,
+        i16::MAX - 1,
+        i16::MAX,
+    ]
 }
 
 fn pool_i32() -> Vec<i32> {
@@ -3621,7 +4240,18 @@ fn pool_i64() -> Vec<i64> {
 }
 
 fn pool_u32() -> Vec<u32> {
-    vec![0, 1, 2, 7, 0x7FFF_FFFE, 0x7FFF_FFFF, 0x8000_0000, 0x8000_0001, u32::MAX - 1, u32::MAX]
+    vec![
+        0,
+        1,
+        2,
+        7,
+        0x7FFF_FFFE,
+        0x7FFF_FFFF,
+        0x8000_0000,
+        0x8000_0001,
+        u32::MAX - 1,
+        u32::MAX,
+    ]
 }
 
 fn pool_f32() -> Vec<f32> {
@@ -3793,7 +4423,11 @@ fn cmp_commuted_matches_swapped_args_int_families() {
         for &a in &i16s {
             for &b in &i16s {
                 let (da, db) = (Datum::from_i16(a), Datum::from_i16(b));
-                assert_eq!(op.commuted().eval(db, da), op.eval(da, db), "{op:?} ({a}, {b})");
+                assert_eq!(
+                    op.commuted().eval(db, da),
+                    op.eval(da, db),
+                    "{op:?} ({a}, {b})"
+                );
             }
         }
     }
@@ -3801,7 +4435,11 @@ fn cmp_commuted_matches_swapped_args_int_families() {
         for &a in &i32s {
             for &b in &i32s {
                 let (da, db) = (Datum::from_i32(a), Datum::from_i32(b));
-                assert_eq!(op.commuted().eval(db, da), op.eval(da, db), "{op:?} ({a}, {b})");
+                assert_eq!(
+                    op.commuted().eval(db, da),
+                    op.eval(da, db),
+                    "{op:?} ({a}, {b})"
+                );
             }
         }
     }
@@ -3809,7 +4447,11 @@ fn cmp_commuted_matches_swapped_args_int_families() {
         for &a in &i64s {
             for &b in &i64s {
                 let (da, db) = (Datum::from_i64(a), Datum::from_i64(b));
-                assert_eq!(op.commuted().eval(db, da), op.eval(da, db), "{op:?} ({a}, {b})");
+                assert_eq!(
+                    op.commuted().eval(db, da),
+                    op.eval(da, db),
+                    "{op:?} ({a}, {b})"
+                );
             }
         }
     }
@@ -3817,7 +4459,11 @@ fn cmp_commuted_matches_swapped_args_int_families() {
         for &a in &i64s {
             for &b in &i32s {
                 let (da, db) = (Datum::from_i64(a), Datum::from_i32(b));
-                assert_eq!(op.commuted().eval(db, da), op.eval(da, db), "{op:?} ({a}, {b})");
+                assert_eq!(
+                    op.commuted().eval(db, da),
+                    op.eval(da, db),
+                    "{op:?} ({a}, {b})"
+                );
             }
         }
     }
@@ -3825,7 +4471,11 @@ fn cmp_commuted_matches_swapped_args_int_families() {
         for &a in &i32s {
             for &b in &i64s {
                 let (da, db) = (Datum::from_i32(a), Datum::from_i64(b));
-                assert_eq!(op.commuted().eval(db, da), op.eval(da, db), "{op:?} ({a}, {b})");
+                assert_eq!(
+                    op.commuted().eval(db, da),
+                    op.eval(da, db),
+                    "{op:?} ({a}, {b})"
+                );
             }
         }
     }
@@ -3856,18 +4506,16 @@ fn qual_bitmap_matches_eval_for_all_census_ops() {
             Int24Eq | Int24Ne | Int24Lt | Int24Le | Int24Gt | Int24Ge => (i16d, i32d),
             Int42Eq | Int42Ne | Int42Lt | Int42Le | Int42Gt | Int42Ge => (i32d, i16d),
             OidEq | OidNe | OidLt | OidLe | OidGt | OidGe => (u32d.clone(), u32d),
-            Float4Eq | Float4Ne | Float4Lt | Float4Le | Float4Gt | Float4Ge => {
-                (f32d.clone(), f32d)
-            }
-            Float8Eq | Float8Ne | Float8Lt | Float8Le | Float8Gt | Float8Ge => {
-                (f64d.clone(), f64d)
-            }
+            Float4Eq | Float4Ne | Float4Lt | Float4Le | Float4Gt | Float4Ge => (f32d.clone(), f32d),
+            Float8Eq | Float8Ne | Float8Lt | Float8Le | Float8Gt | Float8Ge => (f64d.clone(), f64d),
             Float48Eq | Float48Ne | Float48Lt | Float48Le | Float48Gt | Float48Ge => (f32d, f64d),
             Float84Eq | Float84Ne | Float84Lt | Float84Le | Float84Gt | Float84Ge => (f64d, f32d),
         }
     }
     for oid in 0u32..=3000 {
-        let Some(op) = CmpOp::for_fn_oid(oid) else { continue };
+        let Some(op) = CmpOp::for_fn_oid(oid) else {
+            continue;
+        };
         let (vpool, kpool) = pools(op);
         // >64 rows: cycle the pool with a null every 5th row.
         let n = 150usize;
@@ -3923,10 +4571,7 @@ fn desc_typed<'mcx>(mcx: Mcx<'mcx>, cols: &[(u32, i16)]) -> Rc<TupleDescData<'mc
     })
 }
 
-fn virtual_slot_typed<'mcx>(
-    mcx: Mcx<'mcx>,
-    cols: &[(u32, i16, Option<Datum>)],
-) -> SlotData<'mcx> {
+fn virtual_slot_typed<'mcx>(mcx: Mcx<'mcx>, cols: &[(u32, i16, Option<Datum>)]) -> SlotData<'mcx> {
     let shape: Vec<(u32, i16)> = cols.iter().map(|&(t, l, _)| (t, l)).collect();
     let mut slot = exectuples::make_tuple_table_slot(
         mcx,
@@ -3958,7 +4603,11 @@ fn run_qual_d<'mcx>(
     cols: &[(u32, i16, Option<Datum>)],
 ) -> bool {
     let mut slot = virtual_slot_typed(mcx, cols);
-    let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+    let mut slots = EvalSlots {
+        scan: Some(&mut slot),
+        inner: None,
+        outer: None,
+    };
     exec_qual(Some(state), &mut slots).unwrap()
 }
 
@@ -3978,7 +4627,11 @@ fn fused_qual_kernel_float8_var_lt_const() {
         let mut state = qual_state(mcx, mk_opexpr(mcx, 295, BOOLOID, args));
         assert!(matches!(
             state.kernel(),
-            Kernel::QualScanVarCmpConst { attnum: 0, cmp: CmpOp::Float8Lt, .. }
+            Kernel::QualScanVarCmpConst {
+                attnum: 0,
+                cmp: CmpOp::Float8Lt,
+                ..
+            }
         ));
         let row = |v: Option<f64>| [(FLOAT8OID, 8i16, v.map(Datum::from_f64))];
         assert!(run_qual_d(mcx, &mut state, &row(Some(1.0))));
@@ -4007,7 +4660,10 @@ fn fused_qual_kernel_commuted_float48() {
         let mut state = qual_state(mcx, mk_opexpr(mcx, 303, BOOLOID, args));
         assert!(matches!(
             state.kernel(),
-            Kernel::QualScanVarCmpConst { cmp: CmpOp::Float84Lt, .. }
+            Kernel::QualScanVarCmpConst {
+                cmp: CmpOp::Float84Lt,
+                ..
+            }
         ));
         let row = |v: Option<f64>| [(FLOAT8OID, 8i16, v.map(Datum::from_f64))];
         assert!(run_qual_d(mcx, &mut state, &row(Some(1.0))));
@@ -4031,7 +4687,11 @@ fn fused_qual_kernel_oid_unsigned() {
         let mut state = qual_state(mcx, mk_opexpr(mcx, 716, BOOLOID, args));
         assert!(matches!(
             state.kernel(),
-            Kernel::QualScanVarCmpConst { attnum: 0, cmp: CmpOp::OidLt, .. }
+            Kernel::QualScanVarCmpConst {
+                attnum: 0,
+                cmp: CmpOp::OidLt,
+                ..
+            }
         ));
         // Unsigned order: 0x7FFFFFFF < 0x80000000 but NOT as signed i32.
         let row = |v: Option<u32>| [(OIDOID, 4i16, v.map(Datum::from_u32))];
@@ -4056,7 +4716,11 @@ fn fused_qual_kernel_int24_and_int42() {
         let mut state = qual_state(mcx, mk_opexpr(mcx, 160, BOOLOID, args));
         assert!(matches!(
             state.kernel(),
-            Kernel::QualScanVarCmpConst { attnum: 0, cmp: CmpOp::Int24Lt, .. }
+            Kernel::QualScanVarCmpConst {
+                attnum: 0,
+                cmp: CmpOp::Int24Lt,
+                ..
+            }
         ));
         // Every int2 value is < 100000 after C's promotion.
         let row = |v: Option<i16>| [(INT2OID, 2i16, v.map(Datum::from_i16))];
@@ -4074,7 +4738,10 @@ fn fused_qual_kernel_int24_and_int42() {
         let mut state = qual_state(mcx, mk_opexpr(mcx, 161, BOOLOID, args));
         assert!(matches!(
             state.kernel(),
-            Kernel::QualScanVarCmpConst { cmp: CmpOp::Int24Gt, .. }
+            Kernel::QualScanVarCmpConst {
+                cmp: CmpOp::Int24Gt,
+                ..
+            }
         ));
         assert!(run_qual_d(mcx, &mut state, &row(Some(0))));
         assert!(!run_qual_d(mcx, &mut state, &row(Some(-7))));
@@ -4189,7 +4856,11 @@ fn jit_parity_censusgaps_inline_ops() {
             cols: &[(u32, i16, Option<Datum>)],
         ) -> FuzzOutcome {
             let mut slot = virtual_slot_typed(mcx, cols);
-            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let mut slots = EvalSlots {
+                scan: Some(&mut slot),
+                inner: None,
+                outer: None,
+            };
             match exec_eval_expr(state, &mut slots) {
                 Ok(nd) => Ok((nd.isnull, if nd.isnull { 0 } else { nd.value.as_usize() })),
                 Err(e) => Err((e.message.clone(), format!("{:?}", e.sqlstate))),
@@ -4198,10 +4869,14 @@ fn jit_parity_censusgaps_inline_ops() {
         let len_of = |typ: u32| if typ == 21 { 2i16 } else { 4 };
         let mut exercised = 0usize;
         let mut run_case = |expr: Node<'_>, lt: u32, rt: u32| {
-            let mut interp = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+            let mut interp = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             interp.arm_result_mcx(mcx);
             crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR);
-            let mut jit = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+            let mut jit = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
             jit.arm_result_mcx(mcx);
             let _ = crate::jit::session_end();
             if jit.jit.is_some() {
@@ -4228,9 +4903,12 @@ fn jit_parity_censusgaps_inline_ops() {
             let args =
                 NodeList::make2(mcx, mk_scan_var(mcx, 1, lt), mk_scan_var(mcx, 2, rt)).unwrap();
             let arith = mk_opexpr(mcx, f, INT4OID, args);
-            let cmp_args =
-                NodeList::make2(mcx, arith, mk_int4_const(mcx, Some(6))).unwrap();
-            run_case(wrap_bool(mcx, mk_opexpr(mcx, 66, BOOLOID, cmp_args)), lt, rt);
+            let cmp_args = NodeList::make2(mcx, arith, mk_int4_const(mcx, Some(6))).unwrap();
+            run_case(
+                wrap_bool(mcx, mk_opexpr(mcx, 66, BOOLOID, cmp_args)),
+                lt,
+                rt,
+            );
         }
         #[cfg(target_arch = "aarch64")]
         assert_eq!(
@@ -4258,8 +4936,17 @@ fn mk_textlike_qual<'mcx>(mcx: Mcx<'mcx>, pattern: &[u8]) -> PgBox<'mcx, ExprSta
     let args = NodeList::make2(
         mcx,
         mk_scan_var(mcx, 1, TEXTOID_T),
-        Node::mk_const(mcx, TEXTOID_T, -1, 950, -1, text_datum_4b(pattern), false, false)
-            .unwrap(),
+        Node::mk_const(
+            mcx,
+            TEXTOID_T,
+            -1,
+            950,
+            -1,
+            text_datum_4b(pattern),
+            false,
+            false,
+        )
+        .unwrap(),
     )
     .unwrap();
     let op = Node::mk(
@@ -4283,13 +4970,17 @@ fn mk_textlike_qual<'mcx>(mcx: Mcx<'mcx>, pattern: &[u8]) -> PgBox<'mcx, ExprSta
 fn contains_census_admits_contains_class_patterns() {
     with_mcx(|mcx| {
         let state = mk_textlike_qual(mcx, b"%abc%");
-        let c = state.scan_contains_clause().expect("contains-class pattern admits");
+        let c = state
+            .scan_contains_clause()
+            .expect("contains-class pattern admits");
         assert_eq!(c.attnum, 0);
         assert_eq!(c.collation, 950);
         assert_eq!(c.needle(), b"abc");
         // Multi-% runs collapse; multibyte literals admit.
         let state = mk_textlike_qual(mcx, "%%причал%%%".as_bytes());
-        let c = state.scan_contains_clause().expect("wildcard runs + multibyte admit");
+        let c = state
+            .scan_contains_clause()
+            .expect("wildcard runs + multibyte admit");
         assert_eq!(c.needle(), "причал".as_bytes());
     });
 }
@@ -4298,14 +4989,14 @@ fn contains_census_admits_contains_class_patterns() {
 fn contains_census_refuses_non_contains_patterns() {
     with_mcx(|mcx| {
         for pat in [
-            &b"abc%"[..],     // anchored prefix
-            b"%abc",          // anchored suffix
-            b"abc",           // exact
-            b"%a_c%",         // underscore class
-            b"%a\\bc%",       // escape class
-            b"%a%c%",         // multi-segment
-            b"%%",            // empty literal (matches-everything class)
-            b"%",             // ditto
+            &b"abc%"[..], // anchored prefix
+            b"%abc",      // anchored suffix
+            b"abc",       // exact
+            b"%a_c%",     // underscore class
+            b"%a\\bc%",   // escape class
+            b"%a%c%",     // multi-segment
+            b"%%",        // empty literal (matches-everything class)
+            b"%",         // ditto
         ] {
             let state = mk_textlike_qual(mcx, pat);
             assert!(
@@ -4326,15 +5017,19 @@ fn qual_bitmap_contains_matches_perrow_like_oracle() {
     // toast-pointer header must yield an `undecided` bit, never a decision.
     let mut s = 0x243F_6A88_85A3_08D3u64;
     let mut lcg = move || {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         s
     };
-    let alphabet: Vec<char> =
-        "abcdefgxyz0123456789 /:.?=&причалЯндексбßé中文".chars().collect();
+    let alphabet: Vec<char> = "abcdefgxyz0123456789 /:.?=&причалЯндексбßé中文"
+        .chars()
+        .collect();
     for round in 0..200 {
         let needle_len = 1 + (lcg() as usize) % 6;
-        let needle: String =
-            (0..needle_len).map(|_| alphabet[(lcg() as usize) % alphabet.len()]).collect();
+        let needle: String = (0..needle_len)
+            .map(|_| alphabet[(lcg() as usize) % alphabet.len()])
+            .collect();
         let pattern = format!("%{needle}%");
         let nrows = 64 + (lcg() as usize) % 130;
         let mut values = vec![Datum::null(); nrows];
@@ -4350,24 +5045,22 @@ fn qual_bitmap_contains_matches_perrow_like_oracle() {
                     // Stacked Borrows (miri F1).
                     let raw: Box<[u8]> = vec![0x01, 18, 0, 0].into_boxed_slice();
                     owners.push(raw);
-                    values[i] =
-                        Datum::from_usize(owners.last().unwrap().as_ptr() as usize);
+                    values[i] = Datum::from_usize(owners.last().unwrap().as_ptr() as usize);
                 }
                 _ => {
                     let len = (lcg() as usize) % 40;
-                    let text: String =
-                        (0..len).map(|_| alphabet[(lcg() as usize) % alphabet.len()]).collect();
+                    let text: String = (0..len)
+                        .map(|_| alphabet[(lcg() as usize) % alphabet.len()])
+                        .collect();
                     let b = text.as_bytes();
                     let mut v = vec![0u8; 4 + b.len()];
-                    let word =
-                        ::types_tuple::varatt::set_varsize_4b_word((4 + b.len()) as u32);
+                    let word = ::types_tuple::varatt::set_varsize_4b_word((4 + b.len()) as u32);
                     v[..4].copy_from_slice(&word.to_ne_bytes());
                     v[4..].copy_from_slice(b);
                     // As above: push before exposing the pointer (miri F1).
                     let raw = v.into_boxed_slice();
                     owners.push(raw);
-                    values[i] =
-                        Datum::from_usize(owners.last().unwrap().as_ptr() as usize);
+                    values[i] = Datum::from_usize(owners.last().unwrap().as_ptr() as usize);
                 }
             }
         }
@@ -4401,13 +5094,10 @@ fn qual_bitmap_contains_matches_perrow_like_oracle() {
             assert!(!und);
             let len = unsafe { ::types_tuple::varatt::varsize_4b(p) } - 4;
             let text = unsafe { core::slice::from_raw_parts(p.add(4), len) };
-            let oracle = ::adt_like::utf8_match_text(
-                text,
-                pattern.as_bytes(),
-                Some(&::pg_locale::C_LOCALE),
-            )
-            .unwrap()
-                == 1;
+            let oracle =
+                ::adt_like::utf8_match_text(text, pattern.as_bytes(), Some(&::pg_locale::C_LOCALE))
+                    .unwrap()
+                    == 1;
             assert_eq!(bit, oracle, "row {i} needle {needle:?} text {text:?}");
         }
     }
@@ -4443,7 +5133,11 @@ fn expr_type_resolves_delegated_node_families() {
     // T_CollateExpr: C recurses into the arg.
     let collate = Node::mk(
         mcx,
-        ::types_nodes::primnodes::CollateExpr { arg: int_const, collOid: 100, location: -1 },
+        ::types_nodes::primnodes::CollateExpr {
+            arg: int_const,
+            collOid: 100,
+            location: -1,
+        },
     )
     .unwrap();
     assert_eq!(crate::compile::expr_type(collate), INT4OID);
@@ -4481,12 +5175,17 @@ fn current_of_expr_compiles_and_errors_cleanly_at_eval() {
         },
     )
     .unwrap();
-    let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+    let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE)
+        .unwrap()
+        .unwrap();
     state.arm_result_mcx(mcx);
     let mut slots = EvalSlots::default();
     let e = exec_eval_expr(&mut state, &mut slots).unwrap_err();
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
-    assert_eq!(e.message(), "WHERE CURRENT OF is not supported for this table type");
+    assert_eq!(
+        e.message(),
+        "WHERE CURRENT OF is not supported for this table type"
+    );
 }
 
 // ExecBuildHash32Expr strict arms (EEOP_HASHDATUM_FIRST_STRICT /
@@ -4527,7 +5226,11 @@ fn hash32_expr_strict_null_key_aborts_c_verbatim() {
             b: Option<i32>,
         ) -> bool {
             let mut slot = virtual_slot(mcx, &[a, b]);
-            let mut slots = EvalSlots { scan: None, inner: Some(&mut slot), outer: None };
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: Some(&mut slot),
+                outer: None,
+            };
             exec_eval_expr(state, &mut slots).unwrap().isnull
         }
         // C row sequence (verified against PostgreSQL 18.4, the same counts
@@ -4535,11 +5238,23 @@ fn hash32_expr_strict_null_key_aborts_c_verbatim() {
         // the zeroed cell -> NOT null; second-key abort -> null; first-key
         // abort after a null -> stale null; non-null row resets; first-key
         // abort after a non-null row -> stale not-null.
-        assert!(!eval(mcx, &mut state, None, Some(2)), "fresh first-key abort: C zeroed cell");
-        assert!(eval(mcx, &mut state, Some(2), None), "last-key abort writes the result cell");
-        assert!(eval(mcx, &mut state, None, Some(5)), "first-key abort: stale null carried");
+        assert!(
+            !eval(mcx, &mut state, None, Some(2)),
+            "fresh first-key abort: C zeroed cell"
+        );
+        assert!(
+            eval(mcx, &mut state, Some(2), None),
+            "last-key abort writes the result cell"
+        );
+        assert!(
+            eval(mcx, &mut state, None, Some(5)),
+            "first-key abort: stale null carried"
+        );
         assert!(!eval(mcx, &mut state, Some(1), Some(1)), "non-null row");
-        assert!(!eval(mcx, &mut state, None, Some(7)), "first-key abort: stale not-null carried");
+        assert!(
+            !eval(mcx, &mut state, None, Some(7)),
+            "first-key abort: stale not-null carried"
+        );
 
         // Single-key strict: the Hash32Var kernel cover — NULL returns NULL
         // every time (the step's out IS the result cell).
@@ -4549,10 +5264,22 @@ fn hash32_expr_strict_null_key_aborts_c_verbatim() {
         )
         .unwrap();
         let mut s1 = crate::compile::exec_build_hash32_from_exprs(
-            mcx, &desc, &key1, &[450], &[0], &[true], false, 0, ParamBind::NONE, None,
+            mcx,
+            &desc,
+            &key1,
+            &[450],
+            &[0],
+            &[true],
+            false,
+            0,
+            ParamBind::NONE,
+            None,
         )
         .unwrap();
-        assert!(matches!(s1.kernel(), Kernel::Hash32Var { strict: true, .. }));
+        assert!(matches!(
+            s1.kernel(),
+            Kernel::Hash32Var { strict: true, .. }
+        ));
         assert!(!eval(mcx, &mut s1, Some(3), None));
         assert!(eval(mcx, &mut s1, None, None));
         assert!(!eval(mcx, &mut s1, Some(3), None));
@@ -4565,10 +5292,22 @@ fn hash32_expr_strict_null_key_aborts_c_verbatim() {
         )
         .unwrap();
         let mut s2 = crate::compile::exec_build_hash32_from_exprs(
-            mcx, &desc, &key1b, &[450], &[0], &[true], true, 0, ParamBind::NONE, None,
+            mcx,
+            &desc,
+            &key1b,
+            &[450],
+            &[0],
+            &[true],
+            true,
+            0,
+            ParamBind::NONE,
+            None,
         )
         .unwrap();
-        assert!(matches!(s2.kernel(), Kernel::Hash32Var { strict: false, .. }));
+        assert!(matches!(
+            s2.kernel(),
+            Kernel::Hash32Var { strict: false, .. }
+        ));
         assert!(!eval(mcx, &mut s2, None, None));
     });
 }
@@ -4600,8 +5339,7 @@ fn projection_evaluates_nothing_gates_fused_skip() {
         assert!(s.projection_evaluates_nothing());
 
         // Const-only column: still evaluation-free.
-        let tle =
-            Node::mk_target_entry(mcx, mk_int4_const(mcx, Some(7)), 1, None, false).unwrap();
+        let tle = Node::mk_target_entry(mcx, mk_int4_const(mcx, Some(7)), 1, None, false).unwrap();
         let tlist = NodeList::make1(mcx, tle).unwrap();
         let mut s = exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap();
         assert!(s.projection_evaluates_nothing());
@@ -4611,17 +5349,14 @@ fn projection_evaluates_nothing_gates_fused_skip() {
         // Computing projection (strict int4eq over a scan Var): can raise —
         // NOT skippable, in either kernel form.
         let mk_computing = || {
-            let args =
-                NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
-                    .unwrap();
-            let tle = Node::mk_target_entry(
+            let args = NodeList::make2(
                 mcx,
-                mk_opexpr(mcx, 65, BOOLOID, args),
-                1,
-                None,
-                false,
+                mk_scan_var(mcx, 1, INT4OID),
+                mk_int4_const(mcx, Some(7)),
             )
             .unwrap();
+            let tle = Node::mk_target_entry(mcx, mk_opexpr(mcx, 65, BOOLOID, args), 1, None, false)
+                .unwrap();
             let tlist = NodeList::make1(mcx, tle).unwrap();
             exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap()
         };

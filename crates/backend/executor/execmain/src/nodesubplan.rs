@@ -8,6 +8,7 @@
 use core::ptr::NonNull;
 use std::rc::Rc;
 
+use ::datum as Datum_crate;
 use ::datum::NullableDatum;
 use ::execexpr::{exec_project, ExprState};
 use ::executils::{EStateData, EcxtId, ExecSlotId, SubplanStateCell};
@@ -22,7 +23,6 @@ use ::types_nodes::NodeTag;
 use ::types_scan::sdir::ScanDirection;
 use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::TupleDescData;
-use ::datum as Datum_crate;
 use Datum_crate::Datum;
 
 use crate::procnode::{exec_proc_node, with_eval_slots_outer, PlanStateNode};
@@ -89,7 +89,12 @@ pub(crate) fn exec_init_sub_plan<'mcx>(
     let cell = estate
         .es_subplanstates
         .get((subplan.plan_id - 1) as usize)
-        .unwrap_or_else(|| panic!("subplan \"{}\" was not initialized", subplan.plan_name.unwrap_or("?")))
+        .unwrap_or_else(|| {
+            panic!(
+                "subplan \"{}\" was not initialized",
+                subplan.plan_name.unwrap_or("?")
+            )
+        })
         .0;
     check_subplan_initialized(cell, subplan)?;
 
@@ -200,7 +205,11 @@ fn run_subplan<'mcx>(
     let mut found = false;
     let mut values: PgVec<'mcx, NullableDatum> = PgVec::new_in(mcx);
     let mut astate = if sstate.sub_link_type == SubLinkType::ARRAY_SUBLINK {
-        Some(::arrayfuncs::build::init_array_result_any(mcx, sstate.first_col_type, true)?)
+        Some(::arrayfuncs::build::init_array_result_any(
+            mcx,
+            sstate.first_col_type,
+            true,
+        )?)
     } else {
         None
     };
@@ -244,8 +253,15 @@ fn run_subplan<'mcx>(
                     };
                     let mut vnull = false;
                     let v = exectuples::slot_getattr(slot, col as i32 + 1, &mut vnull);
-                    let v = if vnull || attbyval { v } else { datum_copy_in(mcx, v, attlen)? };
-                    values.push(NullableDatum { value: v, isnull: vnull });
+                    let v = if vnull || attbyval {
+                        v
+                    } else {
+                        datum_copy_in(mcx, v, attlen)?
+                    };
+                    values.push(NullableDatum {
+                        value: v,
+                        isnull: vnull,
+                    });
                 }
             }
             other => unreachable!("{other:?} initplan is loud at init"),
@@ -294,14 +310,20 @@ fn run_subplan<'mcx>(
 #[inline(never)]
 fn too_many_rows() -> Box<PgError> {
     Box::new(
-        PgError::error("more than one row returned by a subquery used as an expression".to_string())
-            .with_sqlstate(ERRCODE_CARDINALITY_VIOLATION),
+        PgError::error(
+            "more than one row returned by a subquery used as an expression".to_string(),
+        )
+        .with_sqlstate(ERRCODE_CARDINALITY_VIOLATION),
     )
 }
 
 // datumCopy (datum.c) into es_query_cxt (fold.rs precedent); short and toast
 // headers copy verbatim per C, only expanded flattens (no producers: loud).
-pub(crate) fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum_crate::Datum, attlen: i16) -> PgResult<Datum_crate::Datum> {
+pub(crate) fn datum_copy_in<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: Datum_crate::Datum,
+    attlen: i16,
+) -> PgResult<Datum_crate::Datum> {
     let p = value.as_usize() as *const u8;
     if p.is_null() {
         return Ok(Datum::null());
@@ -427,7 +449,10 @@ fn exec_init_sub_plan_expr<'mcx>(
         .es_subplanstates
         .get((subplan.plan_id - 1) as usize)
         .unwrap_or_else(|| {
-            panic!("subplan \"{}\" was not initialized", subplan.plan_name.unwrap_or("?"))
+            panic!(
+                "subplan \"{}\" was not initialized",
+                subplan.plan_name.unwrap_or("?")
+            )
         })
         .0;
     check_subplan_initialized(cell, subplan)?;
@@ -542,7 +567,9 @@ fn init_hashed_state<'mcx>(
     let mut righttlist = NodeList::nil();
 
     for (i, op_node) in oplist.iter().enumerate() {
-        let opexpr = op_node.as_op_expr().expect("hashable testexpr arm is an OpExpr");
+        let opexpr = op_node
+            .as_op_expr()
+            .expect("hashable testexpr arm is an OpExpr");
         debug_assert_eq!(opexpr.args.len(), 2);
         let larg = opexpr.args.nth(0);
         let rarg = opexpr.args.nth(1);
@@ -591,14 +618,16 @@ fn init_hashed_state<'mcx>(
         tab_eq_funcoids.push(lsyscache::get_opcode(rhs_eq_oper)?);
         let (left_hashfn, right_hashfn) = lsyscache::get_op_hash_functions(opexpr.opno)?
             .unwrap_or_else(|| {
-                panic!("could not find hash function for hash operator {}", opexpr.opno)
+                panic!(
+                    "could not find hash function for hash operator {}",
+                    opexpr.opno
+                )
             });
         lhs_hash_funcs.push(fmgr_core::fmgr_info(left_hashfn)?);
         tab_hash_funcs.push(right_hashfn);
         tab_collations.push(opexpr.inputcollid);
         key_col_idx.push((i + 1) as i16);
-        if left_hashfn != right_hashfn
-            || ::execexpr::expr_type(larg) != ::execexpr::expr_type(rarg)
+        if left_hashfn != right_hashfn || ::execexpr::expr_type(larg) != ::execexpr::expr_type(rarg)
         {
             cross_type = true;
         }
@@ -607,12 +636,14 @@ fn init_hashed_state<'mcx>(
 
     let desc_left = ::execscan::exec_type_from_tl(mcx, &lefttlist)?;
     let desc_right = ::execscan::exec_type_from_tl(mcx, &righttlist)?;
-    let lhs_slot =
-        estate.exec_init_extra_tuple_slot(Some(desc_left), TupleSlotKind::Virtual);
+    let lhs_slot = estate.exec_init_extra_tuple_slot(Some(desc_left), TupleSlotKind::Virtual);
     let rhs_slot =
         estate.exec_init_extra_tuple_slot(Some(desc_right.clone()), TupleSlotKind::Virtual);
-    let probe_slot =
-        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc_right.clone()));
+    let probe_slot = exectuples::make_tuple_table_slot(
+        mcx,
+        TupleSlotKind::MinimalTuple,
+        Some(desc_right.clone()),
+    );
 
     let nested_rtable = ::executils::subplan_env_rtable(estate);
     let nested_env = ::execexpr::SubplanCompileEnv {
@@ -651,7 +682,9 @@ fn init_hashed_state<'mcx>(
         hashtable: None,
         hashnulls: None,
         table_ctx: mcx.context().new_child_bump("Subplan HashTable Context"),
-        hashtempcxt: mcx.context().new_child_bump("Subplan HashTable Temp Context"),
+        hashtempcxt: mcx
+            .context()
+            .new_child_bump("Subplan HashTable Temp Context"),
         key_col_idx,
         tab_eq_funcoids,
         tab_hash_funcs,
@@ -723,9 +756,13 @@ fn eval_expr_nested_subplans<'mcx>(
         let outcome = {
             let r = resume.take();
             let state = &mut *state;
-            with_eval_slots_outer(estate, ecxt, None, outer.as_deref_mut(), move |slots, _, _| {
-                ::execexpr::exec_eval_expr_outcome(state, slots, r)
-            })?
+            with_eval_slots_outer(
+                estate,
+                ecxt,
+                None,
+                outer.as_deref_mut(),
+                move |slots, _, _| ::execexpr::exec_eval_expr_outcome(state, slots, r),
+            )?
         };
         match outcome {
             ::execexpr::EvalOutcome::Done(nd) => return Ok(nd),
@@ -733,9 +770,9 @@ fn eval_expr_nested_subplans<'mcx>(
                 let v = match s.kind {
                     // SAFETY: the suspension's sstate was installed by
                     // subplan_expr_init_hook on this estate (nested env).
-                    ::execexpr::SuspendKind::SubPlan(ss) => unsafe {
-                        subplan_expr_eval_hook(ss, estate, ecxt, outer.as_deref_mut())
-                    }?,
+                    ::execexpr::SuspendKind::SubPlan(ss) => {
+                        unsafe { subplan_expr_eval_hook(ss, estate, ecxt, outer.as_deref_mut()) }?
+                    }
                     // Pending initplan: run it on demand (C ExecEvalParamExec
                     // -> ExecSetParamPlan), then re-execute the fetch.
                     ::execexpr::SuspendKind::ParamExec(pid) => {
@@ -784,9 +821,9 @@ fn project_lhs_nested_subplans<'mcx>(
             Some(s) => {
                 let v = match s.kind {
                     // SAFETY: as eval_expr_nested_subplans.
-                    ::execexpr::SuspendKind::SubPlan(ss) => unsafe {
-                        subplan_expr_eval_hook(ss, estate, ecxt, outer.as_deref_mut())
-                    }?,
+                    ::execexpr::SuspendKind::SubPlan(ss) => {
+                        unsafe { subplan_expr_eval_hook(ss, estate, ecxt, outer.as_deref_mut()) }?
+                    }
                     ::execexpr::SuspendKind::ParamExec(pid) => {
                         ::executils::exec_set_param_plan(estate, pid)?;
                         NullableDatum::null()
@@ -838,7 +875,10 @@ fn scan_sub_plan_loop<'mcx>(
         match link {
             SubLinkType::EXISTS_SUBLINK => {
                 found = true;
-                result = NullableDatum { value: Datum::from_bool(true), isnull: false };
+                result = NullableDatum {
+                    value: Datum::from_bool(true),
+                    isnull: false,
+                };
                 break;
             }
             SubLinkType::EXPR_SUBLINK => {
@@ -868,8 +908,7 @@ fn scan_sub_plan_loop<'mcx>(
                     .testexpr
                     .as_deref_mut()
                     .expect("ROWCOMPARE SubPlan has a testexpr");
-                result =
-                    eval_expr_nested_subplans(testexpr, estate, ecxt, outer.as_deref_mut())?;
+                result = eval_expr_nested_subplans(testexpr, estate, ecxt, outer.as_deref_mut())?;
             }
             SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => {
                 found = true;
@@ -880,19 +919,24 @@ fn scan_sub_plan_loop<'mcx>(
                     .testexpr
                     .as_deref_mut()
                     .expect("ANY/ALL SubPlan has a testexpr");
-                let row =
-                    eval_expr_nested_subplans(testexpr, estate, ecxt, outer.as_deref_mut())?;
+                let row = eval_expr_nested_subplans(testexpr, estate, ecxt, outer.as_deref_mut())?;
                 if link == SubLinkType::ANY_SUBLINK {
                     if row.isnull {
                         result.isnull = true;
                     } else if row.value.as_bool() {
-                        result = NullableDatum { value: Datum::from_bool(true), isnull: false };
+                        result = NullableDatum {
+                            value: Datum::from_bool(true),
+                            isnull: false,
+                        };
                         break;
                     }
                 } else if row.isnull {
                     result.isnull = true;
                 } else if !row.value.as_bool() {
-                    result = NullableDatum { value: Datum::from_bool(false), isnull: false };
+                    result = NullableDatum {
+                        value: Datum::from_bool(false),
+                        isnull: false,
+                    };
                     break;
                 }
             }
@@ -901,7 +945,10 @@ fn scan_sub_plan_loop<'mcx>(
     }
 
     if !found
-        && matches!(link, SubLinkType::EXPR_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK)
+        && matches!(
+            link,
+            SubLinkType::EXPR_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK
+        )
     {
         result = NullableDatum::null();
     }
@@ -1033,9 +1080,15 @@ fn scan_array_sub_plan<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<NullableDatum> {
     let first_col_type = sstate.first_col_type;
-    sstate.array_ctx.as_mut().expect("ARRAY scratch context").reset();
+    sstate
+        .array_ctx
+        .as_mut()
+        .expect("ARRAY scratch context")
+        .reset();
     {
-        let SubPlanExprState { array_ctx, cur_buf, .. } = &mut *sstate;
+        let SubPlanExprState {
+            array_ctx, cur_buf, ..
+        } = &mut *sstate;
         let amcx = array_ctx.as_ref().expect("ARRAY scratch context").mcx();
         let mut astate = ::arrayfuncs::build::init_array_result_any(amcx, first_col_type, true)?;
         while let Some(slot_id) = exec_proc_node(ps, estate)? {
@@ -1146,7 +1199,10 @@ fn exec_hash_sub_plan<'mcx>(
     }
     let h = sstate.hashed.as_mut().unwrap();
     if !h.havehashrows && !h.havenullrows {
-        return Ok(NullableDatum { value: Datum::from_bool(false), isnull: false });
+        return Ok(NullableDatum {
+            value: Datum::from_bool(false),
+            isnull: false,
+        });
     }
 
     let lhs_slot = h.lhs_slot;
@@ -1178,10 +1234,7 @@ fn hash_sub_plan_probe<'mcx>(
     let (no_nulls, all_nulls) = {
         let base = estate.slot(lhs_slot).base();
         let nulls = &base.tts_isnull[..ncols];
-        (
-            nulls.iter().all(|n| !*n),
-            nulls.iter().all(|n| *n),
-        )
+        (nulls.iter().all(|n| !*n), nulls.iter().all(|n| *n))
     };
 
     if no_nulls {
@@ -1198,24 +1251,42 @@ fn hash_sub_plan_probe<'mcx>(
                 ht.lookup(slot, hash, None, mcx)?.0.is_some()
             };
             if found {
-                return Ok(NullableDatum { value: Datum::from_bool(true), isnull: false });
+                return Ok(NullableDatum {
+                    value: Datum::from_bool(true),
+                    isnull: false,
+                });
             }
         }
         if h.havenullrows && find_partial_match(h, estate, lhs_slot, false)? {
-            return Ok(NullableDatum { value: Datum::null(), isnull: true });
+            return Ok(NullableDatum {
+                value: Datum::null(),
+                isnull: true,
+            });
         }
-        return Ok(NullableDatum { value: Datum::from_bool(false), isnull: false });
+        return Ok(NullableDatum {
+            value: Datum::from_bool(false),
+            isnull: false,
+        });
     }
     if h.hashnulls.is_none() {
-        return Ok(NullableDatum { value: Datum::from_bool(false), isnull: false });
+        return Ok(NullableDatum {
+            value: Datum::from_bool(false),
+            isnull: false,
+        });
     }
     if all_nulls
         || (h.havenullrows && find_partial_match(h, estate, lhs_slot, false)?)
         || (h.havehashrows && find_partial_match(h, estate, lhs_slot, true)?)
     {
-        return Ok(NullableDatum { value: Datum::null(), isnull: true });
+        return Ok(NullableDatum {
+            value: Datum::null(),
+            isnull: true,
+        });
     }
-    Ok(NullableDatum { value: Datum::from_bool(false), isnull: false })
+    Ok(NullableDatum {
+        value: Datum::from_bool(false),
+        isnull: false,
+    })
 }
 
 fn build_sub_plan_hash<'mcx>(
@@ -1315,7 +1386,11 @@ fn build_sub_plan_hash_scan<'mcx>(
         let rhs_slot = h.rhs_slot;
         {
             let proj_right = &mut h.proj_right;
-            let mut slots = ::execexpr::EvalSlots { scan: None, inner: None, outer: None };
+            let mut slots = ::execexpr::EvalSlots {
+                scan: None,
+                inner: None,
+                outer: None,
+            };
             let table = &mut estate.es_tupleTable;
             let rslot = &mut table[rhs_slot.0 as usize];
             exec_project(proj_right, &mut slots, rslot, mcx)?;
@@ -1328,7 +1403,9 @@ fn build_sub_plan_hash_scan<'mcx>(
         let table_mcx = h.table_ctx.mcx();
         // SAFETY: rhs_slot is estate-minted and distinct from the hash
         // tables' internals; the derived &mut aliases nothing live.
-        let slot = unsafe { &mut *(&mut estate.es_tupleTable[rhs_slot.0 as usize] as *mut SlotData<'mcx>) };
+        let slot = unsafe {
+            &mut *(&mut estate.es_tupleTable[rhs_slot.0 as usize] as *mut SlotData<'mcx>)
+        };
         if no_nulls {
             let ht = h.hashtable.as_mut().unwrap();
             let hash = ht.hash_slot(slot)?;
@@ -1354,15 +1431,21 @@ fn find_partial_match<'mcx>(
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     let ncols = h.key_col_idx.len();
-    let ht = if main_table { h.hashtable.as_ref() } else { h.hashnulls.as_ref() }
-        .expect("partial-match table exists");
+    let ht = if main_table {
+        h.hashtable.as_ref()
+    } else {
+        h.hashnulls.as_ref()
+    }
+    .expect("partial-match table exists");
     for ix in 0..ht.num_entries() as u32 {
         let tup = ht.entry_tuple(ix);
         // SAFETY: entry images live in table_ctx until the next rebuild.
         unsafe { exectuples::exec_store_minimal_tuple_ptr(&mut h.probe_slot, mcx, tup) };
         // SAFETY: lhs_slot is estate-minted, distinct from probe_slot (owned
         // by the SubPlanExprState, not in es_tupleTable).
-        let lhs = unsafe { &mut *(&mut estate.es_tupleTable[lhs_slot.0 as usize] as *mut SlotData<'mcx>) };
+        let lhs = unsafe {
+            &mut *(&mut estate.es_tupleTable[lhs_slot.0 as usize] as *mut SlotData<'mcx>)
+        };
         // Eq-proc detoasts ride hashtempcxt (reset per probe by the caller),
         // C's short-lived-context discipline — never query-lifetime memory.
         if !exec_tuples_unequal(
@@ -1408,8 +1491,14 @@ fn exec_tuples_unequal<'mcx>(
         // C execTuplesUnequal: the eq proc detoasts by-ref args via
         // DirectFunctionCall, pallocing in the caller's (short-lived) context.
         unsafe { fcinfo.set_result_mcx(temp_mcx) };
-        fcinfo.args[0] = NullableDatum { value: a1, isnull: false };
-        fcinfo.args[1] = NullableDatum { value: a2, isnull: false };
+        fcinfo.args[0] = NullableDatum {
+            value: a1,
+            isnull: false,
+        };
+        fcinfo.args[1] = NullableDatum {
+            value: a2,
+            isnull: false,
+        };
         let fn_addr = flinfo.fn_addr;
         let d = fn_addr(Some(flinfo), &mut fcinfo)?;
         debug_assert!(!fcinfo.isnull);
@@ -1429,7 +1518,6 @@ fn clamp_cardinality(rows: f64) -> usize {
         rows as usize
     }
 }
-
 
 // TupleHashTableHash over the LHS slot with C's lhs_hash_funcs (the probe
 // side of FindTupleHashEntry); combine/rotate/murmur mirror
@@ -1459,7 +1547,10 @@ fn hash_slot_lhs<'mcx>(
             // arg via DirectFunctionCall — into hashtempcxt (reset per
             // probe), never query-lifetime memory.
             unsafe { fcinfo.set_result_mcx(h.hashtempcxt.mcx()) };
-            fcinfo.args[0] = NullableDatum { value: v, isnull: false };
+            fcinfo.args[0] = NullableDatum {
+                value: v,
+                isnull: false,
+            };
             let fn_addr = flinfo.fn_addr;
             let d = fn_addr(Some(flinfo), &mut fcinfo)?;
             if i == 0 {
@@ -1485,13 +1576,19 @@ fn find_exact_cross<'mcx>(
     let mcx = estate.es_query_cxt;
     let ncols = h.key_col_idx.len();
     let HashedSubPlanState {
-        hashtable, probe_slot, cur_eq_funcs, tab_collations, hashtempcxt, ..
+        hashtable,
+        probe_slot,
+        cur_eq_funcs,
+        tab_collations,
+        hashtempcxt,
+        ..
     } = h;
     let temp_mcx = hashtempcxt.mcx();
     let ht = hashtable.as_ref().expect("hashtable built");
     // SAFETY: lhs_slot is estate-minted, distinct from probe_slot and the
     // hash table's internals.
-    let lhs = unsafe { &mut *(&mut estate.es_tupleTable[lhs_slot.0 as usize] as *mut SlotData<'mcx>) };
+    let lhs =
+        unsafe { &mut *(&mut estate.es_tupleTable[lhs_slot.0 as usize] as *mut SlotData<'mcx>) };
     let found = ht.find_entry_with(hash, |ix| {
         let tup = ht.entry_tuple(ix);
         // SAFETY: entry images live in table_ctx until the next rebuild.
@@ -1509,8 +1606,14 @@ fn find_exact_cross<'mcx>(
             // C FindTupleHashEntry runs the cross-type eq inside tempcxt:
             // by-ref detoasts land in hashtempcxt (reset per probe).
             unsafe { fcinfo.set_result_mcx(temp_mcx) };
-            fcinfo.args[0] = NullableDatum { value: a1, isnull: false };
-            fcinfo.args[1] = NullableDatum { value: a2, isnull: false };
+            fcinfo.args[0] = NullableDatum {
+                value: a1,
+                isnull: false,
+            };
+            fcinfo.args[1] = NullableDatum {
+                value: a2,
+                isnull: false,
+            };
             let fn_addr = flinfo.fn_addr;
             let d = fn_addr(Some(flinfo), &mut fcinfo)?;
             if fcinfo.isnull || !d.as_bool() {

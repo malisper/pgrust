@@ -53,10 +53,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ::executils::EStateData;
 use ::nodeagg::sink::{
     sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_null_only_run,
-    sink_remainder_null_block, sink_remainder_spill_bucket,
-    sink_resolve_combines, sink_route_records, sink_run_from_bucket_table, sink_run_from_spill,
-    sink_run_spill_bucket, sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge,
-    sink_topn_merge_fragments,
+    sink_remainder_null_block, sink_remainder_spill_bucket, sink_resolve_combines,
+    sink_route_records, sink_run_from_bucket_table, sink_run_from_spill, sink_run_spill_bucket,
+    sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge, sink_topn_merge_fragments,
     LaneAggTable, SinkCombineFn, SinkEmitAcc, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
     SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SinkTopnCand, SinkTopnSpec, SINK_NBUCKETS,
     SINK_NULL_BUCKET,
@@ -160,7 +159,11 @@ struct AlphaGate {
 /// Summed α-gate transition counts for an AGGSEAL marker line.
 fn alpha_sums(locals: &[AggSinkLocal]) -> (u64, u64, u64) {
     locals.iter().fold((0, 0, 0), |(d, r, p), l| {
-        (d + l.alpha.demotes, r + l.alpha.restores, p + l.alpha.reprobes)
+        (
+            d + l.alpha.demotes,
+            r + l.alpha.restores,
+            p + l.alpha.reprobes,
+        )
     })
 }
 
@@ -538,7 +541,9 @@ impl NumaCombine {
         NumaCombine {
             cursors: [AtomicU32::new(0), AtomicU32::new(0)],
             done: (0..SINK_NBUCKETS).map(|_| AtomicU8::new(0)).collect(),
-            partials: (0..2 * SINK_NBUCKETS).map(|_| UnsafeCell::new(None)).collect(),
+            partials: (0..2 * SINK_NBUCKETS)
+                .map(|_| UnsafeCell::new(None))
+                .collect(),
             steer_hit: AtomicU64::new(0),
             steer_miss: AtomicU64::new(0),
             finals_flat: AtomicU64::new(0),
@@ -621,9 +626,9 @@ fn numa_current_half() -> Option<usize> {
         let map = MAP.get_or_init(|| {
             let mut nodes: Vec<Vec<usize>> = Vec::new();
             for node in 0..1024usize {
-                let Ok(list) = std::fs::read_to_string(format!(
-                    "/sys/devices/system/node/node{node}/cpulist"
-                )) else {
+                let Ok(list) =
+                    std::fs::read_to_string(format!("/sys/devices/system/node/node{node}/cpulist"))
+                else {
                     break;
                 };
                 let mut cpus = Vec::new();
@@ -633,14 +638,17 @@ fn numa_current_half() -> Option<usize> {
                         Some(v) => v,
                         None => continue,
                     };
-                    let hi: usize =
-                        ends.next().and_then(|s| s.parse().ok()).unwrap_or(lo);
+                    let hi: usize = ends.next().and_then(|s| s.parse().ok()).unwrap_or(lo);
                     cpus.extend(lo..=hi);
                 }
                 nodes.push(cpus);
             }
             let nnodes = nodes.len().max(1);
-            let ncpus = nodes.iter().map(|c| c.iter().max().map_or(0, |m| m + 1)).max().unwrap_or(0);
+            let ncpus = nodes
+                .iter()
+                .map(|c| c.iter().max().map_or(0, |m| m + 1))
+                .max()
+                .unwrap_or(0);
             let mut map = vec![0u8; ncpus];
             for (n, cpus) in nodes.iter().enumerate() {
                 let half = u8::from(n >= nnodes.div_ceil(2));
@@ -695,7 +703,11 @@ const TOPN_MODE_WINNERS: u8 = 1;
 
 impl TopnMode {
     fn decode(v: u8) -> TopnMode {
-        if v == TOPN_MODE_WINNERS { TopnMode::WinnersOnly } else { TopnMode::FullDrain }
+        if v == TOPN_MODE_WINNERS {
+            TopnMode::WinnersOnly
+        } else {
+            TopnMode::FullDrain
+        }
     }
 
     fn encode(self) -> u8 {
@@ -785,7 +797,10 @@ fn parseal_enabled() -> bool {
 fn agg_markers_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_MORSEL_MARKERS").as_deref(), Ok("1") | Ok("on"))
+        matches!(
+            std::env::var("PGRUST_MORSEL_MARKERS").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
@@ -899,9 +914,7 @@ impl AggSink {
         // ratified behavior: the combine's per-partition pre-build check
         // bounds each claim's transient table; the retained emit is the
         // result itself). Metering stays on for observability either way.
-        if self.spill_set.is_none()
-            && total > self.budget.saturating_mul(nlocals.max(1))
-        {
+        if self.spill_set.is_none() && total > self.budget.saturating_mul(nlocals.max(1)) {
             self.refuse_budget();
             return Ok(());
         }
@@ -960,7 +973,8 @@ impl AggSink {
         // budget checks below.
         if let Some(mut sc) = l.scatter.take() {
             if let Some(run) = sc.take_run() {
-                self.scatter_rows.fetch_add(run.nrows() as u64, Ordering::Relaxed);
+                self.scatter_rows
+                    .fetch_add(run.nrows() as u64, Ordering::Relaxed);
                 l.run_bytes += run.bytes();
                 l.runs.push(run);
                 l.settle_run_ledger();
@@ -978,7 +992,8 @@ impl AggSink {
             // exactly the incumbent arm's discipline.
             if let Some(mut t) = l.table.take() {
                 if let Some(run) = t.flush_remainder() {
-                    self.sealflush_rows.fetch_add(run.nrows() as u64, Ordering::Relaxed);
+                    self.sealflush_rows
+                        .fetch_add(run.nrows() as u64, Ordering::Relaxed);
                     l.run_bytes += run.bytes();
                     l.runs.push(run);
                     l.settle_run_ledger();
@@ -992,7 +1007,10 @@ impl AggSink {
         }
         // Canonical (text-bearing) shapes partition by canonical bytes;
         // word shapes by key words — the handle dispatches.
-        l.part = l.table.as_mut().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
+        l.part = l
+            .table
+            .as_mut()
+            .map(::nodeagg::sink::SinkTableHandle::partition_remainder);
         // R3 accounting (m2-integration audit): the SEAL index is per-Local
         // retained memory that lives through the whole combine phase —
         // charge it like a run. Crossing = budget refusal (R5 whole-attempt
@@ -1015,8 +1033,10 @@ impl AggSink {
     /// shape reports the degenerate-top-byte growth this lane removes.
     fn note_combine16(&self, t: &LaneAggTable) {
         self.combine16_claims.fetch_add(1, Ordering::Relaxed);
-        self.combine16_grows.fetch_add(t.grow_count() as u64, Ordering::Relaxed);
-        self.combine16_converts.fetch_add(t.convert_count() as u64, Ordering::Relaxed);
+        self.combine16_grows
+            .fetch_add(t.grow_count() as u64, Ordering::Relaxed);
+        self.combine16_converts
+            .fetch_add(t.convert_count() as u64, Ordering::Relaxed);
     }
 
     /// §3.2 step 2 — SEAL mode resolution (topn-winners-only inc-2),
@@ -1065,7 +1085,9 @@ impl runtime::ParallelSink for AggSink {
                 local.numa_votes[h] += 1;
             }
         }
-        let r = catch_unwind(AssertUnwindSafe(|| accept_morsel_body(self, local, worker, range)));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            accept_morsel_body(self, local, worker, range)
+        }));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(AcceptFail::Budget)) => {
@@ -1133,8 +1155,10 @@ impl runtime::ParallelSink for AggSink {
         }
         self.resolve_topn_at_seal(locals);
         if let Some(t0) = t0 {
-            let rows: usize =
-                locals.iter().map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows())).sum();
+            let rows: usize = locals
+                .iter()
+                .map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows()))
+                .sum();
             // Marker channel (PGRUST_MORSEL_MARKERS=1, the WFIN sibling):
             // the single-threaded seal's duration — the phase the 3-set arm
             // parallelizes; its A/B evidence line.
@@ -1254,8 +1278,7 @@ impl AggSink {
     ) -> PgResult<CombineOutcome> {
         // Steering: real socket where we can sample it; the credit's own
         // half elsewhere (deterministic — the non-Linux test environments).
-        let my = numa_current_half()
-            .unwrap_or(usize::from(credit >= SINK_NBUCKETS as u64));
+        let my = numa_current_half().unwrap_or(usize::from(credit >= SINK_NBUCKETS as u64));
         let Some((h, b)) = nc.pop(my) else {
             return Ok(CombineOutcome::Done);
         };
@@ -1271,7 +1294,8 @@ impl AggSink {
             // counter Acquire pairs with our Release increment below.
             unsafe { *nc.partials[h * SINK_NBUCKETS + b].get() = Some((run, store)) };
         }
-        nc.partial_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        nc.partial_ns
+            .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         // Election: the claim that brings the bucket to 2 partials runs the
         // final. AcqRel: Release publishes our partial store, Acquire sees
         // the sibling's.
@@ -1352,7 +1376,8 @@ impl AggSink {
                 self.combine_bucket_flat(b, locals)
             }
         };
-        nc.final_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        nc.final_ns
+            .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         out
     }
 
@@ -1371,17 +1396,12 @@ impl AggSink {
             return false;
         }
         let (rows, content) = self.bucket_estimate(b, locals);
-        est_table_bytes(self, rows).saturating_add(content.saturating_mul(3) / 2)
-            <= self.budget
+        est_table_bytes(self, rows).saturating_add(content.saturating_mul(3) / 2) <= self.budget
     }
 
     /// The flat (t21) per-bucket combine body: pass-through arm, pre-build
     /// size check, combine-split fallback, in-memory merge, tail.
-    fn combine_bucket_flat(
-        &self,
-        b: usize,
-        locals: &[AggSinkLocal],
-    ) -> PgResult<CombineOutcome> {
+    fn combine_bucket_flat(&self, b: usize, locals: &[AggSinkLocal]) -> PgResult<CombineOutcome> {
         {
             // SINGLE-LOCAL PASS-THROUGH (dop1-tax fix 3): exactly one sealed
             // Local and zero flushed runs — the merged bucket table would be
@@ -1503,8 +1523,7 @@ impl AggSink {
                     // claim / numa final election); this is its single
                     // writer.
                     unsafe {
-                        *self.topn_cands[b].get() =
-                            sink_topn_merge_fragments(sel.lists, bound);
+                        *self.topn_cands[b].get() = sink_topn_merge_fragments(sel.lists, bound);
                     }
                 }
                 // R3: the split result is retained emit content like any
@@ -1626,17 +1645,9 @@ impl AggSink {
             .collect();
         let t0 = self.topn.is_some().then(std::time::Instant::now);
         let spk_t0 = ::nodeagg::spankey::spankey_t0();
-        let merged = sink_combine_bucket(
-            b,
-            self.key_words,
-            self.state_bytes,
-            &views,
-            &self.combines,
-        )?;
-        ::nodeagg::spankey::spankey_lap(
-            &::nodeagg::spankey::SPANKEY_CTRS.combine_ns,
-            spk_t0,
-        );
+        let merged =
+            sink_combine_bucket(b, self.key_words, self.state_bytes, &views, &self.combines)?;
+        ::nodeagg::spankey::spankey_lap(&::nodeagg::spankey::SPANKEY_CTRS.combine_ns, spk_t0);
         self.note_combine16(&merged);
         if let Some(t0) = t0 {
             self.topn_ctr
@@ -1665,10 +1676,7 @@ impl AggSink {
             // disjoint from the topn arm below (never co-armed).
             if let Some(fz) = &self.freeze {
                 if let Some(entries) = fz.entries() {
-                    let shape = self
-                        .mk
-                        .as_ref()
-                        .expect("freeze arms only on the Mk drain");
+                    let shape = self.mk.as_ref().expect("freeze arms only on the Mk drain");
                     let rows = ::nodeagg::sink::sink_freeze_member_rows(
                         &merged,
                         self.key_words,
@@ -1676,8 +1684,7 @@ impl AggSink {
                         entries,
                     );
                     fz.note_stragglers((merged.nrows() - rows.len()) as u64);
-                    let buf =
-                        ::nodeagg::sink::sink_emit_bucket_rows(&self.emit, &merged, &rows)?;
+                    let buf = ::nodeagg::sink::sink_emit_bucket_rows(&self.emit, &merged, &rows)?;
                     self.retain_bucket(b as u64, buf, locals_len)?;
                     return Ok(CombineOutcome::Done);
                 }
@@ -1707,7 +1714,9 @@ impl AggSink {
                     self.topn_ctr
                         .select_ns
                         .fetch_add(ts.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    self.topn_ctr.cand_rows.fetch_add(cands.len() as u64, Ordering::Relaxed);
+                    self.topn_ctr
+                        .cand_rows
+                        .fetch_add(cands.len() as u64, Ordering::Relaxed);
                     // Candidate row remap: materialize the candidate rows in
                     // ascending TABLE order (one ordered emit walk), and
                     // point each candidate at its compact-buf index. Rows
@@ -1730,7 +1739,9 @@ impl AggSink {
                     self.topn_ctr
                         .emit_ns
                         .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
+                    self.topn_ctr
+                        .mat_rows
+                        .fetch_add(buf.nrows as u64, Ordering::Relaxed);
                     self.retain_bucket(b as u64, buf, locals_len)?;
                     return Ok(CombineOutcome::Done);
                 }
@@ -1766,7 +1777,9 @@ impl AggSink {
                 self.topn_ctr
                     .emit_ns
                     .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
+                self.topn_ctr
+                    .mat_rows
+                    .fetch_add(buf.nrows as u64, Ordering::Relaxed);
             }
             self.retain_bucket(b as u64, buf, locals_len)?;
             Ok(CombineOutcome::Done)
@@ -1787,7 +1800,12 @@ impl AggSink {
                 Some(super::runtime_instr::merge(locals.iter().map(|l| &l.instr)));
         }
         if self.adopted_flag.load(Ordering::SeqCst) {
-            if let Some(t) = self.adopted.lock().unwrap_or_else(|g| g.into_inner()).take() {
+            if let Some(t) = self
+                .adopted
+                .lock()
+                .unwrap_or_else(|g| g.into_inner())
+                .take()
+            {
                 *self.published.lock().unwrap_or_else(|p| p.into_inner()) =
                     Some(SinkPublished::Table(t));
                 return;
@@ -1896,8 +1914,10 @@ impl runtime::SealedParallelSink for AggSink {
             // The 3-set arm's AGGSEAL sibling line (single-threaded here by
             // last-worker-out of the freeze set): the flush-amplification
             // census the CPROBE channel reads (see AggSinkLocal doc).
-            let rows: usize =
-                sealed.iter().map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows())).sum();
+            let rows: usize = sealed
+                .iter()
+                .map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows()))
+                .sum();
             let flushes: u64 = sealed.iter().map(|l| l.probe_flushes).sum();
             let flush_bytes: u64 = sealed.iter().map(|l| l.probe_flush_bytes).sum();
             let (ad, ar, ap) = alpha_sums(sealed);
@@ -2101,7 +2121,19 @@ fn accept_morsel_body(
                 "runtime agg morsel without a bound executor",
             ))));
         };
-        let WorkerExec { qd, k2s, dgs, idxs, groups, xk, stage_slot, mk, mks, vs, .. } = ex;
+        let WorkerExec {
+            qd,
+            k2s,
+            dgs,
+            idxs,
+            groups,
+            xk,
+            stage_slot,
+            mk,
+            mks,
+            vs,
+            ..
+        } = ex;
         let (k2s, dgs, idxs, groups) = (&mut *k2s, &mut *dgs, &mut *idxs, &mut *groups);
         let (xk, stage_slot) = (&mut *xk, &mut *stage_slot);
         let (mk, mks) = (&mut *mk, &mut *mks);
@@ -2110,8 +2142,7 @@ fn accept_morsel_body(
             let x = q.exec.as_mut().expect("runtime agg worker executor state");
             x.with_mut(|d| -> Result<(), AcceptFail> {
                 let estate = &mut d.estate;
-                let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut()
-                else {
+                let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut() else {
                     return Err(AcceptFail::Error(Box::new(PgError::new(
                         ERROR,
                         "runtime agg worker plan root is not an Agg",
@@ -2129,12 +2160,7 @@ fn accept_morsel_body(
                 // (PgResult<()>); this arm admits only pgrcolumnar scans (its
                 // admission requires cb granule geometry), so the former
                 // not-pgrcolumnar false branch is unreachable by construction.
-                ::nodeseqscan::seq_scan_set_morsel_range(
-                    ss,
-                    estate,
-                    range.start,
-                    range.end,
-                )?;
+                ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, range.start, range.end)?;
                 // Lend the Local's table to the executor for this range
                 // (first morsel: the armed table is already in place).
                 if let Some(t) = local.table.take() {
@@ -2149,12 +2175,31 @@ fn accept_morsel_body(
                 // branch-for-branch.
                 let drained = if sink.vec_accept {
                     sink_drain_range_vec(
-                        sink, local, worker, &mut aps.agg, ss, vs, idxs, groups, estate,
+                        sink,
+                        local,
+                        worker,
+                        &mut aps.agg,
+                        ss,
+                        vs,
+                        idxs,
+                        groups,
+                        estate,
                     )
                 } else {
                     sink_drain_range(
-                        sink, local, worker, &mut aps.agg, ss, k2s, dgs, idxs, groups, xk,
-                        stage_slot, mk, mks,
+                        sink,
+                        local,
+                        worker,
+                        &mut aps.agg,
+                        ss,
+                        k2s,
+                        dgs,
+                        idxs,
+                        groups,
+                        xk,
+                        stage_slot,
+                        mk,
+                        mks,
                         estate,
                     )
                 };
@@ -2282,12 +2327,7 @@ struct SubRouter {
 }
 
 impl SubRouter {
-    fn new(
-        sink: &AggSink,
-        set: &Arc<::spillset::SpillSet>,
-        b: usize,
-        depth: u32,
-    ) -> SubRouter {
+    fn new(sink: &AggSink, set: &Arc<::spillset::SpillSet>, b: usize, depth: u32) -> SubRouter {
         let uniq = sink.split_uniq.fetch_add(1, Ordering::Relaxed);
         SubRouter {
             file: ::spillset::SpillFile::new(
@@ -2362,7 +2402,9 @@ pub(super) fn stream_part_rows(
     mut f: impl FnMut(&[u8]) -> PgResult<()>,
 ) -> PgResult<()> {
     let ctx = ::mcx::MemoryContext::new("m35-agg-split-read");
-    let Some(mut rd) = file.read_part(ctx.mcx(), part)? else { return Ok(()) };
+    let Some(mut rd) = file.read_part(ctx.mcx(), part)? else {
+        return Ok(());
+    };
     let cap = (SPLIT_READ_CHUNK / row_bytes).max(1) * row_bytes;
     let mut buf = vec![0u8; cap];
     let mut filled = 0usize;
@@ -2399,7 +2441,9 @@ fn stream_part_records(
     mut f: impl FnMut(&[u8]) -> PgResult<()>,
 ) -> PgResult<()> {
     let ctx = ::mcx::MemoryContext::new("m35-agg-split-read");
-    let Some(mut rd) = file.read_part(ctx.mcx(), part)? else { return Ok(()) };
+    let Some(mut rd) = file.read_part(ctx.mcx(), part)? else {
+        return Ok(());
+    };
     let min_rec = ::nodeagg::sink::sink_canon_min_record_bytes(state_words);
     let mut buf = vec![0u8; SPLIT_READ_CHUNK.max(min_rec * 2)];
     let mut filled = 0usize;
@@ -2423,9 +2467,8 @@ fn stream_part_records(
         // Usable prefix: whole records only (each header read fail-closed).
         let mut usable = 0usize;
         while filled - usable >= 8 {
-            let rec_len = u64::from_ne_bytes(
-                buf[usable..usable + 8].try_into().expect("8 bytes"),
-            ) as usize;
+            let rec_len =
+                u64::from_ne_bytes(buf[usable..usable + 8].try_into().expect("8 bytes")) as usize;
             // Sanity cap: a legit record is a ≤1GB varlena + states; a
             // larger rec_len is corruption — fail closed before the grow
             // loop could chase it.
@@ -2487,8 +2530,12 @@ fn split_leaf_emit(
         let t0 = ctr.then(std::time::Instant::now);
         acc.emit_table(&sink.emit, t)?;
         if let Some(t0) = t0 {
-            sink.topn_ctr.emit_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            sink.topn_ctr.mat_rows.fetch_add(t.nrows() as u64, Ordering::Relaxed);
+            sink.topn_ctr
+                .emit_ns
+                .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            sink.topn_ctr
+                .mat_rows
+                .fetch_add(t.nrows() as u64, Ordering::Relaxed);
         }
         return Ok(true);
     };
@@ -2498,7 +2545,9 @@ fn split_leaf_emit(
     } else {
         sink_topn_candidates(t, s.spec, s.part)
     };
-    sink.topn_ctr.select_ns.fetch_add(ts.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    sink.topn_ctr
+        .select_ns
+        .fetch_add(ts.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let Some(mut cands) = selected else {
         return Ok(false);
     };
@@ -2513,9 +2562,15 @@ fn split_leaf_emit(
     }
     let t0 = std::time::Instant::now();
     acc.emit_rows(&sink.emit, t, &rows)?;
-    sink.topn_ctr.emit_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    sink.topn_ctr.mat_rows.fetch_add(rows.len() as u64, Ordering::Relaxed);
-    sink.topn_ctr.cand_rows.fetch_add(cands.len() as u64, Ordering::Relaxed);
+    sink.topn_ctr
+        .emit_ns
+        .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    sink.topn_ctr
+        .mat_rows
+        .fetch_add(rows.len() as u64, Ordering::Relaxed);
+    sink.topn_ctr
+        .cand_rows
+        .fetch_add(cands.len() as u64, Ordering::Relaxed);
     s.lists.push(cands);
     Ok(true)
 }
@@ -2597,11 +2652,17 @@ fn split_views_and_emit(
         // The NULL group: one bounded mini-combine over its blocks only.
         let ctr = sink.topn.is_some();
         let t0 = ctr.then(std::time::Instant::now);
-        let view = [SinkLocalView { spilled: &null_runs, runs: &[], remainder: None }];
+        let view = [SinkLocalView {
+            spilled: &null_runs,
+            runs: &[],
+            remainder: None,
+        }];
         let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
         sink.note_combine16(&t);
         if let Some(t0) = t0 {
-            sink.topn_ctr.build_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            sink.topn_ctr
+                .build_ns
+                .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
         if !split_leaf_emit(sink, &t, acc, sel)? {
             return Ok(SplitOutcome::Declined);
@@ -2636,19 +2697,21 @@ fn split_subparts_and_emit(
         let rows = blen / row_bytes;
         // Canonical sub-partitions add the content term (blen bounds the
         // key content — headers/states over-count, the safe direction).
-        let est = est_table_bytes(sink, rows)
-            .saturating_add(if canon { blen.saturating_mul(3) / 2 } else { 0 });
+        let est = est_table_bytes(sink, rows).saturating_add(if canon {
+            blen.saturating_mul(3) / 2
+        } else {
+            0
+        });
         if est > sink.budget {
             if depth + 1 > spill_split_depth_cap() {
                 return Ok(SplitOutcome::DepthCap);
             }
             sink.combine_splits.fetch_add(1, Ordering::Relaxed);
-            sink.split_depth_max.fetch_max((depth + 1) as u64, Ordering::Relaxed);
+            sink.split_depth_max
+                .fetch_max((depth + 1) as u64, Ordering::Relaxed);
             let mut router = SubRouter::new(sink, set, b, depth + 1);
             if canon {
-                stream_part_records(file, s as u32, state_words, |chunk| {
-                    router.absorb(chunk)
-                })?;
+                stream_part_records(file, s as u32, state_words, |chunk| router.absorb(chunk))?;
             } else {
                 stream_part_rows(file, s as u32, row_bytes, |chunk| router.absorb(chunk))?;
             }
@@ -2660,7 +2723,9 @@ fn split_subparts_and_emit(
             continue;
         }
         let ctx = ::mcx::MemoryContext::new("m35-agg-split-read");
-        let Some(mut rd) = file.read_part(ctx.mcx(), s as u32)? else { continue };
+        let Some(mut rd) = file.read_part(ctx.mcx(), s as u32)? else {
+            continue;
+        };
         let bytes = rd.read_to_end()?;
         rd.close()?;
         let synth = if canon {
@@ -2678,7 +2743,9 @@ fn split_subparts_and_emit(
         let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
         sink.note_combine16(&t);
         if let Some(t0) = t0 {
-            sink.topn_ctr.build_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            sink.topn_ctr
+                .build_ns
+                .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
         if !split_leaf_emit(sink, &t, acc, sel)? {
             return Ok(SplitOutcome::Declined);
@@ -2715,10 +2782,12 @@ enum DictFeed {
 
 fn dict_feed_mode() -> DictFeed {
     static MODE: OnceLock<DictFeed> = OnceLock::new();
-    crate::once_val(&MODE, || match std::env::var("PGRUST_RUNTIME_AGG_DICTFEED").as_deref() {
-        Ok("0") | Ok("off") => DictFeed::Off,
-        Ok("raw") => DictFeed::Raw,
-        _ => DictFeed::Code,
+    crate::once_val(&MODE, || {
+        match std::env::var("PGRUST_RUNTIME_AGG_DICTFEED").as_deref() {
+            Ok("0") | Ok("off") => DictFeed::Off,
+            Ok("raw") => DictFeed::Raw,
+            _ => DictFeed::Code,
+        }
     })
 }
 
@@ -2802,8 +2871,11 @@ fn sink_dict_batch<'mcx>(
     for &i in rows {
         let local = lane.code(i as usize);
         debug_assert!((local as usize) < ndict, "filler contract: code < ndict");
-        let code =
-            if global { lane.table.global_code(local) as usize } else { local as usize };
+        let code = if global {
+            lane.table.global_code(local) as usize
+        } else {
+            local as usize
+        };
         debug_assert!(code < size, "stitch contract: global code < gndv");
         if dgs.slots[code].is_none() {
             dgs.slots[code] = Some(pending);
@@ -2831,15 +2903,17 @@ fn sink_dict_batch<'mcx>(
     groups.clear();
     for &i in rows {
         let local = lane.code(i as usize);
-        let code =
-            if global { lane.table.global_code(local) as usize } else { local as usize };
+        let code = if global {
+            lane.table.global_code(local) as usize
+        } else {
+            local as usize
+        };
         let pg = dgs.slots[code].expect("every survivor code resolved above");
         debug_assert!(pg != pending, "pending sentinel must have been installed");
         idxs.push(i);
         groups.push(pg);
     }
-    let soa =
-        ::nodeseqscan::seq_scan_batch_soa(ss).expect("sink dict feed requires the armed SoA");
+    let soa = ::nodeseqscan::seq_scan_batch_soa(ss).expect("sink dict feed requires the armed SoA");
     // SAFETY: as the raw K2 sink fold — every probed row is non-fallback
     // (pgrcolumnar stages none; the caller admits all-lane batches only) with
     // valid lane values for every plan column (the key column is NOT in
@@ -2874,7 +2948,11 @@ impl SinkVecScratch {
     /// referenced scan column) plus the null/idx lanes.
     fn estate_bytes(&self) -> usize {
         super::vec_estate_bytes(&self.cols)
-            + self.cols.iter().map(|(_, l)| super::vec_estate_bytes(l)).sum::<usize>()
+            + self
+                .cols
+                .iter()
+                .map(|(_, l)| super::vec_estate_bytes(l))
+                .sum::<usize>()
             + super::vec_estate_bytes(&self.knull)
             + super::vec_estate_bytes(&self.idxv)
     }
@@ -2954,8 +3032,7 @@ fn sink_drain_range_vec<'mcx>(
     let mut rows_total = 0u64;
     loop {
         ::postgres_seams::check_for_interrupts::call()?;
-        let Some((nrows, _base)) = ::nodeseqscan::seq_scan_topn_direct_next_granule(ss)?
-        else {
+        let Some((nrows, _base)) = ::nodeseqscan::seq_scan_topn_direct_next_granule(ss)? else {
             break;
         };
         let n = nrows as usize;
@@ -3001,11 +3078,11 @@ fn sink_drain_range_vec<'mcx>(
                 }
                 // byval-POD admission: the byref aggctx term is
                 // structurally 0 (sink.byref_states refused).
-                if local.run_bytes + ::nodeagg::sink::agg_sink_table_mem(agg) > sink.budget
-                {
+                if local.run_bytes + ::nodeagg::sink::agg_sink_table_mem(agg) > sink.budget {
                     match &sink.spill_set {
-                        Some(set) => spill_epoch(sink, local, set, worker)
-                            .map_err(AcceptFail::Error)?,
+                        Some(set) => {
+                            spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?
+                        }
                         None => return Err(AcceptFail::Budget),
                     }
                 }
@@ -3013,15 +3090,12 @@ fn sink_drain_range_vec<'mcx>(
             if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
                 match &sink.spill_set {
                     Some(set) => {
-                        if let Some((run, intern_reset)) =
-                            ::nodeagg::sink::agg_sink_flush_now(agg)
+                        if let Some((run, intern_reset)) = ::nodeagg::sink::agg_sink_flush_now(agg)
                         {
                             if intern_reset {
-                                return Err(AcceptFail::Error(
-                                    ::nodeagg::sink::sink_shape_error(
-                                        "intern reset on a vec K2 drain",
-                                    ),
-                                ));
+                                return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                                    "intern reset on a vec K2 drain",
+                                )));
                             }
                             local.alpha.on_pressure_flush();
                             local.probe_flushes += 1;
@@ -3033,12 +3107,10 @@ fn sink_drain_range_vec<'mcx>(
                         }
                         if !local.runs.is_empty()
                             && (agg_spill_eager()
-                                || local.run_bytes
-                                    + ::nodeagg::sink::agg_sink_table_mem(agg)
+                                || local.run_bytes + ::nodeagg::sink::agg_sink_table_mem(agg)
                                     > sink.budget)
                         {
-                            spill_epoch(sink, local, set, worker)
-                                .map_err(AcceptFail::Error)?;
+                            spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?;
                         }
                         if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
                             if lane_trace_enabled() {
@@ -3067,13 +3139,7 @@ fn sink_drain_range_vec<'mcx>(
             }
             // --- Probe (the incumbent prefetched batch kernel) + fold.
             let keys = &vs.cols[0].1[lo..lo + len];
-            if !::nodeagg::agg_hash_compact_batch(
-                agg,
-                estate,
-                keys,
-                &vs.knull[..len],
-                groups,
-            )? {
+            if !::nodeagg::agg_hash_compact_batch(agg, estate, keys, &vs.knull[..len], groups)? {
                 return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
                     "worker compact table disarmed mid-build",
                 )));
@@ -3148,17 +3214,20 @@ fn sink_drain_range<'mcx>(
         // spills the accumulated runs (scatter-built included — the spill
         // record is key/state-word framing either way) or refuses exactly
         // like the table's cap-flush path below.
-        if local.scatter.as_deref().is_some_and(|s| s.nrows() >= sink.cap as usize) {
+        if local
+            .scatter
+            .as_deref()
+            .is_some_and(|s| s.nrows() >= sink.cap as usize)
+        {
             if let Some(run) = local.scatter.as_deref_mut().and_then(|s| s.take_run()) {
-                sink.scatter_rows.fetch_add(run.nrows() as u64, Ordering::Relaxed);
+                sink.scatter_rows
+                    .fetch_add(run.nrows() as u64, Ordering::Relaxed);
                 local.probe_flushes += 1;
                 local.probe_flush_bytes += run.bytes() as u64;
                 local.run_bytes += run.bytes();
                 local.runs.push(run);
             }
-            if local.run_bytes + local.scatter.as_deref().map_or(0, |s| s.bytes())
-                > sink.budget
-            {
+            if local.run_bytes + local.scatter.as_deref().map_or(0, |s| s.bytes()) > sink.budget {
                 match &sink.spill_set {
                     Some(set) => {
                         spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?
@@ -3213,9 +3282,7 @@ fn sink_drain_range<'mcx>(
             } else {
                 0
             };
-            if local.run_bytes + ::nodeagg::sink::agg_sink_table_mem(agg) + aggctx
-                > sink.budget
-            {
+            if local.run_bytes + ::nodeagg::sink::agg_sink_table_mem(agg) + aggctx > sink.budget {
                 // M3.5: the crossing SPILLS when the arm is enabled (the
                 // accumulated runs go to the Local's file as one epoch);
                 // disabled = today's R5 refusal exactly.
@@ -3261,9 +3328,7 @@ fn sink_drain_range<'mcx>(
         if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
             match &sink.spill_set {
                 Some(set) => {
-                    if let Some((run, intern_reset)) =
-                        ::nodeagg::sink::agg_sink_flush_now(agg)
-                    {
+                    if let Some((run, intern_reset)) = ::nodeagg::sink::agg_sink_flush_now(agg) {
                         local.alpha.on_pressure_flush();
                         local.probe_flushes += 1;
                         local.probe_flush_bytes += run.bytes() as u64;
@@ -3297,9 +3362,7 @@ fn sink_drain_range<'mcx>(
                     };
                     if !local.runs.is_empty()
                         && (agg_spill_eager()
-                            || local.run_bytes
-                                + ::nodeagg::sink::agg_sink_table_mem(agg)
-                                + aggctx
+                            || local.run_bytes + ::nodeagg::sink::agg_sink_table_mem(agg) + aggctx
                                 > sink.budget)
                     {
                         spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?;
@@ -3362,7 +3425,15 @@ fn sink_drain_range<'mcx>(
                 ))
             })?;
             if !super::exprkey::exprkey_sink_batch(
-                agg, ss, xk, sink.mk.as_ref(), stage_slot, idxs, groups, n, estate,
+                agg,
+                ss,
+                xk,
+                sink.mk.as_ref(),
+                stage_slot,
+                idxs,
+                groups,
+                n,
+                estate,
             )? {
                 return Err(AcceptFail::Budget);
             }
@@ -3395,8 +3466,7 @@ fn sink_drain_range<'mcx>(
         // discipline). Unreachable unless the vguard admission
         // (sink_vguard_plan_ok, knob-gated default OFF) let the plan in.
         {
-            let plan =
-                ::nodeagg::agg_lanefold_plan(agg).expect("sink drain without a fold plan");
+            let plan = ::nodeagg::agg_lanefold_plan(agg).expect("sink drain without a fold plan");
             if plan.guarded {
                 let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
                     .expect("sink drain requires the armed SoA");
@@ -3413,9 +3483,9 @@ fn sink_drain_range<'mcx>(
                 // deformed lane values for every plan column (the staging
                 // contract the serial proof site rides — survivor windows'
                 // completing deform filled every prefix column).
-                let demote = unsafe {
-                    ::lanefold::check_guards(plan, soa, &sel[..nwords], |_| None)
-                } == ::lanefold::GuardCheck::Demote;
+                let demote =
+                    unsafe { ::lanefold::check_guards(plan, soa, &sel[..nwords], |_| None) }
+                        == ::lanefold::GuardCheck::Demote;
                 if demote {
                     lane_trace("runtime-agg: vguard proof demoted — refusing to serial");
                     return Err(AcceptFail::Budget);
@@ -3470,7 +3540,9 @@ fn sink_drain_range<'mcx>(
             local.alpha.absorbed(mks.rows.len());
             continue;
         }
-        let ScanK2Scratch { rows, keys, knull, .. } = k2s;
+        let ScanK2Scratch {
+            rows, keys, knull, ..
+        } = k2s;
         super::scan_collect_survivors(ss, estate, n, rows)?;
         // α numerator: both K2 legs (dict window and plain keys) fold
         // exactly these survivors.
@@ -3484,8 +3556,8 @@ fn sink_drain_range<'mcx>(
         // answers, so this branch must own every dict window. Raw-answered
         // windows (non-dict key chunks) take the plain keys path below;
         // both resolve into the same worker table in the same row order.
-        if let Some(lane) = ::nodeseqscan::seq_scan_batch_soa(ss)
-            .and_then(|soa| soa.dict_lane(key_col))
+        if let Some(lane) =
+            ::nodeseqscan::seq_scan_batch_soa(ss).and_then(|soa| soa.dict_lane(key_col))
         {
             // Scatter admission excluded the dict-code feed (the only arm
             // that registers a dict lane) — a sighting here is a contract
@@ -3502,8 +3574,8 @@ fn sink_drain_range<'mcx>(
         keys.clear();
         knull.clear();
         {
-            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
-                .expect("sink drain requires the armed SoA");
+            let soa =
+                ::nodeseqscan::seq_scan_batch_soa(ss).expect("sink drain requires the armed SoA");
             let (kv, kn) = (soa.col_values(key_col), soa.col_isnull(key_col));
             for &i in rows.iter() {
                 keys.push(kv[i as usize]);
@@ -3516,8 +3588,8 @@ fn sink_drain_range<'mcx>(
         // cap/flush/budget discipline is at the loop top). No probe, no
         // insert, no fold.
         if let Some(sc) = local.scatter.as_deref_mut() {
-            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
-                .expect("sink drain requires the armed SoA");
+            let soa =
+                ::nodeseqscan::seq_scan_batch_soa(ss).expect("sink drain requires the armed SoA");
             sc.absorb_batch(soa, rows, keys, knull);
             continue;
         }
@@ -3530,8 +3602,7 @@ fn sink_drain_range<'mcx>(
         }
         idxs.clear();
         idxs.extend_from_slice(rows);
-        let soa =
-            ::nodeseqscan::seq_scan_batch_soa(ss).expect("sink drain requires the armed SoA");
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss).expect("sink drain requires the armed SoA");
         // SAFETY: every probed row is non-fallback (all-lane batch), so the
         // SoA lanes carry valid deformed values for every plan column; the
         // plan is unguarded (sink admission); each pergroup was installed by
@@ -3556,7 +3627,9 @@ fn runtime_agg_post_task_park(shared: &parallel::ParallelShared) {
         lane_trace("runtime-agg: post-task-park without a private payload");
         return;
     };
-    let Ok(payload) = private.downcast::<RuntimeAggShared>() else { return };
+    let Ok(payload) = private.downcast::<RuntimeAggShared>() else {
+        return;
+    };
     // Every LAUNCHED helper bumps `exited` exactly once, on EVERY exit path
     // (the leader's liveness reap counts these against `launched`).
     // HOOK-frame placement (the scan arm's law): the standing driver reuses
@@ -3566,7 +3639,9 @@ fn runtime_agg_post_task_park(shared: &parallel::ParallelShared) {
     let _exit = ExitBump(&payload.exited);
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if r.is_err() {
-        payload.sink.fail(PgError::new(ERROR, "runtime agg helper panicked").into());
+        payload
+            .sink
+            .fail(PgError::new(ERROR, "runtime agg helper panicked").into());
     }
     latch::SetLatch(::types_storage::latch::LatchHandle::proc(
         shared.parallel_leader_proc_number,
@@ -3580,8 +3655,12 @@ fn runtime_agg_post_task_park(shared: &parallel::ParallelShared) {
 /// unwinds (FATAL) are rethrown to the gang glue — a terminated worker
 /// must die, and swallowing one would resurrect it into the standing pool.
 fn runtime_agg_standing_driver(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
-    let Ok(payload) = private.downcast::<RuntimeAggShared>() else { return };
+    let Some(private) = shared.private() else {
+        return;
+    };
+    let Ok(payload) = private.downcast::<RuntimeAggShared>() else {
+        return;
+    };
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if let Err(unwind) = r {
         // #70: report the claimant death on the board (count-then-wake)
@@ -3662,7 +3741,10 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShare
                     let _ = payload.rt.drive_pinned(&mut local, &rg);
                 }
             } else {
-                lane_trace(&format!("runtime-agg: helper bind refused: {}", e.message()));
+                lane_trace(&format!(
+                    "runtime-agg: helper bind refused: {}",
+                    e.message()
+                ));
                 payload.refused.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -3697,7 +3779,9 @@ fn spill_substrate_probe(payload: &Arc<RuntimeAggShared>, worker: usize) {
         let mut w = f.begin_epoch(ctx.mcx())?;
         w.write_part(1, &payload_bytes)?;
         w.finish()?;
-        let Some(mut r) = f.read_part(ctx.mcx(), 1)? else { return Ok(false) };
+        let Some(mut r) = f.read_part(ctx.mcx(), 1)? else {
+            return Ok(false);
+        };
         let got = r.read_to_end()?;
         r.close()?;
         Ok(got == payload_bytes)
@@ -3731,11 +3815,7 @@ fn drive_bound(
         // first (fail() is first-wins); budget refusals record none and
         // helper_drive swallows this marker.
         teardown?;
-        return Err(PgError::new(
-            ERROR,
-            "runtime agg worker unwound (recorded upstream)",
-        )
-        .into());
+        return Err(PgError::new(ERROR, "runtime agg worker unwound (recorded upstream)").into());
     }
     teardown
 }
@@ -3832,7 +3912,9 @@ fn sink_rearm_dictfree<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> bool {
-    let Some(prefix) = super::fused_agg_soa_prefix(agg, ss) else { return false };
+    let Some(prefix) = super::fused_agg_soa_prefix(agg, ss) else {
+        return false;
+    };
     ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, None)
         && ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_none()
         && ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
@@ -3936,7 +4018,9 @@ fn arm_sink_build_inner<'mcx>(
     if sink.drain == SinkDrain::ExprKey {
         // The worker's own decide (same plan tree — same census result).
         let Some(mut xk) = super::exprkey::decide_exprkey(agg, ss, estate) else {
-            return Err(shape_err("worker expr-key decide diverged from the leader's"));
+            return Err(shape_err(
+                "worker expr-key decide diverged from the leader's",
+            ));
         };
         // Sink-build marker: the drain adapter's demote exits REFUSE
         // instead of migrating (`ExprKeyState::sink_build` doc).
@@ -3970,11 +4054,7 @@ fn arm_sink_build_inner<'mcx>(
                     return Err(shape_err("worker reduced arm refused under the sink cap"));
                 }
             }
-            (
-                None,
-                Some(lshape),
-                Some(super::exprkey::SinkXkKind::Multi { dict_input_att: _ }),
-            ) => {
+            (None, Some(lshape), Some(super::exprkey::SinkXkKind::Multi { dict_input_att: _ })) => {
                 // The ts-extract/CaseDict class: the serial build's own mk arm sequence
                 // under the sink cap (CaseDict shapes arm their two Intern
                 // atts through the shared pool — the serial feed's exact
@@ -4003,18 +4083,23 @@ fn arm_sink_build_inner<'mcx>(
                 // both flush identical canonical-bytes runs, so the
                 // leader's shape-only snapshot is arm-agnostic — the C2
                 // single-text law verbatim). Divergence = error.
-                let (atts, n_atts) =
-                    xk.sink_mk_intern_atts().expect("Dict kind carries the key-out att");
+                let (atts, n_atts) = xk
+                    .sink_mk_intern_atts()
+                    .expect("Dict kind carries the key-out att");
                 debug_assert_eq!(n_atts, 1, "the dict drain is the 1-Intern spec");
                 if ::nodeagg::agg_hash_compact_try_arm_mk1(agg, Some(atts[0]))
                     != ::nodeagg::CompactArm::Armed
                 {
-                    return Err(shape_err("worker dict-coded arm refused under the sink cap"));
+                    return Err(shape_err(
+                        "worker dict-coded arm refused under the sink cap",
+                    ));
                 }
                 let wshape = ::nodeagg::agg_hash_compact_mk_shape(agg)
                     .ok_or_else(|| shape_err("armed dict-coded table lost its shape"))?;
                 if &wshape != lshape {
-                    return Err(shape_err("worker dict-coded shape diverged from the leader's"));
+                    return Err(shape_err(
+                        "worker dict-coded shape diverged from the leader's",
+                    ));
                 }
                 // The TABLE-OWNED byref str state store used to be armed
                 // HERE, on this one drain arm of three str-capable ones
@@ -4049,9 +4134,7 @@ fn arm_sink_build_inner<'mcx>(
     super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
     // SE-T2AGG CAR B: the worker mirrors the leader's vguard columnar
     // re-arm (direct-index staging law; F1 leader/worker-verdict).
-    if super::sink_vguard_plan_ok(agg, ss)
-        && !super::sink_rearm_vguard_columnar(agg, ss, estate)
-    {
+    if super::sink_vguard_plan_ok(agg, ss) && !super::sink_rearm_vguard_columnar(agg, ss, estate) {
         return Err(shape_err("worker vguard columnar staging refused"));
     }
     if sink.drain == SinkDrain::Mk {
@@ -4078,8 +4161,7 @@ fn arm_sink_build_inner<'mcx>(
             return Err(shape_err("worker mk shape diverged from the leader's"));
         };
         if mk.shape.intern_comp().is_none()
-            && (mk.dict_att.is_some()
-                || ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some())
+            && (mk.dict_att.is_some() || ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some())
         {
             return Err(shape_err("dict component on a pure-int sink mk worker"));
         }
@@ -4135,7 +4217,9 @@ fn arm_sink_build_inner<'mcx>(
 
 fn teardown_worker_exec(clean: bool) -> PgResult<()> {
     WORKER_EXEC.with(|cell| -> PgResult<()> {
-        let Some(ex) = cell.borrow_mut().take() else { return Ok(()) };
+        let Some(ex) = cell.borrow_mut().take() else {
+            return Ok(());
+        };
         if clean {
             let r = crate::execmain::executor_finish_seam(ex.qd)
                 .and_then(|()| crate::execmain::executor_end_seam(ex.qd));
@@ -4157,7 +4241,9 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 }
 
 fn runtime_agg_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
-    let Some(payload) = private.downcast_ref::<RuntimeAggShared>() else { return };
+    let Some(payload) = private.downcast_ref::<RuntimeAggShared>() else {
+        return;
+    };
     let rg = payload.rg.get().and_then(|w| w.upgrade());
     if let Some(rg) = &rg {
         rg.abort();
@@ -4263,7 +4349,10 @@ enum LocalityCap {
 fn agg_locality_ndv_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_NDV").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_NDV").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -4323,7 +4412,10 @@ fn agg_locality_canon_enabled() -> bool {
 fn agg_capband_v2_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_RUNTIME_AGG_CAP_BAND_V2").as_deref(), Ok("1") | Ok("on"))
+        matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_CAP_BAND_V2").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
@@ -4403,7 +4495,10 @@ fn sink_locality_cap_for(est_groups: u64, est_rows: u64) -> Option<u32> {
 fn agg_sealflush_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_RUNTIME_AGG_SEALFLUSH").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_SEALFLUSH").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -4431,7 +4526,10 @@ fn agg_sealflush_floor() -> u64 {
 fn agg_scatter_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_RUNTIME_AGG_SCATTER").as_deref(), Ok("1") | Ok("on"))
+        matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_SCATTER").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
@@ -4530,7 +4628,10 @@ const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 16;
 fn agg_dopcap_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_RUNTIME_AGG_DOPCAP").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_DOPCAP").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -4618,7 +4719,10 @@ fn agg_dopcap_anchor() -> u32 {
 fn agg_alphagate_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_RUNTIME_AGG_ALPHAGATE").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_ALPHAGATE").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -4688,8 +4792,7 @@ fn alpha_gate_floor(state_bytes: usize, cap: u32, dop: i32) -> Option<u32> {
         return None;
     }
     let entry = 16u64 + 8 + state_bytes as u64 + 16;
-    let floor =
-        (agg_dopcap_floor_bytes() / entry.max(1)).clamp(1 << 12, u32::MAX as u64) as u32;
+    let floor = (agg_dopcap_floor_bytes() / entry.max(1)).clamp(1 << 12, u32::MAX as u64) as u32;
     (floor < cap).then_some(floor)
 }
 
@@ -4705,7 +4808,10 @@ fn alpha_gate_floor(state_bytes: usize, cap: u32, dop: i32) -> Option<u32> {
 fn agg_shared_table_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_RUNTIME_AGG_SHARED_TABLE").as_deref(), Ok("1"))
+        matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_SHARED_TABLE").as_deref(),
+            Ok("1")
+        )
     })
 }
 
@@ -4827,8 +4933,7 @@ fn sink_cap_engaged(
             let mut l = l;
             let anchor = agg_dopcap_anchor();
             if agg_dopcap_enabled() && dop as u32 > anchor {
-                let scaled =
-                    ((l as u64 * anchor as u64) / (dop as u64).max(1)) as u32;
+                let scaled = ((l as u64 * anchor as u64) / (dop as u64).max(1)) as u32;
                 // Byte-denominated floor at THIS shape's entry estimate
                 // (the same 16+8+state+16 arithmetic as sink_cap_for).
                 let entry = 16u64 + 8 + state_bytes as u64 + 16;
@@ -4893,7 +4998,9 @@ fn sink_cap_for(state_bytes: usize, budget: usize, ngroups_limit: u64) -> u32 {
 /// restores the phase-1 budget refusal exactly.
 fn agg_spill_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_AGG_SPILL").as_deref() != Ok("0"))
+    crate::once_val(&ON, || {
+        std::env::var("PGRUST_RUNTIME_AGG_SPILL").as_deref() != Ok("0")
+    })
 }
 
 /// EPOCH SIZING A/B arm (spill-envelopes lane): `1` restores the
@@ -4902,7 +5009,9 @@ fn agg_spill_enabled() -> bool {
 /// budget crossing before an epoch is written (fewer, bigger epochs).
 fn agg_spill_eager() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_AGG_SPILL_EAGER").as_deref() == Ok("1"))
+    crate::once_val(&ON, || {
+        std::env::var("PGRUST_RUNTIME_AGG_SPILL_EAGER").as_deref() == Ok("1")
+    })
 }
 
 /// `PGRUST_RUNTIME_AGG_TEXT` kill switch (default ON): the C2 text-key
@@ -4912,7 +5021,10 @@ fn agg_spill_eager() -> bool {
 fn runtime_agg_text_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_RUNTIME_AGG_TEXT").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_TEXT").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -4923,7 +5035,10 @@ fn runtime_agg_text_enabled() -> bool {
 fn runtime_agg_text2_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_RUNTIME_AGG_TEXT2").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_TEXT2").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -4954,7 +5069,10 @@ fn mk_shape_sink_ok(shape: &::nodeagg::MkShape) -> bool {
 fn agg_freeze_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        !matches!(std::env::var("PGRUST_RUNTIME_AGG_FREEZE").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_FREEZE").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -5029,7 +5147,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(false);
     }
-    let Some(rt) = runtime::global() else { return Ok(false) };
+    let Some(rt) = runtime::global() else {
+        return Ok(false);
+    };
     router::tick(ArmClass::Agg, ArmCounter::Offered);
 
     // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED —
@@ -5061,7 +5181,12 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // INSTRUMENT_TIMER (BUFFERS OFF, inc-3 — one clock pair per claim)
     // engage; BUFFERS/WAL combinations refuse until threaded.
     if ea && !super::runtime_instr::ea_mode_admissible(estate) {
-        refuse(estate, true, node_id, super::runtime_instr::ea_mode_refuse_reason(estate));
+        refuse(
+            estate,
+            true,
+            node_id,
+            super::runtime_instr::ea_mode_refuse_reason(estate),
+        );
         return Ok(false);
     }
     // Under EA the leader node carries an instr slot, which the serial-lane
@@ -5124,7 +5249,12 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     let mut dict_coded_kind = false;
     if ss.ss.ps_ProjInfo.is_some() {
         let Some(xk) = xk else {
-            refuse(estate, ea, node_id, "projected scan without an expr-key decide");
+            refuse(
+                estate,
+                ea,
+                node_id,
+                "projected scan without an expr-key decide",
+            );
             return Ok(false);
         };
         if xk.sink_refused() {
@@ -5198,8 +5328,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
                 // leader (the Mk comment above); the worker arm elects
                 // intern-armed or DIRECT, both flushing identical
                 // canonical-bytes runs (shape-only snapshot).
-                let (atts, n_atts) =
-                    xk.sink_mk_intern_atts().expect("Dict kind carries the key-out att");
+                let (atts, n_atts) = xk
+                    .sink_mk_intern_atts()
+                    .expect("Dict kind carries the key-out att");
                 debug_assert_eq!(n_atts, 1, "the dict drain is the 1-Intern spec");
                 ::nodeagg::sink::agg_sink_set_cap_spill(
                     agg,
@@ -5418,9 +5549,12 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // far below it, so it was always admitted by the ordinary path.
     if !dict_coded_kind
         && est_groups as f64 >= strminmax_max_groups()
-        && combines
-            .iter()
-            .any(|c| matches!(c.kind, ::nodeagg::sink::SinkCombineKind::VarlenaMinMax { .. }))
+        && combines.iter().any(|c| {
+            matches!(
+                c.kind,
+                ::nodeagg::sink::SinkCombineKind::VarlenaMinMax { .. }
+            )
+        })
     {
         refuse(estate, ea, node_id, "strminmax group-estimate ceiling");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
@@ -5436,12 +5570,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         est_rows,
     );
     if sink_cap < sink_cap_for(state_bytes, budget, ngroups_limit) {
-        lane_trace(&format!("runtime-agg: locality cap engaged (cap={sink_cap})"));
-    } else if agg_capband_v2_enabled()
-        && cap_shape_ok
-        && dop > 1
-        && sink_cap_override().is_none()
-    {
+        lane_trace(&format!(
+            "runtime-agg: locality cap engaged (cap={sink_cap})"
+        ));
+    } else if agg_capband_v2_enabled() && cap_shape_ok && dop > 1 && sink_cap_override().is_none() {
         // v2 high-α uncap witness (the band's engagement trace — the
         // GL-RADIX-2 ladder greps it; low-α / high-est shapes fall in the
         // branch above with their band cap in the line).
@@ -5450,7 +5582,12 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         ));
     }
     if !::nodeagg::agg_hash_compact_sink_admissible(agg, sink_cap, spill_admission) {
-        refuse(estate, ea, node_id, "worker compact arm would refuse under the sink cap/budget");
+        refuse(
+            estate,
+            ea,
+            node_id,
+            "worker compact arm would refuse under the sink cap/budget",
+        );
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
     }
@@ -5480,10 +5617,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         return Ok(false);
     }
     let policy = parallel::query_task_policy_probe();
-    if policy.has_params
-        || policy.temp_state
-        || policy.serializable
-        || policy.pending_invalidations
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
     {
         refuse(estate, ea, node_id, "binder policy");
         return Ok(false);
@@ -5504,10 +5638,14 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     }
 
     // --- Geometry.
-    let Some((total_granules, starts)) =
-        ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+    let Some((total_granules, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
     else {
-        refuse(estate, ea, node_id, "granule geometry unavailable (no columnar part)");
+        refuse(
+            estate,
+            ea,
+            node_id,
+            "granule geometry unavailable (no columnar part)",
+        );
         return Ok(false);
     };
     if total_granules < min_granules().max(2 * dop as u64) {
@@ -5579,25 +5717,24 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // PGRUST_RUNTIME_AGG_SPILL_CANON=0 restores the train-13 exclusion
     // (canonical engagements keep the phase-1 budget refusal). The
     // predicate MUST stay equal to `spill_admission` above (F1 invariant).
-    let spill_set = if agg_spill_enabled()
-        && (!canon || ::nodeagg::sink::sink_spill_canon_enabled())
-    {
-        match ::spillset::SpillSet::create() {
-            Ok(s) => Some(s),
-            Err(_) => {
-                // FAIL-CLOSED REFUSAL (not disarm): admission above may
-                // have vacated the estimate gates under `spill_admission`;
-                // launching spill-less workers would re-refuse under the
-                // sink cap pre-drive and strand the pinned RG (the F1
-                // class). Refuse the whole engagement — serial arm runs.
-                lane_trace("runtime-agg: spill set creation failed — refused");
-                refuse(estate, ea, node_id, "spill set creation failed");
-                return Ok(false);
+    let spill_set =
+        if agg_spill_enabled() && (!canon || ::nodeagg::sink::sink_spill_canon_enabled()) {
+            match ::spillset::SpillSet::create() {
+                Ok(s) => Some(s),
+                Err(_) => {
+                    // FAIL-CLOSED REFUSAL (not disarm): admission above may
+                    // have vacated the estimate gates under `spill_admission`;
+                    // launching spill-less workers would re-refuse under the
+                    // sink cap pre-drive and strand the pinned RG (the F1
+                    // class). Refuse the whole engagement — serial arm runs.
+                    lane_trace("runtime-agg: spill set creation failed — refused");
+                    refuse(estate, ea, node_id, "spill set creation failed");
+                    return Ok(false);
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     let ea_scan_node = if ea {
         agg.plan
             .plan
@@ -5698,7 +5835,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         // ladder cells (byval count/sum) are untouched by this gate.
         && !byref_states;
     if seal_flush {
-        lane_trace(&format!("runtime-agg: seal-flush armed (est_groups={est_groups})"));
+        lane_trace(&format!(
+            "runtime-agg: seal-flush armed (est_groups={est_groups})"
+        ));
     }
     // SCATTER ACCEPT admission (GL-RADIX-3, [`AggSink::scatter`]): kill
     // switch DEFAULT OFF; PLANNER-EST band gates (α_est ≤ ceiling AND
@@ -5799,7 +5938,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         combines,
         emit,
         topn,
-        topn_cands: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(Vec::new())).collect(),
+        topn_cands: (0..SINK_NBUCKETS)
+            .map(|_| UnsafeCell::new(Vec::new()))
+            .collect(),
         topn_degraded: AtomicBool::new(false),
         // §3.2 step 1 (meaningful only when `topn` armed): the kill switch
         // keeps decision-1 FullDrain; spill-armed engagements compose
@@ -5822,7 +5963,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         vec_accept,
         vec_rows: AtomicU64::new(0),
         scatter_rows: AtomicU64::new(0),
-        out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
+        out_emit: (0..SINK_NBUCKETS)
+            .map(|_| UnsafeCell::new(SinkEmitBuf::default()))
+            .collect(),
         published: Mutex::new(None),
         adopt_shape,
         adopted: Mutex::new(None),
@@ -5904,14 +6047,26 @@ fn engage<'mcx>(
     // Router counter choke point (M5-1): Engaged = ceremony entered;
     // Completed = the runtime answered; Fallback = R5 serial rerun.
     router::tick(ArmClass::Agg, ArmCounter::Engaged);
-    let engaged =
-        engage_ceremony(agg, estate, rt, dop, total_granules, starts, &payload, &sink);
+    let engaged = engage_ceremony(
+        agg,
+        estate,
+        rt,
+        dop,
+        total_granules,
+        starts,
+        &payload,
+        &sink,
+    );
     xact::ExitParallelMode();
     parallel::gtrace("l.agg.engage.end");
     if let Ok(done) = &engaged {
         router::tick(
             ArmClass::Agg,
-            if *done { ArmCounter::Completed } else { ArmCounter::Fallback },
+            if *done {
+                ArmCounter::Completed
+            } else {
+                ArmCounter::Fallback
+            },
         );
     }
     engaged
@@ -5924,12 +6079,11 @@ enum EngageOutcome {
 
 /// This arm's standing-channel constants (M2 inc-1; see
 /// standing_channel::StandingArm — sinks_gate: PGRUST_RUNTIME_POOLBIND_SINKS).
-static STANDING_ARM: super::standing_channel::StandingArm =
-    super::standing_channel::StandingArm {
-        label: "runtime-agg",
-        died: "runtime agg standing executors exited before completing the aggregation",
-        sinks_gate: true,
-    };
+static STANDING_ARM: super::standing_channel::StandingArm = super::standing_channel::StandingArm {
+    label: "runtime-agg",
+    died: "runtime agg standing executors exited before completing the aggregation",
+    sinks_gate: true,
+};
 
 /// Shared post-outcome tail (standing and launched channels): worker-phase
 /// errors rethrow PLAIN (the serial arm's surface, the parity oracle);
@@ -5959,7 +6113,10 @@ fn finish_outcome(
     }
     if outcome == runtime::RgOutcome::Aborted {
         ::postgres_seams::check_for_interrupts::call()?;
-        return Err(Box::new(PgError::new(ERROR, "runtime agg pipeline aborted")));
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime agg pipeline aborted",
+        )));
     }
     if payload.started.load(Ordering::SeqCst) == 0 {
         return Ok(EngageOutcome::Fallback);
@@ -6003,10 +6160,13 @@ fn engage_ceremony<'mcx>(
         // arm's helper_drive binds EAGERLY (with_query_task_binding), so
         // the standing serve re-establishes visibility up front and evicts
         // any parked sticky retention.
-        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
-            drive: runtime_agg_standing_driver,
-            deferred_bind: false,
-        });
+        parallel::set_standing_driver(
+            pcxt,
+            parallel::standing::StandingDriver {
+                drive: runtime_agg_standing_driver,
+                deferred_bind: false,
+            },
+        );
         // M2 inc-2: the POOL-DB channel — built BEFORE submit (the bound
         // descriptor must ride the submission: publication keys the
         // pool-visible active bit off it); sinks_gate: POOLBIND_SINKS=0
@@ -6018,7 +6178,6 @@ fn engage_ceremony<'mcx>(
             /* sinks_gate */ true,
         );
 
-
         // The sink's task sets over the pgrcolumnar granule geometry. Default
         // (combine-parallel lane): the 3-set sealed plumbing — ACCEPT →
         // FREEZE (per-Local SEAL partition, parallel across slots) →
@@ -6026,18 +6185,25 @@ fn engage_ceremony<'mcx>(
         // (single-threaded SEAL in the accept set's finalize) exactly.
         let source = Arc::new(PgrcolumnarGranuleSource { starts });
         let tasksets = if parseal_enabled() {
-            let runtime::SealedSinkTaskSets { accept, freeze, combine, probe } =
-                runtime::sealed_sink_tasksets(
-                    Arc::clone(sink),
-                    source,
-                    rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
-                    0,
-                );
+            let runtime::SealedSinkTaskSets {
+                accept,
+                freeze,
+                combine,
+                probe,
+            } = runtime::sealed_sink_tasksets(
+                Arc::clone(sink),
+                source,
+                rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
+                0,
+            );
             *probe_out = Some(probe);
             vec![accept, freeze, combine]
         } else {
-            let runtime::SinkTaskSets { accept, combine, probe } =
-                runtime::sink_tasksets(Arc::clone(sink), source, rt.nthreads(), 0);
+            let runtime::SinkTaskSets {
+                accept,
+                combine,
+                probe,
+            } = runtime::sink_tasksets(Arc::clone(sink), source, rt.nthreads(), 0);
             *probe_out = Some(probe);
             vec![accept, combine]
         };
@@ -6045,7 +6211,10 @@ fn engage_ceremony<'mcx>(
         let qid = NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64;
         payload.query_id.store(qid, Ordering::SeqCst);
         parallel::gtrace("l.agg.sink.end");
-        let spec = runtime::QuerySpec { query_id: qid, tasksets };
+        let spec = runtime::QuerySpec {
+            query_id: qid,
+            tasksets,
+        };
         // rg-set-BEFORE-publish (M2 inc-3 rung 3): every serve-visible rg
         // cell is stored by on_rg before the bound submission can become
         // pool-visible — no "rg gone" refusal churn window. The unbound arm
@@ -6087,10 +6256,7 @@ fn engage_ceremony<'mcx>(
                 // M2 inc-2: the pool-db board attached at submit (None =
                 // gang-first, inc-1 exactly).
                 pool: pool.as_ref().map(|(entry, _)| Arc::clone(entry)),
-                shared: payload
-                    .pcxt_shared
-                    .get()
-                    .expect("pcxt shared set above"),
+                shared: payload.pcxt_shared.get().expect("pcxt shared set above"),
                 slot: &payload.standing,
                 started: &payload.started,
                 refused: &payload.refused,
@@ -6181,14 +6347,18 @@ fn engage_ceremony<'mcx>(
             // merge (ea-morsels.md §3 — node-exact rows; the Agg root ticks
             // through its procnode wrapper as groups emit).
             if let Some(scan_node) = sink.ea_scan_node {
-                if let Some(m) =
-                    sink.ea_instr.lock().unwrap_or_else(|p| p.into_inner()).take()
+                if let Some(m) = sink
+                    .ea_instr
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
                 {
                     super::runtime_instr::ea_fill_scan_node(estate, scan_node, &m.rows);
                     // Pipeline report for the inc-2 EXPLAIN block (ACCEPT +
                     // COMBINE task sets on this arm; partials = workers).
-                    estate.es_runtime_ea_pipelines.push(
-                        super::runtime_instr::ea_pipeline_report(
+                    estate
+                        .es_runtime_ea_pipelines
+                        .push(super::runtime_instr::ea_pipeline_report(
                             "agg",
                             agg.plan.plan.plan_node_id,
                             scan_node,
@@ -6198,8 +6368,7 @@ fn engage_ceremony<'mcx>(
                             if parseal_enabled() { 3 } else { 2 },
                             m.workers as u64,
                             &m,
-                        ),
-                    );
+                        ));
                     lane_trace(&format!(
                         "runtime-agg: EA merged workers={} claims={} granules={} \
                          scanned={} survived={}",
@@ -6329,8 +6498,16 @@ impl runtime::MorselSource for PgrcolumnarGranuleSource {
 
     fn next_boundary_after(&self, start: u64) -> u64 {
         match self.starts.binary_search(&start) {
-            Ok(i) => self.starts.get(i + 1).copied().unwrap_or_else(|| self.total_granules()),
-            Err(i) => self.starts.get(i).copied().unwrap_or_else(|| self.total_granules()),
+            Ok(i) => self
+                .starts
+                .get(i + 1)
+                .copied()
+                .unwrap_or_else(|| self.total_granules()),
+            Err(i) => self
+                .starts
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| self.total_granules()),
         }
     }
 
@@ -6375,7 +6552,10 @@ mod scratch_estate_tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let after = ::mcx::global_footprint::bytes();
-        assert!(ok, "ledger did not balance after Drop: base {base}, after {after}");
+        assert!(
+            ok,
+            "ledger did not balance after Drop: base {base}, after {after}"
+        );
     }
 
     /// The estate faces count backing-store CAPACITY — the whale lanes
@@ -6386,16 +6566,25 @@ mod scratch_estate_tests {
         let mut dgs = SinkDictScratch::default();
         assert_eq!(dgs.estate_bytes(), 0);
         dgs.slots.resize(1 << 20, None);
-        assert!(dgs.estate_bytes() >= (1 << 20) * 8, "dict slots lane uncounted");
+        assert!(
+            dgs.estate_bytes() >= (1 << 20) * 8,
+            "dict slots lane uncounted"
+        );
         dgs.invalidate();
         // clear() keeps capacity — the allocator still holds the store and
         // the estate face must keep reporting it.
-        assert!(dgs.estate_bytes() >= (1 << 20) * 8, "cleared capacity uncounted");
+        assert!(
+            dgs.estate_bytes() >= (1 << 20) * 8,
+            "cleared capacity uncounted"
+        );
 
         let mut mks = super::super::MkScratch::default();
         mks.code_ids.resize(1 << 20, 0);
         mks.code_states.resize(1 << 20, core::ptr::null_mut());
-        assert!(mks.estate_bytes() >= (1 << 20) * 12, "mk code caches uncounted");
+        assert!(
+            mks.estate_bytes() >= (1 << 20) * 12,
+            "mk code caches uncounted"
+        );
 
         let mut vs = SinkVecScratch::default();
         vs.knull.resize(8192, false);
@@ -6415,16 +6604,37 @@ mod topn_mode_tests {
     #[test]
     fn mode_resolution_matrix() {
         // Kill switch off → FullDrain regardless of everything else.
-        assert_eq!(resolve_topn_mode_admission(true, false, true), TopnMode::FullDrain);
-        assert_eq!(resolve_topn_mode_admission(false, false, true), TopnMode::FullDrain);
-        assert_eq!(resolve_topn_mode_admission(false, false, false), TopnMode::FullDrain);
+        assert_eq!(
+            resolve_topn_mode_admission(true, false, true),
+            TopnMode::FullDrain
+        );
+        assert_eq!(
+            resolve_topn_mode_admission(false, false, true),
+            TopnMode::FullDrain
+        );
+        assert_eq!(
+            resolve_topn_mode_admission(false, false, false),
+            TopnMode::FullDrain
+        );
         // Phase 2 (split×selection): spill-armed engagements compose.
-        assert_eq!(resolve_topn_mode_admission(true, true, true), TopnMode::WinnersOnly);
+        assert_eq!(
+            resolve_topn_mode_admission(true, true, true),
+            TopnMode::WinnersOnly
+        );
         // WINNERS_SPILL=0 restores the ratified phase-1 exclusion exactly.
-        assert_eq!(resolve_topn_mode_admission(true, true, false), TopnMode::FullDrain);
-        assert_eq!(resolve_topn_mode_admission(false, true, false), TopnMode::WinnersOnly);
+        assert_eq!(
+            resolve_topn_mode_admission(true, true, false),
+            TopnMode::FullDrain
+        );
+        assert_eq!(
+            resolve_topn_mode_admission(false, true, false),
+            TopnMode::WinnersOnly
+        );
         // Product default: armed, spill-disarmed, switches on → WinnersOnly.
-        assert_eq!(resolve_topn_mode_admission(false, true, true), TopnMode::WinnersOnly);
+        assert_eq!(
+            resolve_topn_mode_admission(false, true, true),
+            TopnMode::WinnersOnly
+        );
         // SEAL: the pass-through census (1 Local, no runs, no spill face)
         // forces FullDrain; a widened engagement keeps the admission mode.
         assert_eq!(
@@ -6435,8 +6645,14 @@ mod topn_mode_tests {
             resolve_topn_mode_seal(TopnMode::WinnersOnly, false),
             TopnMode::WinnersOnly
         );
-        assert_eq!(resolve_topn_mode_seal(TopnMode::FullDrain, true), TopnMode::FullDrain);
-        assert_eq!(resolve_topn_mode_seal(TopnMode::FullDrain, false), TopnMode::FullDrain);
+        assert_eq!(
+            resolve_topn_mode_seal(TopnMode::FullDrain, true),
+            TopnMode::FullDrain
+        );
+        assert_eq!(
+            resolve_topn_mode_seal(TopnMode::FullDrain, false),
+            TopnMode::FullDrain
+        );
     }
 
     #[test]
@@ -6633,7 +6849,13 @@ mod numa_combine_tests {
                 all_finals[b] += 1;
             }
         }
-        assert!(all_popped.iter().all(|&c| c == 1), "each item owned exactly once");
-        assert!(all_finals.iter().all(|&c| c == 1), "each bucket elects exactly one final");
+        assert!(
+            all_popped.iter().all(|&c| c == 1),
+            "each item owned exactly once"
+        );
+        assert!(
+            all_finals.iter().all(|&c| c == 1),
+            "each bucket elects exactly one final"
+        );
     }
 }

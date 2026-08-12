@@ -77,8 +77,7 @@ use ::types_dest::CommandDest;
 fn ctas_funnel_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        !std::env::var("PGRUST_RUNTIME_CTAS_FUNNEL")
-            .is_ok_and(|v| matches!(v.trim(), "0" | "off"))
+        !std::env::var("PGRUST_RUNTIME_CTAS_FUNNEL").is_ok_and(|v| matches!(v.trim(), "0" | "off"))
     })
 }
 
@@ -119,7 +118,10 @@ static W0_ENGAGED: AtomicU64 = AtomicU64::new(0);
 static W0_COMPLETED: AtomicU64 = AtomicU64::new(0);
 
 pub fn ctas_funnel_engagements() -> (u64, u64) {
-    (W0_ENGAGED.load(Ordering::SeqCst), W0_COMPLETED.load(Ordering::SeqCst))
+    (
+        W0_ENGAGED.load(Ordering::SeqCst),
+        W0_COMPLETED.load(Ordering::SeqCst),
+    )
 }
 
 /// Called by the hook when every gate passed for a write dest and the
@@ -194,7 +196,10 @@ mod tests {
 pub(super) fn w2a_drain_batch_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_W2A_DRAIN_BATCH").as_deref(), Ok("1") | Ok("on"))
+        matches!(
+            std::env::var("PGRUST_W2A_DRAIN_BATCH").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 

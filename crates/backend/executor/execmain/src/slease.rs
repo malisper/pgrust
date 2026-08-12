@@ -92,9 +92,7 @@ use pgsync::{Mutex, OnceLock};
 /// the unarmed default is the unleased posture, byte-exact).
 pub fn armed() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("PGRUST_RUNTIME_SERIAL_LEASE").is_ok_and(|v| v.trim() == "1")
-    })
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_SERIAL_LEASE").is_ok_and(|v| v.trim() == "1"))
 }
 
 /// GL-SLEASE-3 attribution arm: `PGRUST_RUNTIME_SERIAL_LEASE_SWEEPER=0`
@@ -226,7 +224,10 @@ struct Registry {
 
 fn registry() -> &'static Registry {
     static R: OnceLock<Registry> = OnceLock::new();
-    R.get_or_init(|| Registry { all: Mutex::new(Vec::new()), free: Mutex::new(Vec::new()) })
+    R.get_or_init(|| Registry {
+        all: Mutex::new(Vec::new()),
+        free: Mutex::new(Vec::new()),
+    })
 }
 
 /// TLS slot ownership: claims on first armed enter, returns the slot to the
@@ -294,8 +295,10 @@ fn my_slot() -> &'static Slot {
         // Point the slot at THIS thread's CFI flag before any state can
         // publish it to the sweeper (started_ns is still 0 here).
         let flag: &'static AtomicBool = init_small::globals::interrupt_pending_flag();
-        slot.interrupt_flag
-            .store(flag as *const AtomicBool as *mut AtomicBool, Ordering::Release);
+        slot.interrupt_flag.store(
+            flag as *const AtomicBool as *mut AtomicBool,
+            Ordering::Release,
+        );
         *s = Some(SlotOwner(slot));
         slot
     })
@@ -362,8 +365,11 @@ fn sweeper() -> ! {
                     if !wall_age {
                         let blocked = slot.blocked_ns.load(Ordering::Relaxed);
                         let open = slot.wait_open_ns.load(Ordering::Relaxed);
-                        let open_extra =
-                            if open != 0 { now.saturating_sub(open) } else { 0 };
+                        let open_extra = if open != 0 {
+                            now.saturating_sub(open)
+                        } else {
+                            0
+                        };
                         age = age.saturating_sub(blocked.saturating_add(open_extra));
                     }
                     age >= floor_ns
@@ -555,8 +561,10 @@ pub fn wait_hook_start() {
     let prev_open = slot.wait_open_ns.load(Ordering::Relaxed);
     if prev_open != 0 {
         let span = now.saturating_sub(prev_open);
-        slot.blocked_ns
-            .store(slot.blocked_ns.load(Ordering::Relaxed).saturating_add(span), Ordering::Relaxed);
+        slot.blocked_ns.store(
+            slot.blocked_ns.load(Ordering::Relaxed).saturating_add(span),
+            Ordering::Relaxed,
+        );
     }
     slot.wait_open_ns.store(now, Ordering::Relaxed);
     if state == S_HELD {
@@ -582,8 +590,10 @@ pub fn wait_hook_end() {
     let open = slot.wait_open_ns.load(Ordering::Relaxed);
     if open != 0 {
         let span = now_ns().saturating_sub(open);
-        slot.blocked_ns
-            .store(slot.blocked_ns.load(Ordering::Relaxed).saturating_add(span), Ordering::Relaxed);
+        slot.blocked_ns.store(
+            slot.blocked_ns.load(Ordering::Relaxed).saturating_add(span),
+            Ordering::Relaxed,
+        );
         slot.wait_open_ns.store(0, Ordering::Relaxed);
     }
     if state == S_DONATED {

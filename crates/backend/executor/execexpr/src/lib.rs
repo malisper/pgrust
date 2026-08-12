@@ -17,37 +17,36 @@ extern crate alloc;
 mod arrayops;
 mod compile;
 pub mod domain;
+mod hstoresubs;
 mod interp;
 pub mod jit;
-mod hstoresubs;
 mod jsonbsubs;
-mod xmlops;
 mod steps;
 #[cfg(test)]
 mod tests;
+mod xmlops;
 
+pub use arrayops::ResMcx;
 pub use compile::{
-    economy_window, EconomyWindow,
-    erase_fn_expr, exec_build_agg_projection_info, exec_build_agg_projection_info_subplans,
-    exec_build_agg_qual, exec_build_agg_qual_subplans, exec_build_agg_trans,
-    exec_build_window_projection_info, exec_build_window_projection_info_subplans,
-    exec_build_agg_trans_gsets, exec_build_agg_trans_hashed,
+    economy_window, erase_fn_expr, exec_build_agg_projection_info,
+    exec_build_agg_projection_info_subplans, exec_build_agg_qual, exec_build_agg_qual_subplans,
+    exec_build_agg_trans, exec_build_agg_trans_gsets, exec_build_agg_trans_hashed,
     exec_build_agg_trans_hashed_masked, exec_build_agg_trans_hashed_subplans,
-    exec_build_agg_trans_mixed, exec_build_agg_trans_plain_masked,
-    exec_build_agg_trans_subplans,
-    exec_build_grouping_equal,
-    exec_build_hash32_from_attrs, exec_build_hash32_from_exprs, exec_build_projection_info,
-    exec_build_merge_projection_info_subplans, exec_build_projection_info_subplans,
-    exec_init_expr, exec_init_expr_subplans,
-    exec_init_expr_subplans_agg, exec_init_expr_with_case_test,
-    exec_init_qual, exec_init_qual_subplans, expr_type, lane_scan_qual, AggBind, AggOrderedSpec,
-    AggTransSpec, LaneBoolTest, LaneClause, LaneCmpClause, LaneCmpRhs, LaneQualShape, LaneSuffix,
+    exec_build_agg_trans_mixed, exec_build_agg_trans_plain_masked, exec_build_agg_trans_subplans,
+    exec_build_grouping_equal, exec_build_hash32_from_attrs, exec_build_hash32_from_exprs,
+    exec_build_merge_projection_info_subplans, exec_build_projection_info,
+    exec_build_projection_info_subplans, exec_build_window_projection_info,
+    exec_build_window_projection_info_subplans, exec_init_expr, exec_init_expr_subplans,
+    exec_init_expr_subplans_agg, exec_init_expr_with_case_test, exec_init_qual,
+    exec_init_qual_subplans, expr_type, lane_scan_qual, AggBind, AggOrderedSpec, AggTransSpec,
+    EconomyWindow, LaneBoolTest, LaneClause, LaneCmpClause, LaneCmpRhs, LaneQualShape, LaneSuffix,
     SubplanCompileEnv, WinBind, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };
 pub use interp::{
-    agg_datum_copy, agg_datum_replace, exec_eval_expr, exec_eval_expr_outcome, exec_project, exec_project_prearmed, exec_project_outcome,
-    exec_project_returning, exec_project_returning_outcome, exec_qual, exec_qual_outcome, EvalOutcome, EvalSlots, QualOutcome,
-    Resume, RetSlot, RetSlots, SuspendKind, Suspension,
+    agg_datum_copy, agg_datum_replace, exec_eval_expr, exec_eval_expr_outcome, exec_project,
+    exec_project_outcome, exec_project_prearmed, exec_project_returning,
+    exec_project_returning_outcome, exec_qual, exec_qual_outcome, EvalOutcome, EvalSlots,
+    QualOutcome, Resume, RetSlot, RetSlots, SuspendKind, Suspension,
 };
 pub use steps::{
     agg_count_star_advance, qual_bitmap_cmp_const, qual_bitmap_contains, AggPerGroup, CmpOp,
@@ -57,7 +56,6 @@ pub use steps::{
 };
 pub use types_portal::params::ParamBind;
 pub use xmlops::map_sql_value_to_xml_value;
-pub use arrayops::ResMcx;
 
 /// evaluate_expr (clauses.c): run a const-foldable expression once, Const-wrap.
 pub fn evaluate_expr<'mcx>(
@@ -69,10 +67,13 @@ pub fn evaluate_expr<'mcx>(
 ) -> types_error::PgResult<types_nodes::Node<'mcx>> {
     use types_nodes::primnodes::Const;
 
-    let mut state =
-        exec_init_expr(mcx, Some(expr), ParamBind::NONE)?.expect("expr is Some");
+    let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE)?.expect("expr is Some");
     state.arm_result_mcx(mcx);
-    let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+    let mut slots = EvalSlots {
+        scan: None,
+        inner: None,
+        outer: None,
+    };
     let r = exec_eval_expr(&mut state, &mut slots)?;
 
     let (typlen, typbyval) = lsyscache::get_typlenbyval(result_type)?;

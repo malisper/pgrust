@@ -306,7 +306,10 @@ pub fn try_own_agg_over_bitmap_feed<'mcx>(
     let result = ::nodeagg::exec_agg_batched(
         agg,
         estate,
-        BitmapFeedAggSource { bhs: &mut b.scan, outer_slot },
+        BitmapFeedAggSource {
+            bhs: &mut b.scan,
+            outer_slot,
+        },
     )?;
     if !hashed_emit {
         // Scan-slot hygiene at drain settle (the indexsource end_claim

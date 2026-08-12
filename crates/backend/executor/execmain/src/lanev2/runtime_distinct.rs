@@ -69,8 +69,10 @@ use ::types_nodes::NodeTag;
 use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_instr::{self, EaRowTally, InstrumentPartial};
 use super::stats::{self, RefuseReason, ShapeClass};
+use super::{
+    drain_pipeline, BatchEmit, BatchSink, SeqScanFilterProject, SeqScanSource, Sink, SinkFeed,
+};
 use super::{lane_trace, seq_scan_fusible, seq_scan_fusible_runtime_ea, trace_feed};
-use super::{drain_pipeline, BatchEmit, BatchSink, SeqScanFilterProject, SeqScanSource, Sink, SinkFeed};
 
 // ---------------------------------------------------------------------------
 // Shared state: the parallel context's private payload AND the sink body
@@ -299,9 +301,9 @@ impl DstCombined {
             DstCombined::Merged(m) => m.mem_bytes(),
             DstCombined::Emit(b, cands) => {
                 b.mem_bytes()
-                    + cands.as_ref().map_or(0, |c| {
-                        c.len() * core::mem::size_of::<PdTopnCand>()
-                    })
+                    + cands
+                        .as_ref()
+                        .map_or(0, |c| c.len() * core::mem::size_of::<PdTopnCand>())
             }
         }
     }
@@ -375,7 +377,10 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
     fn seal(&self, _worker: usize, local: DistinctSinkLocal) -> DistinctSealed {
         let DistinctSinkLocal { pd, spill } = local;
         if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
-            return DistinctSealed { table: pd_empty_grouped_table(&self.spec), spill: None };
+            return DistinctSealed {
+                table: pd_empty_grouped_table(&self.spec),
+                spill: None,
+            };
         }
         let r = catch_unwind(AssertUnwindSafe(|| {
             if self.lowwidth {
@@ -394,11 +399,17 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
             Ok(Ok(t)) => DistinctSealed { table: t, spill },
             Ok(Err(e)) => {
                 self.fail(e);
-                DistinctSealed { table: pd_empty_grouped_table(&self.spec), spill: None }
+                DistinctSealed {
+                    table: pd_empty_grouped_table(&self.spec),
+                    spill: None,
+                }
             }
             Err(_panic) => {
                 self.fail(PgError::new(ERROR, "runtime distinct worker panicked in seal").into());
-                DistinctSealed { table: pd_empty_grouped_table(&self.spec), spill: None }
+                DistinctSealed {
+                    table: pd_empty_grouped_table(&self.spec),
+                    spill: None,
+                }
             }
         }
     }
@@ -411,7 +422,9 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
         if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
             return;
         }
-        let r = catch_unwind(AssertUnwindSafe(|| self.combine_body(part as usize, sealed)));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            self.combine_body(part as usize, sealed)
+        }));
         match r {
             Ok(Ok(DstCombine::Done(m))) => {
                 // R3 accounting (m2-integration audit): the merged bucket is
@@ -501,7 +514,10 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
             }
         }
         let published = if self.paremit.is_some() {
-            debug_assert!(merged_cells.is_empty(), "adopt cell in a paremit engagement");
+            debug_assert!(
+                merged_cells.is_empty(),
+                "adopt cell in a paremit engagement"
+            );
             if !merged_cells.is_empty() {
                 return;
             }
@@ -607,10 +623,8 @@ impl RuntimeDistinctShared {
             inmem_vals += v;
             inmem_key_bytes += kb;
         }
-        let per_group = self.spec.nkeys() * 8
-            + 2 * self.spec.vocab.len() * 8
-            + self.spec.sets.len() * 48
-            + 64;
+        let per_group =
+            self.spec.nkeys() * 8 + 2 * self.spec.vocab.len() * 8 + self.spec.sets.len() * 48 + 64;
         let est = (inmem_vals + 2 * spilled_vals)
             .saturating_mul(16)
             .saturating_mul(3)
@@ -649,11 +663,14 @@ impl RuntimeDistinctShared {
                 synth.push(pd_table_from_spill(&self.spec, &bytes)?);
             }
         }
-        let refs: Vec<&PdHandedTable> =
-            sealed.iter().map(|s| &s.table).chain(synth.iter()).collect();
-        Ok(DstCombine::Done(
-            self.finish_combine(pd_merge_bucket_refs(&self.spec, &refs, b))?,
-        ))
+        let refs: Vec<&PdHandedTable> = sealed
+            .iter()
+            .map(|s| &s.table)
+            .chain(synth.iter())
+            .collect();
+        Ok(DstCombine::Done(self.finish_combine(
+            pd_merge_bucket_refs(&self.spec, &refs, b),
+        )?))
     }
 
     /// inc-3b COMBINE-SPLIT (design §4, the agg inc-2b twin on the VALUE
@@ -764,7 +781,8 @@ impl RuntimeDistinctShared {
                     return Ok(false);
                 }
                 self.combine_splits.fetch_add(1, Ordering::Relaxed);
-                self.split_depth_max.fetch_max((depth + 1) as u64, Ordering::Relaxed);
+                self.split_depth_max
+                    .fetch_max((depth + 1) as u64, Ordering::Relaxed);
                 let mut router = DstSubRouter::new(self, set, b, depth + 1);
                 stream_part_dst(&self.spec, file, sl as u32, |chunk| {
                     router.absorb(&self.spec, chunk)
@@ -784,7 +802,9 @@ impl RuntimeDistinctShared {
                 continue;
             }
             let ctx = ::mcx::MemoryContext::new("m35-dst-split-read");
-            let Some(mut rd) = file.read_part(ctx.mcx(), sl as u32)? else { continue };
+            let Some(mut rd) = file.read_part(ctx.mcx(), sl as u32)? else {
+                continue;
+            };
             let bytes = rd.read_to_end()?;
             rd.close()?;
             let synth = pd_table_from_spill(&self.spec, &bytes)?;
@@ -839,7 +859,9 @@ fn stream_part_dst(
     }
     let min_width = ::nodeagg::pd_spill_min_record_width(spec);
     let ctx = ::mcx::MemoryContext::new("m35-dst-split-read");
-    let Some(mut rd) = file.read_part(ctx.mcx(), part)? else { return Ok(()) };
+    let Some(mut rd) = file.read_part(ctx.mcx(), part)? else {
+        return Ok(());
+    };
     let mut buf: Vec<u8> = vec![0u8; 1 << 20];
     let mut filled = 0usize;
     loop {
@@ -867,8 +889,7 @@ fn stream_part_dst(
             if filled - usable < 8 {
                 break;
             }
-            let rec_len =
-                u64::from_ne_bytes(buf[usable..usable + 8].try_into().unwrap()) as usize;
+            let rec_len = u64::from_ne_bytes(buf[usable..usable + 8].try_into().unwrap()) as usize;
             if rec_len < min_width || rec_len % 8 != 0 {
                 return Err(Box::new(PgError::new(
                     ERROR,
@@ -1118,16 +1139,14 @@ impl PdAcceptSink<'_> {
         let mut granules = 0u64;
         'claim: loop {
             ::postgres_seams::check_for_interrupts::call()?;
-            let Some((nrows, _base)) = ::nodeseqscan::seq_scan_topn_direct_next_granule(ss)?
-            else {
+            let Some((nrows, _base)) = ::nodeseqscan::seq_scan_topn_direct_next_granule(ss)? else {
                 break;
             };
             let n = nrows as usize;
             // Canonicalize the granule's lanes (borrow-scoped, one at a
             // time; decode-on-demand is granule-memoized underneath).
             let mut lane_into = |col: u16, kind: PdInt, out: &mut Vec<i64>| -> bool {
-                let Some(lane) = ::nodeseqscan::seq_scan_topn_direct_lane(ss, col as usize)
-                else {
+                let Some(lane) = ::nodeseqscan::seq_scan_topn_direct_lane(ss, col as usize) else {
                     return false;
                 };
                 out.clear();
@@ -1160,12 +1179,13 @@ impl PdAcceptSink<'_> {
                 .enumerate()
                 .map(|(vi, r)| r.as_ref().map(|_| vs.riders[vi].as_slice()))
                 .collect();
-            self.local.pd.vec_resolve_fold(&vs.keys, &riders, &mut vs.pd);
+            self.local
+                .pd
+                .vec_resolve_fold(&vs.keys, &riders, &mut vs.pd);
             // Phase 4: the staged set feed, resumable across spill epochs.
             let mut at = 0usize;
             loop {
-                let (feed, consumed) =
-                    self.local.pd.vec_stage_sets(&vs.pd.gids, &vs.vals, at)?;
+                let (feed, consumed) = self.local.pd.vec_stage_sets(&vs.pd.gids, &vs.vals, at)?;
                 at = consumed;
                 if feed == PdFeed::Ok {
                     break;
@@ -1189,17 +1209,15 @@ impl PdAcceptSink<'_> {
             granules += 1;
         }
         self.shared.vec_rows.fetch_add(rows, Ordering::Relaxed);
-        self.shared.vec_granules.fetch_add(granules, Ordering::Relaxed);
+        self.shared
+            .vec_granules
+            .fetch_add(granules, Ordering::Relaxed);
         Ok(())
     }
 }
 
 impl<'mcx> Sink<'mcx> for PdAcceptSink<'_> {
-    fn accept(
-        &mut self,
-        tuple: ExecSlotId,
-        estate: &mut EStateData<'mcx>,
-    ) -> PgResult<SinkFeed> {
+    fn accept(&mut self, tuple: ExecSlotId, estate: &mut EStateData<'mcx>) -> PgResult<SinkFeed> {
         if self.crossed {
             return Ok(SinkFeed::NeedMore);
         }
@@ -1294,7 +1312,10 @@ impl RuntimeDistinctShared {
             };
             let (tmp, reset_tmp) = (ex.tmp, ex.reset_tmp);
             crate::querydesc::with_qd(ex.qd, |q| {
-                let x = q.exec.as_mut().expect("runtime distinct worker executor state");
+                let x = q
+                    .exec
+                    .as_mut()
+                    .expect("runtime distinct worker executor state");
                 x.with_mut(|d| -> PgResult<()> {
                     let estate = &mut d.estate;
                     let ss = distinct_worker_scan(d.planstate.as_mut())?;
@@ -1303,12 +1324,7 @@ impl RuntimeDistinctShared {
                     // (PgResult<()>); this arm admits only pgrcolumnar scans, so
                     // the former not-pgrcolumnar branch is unreachable by
                     // construction.
-                    ::nodeseqscan::seq_scan_set_morsel_range(
-                        ss,
-                        estate,
-                        range.start,
-                        range.end,
-                    )?;
+                    ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, range.start, range.end)?;
                     // EA-on-morsels: borrow the worker's cumulative partial
                     // for the drain's row funnel (None on every non-EA path).
                     let ea = self.ea_instr_slots.is_some();
@@ -1402,7 +1418,9 @@ fn runtime_distinct_post_task_park(shared: &parallel::ParallelShared) {
         lane_trace("runtime-distinct: post-task-park without a private payload");
         return;
     };
-    let Ok(payload) = private.downcast::<RuntimeDistinctShared>() else { return };
+    let Ok(payload) = private.downcast::<RuntimeDistinctShared>() else {
+        return;
+    };
     // Every LAUNCHED helper bumps `exited` exactly once, on EVERY exit path
     // (the leader's liveness reap counts these against `launched`).
     // HOOK-frame placement (the scan arm's law): the standing driver reuses
@@ -1422,8 +1440,12 @@ fn runtime_distinct_post_task_park(shared: &parallel::ParallelShared) {
 /// POST_TASK_PARK body minus the ExitBump; exit-committed unwinds (FATAL)
 /// rethrow to the gang glue (a terminated worker must die).
 fn runtime_distinct_standing_driver(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
-    let Ok(payload) = private.downcast::<RuntimeDistinctShared>() else { return };
+    let Some(private) = shared.private() else {
+        return;
+    };
+    let Ok(payload) = private.downcast::<RuntimeDistinctShared>() else {
+        return;
+    };
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if let Err(unwind) = r {
         // #70: report the claimant death on the board (count-then-wake)
@@ -1431,8 +1453,7 @@ fn runtime_distinct_standing_driver(shared: &parallel::ParallelShared) {
         // reap counts deaths like refusals; without it a die-pre-bind storm
         // parks the leader forever.
         parallel::standing::note_predrive_death();
-        payload
-            .fail(PgError::new(ERROR, "runtime distinct standing executor panicked").into());
+        payload.fail(PgError::new(ERROR, "runtime distinct standing executor panicked").into());
         latch::SetLatch(::types_storage::latch::LatchHandle::proc(
             shared.parallel_leader_proc_number,
         ));
@@ -1528,11 +1549,9 @@ fn drive_bound(
         // crossings do not set the errored flag and keep their serial
         // fallback path.
         teardown?;
-        return Err(PgError::new(
-            ERROR,
-            "runtime distinct worker unwound (recorded upstream)",
-        )
-        .into());
+        return Err(
+            PgError::new(ERROR, "runtime distinct worker unwound (recorded upstream)").into(),
+        );
     }
     teardown
 }
@@ -1558,7 +1577,10 @@ fn build_worker_exec(payload: &Arc<RuntimeDistinctShared>) -> PgResult<()> {
         let armed = (|| -> PgResult<EcxtId> {
             crate::execmain::executor_start_seam(qd, payload.eflags)?;
             crate::querydesc::with_qd(qd, |q| {
-                let x = q.exec.as_mut().expect("runtime distinct worker ExecutorStart");
+                let x = q
+                    .exec
+                    .as_mut()
+                    .expect("runtime distinct worker ExecutorStart");
                 x.with_mut(|d| -> PgResult<EcxtId> {
                     let estate = &mut d.estate;
                     let ss = distinct_worker_scan(d.planstate.as_mut())?;
@@ -1598,7 +1620,9 @@ fn build_worker_exec(payload: &Arc<RuntimeDistinctShared>) -> PgResult<()> {
 
 fn teardown_worker_exec(clean: bool) -> PgResult<()> {
     WORKER_EXEC.with(|cell| -> PgResult<()> {
-        let Some(ex) = cell.borrow_mut().take() else { return Ok(()) };
+        let Some(ex) = cell.borrow_mut().take() else {
+            return Ok(());
+        };
         if clean {
             let r = crate::execmain::executor_finish_seam(ex.qd)
                 .and_then(|()| crate::execmain::executor_end_seam(ex.qd));
@@ -1620,7 +1644,9 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 }
 
 fn runtime_distinct_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
-    let Some(payload) = private.downcast_ref::<RuntimeDistinctShared>() else { return };
+    let Some(payload) = private.downcast_ref::<RuntimeDistinctShared>() else {
+        return;
+    };
     let rg = payload.rg.get().and_then(|w| w.upgrade());
     if let Some(rg) = &rg {
         rg.abort();
@@ -1750,7 +1776,9 @@ fn vec_cols(
 /// restores the phase-1 budget refusal exactly.
 fn distinct_spill_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
+    crate::once_val(&ON, || {
+        std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0")
+    })
 }
 
 /// GL-LOWDIST-4 B1 heap-feed knob (t35 law: DEFAULT OFF for the letter; ON
@@ -1790,8 +1818,7 @@ pub(super) fn distinct_task_source<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<(u64, Arc<dyn runtime::MorselSource>)>> {
     if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
-        let Some((granules, starts)) =
-            ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+        let Some((granules, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
         else {
             return Ok(None);
         };
@@ -1887,7 +1914,9 @@ pub(super) fn lowwidth_leader_parity_dop(
         Some(max) if dop >= 1 && dop <= max => {
             let bumped = (dop + 1).min(rt.nthreads() as i32).max(dop);
             if bumped != dop {
-                lane_trace(&format!("{arm}: low-width leader-parity dop {dop}->{bumped}"));
+                lane_trace(&format!(
+                    "{arm}: low-width leader-parity dop {dop}->{bumped}"
+                ));
             }
             (bumped, true)
         }
@@ -1960,7 +1989,9 @@ fn runtime_distinct_worker_budget() -> usize {
 /// section doc).
 fn distinct_paremit_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_DISTINCT_PAREMIT").as_deref() != Ok("0"))
+    crate::once_val(&ON, || {
+        std::env::var("PGRUST_RUNTIME_DISTINCT_PAREMIT").as_deref() != Ok("0")
+    })
 }
 
 /// `PGRUST_RUNTIME_DISTINCT_TOPN` kill switch (default ON): 0/off = the
@@ -2063,7 +2094,10 @@ fn distinct_topn_arm(
     };
     let key = match cols[(oc - 1) as usize] {
         PdParemitCol::SetCount(si) => PdTopnKey::SetCount(si),
-        PdParemitCol::Vocab { transno, sum: false } => {
+        PdParemitCol::Vocab {
+            transno,
+            sum: false,
+        } => {
             let vi = spec.vocab.iter().position(|v| v.transno == transno)?;
             PdTopnKey::VocabCount(vi)
         }
@@ -2085,12 +2119,7 @@ fn distinct_topn_arm(
 /// arm is ARMED — dop set + runtime on — so unarmed sessions stay silent) +
 /// under EA the per-node transparency record (ea-morsels.md §6).
 #[cold]
-fn refused(
-    estate: &mut EStateData<'_>,
-    ea: bool,
-    node_id: i32,
-    reason: &'static str,
-) {
+fn refused(estate: &mut EStateData<'_>, ea: bool, node_id: i32, reason: &'static str) {
     // M5-1: every distinct-arm refusal feeds the router's consolidated
     // taxonomy alongside the trace / EA transparency line.
     router::tick_refused(ArmClass::Distinct, reason);
@@ -2121,7 +2150,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
-    let Some(rt) = runtime::global() else { return Ok(None) };
+    let Some(rt) = runtime::global() else {
+        return Ok(None);
+    };
     // Static shape refusal memo: the plan-shape gates below cannot flip for
     // this node; skip the whole probe (incl. spec derivation) on re-pulls.
     if *rd_shape_refused {
@@ -2171,7 +2202,12 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // INSTRUMENT_TIMER (BUFFERS OFF, inc-3 — one clock pair per claim)
     // engage; BUFFERS/WAL combinations refuse until threaded.
     if ea && !runtime_instr::ea_mode_admissible(estate) {
-        refused(estate, true, node_id, runtime_instr::ea_mode_refuse_reason(estate));
+        refused(
+            estate,
+            true,
+            node_id,
+            runtime_instr::ea_mode_refuse_reason(estate),
+        );
         return Ok(None);
     }
     if super::runtime_in_parallel_machinery(ss) {
@@ -2190,8 +2226,11 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // shapes read the 1.0 density default — the serial adopt/emit tail the
     // 8.0 tier priced is exactly what the parallel emit removes (the
     // near-unique class's conversion; hashgrouped.rs economics doc).
-    let paremit_cols =
-        if distinct_paremit_enabled() { ::nodeagg::pd_paremit_cols(agg) } else { None };
+    let paremit_cols = if distinct_paremit_enabled() {
+        ::nodeagg::pd_paremit_cols(agg)
+    } else {
+        None
+    };
     if !::nodeagg::agg_hashgroup_admissible(agg) {
         refused(estate, ea, node_id, "hashgroup admission/economics");
         return Ok(None);
@@ -2234,7 +2273,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // of the same gate: no surface without a bytes-comparable image ever
     // sees a bytes key — the m2-sinks §1 rule-5 selection-order totality
     // law's admission discipline).
-    let Some(mut spec) = ::nodeagg::pd_derive_spec(agg, desc, true, ::nodeagg::distinct_datetime_enabled()) else {
+    let Some(mut spec) =
+        ::nodeagg::pd_derive_spec(agg, desc, true, ::nodeagg::distinct_datetime_enabled())
+    else {
         refused(estate, ea, node_id, "spec derivation");
         *rd_shape_refused = true;
         return Ok(None);
@@ -2250,8 +2291,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         // inert). An estimate error only moves probe-table GEOMETRY — the
         // ratio clamp and expected-cap bound in flush_staged bound the
         // overshoot, and the capacity-based budget metering stays honest.
-        s.expected_worker_rows =
-            (sort.plan.plan.plan_rows / f64::from(dop.max(1))).max(0.0) as u64;
+        s.expected_worker_rows = (sort.plan.plan.plan_rows / f64::from(dop.max(1))).max(0.0) as u64;
     }
     if spec.max_att > desc.natts {
         refused(estate, ea, node_id, "att bound");
@@ -2297,7 +2337,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
             refused(estate, ea, node_id, "hashgroup admission/economics");
             return Ok(None);
         }
-        lane_trace(&format!("runtime-distinct: topn dop-budget admission (dop={dop})"));
+        lane_trace(&format!(
+            "runtime-distinct: topn dop-budget admission (dop={dop})"
+        ));
     }
     // No params, either kind (the binder refuses Params; the worker pstmt
     // carries none).
@@ -2305,7 +2347,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         refused(estate, ea, node_id, "extern params");
         return Ok(None);
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        return Ok(None);
+    };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
         refused(estate, ea, node_id, "exec params");
         return Ok(None);
@@ -2314,7 +2358,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // receive the SCAN SUBTREE as their pstmt — the Agg need not be the
     // plan root, so ORDER BY/LIMIT above it, the real bank grouped-distinct shape,
     // stays engageable).
-    let Some(sort_node) = agg.plan.plan.lefttree else { return Ok(None) };
+    let Some(sort_node) = agg.plan.plan.lefttree else {
+        return Ok(None);
+    };
     if sort_node.node_tag() != NodeTag::T_Sort
         || !std::ptr::eq(sort_node.as_sort().expect("Sort tag"), sort.plan)
     {
@@ -2322,7 +2368,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         *rd_shape_refused = true;
         return Ok(None);
     }
-    let Some(scan_node) = sort.plan.plan.lefttree else { return Ok(None) };
+    let Some(scan_node) = sort.plan.plan.lefttree else {
+        return Ok(None);
+    };
     if scan_node.node_tag() != NodeTag::T_SeqScan {
         refused(estate, ea, node_id, "sort child not SeqScan");
         *rd_shape_refused = true;
@@ -2348,18 +2396,14 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         return Ok(None);
     }
     let policy = parallel::query_task_policy_probe();
-    if policy.has_params
-        || policy.temp_state
-        || policy.serializable
-        || policy.pending_invalidations
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
     {
         refused(estate, ea, node_id, "binder policy sources");
         return Ok(None);
     }
 
     // --- Geometry: enough granules to be worth a gang.
-    let Some((total_granules, source)) = distinct_task_source(ss, estate)?
-    else {
+    let Some((total_granules, source)) = distinct_task_source(ss, estate)? else {
         return Ok(None);
     };
     if total_granules < super::runtime_scan::min_granules().max(2 * dop as u64) {
@@ -2377,8 +2421,20 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
 
     // --- Engage.
     engage(
-        agg, estate, rt, dop, lowwidth, total_granules, source, spec, order, paremit, topn,
-        vec, scan_node, ea,
+        agg,
+        estate,
+        rt,
+        dop,
+        lowwidth,
+        total_granules,
+        source,
+        spec,
+        order,
+        paremit,
+        topn,
+        vec,
+        scan_node,
+        ea,
     )
 }
 
@@ -2464,7 +2520,9 @@ fn engage<'mcx>(
         locality_cap,
         lowwidth: {
             if lowwidth {
-                lane_trace(&format!("runtime-distinct: low-width combine armed (dop={dop})"));
+                lane_trace(&format!(
+                    "runtime-distinct: low-width combine armed (dop={dop})"
+                ));
             }
             lowwidth
         },
@@ -2473,7 +2531,9 @@ fn engage<'mcx>(
         combine_splits: AtomicU64::new(0),
         split_depth_max: AtomicU64::new(0),
         split_uniq: AtomicU64::new(0),
-        out: (0..PD_SINK_GROUP_PARTS as usize).map(|_| UnsafeCell::new(None)).collect(),
+        out: (0..PD_SINK_GROUP_PARTS as usize)
+            .map(|_| UnsafeCell::new(None))
+            .collect(),
         merged: Mutex::new(None),
         ea_scan_node: if ea {
             scan_node.as_seq_scan().map(|s| s.scan.plan.plan_node_id)
@@ -2502,13 +2562,26 @@ fn engage<'mcx>(
     // Router counter choke point (M5-1): Engaged = ceremony entered;
     // Completed = the runtime answered; Fallback = R5 serial rerun.
     router::tick(ArmClass::Distinct, ArmCounter::Engaged);
-    let engaged =
-        engage_ceremony(agg, estate, rt, dop, total_granules, source, &payload, spec, order);
+    let engaged = engage_ceremony(
+        agg,
+        estate,
+        rt,
+        dop,
+        total_granules,
+        source,
+        &payload,
+        spec,
+        order,
+    );
     xact::ExitParallelMode();
     if let Ok(r) = &engaged {
         router::tick(
             ArmClass::Distinct,
-            if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+            if r.is_some() {
+                ArmCounter::Completed
+            } else {
+                ArmCounter::Fallback
+            },
         );
     }
     engaged
@@ -2521,12 +2594,11 @@ enum EngageOutcome {
 
 /// This arm's standing-channel constants (M2 inc-1; see
 /// standing_channel::StandingArm — sinks_gate: PGRUST_RUNTIME_POOLBIND_SINKS).
-static STANDING_ARM: super::standing_channel::StandingArm =
-    super::standing_channel::StandingArm {
-        label: "runtime-distinct",
-        died: "runtime distinct standing executors exited before completing the build",
-        sinks_gate: true,
-    };
+static STANDING_ARM: super::standing_channel::StandingArm = super::standing_channel::StandingArm {
+    label: "runtime-distinct",
+    died: "runtime distinct standing executors exited before completing the build",
+    sinks_gate: true,
+};
 
 /// Shared post-outcome tail (standing and launched channels): worker-phase
 /// errors rethrow PLAIN; a budget crossing takes the bounded-memory serial
@@ -2549,7 +2621,10 @@ fn finish_outcome(
             // serial arm (nothing was emitted; the leader's scan is
             // untouched).
             lane_trace("runtime-distinct: worker budget crossed; serial fallback");
-            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AdmissionEconomicsFusedDrive);
+            stats::tick_refused(
+                ShapeClass::AggBuild,
+                RefuseReason::AdmissionEconomicsFusedDrive,
+            );
             return Ok(EngageOutcome::Fallback);
         }
         ::postgres_seams::check_for_interrupts::call()?;
@@ -2598,10 +2673,13 @@ fn engage_ceremony<'mcx>(
         // Standing driver dispatch (M2 inc-1): deferred_bind false — this
         // arm binds EAGERLY (with_query_task_binding); the standing serve
         // re-establishes visibility up front and evicts parked sticky.
-        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
-            drive: runtime_distinct_standing_driver,
-            deferred_bind: false,
-        });
+        parallel::set_standing_driver(
+            pcxt,
+            parallel::standing::StandingDriver {
+                drive: runtime_distinct_standing_driver,
+                deferred_bind: false,
+            },
+        );
         // M2 inc-2: the POOL-DB channel — built BEFORE submit (the bound
         // descriptor must ride the submission: publication keys the
         // pool-visible active bit off it); sinks_gate: POOLBIND_SINKS=0
@@ -2613,19 +2691,22 @@ fn engage_ceremony<'mcx>(
             /* sinks_gate */ true,
         );
 
-
         // Submit the pinned RG (accept → freeze → combine) before launch.
         // The per-AM morsel source was built at admission
         // (distinct_task_source — GL-LOWDIST-4 B1): pgrcolumnar RG-boundary
         // claims fed straight into set_granule_range, or heap block-range
         // claims through the same AM-dispatched positioner.
-        let runtime::SealedSinkTaskSets { accept, freeze, combine, probe } =
-            runtime::sealed_sink_tasksets(
-                Arc::clone(payload),
-                source,
-                rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
-                0,
-            );
+        let runtime::SealedSinkTaskSets {
+            accept,
+            freeze,
+            combine,
+            probe,
+        } = runtime::sealed_sink_tasksets(
+            Arc::clone(payload),
+            source,
+            rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
+            0,
+        );
         *probe_out = Some(probe);
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let qspec = runtime::QuerySpec {
@@ -2753,9 +2834,7 @@ fn engage_ceremony<'mcx>(
             // SeqScan's rows/nfiltered/loops and the bypassed Sort's
             // pass-through rows (ea-morsels.md §3 — node-exact rows; the
             // engaged Agg root ticks through its procnode wrapper).
-            if let (Some(scan_id), Some(slots)) =
-                (payload.ea_scan_node, &payload.ea_instr_slots)
-            {
+            if let (Some(scan_id), Some(slots)) = (payload.ea_scan_node, &payload.ea_instr_slots) {
                 let ips: Vec<InstrumentPartial> = slots
                     .iter()
                     .filter_map(|m| m.lock().unwrap_or_else(|p| p.into_inner()).take())
@@ -2774,15 +2853,17 @@ fn engage_ceremony<'mcx>(
                 // Pipeline report for the inc-2 EXPLAIN block (ACCEPT +
                 // SEALCVT + COMBINE task sets on this arm; the skipped Sort
                 // is the second member; partials = workers).
-                estate.es_runtime_ea_pipelines.push(runtime_instr::ea_pipeline_report(
-                    "distinct",
-                    agg.plan.plan.plan_node_id,
-                    scan_id,
-                    sort_id.unwrap_or(-1),
-                    3,
-                    m.workers as u64,
-                    &m,
-                ));
+                estate
+                    .es_runtime_ea_pipelines
+                    .push(runtime_instr::ea_pipeline_report(
+                        "distinct",
+                        agg.plan.plan.plan_node_id,
+                        scan_id,
+                        sort_id.unwrap_or(-1),
+                        3,
+                        m.workers as u64,
+                        &m,
+                    ));
                 lane_trace(&format!(
                     "runtime-distinct: EA merged workers={} claims={} granules={} \
                      scanned={} survived={}",

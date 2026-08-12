@@ -229,12 +229,7 @@ pub(super) fn try_own_index_scan_express<'mcx>(
                     RefuseReason::Instrumented => express_refuse_reason(is, estate, true),
                     other => Some(other),
                 };
-                super::engine_record_verdict(
-                    estate,
-                    idx as i32,
-                    ShapeClass::IndexScan,
-                    production,
-                );
+                super::engine_record_verdict(estate, idx as i32, ShapeClass::IndexScan, production);
             }
         }
         // Refused: NO tick here (module doc) — the incumbent standalone
@@ -254,5 +249,12 @@ pub(super) fn try_own_index_scan_express<'mcx>(
     // priced on the point path. No clear-on-finish: exec_index_scan's own
     // body already clears the scan slot at exhaustion.
     let mut root = RootAdapter::new(None);
-    pull_step_rows(is, &mut PointProbeSource, &mut PassthroughOp, &mut root, estate).map(Some)
+    pull_step_rows(
+        is,
+        &mut PointProbeSource,
+        &mut PassthroughOp,
+        &mut root,
+        estate,
+    )
+    .map(Some)
 }

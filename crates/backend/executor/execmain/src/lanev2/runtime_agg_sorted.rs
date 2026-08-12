@@ -173,17 +173,13 @@ impl runtime::ParallelSink for SortedAggSink {
         SortedAggLocal::default()
     }
 
-    fn accept_local(
-        &self,
-        local: &mut SortedAggLocal,
-        worker: usize,
-        range: runtime::MorselRange,
-    ) {
+    fn accept_local(&self, local: &mut SortedAggLocal, worker: usize, range: runtime::MorselRange) {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
-        let r =
-            catch_unwind(AssertUnwindSafe(|| accept_morsel_body(self, local, worker, range)));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            accept_morsel_body(self, local, worker, range)
+        }));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(AcceptFail::Budget)) => {
@@ -196,9 +192,7 @@ impl runtime::ParallelSink for SortedAggSink {
             }
             Err(_panic) => {
                 mark_self_errored();
-                self.fail(
-                    PgError::new(ERROR, "runtime sorted-agg sink worker panicked").into(),
-                );
+                self.fail(PgError::new(ERROR, "runtime sorted-agg sink worker panicked").into());
             }
         }
     }
@@ -299,11 +293,13 @@ fn accept_morsel_body(
         let (qd, keys) = (ex.qd, ex.keys);
         let (spec, natts) = (&ex.spec, ex.natts);
         crate::querydesc::with_qd(qd, |q| {
-            let x = q.exec.as_mut().expect("runtime sorted-agg worker executor state");
+            let x = q
+                .exec
+                .as_mut()
+                .expect("runtime sorted-agg worker executor state");
             x.with_mut(|d| -> Result<(), AcceptFail> {
                 let estate = &mut d.estate;
-                let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut()
-                else {
+                let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut() else {
                     return Err(AcceptFail::Error(sink_shape_error(
                         "sorted worker plan root is not an Agg",
                     )));
@@ -529,7 +525,10 @@ fn drive_claim<'mcx>(
                     unsafe {
                         ::lanefold::fold_batch(
                             plan,
-                            &super::CodesCols { inner: soa, codes: &[] },
+                            &super::CodesCols {
+                                inner: soa,
+                                codes: &[],
+                            },
                             &run[..nwords],
                             n as usize,
                             ::nodeagg::agg_sorted_pergroup_base(agg),
@@ -549,10 +548,8 @@ fn drive_claim<'mcx>(
             let boundary = {
                 let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
                     .ok_or_else(|| sink_shape_error("claim drive lost its SoA"))?;
-                let mut key_vals: [&[Datum]; SORTED_FOLD_MAX_KEYS] =
-                    [&[]; SORTED_FOLD_MAX_KEYS];
-                let mut key_nulls: [&[bool]; SORTED_FOLD_MAX_KEYS] =
-                    [&[]; SORTED_FOLD_MAX_KEYS];
+                let mut key_vals: [&[Datum]; SORTED_FOLD_MAX_KEYS] = [&[]; SORTED_FOLD_MAX_KEYS];
+                let mut key_nulls: [&[bool]; SORTED_FOLD_MAX_KEYS] = [&[]; SORTED_FOLD_MAX_KEYS];
                 for k in 0..nkeys {
                     key_vals[k] = soa.col_values(keys.cols[k].0 as usize);
                     key_nulls[k] = soa.col_isnull(keys.cols[k].0 as usize);
@@ -574,11 +571,7 @@ fn drive_claim<'mcx>(
                         if cn || jn {
                             cn && jn
                         } else {
-                            super::sorted_key_datum_eq(
-                                key_vals[k][j as usize],
-                                cv,
-                                keys.cols[k].1,
-                            )
+                            super::sorted_key_datum_eq(key_vals[k][j as usize], cv, keys.cols[k].1)
                         }
                     });
                     if !same {
@@ -619,11 +612,7 @@ fn drive_claim<'mcx>(
                         // are live images (just projected); `spec` mirrors
                         // the result tupledesc (admission).
                         unsafe {
-                            a.push_row(
-                                &sb.tts_values[..natts],
-                                &sb.tts_isnull[..natts],
-                                spec,
-                            )?;
+                            a.push_row(&sb.tts_values[..natts], &sb.tts_isnull[..natts], spec)?;
                         }
                     }
                     ::nodeagg::agg_sorted_group_begin(agg, estate, None)?;
@@ -666,7 +655,9 @@ fn post_task_park(shared: &parallel::ParallelShared) {
         lane_trace("runtime-agg-sorted: post-task-park without a private payload");
         return;
     };
-    let Ok(payload) = private.downcast::<RuntimeAggSortedShared>() else { return };
+    let Ok(payload) = private.downcast::<RuntimeAggSortedShared>() else {
+        return;
+    };
     // Every LAUNCHED helper bumps `exited` exactly once, on EVERY exit
     // path. HOOK-frame placement (the scan arm's law): the standing driver
     // reuses helper_drive and must NOT bump — standing exits ride the
@@ -687,8 +678,12 @@ fn post_task_park(shared: &parallel::ParallelShared) {
 /// POST_TASK_PARK body minus the ExitBump; exit-committed unwinds (FATAL)
 /// rethrow to the gang glue (a terminated worker must die).
 fn standing_driver(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
-    let Ok(payload) = private.downcast::<RuntimeAggSortedShared>() else { return };
+    let Some(private) = shared.private() else {
+        return;
+    };
+    let Ok(payload) = private.downcast::<RuntimeAggSortedShared>() else {
+        return;
+    };
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(&payload)));
     if let Err(unwind) = r {
         // #70: report the claimant death on the board (count-then-wake)
@@ -808,7 +803,10 @@ fn build_worker_exec(payload: &Arc<RuntimeAggSortedShared>) -> PgResult<()> {
         let armed = (|| -> PgResult<(SortedFoldKeys, SortedByrefSpec, usize)> {
             crate::execmain::executor_start_seam(qd, payload.eflags)?;
             crate::querydesc::with_qd(qd, |q| {
-                let x = q.exec.as_mut().expect("runtime sorted-agg worker ExecutorStart");
+                let x = q
+                    .exec
+                    .as_mut()
+                    .expect("runtime sorted-agg worker ExecutorStart");
                 x.with_mut(|d| -> PgResult<(SortedFoldKeys, SortedByrefSpec, usize)> {
                     let estate = &mut d.estate;
                     let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut()
@@ -852,16 +850,22 @@ fn arm_sorted_build<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(SortedFoldKeys, SortedByrefSpec, usize)> {
     if !sorted_arm_shape_ok(agg) {
-        return Err(sink_shape_error("worker sorted-fold shape diverged from the leader's"));
+        return Err(sink_shape_error(
+            "worker sorted-fold shape diverged from the leader's",
+        ));
     }
     let Some(keys) = super::sorted_fold_key_cols(agg, ss) else {
-        return Err(sink_shape_error("worker sorted key shape diverged from the leader's"));
+        return Err(sink_shape_error(
+            "worker sorted key shape diverged from the leader's",
+        ));
     };
     if !arm_sorted_staging(agg, ss, &keys, estate)? {
         return Err(sink_shape_error("worker sorted staging refused"));
     }
     let Some(spec) = ::nodeagg::sortedsink::agg_sorted_result_byref_spec(agg) else {
-        return Err(sink_shape_error("worker result byref spec diverged from the leader's"));
+        return Err(sink_shape_error(
+            "worker result byref spec diverged from the leader's",
+        ));
     };
     let natts = spec.len();
     Ok((keys, spec, natts))
@@ -918,7 +922,9 @@ fn arm_sorted_staging<'mcx>(
 
 fn teardown_worker_exec(clean: bool) -> PgResult<()> {
     WORKER_EXEC.with(|cell| -> PgResult<()> {
-        let Some(ex) = cell.borrow_mut().take() else { return Ok(()) };
+        let Some(ex) = cell.borrow_mut().take() else {
+            return Ok(());
+        };
         if clean {
             let r = crate::execmain::executor_finish_seam(ex.qd)
                 .and_then(|()| crate::execmain::executor_end_seam(ex.qd));
@@ -940,7 +946,9 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 }
 
 fn private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
-    let Some(payload) = private.downcast_ref::<RuntimeAggSortedShared>() else { return };
+    let Some(payload) = private.downcast_ref::<RuntimeAggSortedShared>() else {
+        return;
+    };
     let rg = payload.rg.get().and_then(|w| w.upgrade());
     if let Some(rg) = &rg {
         rg.abort();
@@ -981,7 +989,10 @@ fn min_granules() -> u64 {
 fn split_claims() -> bool {
     static B: OnceLock<bool> = OnceLock::new();
     crate::once_val(&B, || {
-        matches!(std::env::var("PGRUST_RUNTIME_AGG_SORTED_SPLIT").as_deref(), Ok("1"))
+        matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_SORTED_SPLIT").as_deref(),
+            Ok("1")
+        )
     })
 }
 
@@ -1089,7 +1100,9 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
     {
         return Ok(false);
     }
-    let Some(rt) = runtime::global() else { return Ok(false) };
+    let Some(rt) = runtime::global() else {
+        return Ok(false);
+    };
 
     fn refuse(why: &'static str) {
         lane_trace(&format!("runtime-agg-sorted: refused ({why})"));
@@ -1174,10 +1187,7 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
         return Ok(false);
     }
     let policy = parallel::query_task_policy_probe();
-    if policy.has_params
-        || policy.temp_state
-        || policy.serializable
-        || policy.pending_invalidations
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
     {
         refuse("binder policy");
         return Ok(false);
@@ -1195,8 +1205,7 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
         return Ok(false);
     }
     // --- Geometry.
-    let Some((total_granules, starts)) =
-        ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+    let Some((total_granules, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
     else {
         refuse("granule geometry unavailable (no columnar part)");
         return Ok(false);
@@ -1224,7 +1233,19 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
         error: Mutex::new(None),
         budget_refused: AtomicBool::new(false),
     });
-    engage(agg, estate, rt, dop, total_granules, starts, agg_node, sink, &keys, &spec, natts)
+    engage(
+        agg,
+        estate,
+        rt,
+        dop,
+        total_granules,
+        starts,
+        agg_node,
+        sink,
+        &keys,
+        &spec,
+        natts,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1269,7 +1290,17 @@ fn engage<'mcx>(
 
     xact::EnterParallelMode();
     let engaged = engage_ceremony(
-        agg, estate, rt, dop, total_granules, starts, &payload, &sink, keys, spec, natts,
+        agg,
+        estate,
+        rt,
+        dop,
+        total_granules,
+        starts,
+        &payload,
+        &sink,
+        keys,
+        spec,
+        natts,
     );
     xact::ExitParallelMode();
     engaged
@@ -1282,12 +1313,11 @@ enum EngageOutcome {
 
 /// This arm's standing-channel constants (M2 inc-1; see
 /// standing_channel::StandingArm — sinks_gate: PGRUST_RUNTIME_POOLBIND_SINKS).
-static STANDING_ARM: super::standing_channel::StandingArm =
-    super::standing_channel::StandingArm {
-        label: "runtime-agg-sorted",
-        died: "runtime sorted-agg standing executors exited before completing the aggregation",
-        sinks_gate: true,
-    };
+static STANDING_ARM: super::standing_channel::StandingArm = super::standing_channel::StandingArm {
+    label: "runtime-agg-sorted",
+    died: "runtime sorted-agg standing executors exited before completing the aggregation",
+    sinks_gate: true,
+};
 
 /// Shared post-outcome tail (standing and launched channels): worker-phase
 /// errors rethrow PLAIN; budget refusals take the R5 whole-attempt serial
@@ -1308,7 +1338,10 @@ fn finish_outcome(
     }
     if outcome == runtime::RgOutcome::Aborted {
         ::postgres_seams::check_for_interrupts::call()?;
-        return Err(Box::new(PgError::new(ERROR, "runtime sorted-agg pipeline aborted")));
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime sorted-agg pipeline aborted",
+        )));
     }
     if payload.started.load(Ordering::SeqCst) == 0 {
         return Ok(EngageOutcome::Fallback);
@@ -1330,8 +1363,7 @@ fn engage_ceremony<'mcx>(
     spec: &SortedByrefSpec,
     natts: usize,
 ) -> PgResult<bool> {
-    let pcxt =
-        parallel::CreateParallelContext("postgres", "pgrust_runtime_agg_sorted_main", dop)?;
+    let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_agg_sorted_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
 
     let body = (|mut_submitted: &mut Option<runtime::RgHandle>| -> PgResult<EngageOutcome> {
@@ -1349,10 +1381,13 @@ fn engage_ceremony<'mcx>(
         // Standing driver dispatch (M2 inc-1): deferred_bind false — this
         // arm binds EAGERLY (with_query_task_binding); the standing serve
         // re-establishes visibility up front and evicts parked sticky.
-        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
-            drive: standing_driver,
-            deferred_bind: false,
-        });
+        parallel::set_standing_driver(
+            pcxt,
+            parallel::standing::StandingDriver {
+                drive: standing_driver,
+                deferred_bind: false,
+            },
+        );
         // M2 inc-2: the POOL-DB channel — built BEFORE submit (the bound
         // descriptor must ride the submission: publication keys the
         // pool-visible active bit off it); sinks_gate: POOLBIND_SINKS=0
@@ -1364,18 +1399,22 @@ fn engage_ceremony<'mcx>(
             /* sinks_gate */ true,
         );
 
-
-        let source = Arc::new(SortedGranuleSource { starts, whole: !split_claims() });
-        let runtime::SinkTaskSets { accept, combine, probe: _probe } = runtime::sink_tasksets(
-            Arc::clone(sink),
-            source,
-            rt.nthreads(),
-            0,
-        );
+        let source = Arc::new(SortedGranuleSource {
+            starts,
+            whole: !split_claims(),
+        });
+        let runtime::SinkTaskSets {
+            accept,
+            combine,
+            probe: _probe,
+        } = runtime::sink_tasksets(Arc::clone(sink), source, rt.nthreads(), 0);
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let qid = NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64;
         payload.query_id.store(qid, Ordering::SeqCst);
-        let spec = runtime::QuerySpec { query_id: qid, tasksets: vec![accept, combine] };
+        let spec = runtime::QuerySpec {
+            query_id: qid,
+            tasksets: vec![accept, combine],
+        };
         // rg-set-BEFORE-publish (M2 inc-3 rung 3): every serve-visible rg
         // cell is stored by on_rg before the bound submission can become
         // pool-visible — no "rg gone" refusal churn window.
@@ -1389,9 +1428,7 @@ fn engage_ceremony<'mcx>(
                 .unwrap_or_else(|_| unreachable!("sink rg set once"));
         };
         let (rg, waiter) = match &pool {
-            Some((_, descriptor)) => {
-                rt.submit_pinned_bound(spec, 0, descriptor.clone(), set_rg)
-            }
+            Some((_, descriptor)) => rt.submit_pinned_bound(spec, 0, descriptor.clone(), set_rg),
             None => {
                 let (rg, waiter) = rt.submit_pinned(spec);
                 set_rg(&rg);
@@ -1459,16 +1496,8 @@ fn engage_ceremony<'mcx>(
                 .unwrap_or_else(|p| p.into_inner())
                 .take()
                 .ok_or_else(|| sink_shape_error("completed sorted sink published nothing"))?;
-            let segs = stitch_and_finalize(
-                agg,
-                estate,
-                recs,
-                total_granules,
-                sink,
-                keys,
-                spec,
-                natts,
-            )?;
+            let segs =
+                stitch_and_finalize(agg, estate, recs, total_granules, sink, keys, spec, natts)?;
             let groups: usize = segs.iter().map(|s| s.nrows).sum();
             lane_trace(&format!("runtime-agg-sorted: complete, groups={groups}"));
             ::nodeagg::sortedsink::agg_sorted_sink_adopt(agg, segs, natts);
@@ -1592,7 +1621,13 @@ fn stitch_and_finalize<'mcx>(
     }
 
     for rec in recs {
-        let ClaimRec { first, interior, last, spanning, .. } = rec;
+        let ClaimRec {
+            first,
+            interior,
+            last,
+            spanning,
+            ..
+        } = rec;
         if first.is_none() {
             // No surviving rows in this claim: the open group persists
             // across it (the store is key-clustered; survivors of one key
@@ -1605,7 +1640,9 @@ fn stitch_and_finalize<'mcx>(
             match open.as_mut() {
                 Some(o) if stitch_key_eq(&o.key, &p.key, nkeys, &sink.key_lens) => {
                     ::nodeagg::runtime_partial::agg_runtime_combine_into(
-                        agg, &mut o.partial, &p.partial,
+                        agg,
+                        &mut o.partial,
+                        &p.partial,
                     )?;
                 }
                 Some(_) => {
@@ -1622,7 +1659,9 @@ fn stitch_and_finalize<'mcx>(
         match open.take() {
             Some(mut o) if stitch_key_eq(&o.key, &pf.key, nkeys, &sink.key_lens) => {
                 ::nodeagg::runtime_partial::agg_runtime_combine_into(
-                    agg, &mut o.partial, &pf.partial,
+                    agg,
+                    &mut o.partial,
+                    &pf.partial,
                 )?;
                 emit_boundary!(o);
             }
@@ -1680,8 +1719,16 @@ impl runtime::MorselSource for SortedGranuleSource {
 
     fn next_boundary_after(&self, start: u64) -> u64 {
         match self.starts.binary_search(&start) {
-            Ok(i) => self.starts.get(i + 1).copied().unwrap_or_else(|| self.total_granules()),
-            Err(i) => self.starts.get(i).copied().unwrap_or_else(|| self.total_granules()),
+            Ok(i) => self
+                .starts
+                .get(i + 1)
+                .copied()
+                .unwrap_or_else(|| self.total_granules()),
+            Err(i) => self
+                .starts
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| self.total_granules()),
         }
     }
 

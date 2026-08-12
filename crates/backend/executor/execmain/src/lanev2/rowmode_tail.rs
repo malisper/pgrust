@@ -465,7 +465,11 @@ pub fn material_pull_verdict<'mcx>(
     m: &crate::procnode::MaterialNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) {
-    verdict(ShapeClass::Material, || Some(m.state.plan.plan.plan_node_id), estate);
+    verdict(
+        ShapeClass::Material,
+        || Some(m.state.plan.plan.plan_node_id),
+        estate,
+    );
 }
 
 // ===========================================================================
@@ -489,7 +493,11 @@ pub fn recursive_union_pull_verdict<'mcx>(
     ru: &crate::procnode::RecursiveUnionNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) {
-    verdict(ShapeClass::RecursiveUnion, || Some(ru.state.plan.plan.plan_node_id), estate);
+    verdict(
+        ShapeClass::RecursiveUnion,
+        || Some(ru.state.plan.plan.plan_node_id),
+        estate,
+    );
 }
 
 /// WorkTableScan pull verdict (SH-E): `exec_work_table_scan` resolves its
@@ -508,7 +516,11 @@ pub fn memoize_pull_verdict<'mcx>(
     m: &crate::procnode::MemoizeNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) {
-    verdict(ShapeClass::Memoize, || Some(m.state.plan.plan.plan_node_id), estate);
+    verdict(
+        ShapeClass::Memoize,
+        || Some(m.state.plan.plan.plan_node_id),
+        estate,
+    );
 }
 
 // ===========================================================================
@@ -523,7 +535,11 @@ pub fn set_op_pull_verdict<'mcx>(
     so: &crate::procnode::SetOpNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) {
-    verdict(ShapeClass::SetOp, || Some(so.state.plan.plan.plan_node_id), estate);
+    verdict(
+        ShapeClass::SetOp,
+        || Some(so.state.plan.plan.plan_node_id),
+        estate,
+    );
 }
 
 /// MergeAppend pull verdict (SH-E).
@@ -532,7 +548,11 @@ pub fn merge_append_pull_verdict<'mcx>(
     m: &crate::procnode::MergeAppendNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) {
-    verdict(ShapeClass::MergeAppend, || Some(m.state.plan.plan.plan_node_id), estate);
+    verdict(
+        ShapeClass::MergeAppend,
+        || Some(m.state.plan.plan.plan_node_id),
+        estate,
+    );
 }
 
 /// Unique tail fallback verdict (SH-E) — called ONLY from `try_own_unique`
@@ -544,7 +564,11 @@ pub(super) fn unique_tail_verdict<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) {
     if rowmode_enabled() {
-        verdict(ShapeClass::Unique, || Some(u.state.plan.plan.plan_node_id), estate);
+        verdict(
+            ShapeClass::Unique,
+            || Some(u.state.plan.plan.plan_node_id),
+            estate,
+        );
     }
 }
 
@@ -566,5 +590,9 @@ pub fn lock_rows_pull_verdict<'mcx>(
     // TupleOp hook is offered only on non-admit), so it never rides the
     // fast-admit byte — the full-gate slow path is its permanent spelling
     // (defensive: a stale byte must never flip hook priority).
-    verdict_slow(ShapeClass::LockRows, || Some(l.state.plan.plan.plan_node_id), estate)
+    verdict_slow(
+        ShapeClass::LockRows,
+        || Some(l.state.plan.plan.plan_node_id),
+        estate,
+    )
 }

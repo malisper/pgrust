@@ -22,8 +22,8 @@ use ::types_error::PgResult;
 use ::types_nodes::bitmapset::Bitmapset;
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
-use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::nodes_enums::CmdType;
+use ::types_nodes::plannodes::PlannedStmt;
 use ::types_portal::params::{ParamExecData, ParamExternData};
 use ::types_portal::{ParamListHandle, QueryEnvHandle};
 use ::types_scan::sdir::ForwardScanDirection;
@@ -313,15 +313,20 @@ pub(crate) fn build_worker_pstmt<'mcx>(
     estate: &EStateData<'mcx>,
     plan_node: Node<'mcx>,
 ) -> PgResult<&'mcx PlannedStmt<'mcx>> {
-    let leader = estate.es_plannedstmt.expect("parallel plan without es_plannedstmt");
+    let leader = estate
+        .es_plannedstmt
+        .expect("parallel plan without es_plannedstmt");
     let mcx = estate.es_query_cxt;
     // Transfer only parallel-safe subplans, leaving a NULL hole for unsafe
     // ones so the plan_id indexes of the safe ones are preserved; workers
     // must never ExecInitNode an unsafe subplan.
     let mut subplans = ::types_nodes::list::OptNodeList::nil();
     for subplan in leader.subplans.iter() {
-        let cell = subplan
-            .filter(|sp| sp.as_plan().expect("subplans cell is a plan tree").parallel_safe);
+        let cell = subplan.filter(|sp| {
+            sp.as_plan()
+                .expect("subplans cell is a plan tree")
+                .parallel_safe
+        });
         subplans.lappend(mcx, cell)?;
     }
     let pstmt = PlannedStmt {
@@ -352,7 +357,9 @@ pub(crate) fn build_worker_pstmt<'mcx>(
         stmt_location: -1,
         stmt_len: -1,
     };
-    Ok(Node::mk(mcx, pstmt)?.as_planned_stmt().expect("PlannedStmt"))
+    Ok(Node::mk(mcx, pstmt)?
+        .as_planned_stmt()
+        .expect("PlannedStmt"))
 }
 
 fn serialize_param_exec(
@@ -380,7 +387,10 @@ fn setup_tuple_queues(
         let mq = shm_mq::shm_mq_create(tqueue::PARALLEL_TUPLE_QUEUE_SIZE);
         mq.set_receiver(me);
         let ledger = Arc::new(tqueue::ChunkLedger::new());
-        handles.push(Some((shm_mq::shm_mq_attach(Arc::clone(&mq)), Arc::clone(&ledger))));
+        handles.push(Some((
+            shm_mq::shm_mq_attach(Arc::clone(&mq)),
+            Arc::clone(&ledger),
+        )));
         queues.push((mq, ledger));
     }
     *shared.queues.lock().unwrap_or_else(|e| e.into_inner()) = queues;
@@ -409,7 +419,10 @@ pub fn exec_init_parallel_plan<'mcx>(
     // pattern). The panic must unwind to an ERROR, abort the transaction, and
     // leave the session usable — never wedge it.
     if std::env::var_os("PGRUST_CRASH_TEST").is_some()
-        && estate.es_sourceText.unwrap_or("").contains("pgrust:leader-panic-parallel-init")
+        && estate
+            .es_sourceText
+            .unwrap_or("")
+            .contains("pgrust:leader-panic-parallel-init")
     {
         panic!("injected leader panic (parallel init)");
     }
@@ -474,7 +487,9 @@ pub fn exec_init_parallel_plan<'mcx>(
         query_text: estate.es_sourceText.unwrap_or("").to_string(),
         // Portal-lifetime array, outlives the workers (registered params
         // contract in standard_executor_start).
-        param_extern: estate.es_param_list_info.map(|p| (SendConst(p.as_ptr()), p.len())),
+        param_extern: estate
+            .es_param_list_info
+            .map(|p| (SendConst(p.as_ptr()), p.len())),
         param_exec: Mutex::new(serialize_param_exec(estate, send_params)),
         tuples_needed,
         eflags: estate.es_top_eflags,
@@ -485,7 +500,10 @@ pub fn exec_init_parallel_plan<'mcx>(
             instrument_options: estate.es_instrument,
             workers: Mutex::new((0..nworkers).map(|_| None).collect()),
         }),
-        usage: Mutex::new(vec![(BufferUsage::default(), WalUsage::default()); nworkers.max(0) as usize]),
+        usage: Mutex::new(vec![
+            (BufferUsage::default(), WalUsage::default());
+            nworkers.max(0) as usize
+        ]),
     });
     let tqueue = setup_tuple_queues(&shared, nworkers);
     parallel::set_private(pcxt, Arc::clone(&shared) as Arc<dyn Any + Send + Sync>);
@@ -507,12 +525,14 @@ pub fn exec_parallel_create_readers(pei: &mut ParallelExecutorInfo) {
     debug_assert!(pei.reader.is_empty());
     let launched = parallel::nworkers_launched(pei.pcxt);
     for i in 0..launched as usize {
-        let (mut handle, ledger) =
-            pei.tqueue[i].take().expect("tuple queue handle already taken");
+        let (mut handle, ledger) = pei.tqueue[i]
+            .take()
+            .expect("tuple queue handle already taken");
         if let Some(bgwh) = parallel::worker_bgwhandle(pei.pcxt, i) {
             handle.set_handle(bgwh.slot, bgwh.generation);
         }
-        pei.reader.push(tqueue::TupleQueueReader::new_batched(handle, ledger));
+        pei.reader
+            .push(tqueue::TupleQueueReader::new_batched(handle, ledger));
     }
 }
 
@@ -529,8 +549,10 @@ pub fn exec_parallel_reinitialize<'mcx>(
     pei.tqueue = setup_tuple_queues(&pei.shared, parallel::nworkers(pei.pcxt));
     pei.reader.clear();
     pei.finished = false;
-    *pei.shared.param_exec.lock().unwrap_or_else(|e| e.into_inner()) =
-        serialize_param_exec(estate, send_params);
+    *pei.shared
+        .param_exec
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = serialize_param_exec(estate, send_params);
     // Worker instrumentation slots survive reinitialize: relaunched workers
     // aggregate into them (execParallel.c:1314-1322), retrieved once at cleanup.
     // ExecParallelReInitializeDSM walk.
@@ -609,24 +631,35 @@ fn retrieve_instrumentation(
     estate: &mut EStateData<'_>,
     pei: &ParallelExecutorInfo,
 ) -> PgResult<()> {
-    let Some(si) = &pei.shared.instrumentation else { return Ok(()) };
+    let Some(si) = &pei.shared.instrumentation else {
+        return Ok(());
+    };
     let mcx = estate.es_query_cxt;
     let mut workers = si.workers.lock().unwrap_or_else(|e| e.into_inner());
     for slot in workers.iter_mut() {
         let Some(w) = slot.take() else { continue };
         if estate.es_instrumentation.len() < w.instrument.len() {
             let grow = w.instrument.len() - estate.es_instrumentation.len();
-            estate.es_instrumentation.try_reserve(grow).map_err(|_| mcx.oom(grow))?;
-            estate.es_instrumentation.resize(w.instrument.len(), Instrumentation::default());
+            estate
+                .es_instrumentation
+                .try_reserve(grow)
+                .map_err(|_| mcx.oom(grow))?;
+            estate
+                .es_instrumentation
+                .resize(w.instrument.len(), Instrumentation::default());
         }
         for (id, wi) in w.instrument.iter().enumerate() {
             ::instrument::instr_agg_node(&mut estate.es_instrumentation[id], wi);
         }
         let mut instrument = PgVec::new_in(mcx);
-        instrument.try_reserve_exact(w.instrument.len()).map_err(|_| mcx.oom(1))?;
+        instrument
+            .try_reserve_exact(w.instrument.len())
+            .map_err(|_| mcx.oom(1))?;
         instrument.extend(w.instrument.iter().copied());
         let mut node_ids = PgVec::new_in(mcx);
-        node_ids.try_reserve_exact(pei.subtree_ids.len()).map_err(|_| mcx.oom(1))?;
+        node_ids
+            .try_reserve_exact(pei.subtree_ids.len())
+            .map_err(|_| mcx.oom(1))?;
         node_ids.extend(pei.subtree_ids.iter().copied());
         let mut wi = WorkerInstr {
             node_ids,
@@ -638,17 +671,29 @@ fn retrieve_instrumentation(
             index: PgVec::new_in(mcx),
             bitmap: PgVec::new_in(mcx),
         };
-        wi.sort.try_reserve_exact(w.sort.len()).map_err(|_| mcx.oom(1))?;
+        wi.sort
+            .try_reserve_exact(w.sort.len())
+            .map_err(|_| mcx.oom(1))?;
         wi.sort.extend(w.sort.iter().copied());
-        wi.incsort.try_reserve_exact(w.incsort.len()).map_err(|_| mcx.oom(1))?;
+        wi.incsort
+            .try_reserve_exact(w.incsort.len())
+            .map_err(|_| mcx.oom(1))?;
         wi.incsort.extend(w.incsort.iter().copied());
-        wi.agg.try_reserve_exact(w.agg.len()).map_err(|_| mcx.oom(1))?;
+        wi.agg
+            .try_reserve_exact(w.agg.len())
+            .map_err(|_| mcx.oom(1))?;
         wi.agg.extend(w.agg.iter().copied());
-        wi.hash.try_reserve_exact(w.hash.len()).map_err(|_| mcx.oom(1))?;
+        wi.hash
+            .try_reserve_exact(w.hash.len())
+            .map_err(|_| mcx.oom(1))?;
         wi.hash.extend(w.hash.iter().copied());
-        wi.index.try_reserve_exact(w.index.len()).map_err(|_| mcx.oom(1))?;
+        wi.index
+            .try_reserve_exact(w.index.len())
+            .map_err(|_| mcx.oom(1))?;
         wi.index.extend(w.index.iter().copied());
-        wi.bitmap.try_reserve_exact(w.bitmap.len()).map_err(|_| mcx.oom(1))?;
+        wi.bitmap
+            .try_reserve_exact(w.bitmap.len())
+            .map_err(|_| mcx.oom(1))?;
         wi.bitmap.extend(w.bitmap.iter().copied());
         estate.es_worker_instrument.push(wi);
     }
@@ -658,9 +703,12 @@ fn retrieve_instrumentation(
 /// `ParallelQueryMain` (execParallel.c) — runs on the worker thread, inside
 /// the transaction/snapshot/GUC environment ParallelWorkerMain restored.
 pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
-    let private = shared.private().expect("ParallelQueryMain without executor shared state");
-    let exec: &ParallelExecShared =
-        private.downcast_ref().expect("ParallelQueryMain private is ParallelExecShared");
+    let private = shared
+        .private()
+        .expect("ParallelQueryMain without executor shared state");
+    let exec: &ParallelExecShared = private
+        .downcast_ref()
+        .expect("ParallelQueryMain private is ParallelExecShared");
     let me = parallel::ParallelWorkerNumber();
     debug_assert!(me >= 0);
 
@@ -699,8 +747,10 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         },
         None => ParamListHandle::NULL,
     };
-    let instrument_options =
-        exec.instrumentation.as_ref().map_or(0, |si| si.instrument_options);
+    let instrument_options = exec
+        .instrumentation
+        .as_ref()
+        .map_or(0, |si| si.instrument_options);
 
     let qd = querydesc::create_query_desc_seam(
         pstmt,
@@ -744,8 +794,11 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
             x.with_mut(|d| -> PgResult<()> {
                 let pe = exec.param_exec.lock().unwrap_or_else(|e| e.into_inner());
                 for (paramid, value, isnull) in pe.iter() {
-                    d.estate.es_param_exec_vals[*paramid as usize] =
-                        ParamExecData { value: *value, isnull: *isnull, exec_plan: false };
+                    d.estate.es_param_exec_vals[*paramid as usize] = ParamExecData {
+                        value: *value,
+                        isnull: *isnull,
+                        exec_plan: false,
+                    };
                 }
                 drop(pe);
                 // ExecParallelInitializeWorker, then the tuple bound (C order).
@@ -754,23 +807,19 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                     for_each_parallel_scan(ps, &mut |node| {
                         let id = node.plan_node_id();
                         let nodes = exec.nodes.lock().unwrap_or_else(|e| e.into_inner());
-                        let entry =
-                            nodes.iter().find(|(nid, _)| *nid == id).unwrap_or_else(|| {
-                                panic!(
-                                    "ExecParallelInitializeWorker (execParallel.c): no shared \
+                        let entry = nodes.iter().find(|(nid, _)| *nid == id).unwrap_or_else(|| {
+                            panic!(
+                                "ExecParallelInitializeWorker (execParallel.c): no shared \
                                      entry for plan node {id}"
-                                )
-                            });
+                            )
+                        });
                         match (node, &entry.1) {
                             (ParallelScanMut::SeqScan(ss), ParallelNodeShared::SeqScan(p)) => {
                                 let p = Arc::clone(p);
                                 drop(nodes);
                                 ::nodeseqscan::exec_seq_scan_initialize_worker(ss, estate, p)
                             }
-                            (
-                                ParallelScanMut::IndexScan(is),
-                                ParallelNodeShared::IndexScan(p),
-                            ) => {
+                            (ParallelScanMut::IndexScan(is), ParallelNodeShared::IndexScan(p)) => {
                                 let p = Arc::clone(p);
                                 drop(nodes);
                                 ::nodeindexscan::exec_index_scan_initialize_worker(is, estate, p)
@@ -794,19 +843,13 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                                 ::nodebitmapheapscan::exec_bitmap_heap_initialize_worker(bhs, p);
                                 Ok(())
                             }
-                            (
-                                ParallelScanMut::HashJoin(hj),
-                                ParallelNodeShared::HashJoin(p),
-                            ) => {
+                            (ParallelScanMut::HashJoin(hj), ParallelNodeShared::HashJoin(p)) => {
                                 let p = Arc::clone(p);
                                 drop(nodes);
                                 hj.hash.state.set_parallel_state(p);
                                 Ok(())
                             }
-                            (
-                                ParallelScanMut::Append(ap),
-                                ParallelNodeShared::Append(p),
-                            ) => {
+                            (ParallelScanMut::Append(ap), ParallelNodeShared::Append(p)) => {
                                 let p = Arc::clone(p);
                                 drop(nodes);
                                 ::nodeappend::exec_append_initialize_worker(ap, p);
@@ -826,7 +869,11 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
 
         let save = ::instrument::instr_start_parallel_query();
 
-        let count = if exec.tuples_needed < 0 { 0 } else { exec.tuples_needed as u64 };
+        let count = if exec.tuples_needed < 0 {
+            0
+        } else {
+            exec.tuples_needed as u64
+        };
         parallel::gtrace("w.run.begin");
         crate::execmain::executor_run_seam(qd, ForwardScanDirection, count, &mut receiver)?;
         parallel::gtrace("w.run.end");
@@ -834,7 +881,10 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
 
         {
             let mut usage = exec.usage.lock().unwrap_or_else(|e| e.into_inner());
-            usage[me as usize] = (::instrument::instr_end_parallel_query(&save), WalUsage::default());
+            usage[me as usize] = (
+                ::instrument::instr_end_parallel_query(&save),
+                WalUsage::default(),
+            );
         }
 
         if let Some(si) = &exec.instrumentation {

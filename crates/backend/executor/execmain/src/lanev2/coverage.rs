@@ -39,9 +39,7 @@ use std::borrow::Cow;
 use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_error::PgResult;
-use ::types_fmgr::{
-    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
-};
+use ::types_fmgr::{varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
 use super::{router, stats};
 
@@ -76,8 +74,7 @@ pub fn coverage_snapshot() -> Vec<CoverageRow> {
     // Capacity from the vocabulary constants (also what pins them live for
     // the derived-count tests): meta + every class's owned row + every
     // router cell; refusals/matrix rows grow past it as needed.
-    let mut rows =
-        Vec::with_capacity(1 + stats::n_classes() + router::n_arm_counter_cells());
+    let mut rows = Vec::with_capacity(1 + stats::n_classes() + router::n_arm_counter_cells());
     // Arming state first: an unarmed read reports armed=0 up front instead
     // of a wall of silent zeros.
     rows.push(CoverageRow {
@@ -129,7 +126,8 @@ pub fn coverage_snapshot() -> Vec<CoverageRow> {
 
 // The same file router.rs's coverage_matrix_is_consistent test pins (header
 // schema, closed vocabularies), embedded at the equivalent relative path.
-const M5_COVERAGE_TSV: &str = include_str!("../../../../../../crates/backend/executor/execmain/src/lanev2/m5-coverage.tsv");
+const M5_COVERAGE_TSV: &str =
+    include_str!("../../../../../../crates/backend/executor/execmain/src/lanev2/m5-coverage.tsv");
 
 /// The living coverage-matrix rows: one row per data line, status in
 /// `detail` alongside route_to/probe_key. `value` = 1 (presence).
@@ -152,7 +150,9 @@ fn matrix_rows() -> Vec<CoverageRow> {
             surface: "matrix",
             class: Cow::Owned(class.to_string()),
             counter: "status",
-            detail: Cow::Owned(format!("{status};route_to={route_to};probe_key={probe_key}")),
+            detail: Cow::Owned(format!(
+                "{status};route_to={route_to};probe_key={probe_key}"
+            )),
             value: 1,
         });
     }
@@ -160,7 +160,10 @@ fn matrix_rows() -> Vec<CoverageRow> {
 }
 
 fn text_datum(mcx: Mcx<'_>, s: &str) -> PgResult<Datum> {
-    Ok(varlena_result(::varlena::cstring_to_text(mcx, s.as_bytes())?))
+    Ok(varlena_result(::varlena::cstring_to_text(
+        mcx,
+        s.as_bytes(),
+    )?))
 }
 
 /// fmgr builtin: `pgrust_lane_coverage()` — materialized SRF of the
@@ -222,13 +225,21 @@ mod tests {
         let mut class_names: Vec<_> = owned.iter().map(|r| r.class.clone()).collect();
         class_names.sort();
         class_names.dedup();
-        assert_eq!(class_names.len(), stats::n_classes(), "class names must be distinct");
+        assert_eq!(
+            class_names.len(),
+            stats::n_classes(),
+            "class names must be distinct"
+        );
 
         let mut reasons = stats::reason_names();
         assert_eq!(reasons.len(), stats::n_reasons());
         reasons.sort();
         reasons.dedup();
-        assert_eq!(reasons.len(), stats::n_reasons(), "reason names must be distinct");
+        assert_eq!(
+            reasons.len(),
+            stats::n_reasons(),
+            "reason names must be distinct"
+        );
 
         let router_cells = rows
             .iter()
@@ -236,7 +247,9 @@ mod tests {
             .count();
         assert_eq!(router_cells, router::n_arm_counter_cells());
 
-        assert!(rows.iter().any(|r| r.surface == "meta" && r.class == "armed"));
+        assert!(rows
+            .iter()
+            .any(|r| r.surface == "meta" && r.class == "armed"));
         assert!(
             rows.iter().filter(|r| r.surface == "matrix").count() >= 1,
             "the embedded m5-coverage.tsv must contribute matrix rows"
@@ -252,12 +265,22 @@ mod tests {
     #[test]
     fn reserved_oid_is_clear_of_canonical() {
         for b in LANEV2_BUILTINS {
-            assert!(PGRUST_FOID_RANGE.contains(&b.foid), "{} outside the range", b.foid);
-            assert!(b.foid < 16384, "user oid space starts at FirstNormalObjectId");
+            assert!(
+                PGRUST_FOID_RANGE.contains(&b.foid),
+                "{} outside the range",
+                b.foid
+            );
+            assert!(
+                b.foid < 16384,
+                "user oid space starts at FirstNormalObjectId"
+            );
         }
         // The whole reserved range is clear of CANONICAL (oids AND names).
         for &(oid, name, ..) in ::fmgr_core::CANONICAL.iter() {
-            assert!(!PGRUST_FOID_RANGE.contains(&oid), "CANONICAL claims reserved oid {oid}");
+            assert!(
+                !PGRUST_FOID_RANGE.contains(&oid),
+                "CANONICAL claims reserved oid {oid}"
+            );
             for b in LANEV2_BUILTINS {
                 assert_ne!(name, b.name, "CANONICAL claims the name {name}");
             }

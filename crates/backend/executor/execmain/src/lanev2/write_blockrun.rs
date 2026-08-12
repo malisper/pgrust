@@ -74,7 +74,10 @@ use ::types_error::{PgError, PgResult, ERROR};
 pub(super) fn w2a_blockrun_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        !matches!(std::env::var("PGRUST_W2A_BLOCKRUN").as_deref(), Ok("0") | Ok("off"))
+        !matches!(
+            std::env::var("PGRUST_W2A_BLOCKRUN").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
@@ -84,7 +87,10 @@ pub(super) fn w2a_blockrun_enabled() -> bool {
 fn runmap_trace_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_W2A_BLOCKRUN_RUNMAP").as_deref(), Ok("1") | Ok("on"))
+        matches!(
+            std::env::var("PGRUST_W2A_BLOCKRUN_RUNMAP").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
@@ -249,7 +255,8 @@ impl WorkerWriteState {
         // only COPIES datums out of `slot` into its own pool slot during the
         // call and retains no borrow of it.
         let slot: &mut ::types_slot::SlotData<'static> = unsafe {
-            &mut *(slot as *mut ::types_slot::SlotData<'_>).cast::<::types_slot::SlotData<'static>>()
+            &mut *(slot as *mut ::types_slot::SlotData<'_>)
+                .cast::<::types_slot::SlotData<'static>>()
         };
         let rel = self.rel.as_ref().expect("live until seal/abandon");
         // The parallel-write token brackets exactly this call chain.
@@ -300,7 +307,6 @@ impl WorkerWriteState {
         }
         super::lane_trace("blockrun: worker abandon");
     }
-
 }
 
 #[cfg(test)]
@@ -311,7 +317,10 @@ mod tests {
     #[test]
     fn blockrun_default_on_flipped_kill() {
         if std::env::var("PGRUST_W2A_BLOCKRUN").is_err() {
-            assert!(w2a_blockrun_enabled(), "blockrun defaults ON since the GL-W2A-2 flip");
+            assert!(
+                w2a_blockrun_enabled(),
+                "blockrun defaults ON since the GL-W2A-2 flip"
+            );
         }
     }
 }
