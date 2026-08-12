@@ -8019,6 +8019,59 @@ impl<'mcx> Parser<'mcx> {
                 n.behavior = drop_behavior(view.v(9).ival());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // AlterObjectDependsStmt: ALTER {FUNCTION|PROCEDURE|ROUTINE}
+            // function_with_argtypes opt_no DEPENDS ON EXTENSION name
+            1333 | 1334 | 1335 => {
+                let mut n = Node::build::<parsenodes::AlterObjectDependsStmt>(mcx)?;
+                n.objectType = match rule {
+                    1333 => ObjectType::OBJECT_FUNCTION,
+                    1334 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.object = view.v(3).node();
+                n.extname = Some(Node::mk_string(mcx, view.v(8).str_val())?);
+                n.remove = view.v(4).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterObjectDependsStmt: ALTER TRIGGER name ON qualified_name
+            // opt_no DEPENDS ON EXTENSION name
+            1336 => {
+                let mut n = Node::build::<parsenodes::AlterObjectDependsStmt>(mcx)?;
+                n.objectType = ObjectType::OBJECT_TRIGGER;
+                n.relation =
+                    view.v(5).node().expect("qualified_name").as_variant::<RangeVar>();
+                let names =
+                    NodeList::make1(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
+                n.object = Some(Node::mk_list(mcx, names)?);
+                n.extname = Some(Node::mk_string(mcx, view.v(10).str_val())?);
+                n.remove = view.v(6).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterObjectDependsStmt: ALTER MATERIALIZED VIEW qualified_name
+            // opt_no DEPENDS ON EXTENSION name
+            1337 => {
+                let mut n = Node::build::<parsenodes::AlterObjectDependsStmt>(mcx)?;
+                n.objectType = ObjectType::OBJECT_MATVIEW;
+                n.relation =
+                    view.v(4).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.extname = Some(Node::mk_string(mcx, view.v(9).str_val())?);
+                n.remove = view.v(5).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterObjectDependsStmt: ALTER INDEX qualified_name opt_no
+            // DEPENDS ON EXTENSION name
+            1338 => {
+                let mut n = Node::build::<parsenodes::AlterObjectDependsStmt>(mcx)?;
+                n.objectType = ObjectType::OBJECT_INDEX;
+                n.relation =
+                    view.v(3).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.extname = Some(Node::mk_string(mcx, view.v(8).str_val())?);
+                n.remove = view.v(4).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_no: NO | /*EMPTY*/
+            1339 => *yyval = YYSTYPE::Boolean(true),
+            1340 => *yyval = YYSTYPE::Boolean(false),
             // AlterObjectSchemaStmt: ALTER {AGGREGATE|FUNCTION|OPERATOR|
             // PROCEDURE|ROUTINE} with_argtypes SET SCHEMA name
             1341 | 1346 | 1347 | 1350 | 1351 => {

@@ -2774,10 +2774,14 @@ fn unported_grammar_action_errors_instead_of_panicking() {
         e.message()
     );
 
-    // AlterObjectDependsStmt: ALTER INDEX ... DEPENDS ON EXTENSION (gram.y:10040).
-    let e = parse_err("ALTER INDEX i DEPENDS ON EXTENSION e");
-    assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
-    assert!(e.message().contains("not yet implemented (grammar rule"));
+    // AlterObjectDependsStmt (gram.y:9986-10053) is ported: all six object
+    // forms plus the NO DEPENDS variant parse.
+    parse("ALTER FUNCTION f(int) DEPENDS ON EXTENSION e");
+    parse("ALTER PROCEDURE p(int) NO DEPENDS ON EXTENSION e");
+    parse("ALTER ROUTINE r(int) DEPENDS ON EXTENSION e");
+    parse("ALTER TRIGGER tg ON s.t DEPENDS ON EXTENSION e");
+    parse("ALTER MATERIALIZED VIEW mv NO DEPENDS ON EXTENSION e");
+    parse("ALTER INDEX i DEPENDS ON EXTENSION e");
 
     // CreateAssertionStmt (gram.y:6334) — C itself raises 0A000 "CREATE
     // ASSERTION is not yet implemented"; the unported fence keeps the class.

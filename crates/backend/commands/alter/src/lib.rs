@@ -16,7 +16,10 @@ use types_core::{
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
 };
-use types_nodes::parsenodes::{AlterObjectSchemaStmt, AlterOwnerStmt, ObjectType, RenameStmt};
+use types_nodes::parsenodes::{
+    AlterObjectDependsStmt, AlterObjectSchemaStmt, AlterOwnerStmt, ObjectType, RenameStmt,
+};
+use types_nodes::{Node, NodeList};
 use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::InplaceUpdateTupleLock;
@@ -558,6 +561,91 @@ pub fn ExecAlterObjectSchemaStmt_generic<'mcx>(
         catalog_namespace::LookupCreationNamespace(mcx, stmt.newschema.expect("newschema"))?;
     AlterObjectNamespace_internal(mcx, &catalog_rel, address.objectId, nsp_oid)?;
     catalog_rel.close(RowExclusiveLock)?;
+    Ok(address)
+}
+
+// ExecAlterObjectDependsStmt (alter.c): record or remove the
+// DEPENDENCY_AUTO_EXTENSION pg_depend row tying the object to an extension.
+pub fn ExecAlterObjectDependsStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &AlterObjectDependsStmt<'mcx>,
+) -> PgResult<ObjectAddress> {
+    // get_object_address_rv (objectaddress.c): the table-like forms carry the
+    // relation in stmt->relation; prefix its names onto the object list.
+    let object: Node<'mcx> = if let Some(rel) = stmt.relation {
+        let mut names = NodeList::nil();
+        if let Some(catalogname) = rel.catalogname {
+            names.lappend(mcx, Node::mk_string(mcx, catalogname)?)?;
+        }
+        if let Some(schemaname) = rel.schemaname {
+            names.lappend(mcx, Node::mk_string(mcx, schemaname)?)?;
+        }
+        names.lappend(mcx, Node::mk_string(mcx, rel.relname.expect("relname"))?)?;
+        if let Some(o) = stmt.object {
+            for item in o.as_list().expect("object is a name list").iter() {
+                names.lappend(mcx, item)?;
+            }
+        }
+        Node::mk_list(mcx, names)?
+    } else {
+        stmt.object.expect("AlterObjectDependsStmt.object")
+    };
+
+    let (address, relation) = catalog_objectaddress::get_object_address(
+        mcx,
+        stmt.objectType,
+        object,
+        AccessExclusiveLock,
+        false,
+    )?;
+
+    // C: no privileges are checked on the extension, only the object.
+    catalog_objectaddress::check_object_ownership(
+        mcx,
+        miscinit::GetUserId(),
+        stmt.objectType,
+        address,
+        stmt.object.unwrap_or(object),
+        relation.as_ref(),
+    )?;
+
+    // If a relation was involved, retain the lock until commit.
+    if let Some(rel) = relation {
+        rel.close(types_rel::lock::NoLock)?;
+    }
+
+    let (ref_addr, ext_rel) = catalog_objectaddress::get_object_address(
+        mcx,
+        ObjectType::OBJECT_EXTENSION,
+        stmt.extname.expect("AlterObjectDependsStmt.extname"),
+        AccessExclusiveLock,
+        false,
+    )?;
+    debug_assert!(ext_rel.is_none());
+
+    if stmt.remove {
+        pg_depend::deleteDependencyRecordsForSpecific(
+            mcx,
+            address.classId,
+            address.objectId,
+            pg_depend::DependencyType::AutoExtension.as_char(),
+            ref_addr.classId,
+            ref_addr.objectId,
+        )?;
+    } else {
+        // Avoid duplicates.
+        let currexts =
+            pg_depend::getAutoExtensionsOfObject(mcx, address.classId, address.objectId)?;
+        if !currexts.contains(&ref_addr.objectId) {
+            pg_depend::recordDependencyOn(
+                mcx,
+                &address,
+                &ref_addr,
+                pg_depend::DependencyType::AutoExtension,
+            )?;
+        }
+    }
+
     Ok(address)
 }
 

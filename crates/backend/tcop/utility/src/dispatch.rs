@@ -1588,6 +1588,16 @@ fn slow_switch<'mcx>(
             typecmds::AlterDomain(mcx, stmt)?;
             Ok(None)
         }
+        T_AlterObjectDependsStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterObjectDependsStmt>()
+                .expect("AlterObjectDependsStmt");
+            collect_gap("ALTER ... DEPENDS ON EXTENSION")?;
+            let address = commands_alter::ExecAlterObjectDependsStmt(mcx, stmt)?;
+            Ok(Some(address))
+        }
         T_AlterObjectSchemaStmt => {
             // Retention contract as unify_stmt_lifetime.
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };

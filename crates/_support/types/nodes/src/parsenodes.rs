@@ -433,6 +433,17 @@ pub struct AlterObjectSchemaStmt<'mcx> {
     pub missing_ok: bool,
 }
 
+// C: relation is used by the table-like forms (INDEX/MATVIEW/TRIGGER),
+// object by the function-like forms; extname is a String node.
+#[derive(Default)]
+pub struct AlterObjectDependsStmt<'mcx> {
+    pub objectType: ObjectType,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub object: Option<Node<'mcx>>,
+    pub extname: Option<Node<'mcx>>,
+    pub remove: bool,
+}
+
 #[derive(Default)]
 pub struct ReturnStmt<'mcx> {
     pub returnval: Option<Node<'mcx>>,
@@ -1517,6 +1528,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterCollationStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterDomainStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterDomainStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterObjectDependsStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterObjectDependsStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterObjectSchemaStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterObjectSchemaStmt;

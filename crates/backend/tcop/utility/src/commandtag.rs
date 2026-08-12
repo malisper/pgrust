@@ -134,7 +134,13 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             };
             alter_object_type_command_tag(objtype)
         }
-        T_AlterObjectDependsStmt => payload_gap("CreateCommandTag", "AlterObjectDependsStmt"),
+        // AlterObjectTypeCommandTag over stmt->objectType.
+        T_AlterObjectDependsStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterObjectDependsStmt>()
+                .expect("AlterObjectDependsStmt");
+            alter_object_type_command_tag(stmt.objectType)
+        }
         T_AlterObjectSchemaStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>()
