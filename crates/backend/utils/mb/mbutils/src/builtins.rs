@@ -86,6 +86,27 @@ pub fn fc_pg_convert_to(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     convert_common(fcinfo, 0, crate::GetDatabaseEncoding(), dest_encoding)
 }
 
+// INT4 length(BYTEA string, NAME src_encoding_name) — C length_in_encoding
+// (mbutils.c): character count of the bytea in the named encoding, erroring
+// on invalid sequences exactly like pg_verify_mbstr_len(noError = false).
+pub fn fc_length_in_encoding(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let src_name = name_str(unsafe { fcinfo.arg_name(1) });
+    let src_encoding = crate::pg_char_to_encoding(src_name);
+    if src_encoding < 0 {
+        // C spells this one without the source/destination qualifier.
+        return Err(Box::new(
+            PgError::error(format!("invalid encoding name \"{src_name}\""))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    let string = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let retval = crate::pg_verify_mbstr_len(src_encoding, string.data(), false)?;
+    Ok(Datum::from_i32(retval))
+}
+
 // pg_encoding_max_length_sql (mbutils.c): NULL for an invalid encoding number.
 pub fn fc_pg_encoding_max_length(
     _flinfo: Option<&mut FmgrInfo>,
@@ -108,6 +129,14 @@ pub const MBUTILS_BUILTINS: &[FmgrBuiltin] = &[
         strict: true,
         retset: false,
         func: fc_getdatabaseencoding,
+    },
+    FmgrBuiltin {
+        foid: 1713,
+        name: "length_in_encoding",
+        nargs: 2,
+        strict: true,
+        retset: false,
+        func: fc_length_in_encoding,
     },
     FmgrBuiltin {
         foid: 1714,

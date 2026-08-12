@@ -5,6 +5,8 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+array = { package = "types_array", path = "../../../../_support/types/array" }
+nbt_compare = { path = "../../../access/nbtree/compare" }
 datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 namespace_seams = { path = "../../../catalog/namespace_seams" }

@@ -209,6 +209,9 @@ fn fmt_g_matches_c_printf() {
     assert_eq!(fmt_g(0.0001), "0.0001");
     assert_eq!(fmt_g(0.00001), "1e-05");
     assert_eq!(fmt_g(1234567.0), "1.23457e+06");
-    assert_eq!(fmt_g(f64::NAN), "nan");
-    assert_eq!(fmt_g(f64::INFINITY), "inf");
+    // PG snprintf.c fmtfloat spellings, not libc %g "nan"/"inf" (Q2-O1):
+    // C: "setseed parameter NaN is out of allowed range [-1,1]".
+    assert_eq!(fmt_g(f64::NAN), "NaN");
+    assert_eq!(fmt_g(f64::INFINITY), "Infinity");
+    assert_eq!(fmt_g(f64::NEG_INFINITY), "-Infinity");
 }

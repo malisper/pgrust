@@ -60,13 +60,15 @@ fn setseed_range_error(seed: f64) -> PgError {
 }
 
 // C printf %g, default precision 6 (guc::units::fmt_g's contract; that crate
-// sits above this one in the dep order).
+// sits above this one in the dep order). NaN/Infinity spell like PG's own
+// snprintf (port/snprintf.c fmtfloat special-cases them), not like libc %g:
+// "setseed parameter NaN is out of allowed range [-1,1]".
 fn fmt_g(v: f64) -> String {
     if v.is_nan() {
-        return "nan".to_string();
+        return "NaN".to_string();
     }
     if v.is_infinite() {
-        return if v < 0.0 { "-inf" } else { "inf" }.to_string();
+        return if v < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
     }
     if v == 0.0 {
         return if v.is_sign_negative() { "-0" } else { "0" }.to_string();
