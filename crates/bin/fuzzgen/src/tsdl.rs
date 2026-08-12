@@ -40,6 +40,7 @@
 
 use crate::rich::{TS_LANGS, TS_STOPWORD_LANGS};
 use crate::stem_data::STEM_SUFFIXES;
+use crate::stem_reach::STEM_REACH;
 use crate::stmt::{Gen, StmtKind};
 
 /// Token types every shipped configuration maps (the pg_ts_config_map
@@ -569,6 +570,244 @@ const STEM_VOCAB: &[(&str, &[&str])] = &[
         "சென்றுகொண்டிருந்தாள்", "பேசிக்கொண்டிருக்கிறார்கள்",
         "செய்யப்பட்டது", "காணப்படுகிறது", "நடைபெற்றது",
     ]),
+    // --- W4-STEM lane additions: arm-reaching vocabulary authored against
+    // the still-unhit suffix-rule arms of the REL_18_3 snowball C (read-C ->
+    // author reaching input; see docs/fuzzing/findings-w4stem.md).  New
+    // tuples rather than edits so the LD10 pools stay byte-identical; the
+    // sweep visits every tuple.
+    ("arabic", &[
+        "أأنتم", "أؤمن", "أآمن", "أإذا", "ببساطة", "ببطء", "سأكتب", "سأذهب", "كتابك", "كتابه",
+        "كتابي", "كتابكما", "كتابهما", "مدرستكما", "كتبتموه", "رأيتموها", "أخذتموها", "علمتموهم",
+        "لأأكل", "وأؤمن", "فأآمن", "بأإذا", "أأكلتم", "أؤكد", "أآخذ", "أإنك", "وببساطة", "فببطء",
+        "لسأذهب", "وسأكتب", "فسأقرأ", "كتابكِ", "كتابكَ", "لكتابك", "والكتابه", "مدرستكم",
+        "مدرستهن", "مدرستنا", "مدرستها", "قرأتموه", "سمعتموها", "فهمتموهم", "أكلتموهن",
+        "ضربتموهما", "أاحمد", "أاخوك", "أاكتب", "أانت", "أإسلام", "أإنسان", "أإكرام", "أإبل",
+        "مكتبتك", "مكتبته", "مكتبتي", "مدرستهم", "بيوتكما", "بيوتهما", "سيارتكن", "مدرساتهم",
+        "سياراتهن", "مكتباتكم", "جامعاتنا", "معلمتاهما",
+    ]),
+    ("danish", &[
+        "venligst", "hjælpeløst", "kærligst", "farligst", "dejligst", "hurtigst", "hjælpsomst",
+        "morsomst", "langsomst", "voldsomst", "ensomst", "alvorsomst", "frygtsomst", "agtsomst",
+    ]),
+    ("dutch", &[
+        "waarheid", "vrijheid", "schoonheid", "gezondheid", "zichtbaar", "eetbaar",
+        "dankbaarheid", "gedachten", "krachten", "vluchten", "lichamelijk", "gemeenschappelijk",
+        "smeuïg", "ruïne", "beïnvloed", "geïnd", "geëerd", "geëindigd", "gecreëerd", "geërfd",
+        "geëvalueerd", "coördinatie", "reëel", "ideeën", "zeeën", "tweeën", "knieën",
+        "categorieën", "theorieën", "industrieën", "politiek", "fabriek", "muziek", "techniek",
+        "kritiek", "publiek", "uniek", "antiek", "logisch", "tragisch", "typisch", "fysisch",
+        "komisch",
+    ]),
+    ("english", &[
+        "'twas", "o'clock", "don't", "cats'", "'ello", "authoritative", "imaginative",
+        "generative", "communicative", "cry", "by", "say", "enormously", "effortlessly",
+        "proceeding", "exceeding", "communing", "enthralling", "extolling", "vying", "hying",
+        "guying", "buying", "commune", "communed", "atlases", "cosmoses", "biases", "gases",
+        "gasses",
+    ]),
+    ("estonian", &[
+        "raamatugi", "lapski", "majagi", "seegi", "kappide", "lippude", "kottide", "seppade",
+        "majade", "raamatute", "laste", "poiste", "autode", "majadesse", "raamatutesse",
+        "lastele", "poistele", "koolidesse", "inimestki", "lehmgi", "tulebki", "läkski", "ongi",
+        "polegi", "sepp", "kepp", "lipp", "kott", "pott", "sekk", "pikk", "rikk", "seppa",
+        "keppi", "lippu", "kotti", "küll", "kell", "tall", "pall", "kass", "mass", "juss", "kukk",
+        "sukk", "tikk", "pukk", "nukk",
+    ]),
+    ("finnish", &[
+        "lyhyet", "kauniit", "tiet", "työt", "yöt", "suot", "maat", "talot", "kirjaani",
+        "taloaan", "ystävääni", "kotiinsa", "vapaassa", "maassaan", "taloonsa", "kauneimmassa",
+        "tärkeintä", "useimmiten", "kaikkein", "tyttäret", "miehet", "naiset", "lapset", "vuodet",
+        "kädet", "veneet", "huoneet", "perheet", "lampaat", "hampaat", "rikkaat", "oppaat",
+        "ihanat", "kanat", "sanat", "tavat", "kalat", "talvet", "järvet", "lahdet", "tähdet",
+        "kannet", "onnet", "immet", "kymmenet", "askeleet", "kirjeet", "kappaleet", "ihmiset",
+        "hampaani", "lampaani", "oppaansa", "rikkaansa", "taloni", "kirjani", "autoni", "maani",
+        "puuni", "tieni", "työni", "yöni", "suoni", "hampaissa", "lampaissa", "rikkaissa",
+        "oppaissa", "vieraissa", "oikeissa", "suurissa", "pienissä", "nuorissa", "kokouksensa",
+        "tyttäreksensä", "kirjaksensa", "hyväksensä", "huonetta", "perhettä", "kirjettä",
+        "venettä", "ainetta", "konetta", "talohon", "radiohon", "autohon", "maahan", "päähän",
+        "työhön", "tiehen", "suohon", "yöhön", "puuhun", "teehen", "syyhyn", "maiden", "teiden",
+        "öiden", "soiden", "puiden", "töiden", "maisiin", "kalliisiin", "vapaisiin", "tehtaisiin",
+        "maita", "töitä", "öitä", "puita", "teitä", "soita",
+    ]),
+    ("french", &[
+        "noël", "naïve", "maïs", "canoë", "aïeul", "ambiguë", "haïr", "héroïne", "égoïste",
+        "archaïque", "justificative", "qualificatives", "explicatifs", "significatifs",
+        "communicative", "multiplicatifs", "applicatives", "indicatifs", "l'homme", "d'accord",
+        "qu'elle", "jusqu'à", "s'il", "n'est", "c'était", "presqu'île", "m'appelle", "t'aime",
+        "aujourd'hui", "quelqu'un", "inhumaine", "déshumaniser", "bonhomie", "silhouette",
+        "souhait", "véhicule", "appréhension", "cohérent", "véhément", "menhir", "dahlia",
+        "cahier", "trahir", "envahir", "ébahi", "cohue", "héroïsme", "égoïsme", "archaïsme",
+        "judaïsme", "athéisme", "prosaïque", "mosaïque", "stoïque", "naïveté", "aïeux", "païen",
+        "haïssable", "ouïe", "inouï", "ambiguïté", "exiguïté", "contiguïté", "ciguë", "aiguë",
+        "exiguë", "significance", "significances", "publicance", "fabricances", "multiplicatrice",
+        "significatrices", "communicatrices", "essayer", "employer", "nettoyer", "balayer",
+        "ennuyer", "appuyer", "essuyer", "tutoyer", "vouvoyer", "l'", "d'", "qu'", "s'", "n'",
+        "j'", "m'", "t'", "c'",
+    ]),
+    ("german", &[
+        "beleidigungen", "entschuldigung", "reinigung", "heiligung", "fröhlichkeit", "möglich",
+        "herrlich", "täglich", "physik", "musik", "kritik", "politik", "technik", "straße",
+        "größe", "füße", "weiß", "heißen", "grüßen", "mißverständnis", "ätzend", "äußerst",
+        "öffentlich", "übermäßig", "gemütlichkeit", "tatsächlich", "grundsätzlich", "zusätzlich",
+        "ausschließlich", "schließlich", "gründlich", "mündlich", "natürlich", "persönlich",
+        "gewöhnlich", "verhältnismäßig", "regelmäßig", "gleichmäßig", "gierig", "gierige",
+        "neugierig", "schwierig", "niedrig", "niedrige", "würdig", "würdige", "lebendig",
+        "lebendige", "vollständig", "vollständige", "selbständig", "beständige",
+    ]),
+    ("hungarian", &[
+        "házért", "könyvért", "emberként", "házanként", "fáért", "munkáért", "egyenként",
+        "percenként", "almát", "körtét", "könyvvé", "vízzé", "házzá", "emberré", "kővé", "fává",
+        "naponta", "hetente", "havonta", "évente", "percente", "óránta", "pénzzé", "mézzé",
+        "gazzá", "vazzá", "jéggé", "éggé", "lisztté", "tésztává",
+    ]),
+    ("indonesian", &[
+        "mengecat", "mengebom", "memukul", "menari", "penari", "pemukul", "pengecatan",
+        "perbuatan", "kebaikan", "memukuli", "menandai", "mengunjungi", "mengevaluasi",
+        "mengekspor",
+    ]),
+    ("italian", &[
+        "logica", "pratica", "famosa", "turismo", "amabile", "possibile", "incredibile",
+        "attività", "elettricità", "creativa", "informativo", "educative", "abilità", "utilità",
+        "velocità", "qualificativa", "significativi", "indicativa", "comunicativo", "divano",
+        "divani", "usciere", "uscieri", "comprarglielo", "vendendoglieli", "parlandoci",
+        "scrivendovi", "leggendola", "portandoteli", "lucciole", "gucciardini", "sciogliendogli",
+        "raccogliendole", "togliendoci", "accogliendovi", "distribuendoglieli",
+        "attribuendogliela", "costruendoglielo", "riducendoglieli", "producendogliele",
+        "traducendoglielo", "bevendoglielo", "dicendoglielo", "facendoglielo", "traendone",
+        "ponendovi", "componendoci", "proponendoglielo",
+    ]),
+    ("nepali", &[
+        "छन्", "गर्छन्", "भएका", "गरेका", "हुन्छन्", "थिएनन्", "गरिन्छ", "भनिन्छ", "गर्नेछन्",
+        "जानेछन्", "आएका", "गएका", "खान्छिन्", "जान्छिन्", "गर्छिन्", "हुन्छिन्", "खान्थे",
+        "जान्थे", "गर्थे", "हुन्थे", "खाएछ", "गएछ", "भएछ", "आएछ", "खानेछु", "जानेछु", "गर्नेछु",
+        "हुनेछु", "गर्नुहुन्छ", "जानुहुन्छ", "खानुहुन्छ", "भन्नुहुन्छ", "गर्नुभयो", "जानुभयो",
+        "आउनुभयो", "भन्नुभयो", "गरिएको", "भनिएको", "लेखिएको", "पढिएको",
+    ]),
+    ("norwegian", &[
+        "hetens", "husets", "barnets", "landets", "kjærlighetens", "regjeringens", "sannhetens",
+        "mulighetenes", "virksomhetens", "nyhetenes", "sikkerhetens", "hemmelighetens",
+        "myndighetenes", "mulighetens", "sannhetenes", "skjønnhetens", "sikkerhetenes",
+        "frihetens", "enighetenes",
+    ]),
+    ("porter", &[
+        "troubled", "sized", "tanned", "falling", "hissing", "fizzed", "failing", "filing",
+        "crying", "string", "feed", "motoring", "sing", "happy", "poniard", "abed", "shed",
+        "bled", "sled", "breed", "treed", "king", "ring", "thing", "bring", "spring", "fly",
+        "dry", "shy", "why", "cry", "try", "ply", "sly", "enjoy", "employ", "destroy", "annoy",
+        "convey", "survey", "obey", "prey", "say", "day", "they", "buy", "guy", "ripped",
+        "matted", "meetings", "feelings", "sufferings", "happenings", "occasional",
+        "professional", "irrational", "emotional", "educational", "generational", "international",
+        "abilities", "abilitiy", "enjoyed", "employed", "destroyed", "surveyed", "conveyed",
+        "obeyed", "preyed", "stayed", "played", "prayed", "swayed",
+    ]),
+    ("portuguese", &[
+        "amabilidade", "possibilidades", "eletricidade", "atividade", "lógica", "prática",
+        "famosa", "turismo", "amável", "incrível", "tratamento", "movimento", "dá-lo", "fazê-lo",
+        "vendê-las", "parti-lo", "dando-se", "vendo-a", "comprá-los", "dizê-lo", "ouvi-la",
+        "pô-lo", "cheguei", "paguei", "seguiu", "consegue", "água", "línguas", "averigúe",
+        "argúi", "mão", "cão", "põe", "irmã", "alemã", "órgão", "decorativa", "educativas",
+        "informativos", "negativa", "comunicativa", "distribuição", "atribuições", "contribuição",
+        "retribuições", "constituição", "substituições", "instituição", "restituição",
+        "diminuição", "evolução", "revolução", "solução", "resolução", "execução", "tradução",
+        "produção", "redução", "introdução", "construção", "destruição", "seguindo-a",
+        "conseguindo-o", "distinguindo-as", "perseguindo-os", "arguindo-se", "delinquindo",
+        "significância", "insignificâncias", "elegância", "fragância", "arqueologias",
+        "mineralogia", "geologias", "reconhece", "aparece", "cresce", "desce", "padece", "merece",
+    ]),
+    ("romanian", &[
+        "națiunile", "stațiunea", "porțiunilor", "abilitățile", "posibilitățile", "activității",
+        "acțiunea", "elasticității", "acțiune", "condiție", "funcții", "noțiuni", "generație",
+        "operațiile", "tradiții", "pozițiilor", "ambiție", "ambiguë", "copiii", "fiii",
+        "geamgiii", "împărții", "călătorii", "citii", "vorbii", "dormii", "fugii", "veniși",
+        "făcuși", "avuși", "dăduși", "stătuși", "băuși",
+    ]),
+    ("russian", &[
+        "вернувшись", "улыбнувшись", "прочитав", "сказавши", "встретившись", "прочитанная",
+        "сделанного", "говорящими", "улыбающейся", "написанным", "новейший", "сильнейшая",
+        "добрейшее", "величайший", "синии", "армии", "линии", "гении", "далее", "ранее", "более",
+        "менее", "быстрее", "сильнее", "красивее", "интереснее", "занимавшись", "поднявшись",
+        "собравшись", "оставшись", "добившись", "влюбившись", "задумавшись", "пробившись",
+        "евшая", "певшего", "жившими", "бывшей", "плывшим", "нывшее", "знавшая", "державшего",
+        "слышавшими", "видевшей", "прочитаемы", "читаемы", "делаемы", "любимы", "гонимы",
+        "хранимы", "влекомы", "ведомы", "несомы", "знакомы",
+    ]),
+    ("spanish", &[
+        "leyéndolo", "construyéndola", "oyéndolas", "huyéndonos", "cayéndose", "trayéndomelo",
+        "yéndose", "creyéndole", "famosa", "modernista", "esperanza", "amable", "imposible",
+        "científico", "turismo", "perezoso", "tratamientos", "sufrimiento", "lógica", "práctica",
+        "elegantemente", "amablemente", "posiblemente", "evidentemente", "increíblemente",
+        "amabilidad", "electricidad", "actividades", "visibilidad", "sensibilidades",
+        "informativa", "educativos", "creativas", "negativo", "decorativas", "busquemos",
+        "lleguen", "paguéis", "toquen", "juguemos", "llegué", "pagué", "apagué", "entregué",
+        "saqué", "yendo", "oyendo", "cayendo", "leyendo", "huyendo", "trayendo", "creyendo",
+        "construyendo", "destruyendo", "atribuyendo", "concluyendo", "influyendo", "sustituyendo",
+        "distribuyéndolas", "atribuyéndoselo", "guemos", "lleguemos", "paguemos", "apaguemos",
+        "neguemos", "entreguemos", "carguemos", "descarguemos", "llegue", "pague", "apague",
+        "juegue", "niegue", "entregue", "cargue", "descargue", "agregue", "daránselo",
+        "haránselas", "dénselo", "comprénselo", "hacérselo", "ponérselas", "construírselo",
+        "huírse", "oírse", "reírse", "freírlo", "sonreírles", "significancia", "significancias",
+        "publicancia", "elegancia", "fragancia", "vagancia",
+    ]),
+    ("tamil", &[
+        "வோகம்", "வொப்பு", "வோட்டு", "வொலி", "ஏதாவது", "ஓரிடம்", "எங்கே", "யாரோ", "அக்காலம்",
+        "இப்போது", "உத்தரவு", "அவ்வூர்", "இச்செயல்", "எக்காலம்", "மரங்கள்", "வீடுகள்",
+        "புத்தகங்களை", "அவர்களது", "படித்தேன்", "வருவேன்", "சாப்பிட்டோம்", "அவனது", "இவளது",
+        "உங்கள்", "வோட்டம்", "வொற்றி", "வோகன்", "வொழுக்கம்", "வீடு", "விளக்கு", "வெற்றி", "வேலை",
+        "எவ்வளவோ", "ஏதேனும்", "ஓடினான்", "ஊரெங்கும்", "அத்தனை", "இத்தனை", "எத்தனை", "அந்நாள்",
+        "இந்நாள்", "எந்நாள்", "அஃது", "இஃது", "எஃது", "மரத்திலிருந்து", "வீட்டிலிருந்து",
+        "அவர்களிடமிருந்து", "புத்தகங்களிலிருந்து", "படிக்கவில்லை", "வரவில்லை", "செய்யவில்லை",
+        "போகவில்லை", "படித்துக்கொண்டிருக்கிறேன்", "எழுதிக்கொண்டிருந்தான்", "எவ்வோட்டம்",
+        "அவ்வோட்டம்", "இவ்வொழுக்கம்", "அவ்வொலி", "எவ்வொப்பு", "அவ்விளக்கு", "இவ்வீடு",
+        "எவ்வெற்றி", "அவ்வேலை", "இவ்வேளை", "எவ்வீதி", "அவ்வீடு", "உவ்வோடு", "எவ்வுலகு",
+        "மரங்களுக்காக", "வீடுகளுக்காக", "அவைகளிடமிருந்து", "புத்தகங்களினுடைய", "மனிதர்களிடத்தில்",
+        "குழந்தைகளினால்", "பள்ளிகளிலேயே", "நகரங்களிலுள்ள",
+    ]),
+    ("turkish", &[
+        "annelerininki", "babasınınki", "evdekininki", "evdekilerininki", "kapısındaki",
+        "odalarındaki", "evdekindeki", "evdekilerindeki", "arabalarınınki", "kitaplarındakiler",
+        "çocuklarınınkiler", "bahçedekilerinki", "arkadaşlarınınki", "öğrencilerininki",
+        "okulundakilerinki", "masasındakilerden", "elindekininki", "yolundakilerinki",
+        "şehirdekilerininki", "denizindekiler", "gözlerindekini", "kalbindekini", "aklındakinden",
+        "cebindekinin", "davamınki", "paranınki", "seninkisi", "benimkisi", "bizimkisi",
+        "kedininki", "komşununki", "müdürünki", "gülünki", "kapınınki", "suyunki", "köyünki",
+        "evdeyken", "okuldayken", "çocukken", "gençken", "öğrenciyken", "hastayken", "hastaydım",
+        "hastaydın", "hastaydık", "hastaydınız", "hastaydılar", "zenginsem", "zenginsen",
+        "zenginsek", "zenginseniz", "zenginseler", "güzelmişim", "güzelmişsin", "güzelmişiz",
+        "güzelmişsiniz", "güzelmişler", "öğretmenim", "öğretmensin", "öğretmeniz",
+        "öğretmensiniz", "çocuğum", "çocuksun", "çocuğuz", "çocuksunuz", "iyidir", "iyidirler",
+        "kötüdür", "büyüktür", "küçüktürler", "delicesine", "aptalcasına", "çılgıncasına",
+        "kahramancasına", "evdeymişsiniz", "okuldaymışız", "hastaymışlar", "buradaymışsınız",
+        "hastaymıştı", "zenginmişse", "güzeldiyseniz", "iyiymişsinizdir", "evdekilerimizinki",
+        "okuldakilerimizinki", "arabadakilerinizinki", "okuldakininki", "okuldakindeki",
+        "yurttakindeki", "köydekindeki", "bahçedekindeki", "sokaktakininki", "gemidekindeki",
+        "sonrakindeki", "öncekindeki", "evdekinizinki", "okuldakimizinki", "katalog", "diyalog",
+        "psikolog", "jeolog", "monolog", "katalogu", "psikologlar", "ad", "soyad", "adı",
+        "soyadı", "adın", "soyadım", "Türkiye'de", "Ankara'nın", "İstanbul'dan", "Ali'nin",
+        "İzmir'e", "Ahmet'le", "sözcüklerini", "gözlüğünü", "köylülerden", "önsözünde",
+        "gözünüzü", "köyümüzü", "gönlümüzü", "ölümsüz", "gözlerimizdekilerdenmiş", "hastayiz",
+        "zenginyız", "okulyüz", "gördünüzse", "öldünüzmü", "çözdükçe", "süründüler", "büyüdünüz",
+        "yürüdüğümüz", "hastaymışsınızcasına", "hastaymışımcasına", "hastaymışsıncasına",
+        "hastaymışızcasına", "deliymişlercesine", "zenginmişsinizcesine", "hastaymışımdır",
+        "hastaymışsındır", "hastaymışızdır", "hastaymışsınızdır", "güzelmişsinizdir", "radyum",
+        "alüminyum", "potasyum", "kalsiyum", "stadyum", "akvaryum",
+    ]),
+    ("yiddish", &[
+        "געמיטן", "געביטן", "געביסן", "געליטן", "געריסן", "אלטענעם", "אלטענער", "אלטענע",
+        "אלטענס", "גוטענעם", "שיינענער", "קליינענע", "קאמוניסט", "סאציאליסט", "ארטיסט",
+        "זשורנאליסט", "געגאנגענער", "גענומענע", "געשריבענעם", "פארשטאנענער", "צוגענומענער",
+        "אנגעשריבענע", "וווינען", "ווייסן", "ייִדיש", "בלוילעך", "גרינלעך", "רויטלעך",
+        "שוואַרצלעך", "זיסלעך", "טובֿות", "מצוות", "שבתות", "חבֿרטע", "רביצין", "מיטענע",
+        "ביטענע", "ביסענע", "וויזענע", "טריבענע", "ליטענע", "קליבענע", "ריבענע", "ריסענע",
+        "שוויגענע", "שמיסענע", "שניטענע", "בונדענע", "זונגענע", "טרונקענע", "צווונגענע",
+        "שלונגענע", "בויגענע", "הויבענע", "שוווירענע", "נומענע", "גאנגענע", "שריבענע", "שטאנענע",
+        "מיטענער", "ביטענעם", "וויזענער", "טרונקענעם", "בויגענער", "לערנען", "קוקן", "זאגן",
+        "מאכן", "ברענגען", "בראכטע", "געבראכטע", "יידיש", "ווו", "בלוילעכע", "גרינלעכער",
+        "זיסלעכן", "קינדערלעכס", "מיידעלעס", "פייגעלעס", "טישל", "בענקל", "שטעטל", "ביכל",
+        "הענטל", "פיסל", "קעפל", "שיפל", "וווּ", "וווּנדער", "באַוווּסט", "צוּם", "בּוּך",
+        "יִנגל", "יִד", "ייִנגל", "געלט", "געלטן", "געבן", "געבנדיק", "צוגנעמען", "צוקטן",
+        "צוקנען", "בארגיק", "גליק", "בליק", "אויסבליק", "אומגליק", "גליקן", "בליקן", "צוגן",
+        "צוקט",
+    ]),
 ];
 
 /// Words per stemvocab statement.
@@ -580,8 +819,15 @@ const STEMVOCAB_WORDS: usize = 16;
 /// stemdrain). Exhaustive per full cycle by construction.
 fn stemvocab(g: &mut Gen) -> Vec<String> {
     g.fire("tsdl:stemvocab");
-    let li = g.ts.vocab_lang % STEM_VOCAB.len();
-    let (lang, pool) = STEM_VOCAB[li];
+    // The sweep covers the curated STEM_VOCAB tuples then the generated
+    // STEM_REACH exception-stem products (W4-STEM lane).
+    let n_pools = STEM_VOCAB.len() + STEM_REACH.len();
+    let li = g.ts.vocab_lang % n_pools;
+    let (lang, pool) = if li < STEM_VOCAB.len() {
+        STEM_VOCAB[li]
+    } else {
+        STEM_REACH[li - STEM_VOCAB.len()]
+    };
     let mut stmts = Vec::new();
     let dict = if lang == "porter" {
         match g.ts.porter_dict.clone() {
@@ -616,7 +862,7 @@ fn stemvocab(g: &mut Gen) -> Vec<String> {
         g.ts.vocab_pos += 1;
         if g.ts.vocab_pos >= pool.len() {
             g.ts.vocab_pos = 0;
-            g.ts.vocab_lang = (li + 1) % STEM_VOCAB.len();
+            g.ts.vocab_lang = (li + 1) % n_pools;
             break;
         }
     }

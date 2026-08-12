@@ -1373,6 +1373,19 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "einterp:op:retview", default: 1.0 },
     ProdWeight { name: "einterp:op:partbound", default: 0.8 },
     ProdWeight { name: "einterp:op:viewwalk", default: 1.0 },
+    // W4-WALK lane: nodeFuncs walker/mutator + execExpr residue drain
+    // (docs/fuzzing/findings-w4walk.md). All hand-verified byte-identical.
+    ProdWeight { name: "einterp:w4:typmod", default: 1.0 },
+    ProdWeight { name: "einterp:w4:hazard", default: 1.2 },
+    ProdWeight { name: "einterp:w4:wholerow", default: 1.2 },
+    ProdWeight { name: "einterp:w4:jsonret", default: 1.2 },
+    ProdWeight { name: "einterp:w4:plassign", default: 1.0 },
+    ProdWeight { name: "einterp:w4:ruledrv", default: 1.0 },
+    ProdWeight { name: "einterp:w4:saop", default: 1.0 },
+    ProdWeight { name: "einterp:w4:arraymd", default: 1.0 },
+    ProdWeight { name: "einterp:w4:errloc", default: 1.0 },
+    ProdWeight { name: "einterp:w4:collate", default: 1.0 },
+    ProdWeight { name: "einterp:w4:partition", default: 1.0 },
     // LD4 EXPLAIN plan-node/option drain module (crate::exd): shape arms
     // (each a self-contained fixture + probe group over the explain.c
     // hollow cluster) and the plain-EXPLAIN format rider. The heavier
@@ -1584,6 +1597,28 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "earm2:w2colref", default: 0.8 },
     ProdWeight { name: "earm2:w2idx", default: 1.2 },
     ProdWeight { name: "earm2:w2poly", default: 1.0 },
+    // W4-ERR earm3 module (ERROR-ARM round 3): verbatim hand-verified
+    // sections; weights bias toward the biggest residual C-arm mass
+    // (tablecmds partition-FK lifecycle, DefineIndex, LIKE/inheritance
+    // merge, wrong-relkind ALTER arms, column-ref resolution).
+    ProdWeight { name: "earm3:pfk", default: 1.4 },
+    ProdWeight { name: "earm3:idxddl", default: 1.3 },
+    ProdWeight { name: "earm3:likei", default: 1.3 },
+    ProdWeight { name: "earm3:idxcon", default: 1.1 },
+    ProdWeight { name: "earm3:gentype", default: 1.1 },
+    ProdWeight { name: "earm3:aclres", default: 1.2 },
+    ProdWeight { name: "earm3:roles", default: 1.0 },
+    ProdWeight { name: "earm3:trunc", default: 1.1 },
+    ProdWeight { name: "earm3:dropcon", default: 1.0 },
+    ProdWeight { name: "earm3:altcol", default: 1.2 },
+    ProdWeight { name: "earm3:wrongk", default: 1.3 },
+    ProdWeight { name: "earm3:addcol", default: 1.0 },
+    ProdWeight { name: "earm3:castop", default: 1.1 },
+    ProdWeight { name: "earm3:rcte", default: 1.0 },
+    ProdWeight { name: "earm3:colname", default: 0.9 },
+    ProdWeight { name: "earm3:colref", default: 1.2 },
+    ProdWeight { name: "earm3:shdep2", default: 1.1 },
+    ProdWeight { name: "earm3:tsdes", default: 0.9 },
     // exr (LD9): executor-residue shape selection.
     ProdWeight { name: "exr:create", default: 1.2 },
     ProdWeight { name: "exr:drop", default: 0.15 },
@@ -1873,6 +1908,20 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "opt2:uniq", default: 0.8 },
     ProdWeight { name: "opt2:refute", default: 1.2 },
     ProdWeight { name: "opt2:gucmatrix", default: 1.0 },
+    // opt3 (W4-OPT): optimizer + executor residue shape selection. Every
+    // family was written against named unhit line regions of the in-lane
+    // BEFORE linegap (see findings-w4opt.md); weights bias toward the
+    // biggest residue masses (routing/winframe/reparam).
+    ProdWeight { name: "opt3:fkjoin", default: 1.4 },
+    ProdWeight { name: "opt3:ojnest", default: 1.2 },
+    ProdWeight { name: "opt3:constdeep", default: 1.0 },
+    ProdWeight { name: "opt3:reparam", default: 1.6 },
+    ProdWeight { name: "opt3:initplan", default: 1.2 },
+    ProdWeight { name: "opt3:winframe", default: 1.6 },
+    ProdWeight { name: "opt3:routing", default: 1.6 },
+    ProdWeight { name: "opt3:idxkeys", default: 1.2 },
+    ProdWeight { name: "opt3:sqlfn", default: 1.0 },
+    ProdWeight { name: "opt3:scanmisc", default: 1.4 },
     // cfgm (CFG lane): config-machinery shape selection. set/local/sweep
     // carry the guc.c drain mass; conv/clienc carry the encoding-conv
     // chunk; the ok/err knob prices the matched-error SET arms.

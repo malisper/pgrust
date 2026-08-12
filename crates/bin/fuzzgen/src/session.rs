@@ -288,9 +288,11 @@ mod tests {
         c.budget = 240;
         let stmts = run_session(&c, &cat);
         // Groups complete past the budget: at least the budget, and no more
-        // than one whole group beyond it (the LD8 earm2 verbatim sections
-        // are the largest groups in the registry at up to ~60 statements).
-        assert!(stmts.len() >= 240 && stmts.len() < 240 + 61, "len {}", stmts.len());
+        // than one whole group beyond it (the objid verbatim sections are
+        // the largest groups in the registry at up to ~131 statements; the
+        // W4-wave registry growth shifted this seed's module stream onto
+        // one of them).
+        assert!(stmts.len() >= 240 && stmts.len() < 240 + 140, "len {}", stmts.len());
         for (i, s) in stmts.iter().enumerate() {
             assert_eq!(s.stmt_index as usize, i);
             assert!(s.productions.iter().any(|p| p.starts_with("module:")));
@@ -507,8 +509,10 @@ mod tests {
         // drain groups, then the LD10 pubsub module dilute per-module
         // traffic); the >=50 idx-statement floor below stays meaningful at
         // this budget. Re-bumped 5000 -> 5800 when the CFG-lane cfgm
-        // module joined the registry.
-        c.budget = 5800;
+        // module joined the registry, then 5800 -> 6600 when the W4-WALK
+        // lane's 11 einterp:w4:* shapes (some large, e.g. the hazard/
+        // wholerow batteries) enlarged average einterp group size.
+        c.budget = 6600;
         let outp = run_session_probed(&c, &cat);
         let idx_windows: Vec<_> = outp
             .ddl_windows

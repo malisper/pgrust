@@ -33,6 +33,7 @@ use crate::exd::gen_exd_module;
 use crate::earm::gen_earm_module;
 use crate::ddldeep::gen_ddldeep_module;
 use crate::earm2::gen_earm2_module;
+use crate::earm3::gen_earm3_module;
 use crate::explain::gen_explain_module;
 use crate::exr::{gen_exr_module, ExrState};
 use crate::geo::{gen_geo_module, GeoState};
@@ -47,6 +48,7 @@ use crate::objid::gen_objid_module;
 use crate::obs::gen_obs_module;
 use crate::cfgm::gen_cfgm_module;
 use crate::opt2::gen_opt2_module;
+use crate::opt3::gen_opt3_module;
 use crate::par::{gen_par_module, ParState};
 use crate::part::{gen_part_module, PartState};
 use crate::pgram::gen_pgram_module;
@@ -257,12 +259,14 @@ pub const STMT_MODULES: &[StmtModuleDef] = &[
     StmtModuleDef { name: "earm", generate: gen_earm_module },
     StmtModuleDef { name: "plansel", generate: gen_plansel_module },
     StmtModuleDef { name: "earm2", generate: gen_earm2_module },
+    StmtModuleDef { name: "earm3", generate: gen_earm3_module },
     StmtModuleDef { name: "exr", generate: gen_exr_module },
     StmtModuleDef { name: "numx", generate: gen_numx_module },
     StmtModuleDef { name: "pubsub", generate: gen_pubsub_module },
     StmtModuleDef { name: "ddldeep", generate: gen_ddldeep_module },
     StmtModuleDef { name: "pgram", generate: gen_pgram_module },
     StmtModuleDef { name: "opt2", generate: gen_opt2_module },
+    StmtModuleDef { name: "opt3", generate: gen_opt3_module },
     StmtModuleDef { name: "cfgm", generate: gen_cfgm_module },
 ];
 

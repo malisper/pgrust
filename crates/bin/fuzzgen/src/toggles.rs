@@ -158,6 +158,7 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // sections (12-60 statements per pick, fixtures + probes + drops);
     // like earm the groups are large, so the weight sits low.
     ModuleSpec { name: "earm2", default_weight: 0.2 },
+    ModuleSpec { name: "earm3", default_weight: 0.2 },
     // exr (LD9) emits executor-residue drain groups (runtime pruning
     // brackets, window frame-option probes, MERGE/ON CONFLICT rollback
     // brackets, transition-table trigger groups) over a persistent
@@ -185,6 +186,10 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // fixture create + forced-profile query sweeps + drop, ~40-90
     // statements per pick); plansel-like low weight.
     ModuleSpec { name: "opt2", default_weight: 0.3 },
+    // opt3 (W4-OPT) emits optimizer/executor residue sweep groups
+    // (in-group fixture create + forced-profile query sweeps + drop,
+    // ~40-120 statements per pick); opt2-like low weight.
+    ModuleSpec { name: "opt3", default_weight: 0.3 },
     // cfgm (CFG lane) emits GUC set/reset/show brackets, custom-class
     // placeholders, timezone-abbreviation loads, SET TRANSACTION grammar
     // arms and exception-swallowed encoding-conversion byte sweeps; most
@@ -356,7 +361,7 @@ mod tests {
                  dtm=off,adtmisc=off,sqljson=off,plpg=off,coll=off,mbconv=off,\
              xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,\
                  plansel=off,earm2=off,exr=off,numx=off,pubsub=off,ddldeep=off,\
-                 pgram=off,opt2=off,cfgm=off"
+                 pgram=off,opt2=off,opt3=off,cfgm=off,earm3=off"
             )
             .is_err()
         );
@@ -371,7 +376,7 @@ mod tests {
              dtm=off,adtmisc=off,sqljson=off,plpg=off,coll=off,mbconv=off,\
              xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,\
              plansel=off,earm2=off,exr=off,numx=off,pubsub=off,ddldeep=off,\
-             pgram=off,opt2=off,cfgm=off",
+             pgram=off,opt2=off,opt3=off,cfgm=off,earm3=off",
         )
         .unwrap();
         let mut rng = Rng::new(5);

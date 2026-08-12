@@ -80,6 +80,20 @@ const SHAPES: &[&str] = &[
     "einterp:op:retview",
     "einterp:op:partbound",
     "einterp:op:viewwalk",
+    // W4-WALK lane additions (line-drain-queue residue LD2 left; every
+    // statement hand-verified byte-identical on both engines via
+    // scripts/deck-target-e2e.sh diff over docs/fuzzing/deck-w4walk.sql):
+    "einterp:w4:typmod",
+    "einterp:w4:hazard",
+    "einterp:w4:wholerow",
+    "einterp:w4:jsonret",
+    "einterp:w4:plassign",
+    "einterp:w4:ruledrv",
+    "einterp:w4:saop",
+    "einterp:w4:arraymd",
+    "einterp:w4:errloc",
+    "einterp:w4:collate",
+    "einterp:w4:partition",
 ];
 
 fn raw(s: impl Into<String>) -> StmtKind {
@@ -845,6 +859,267 @@ fn body(g: &mut Gen, shape: &str) -> Vec<StmtKind> {
                 raw("DROP VIEW ei_vw2;"),
                 raw("DROP VIEW ei_vw1;"),
                 raw("DROP TABLE ei_vw;"),
+            ]
+        }
+        // ---------------------------------------------------- W4-WALK ---
+        // exprTypmod all-branches-same-typmod arms (CASE 401-416, ARRAY
+        // 437-450, COALESCE 465-478, MINMAX 493-506) + the mixed -1 arms.
+        // exprTypmod runs on every output column at RowDescription time.
+        "einterp:w4:typmod" => {
+            let m = 5 + g.rng.below(4);
+            vec![
+                raw("CREATE TABLE ei_tm (a int, c varchar(5));"),
+                raw(format!("INSERT INTO ei_tm SELECT g, ('c' || g)::varchar(5) FROM generate_series(1, {}) g;", 6 + g.rng.below(6))),
+                raw(format!("SELECT CASE WHEN a > {m} THEN c ELSE 'z'::varchar(5) END, CASE a WHEN 1 THEN c ELSE 'y'::varchar(5) END, ARRAY[c, 'q'::varchar(5)], ARRAY[ARRAY[c], ARRAY['m'::varchar(5)]], COALESCE(c, 'n'::varchar(5)), GREATEST(c, 'g'::varchar(5)), LEAST(c, 'l'::varchar(5)), NULLIF(c, 'c1'::varchar(5)) FROM ei_tm ORDER BY a;")),
+                raw(format!("SELECT CASE WHEN a > {m} THEN c ELSE 'z'::varchar(9) END, ARRAY[c, 'q'::varchar(9)], COALESCE(c, 'n'::varchar(9)), GREATEST(c, 'g'::varchar(9)), LEAST(c::varchar(9), 'l'::varchar(5)) FROM ei_tm ORDER BY a;")),
+                raw("DROP TABLE ei_tm;"),
+            ]
+        }
+        // Parallel-hazard beacon: max_parallel_hazard() walks the whole
+        // parse tree of every plannable SELECT and returns TRUE up the
+        // walk chain at the first PARALLEL UNSAFE function, lighting the
+        // enclosing nodes' `if (WALK(field)) return true;` arms
+        // (expression_tree_walker_impl 2138/2165/2294/2319/2321/2344/
+        // 2346/2372/2375/2377/2385/2590/2642/2644, query_tree_walker_impl
+        // 2725-2729/2760-2762, range_table_entry_walker_impl
+        // 2836/2854/2858/2868/2873).
+        "einterp:w4:hazard" => {
+            let k = 1 + g.rng.below(4);
+            let pct = 40 + g.rng.below(50);
+            vec![
+                raw("CREATE FUNCTION ei_pu(x int) RETURNS int LANGUAGE sql VOLATILE PARALLEL UNSAFE AS 'SELECT x + 0';"),
+                raw("CREATE TABLE ei_hz (a int, b text, jb jsonb);"),
+                raw(format!("INSERT INTO ei_hz SELECT g, 'b' || g, jsonb_build_object('n', g) FROM generate_series(1, {}) g;", 6 + k)),
+                raw(format!("SELECT percentile_disc(0.5 * ei_pu(1)) WITHIN GROUP (ORDER BY a) FROM ei_hz;")),
+                raw(format!("SELECT count(a + ei_pu(0)) FILTER (WHERE a > ei_pu({k})) FROM ei_hz;")),
+                raw(format!("SELECT count(*) FILTER (WHERE a > ei_pu({k})) OVER (ORDER BY a) FROM ei_hz;")),
+                raw(format!("SELECT sum(a) OVER (ORDER BY a ROWS BETWEEN ei_pu({k}) PRECEDING AND CURRENT ROW) FROM ei_hz;")),
+                raw(format!("SELECT sum(a) OVER (ORDER BY a ROWS BETWEEN CURRENT ROW AND ei_pu({k}) FOLLOWING) FROM ei_hz;")),
+                raw(format!("SELECT a FROM ei_hz WHERE (a + ei_pu(0), b) < ({}, 'zz');", 8 + k)),
+                raw(format!("SELECT a FROM ei_hz WHERE CASE a + ei_pu(0) WHEN {k} THEN true ELSE false END;")),
+                raw("SELECT t.a FROM ei_hz t JOIN ei_hz u ON t.a = u.a + ei_pu(1);"),
+                raw(format!("SELECT count(*) FROM ei_hz TABLESAMPLE BERNOULLI ({pct} + ei_pu(0)) REPEATABLE (7);")),
+                raw(format!("SELECT count(*) FROM ei_hz TABLESAMPLE SYSTEM (90) REPEATABLE (ei_pu({k}));")),
+                raw(format!("SELECT * FROM (VALUES (ei_pu({k}), 'v1'), (2, 'v2')) v(x, y);")),
+                raw("SELECT a + ei_pu(0), count(*) FROM ei_hz GROUP BY a + ei_pu(0);"),
+                raw(format!("SELECT count(*) FROM ei_hz GROUP BY a HAVING count(*) < ei_pu({}0);", 1 + g.rng.below(4))),
+                raw(format!("SELECT a FROM ei_hz ORDER BY a LIMIT {k} OFFSET ei_pu(0);")),
+                raw(format!("SELECT a FROM ei_hz ORDER BY a LIMIT ei_pu({k});")),
+                raw(format!("SELECT JSON_VALUE(jb, '$.n ? (@ > $x)' PASSING ei_pu({k}) AS x) FROM ei_hz;")),
+                raw("SELECT JSON_VALUE(CASE WHEN ei_pu(1) = 1 THEN jb END, '$.n') FROM ei_hz;"),
+                raw(format!("SELECT JSON_VALUE(jb, '$.missing' RETURNING int DEFAULT ei_pu({k}) ON EMPTY) FROM ei_hz;")),
+                raw(format!("SELECT JSON_VALUE(jb, '$.nope' RETURNING int DEFAULT ei_pu({k}) ON ERROR) FROM ei_hz;")),
+                raw(format!("SELECT jt.v FROM ei_hz, JSON_TABLE(jb, '$.n' PASSING ei_pu({k}) AS px COLUMNS (v int PATH '$', ex int EXISTS PATH '$ ? (@ > $px)')) jt WHERE a = {k};")),
+                raw("DROP TABLE ei_hz;"),
+                raw("DROP FUNCTION ei_pu(int);"),
+            ]
+        }
+        // Whole-row vars: OLD/NEW RETURNING wholerow (ExecEvalWholeRowVar
+        // 5369-5386 + init flags 3180/3182), resjunk-carrying subquery /
+        // materialized-CTE wholerow (junk filter, 3203-3236 + 5393),
+        // dropped-column wholerow, and the inheritance child→parent
+        // rowtype cast under a USING join (expression_tree_mutator
+        // ConvertRowtypeExpr 3260-3265 via flatten_join_alias_vars).
+        "einterp:w4:wholerow" => {
+            let n = 4 + g.rng.below(5);
+            vec![
+                raw("CREATE TABLE ei_wr (a int, b text);"),
+                raw(format!("INSERT INTO ei_wr SELECT g, 'w' || g FROM generate_series(1, {n}) g;")),
+                raw("INSERT INTO ei_wr VALUES (100, 'ins') RETURNING (old)::text, (new)::text;"),
+                raw("UPDATE ei_wr SET b = b || '+' WHERE a = 100 RETURNING (old)::text, (new)::text;"),
+                raw("DELETE FROM ei_wr WHERE a = 100 RETURNING (old)::text, (new)::text;"),
+                raw(format!("SELECT (s.*)::text FROM (SELECT a, b FROM ei_wr ORDER BY a + 1 DESC LIMIT {n}) s;")),
+                raw("WITH c AS MATERIALIZED (SELECT a, b FROM ei_wr ORDER BY a + 1 DESC LIMIT 3) SELECT (c.*)::text FROM c;"),
+                raw("CREATE TABLE ei_wrd (a int, zap int, b text);"),
+                raw("INSERT INTO ei_wrd SELECT g, g * 10, 'd' || g FROM generate_series(1, 4) g;"),
+                raw("ALTER TABLE ei_wrd DROP COLUMN zap;"),
+                raw("SELECT (d.*)::text FROM ei_wrd d ORDER BY a;"),
+                raw("SELECT row_to_json(d) FROM ei_wrd d JOIN ei_wr u USING (a) ORDER BY a;"),
+                raw("CREATE TABLE ei_wpar (a int, b text);"),
+                raw("CREATE TABLE ei_wchi (extra int) INHERITS (ei_wpar);"),
+                raw("INSERT INTO ei_wpar VALUES (1, 'p1'), (2, 'p2');"),
+                raw("INSERT INTO ei_wchi VALUES (3, 'c3', 30), (4, 'c4', 40);"),
+                raw("SELECT (p.*)::text FROM ei_wpar p ORDER BY a;"),
+                raw("SELECT (c.*)::ei_wpar::text FROM ei_wchi c JOIN ei_wr t2 USING (a) ORDER BY 1;"),
+                raw("DROP TABLE ei_wchi;"),
+                raw("DROP TABLE ei_wpar;"),
+                raw("DROP TABLE ei_wrd;"),
+                raw("DROP TABLE ei_wr;"),
+            ]
+        }
+        // SQL/JSON returning/behavior residue: datetime()-typed items
+        // coerced to string (ExecGetJsonValueItemString 5066-5081),
+        // RETURNING jsonb/json/domain (ExecEvalJsonExprPath 4906-4913),
+        // EXISTS→int/domain coercion (ExecEvalJsonCoercion 5129-5144),
+        // empty-result ON ERROR branch (4989-4997) and the matched
+        // coercion/empty error arms (ExecEvalJsonCoercionFinish
+        // 5204-5232).
+        "einterp:w4:jsonret" => {
+            let k = 1 + g.rng.below(3);
+            vec![
+                raw("CREATE TABLE ei_jr (a int, jb jsonb);"),
+                raw(format!("INSERT INTO ei_jr VALUES ({k}, jsonb '{{\"s\": \"str\", \"n\": 42, \"d\": \"2023-03-05\", \"t\": \"12:34:56\", \"tz\": \"12:34:56+05:30\", \"ts\": \"2023-03-05 12:34:56\", \"tstz\": \"2023-03-05 12:34:56+05:30\", \"o\": {{\"k\": 1}}}}');")),
+                raw("SELECT JSON_VALUE(jb, '$.d.datetime(\"yyyy-mm-dd\")' RETURNING text), JSON_VALUE(jb, '$.t.datetime(\"HH24:MI:SS\")' RETURNING text), JSON_VALUE(jb, '$.tz.datetime(\"HH24:MI:SSTZH:TZM\")' RETURNING text) FROM ei_jr;"),
+                raw("SELECT JSON_VALUE(jb, '$.ts.datetime(\"yyyy-mm-dd HH24:MI:SS\")' RETURNING text), JSON_VALUE(jb, '$.tstz.datetime(\"yyyy-mm-dd HH24:MI:SSTZH:TZM\")' RETURNING text) FROM ei_jr;"),
+                raw("SELECT JSON_VALUE(jb, '$.n' RETURNING jsonb), JSON_VALUE(jb, '$.s' RETURNING json), JSON_VALUE(jsonb '[null]', '$[0]' RETURNING text) FROM ei_jr;"),
+                raw("CREATE DOMAIN ei_jdom AS jsonb CHECK (VALUE IS NOT NULL);"),
+                raw("SELECT JSON_VALUE(jb, '$.n' RETURNING ei_jdom) FROM ei_jr;"),
+                raw("CREATE DOMAIN ei_bit AS int CHECK (VALUE IN (0, 1));"),
+                raw("SELECT jt.* FROM ei_jr, JSON_TABLE(jb, '$' COLUMNS (ei int EXISTS PATH '$.o.k', ed ei_bit EXISTS PATH '$.nope')) jt;"),
+                raw("SELECT JSON_QUERY(jb, '$.o' RETURNING json), JSON_QUERY(jb, '$.o' RETURNING text OMIT QUOTES), JSON_QUERY(jb, '$.s' OMIT QUOTES), JSON_QUERY(jb, '$.n' WITH WRAPPER) FROM ei_jr;"),
+                raw("SELECT JSON_VALUE(jb, '$.missing' DEFAULT 'dfl' ON ERROR), JSON_QUERY(jb, '$.missing' EMPTY OBJECT ON ERROR), JSON_VALUE(jb, '$.s' RETURNING int) FROM ei_jr;"),
+                raw("SELECT JSON_EXISTS(jb, 'strict $.miss.also' TRUE ON ERROR), JSON_EXISTS(jb, 'strict $.miss.also' UNKNOWN ON ERROR), JSON_EXISTS(jb, 'strict $.miss.also' FALSE ON ERROR) FROM ei_jr;"),
+                raw("SELECT JSON_VALUE(jsonb '\"abc\"', '$' RETURNING int ERROR ON ERROR);"),
+                raw("SELECT JSON_QUERY(jb, '$.missing' ERROR ON EMPTY ERROR ON ERROR) FROM ei_jr;"),
+                raw("DROP DOMAIN ei_bit;"),
+                raw("DROP DOMAIN ei_jdom;"),
+                raw("DROP TABLE ei_jr;"),
+            ]
+        }
+        // plpgsql assignment statements are planned Queries: the
+        // parenthesized (r).f form forces a SQL FieldSelect over the
+        // expanded record (ExecEvalFieldSelect 3749-3789); subscripted /
+        // field assignments light SubscriptingRef + FieldStore init and
+        // walker arms (ExecInitSubscriptingRef, isAssignmentIndirectionExpr,
+        // expression_tree_walker 2192/2266).
+        "einterp:w4:plassign" => {
+            let k = 1 + g.rng.below(7);
+            vec![
+                raw("CREATE TYPE ei_pct AS (p int, q text);"),
+                raw("CREATE FUNCTION ei_ppu(x int) RETURNS int LANGUAGE sql VOLATILE PARALLEL UNSAFE AS 'SELECT x + 0';"),
+                raw(format!("DO $$ DECLARE r record; v int; s text; BEGIN SELECT {k} AS p, 'seven' AS q INTO r; v := (r).p; s := (r).q; RAISE NOTICE 'rec % %', v, s; END $$;")),
+                raw(format!("DO $$ DECLARE arr int[]; c ei_pct; carr ei_pct[]; BEGIN arr := ARRAY[1, 2, 3]; arr[ei_ppu(2)] := ei_ppu({k}); c := ROW(1, 'one'); c.p := ei_ppu(3); carr := ARRAY[ROW(1, 'a')::ei_pct, ROW(2, 'b')::ei_pct]; carr[ei_ppu(1)].q := 'mut'; carr[2].p := ei_ppu({k}); RAISE NOTICE 'asg % % %', arr, c, carr; END $$;")),
+                raw("DROP FUNCTION ei_ppu(int);"),
+                raw("DROP TYPE ei_pct;"),
+            ]
+        }
+        // DO ALSO rule rewriting: rewriteRuleAction's NEW substitution is
+        // a full query_tree_mutator pass over the action, mutating the
+        // CYCLE CTE (expression_tree_mutator CTECycleClause 3504-3510)
+        // and the range table (JSON_TABLE / TABLESAMPLE / VALUES /
+        // subquery arms of range_table_mutator).
+        "einterp:w4:ruledrv" => {
+            let k = 1 + g.rng.below(3);
+            vec![
+                raw("CREATE TABLE ei_rsrc (a int, b text);"),
+                raw("CREATE TABLE ei_rlog (tag text, val int);"),
+                raw("CREATE RULE ei_rule AS ON INSERT TO ei_rsrc DO ALSO INSERT INTO ei_rlog WITH RECURSIVE g(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM g WHERE x < 2) CYCLE x SET cyc USING pth SELECT 'w' || NEW.b, g.x + sub.z + jt.jv + sum(g.x) OVER (ORDER BY g.x ROWS BETWEEN (1 + 0) PRECEDING AND CURRENT ROW) FROM g, (SELECT max(v.q) AS z FROM (VALUES (1), (2)) v(q)) sub, JSON_TABLE(jsonb '[5]', '$[*]' COLUMNS (jv int PATH '$')) jt WHERE g.x <= NEW.a + jt.jv;"),
+                // NOTE: REPEATABLE takes a CONSTANT here, never NEW.* — a
+                // rule action with TABLESAMPLE ... REPEATABLE(NEW.a) crashes
+                // C REL_18_3 (findings-w4walk-repro-f1.sql); kept out of the
+                // generator on purpose (divergence, not a matched shape).
+                raw("CREATE RULE ei_rule2 AS ON UPDATE TO ei_rsrc DO ALSO INSERT INTO ei_rlog SELECT min('u' || NEW.b), count(*)::int FROM ei_rsrc TABLESAMPLE BERNOULLI (80) REPEATABLE (7) GROUP BY ei_rsrc.a % (NEW.a + 1) HAVING count(*) >= 0;"),
+                raw(format!("INSERT INTO ei_rsrc VALUES ({k}, 'r1'), ({}, 'r2');", k + 1)),
+                raw("UPDATE ei_rsrc SET b = b || '+' WHERE a IS NOT NULL;"),
+                raw("SELECT count(*) >= 0 FROM ei_rlog;"),
+                raw("DROP RULE ei_rule2 ON ei_rsrc;"),
+                raw("DROP RULE ei_rule ON ei_rsrc;"),
+                raw("DROP TABLE ei_rlog;"),
+                raw("DROP TABLE ei_rsrc;"),
+            ]
+        }
+        // Hashed ScalarArrayOp: null-scalar arm (4247) + hashed IN /
+        // NOT-IN lists over the minimum size, with and without NULLs.
+        "einterp:w4:saop" => {
+            let k = 1 + g.rng.below(5);
+            vec![
+                raw("CREATE TABLE ei_sa (a int, b text);"),
+                raw(format!("INSERT INTO ei_sa SELECT g, 'b' || g FROM generate_series(1, {}) g;", 5 + k)),
+                raw("INSERT INTO ei_sa VALUES (NULL, NULL);"),
+                raw("SELECT a, b NOT IN ('x1', 'x2', 'x3', 'x4', 'x5', 'x6', 'x7', 'x8', NULL) FROM ei_sa ORDER BY a NULLS LAST;"),
+                raw("SELECT a FROM ei_sa WHERE b IN ('b1', 'b2', 'i3', 'i4', 'i5', 'i6', 'i7', 'i8', 'i9', 'i10', 'i11', NULL) ORDER BY a;"),
+                raw("SELECT a FROM ei_sa WHERE b NOT IN ('b1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7', 'q8', 'q9', 'q10', 'q11', 'q12') ORDER BY a;"),
+                raw("DROP TABLE ei_sa;"),
+            ]
+        }
+        // Multidimensional ArrayExpr over table columns: all-empty
+        // subarrays, null-bitmap copy, and the two matched dimension
+        // errors (ExecEvalArrayExpr 3469-3601).
+        "einterp:w4:arraymd" => {
+            let k = 1 + g.rng.below(6);
+            vec![
+                raw("CREATE TABLE ei_am (a int, ia int[], ea int[]);"),
+                raw(format!("INSERT INTO ei_am VALUES (1, ARRAY[{k}, 2], '{{}}'), (2, ARRAY[3, {k}], '{{}}');")),
+                raw("SELECT ARRAY[ea, ea] FROM ei_am ORDER BY a;"),
+                raw("SELECT ARRAY[ia, ARRAY[NULL::int, a]] FROM ei_am ORDER BY a;"),
+                raw("SELECT ARRAY[ARRAY[ia, ia], ARRAY[ia, ARRAY[NULL::int, 9]]] FROM ei_am ORDER BY a;"),
+                raw("SELECT ARRAY[ea, ia] FROM ei_am ORDER BY a;"),
+                raw("SELECT ARRAY[ia, ARRAY[5, 6, 7]] FROM ei_am ORDER BY a;"),
+                raw("DROP TABLE ei_am;"),
+            ]
+        }
+        // exprLocation raw-node error-position battery: every statement
+        // errors with parser_errposition on a specific raw node kind; all
+        // errors byte-identical on both engines (diff-verified).
+        "einterp:w4:errloc" => {
+            vec![
+                raw("CREATE TABLE ei_el (a int, b text, arr int[]);"),
+                raw("SELECT CAST(1 AS ei_no_such_type);"),
+                raw("UPDATE ei_el SET nosuchcol = 1;"),
+                raw("UPDATE ei_el SET (a, b) = (SELECT 1, 'x', 2.0);"),
+                raw("SELECT count(*) OVER ei_nowin FROM ei_el;"),
+                raw("SELECT * FROM ei_el TABLESAMPLE ei_nosuchmethod (10);"),
+                raw("INSERT INTO ei_el VALUES (1, 'dup', NULL) ON CONFLICT (nosuchcol) DO NOTHING;"),
+                raw("INSERT INTO ei_el VALUES (1, 'dup', NULL) ON CONFLICT DO UPDATE SET b = 'x';"),
+                raw("WITH RECURSIVE g(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM g WHERE x < 3) SEARCH DEPTH FIRST BY nosuch SET seq SELECT * FROM g;"),
+                raw("WITH RECURSIVE g(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM g WHERE x < 3) CYCLE nosuch SET is_c USING pathc SELECT * FROM g;"),
+                raw("WITH RECURSIVE g(x) AS (SELECT x + 1 FROM g WHERE x < 3) SELECT * FROM g;"),
+                raw("SELECT a FROM ei_el GROUP BY a HAVING ARRAY[a];"),
+                // (Constraint 1730 / FunctionParameter 1733 exprLocation
+                // arms are error-shaped CREATEs — they live only in the
+                // deck, not here, to keep the group's create/drop pairing
+                // invariant clean.)
+                raw("SELECT CASE WHEN a THEN 1 ELSE 2 END FROM ei_el;"),
+                raw("SELECT GREATEST(a, b) FROM ei_el;"),
+                raw("SELECT a FROM ei_el WHERE row_number() OVER (ORDER BY a) < 3;"),
+                raw("SELECT a IS JSON FROM ei_el;"),
+                raw("SELECT JSON_OBJECT('k' VALUE 1, 'k' VALUE 2 WITH UNIQUE KEYS);"),
+                raw("SELECT a FROM ei_el WHERE JSON_OBJECTAGG(b VALUE a) IS NOT NULL;"),
+                raw("SELECT JSON_ARRAY(SELECT a INTO ei_elnope FROM ei_el);"),
+                raw("DROP TABLE ei_el;"),
+            ]
+        }
+        // Collation plumbing + deparse: inputcollid consumers
+        // (exprInputCollation 1086-1108) via pg_get_viewdef over collated
+        // aggregate/window/minmax/saop shapes; domain-over-collated-text
+        // check errors stay matched.
+        "einterp:w4:collate" => {
+            let k = 1 + g.rng.below(5);
+            vec![
+                raw("CREATE TABLE ei_cl (a int, b text);"),
+                raw(format!("INSERT INTO ei_cl SELECT g, 'b' || g FROM generate_series(1, {}) g;", 4 + k)),
+                raw("SELECT b IS DISTINCT FROM 'b2' COLLATE \"C\", NULLIF(b COLLATE \"POSIX\", 'b3'), b < ANY (ARRAY['b4', 'b9'] COLLATE \"C\"), GREATEST(b COLLATE \"C\", 'a'), min(b COLLATE \"C\") OVER (ORDER BY a) FROM ei_cl ORDER BY a;"),
+                raw("CREATE VIEW ei_vcoll AS SELECT max(b COLLATE \"C\") AS m, count(*) FILTER (WHERE b IS DISTINCT FROM 'x' COLLATE \"C\") AS f, min(b COLLATE \"POSIX\") OVER (ORDER BY a) AS w, NULLIF(b COLLATE \"C\", 'nn') AS nl, b < ANY (ARRAY['p', 'q'] COLLATE \"C\") AS sa, GREATEST(b COLLATE \"C\", 'gg') AS gr, lower(b COLLATE \"POSIX\") AS lo FROM ei_cl GROUP BY a, b;"),
+                raw("SELECT pg_get_viewdef('ei_vcoll'::regclass, true);"),
+                raw("SELECT count(*) >= 0 FROM ei_vcoll;"),
+                raw("DROP VIEW ei_vcoll;"),
+                raw("DROP TABLE ei_cl;"),
+            ]
+        }
+        // Partition DDL with expression bounds + runtime pruning through
+        // a prepared statement (generic-plan pruning steps), plus the two
+        // matched bound errors (exprLocation PartitionRangeDatum /
+        // PartitionElem arms).
+        "einterp:w4:partition" => {
+            let k = 1 + g.rng.below(6);
+            vec![
+                raw("CREATE TABLE ei_prt (a int, b text) PARTITION BY RANGE ((a % 100));"),
+                raw("CREATE TABLE ei_prt_p1 PARTITION OF ei_prt FOR VALUES FROM (0 + 0) TO (5 * 2);"),
+                raw("CREATE TABLE ei_prt_p2 PARTITION OF ei_prt FOR VALUES FROM (10) TO (20 + 5);"),
+                raw(format!("INSERT INTO ei_prt SELECT g, 'pt' || g FROM generate_series(1, {}) g;", 15 + k)),
+                raw("PREPARE ei_prep (int) AS SELECT count(*) FROM ei_prt WHERE (a % 100) < $1;"),
+                raw(format!("EXECUTE ei_prep ({});", 2 + g.rng.below(8))),
+                raw("EXECUTE ei_prep (12);"),
+                raw("EXECUTE ei_prep (3);"),
+                raw("EXECUTE ei_prep (18);"),
+                raw("EXECUTE ei_prep (9);"),
+                raw(format!("EXECUTE ei_prep ({k});")),
+                raw("DEALLOCATE ei_prep;"),
+                raw("CREATE TABLE ei_prt_bad PARTITION OF ei_prt FOR VALUES FROM (30) TO (25);"),
+                // (the PartitionElem exprLocation arm — CREATE TABLE .. BY
+                // RANGE(nosuchcol) — is a standalone error-shaped CREATE;
+                // it lives only in the deck to keep create/drop pairing.)
+                raw("DROP TABLE ei_prt;"),
             ]
         }
         other => unreachable!("unknown einterp shape {other}"),
