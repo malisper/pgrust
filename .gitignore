@@ -3,10 +3,36 @@
 CI-results/
 *.profraw
 **/target-*/
+covloop-history/
 scripts/__pycache__/
 proofs/coverage/__pycache__/
 
 # cargo-mutants working/output directory (transient audit artifacts)
 mutants.out/
 mutants.out.old/
+/cpg-cov/
+/cpg-ref/
+/cpg-icu/
+/cpg-icu-build.out
+# crashdiff (W1) work root: B-side scratch checkout, per-seed run evidence
+/crashdiff-work/
+/int8-evidence/
+# Q3 nodes/obs lane: per-seed diffrunner evidence + corpus run logs
+/q3-evidence/
+/q3-before-corpus.out
+/q3-after-corpus.out
+/q3-after2-corpus.out
+/pgref-build.out
+/gapreport-build.out
+# Q5 lane (fuzz-q5-adminacl) local rigs/evidence: B-side scratch checkout,
+# hand-verify decks + servers, differential evidence
+/bmain/
+/q5-evidence/
+/q5-handverify/
+# integration-9 local evidence (manifests + leg logs; summary lives in docs/fuzzing/findings-int9.md)
+/int9-evidence/
+
+# snouty local config
 .snouty.toml
+# accidental build-log commits
+/cpg-build.log

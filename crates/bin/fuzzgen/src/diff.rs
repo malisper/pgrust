@@ -1,0 +1,1287 @@
+//! Per-statement outcome capture and divergence classification.
+//!
+//! Rowsets compare as multisets unless the statement carries ORDER BY
+//! (COPY/heap order is ruled non-surface); float-typed columns compare
+//! with a ulp tolerance (B1 ruling: float surfaces get ulp comparators,
+//! not exact text equality); columns the generator marked as
+//! order-sensitive float aggregates compare ruled-soft — any two float
+//! values agree, because plan-dependent accumulation order makes their
+//! divergence unbounded in ulp terms (crate::agg module docs). Everything
+//! else is exact. Ulp-only, soft-only and tie-order-only differences are
+//! surfaced as candidates for the ruled table (crate::ruled), not
+//! silently swallowed here.
+
+pub const FLOAT4_OID: u32 = 700;
+pub const FLOAT8_OID: u32 = 701;
+
+/// Geometric composite types whose text output embeds float8 fields
+/// (point/lseg/path/box/polygon/line/circle). Soak-3 N1: CI cluster
+/// gcc/glibc build-flag float divergence (ratified B1 surface) lands
+/// inside these composites' text, out of reach of the bare-float ulp
+/// comparator — they get token-wise ulp comparison instead.
+pub const GEO_OIDS: [u32; 7] = [600, 601, 602, 603, 604, 628, 718];
+
+/// Multiplier widening the ulp budget for geometry composites: distance
+/// chains (dist_cpoly-style) accumulate up to ~15 ulp on the ratified B1
+/// build-flag surface (soak-3 N1), so the geo budget is ulp_tol * 8
+/// (default 4 -> 32) rather than the bare-float budget.
+pub const GEO_ULP_FACTOR: u64 = 8;
+
+/// What one side produced for one statement.
+#[derive(Clone, Debug)]
+pub enum StmtOutcome {
+    Rows { col_oids: Vec<u32>, rows: Vec<Vec<Option<String>>> },
+    Command { tag: String, affected: Option<u64> },
+    /// A COPY data transfer: the raw payload of COPY ... TO STDOUT (empty
+    /// for COPY FROM STDIN feeds) plus the command tag. X2: with FORMAT
+    /// binary the payload is copyto.c's binary emit — compared
+    /// byte-for-byte, any byte diff is a finding.
+    CopyOut { bytes: Vec<u8>, tag: String },
+    Error { sqlstate: String, message: String },
+    ConnLost { detail: String },
+}
+
+/// Divergence class per charter §3.2. `Ruled` carries the matched ruling id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiffClass {
+    Match,
+    Ruled(String),
+    RowsetDiff,
+    ErrorDiff,
+    CountDiff,
+    /// A runner-injected state probe (`SELECT * FROM t ORDER BY <pk>`)
+    /// found the two sides holding different table contents: a silent
+    /// state divergence some earlier statement wrote. Carries the table.
+    StateDiff(String),
+    SessionDiverged(Side),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    A,
+    B,
+    Both,
+}
+
+impl DiffClass {
+    /// Stable key for JSONL output and reducer target matching.
+    pub fn key(&self) -> &'static str {
+        match self {
+            DiffClass::Match => "MATCH",
+            DiffClass::Ruled(_) => "RULED",
+            DiffClass::RowsetDiff => "ROWSET_DIFF",
+            DiffClass::ErrorDiff => "ERROR_DIFF",
+            DiffClass::CountDiff => "COUNT_DIFF",
+            DiffClass::StateDiff(_) => "STATE_DIFF",
+            DiffClass::SessionDiverged(_) => "SESSION_DIVERGED",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Classified {
+    pub class: DiffClass,
+    pub detail: String,
+}
+
+/// Per-column compare mode: exact text, float-with-ulp-tolerance, or
+/// ruled-soft float (order-sensitive float aggregate — any two float
+/// values agree).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ColCmp {
+    Exact,
+    FloatUlp,
+    FloatSoft,
+    /// Geometric composite text (point/lseg/path/box/polygon/line/circle):
+    /// token-wise compare, numeric fields by ulp under the widened geo
+    /// budget (ulp_tol * GEO_ULP_FACTOR), structure exactly.
+    GeoUlp,
+}
+
+/// Compare modes from the result-column type oids plus the generator's
+/// soft-column mask (soft applies only where the column really is float —
+/// a lying mask never weakens a non-float column).
+pub fn col_cmp_modes(col_oids: &[u32], soft_cols: &[usize]) -> Vec<ColCmp> {
+    col_oids
+        .iter()
+        .enumerate()
+        .map(|(i, &o)| {
+            let is_float = o == FLOAT4_OID || o == FLOAT8_OID;
+            if is_float && soft_cols.contains(&i) {
+                ColCmp::FloatSoft
+            } else if is_float {
+                ColCmp::FloatUlp
+            } else if GEO_OIDS.contains(&o) {
+                ColCmp::GeoUlp
+            } else {
+                ColCmp::Exact
+            }
+        })
+        .collect()
+}
+
+/// How two cells compared: exactly, within float ulp tolerance, under the
+/// ruled-soft float-aggregate mode, or not at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CellCmp {
+    Equal,
+    EqualUlp,
+    EqualSoft,
+    Diff,
+}
+
+/// How two rowsets compared under a given order discipline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowsetCmp {
+    Equal,
+    /// Equal only because float cells matched within ulp tolerance.
+    EqualUlp,
+    /// Equal only under the ruled-soft float-aggregate column mode.
+    EqualSoft,
+    Diff(String),
+}
+
+fn ulp_distance(a: f64, b: f64) -> u64 {
+    // Map to a monotone integer line (negative floats reflected) so ulp
+    // distance is a plain absolute difference; the sign boundary is handled
+    // by the reflection.
+    fn key(x: f64) -> i64 {
+        let bits = x.to_bits() as i64;
+        // bits < 0 keeps MIN - bits in [MIN + 1, 0]: no overflow.
+        if bits < 0 {
+            i64::MIN - bits
+        } else {
+            bits
+        }
+    }
+    let (ka, kb) = (key(a), key(b));
+    ka.abs_diff(kb)
+}
+
+/// One token of a geometry composite's text form: a structural separator,
+/// a numeric field, or any other chunk (compared exactly).
+#[derive(Clone, Debug, PartialEq)]
+enum GeoTok {
+    Sep(char),
+    Num(f64),
+    Text(String),
+}
+
+/// Tokenize geometry composite text (`<(1,2),3>`, `((0,0),(1,1))`,
+/// `{1,-2,3e+10}`, ...) into separators and fields. Fields that parse as
+/// pg floats (incl. Infinity/NaN) become Num; anything else stays Text.
+fn geo_tokens(s: &str) -> Vec<GeoTok> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut flush = |cur: &mut String, out: &mut Vec<GeoTok>| {
+        if !cur.is_empty() {
+            match parse_pg_float(cur) {
+                Some(f) => out.push(GeoTok::Num(f)),
+                None => out.push(GeoTok::Text(std::mem::take(cur))),
+            }
+            cur.clear();
+        }
+    };
+    for c in s.chars() {
+        if matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ' ') {
+            flush(&mut cur, &mut out);
+            out.push(GeoTok::Sep(c));
+        } else {
+            cur.push(c);
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// Token-wise geometry compare: structure exact, numeric fields by ulp
+/// under the caller-widened budget. NaN==NaN counts as a (tolerant) match
+/// only when both sides are NaN in the same field.
+fn cmp_geo_text(x: &str, y: &str, geo_tol: u64) -> CellCmp {
+    let (ta, tb) = (geo_tokens(x), geo_tokens(y));
+    if ta.len() != tb.len() {
+        return CellCmp::Diff;
+    }
+    let mut any_ulp = false;
+    for (a, b) in ta.iter().zip(tb.iter()) {
+        match (a, b) {
+            (GeoTok::Sep(ca), GeoTok::Sep(cb)) if ca == cb => {}
+            (GeoTok::Text(sa), GeoTok::Text(sb)) if sa == sb => {}
+            (GeoTok::Num(fa), GeoTok::Num(fb)) => {
+                if fa.is_nan() || fb.is_nan() {
+                    if !(fa.is_nan() && fb.is_nan()) {
+                        return CellCmp::Diff;
+                    }
+                    any_ulp = true;
+                } else if fa == fb {
+                    // exact numeric match (possibly different text spellings —
+                    // still counts tolerant so a formatting divergence with
+                    // identical value surfaces as ulp-matched, not silent)
+                    // NOTE: identical text never reaches here (fast path).
+                    any_ulp = true;
+                } else if ulp_distance(*fa, *fb) <= geo_tol {
+                    any_ulp = true;
+                } else {
+                    return CellCmp::Diff;
+                }
+            }
+            _ => return CellCmp::Diff,
+        }
+    }
+    if any_ulp { CellCmp::EqualUlp } else { CellCmp::Equal }
+}
+
+fn parse_pg_float(s: &str) -> Option<f64> {
+    match s {
+        "Infinity" => Some(f64::INFINITY),
+        "-Infinity" => Some(f64::NEG_INFINITY),
+        "NaN" => Some(f64::NAN),
+        _ => s.parse().ok(),
+    }
+}
+
+fn cmp_cell(a: &Option<String>, b: &Option<String>, mode: ColCmp, ulp_tol: u64) -> CellCmp {
+    match (a, b) {
+        (None, None) => CellCmp::Equal,
+        (Some(x), Some(y)) => {
+            if x == y {
+                return CellCmp::Equal;
+            }
+            match mode {
+                ColCmp::Exact => {}
+                ColCmp::FloatUlp => {
+                    if let (Some(fx), Some(fy)) = (parse_pg_float(x), parse_pg_float(y)) {
+                        if fx.is_nan() && fy.is_nan() {
+                            return CellCmp::EqualUlp;
+                        }
+                        if !fx.is_nan() && !fy.is_nan() && ulp_distance(fx, fy) <= ulp_tol {
+                            return CellCmp::EqualUlp;
+                        }
+                    }
+                }
+                ColCmp::GeoUlp => {
+                    return cmp_geo_text(x, y, ulp_tol.saturating_mul(GEO_ULP_FACTOR));
+                }
+                ColCmp::FloatSoft => {
+                    // Ruled-soft: both sides being float values is enough —
+                    // plan-dependent accumulation order makes the divergence
+                    // unbounded in ulp terms. NULL vs value stays a diff.
+                    if parse_pg_float(x).is_some() && parse_pg_float(y).is_some() {
+                        return CellCmp::EqualSoft;
+                    }
+                }
+            }
+            CellCmp::Diff
+        }
+        _ => CellCmp::Diff,
+    }
+}
+
+fn cmp_row(
+    a: &[Option<String>],
+    b: &[Option<String>],
+    modes: &[ColCmp],
+    ulp_tol: u64,
+) -> CellCmp {
+    if a.len() != b.len() {
+        return CellCmp::Diff;
+    }
+    let mut worst = CellCmp::Equal;
+    for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+        match cmp_cell(x, y, modes.get(i).copied().unwrap_or(ColCmp::Exact), ulp_tol) {
+            CellCmp::Diff => return CellCmp::Diff,
+            CellCmp::EqualSoft => worst = CellCmp::EqualSoft,
+            CellCmp::EqualUlp => {
+                if worst == CellCmp::Equal {
+                    worst = CellCmp::EqualUlp;
+                }
+            }
+            CellCmp::Equal => {}
+        }
+    }
+    worst
+}
+
+fn render_row(row: &[Option<String>]) -> String {
+    let cells: Vec<String> = row
+        .iter()
+        .map(|c| match c {
+            None => "NULL".to_string(),
+            Some(s) => s.clone(),
+        })
+        .collect();
+    cells.join("|")
+}
+
+/// Canonical text encoding of a row for multiset sorting: NULL and cell
+/// values are separated by bytes that cannot appear in text output.
+fn canon_row(row: &[Option<String>]) -> String {
+    let mut out = String::new();
+    for c in row {
+        match c {
+            None => out.push('\u{1}'),
+            Some(s) => out.push_str(s),
+        }
+        out.push('\u{1f}');
+    }
+    out
+}
+
+/// Ordered (positional) rowset compare.
+pub fn cmp_rows_ordered(
+    a: &[Vec<Option<String>>],
+    b: &[Vec<Option<String>>],
+    modes: &[ColCmp],
+    ulp_tol: u64,
+) -> RowsetCmp {
+    if a.len() != b.len() {
+        return RowsetCmp::Diff(format!("row count {} vs {}", a.len(), b.len()));
+    }
+    let mut worst = RowsetCmp::Equal;
+    for (i, (ra, rb)) in a.iter().zip(b.iter()).enumerate() {
+        match cmp_row(ra, rb, modes, ulp_tol) {
+            CellCmp::Diff => {
+                return RowsetCmp::Diff(format!(
+                    "row {}: [{}] vs [{}]",
+                    i,
+                    render_row(ra),
+                    render_row(rb)
+                ))
+            }
+            CellCmp::EqualSoft => worst = RowsetCmp::EqualSoft,
+            CellCmp::EqualUlp => {
+                if worst == RowsetCmp::Equal {
+                    worst = RowsetCmp::EqualUlp;
+                }
+            }
+            CellCmp::Equal => {}
+        }
+    }
+    worst
+}
+
+/// Multiset rowset compare: exact path sorts canonical encodings; when
+/// that fails, an O(n^2) tolerance-aware greedy matching decides whether
+/// the remaining differences are float-ulp/ruled-soft only.
+pub fn cmp_rows_multiset(
+    a: &[Vec<Option<String>>],
+    b: &[Vec<Option<String>>],
+    modes: &[ColCmp],
+    ulp_tol: u64,
+) -> RowsetCmp {
+    if a.len() != b.len() {
+        return RowsetCmp::Diff(format!("row count {} vs {}", a.len(), b.len()));
+    }
+    let mut ca: Vec<String> = a.iter().map(|r| canon_row(r)).collect();
+    let mut cb: Vec<String> = b.iter().map(|r| canon_row(r)).collect();
+    ca.sort();
+    cb.sort();
+    if ca == cb {
+        return RowsetCmp::Equal;
+    }
+    let mut used = vec![false; b.len()];
+    let mut any_ulp = false;
+    let mut any_soft = false;
+    for ra in a {
+        let mut matched = false;
+        for (j, rb) in b.iter().enumerate() {
+            if used[j] {
+                continue;
+            }
+            let c = cmp_row(ra, rb, modes, ulp_tol);
+            match c {
+                CellCmp::Equal => {
+                    used[j] = true;
+                    matched = true;
+                    break;
+                }
+                CellCmp::EqualUlp | CellCmp::EqualSoft => {
+                    any_ulp = true;
+                    any_soft |= c == CellCmp::EqualSoft;
+                    used[j] = true;
+                    matched = true;
+                    break;
+                }
+                CellCmp::Diff => {}
+            }
+        }
+        if !matched {
+            return RowsetCmp::Diff(format!("unmatched row on A: [{}]", render_row(ra)));
+        }
+    }
+    debug_assert!(any_ulp, "exact multiset differed but greedy match used no tolerant cell");
+    if any_soft {
+        RowsetCmp::EqualSoft
+    } else {
+        RowsetCmp::EqualUlp
+    }
+}
+
+/// Parse the affected-row count out of a CommandComplete tag ("UPDATE 3",
+/// "INSERT 0 1", "DELETE 0"); None for tags without one ("BEGIN", "SET").
+pub fn tag_affected(tag: &str) -> Option<u64> {
+    let last = tag.rsplit(' ').next()?;
+    if last == tag {
+        return None;
+    }
+    last.parse().ok()
+}
+
+/// Statement-level ORDER BY detection over the rendered SQL. Generated
+/// statements spell it exactly this way; reduced/replayed scripts do too.
+pub fn has_order_by(sql: &str) -> bool {
+    sql.contains(" ORDER BY ")
+}
+
+/// EXPLAIN statement detection (rendered SQL or replayed scripts).
+pub fn is_explain_stmt(sql: &str) -> bool {
+    let head = sql.trim_start();
+    head.len() >= 7 && head[..7].eq_ignore_ascii_case("EXPLAIN")
+}
+
+/// Runtime resource counters inside EXPLAIN ANALYZE output whose values
+/// (and value-adjacent text, e.g. quicksort vs external merge) are
+/// implementation state, not planner conformance: masked before the
+/// EXPLAIN rowset compare. Cost/row *estimates* are never printed at all
+/// (COSTS OFF always); "actual rows=" stays compared — under matching
+/// plans it is a real conformance signal. Longest-first: prefixes such as
+/// "Memory" vs "Memory Usage" must try the longer token first.
+const EXPLAIN_COUNTER_TOKENS: &[&str] = &[
+    // Buffer-usage counters (G2, show_buffer_usage): in TEXT format the
+    // whole "Buffers:" tail is masked (WHICH counters print depends on
+    // which are nonzero — implementation state), so line PRESENCE and
+    // indentation stay the compared surface; JSON/YAML print every block
+    // counter unconditionally under per-node keys, masked value-wise.
+    // "I/O Timings"/"I/O * Time" only appear under track_io_timing
+    // (observability profile) and are wall-clock.
+    "Shared Hit Blocks",
+    "Shared Read Blocks",
+    "Shared Dirtied Blocks",
+    "Shared Written Blocks",
+    "Local Hit Blocks",
+    "Local Read Blocks",
+    "Local Dirtied Blocks",
+    "Local Written Blocks",
+    "Temp Read Blocks",
+    "Temp Written Blocks",
+    "Shared I/O Read Time",
+    "Shared I/O Write Time",
+    "Local I/O Read Time",
+    "Local I/O Write Time",
+    "Temp I/O Read Time",
+    "Temp I/O Write Time",
+    "I/O Timings",
+    "I/O Read Time",
+    "I/O Write Time",
+    "Buffers",
+    "Average Sort Space Used",
+    "Peak Sort Space Used",
+    "Original Hash Buckets",
+    "Original Hash Batches",
+    "Peak Memory Usage",
+    "Sort Space Used",
+    "Sort Space Type",
+    "Average Memory",
+    "Memory Usage",
+    "Sort Methods",
+    "Sort Method",
+    "Peak Memory",
+    // Tuplestore lines (WindowAgg/Materialize/CTE): `Storage: Memory
+    // Maximum Storage: NNkB` — the high-water mark is allocator state
+    // (U1-F2). "Maximum Storage" must precede "Storage" so the longer
+    // token wins.
+    "Maximum Storage",
+    "Storage",
+    "Hash Buckets",
+    "Hash Batches",
+    "Disk Usage",
+    "Buckets",
+    "Batches",
+    // WAL usage (LD4, show_wal_usage): record/fpi/byte counts are storage
+    // state (page fullness, checkpoint history decides fpi). JSON/YAML
+    // print every key unconditionally, masked value-wise; the TEXT "WAL:"
+    // line prints only the nonzero counters, so it masks to end-of-line
+    // like "Buffers:" (the exd module additionally keeps TEXT WAL out of
+    // differential legs).
+    "WAL Records",
+    "WAL FPI",
+    "WAL Bytes",
+    "WAL Buffers Full",
+    "WAL",
+    // Planning/execution summary (LD4, SUMMARY ON arms): wall clock.
+    "Planning Time",
+    "Execution Time",
+    // Planner memory (LD4, MEMORY option): allocator state. The TEXT line
+    // is "Memory: used=NkB  allocated=NkB" — both pairs are one value
+    // tail, so bare "Memory" masks to end-of-line (its other TEXT
+    // appearances, "Sort Method: .."/"Buffers: ..", are already inside
+    // end-of-line masks; JSON/YAML use the longer keys below).
+    "Memory Used",
+    "Memory Allocated",
+    // HashAgg planner-estimate partition count (memory-model state).
+    "Planned Partitions",
+    "Memory",
+    "Disk",
+];
+
+/// Mask counter values in one EXPLAIN output cell: after `<token>:` (or
+/// `<token>":` in JSON), everything up to the next value delimiter
+/// (comma, newline, double space, or end) becomes `X`. Applied to BOTH
+/// sides identically, so masked-equal is well-defined; TEXT, JSON and
+/// YAML forms all terminate their values at one of these delimiters.
+pub fn normalize_explain_cell(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    'outer: while i < bytes.len() {
+        for tok in EXPLAIN_COUNTER_TOKENS {
+            let t = tok.as_bytes();
+            if bytes[i..].starts_with(t) {
+                // Word boundary on the left (start, or non-alphanumeric).
+                let left_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+                // Separator: optional closing quote (JSON key), then ':',
+                // then optional spaces.
+                let mut j = i + t.len();
+                if j < bytes.len() && bytes[j] == b'"' {
+                    j += 1;
+                }
+                if left_ok && j < bytes.len() && bytes[j] == b':' {
+                    j += 1;
+                    while j < bytes.len() && bytes[j] == b' ' {
+                        j += 1;
+                    }
+                    // Copy token + separator, mask the value. "Sort
+                    // Method" masks to end-of-line: in TEXT format the
+                    // method decides which counter label follows on the
+                    // same line (quicksort -> Memory, external merge ->
+                    // Disk), so the whole tail is implementation state.
+                    // Likewise "Buffers"/"I/O Timings" TEXT lines: which
+                    // name=NN pairs print depends on which counters are
+                    // nonzero.
+                    let to_eol = tok.starts_with("Sort Method")
+                        || *tok == "Buffers"
+                        || *tok == "I/O Timings"
+                        || *tok == "WAL"
+                        || *tok == "Memory";
+                    out.push_str(&s[i..j]);
+                    out.push('X');
+                    while j < bytes.len() {
+                        if bytes[j] == b'\n' {
+                            break;
+                        }
+                        if !to_eol {
+                            if bytes[j] == b',' {
+                                break;
+                            }
+                            if bytes[j] == b' '
+                                && j + 1 < bytes.len()
+                                && bytes[j + 1] == b' '
+                            {
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                    i = j;
+                    continue 'outer;
+                }
+            }
+        }
+        let c = s[i..].chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+fn normalize_explain_rows(rows: &[Vec<Option<String>>]) -> Vec<Vec<Option<String>>> {
+    rows.iter()
+        .map(|r| {
+            r.iter()
+                .map(|c| c.as_ref().map(|s| normalize_explain_cell(s)))
+                .collect()
+        })
+        .collect()
+}
+
+/// Short shape name for mixed-outcome diagnostics.
+fn outcome_shape(o: &StmtOutcome) -> String {
+    match o {
+        StmtOutcome::Rows { rows, .. } => format!("a rowset ({} rows)", rows.len()),
+        StmtOutcome::Command { tag, .. } => format!("command tag {tag:?}"),
+        StmtOutcome::CopyOut { tag, .. } => format!("a COPY transfer ({tag})"),
+        StmtOutcome::Error { sqlstate, .. } => format!("error {sqlstate}"),
+        StmtOutcome::ConnLost { .. } => "a lost connection".to_string(),
+    }
+}
+
+/// First-divergence detail for two COPY payloads: offset, lengths, and a
+/// bounded hex window around the first differing byte on each side.
+fn copy_diff_detail(a: &[u8], b: &[u8]) -> String {
+    let off = a
+        .iter()
+        .zip(b.iter())
+        .position(|(x, y)| x != y)
+        .unwrap_or_else(|| a.len().min(b.len()));
+    let win = |s: &[u8]| -> String {
+        let lo = off.saturating_sub(8);
+        let hi = (off + 8).min(s.len());
+        s[lo..hi].iter().map(|byte| format!("{byte:02x}")).collect()
+    };
+    format!(
+        "COPY payloads differ at byte {} (len {} vs {}): ..{}.. vs ..{}..",
+        off,
+        a.len(),
+        b.len(),
+        win(a),
+        win(b)
+    )
+}
+
+pub struct DiffInput<'a> {
+    pub sql: &'a str,
+    pub a: &'a StmtOutcome,
+    pub b: &'a StmtOutcome,
+    pub ulp_tol: u64,
+    /// Output columns the generator marked as order-sensitive float
+    /// aggregates (session::Statement::soft_float_cols): compared
+    /// ruled-soft. Empty for replayed scripts without metadata.
+    pub soft_cols: &'a [usize],
+}
+
+/// Raw classification, before the ruled-divergence table is consulted
+/// (crate::ruled::apply_ruled does that pass). Ulp-only and tie-order-only
+/// rowset agreements come out as `Ruled` candidates with placeholder ids
+/// resolved by the ruled table.
+pub fn classify(input: &DiffInput) -> Classified {
+    let DiffInput { sql, a, b, ulp_tol, soft_cols } = *input;
+    use StmtOutcome::*;
+    match (a, b) {
+        (ConnLost { detail }, ConnLost { .. }) => Classified {
+            class: DiffClass::SessionDiverged(Side::Both),
+            detail: format!("both connections lost; A: {detail}"),
+        },
+        (ConnLost { detail }, _) => Classified {
+            class: DiffClass::SessionDiverged(Side::A),
+            detail: format!("A connection lost: {detail}"),
+        },
+        (_, ConnLost { detail }) => Classified {
+            class: DiffClass::SessionDiverged(Side::B),
+            detail: format!("B connection lost: {detail}"),
+        },
+        (Error { sqlstate: sa, message: ma }, Error { sqlstate: sb, message: mb }) => {
+            if sa == sb {
+                Classified {
+                    class: DiffClass::Match,
+                    detail: if ma == mb {
+                        format!("both error {sa}")
+                    } else {
+                        format!("both error {sa} (messages differ: {ma:?} vs {mb:?})")
+                    },
+                }
+            } else {
+                Classified {
+                    class: DiffClass::ErrorDiff,
+                    detail: format!("SQLSTATE {sa} ({ma}) vs {sb} ({mb})"),
+                }
+            }
+        }
+        (Error { sqlstate, message }, _) => Classified {
+            class: DiffClass::ErrorDiff,
+            detail: format!("A errored {sqlstate} ({message}); B succeeded"),
+        },
+        (_, Error { sqlstate, message }) => Classified {
+            class: DiffClass::ErrorDiff,
+            detail: format!("A succeeded; B errored {sqlstate} ({message})"),
+        },
+        (CopyOut { bytes: ba, tag: ta }, CopyOut { bytes: bb, tag: tb }) => {
+            if ba == bb {
+                if ta == tb {
+                    Classified { class: DiffClass::Match, detail: String::new() }
+                } else {
+                    Classified {
+                        class: DiffClass::CountDiff,
+                        detail: format!("COPY tags differ: {ta:?} vs {tb:?}"),
+                    }
+                }
+            } else {
+                Classified {
+                    class: DiffClass::RowsetDiff,
+                    detail: copy_diff_detail(ba, bb),
+                }
+            }
+        }
+        (CopyOut { tag, .. }, other) => Classified {
+            class: DiffClass::RowsetDiff,
+            detail: format!(
+                "A produced a COPY transfer ({tag}); B produced {}",
+                outcome_shape(other)
+            ),
+        },
+        (other, CopyOut { tag, .. }) => Classified {
+            class: DiffClass::RowsetDiff,
+            detail: format!(
+                "A produced {}; B produced a COPY transfer ({tag})",
+                outcome_shape(other)
+            ),
+        },
+        (Command { tag: ta, affected: ca }, Command { tag: tb, affected: cb }) => {
+            if ca != cb {
+                Classified {
+                    class: DiffClass::CountDiff,
+                    detail: format!("affected {ca:?} ({ta}) vs {cb:?} ({tb})"),
+                }
+            } else {
+                Classified { class: DiffClass::Match, detail: String::new() }
+            }
+        }
+        (Rows { .. }, Command { tag, .. }) => Classified {
+            class: DiffClass::RowsetDiff,
+            detail: format!("A returned rows; B returned command tag {tag:?}"),
+        },
+        (Command { tag, .. }, Rows { .. }) => Classified {
+            class: DiffClass::RowsetDiff,
+            detail: format!("A returned command tag {tag:?}; B returned rows"),
+        },
+        (Rows { col_oids: oa, rows: ra }, Rows { col_oids: ob, rows: rb }) => {
+            if oa != ob {
+                return Classified {
+                    class: DiffClass::RowsetDiff,
+                    detail: format!("column type oids differ: {oa:?} vs {ob:?}"),
+                };
+            }
+            let modes = col_cmp_modes(oa, soft_cols);
+            let ordered = has_order_by(sql);
+            // EXPLAIN statements: a raw diff that disappears once runtime
+            // resource counters are masked is Ruled("explain-counter"),
+            // not a finding — plan *structure* still compares strictly.
+            let explain_counter_only = |d: &str| -> Option<Classified> {
+                if !is_explain_stmt(sql) {
+                    return None;
+                }
+                let na = normalize_explain_rows(ra);
+                let nb = normalize_explain_rows(rb);
+                let norm = if ordered {
+                    cmp_rows_ordered(&na, &nb, &modes, ulp_tol)
+                } else {
+                    cmp_rows_multiset(&na, &nb, &modes, ulp_tol)
+                };
+                if matches!(norm, RowsetCmp::Diff(_)) {
+                    None
+                } else {
+                    Some(Classified {
+                        class: DiffClass::Ruled("explain-counter".to_string()),
+                        detail: format!(
+                            "equal after masking runtime resource counters: {d}"
+                        ),
+                    })
+                }
+            };
+            if ordered {
+                match cmp_rows_ordered(ra, rb, &modes, ulp_tol) {
+                    RowsetCmp::Equal => {
+                        Classified { class: DiffClass::Match, detail: String::new() }
+                    }
+                    RowsetCmp::EqualUlp => Classified {
+                        class: DiffClass::Ruled("float-ulp".to_string()),
+                        detail: "equal within float ulp tolerance".to_string(),
+                    },
+                    RowsetCmp::EqualSoft => Classified {
+                        class: DiffClass::Ruled("float-agg".to_string()),
+                        detail: "equal outside ruled-soft float-aggregate columns".to_string(),
+                    },
+                    RowsetCmp::Diff(d) => {
+                        if let Some(c) = explain_counter_only(&d) {
+                            return c;
+                        }
+                        match cmp_rows_multiset(ra, rb, &modes, ulp_tol) {
+                            RowsetCmp::Equal | RowsetCmp::EqualUlp => Classified {
+                                class: DiffClass::Ruled("tie-order".to_string()),
+                                detail: format!("multiset-equal, order differs: {d}"),
+                            },
+                            // A soft column may itself have steered the sort;
+                            // the soft ruling subsumes the order difference.
+                            RowsetCmp::EqualSoft => Classified {
+                                class: DiffClass::Ruled("float-agg".to_string()),
+                                detail: format!(
+                                    "multiset-equal outside ruled-soft float-aggregate \
+                                     columns, order differs: {d}"
+                                ),
+                            },
+                            RowsetCmp::Diff(_) => {
+                                Classified { class: DiffClass::RowsetDiff, detail: d }
+                            }
+                        }
+                    }
+                }
+            } else {
+                match cmp_rows_multiset(ra, rb, &modes, ulp_tol) {
+                    RowsetCmp::Equal => {
+                        Classified { class: DiffClass::Match, detail: String::new() }
+                    }
+                    RowsetCmp::EqualUlp => Classified {
+                        class: DiffClass::Ruled("float-ulp".to_string()),
+                        detail: "multiset-equal within float ulp tolerance".to_string(),
+                    },
+                    RowsetCmp::EqualSoft => Classified {
+                        class: DiffClass::Ruled("float-agg".to_string()),
+                        detail: "multiset-equal outside ruled-soft float-aggregate columns"
+                            .to_string(),
+                    },
+                    RowsetCmp::Diff(d) => {
+                        if let Some(c) = explain_counter_only(&d) {
+                            return c;
+                        }
+                        Classified { class: DiffClass::RowsetDiff, detail: d }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(cells: &[&[Option<&str>]]) -> Vec<Vec<Option<String>>> {
+        cells
+            .iter()
+            .map(|r| r.iter().map(|c| c.map(|s| s.to_string())).collect())
+            .collect()
+    }
+
+    fn rowset(col_oids: Vec<u32>, r: Vec<Vec<Option<String>>>) -> StmtOutcome {
+        StmtOutcome::Rows { col_oids, rows: r }
+    }
+
+    fn classify_sql(sql: &str, a: &StmtOutcome, b: &StmtOutcome) -> Classified {
+        classify(&DiffInput { sql, a, b, ulp_tol: 4, soft_cols: &[] })
+    }
+
+    fn classify_soft(
+        sql: &str,
+        a: &StmtOutcome,
+        b: &StmtOutcome,
+        soft_cols: &[usize],
+    ) -> Classified {
+        classify(&DiffInput { sql, a, b, ulp_tol: 4, soft_cols })
+    }
+
+    #[test]
+    fn identical_rowsets_match() {
+        let a = rowset(vec![23], rows(&[&[Some("1")], &[Some("2")]]));
+        let b = rowset(vec![23], rows(&[&[Some("1")], &[Some("2")]]));
+        assert_eq!(classify_sql("SELECT c FROM t;", &a, &b).class, DiffClass::Match);
+    }
+
+    #[test]
+    fn multiset_vs_ordered_compare() {
+        let a = rowset(vec![23], rows(&[&[Some("1")], &[Some("2")]]));
+        let b = rowset(vec![23], rows(&[&[Some("2")], &[Some("1")]]));
+        // No ORDER BY: multiset compare, reordering is a match.
+        assert_eq!(classify_sql("SELECT c FROM t;", &a, &b).class, DiffClass::Match);
+        // ORDER BY: ordered compare fails, multiset succeeds -> tie-order
+        // ruled candidate, not a raw finding.
+        let c = classify_sql("SELECT c FROM t ORDER BY 1;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("tie-order".to_string()));
+    }
+
+    #[test]
+    fn real_rowset_diff_flags() {
+        let a = rowset(vec![23], rows(&[&[Some("1")]]));
+        let b = rowset(vec![23], rows(&[&[Some("3")]]));
+        assert_eq!(
+            classify_sql("SELECT c FROM t ORDER BY 1;", &a, &b).class,
+            DiffClass::RowsetDiff
+        );
+        assert_eq!(classify_sql("SELECT c FROM t;", &a, &b).class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn null_vs_value_diffs() {
+        let a = rowset(vec![25], rows(&[&[None]]));
+        let b = rowset(vec![25], rows(&[&[Some("")]]));
+        assert_eq!(classify_sql("SELECT c FROM t;", &a, &b).class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn geo_composite_last_digit_float_is_ruled_candidate() {
+        // soak-3 N1 witness shape: circle radius differing in the last digit
+        // (1 ulp) inside the composite text — must resolve as the ruled
+        // float-ulp candidate, not RowsetDiff.
+        let a = rowset(vec![718], rows(&[&[Some("<(1,2),2.6925824035672523>")]]));
+        let b = rowset(vec![718], rows(&[&[Some("<(1,2),2.692582403567252>")]]));
+        let c = classify_sql("SELECT circle(p) FROM t;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("float-ulp".to_string()));
+    }
+
+    #[test]
+    fn geo_composite_within_widened_budget_is_ruled_candidate() {
+        // dist-chain accumulation up to ~15 ulp (soak-3 N1) fits the widened
+        // geo budget (ulp_tol 4 * factor 8 = 32) inside a path composite.
+        let x = 2.6925824035672523f64;
+        let y = f64::from_bits(x.to_bits() + 15);
+        let a = rowset(vec![602], rows(&[&[Some(&format!("(({x:?},1),(2,3))"))]]));
+        let b = rowset(vec![602], rows(&[&[Some(&format!("(({y:?},1),(2,3))"))]]));
+        let c = classify_sql("SELECT pth FROM t;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("float-ulp".to_string()));
+    }
+
+    #[test]
+    fn geo_composite_real_diff_still_flags() {
+        // Structure diff and beyond-budget numeric diff both stay findings.
+        let a = rowset(vec![718], rows(&[&[Some("<(1,2),3>")]]));
+        let b = rowset(vec![718], rows(&[&[Some("<(1,2),4>")]]));
+        assert_eq!(classify_sql("SELECT c FROM t;", &a, &b).class, DiffClass::RowsetDiff);
+        let a = rowset(vec![604], rows(&[&[Some("((0,0),(1,1))")]]));
+        let b = rowset(vec![604], rows(&[&[Some("((0,0),(1,1),(2,2))")]]));
+        assert_eq!(classify_sql("SELECT g FROM t;", &a, &b).class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn geo_composite_nan_matches_nan_only() {
+        let a = rowset(vec![600], rows(&[&[Some("(NaN,1)")]]));
+        let b = rowset(vec![600], rows(&[&[Some("(NaN,1)")]]));
+        // identical text: exact match fast path
+        assert_eq!(classify_sql("SELECT p FROM t;", &a, &b).class, DiffClass::Match);
+        let c = rowset(vec![600], rows(&[&[Some("(NaN,1)")]]));
+        let d = rowset(vec![600], rows(&[&[Some("(0,1)")]]));
+        assert_eq!(classify_sql("SELECT p FROM t;", &c, &d).class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn float_ulp_within_tolerance_is_ruled_candidate() {
+        let x = 0.1f64 + 0.2f64;
+        let y = 0.3f64; // 1 ulp away from x
+        let a = rowset(vec![FLOAT8_OID], rows(&[&[Some(&format!("{x:?}"))]]));
+        let b = rowset(vec![FLOAT8_OID], rows(&[&[Some(&format!("{y:?}"))]]));
+        let c = classify_sql("SELECT f FROM t ORDER BY 1;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("float-ulp".to_string()));
+    }
+
+    #[test]
+    fn float_beyond_tolerance_diffs() {
+        let a = rowset(vec![FLOAT8_OID], rows(&[&[Some("1.0")]]));
+        let b = rowset(vec![FLOAT8_OID], rows(&[&[Some("1.001")]]));
+        assert_eq!(
+            classify_sql("SELECT f FROM t ORDER BY 1;", &a, &b).class,
+            DiffClass::RowsetDiff
+        );
+    }
+
+    #[test]
+    fn soft_columns_accept_any_float_divergence() {
+        // Far beyond any ulp tolerance: a ruled-soft column still agrees.
+        let a = rowset(vec![FLOAT8_OID], rows(&[&[Some("1e-10")]]));
+        let b = rowset(vec![FLOAT8_OID], rows(&[&[Some("0")]]));
+        let c = classify_soft("SELECT sum(f) FROM t;", &a, &b, &[0]);
+        assert_eq!(c.class, DiffClass::Ruled("float-agg".to_string()));
+        // Without the soft mask the same divergence is a real finding.
+        assert_eq!(
+            classify_soft("SELECT sum(f) FROM t;", &a, &b, &[]).class,
+            DiffClass::RowsetDiff
+        );
+        // NaN vs value agrees under soft (both are float values).
+        let n = rowset(vec![FLOAT8_OID], rows(&[&[Some("NaN")]]));
+        assert_eq!(
+            classify_soft("SELECT sum(f) FROM t;", &a, &n, &[0]).class,
+            DiffClass::Ruled("float-agg".to_string())
+        );
+        // NULL vs value stays a diff even in a soft column.
+        let nul = rowset(vec![FLOAT8_OID], rows(&[&[None]]));
+        assert_eq!(
+            classify_soft("SELECT sum(f) FROM t;", &a, &nul, &[0]).class,
+            DiffClass::RowsetDiff
+        );
+    }
+
+    #[test]
+    fn soft_mask_never_weakens_nonfloat_or_other_columns() {
+        // Soft index pointing at a non-float column: exact compare stands.
+        let a = rowset(vec![1700], rows(&[&[Some("1.0")]]));
+        let b = rowset(vec![1700], rows(&[&[Some("1.00")]]));
+        assert_eq!(
+            classify_soft("SELECT sum(n) FROM t;", &a, &b, &[0]).class,
+            DiffClass::RowsetDiff
+        );
+        // Soft on column 1 leaves column 0 float-ulp: beyond-ulp diff in
+        // column 0 is still a finding.
+        let a = rowset(
+            vec![FLOAT8_OID, FLOAT8_OID],
+            rows(&[&[Some("1.0"), Some("5.0")]]),
+        );
+        let b = rowset(
+            vec![FLOAT8_OID, FLOAT8_OID],
+            rows(&[&[Some("1.001"), Some("6.0")]]),
+        );
+        assert_eq!(
+            classify_soft("SELECT f, sum(g) FROM t;", &a, &b, &[1]).class,
+            DiffClass::RowsetDiff
+        );
+    }
+
+    #[test]
+    fn float_ulp_ignored_for_nonfloat_columns() {
+        // Same numeric distance, but a numeric (1700) column: exact compare.
+        let a = rowset(vec![1700], rows(&[&[Some("0.30000000000000004")]]));
+        let b = rowset(vec![1700], rows(&[&[Some("0.3")]]));
+        assert_eq!(
+            classify_sql("SELECT n FROM t ORDER BY 1;", &a, &b).class,
+            DiffClass::RowsetDiff
+        );
+    }
+
+    #[test]
+    fn float_specials() {
+        let a = rowset(vec![FLOAT8_OID], rows(&[&[Some("NaN")], &[Some("Infinity")]]));
+        let b = rowset(vec![FLOAT8_OID], rows(&[&[Some("NaN")], &[Some("Infinity")]]));
+        assert_eq!(
+            classify_sql("SELECT f FROM t ORDER BY 1;", &a, &b).class,
+            DiffClass::Match
+        );
+        let c = rowset(vec![FLOAT8_OID], rows(&[&[Some("Infinity")]]));
+        let d = rowset(vec![FLOAT8_OID], rows(&[&[Some("-Infinity")]]));
+        assert_eq!(
+            classify_sql("SELECT f FROM t ORDER BY 1;", &c, &d).class,
+            DiffClass::RowsetDiff
+        );
+    }
+
+    #[test]
+    fn column_oid_mismatch_is_rowset_diff() {
+        let a = rowset(vec![23], rows(&[&[Some("1")]]));
+        let b = rowset(vec![20], rows(&[&[Some("1")]]));
+        let c = classify_sql("SELECT c FROM t;", &a, &b);
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+        assert!(c.detail.contains("column type oids"));
+    }
+
+    #[test]
+    fn sqlstate_compare() {
+        let e1 = StmtOutcome::Error {
+            sqlstate: "22012".to_string(),
+            message: "division by zero".to_string(),
+        };
+        let e2 = StmtOutcome::Error {
+            sqlstate: "22012".to_string(),
+            message: "division by zero somewhere".to_string(),
+        };
+        let e3 = StmtOutcome::Error {
+            sqlstate: "22003".to_string(),
+            message: "out of range".to_string(),
+        };
+        // Same SQLSTATE, different message text: MATCH.
+        assert_eq!(classify_sql("SELECT 1/0;", &e1, &e2).class, DiffClass::Match);
+        assert_eq!(classify_sql("SELECT 1/0;", &e1, &e3).class, DiffClass::ErrorDiff);
+        let ok = rowset(vec![23], rows(&[&[Some("1")]]));
+        assert_eq!(classify_sql("SELECT 1;", &e1, &ok).class, DiffClass::ErrorDiff);
+        assert_eq!(classify_sql("SELECT 1;", &ok, &e1).class, DiffClass::ErrorDiff);
+    }
+
+    #[test]
+    fn count_diff() {
+        let a = StmtOutcome::Command { tag: "UPDATE 3".to_string(), affected: Some(3) };
+        let b = StmtOutcome::Command { tag: "UPDATE 2".to_string(), affected: Some(2) };
+        assert_eq!(classify_sql("UPDATE t SET c = 1;", &a, &b).class, DiffClass::CountDiff);
+        let c = StmtOutcome::Command { tag: "UPDATE 3".to_string(), affected: Some(3) };
+        assert_eq!(classify_sql("UPDATE t SET c = 1;", &a, &c).class, DiffClass::Match);
+    }
+
+    #[test]
+    fn session_diverged_records_side() {
+        let ok = rowset(vec![23], rows(&[&[Some("1")]]));
+        let lost = StmtOutcome::ConnLost { detail: "server closed".to_string() };
+        assert_eq!(
+            classify_sql("SELECT 1;", &lost, &ok).class,
+            DiffClass::SessionDiverged(Side::A)
+        );
+        assert_eq!(
+            classify_sql("SELECT 1;", &ok, &lost).class,
+            DiffClass::SessionDiverged(Side::B)
+        );
+        assert_eq!(
+            classify_sql("SELECT 1;", &lost, &lost).class,
+            DiffClass::SessionDiverged(Side::Both)
+        );
+    }
+
+    #[test]
+    fn copy_out_byte_compare() {
+        let co = |bytes: &[u8], tag: &str| StmtOutcome::CopyOut {
+            bytes: bytes.to_vec(),
+            tag: tag.to_string(),
+        };
+        let sql = "COPY t TO STDOUT (FORMAT binary);";
+        // Identical payload + tag: match.
+        assert_eq!(
+            classify_sql(sql, &co(b"PGCOPY\n\xff\x0d\x0a\x00abc", "COPY 2"),
+                         &co(b"PGCOPY\n\xff\x0d\x0a\x00abc", "COPY 2")).class,
+            DiffClass::Match
+        );
+        // One byte off: RowsetDiff with offset detail.
+        let c = classify_sql(sql, &co(b"PGCOPY\n\xff\x0d\x0a\x00abc", "COPY 2"),
+                             &co(b"PGCOPY\n\xff\x0d\x0a\x00abd", "COPY 2"));
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+        assert!(c.detail.contains("differ at byte 13"), "{}", c.detail);
+        // Prefix relationship: diverges at the shorter length.
+        let c = classify_sql(sql, &co(b"PGCOPY", "COPY 2"), &co(b"PGCOPY\n", "COPY 2"));
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+        assert!(c.detail.contains("len 6 vs 7"), "{}", c.detail);
+        // Same bytes, different tag: CountDiff.
+        let c = classify_sql(sql, &co(b"x", "COPY 2"), &co(b"x", "COPY 3"));
+        assert_eq!(c.class, DiffClass::CountDiff);
+        // COPY vs non-COPY shapes.
+        let cmd = StmtOutcome::Command { tag: "COPY 2".to_string(), affected: Some(2) };
+        assert_eq!(classify_sql(sql, &co(b"x", "COPY 2"), &cmd).class, DiffClass::RowsetDiff);
+        assert_eq!(classify_sql(sql, &cmd, &co(b"x", "COPY 2")).class, DiffClass::RowsetDiff);
+        // Error on one side stays an ERROR_DIFF.
+        let err = StmtOutcome::Error {
+            sqlstate: "42601".to_string(),
+            message: "m".to_string(),
+        };
+        assert_eq!(classify_sql(sql, &err, &co(b"x", "COPY 2")).class, DiffClass::ErrorDiff);
+    }
+
+    #[test]
+    fn tag_affected_parses() {
+        assert_eq!(tag_affected("UPDATE 3"), Some(3));
+        assert_eq!(tag_affected("INSERT 0 1"), Some(1));
+        assert_eq!(tag_affected("SELECT 12"), Some(12));
+        assert_eq!(tag_affected("BEGIN"), None);
+        assert_eq!(tag_affected("CREATE TABLE"), None);
+    }
+
+    #[test]
+    fn explain_counter_masking() {
+        // TEXT format: value runs end at double-space or end-of-cell;
+        // "Sort Method" masks to end-of-line (the method decides whether
+        // Memory or Disk follows).
+        assert_eq!(
+            normalize_explain_cell("Sort Method: quicksort  Memory: 25kB"),
+            "Sort Method: X"
+        );
+        assert_eq!(
+            normalize_explain_cell("Sort Method: external merge  Disk: 48kB"),
+            "Sort Method: X"
+        );
+        assert_eq!(
+            normalize_explain_cell(
+                "Buckets: 1024 (originally 1024)  Batches: 1 (originally 1)  Memory Usage: 9kB"
+            ),
+            "Buckets: X  Batches: X  Memory Usage: X"
+        );
+        // JSON format: quoted keys; Sort Method masks to end-of-line,
+        // numeric counter values to the comma.
+        assert_eq!(
+            normalize_explain_cell("\"Sort Method\": \"external merge\",\n\"Sort Space Used\": 2408,"),
+            "\"Sort Method\": X\n\"Sort Space Used\": X,"
+        );
+        // Not a counter context: "rows=" and plan node text untouched.
+        assert_eq!(
+            normalize_explain_cell("Seq Scan on fz_scalar t0 (actual rows=5 loops=1)"),
+            "Seq Scan on fz_scalar t0 (actual rows=5 loops=1)"
+        );
+        // Left word boundary: "NotMemory: 3" is not the Memory token.
+        assert_eq!(normalize_explain_cell("NotMemory: 3"), "NotMemory: 3");
+        // Tuplestore lines (U1-F2): the high-water mark differs across
+        // allocators; "Maximum Storage" wins over the shorter "Storage".
+        assert_eq!(
+            normalize_explain_cell("Storage: Memory  Maximum Storage: 17kB"),
+            "Storage: X  Maximum Storage: X"
+        );
+        assert_eq!(
+            normalize_explain_cell("\"Storage\": \"Memory\",\n\"Maximum Storage\": 17,"),
+            "\"Storage\": X,\n\"Maximum Storage\": X,"
+        );
+        // Buffer-usage lines (G2): TEXT masks the whole tail (which
+        // name=NN pairs print depends on which counters are nonzero);
+        // multi-line cells keep per-line structure.
+        assert_eq!(
+            normalize_explain_cell("Buffers: shared hit=4 read=2 dirtied=1, temp read=5 written=6"),
+            "Buffers: X"
+        );
+        assert_eq!(
+            normalize_explain_cell("   Buffers: shared hit=120\n   ->  Seq Scan on t"),
+            "   Buffers: X\n   ->  Seq Scan on t"
+        );
+        assert_eq!(
+            normalize_explain_cell("I/O Timings: shared read=0.05 write=0.01"),
+            "I/O Timings: X"
+        );
+        // JSON/YAML block counters mask value-wise; every key survives.
+        assert_eq!(
+            normalize_explain_cell("\"Shared Hit Blocks\": 111,\n\"Temp Read Blocks\": 0,"),
+            "\"Shared Hit Blocks\": X,\n\"Temp Read Blocks\": X,"
+        );
+        assert_eq!(
+            normalize_explain_cell("Shared Hit Blocks: 1\nShared Read Blocks: 0"),
+            "Shared Hit Blocks: X\nShared Read Blocks: X"
+        );
+        // "Buffers" left-boundary: a plan node name containing the word
+        // without the colon separator stays untouched.
+        assert_eq!(normalize_explain_cell("SharedBuffers: 3"), "SharedBuffers: 3");
+        // LD4 additions — WAL usage: TEXT tail masks to end-of-line
+        // (which counters print is runtime state), JSON keys value-wise.
+        assert_eq!(
+            normalize_explain_cell("WAL: records=22 bytes=1441\n->  Seq Scan on t"),
+            "WAL: X\n->  Seq Scan on t"
+        );
+        assert_eq!(
+            normalize_explain_cell("\"WAL Records\": 22,\n\"WAL FPI\": 0,\n\"WAL Bytes\": 1441,"),
+            "\"WAL Records\": X,\n\"WAL FPI\": X,\n\"WAL Bytes\": X,"
+        );
+        // Planning/execution summary + planner memory (SUMMARY ON /
+        // MEMORY arms): values masked, line presence compared. The TEXT
+        // planning-memory line is one end-of-line value tail.
+        assert_eq!(
+            normalize_explain_cell("Planning Time: 0.005 ms"),
+            "Planning Time: X"
+        );
+        assert_eq!(
+            normalize_explain_cell("Execution Time: 0.019 ms"),
+            "Execution Time: X"
+        );
+        assert_eq!(
+            normalize_explain_cell("Memory: used=10kB  allocated=16kB"),
+            "Memory: X"
+        );
+        assert_eq!(
+            normalize_explain_cell("\"Memory Used\": 10,\n\"Memory Allocated\": 16"),
+            "\"Memory Used\": X,\n\"Memory Allocated\": X"
+        );
+    }
+
+    #[test]
+    fn explain_counter_only_diff_is_ruled_candidate() {
+        let mk = |lines: &[&str]| {
+            rowset(vec![25], lines.iter().map(|l| vec![Some(l.to_string())]).collect())
+        };
+        let sql = "EXPLAIN (COSTS OFF, SUMMARY OFF, ANALYZE, TIMING OFF, BUFFERS OFF) \
+                   SELECT t0.s_int4 FROM fz_scalar t0;";
+        let a = mk(&["Sort (actual rows=5 loops=1)", "  Sort Method: quicksort  Memory: 25kB"]);
+        let b = mk(&["Sort (actual rows=5 loops=1)", "  Sort Method: external merge  Disk: 48kB"]);
+        // Counter-only divergence: ruled candidate, resolved by the table.
+        let c = classify_sql(sql, &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("explain-counter".to_string()));
+        // Structural divergence stays a real finding even on EXPLAIN.
+        let s = mk(&["Index Scan using fz_pk on fz_scalar t0 (actual rows=5 loops=1)"]);
+        assert_eq!(classify_sql(sql, &a, &s).class, DiffClass::RowsetDiff);
+        // The same counter rows on a non-EXPLAIN statement: real finding.
+        assert_eq!(
+            classify_sql("SELECT c FROM t;", &a, &b).class,
+            DiffClass::RowsetDiff
+        );
+    }
+
+    #[test]
+    fn ulp_distance_sane() {
+        assert_eq!(ulp_distance(1.0, 1.0), 0);
+        assert_eq!(ulp_distance(1.0, f64::from_bits(1.0f64.to_bits() + 1)), 1);
+        // Across the sign boundary.
+        let tiny = f64::from_bits(1);
+        assert_eq!(ulp_distance(-tiny, tiny), 2);
+        assert_eq!(ulp_distance(0.0, -0.0), 0);
+        assert!(ulp_distance(1.0, 2.0) > 1_000_000);
+    }
+}

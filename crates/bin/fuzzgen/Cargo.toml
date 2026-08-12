@@ -11,3 +11,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "fuzzgen"
 path = "src/main.rs"
+
+[[bin]]
+name = "diffrunner"
+path = "src/bin/diffrunner.rs"
+
+[[bin]]
+name = "covapply"
+path = "src/bin/covapply.rs"
