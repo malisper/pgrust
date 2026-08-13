@@ -313,6 +313,16 @@ fn mdunlinkfork(
             segno += 1;
         }
     }
+    // Drop the size-cache entry AGAIN now the file ops are done: a walker
+    // whose token postdates the leading remove could have measured the
+    // dying file mid-truncate and published that for this key. This second
+    // remove (an epoch bump) either invalidates that walker's still-pending
+    // publish or deletes its already-landed entry; a walk beginning after
+    // this point measures the settled tombstone (or ENOENTs), which is
+    // coherent by definition.
+    if !is_temp(rlocator) {
+        nblocks_cache::remove(rlocator.locator, forknum);
+    }
     Ok(())
 }
 
@@ -962,14 +972,21 @@ pub fn mdnblocks(
     forknum: ForkNumber,
 ) -> PgResult<BlockNumber> {
     if !is_temp(rlocator) {
-        if let Some(cached) = nblocks_cache::lookup(rlocator.locator, forknum) {
-            if nblocks_validate() {
-                validate_cached(rlocator, st, forknum, cached)?;
+        // Miss-detection and the WalkToken snapshot are one critical
+        // section: the token proves the walk began no earlier than the
+        // snapshot, which is what lets note_walked detect (and discard) a
+        // walk that raced a size mutation (connscale §6b').
+        match nblocks_cache::lookup_or_begin_walk(rlocator.locator, forknum) {
+            Ok(cached) => {
+                if nblocks_validate() {
+                    validate_cached(rlocator, st, forknum, cached)?;
+                }
+                return Ok(cached);
             }
-            return Ok(cached);
+            Err(token) => return mdnblocks_walk(rlocator, st, forknum, Some(token)),
         }
     }
-    mdnblocks_walk(rlocator, st, forknum, true)
+    mdnblocks_walk(rlocator, st, forknum, None)
 }
 
 /// Cross-check of the size cache against the real lseek walk
@@ -996,7 +1013,7 @@ fn validate_cached(
     let mut last = cached;
     let mut walked = 0;
     for _ in 0..2000 {
-        walked = mdnblocks_walk(rlocator, st, forknum, false)?;
+        walked = mdnblocks_walk(rlocator, st, forknum, None)?;
         match nblocks_cache::lookup(rlocator.locator, forknum) {
             // Entry removed under us (drop/rewrite churn): nothing to check.
             None => return Ok(()),
@@ -1013,14 +1030,16 @@ fn validate_cached(
 
 /// The real probe: lseek(SEEK_END) per segment from the last open one. Side
 /// effect relied on by mdregistersync/mdimmedsync/mdtruncate: opens every
-/// active segment. With `publish`, the result repopulates the process-global
-/// size cache (non-temp relations); the validation arm passes false so a
-/// stale entry cannot self-heal before it is caught.
+/// active segment. With a `WalkToken` (taken at the cache miss, BEFORE this
+/// walk touches the filesystem), the result repopulates the process-global
+/// size cache — but only if `note_walked` proves no size mutation raced the
+/// walk; the validation arm passes None so a stale entry cannot self-heal
+/// before it is caught.
 fn mdnblocks_walk(
     rlocator: RelFileLocatorBackend,
     st: &mut MdRelnState,
     forknum: ForkNumber,
-    publish: bool,
+    token: Option<nblocks_cache::WalkToken>,
 ) -> PgResult<BlockNumber> {
     let fk = fork_idx(forknum);
 
@@ -1045,8 +1064,9 @@ fn mdnblocks_walk(
             None => break segno * RELSEG_SIZE,
         }
     };
-    if publish && !is_temp(rlocator) {
-        nblocks_cache::note_walked(rlocator.locator, forknum, total);
+    if let Some(token) = token {
+        debug_assert!(!is_temp(rlocator), "temp relations never take a WalkToken");
+        nblocks_cache::note_walked(rlocator.locator, forknum, total, token);
     }
     Ok(total)
 }
@@ -1102,7 +1122,7 @@ fn mdtruncate_inner(
     // C's contract makes the CALLER's smgrnblocks open every active segment
     // so the loop below sees them all; with the size cache that call may not
     // walk, so reinstate the walk here (same lseek pattern, rare path).
-    mdnblocks_walk(rlocator, st, forknum, true)?;
+    mdnblocks_walk(rlocator, st, forknum, None)?;
 
     let mut curopensegs = st.md_num_open_segs[fk];
     while curopensegs > 0 {
@@ -1171,7 +1191,7 @@ pub fn mdregistersync(
 
     // The walk (not the cached read: the SIDE EFFECT is the point) opens all
     // active segments; probe further for inactive ones.
-    mdnblocks_walk(rlocator, st, forknum, true)?;
+    mdnblocks_walk(rlocator, st, forknum, None)?;
 
     let min_inactive_seg = st.md_num_open_segs[fk];
     let mut segno = min_inactive_seg;
@@ -1201,7 +1221,7 @@ pub fn mdimmedsync(
 
     // Walk, not the cached read: the open-all-active-segments side effect
     // is required so the fsync loop below reaches every segment.
-    mdnblocks_walk(rlocator, st, forknum, true)?;
+    mdnblocks_walk(rlocator, st, forknum, None)?;
 
     let min_inactive_seg = st.md_num_open_segs[fk];
     let mut segno = min_inactive_seg;
