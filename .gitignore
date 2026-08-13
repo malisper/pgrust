@@ -40,3 +40,10 @@ cpg-ref-install/
 target-mut/
 # cfg-sampler evidence output (summaries live in docs/fuzzing/findings-cfg*.md)
 cfgfindings/
+
+# FTS-RANK lane transient coverage/differential artifacts
+covloop-*.log
+diffpair*.log
+fts-findings*.jsonl
+fts-only-findings*.jsonl
+fts-*findings-manifest.txt

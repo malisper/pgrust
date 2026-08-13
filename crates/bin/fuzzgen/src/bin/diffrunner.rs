@@ -86,6 +86,16 @@ usage: diffrunner --a <host:port> --b <host:port> [options]
                       fuel + reg*/xid/cid tail, then a seeded payload-fuzz
                       arm sized by --count with --seed. Ignores
                       --xproto/--replay.
+  --copyopts          run the COPY options-matrix drain (lane COPYOPTS)
+                      instead of a statement stream: an option-error deck
+                      (conflicting/duplicate options, illegal defGetCopy*
+                      values, BINARY/text-only rejects, unrecognized
+                      options) whose rejects must MATCH by SQLSTATE, plus
+                      differential round-trip identity over a control-char
+                      source (TO emits, both engines reload A's bytes,
+                      clone state + re-emit compared), with a seeded
+                      valid-option round-trip arm sized by --count/--seed.
+                      Ignores --xproto/--replay.
   --dbddl             run the database/tablespace DDL suite (Q8
                       database-ddl chunk): the suite opens its OWN
                       connections (fresh-db probes, held-session busy-db
@@ -135,6 +145,7 @@ struct Args {
     profile: String,
     copybin: bool,
     copytext: bool,
+    copyopts: bool,
     dbddl: bool,
 }
 
@@ -165,6 +176,7 @@ fn parse_args() -> Result<Args, String> {
         profile: "default".to_string(),
         copybin: false,
         copytext: false,
+        copyopts: false,
         dbddl: false,
     };
     let mut it = std::env::args().skip(1);
@@ -211,6 +223,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--copybin" => args.copybin = true,
             "--copytext" => args.copytext = true,
+            "--copyopts" => args.copyopts = true,
             "--dbddl" => args.dbddl = true,
             "--help" | "-h" => {
                 print!("{USAGE}");
@@ -221,7 +234,7 @@ fn parse_args() -> Result<Args, String> {
     }
     args.a = a.ok_or("--a is required")?;
     args.b = b.ok_or("--b is required")?;
-    if args.copybin || args.copytext || args.dbddl {
+    if args.copybin || args.copytext || args.copyopts || args.dbddl {
         // The suites always ride the simple protocol (their COPY FROM
         // feeds are unsupported on the extended path; dbddl owns its own
         // extended-replay pass) and own their decks.
@@ -402,6 +415,47 @@ fn run() -> Result<ExitCode, String> {
         drop(findings_out);
         eprintln!(
             "diffrunner: copytext seed={} count={} guc_pin={} cases={} matches={} ruled={} findings={}",
+            args.seed,
+            args.count,
+            if args.guc_pin { "on" } else { "off" },
+            stats.cases,
+            stats.matches,
+            stats.ruled,
+            stats.findings
+        );
+        return Ok(if stats.findings > 0 { ExitCode::from(2) } else { ExitCode::SUCCESS });
+    }
+
+    if args.copyopts {
+        // COPY options-matrix drain (lane COPYOPTS). Seeded round-trip arm
+        // sized by --count (deterministic in --seed).
+        let table = fuzzgen::ruled::default_table();
+        let (records, stats) = fuzzgen::copyopts::run_suite(
+            &mut *a,
+            &mut *b,
+            &table,
+            args.ulp,
+            args.seed,
+            args.count,
+        );
+        let mut findings_out: Box<dyn Write> = match &args.findings {
+            Some(path) => Box::new(
+                std::fs::File::create(path).map_err(|e| format!("open {path}: {e}"))?,
+            ),
+            None => Box::new(std::io::stdout()),
+        };
+        writeln!(
+            findings_out,
+            "{{\"meta\":\"diffrunner\",\"suite\":\"copyopts\",\"seed\":{},\"count\":{},\"guc_pin\":{}}}",
+            args.seed, args.count, args.guc_pin
+        )
+        .map_err(|e| e.to_string())?;
+        for r in &records {
+            writeln!(findings_out, "{}", r.to_jsonl(args.seed)).map_err(|e| e.to_string())?;
+        }
+        drop(findings_out);
+        eprintln!(
+            "diffrunner: copyopts seed={} count={} guc_pin={} cases={} matches={} ruled={} findings={}",
             args.seed,
             args.count,
             if args.guc_pin { "on" } else { "off" },

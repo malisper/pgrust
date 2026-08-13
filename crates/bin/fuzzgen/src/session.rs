@@ -8,6 +8,8 @@
 
 use crate::catalog::Catalog;
 use crate::coll::CollState;
+use crate::seqident::SeqState;
+use crate::inherit::InheritState;
 use crate::ddl::{DdlEventKind, DdlState};
 use crate::dml::DmlState;
 use crate::objddl::ObjState;
@@ -15,17 +17,24 @@ use crate::geo::GeoState;
 use crate::heap::HeapState;
 use crate::idx::IdxState;
 use crate::par::ParState;
+use crate::plancache::PlanCacheState;
 use crate::plansel::PlanState;
 use crate::exr::ExrState;
+use crate::exr2::Exr2State;
 use crate::spill::SpillState;
 use crate::cursor::CursorState;
 use crate::part::PartState;
 use crate::plpg::PlpgState;
+use crate::ritrig::RiState;
+use crate::rangeops::RangeopsState;
 use crate::tsdl::TsState;
+use crate::udt::UdtState;
 use crate::render::soft_float_cols;
 use crate::rng::Rng;
 use crate::stmt::{gen_statements, Gen};
+use crate::tablesample::TablesampleState;
 use crate::toggles::ToggleVector;
+use crate::matview::MatviewState;
 use crate::views::ViewsState;
 use crate::weights::WeightTable;
 
@@ -94,14 +103,26 @@ pub fn run_session_probed(cfg: &SessionConfig, catalog: &Catalog) -> SessionOutp
     let mut par_state = ParState::new();
     let mut spill_state = SpillState::new();
     let mut plan_state = PlanState::new();
+    let mut plancache_state = PlanCacheState::new();
     let mut exr_state = ExrState::new();
+    let mut exr2_state = Exr2State::new();
     let mut heap_state = HeapState::new();
+    let mut largeobj_state = crate::largeobj::LargeObjState::new();
+    let mut vac_state = crate::vacuum::VacState::new();
+    let mut altertable_state = crate::altertable::AltState::new();
     let mut geo_state = GeoState::new();
     let mut ts_state = TsState::new();
     let mut cursor_state = CursorState::new();
     let mut views_state = ViewsState::new();
+    let mut matview_state = MatviewState::new();
     let mut plpg_state = PlpgState::new();
     let mut coll_state = CollState::new();
+    let mut seq_state = SeqState::new();
+    let mut ritrig_state = RiState::new();
+    let mut rangeops_state = RangeopsState::new();
+    let mut udt_state = UdtState::new();
+    let mut inherit_state = InheritState::new();
+    let mut tsm_state = TablesampleState::new();
     let mut eff_catalog = catalog.clone();
     let mut windows: Vec<DdlWindow> = Vec::new();
     let mut out: Vec<Statement> = Vec::with_capacity(cfg.budget as usize);
@@ -125,18 +146,27 @@ pub fn run_session_probed(cfg: &SessionConfig, catalog: &Catalog) -> SessionOutp
             std::mem::swap(&mut g.par, &mut par_state);
             std::mem::swap(&mut g.spill, &mut spill_state);
             std::mem::swap(&mut g.plan, &mut plan_state);
+            std::mem::swap(&mut g.plancache, &mut plancache_state);
             std::mem::swap(&mut g.exr, &mut exr_state);
+            std::mem::swap(&mut g.exr2, &mut exr2_state);
             std::mem::swap(&mut g.heap, &mut heap_state);
+            std::mem::swap(&mut g.largeobj, &mut largeobj_state);
+            std::mem::swap(&mut g.vac, &mut vac_state);
+            std::mem::swap(&mut g.altertable, &mut altertable_state);
             std::mem::swap(&mut g.geo, &mut geo_state);
             std::mem::swap(&mut g.ts, &mut ts_state);
             std::mem::swap(&mut g.cursor, &mut cursor_state);
             std::mem::swap(&mut g.views, &mut views_state);
+            std::mem::swap(&mut g.matview, &mut matview_state);
             std::mem::swap(&mut g.plpg, &mut plpg_state);
             std::mem::swap(&mut g.coll, &mut coll_state);
+            std::mem::swap(&mut g.seq, &mut seq_state);
+            std::mem::swap(&mut g.ritrig, &mut ritrig_state);
+            std::mem::swap(&mut g.rangeops, &mut rangeops_state);
+            std::mem::swap(&mut g.udt, &mut udt_state);
+            std::mem::swap(&mut g.inherit, &mut inherit_state);
+            std::mem::swap(&mut g.tsm, &mut tsm_state);
             let kinds = gen_statements(module, &mut g);
-            std::mem::swap(&mut g.coll, &mut coll_state);
-            std::mem::swap(&mut g.plpg, &mut plpg_state);
-            std::mem::swap(&mut g.cursor, &mut cursor_state);
             std::mem::swap(&mut g.dml, &mut dml_state);
             std::mem::swap(&mut g.ddl, &mut ddl_state);
             std::mem::swap(&mut g.part, &mut part_state);
@@ -145,11 +175,26 @@ pub fn run_session_probed(cfg: &SessionConfig, catalog: &Catalog) -> SessionOutp
             std::mem::swap(&mut g.par, &mut par_state);
             std::mem::swap(&mut g.spill, &mut spill_state);
             std::mem::swap(&mut g.plan, &mut plan_state);
+            std::mem::swap(&mut g.plancache, &mut plancache_state);
             std::mem::swap(&mut g.exr, &mut exr_state);
+            std::mem::swap(&mut g.exr2, &mut exr2_state);
             std::mem::swap(&mut g.heap, &mut heap_state);
+            std::mem::swap(&mut g.largeobj, &mut largeobj_state);
+            std::mem::swap(&mut g.vac, &mut vac_state);
+            std::mem::swap(&mut g.altertable, &mut altertable_state);
             std::mem::swap(&mut g.geo, &mut geo_state);
             std::mem::swap(&mut g.ts, &mut ts_state);
+            std::mem::swap(&mut g.cursor, &mut cursor_state);
             std::mem::swap(&mut g.views, &mut views_state);
+            std::mem::swap(&mut g.matview, &mut matview_state);
+            std::mem::swap(&mut g.plpg, &mut plpg_state);
+            std::mem::swap(&mut g.coll, &mut coll_state);
+            std::mem::swap(&mut g.seq, &mut seq_state);
+            std::mem::swap(&mut g.ritrig, &mut ritrig_state);
+            std::mem::swap(&mut g.rangeops, &mut rangeops_state);
+            std::mem::swap(&mut g.udt, &mut udt_state);
+            std::mem::swap(&mut g.inherit, &mut inherit_state);
+            std::mem::swap(&mut g.tsm, &mut tsm_state);
             kinds
         };
         for ev in ddl_state
@@ -161,9 +206,12 @@ pub fn run_session_probed(cfg: &SessionConfig, catalog: &Catalog) -> SessionOutp
             .chain(spill_state.take_events())
             .chain(plan_state.take_events())
             .chain(exr_state.take_events())
+            .chain(exr2_state.take_events())
             .chain(heap_state.take_events())
+            .chain(vac_state.take_events())
             .chain(geo_state.take_events())
             .chain(views_state.take_events())
+            .chain(tsm_state.take_events())
         {
             match ev.kind {
                 DdlEventKind::Created => windows.push(DdlWindow {
@@ -320,7 +368,33 @@ mod tests {
         // the two new battery modules emit chunky groups that dilute the
         // per-module draw further; explain needs the longer stream to
         // reliably fire at this seed.
-        let long = run_session(&SessionConfig { budget: 1800, ..cfg(12) }, &cat);
+        // 1800 -> 2400 with the indexam module (INDEXAM): another low-weight
+        // (0.3) drain module dilutes the per-module draw, so idx needs the
+        // longer stream to reliably fire at this seed.
+        // 1800 -> 2400 with the 50th module (arrayops, Track-B): the extra
+        // module dilutes the per-module draw so the sparse objddl module
+        // needs the larger budget to fire at this seed (fires by 2200; 2400
+        // for margin).
+        // 1800 -> 2400 with the 50-module registry (altertable, Track-B):
+        // the extra module dilutes the per-module draw again; the sparse
+        // tsdl module needs the longer stream to reliably fire at this seed.
+        // 1800 -> 2200 with the dtx module added to the all-on mix: the
+        // extra datetime module shifts the per-seed draw so util needs the
+        // longer stream to reliably fire at this seed.
+        // 1800 -> 2400 with the like module (LIKE lane) joining the all-on
+        // mix: the extra 0.8-weight module dilutes the per-module draw, so
+        // the sparse views module needs the longer stream to fire at this
+        // seed.
+        // 1800 -> 3000 when the INHERIT lane's inherit module joined the
+        // registry (further per-module dilution pushed the sparse types
+        // module past 1800 at this seed).
+        // 1800 -> 2600 with the tablesample module: one more registry entry
+        // dilutes per-module traffic, and util needs the longer stream to
+        // reliably fire at this seed.
+        // Consolidated coverage-union (waves 1-4, 95-module registry):
+        // the ~2x larger registry dilutes per-module draws, so the sparse
+        // `types` module needs budget ~3600 to fire at this seed; 4400 for margin.
+        let long = run_session(&SessionConfig { budget: 4400, ..cfg(12) }, &cat);
         let all: Vec<String> = long.iter().flat_map(|s| s.productions.clone()).collect();
         for prefix in [
             "colref",
@@ -347,6 +421,7 @@ mod tests {
             "module:tsdl",
             "module:cursor",
             "module:views",
+            "module:arrayops",
         ] {
             assert!(
                 all.iter().any(|p| p.starts_with(prefix)),
@@ -375,12 +450,7 @@ mod tests {
         let cat = FixtureCatalog.load_catalog().unwrap();
         let mut c = cfg(9);
         c.toggles = ToggleVector::parse(
-            "expr=off,joins=off,subq=off,agg=off,win=off,dml=on,txn=off,\
-             ddl=off,types=off,explain=off,util=off,part=off,partalt=off,\
-             objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
-             nodes=off,obs=off,objid=off,einterp=off,exd=off,spill=off,\
-             earm=off,plansel=off,earm2=off,exr=off,numx=off,pubsub=off,pgram=off,opt2=off,cfgm=off,\
-             heap=off",
+            "expr=off,joins=off,subq=off,agg=off,win=off,winfunc=off,dml=on,merge=off,txn=off,ddl=off,types=off,explain=off,util=off,part=off,partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,matview=off,geo=off,dtm=off,dtx=off,adtmisc=off,sqljson=off,jsonpath=off,jsonfuncs=off,plpg=off,coll=off,mbconv=off,xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,plansel=off,earm2=off,earm3=off,earm4=off,exr=off,exr2=off,numx=off,pubsub=off,ddldeep=off,pgram=off,opt2=off,opt3=off,cfgm=off,btbrin=off,heap=off,stats=off,tsrank=off,planner=off,partition=off,triggers=off,plpgsql=off,regex=off,mergex=off,aggwin=off,indexam=off,typeio=off,aclrls=off,lockcursor=off,largeobj=off,plancache=off,vacuum=off,seqident=off,ritrig=off,rangeops=off,udt=off,arrayops=off,altertable=off,byteaenc=off,srf=off,stringfunc=off,floatmath=off,numeric=off,ruleutils=off,cterec=off,castcoerce=off,intops=off,expreval=off,like=off,subplan=off,scalartypes=off,inherit=off,bitstring=off,groupingsets=off,tablesample=off"
         )
         .unwrap();
         c.weights = WeightTable::parse(
@@ -419,11 +489,16 @@ mod tests {
     fn ddl_windows_and_cross_module_reuse() {
         let cat = FixtureCatalog.load_catalog().unwrap();
         let mut c = cfg(41);
-        // 3000 (was 1800, 900, 600): the round-3 drain-module merges
-        // (plansel/earm2/exr/numx/pubsub — the 38-module registry) dilute
-        // per-module traffic further; the cross-module-reuse property
-        // needs the longer window under the new module mix.
-        c.budget = 3000;
+        // 3600 (was 3000, 1800, 900, 600): each new drain-module merge
+        // (plansel/earm2/exr/numx/pubsub, then the W5 waves, then the
+        // largeobj lo_* module — a 50-module registry) dilutes per-module
+        // traffic further; the cross-module-reuse property needs the longer
+        // window under the new module mix.
+        c.budget = 4000;
+        // 4000 (was 3000, 1800, 900, 600): each drain-module merge dilutes
+        // per-module traffic further (the groupingsets addition brings the
+        // registry to 50 modules); the cross-module-reuse property needs the
+        // longer window under the new module mix.
         let outp = run_session_probed(&c, &cat);
         assert!(!outp.ddl_windows.is_empty(), "no ddl table created in 600 stmts");
         for w in &outp.ddl_windows {
@@ -432,6 +507,11 @@ mod tests {
             assert!(
                 create.starts_with(&format!("CREATE TABLE {} ", w.table))
                     || create.starts_with(&format!("CREATE TEMPORARY TABLE {} ", w.table))
+                    // The idx module leads some create groups (e.g. the
+                    // GiST fixture) with an UNLOGGED table.
+                    // The idx module's GiST populations lead their create
+                    // group with CREATE UNLOGGED TABLE fz_gst_N.
+                    || create.starts_with(&format!("CREATE UNLOGGED TABLE {} ", w.table))
                     // The views module probe-registers its materialized
                     // views, whose CREATE leads their group.
                     || create.starts_with(&format!("CREATE MATERIALIZED VIEW {} ", w.table)),
@@ -522,8 +602,19 @@ mod tests {
         // lane's 11 einterp:w4:* shapes (some large, e.g. the hazard/
         // wholerow batteries) enlarged average einterp group size, then
         // 6600 -> 8000 when the W5-PART partalt module joined (further
-        // per-module dilution).
-        c.budget = 8000;
+        // per-module dilution), then 8000 -> 9600 when the STATS-lane
+        // stats module joined (another ~20-60-statement drain group).
+        // Campaign union: the 75-module registry (W1-W3 SQL-drain waves)
+        // dilutes per-module traffic; 14000 is the empirical floor+margin
+        // (vacuum lane measured 13000 as the floor for the >=50 idx floor
+        // below; other lanes' lower pre-union values are superseded).
+        c.budget = 16000;
+        // per-module dilution), then 8000 -> 16000 when the JSONFUNCS
+        // module joined — seed 37's realization shifted the idx groups
+        // later in the stream, so the floor needs the larger budget to
+        // stay meaningful (measured: 36 @ 8000 -> 74 @ 16000).
+        // per-module dilution), then 8000 -> 9600 when the Track-B ruleutils
+        // deparse-drain module joined the registry.
         let outp = run_session_probed(&c, &cat);
         let idx_windows: Vec<_> = outp
             .ddl_windows
@@ -690,4 +781,5 @@ mod tests {
         assert!(rec.starts_with("{\"seed\":9,"));
     }
 }
+
 

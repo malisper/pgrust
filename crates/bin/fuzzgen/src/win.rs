@@ -264,7 +264,7 @@ fn gen_window_item(
 /// One window definition. `total` appends every relation's unique key to
 /// the ORDER BY, making the order total within each partition; frames are
 /// offered only on total inline windows (`allow_frame`).
-fn gen_window_def(
+pub(crate) fn gen_window_def(
     g: &mut Gen,
     scope: &Scope,
     uks: &[(String, String)],
@@ -343,7 +343,7 @@ fn gen_order_key(g: &mut Gen, expr: Expr) -> WinOrderKey {
 }
 
 /// Random in-scope column reference (partition/order keys).
-fn random_colref(g: &mut Gen, scope: &Scope) -> Expr {
+pub(crate) fn random_colref(g: &mut Gen, scope: &Scope) -> Expr {
     let ty = g.any_type(scope);
     let cols = scope.columns_of_type(ty);
     debug_assert!(!cols.is_empty(), "any_type returned a type with no columns");

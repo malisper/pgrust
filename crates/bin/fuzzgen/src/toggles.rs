@@ -18,6 +18,11 @@ pub const REGISTRY: &[ModuleSpec] = &[
     ModuleSpec { name: "subq", default_weight: 1.0 },
     ModuleSpec { name: "agg", default_weight: 1.0 },
     ModuleSpec { name: "win", default_weight: 1.0 },
+    // Builtin window-FUNCTION argument/result edge probes (percent_rank,
+    // cume_dist, and the NULL/error/out-of-range argument regimes the win
+    // module steers around). Complements win; a distinct toggle so a swarm
+    // can drive the edge regime independently.
+    ModuleSpec { name: "winfunc", default_weight: 1.0 },
     ModuleSpec { name: "dml", default_weight: 1.0 },
     // MERGE is one statement per pick but touches the same shared-table
     // state as dml; below-default weight keeps the write mix balanced.
@@ -74,6 +79,12 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // coverage comes from OTHER modules' DML through the registered views,
     // so the selection weight stays low.
     ModuleSpec { name: "views", default_weight: 0.6 },
+    // matview complements `views`: group-local matview CONTENT/scannability/
+    // match-merge/CTAS/SELECT INTO/security-option/OR-REPLACE-add-column/
+    // RECURSIVE-view arms (createas.c + matview.c + view.c). Each pick is a
+    // self-contained create->exercise->drop group of ~6-14 statements, so it
+    // sits at a below-default weight like views.
+    ModuleSpec { name: "matview", default_weight: 0.5 },
     // geo creates whole indexed-table populations (create groups are ~5
     // statements with bulk loads) but most picks are single scalar/query
     // statements; slightly below default keeps the create churn balanced.
@@ -83,6 +94,11 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // moderate weight buys its coverage without starving table-driven
     // modules.
     ModuleSpec { name: "dtm", default_weight: 0.8 },
+    // dtx complements dtm with the set-returning / typmod / timezone-
+    // function datetime surface (generate_series, isfinite, interval &
+    // precision typmods, timezone(zone,src), to_timestamp epoch); one
+    // statement per pick, so it shares dtm's moderate weight.
+    ModuleSpec { name: "dtx", default_weight: 0.8 },
     // adtmisc emits mostly single literal-driven SELECTs (grant/denial
     // brackets are 3-4 statements); slightly below default keeps the
     // breadth families from crowding the stateful modules.
@@ -92,6 +108,18 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // executor surface over mostly literal inputs, so a moderate weight
     // buys its coverage without starving table-driven modules.
     ModuleSpec { name: "sqljson", default_weight: 0.8 },
+    // jsonpath drains the raw jsonpath execution engine the sqljson module
+    // leaves dark (@?/@@ operators, vars/PASSING binding, filter predicate
+    // grammar, unicode scanner, recursive accessor, cross-type datetime
+    // compare, and the DefineIndex mutability walk). One statement per pick
+    // except the self-contained mutidx bracket; moderate weight like sqljson.
+    ModuleSpec { name: "jsonpath", default_weight: 0.8 },
+    // jsonfuncs emits one json/jsonb function-or-operator statement per
+    // pick (the builder/accessor/operator/expand/aggregate surface J1's
+    // sqljson does not reach: jsonb_op.c operators, the jsonfuncs.c each/
+    // elements/keys/extract SRFs and classic *_agg aggregates, jsonb
+    // subscripting) over mostly literal inputs — sqljson-like weight.
+    ModuleSpec { name: "jsonfuncs", default_weight: 0.8 },
     // plpg emits whole self-contained object groups (create + exercise +
     // probe + drop, typically 3-15 statements); below-default weight keeps
     // the group churn from crowding the single-statement modules.
@@ -165,12 +193,24 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // like earm the groups are large, so the weight sits low.
     ModuleSpec { name: "earm2", default_weight: 0.2 },
     ModuleSpec { name: "earm3", default_weight: 0.2 },
+    // earm4 (ERR3) emits whole VERBATIM ERROR-ARM round-4 sections
+    // (domain/constraint/tablespace/ownership/policy/rule/publication/
+    // subscription/COMMENT+SECURITY LABEL/sequence-identity/parser
+    // grammar arms); like earm2/earm3 the groups are large, low weight.
+    ModuleSpec { name: "earm4", default_weight: 0.2 },
     // exr (LD9) emits executor-residue drain groups (runtime pruning
     // brackets, window frame-option probes, MERGE/ON CONFLICT rollback
     // brackets, transition-table trigger groups) over a persistent
     // fixture suite; below-default weight like spill — the create group
     // is chunky and the bracket groups run heavyweight nodes.
     ModuleSpec { name: "exr", default_weight: 0.5 },
+    // exr2 (EXEC-RESIDUE) drains the rescan half of the executor nodes exr
+    // only runs once (ExecReScanSetOp/RecursiveUnion/WindowAgg/
+    // NamedTuplestoreScan via correlated LATERAL) plus setop hash/sort
+    // internals and the plan-serialization toggle arms; below-default
+    // weight like exr — the create group is chunky and the lateral-rescan
+    // groups run heavyweight nodes per outer row.
+    ModuleSpec { name: "exr2", default_weight: 0.5 },
     // numx (LD9) is one boundary-value statement per pick over the
     // numeric.c arithmetic/format surface (plus in-group sort/window
     // fixture families); xnum-like weight.
@@ -217,6 +257,253 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // entries). A create pick builds a churn-heavy table and vacuum/cluster
     // picks walk the whole heap, so it sits at a low weight like spill.
     ModuleSpec { name: "heap", default_weight: 0.5 },
+    // stats (STATS lane) emits self-contained statistics build+estimation
+    // drain groups (fixture create + CREATE STATISTICS + ANALYZE +
+    // stats-consuming query sweeps + introspection + drop, ~20-60
+    // statements per pick) targeting the extended-stats/ANALYZE/selfuncs
+    // line mass. A create pick bulk-loads a few-thousand-row table and the
+    // sweeps run heavyweight estimation, so it sits at a low weight like
+    // plansel/opt2; drain legs enable it explicitly via --modules stats=on:N.
+    ModuleSpec { name: "stats", default_weight: 0.4 },
+    // tsrank (FTS-RANK lane) emits one self-contained literal-driven ts
+    // ranking / headline / tsvector-op / ts_stat / tsquery-op probe SELECT
+    // per pick — a deep but narrow adt surface over constant inputs, so a
+    // moderate weight buys its coverage without starving table-driven
+    // modules.
+    ModuleSpec { name: "tsrank", default_weight: 0.8 },
+    // planner (fuzz-planner) drains optimizer path/plan-shape residue
+    // (SampleScan/TidRangeScan/sorted-Group/SetOp/window-run-condition/
+    // GEQO/BitmapOr) behind GUC + query-shape forcing over self-contained
+    // fz_pl_* fixtures; groups run ~8-30 statements per pick — opt2-like
+    // low weight, enabled explicitly for drain legs via
+    // --modules planner=on:N.
+    ModuleSpec { name: "planner", default_weight: 0.3 },
+    // partition (PARTITION lane) emits self-contained partition-surface
+    // drain groups over dedicated fz_pt_* fixtures: partition-wise join/agg
+    // bound MERGING (compatibly-partitioned parents with DIFFERENT bounds —
+    // the merge_list_bounds / merge_range_bounds family that plansel's
+    // identical-bound twins never reach), no-partition-found routing errors,
+    // DEFAULT-partition ATTACH validation, attribute-mapped cross-partition
+    // routing, prefix-equality runtime pruning and partition-constraint
+    // deparse. Groups are chunky create/probe/drop batteries (~15-40
+    // statements), so the weight sits low like plansel/opt2.
+    ModuleSpec { name: "partition", default_weight: 0.3 },
+    // triggers (Track-B) emits whole self-contained trigger/rule/event-trigger
+    // EXECUTION-drain groups (fixtures + state-flips + a total-ordered
+    // firing-log probe + drops, ~15-25 statements per pick) over fixed trg_*
+    // names; earm-like low weight keeps the chunky groups from crowding the
+    // single-statement modules, and event-trigger/session-role picks are
+    // rigorously self-cleaning.
+    ModuleSpec { name: "triggers", default_weight: 0.3 },
+    // plpgsql (PLPGSQL lane) emits whole self-contained plpgsql/SPI
+    // residual-arm drain groups (create + exercise + probe + drop,
+    // typically 3-7 statements); below-default weight keeps the group
+    // churn from crowding the single-statement modules, matching plpg.
+    ModuleSpec { name: "plpgsql", default_weight: 0.6 },
+    // regex drives the regexp_* function + operator surface (a SQL-reachable
+    // crash/DoS engine) with crafted adversarial patterns; every pick is one
+    // literal-driven statement (or a small SRF), so the weight can sit near
+    // the query-module default.
+    ModuleSpec { name: "regex", default_weight: 0.8 },
+    // Self-contained rewrite/ModifyTable residue batteries (Track-B): each
+    // pick builds, drains one arm family and drops its own objects, so the
+    // weight only trades against generation budget, not shared table state.
+    ModuleSpec { name: "mergex", default_weight: 0.6 },
+    // aggwin (AGGWIN) drains the nodeWindowAgg.c / nodeAgg.c frame residue
+    // the win/agg/par/spill modules leave uncovered: GROUPS frame mode +
+    // EXCLUDE across all modes, typed RANGE-offset in_range, window rescan
+    // (ExecReScanWindowAgg), WINDOW refinement chains, FILTER on window
+    // aggregates, moving-frame inverse/restart transition, and HashAgg
+    // grouping-sets disk spill. Each pick is a self-contained fixture (or
+    // GUC-bracketed inline-source) group — a low weight like spill/heap.
+    ModuleSpec { name: "aggwin", default_weight: 0.4 },
+    // indexam (INDEXAM) deep-drains the GIN / GiST / SP-GiST operator-class
+    // internals (multi-key scan keys, posting/pending lists, page-split
+    // picksplit, KNN, vacuum) plus partial/expression/INCLUDE/multicolumn
+    // and non-default-opclass btree paths, over dedicated fz_ix_* fixtures
+    // at page-splitting volume; groups run 15-40 statements at a low weight
+    // like btbrin — enabled explicitly for drain legs via
+    // --modules indexam=on:N.
+    ModuleSpec { name: "indexam", default_weight: 0.3 },
+    // typeio drains the utils/adt type-I/O + operator residue (network /
+    // mac / mac8 / varbit comparison+bitwise, float4 to_char pictures,
+    // moving-aggregate inverse transitions, datetime out-of-range arms)
+    // via literal-driven scalar SELECTs; near the query-module default.
+    ModuleSpec { name: "typeio", default_weight: 0.8 },
+    // aclrls emits self-contained ACL/RLS drain brackets (create roles +
+    // tables + policies, exercise the privilege-decision / row-security
+    // execution surface, drop everything — typically 15-30 statements per
+    // pick); like the other bracket-heavy drain modules the selection
+    // weight sits low so the large groups don't crowd the statement mix.
+    ModuleSpec { name: "aclrls", default_weight: 0.3 },
+    // lockcursor emits multi-statement, self-contained brackets (LOCK
+    // TABLE all-modes, nested savepoints, NOTIFY-error arms) plus the
+    // advisory arms adtmisc misses; a bracket is ~10-25 statements, so the
+    // selection weight sits low like txn/pubsub.
+    ModuleSpec { name: "lockcursor", default_weight: 0.4 },
+    // largeobj (LARGEOBJECT) emits self-contained large-object drain groups
+    // (create + write/seek/read/truncate/get/put + unlink, or an isolated
+    // error probe) over the be-fsstubs.c/inv_api.c lo_* surface; every loid
+    // is created and unlinked in-group, so no persistent state grows. Most
+    // picks are 4-13 cheap statements, so it sits at a moderate weight like
+    // the other single-session drain modules.
+    ModuleSpec { name: "largeobj", default_weight: 0.5 },
+    // plancache (PLANCACHE) emits self-contained plan-cache drain groups:
+    // in-group fixture create + PREPARE + force_generic/force_custom
+    // (plan_cache_mode) result-identity sweeps + generic-plan runtime
+    // partition pruning + plancache DDL invalidation + pg_prepared_
+    // statements introspection + drop (~15-40 statements per pick, one
+    // create per group). Below-default weight like plansel/opt2 — the
+    // groups carry a create+drop each.
+    ModuleSpec { name: "plancache", default_weight: 0.3 },
+    // vacuum (VACUUM lane) emits single-session, autocommit SQL-maintenance
+    // option-matrix groups over purpose-built fz_vac_* fixtures (the full
+    // VACUUM/ANALYZE/CLUSTER/REINDEX option grammar + partitioned
+    // propagation + in-place-tablespace REINDEX). A create pick builds a
+    // churn-heavy table and maintenance picks walk the whole relation, so it
+    // sits at a low weight like heap/spill.
+    ModuleSpec { name: "vacuum", default_weight: 0.5 },
+    // seqident (SEQIDENT) emits self-contained sequence / GENERATED
+    // IDENTITY / serial groups (create + exercise + capture + drop,
+    // typically 5-14 statements) over group-local fz_si_* objects; only
+    // name counters persist. Below-default weight keeps the group churn
+    // from crowding the single-statement modules, like coll/plpg.
+    ModuleSpec { name: "seqident", default_weight: 0.6 },
+    // ritrig emits self-contained referential-integrity groups (create
+    // parent+child fixture, cascading DELETE/UPDATE or a deliberate
+    // violation, pk-ordered state probe, drop — typically 8-14 statements);
+    // below-default weight like coll/plpg keeps the group churn from
+    // crowding the single-statement modules.
+    ModuleSpec { name: "ritrig", default_weight: 0.5 },
+    // rangeops emits mostly single literal-driven SELECTs over the range /
+    // multirange operator+function matrix (adtmisc/dtm-shaped); the
+    // custom-range CREATE TYPE AS RANGE groups are self-contained 4-8
+    // statement create/exercise/drop brackets, so the weight sits slightly
+    // below default to keep the group churn balanced.
+    ModuleSpec { name: "rangeops", default_weight: 0.7 },
+    // udt (UDT lane) emits self-contained user-defined-type groups (enum /
+    // composite / domain: create + exercise + probe + drop, typically
+    // 12-28 statements per pick); below-default weight like coll/plpg keeps
+    // the group churn from crowding the single-statement modules.
+    ModuleSpec { name: "udt", default_weight: 0.6 },
+    // arrayops is one statement per pick (the subscript-UPDATE family emits a
+    // small create/mutate/select/drop group); operator/function matrix over
+    // typed array literals, xnum-like weight.
+    ModuleSpec { name: "arrayops", default_weight: 0.8 },
+    // altertable (Track-B) emits self-contained ALTER TABLE rewrite/phase
+    // EXECUTION groups (fixture create + ALTER + content/metadata verify +
+    // drop, typically 5-9 statements) over group-local fz_at_* fixtures; it
+    // drains the SUCCESSFUL ATRewriteTable/ATExecAlterColumnType/AT_PASS
+    // surface the earm* lanes' error arms don't reach. Below-default weight
+    // keeps the create+drop churn balanced like heap/spill.
+    ModuleSpec { name: "altertable", default_weight: 0.5 },
+    // byteaenc (BYTEAENC) is one boundary/error statement per pick over the
+    // bytea + encode/decode + encoding-convert surface (the bytea_output
+    // GUC bracket is the only multi-statement pick, 5 cheap statements);
+    // cheap and self-contained, so it sits at the query-module default.
+    ModuleSpec { name: "byteaenc", default_weight: 0.7 },
+    // srf (Track-B SRF) is one self-contained statement per pick over
+    // literal inputs (generate_series / generate_subscripts / unnest /
+    // ROWS FROM / string_to_table + the SRF-context error guards); cheap
+    // and stateless, so it sits near the query-module default.
+    ModuleSpec { name: "srf", default_weight: 0.8 },
+    // stringfunc (STRINGFUNC lane) emits one literal-driven scalar SELECT
+    // per pick over the varlena/oracle_compat/formatting/ascii string
+    // function surface (substring/overlay/pad/trim/translate/split/format/
+    // normalize/hash ...); a deep-but-narrow adt surface like dtm/xnum, so
+    // a moderate weight buys its coverage without starving table-driven
+    // modules.
+    ModuleSpec { name: "stringfunc", default_weight: 0.8 },
+    // floatmath (Track-B) emits one literal-driven scalar SELECT per pick
+    // over the float.c function/operator surface (trig/hyperbolic/exp-log/
+    // rounding/arithmetic/comparison/casts/text-roundtrip/special values);
+    // the aggregate family creates-and-drops a small fz_fma fixture in-
+    // group. Most picks are single cheap statements over a deep-but-narrow
+    // adt surface, so a moderate weight buys its coverage without starving
+    // the table-driven modules (dtm/xnum/numx precedent).
+    ModuleSpec { name: "floatmath", default_weight: 0.8 },
+    // numeric (NUMERIC lane) drains the numeric.c residue no other module
+    // reaches: integer statistical aggregates (the int128 "poly" path,
+    // serial + parallel + moving-window) and extreme-precision arithmetic
+    // (300-1500-digit operands -> mul_var/div_var/sqrt_var/ln_var). One
+    // fixture create+probe+drop group (istat) or a single literal
+    // statement (xprec) per pick; numx-like moderate weight.
+    ModuleSpec { name: "numeric", default_weight: 0.6 },
+    // ruleutils (Track-B deparse drain) emits self-contained schema-wrapped
+    // groups (~6-12 statements: schema guard + creates + total-ordered
+    // pg_get_*def sweeps + CASCADE drop) targeting ruleutils.c. Each group
+    // rebuilds a throwaway schema, so keep the selection weight low like the
+    // other object-churning drain modules; drain legs enable it explicitly
+    // via --modules ruleutils=on:N.
+    ModuleSpec { name: "ruleutils", default_weight: 0.4 },
+    // cterec (Track-B) emits self-contained recursive-CTE SEARCH/CYCLE,
+    // data-modifying-CTE BEGIN..ROLLBACK brackets, and sublink probes over
+    // inline VALUES; single statement per pick except the dml bracket
+    // (~7 statements). Moderate weight — the surface is deep but narrow.
+    ModuleSpec { name: "cterec", default_weight: 0.6 },
+    // castcoerce (CASTCOERCE) emits mostly single literal-driven SELECTs
+    // (explicit/typmod/unify/unknown/array/bincoerce/failed) plus a handful
+    // of self-contained CREATE-DOMAIN/TYPE/CAST + TEMP-table groups (5-11
+    // statements, each dropping everything it creates); a moderate weight
+    // like dtm buys the deep-but-narrow parser-coercion surface without
+    // starving the table-driven modules.
+    ModuleSpec { name: "castcoerce", default_weight: 0.8 },
+    // intops (INTOPS) is one boundary-value statement per pick over the
+    // int.c/int8.c arithmetic/bit/overflow/parse surface; a deep but narrow
+    // adt surface reached only at boundary operands, so a moderate weight
+    // like numx buys its coverage without starving table-driven modules.
+    ModuleSpec { name: "intops", default_weight: 0.7 },
+    // expreval saturates the scalar-expression opcode arms the mutation lane
+    // flagged (hashed ScalarArrayOp, IS JSON, whole-row Var, IS DISTINCT,
+    // GREATEST/LEAST, CASE, COALESCE/NULLIF, bool 3VL, ROW/array compare)
+    // over inline VALUES operands; one deep-but-cheap SELECT group per pick,
+    // so it sits near the query-module default.
+    ModuleSpec { name: "expreval", default_weight: 0.8 },
+    // like (LIKE lane) emits one literal-only scalar SELECT per pick (plus
+    // one VALUES-driven non-constant-pattern shape) over the LIKE/ILIKE/
+    // SIMILAR TO pattern-match surface; a deep-but-narrow adt target like
+    // dtm/xnum, so a moderate weight buys its coverage without starving
+    // the table-driven modules.
+    ModuleSpec { name: "like", default_weight: 0.8 },
+    // subplan (SUBPLAN-1) emits self-contained SubPlan/InitPlan execution
+    // batteries: an uncorrelated/correlated subquery driven through every
+    // clause context (SELECT/WHERE/HAVING/GROUP BY/ORDER BY/CASE/func-arg/
+    // VALUES/LIMIT), the ANY/ALL/IN/EXISTS sublink family (hashed vs
+    // rescanned), nested SubPlan-in-SubPlan, multi-param InitPlans, SubPlan
+    // inside aggregate args, and SubPlan under a forced Gather. Groups are
+    // ~10-15 statements over a purpose-built fz_sp_* fixture (create + probes
+    // + drop) — opt2/plansel-like low weight.
+    ModuleSpec { name: "subplan", default_weight: 0.3 },
+    // scalartypes (Track-B) emits one self-contained probe group per pick
+    // over the niche fixed-width scalar types (money, uuid, pg_lsn, tid,
+    // xid8, macaddr8) and their system functions — literal-driven I/O,
+    // comparison, arithmetic and cast surfaces the AST modules never reach.
+    // Light like numx/xnum.
+    ModuleSpec { name: "scalartypes", default_weight: 0.7 },
+    // inherit (INHERIT lane) emits self-contained classic table-inheritance
+    // groups (CREATE ... INHERITS single/multi-parent, column/constraint
+    // merge, ALTER propagation, attach/detach, ONLY-recursion DML, DROP
+    // dependency) with catalog-bookkeeping probes and drops; coll-like
+    // moderate weight — groups are ~15-30 statements.
+    ModuleSpec { name: "inherit", default_weight: 0.5 },
+    // bitstring drains the bit/varbit (varbit.c) function + operator + typmod
+    // + cast surface as single literal-driven scalar/inline-VALUES SELECTs
+    // (complements the adtmisc adtm:bit* random arms and the TYPEIO operator
+    // lane); each pick is one cheap statement over a deep-but-narrow adt
+    // surface, so a moderate weight buys its coverage like dtm/adtmisc.
+    ModuleSpec { name: "bitstring", default_weight: 0.8 },
+    // groupingsets (GROUPINGSETS lane) emits self-contained grouping-set
+    // execution-drain groups (fixture create + 1-3 GUC-bracketed probes +
+    // drop) over deterministic small or fixed-shape bulk fixtures; each
+    // pick is a handful of statements, so it sits at a moderate below-
+    // default weight like the other query-drain modules.
+    ModuleSpec { name: "groupingsets", default_weight: 0.5 },
+    // tablesample emits self-contained TABLESAMPLE / LIMIT-FETCH / DISTINCT
+    // ON drain groups over a purpose-built fz_tsm_N fixture (create groups
+    // are ~10 statements with bulk loads; query picks are 1-3 statements).
+    // A moderate below-default weight keeps the create churn balanced like
+    // spill/plansel.
+    ModuleSpec { name: "tablesample", default_weight: 0.5 },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -375,13 +662,7 @@ mod tests {
         // All-off is rejected.
         assert!(
             ToggleVector::parse(
-                "expr=off,joins=off,subq=off,agg=off,win=off,dml=off,merge=off,\
-                 txn=off,ddl=off,types=off,explain=off,util=off,part=off,\
-                 partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
-                 dtm=off,adtmisc=off,sqljson=off,plpg=off,coll=off,mbconv=off,\
-             xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,\
-                 plansel=off,earm2=off,exr=off,numx=off,pubsub=off,ddldeep=off,\
-                 pgram=off,opt2=off,opt3=off,cfgm=off,earm3=off,btbrin=off,heap=off"
+                "expr=off,joins=off,subq=off,agg=off,win=off,winfunc=off,dml=off,merge=off,txn=off,ddl=off,types=off,explain=off,util=off,part=off,partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,matview=off,geo=off,dtm=off,dtx=off,adtmisc=off,sqljson=off,jsonpath=off,jsonfuncs=off,plpg=off,coll=off,mbconv=off,xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,plansel=off,earm2=off,earm3=off,earm4=off,exr=off,exr2=off,numx=off,pubsub=off,ddldeep=off,pgram=off,opt2=off,opt3=off,cfgm=off,btbrin=off,heap=off,stats=off,tsrank=off,planner=off,partition=off,triggers=off,plpgsql=off,regex=off,mergex=off,aggwin=off,indexam=off,typeio=off,aclrls=off,lockcursor=off,largeobj=off,plancache=off,vacuum=off,seqident=off,ritrig=off,rangeops=off,udt=off,arrayops=off,altertable=off,byteaenc=off,srf=off,stringfunc=off,floatmath=off,numeric=off,ruleutils=off,cterec=off,castcoerce=off,intops=off,expreval=off,like=off,subplan=off,scalartypes=off,inherit=off,bitstring=off,groupingsets=off,tablesample=off"
             )
             .is_err()
         );
@@ -390,13 +671,7 @@ mod tests {
     #[test]
     fn disabled_modules_are_never_picked() {
         let tv = ToggleVector::parse(
-            "expr=on,joins=off,subq=off,agg=off,win=off,dml=off,merge=off,\
-             txn=off,ddl=off,types=off,explain=off,util=off,part=off,\
-             partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
-             dtm=off,adtmisc=off,sqljson=off,plpg=off,coll=off,mbconv=off,\
-             xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,\
-             plansel=off,earm2=off,exr=off,numx=off,pubsub=off,ddldeep=off,\
-             pgram=off,opt2=off,opt3=off,cfgm=off,earm3=off,btbrin=off,heap=off",
+            "expr=on,joins=off,subq=off,agg=off,win=off,winfunc=off,dml=off,merge=off,txn=off,ddl=off,types=off,explain=off,util=off,part=off,partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,matview=off,geo=off,dtm=off,dtx=off,adtmisc=off,sqljson=off,jsonpath=off,jsonfuncs=off,plpg=off,coll=off,mbconv=off,xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,plansel=off,earm2=off,earm3=off,earm4=off,exr=off,exr2=off,numx=off,pubsub=off,ddldeep=off,pgram=off,opt2=off,opt3=off,cfgm=off,btbrin=off,heap=off,stats=off,tsrank=off,planner=off,partition=off,triggers=off,plpgsql=off,regex=off,mergex=off,aggwin=off,indexam=off,typeio=off,aclrls=off,lockcursor=off,largeobj=off,plancache=off,vacuum=off,seqident=off,ritrig=off,rangeops=off,udt=off,arrayops=off,altertable=off,byteaenc=off,srf=off,stringfunc=off,floatmath=off,numeric=off,ruleutils=off,cterec=off,castcoerce=off,intops=off,expreval=off,like=off,subplan=off,scalartypes=off,inherit=off,bitstring=off,groupingsets=off,tablesample=off"
         )
         .unwrap();
         let mut rng = Rng::new(5);

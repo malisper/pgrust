@@ -195,6 +195,24 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "win:frame:none", default: 3.0 },
     ProdWeight { name: "win:frame:rows", default: 1.5 },
     ProdWeight { name: "win:frame:range", default: 1.0 },
+    // winfunc module: builtin window-FUNCTION argument/result edge probes.
+    // percent_rank/cume_dist (absent from the win module entirely), and the
+    // NULL/error/out-of-range argument regimes for ntile/nth_value/lead/lag
+    // that the win module deliberately steers around.
+    ProdWeight { name: "winfunc:pct_rank", default: 1.5 },
+    ProdWeight { name: "winfunc:cume_dist", default: 1.5 },
+    ProdWeight { name: "winfunc:ntile_null", default: 1.0 },
+    ProdWeight { name: "winfunc:ntile_err", default: 1.0 },
+    ProdWeight { name: "winfunc:ntile_one", default: 1.0 },
+    ProdWeight { name: "winfunc:ntile_big", default: 1.0 },
+    ProdWeight { name: "winfunc:leadlag_nulloff", default: 1.0 },
+    ProdWeight { name: "winfunc:leadlag_negoff", default: 1.0 },
+    ProdWeight { name: "winfunc:leadlag_bigoff", default: 1.0 },
+    ProdWeight { name: "winfunc:leadlag_default", default: 1.0 },
+    ProdWeight { name: "winfunc:nth_null", default: 1.0 },
+    ProdWeight { name: "winfunc:nth_err", default: 1.0 },
+    ProdWeight { name: "winfunc:nth_big", default: 1.0 },
+    ProdWeight { name: "winfunc:firstlast_frame", default: 1.0 },
     // ORDER BY / LIMIT / OFFSET suffix (all statement modules). A total
     // ORDER BY covers every output column; only it may carry LIMIT/OFFSET.
     ProdWeight { name: "orderby:none", default: 2.0 },
@@ -283,6 +301,17 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "merge:nmbs:none", default: 5.0 },
     ProdWeight { name: "merge:returning", default: 1.0 },
     ProdWeight { name: "merge:returning:none", default: 2.0 },
+    // MERGE/ModifyTable/rewrite residue batteries (mergex; self-contained
+    // per group). Family selection weights, then fire-only witnesses.
+    ProdWeight { name: "mergex", default: 1.0 },
+    ProdWeight { name: "mergex:gencol", default: 1.5 },
+    ProdWeight { name: "mergex:defcol", default: 1.5 },
+    ProdWeight { name: "mergex:subfield", default: 1.2 },
+    ProdWeight { name: "mergex:wcte", default: 1.2 },
+    ProdWeight { name: "mergex:mergedef", default: 1.0 },
+    ProdWeight { name: "mergex:gencol:returning", default: 1.0 },
+    ProdWeight { name: "mergex:defcol:allrow", default: 1.0 },
+    ProdWeight { name: "mergex:mergedef:nmbs", default: 1.0 },
     // Transactions module: bracket length bucket, savepoint window,
     // terminator, inner statement kind.
     ProdWeight { name: "txn:short", default: 3.0 },
@@ -412,6 +441,16 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "ts:rank", default: 1.0 },
     ProdWeight { name: "ts:headline", default: 0.7 },
 
+    // tsrank module (FTS-RANK lane): ranking / headline / tsvector-op /
+    // ts_stat / tsquery-op probes over literal tsvector/tsquery inputs.
+    ProdWeight { name: "tsr:rank", default: 1.0 },
+    ProdWeight { name: "tsr:rankcd", default: 1.0 },
+    ProdWeight { name: "tsr:headline", default: 1.0 },
+    ProdWeight { name: "tsr:vecop", default: 1.0 },
+    ProdWeight { name: "tsr:tsqop", default: 1.0 },
+    ProdWeight { name: "tsr:stat", default: 0.8 },
+    ProdWeight { name: "tsr:rewrite", default: 1.0 },
+
     // tsdl module (T2 text-search DDL + language probes).
     // LD3 stemmer drain: exhaustive among-table suffix sweep across every
     // shipped snowball dictionary (stem_data.rs cursor walk).
@@ -472,11 +511,43 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "dtm:attz", default: 2.5 },
     ProdWeight { name: "dtm:tochar", default: 2.0 },
     ProdWeight { name: "dtm:cast", default: 2.5 },
+    // TYPEIO type-I/O + operator residue drain (typeio.rs). Statement-shape
+    // choice: the network/mac/mac8/varbit comparison+bitwise arms and the
+    // float4 to_char picture matrix carry the widest uncovered surface;
+    // numwin (moving-aggregate inverse + in_range) and dtedge (datetime
+    // out-of-range error identity) sit alongside.
+    ProdWeight { name: "tio:netord", default: 3.0 },
+    ProdWeight { name: "tio:mac", default: 2.5 },
+    ProdWeight { name: "tio:mac8", default: 3.0 },
+    ProdWeight { name: "tio:varbit", default: 3.0 },
+    ProdWeight { name: "tio:fmtf4", default: 2.5 },
+    ProdWeight { name: "tio:numwin", default: 2.0 },
+    ProdWeight { name: "tio:dtedge", default: 1.5 },
+    // LIKE lane (like.rs): the LIKE/ILIKE/SIMILAR TO pattern-match drain.
+    // basic/ilike/escape/esclit carry the like.c match_text + do_like_escape
+    // hollow lines and weigh highest; similar/substr are the regex-surface
+    // tail (lower); err is deliberate error fuel (lowest).
+    ProdWeight { name: "like:basic", default: 4.0 },
+    ProdWeight { name: "like:ilike", default: 3.0 },
+    ProdWeight { name: "like:escape", default: 3.5 },
+    ProdWeight { name: "like:esclit", default: 3.0 },
+    ProdWeight { name: "like:mb", default: 2.5 },
+    ProdWeight { name: "like:bytea", default: 2.0 },
+    ProdWeight { name: "like:similar", default: 1.5 },
+    ProdWeight { name: "like:substr", default: 1.0 },
+    ProdWeight { name: "like:col", default: 1.5 },
+    ProdWeight { name: "like:err", default: 1.5 },
     // LD3 datetime decode drain (dtmdec.rs): raw-literal permutation
     // casts. The dtm:decode gate sits alongside the matrix shapes; the
     // dtmdec:* subs split the six type targets, the deterministic-special
     // and style-bracket shapes, and the malformed-literal error fuel.
     ProdWeight { name: "dtm:decode", default: 3.0 },
+    // dtx (datetime-extra): the surface dtm's scalar SELECTs cannot reach.
+    ProdWeight { name: "dtx:gseries", default: 2.0 },
+    ProdWeight { name: "dtx:isfinite", default: 1.5 },
+    ProdWeight { name: "dtx:typmod", default: 3.0 },
+    ProdWeight { name: "dtx:tzfunc", default: 2.5 },
+    ProdWeight { name: "dtx:epoch", default: 1.5 },
     ProdWeight { name: "dtmdec:date", default: 2.0 },
     ProdWeight { name: "dtmdec:time", default: 2.0 },
     ProdWeight { name: "dtmdec:timetz", default: 1.5 },
@@ -1084,6 +1155,39 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "views:deparse:pretty", default: 2.0 },
     ProdWeight { name: "views:deparse:wrap", default: 1.0 },
     ProdWeight { name: "views:deparse:updatable", default: 1.0 },
+    // matview module (Track-B complement to `views`): the createas.c /
+    // matview.c / view.c arms `views` leaves cold. Action mix — content and
+    // match-merge (the HIGH-severity refresh-content surfaces) lead.
+    ProdWeight { name: "matview:content", default: 3.0 },
+    ProdWeight { name: "matview:scan", default: 1.5 },
+    ProdWeight { name: "matview:merge", default: 2.5 },
+    ProdWeight { name: "matview:nouniq", default: 1.0 },
+    ProdWeight { name: "matview:ctas", default: 2.0 },
+    ProdWeight { name: "matview:secview", default: 1.5 },
+    ProdWeight { name: "matview:replace", default: 1.5 },
+    ProdWeight { name: "matview:recursive", default: 1.5 },
+    // matview: content-arm source shapes (join / aggregate / DISTINCT).
+    ProdWeight { name: "matview:content:join", default: 2.0 },
+    ProdWeight { name: "matview:content:agg", default: 2.0 },
+    ProdWeight { name: "matview:content:distinct", default: 1.5 },
+    // matview: scannability arm — plain refresh vs the CONCURRENTLY-on-
+    // unpopulated error variant.
+    ProdWeight { name: "matview:scan:plain", default: 2.0 },
+    ProdWeight { name: "matview:scan:concurrent", default: 1.5 },
+    // matview: CREATE TABLE AS / SELECT INTO shapes.
+    ProdWeight { name: "matview:ctas:data", default: 2.0 },
+    ProdWeight { name: "matview:ctas:nodata", default: 1.5 },
+    ProdWeight { name: "matview:ctas:into", default: 1.5 },
+    ProdWeight { name: "matview:ctas:agg", default: 1.5 },
+    // matview: security-option view shapes and whether to write through.
+    ProdWeight { name: "matview:sec:barrier", default: 2.0 },
+    ProdWeight { name: "matview:sec:invoker", default: 2.0 },
+    ProdWeight { name: "matview:sec:both", default: 1.0 },
+    ProdWeight { name: "matview:sec:write", default: 1.5 },
+    ProdWeight { name: "matview:sec:read", default: 1.0 },
+    // matview: recursive-view shapes.
+    ProdWeight { name: "matview:rec:count", default: 2.0 },
+    ProdWeight { name: "matview:rec:pair", default: 1.5 },
     // adt-misc breadth module (A3): statement shapes. The four families
     // (acl / varbit+varlena / multirange / float-numeric edges) each get
     // their own steering knob; money is its own low-weight surface.
@@ -1139,6 +1243,40 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "sqljson:jts", default: 1.5 },
     ProdWeight { name: "sqljson:windup", default: 1.0 },
     ProdWeight { name: "sqljson:viewdef", default: 1.5 },
+    // jsonpath module: the raw jsonpath execution-engine drain (gap-006
+    // jsonpath cluster). The predicate-grammar and variable families carry
+    // the most dark C mass (executeBinaryArithmExpr / executeLikeRegex /
+    // getJsonPathVariableFromJsonb / jspIsMutableWalker), so they sit above
+    // the operator/error fillers.
+    ProdWeight { name: "jsonpath:opexists", default: 2.0 },
+    ProdWeight { name: "jsonpath:opmatch", default: 2.0 },
+    ProdWeight { name: "jsonpath:exists", default: 2.0 },
+    ProdWeight { name: "jsonpath:match", default: 2.0 },
+    ProdWeight { name: "jsonpath:vars", default: 3.0 },
+    ProdWeight { name: "jsonpath:arith", default: 3.0 },
+    ProdWeight { name: "jsonpath:cmp", default: 2.5 },
+    ProdWeight { name: "jsonpath:likeregex", default: 3.0 },
+    ProdWeight { name: "jsonpath:startswith", default: 2.0 },
+    ProdWeight { name: "jsonpath:recursive", default: 2.0 },
+    ProdWeight { name: "jsonpath:unicode", default: 2.5 },
+    ProdWeight { name: "jsonpath:dtcmp", default: 2.0 },
+    ProdWeight { name: "jsonpath:mutidx", default: 1.5 },
+    ProdWeight { name: "jsonpath:err", default: 1.0 },
+    // JSONFUNCS module: the json/jsonb function + operator surface J1's
+    // sqljson does not reach (jsonb_op.c operators, jsonfuncs.c expand
+    // SRFs + classic aggregates, jsonb subscripting).
+    ProdWeight { name: "jsonfuncs:jacc", default: 2.5 },
+    ProdWeight { name: "jsonfuncs:contain", default: 2.5 },
+    ProdWeight { name: "jsonfuncs:exist", default: 2.5 },
+    ProdWeight { name: "jsonfuncs:concat", default: 2.0 },
+    ProdWeight { name: "jsonfuncs:each", default: 2.5 },
+    ProdWeight { name: "jsonfuncs:elems", default: 2.5 },
+    ProdWeight { name: "jsonfuncs:keys", default: 2.0 },
+    ProdWeight { name: "jsonfuncs:extract", default: 2.5 },
+    ProdWeight { name: "jsonfuncs:meta", default: 2.0 },
+    ProdWeight { name: "jsonfuncs:agg", default: 2.5 },
+    ProdWeight { name: "jsonfuncs:sub", default: 2.0 },
+    ProdWeight { name: "jsonfuncs:err", default: 1.0 },
     // Q2 mbconv module (encoding-conversion production; data tables in
     // mbconv_data.rs are pre-verified on both engines). The ok/err knob
     // biases away from the matched 22P05/22021 arms.
@@ -1386,6 +1524,19 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "einterp:w4:errloc", default: 1.0 },
     ProdWeight { name: "einterp:w4:collate", default: 1.0 },
     ProdWeight { name: "einterp:w4:partition", default: 1.0 },
+    // EXPREVAL scalar-opcode saturation module (crate::expreval): the exact
+    // ExecInterpExpr scalar arms the mutation lane flagged as thin oracle
+    // coverage. Each shape is one deep-but-cheap VALUES-driven SELECT group.
+    ProdWeight { name: "expreval:saop:hash", default: 1.2 },
+    ProdWeight { name: "expreval:saop:linear", default: 1.2 },
+    ProdWeight { name: "expreval:isjson", default: 1.2 },
+    ProdWeight { name: "expreval:wholerow", default: 1.0 },
+    ProdWeight { name: "expreval:distinct", default: 1.0 },
+    ProdWeight { name: "expreval:greatest", default: 1.0 },
+    ProdWeight { name: "expreval:case", default: 1.0 },
+    ProdWeight { name: "expreval:coalesce", default: 1.0 },
+    ProdWeight { name: "expreval:bool3vl", default: 1.0 },
+    ProdWeight { name: "expreval:rowcmp", default: 1.0 },
     // LD4 EXPLAIN plan-node/option drain module (crate::exd): shape arms
     // (each a self-contained fixture + probe group over the explain.c
     // hollow cluster) and the plain-EXPLAIN format rider. The heavier
@@ -1634,6 +1785,23 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "earm3:colref", default: 1.2 },
     ProdWeight { name: "earm3:shdep2", default: 1.1 },
     ProdWeight { name: "earm3:tsdes", default: 0.9 },
+    // ERR3 earm4 module (ERROR-ARM round 4): verbatim hand-verified
+    // sections over the catalog/DDL error surface the first three passes
+    // left (domain/constraint validation, tablespace/AM, ownership +
+    // dependency, RLS policy, rules, publication/subscription DDL,
+    // COMMENT/SECURITY LABEL, sequence-identity, parser grammar).
+    ProdWeight { name: "earm4:domcon", default: 1.2 },
+    ProdWeight { name: "earm4:chkval", default: 1.3 },
+    ProdWeight { name: "earm4:atmisc", default: 1.2 },
+    ProdWeight { name: "earm4:tblspc", default: 1.0 },
+    ProdWeight { name: "earm4:owndep", default: 1.1 },
+    ProdWeight { name: "earm4:policy", default: 1.1 },
+    ProdWeight { name: "earm4:rules", default: 1.0 },
+    ProdWeight { name: "earm4:pubval", default: 1.1 },
+    ProdWeight { name: "earm4:subval", default: 1.0 },
+    ProdWeight { name: "earm4:commlbl", default: 1.0 },
+    ProdWeight { name: "earm4:seqid2", default: 1.1 },
+    ProdWeight { name: "earm4:pgram2", default: 1.2 },
     // exr (LD9): executor-residue shape selection.
     ProdWeight { name: "exr:create", default: 1.2 },
     ProdWeight { name: "exr:drop", default: 0.15 },
@@ -1739,6 +1907,43 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     // exr: merge-join sub-shapes.
     ProdWeight { name: "exr:mj:dup", default: 1.2 },
     ProdWeight { name: "exr:mj:dim", default: 1.0 },
+    // exr2 (EXEC-RESIDUE): rescan-half + serialization shape selection.
+    ProdWeight { name: "exr2:create", default: 1.2 },
+    ProdWeight { name: "exr2:drop", default: 0.15 },
+    ProdWeight { name: "exr2:setop", default: 2.0 },
+    ProdWeight { name: "exr2:setoprescan", default: 3.0 },
+    ProdWeight { name: "exr2:recursive", default: 2.5 },
+    ProdWeight { name: "exr2:winrescan", default: 2.5 },
+    ProdWeight { name: "exr2:ntrescan", default: 2.0 },
+    ProdWeight { name: "exr2:serial", default: 1.5 },
+    // exr2: top-level setop strategy.
+    ProdWeight { name: "exr2:so:hash", default: 1.0 },
+    ProdWeight { name: "exr2:so:sort", default: 1.0 },
+    // exr2: setop-rescan strategy.
+    ProdWeight { name: "exr2:sor:hash", default: 1.0 },
+    ProdWeight { name: "exr2:sor:sort", default: 1.0 },
+    // exr2: recursive-union sub-shapes.
+    ProdWeight { name: "exr2:rec:lateral", default: 1.5 },
+    ProdWeight { name: "exr2:rec:plain", default: 1.0 },
+    // exr2: named-tuplestore rescan sub-shapes.
+    ProdWeight { name: "exr2:nt:ins", default: 1.0 },
+    ProdWeight { name: "exr2:nt:upd", default: 1.0 },
+    ProdWeight { name: "exr2:nt:del", default: 1.0 },
+    ProdWeight { name: "exr2:nt:mix", default: 1.0 },
+    // exr2: plan-serialization toggle sub-shapes.
+    ProdWeight { name: "exr2:ser:print", default: 1.2 },
+    ProdWeight { name: "exr2:ser:parallel", default: 1.0 },
+    // numeric (NUMERIC lane): top-level shape selection.
+    ProdWeight { name: "numeric:istat", default: 2.0 },
+    ProdWeight { name: "numeric:xprec", default: 1.5 },
+    // numeric: integer statistical-aggregate (int128 poly) sub-shapes.
+    ProdWeight { name: "numeric:is:serial", default: 1.2 },
+    ProdWeight { name: "numeric:is:par", default: 1.0 },
+    ProdWeight { name: "numeric:is:move", default: 0.8 },
+    // numeric: extreme-precision arithmetic sub-shapes.
+    ProdWeight { name: "numeric:xp:mul", default: 1.2 },
+    ProdWeight { name: "numeric:xp:div", default: 1.2 },
+    ProdWeight { name: "numeric:xp:trans", default: 1.0 },
     // numx (LD9): adt-numeric shape selection.
     ProdWeight { name: "numx:div", default: 2.5 },
     ProdWeight { name: "numx:pow", default: 2.5 },
@@ -2058,6 +2263,918 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "partalt:pwagg", default: 1.3 },
     ProdWeight { name: "partalt:reparam", default: 1.3 },
     ProdWeight { name: "partalt:hashfn", default: 1.0 },
+    // stats (STATS lane): extended-stats build+apply (dep/ndist/mcv),
+    // per-column ANALYZE stats-build (analyze), selfuncs restriction+join
+    // estimation (sel), and index cost estimators (index).
+    ProdWeight { name: "stats:dep", default: 1.3 },
+    ProdWeight { name: "stats:ndist", default: 1.1 },
+    ProdWeight { name: "stats:mcv", default: 1.3 },
+    ProdWeight { name: "stats:analyze", default: 1.2 },
+    ProdWeight { name: "stats:sel", default: 1.4 },
+    ProdWeight { name: "stats:index", default: 1.2 },
+    // planner (fuzz-planner): optimizer path/plan-shape drain family
+    // selection. geqo/winrun carry the biggest cold regions (whole GEQO
+    // subsystem; find_window_run_conditions), so they weigh highest.
+    ProdWeight { name: "planner:sample", default: 1.4 },
+    ProdWeight { name: "planner:tidrange", default: 1.4 },
+    ProdWeight { name: "planner:groupsort", default: 1.3 },
+    ProdWeight { name: "planner:setop", default: 1.3 },
+    ProdWeight { name: "planner:winrun", default: 1.6 },
+    ProdWeight { name: "planner:geqo", default: 1.6 },
+    ProdWeight { name: "planner:bitmapor", default: 1.5 },
+    // partition (PARTITION lane): partition-wise-join bound-MERGE drain.
+    // pwrange/pwlist carry the partbounds.c merge_range_bounds /
+    // merge_list_bounds mass (compatibly-partitioned parents with DIFFERENT
+    // bounds); route_err carries ExecBuildSlotPartitionKeyDescription;
+    // attach_default carries check_default_partition_contents; colmap
+    // carries adjust_partition_colnos[_using_map]; prune_prefix carries
+    // get_steps_using_prefix_recurse; constraintdef carries
+    // get_partition_qual_relid + the partition_bounds_equal fast-path arm.
+    ProdWeight { name: "partition:pwrange", default: 2.0 },
+    ProdWeight { name: "partition:pwlist", default: 2.0 },
+    ProdWeight { name: "partition:route_err", default: 1.0 },
+    ProdWeight { name: "partition:attach_default", default: 1.0 },
+    ProdWeight { name: "partition:colmap", default: 1.0 },
+    ProdWeight { name: "partition:prune_prefix", default: 1.2 },
+    ProdWeight { name: "partition:constraintdef", default: 1.0 },
+    // triggers (Track-B): trigger/rule/event-trigger EXECUTION-drain shapes.
+    // Event-trigger and partitioned-clone sections target the largest hollow
+    // spans (event_trigger.c ddl/sql_drop SRF handlers, trigger.c
+    // parent-clone), so they carry above-parity section weight.
+    ProdWeight { name: "triggers:setconstr", default: 1.3 },
+    ProdWeight { name: "triggers:enabledisable", default: 1.1 },
+    ProdWeight { name: "triggers:replrole", default: 1.0 },
+    ProdWeight { name: "triggers:rename", default: 1.2 },
+    ProdWeight { name: "triggers:parted", default: 1.3 },
+    ProdWeight { name: "triggers:eventddl", default: 1.5 },
+    ProdWeight { name: "triggers:eventdrop", default: 1.4 },
+    ProdWeight { name: "triggers:rules", default: 1.1 },
+    ProdWeight { name: "triggers:viewupd", default: 0.9 },
+    // PLPGSQL lane (crate::plpg2): plpgsql/SPI residual-arm drain. Group
+    // kinds, then per-group sub-forms.
+    ProdWeight { name: "plpg2:raise", default: 2.5 },
+    ProdWeight { name: "plpg2:diag", default: 1.5 },
+    ProdWeight { name: "plpg2:srf", default: 2.0 },
+    ProdWeight { name: "plpg2:cursor", default: 2.5 },
+    ProdWeight { name: "plpg2:foreach", default: 1.5 },
+    ProdWeight { name: "plpg2:dynexec", default: 2.0 },
+    ProdWeight { name: "plpg2:record", default: 2.0 },
+    ProdWeight { name: "plpg2:call", default: 1.5 },
+    ProdWeight { name: "plpg2:do", default: 1.5 },
+    ProdWeight { name: "plpg2:assert", default: 1.5 },
+    ProdWeight { name: "plpg2:vartype", default: 1.5 },
+    // raise sub-forms.
+    ProdWeight { name: "plpg2:raise:full", default: 2.5 },
+    ProdWeight { name: "plpg2:raise:cond", default: 1.0 },
+    ProdWeight { name: "plpg2:raise:sqlstate", default: 1.0 },
+    ProdWeight { name: "plpg2:raise:level", default: 1.5 },
+    ProdWeight { name: "plpg2:raise:reraise", default: 1.0 },
+    // diag sub-forms.
+    ProdWeight { name: "plpg2:diag:cur", default: 1.0 },
+    ProdWeight { name: "plpg2:diag:stacked", default: 1.0 },
+    // srf sub-forms.
+    ProdWeight { name: "plpg2:srf:table", default: 1.5 },
+    ProdWeight { name: "plpg2:srf:setof", default: 1.5 },
+    ProdWeight { name: "plpg2:srf:record", default: 1.5 },
+    // cursor sub-forms.
+    ProdWeight { name: "plpg2:cursor:forc", default: 1.5 },
+    ProdWeight { name: "plpg2:cursor:explicit", default: 1.5 },
+    ProdWeight { name: "plpg2:cursor:exec", default: 1.5 },
+    // dynexec sub-forms.
+    ProdWeight { name: "plpg2:dyn2:into", default: 1.5 },
+    ProdWeight { name: "plpg2:dyn2:dml", default: 1.5 },
+    // do sub-forms.
+    ProdWeight { name: "plpg2:do:plain", default: 1.0 },
+    ProdWeight { name: "plpg2:do:exc", default: 1.0 },
+    // assert sub-forms.
+    ProdWeight { name: "plpg2:assert:pass", default: 1.5 },
+    ProdWeight { name: "plpg2:assert:fail", default: 1.0 },
+    // regex (crafted-pattern engine drain): shape selection + the ok/err
+    // fuel knob. The complexity-guard shapes (cat/bigquant/deepnest) and
+    // the always-error invalid shape carry the crash/hang/ETOOBIG surface;
+    // the function/operator shapes carry differential result identity.
+    ProdWeight { name: "regex:match", default: 1.5 },
+    ProdWeight { name: "regex:matches", default: 1.5 },
+    ProdWeight { name: "regex:replace", default: 1.5 },
+    ProdWeight { name: "regex:count", default: 1.0 },
+    ProdWeight { name: "regex:substr", default: 1.0 },
+    ProdWeight { name: "regex:split", default: 1.0 },
+    ProdWeight { name: "regex:op", default: 1.5 },
+    ProdWeight { name: "regex:cat", default: 1.5 },
+    ProdWeight { name: "regex:bigquant", default: 1.5 },
+    ProdWeight { name: "regex:deepnest", default: 1.5 },
+    ProdWeight { name: "regex:backref", default: 1.2 },
+    ProdWeight { name: "regex:charclass", default: 1.2 },
+    ProdWeight { name: "regex:anchor", default: 1.0 },
+    ProdWeight { name: "regex:flags", default: 1.0 },
+    ProdWeight { name: "regex:invalid", default: 1.0 },
+    ProdWeight { name: "regex:ok", default: 4.0 },
+    ProdWeight { name: "regex:err", default: 1.0 },
+    // aggwin (AGGWIN): window-frame + grouping-sets-spill residue families.
+    ProdWeight { name: "aggwin", default: 1.0 },
+    ProdWeight { name: "aggwin:groups", default: 3.0 },
+    ProdWeight { name: "aggwin:exclude", default: 3.0 },
+    ProdWeight { name: "aggwin:rangetyped", default: 2.5 },
+    ProdWeight { name: "aggwin:rescan", default: 2.0 },
+    ProdWeight { name: "aggwin:namedchain", default: 1.5 },
+    ProdWeight { name: "aggwin:filter", default: 1.5 },
+    ProdWeight { name: "aggwin:moving", default: 2.0 },
+    ProdWeight { name: "aggwin:hashaggspill", default: 1.5 },
+    // indexam (INDEXAM) shape picks: GIN / GiST / SP-GiST operator-class
+    // drain + partial/expr/INCLUDE cover arms. Even weights — each shape
+    // covers a disjoint C region (a whole AM's internals).
+    ProdWeight { name: "indexam:gin", default: 1.0 },
+    ProdWeight { name: "indexam:gist", default: 1.0 },
+    ProdWeight { name: "indexam:spgist", default: 1.0 },
+    ProdWeight { name: "indexam:cover", default: 1.0 },
+    // aclrls (ACL/RLS drain): shape selection. The RLS-application shapes
+    // carry the rowsecurity.c mass (get_row_security_policies +
+    // add_security_quals + add_with_check_options), so they sit above the
+    // rest; own:shdep carries the pg_shdepend owner-dependency machinery
+    // adtmisc never builds; grant:rel carries the ExecGrant_* delegation
+    // chain; aclitem is a cheap scalar family kept at a token weight.
+    ProdWeight { name: "aclrls:rls:apply", default: 2.0 },
+    ProdWeight { name: "aclrls:rls:force", default: 1.3 },
+    ProdWeight { name: "aclrls:rls:ddl", default: 1.5 },
+    ProdWeight { name: "aclrls:grant:rel", default: 1.5 },
+    ProdWeight { name: "aclrls:grant:defacl", default: 1.2 },
+    ProdWeight { name: "aclrls:own:shdep", default: 1.5 },
+    ProdWeight { name: "aclrls:role:member", default: 1.0 },
+    ProdWeight { name: "aclrls:aclitem", default: 0.8 },
+    // Error-fuel bias (deliberate matched errors: WITH CHECK violations,
+    // drop-role-with-deps, denied writes, bogus aclitem literals). Biased
+    // toward the non-error arm per the findings-budget rule.
+    ProdWeight { name: "aclrls:ok", default: 3.0 },
+    ProdWeight { name: "aclrls:err", default: 1.0 },
+    // lockcursor: shape picks + sub-picks (LOCK TABLE all-modes / advisory
+    // ref-counting / nested savepoints / savepoint + NOTIFY error arms).
+    ProdWeight { name: "lockcursor:locktable", default: 2.0 },
+    ProdWeight { name: "lockcursor:advisory", default: 1.5 },
+    ProdWeight { name: "lockcursor:savepoint", default: 2.0 },
+    ProdWeight { name: "lockcursor:savepoint_err", default: 1.5 },
+    ProdWeight { name: "lockcursor:notify", default: 1.5 },
+    ProdWeight { name: "lockcursor:lt:err", default: 1.0 },
+    ProdWeight { name: "lockcursor:lt:noerr", default: 2.0 },
+    ProdWeight { name: "lockcursor:sp:commit", default: 1.0 },
+    ProdWeight { name: "lockcursor:sp:rollback", default: 1.0 },
+    // largeobj (LARGEOBJECT): the lo_* / pg_largeobject drain module. Action
+    // mix favors the write/read/seek/truncate descriptor and bytea paths;
+    // create/creat/meta/err at modest weight.
+    ProdWeight { name: "largeobj:bytea", default: 2.0 },
+    ProdWeight { name: "largeobj:creat", default: 1.0 },
+    ProdWeight { name: "largeobj:putget", default: 2.0 },
+    ProdWeight { name: "largeobj:fd", default: 2.5 },
+    ProdWeight { name: "largeobj:chunk", default: 2.0 },
+    ProdWeight { name: "largeobj:trunc", default: 2.0 },
+    ProdWeight { name: "largeobj:lo64", default: 1.5 },
+    ProdWeight { name: "largeobj:meta", default: 1.0 },
+    ProdWeight { name: "largeobj:err", default: 1.5 },
+    // lo_creat mode arg.
+    ProdWeight { name: "largeobj:creat:neg", default: 1.0 },
+    ProdWeight { name: "largeobj:creat:rw", default: 1.0 },
+    // descriptor seek whence.
+    ProdWeight { name: "largeobj:whence:set", default: 1.5 },
+    ProdWeight { name: "largeobj:whence:cur", default: 1.0 },
+    ProdWeight { name: "largeobj:whence:end", default: 1.0 },
+    // truncate direction.
+    ProdWeight { name: "largeobj:trunc:grow", default: 1.0 },
+    ProdWeight { name: "largeobj:trunc:shrink", default: 1.0 },
+    // error arms.
+    ProdWeight { name: "largeobj:err:getne", default: 1.0 },
+    ProdWeight { name: "largeobj:err:putne", default: 1.0 },
+    ProdWeight { name: "largeobj:err:unlinkne", default: 1.0 },
+    ProdWeight { name: "largeobj:err:openne", default: 1.0 },
+    ProdWeight { name: "largeobj:err:badfdread", default: 1.0 },
+    ProdWeight { name: "largeobj:err:badfdwrite", default: 1.0 },
+    ProdWeight { name: "largeobj:err:negseek", default: 1.0 },
+    ProdWeight { name: "largeobj:err:badwhence", default: 1.0 },
+    ProdWeight { name: "largeobj:err:negfrag", default: 1.0 },
+    ProdWeight { name: "largeobj:err:readonly", default: 1.0 },
+    ProdWeight { name: "largeobj:err:writeonly", default: 1.0 },
+    // plancache (PLANCACHE): generic-vs-custom plan drain. mode carries the
+    // force_generic/force_custom result-identity sweep; transition carries
+    // the 5-custom->generic flip; prune carries generic-plan runtime
+    // partition pruning; invalidate carries plancache DDL invalidation;
+    // introspect carries pg_prepared_statements. q:* pick the prepared-
+    // query shape; prune:* the pruning-qual shape; explain gates the
+    // EXPLAIN EXECUTE plan-text witness at the flip boundary.
+    ProdWeight { name: "plancache:mode", default: 2.0 },
+    ProdWeight { name: "plancache:transition", default: 1.5 },
+    ProdWeight { name: "plancache:prune", default: 2.0 },
+    ProdWeight { name: "plancache:invalidate", default: 1.5 },
+    ProdWeight { name: "plancache:introspect", default: 0.8 },
+    ProdWeight { name: "plancache:q:rows", default: 2.0 },
+    ProdWeight { name: "plancache:q:agg", default: 2.0 },
+    ProdWeight { name: "plancache:q:partial", default: 1.5 },
+    ProdWeight { name: "plancache:q:in", default: 1.5 },
+    ProdWeight { name: "plancache:prune:range", default: 1.5 },
+    ProdWeight { name: "plancache:prune:eq", default: 1.5 },
+    ProdWeight { name: "plancache:explain", default: 1.0 },
+    ProdWeight { name: "plancache:explain:none", default: 2.0 },
+    // vacuum (VACUUM lane): SQL-maintenance option-matrix shape selection.
+    ProdWeight { name: "vac:create", default: 1.5 },
+    ProdWeight { name: "vac:createpart", default: 0.8 },
+    ProdWeight { name: "vac:drop", default: 0.3 },
+    ProdWeight { name: "vac:vacuum", default: 3.0 },
+    ProdWeight { name: "vac:analyze", default: 1.5 },
+    ProdWeight { name: "vac:cluster", default: 1.5 },
+    ProdWeight { name: "vac:reindex", default: 1.5 },
+    ProdWeight { name: "vac:vacpart", default: 1.2 },
+    ProdWeight { name: "vac:reindexschema", default: 0.6 },
+    ProdWeight { name: "vac:reindextblspc", default: 0.6 },
+    ProdWeight { name: "vac:dbstats", default: 0.6 },
+    ProdWeight { name: "vac:badcombo", default: 0.4 },
+    // create picks.
+    ProdWeight { name: "vac:ff:30", default: 1.5 },
+    ProdWeight { name: "vac:ff:70", default: 1.0 },
+    ProdWeight { name: "vac:ff:100", default: 1.0 },
+    ProdWeight { name: "vac:rows:1000", default: 1.5 },
+    ProdWeight { name: "vac:rows:3000", default: 1.5 },
+    ProdWeight { name: "vac:rows:6000", default: 1.0 },
+    ProdWeight { name: "vac:clusteron:yes", default: 1.5 },
+    ProdWeight { name: "vac:clusteron:no", default: 1.0 },
+    ProdWeight { name: "vac:pp:2", default: 1.5 },
+    ProdWeight { name: "vac:pp:3", default: 1.0 },
+    // VACUUM form + legacy keyword shapes.
+    ProdWeight { name: "vac:v:legacy", default: 1.5 },
+    ProdWeight { name: "vac:v:paren", default: 3.0 },
+    ProdWeight { name: "vac:vl:plain", default: 1.5 },
+    ProdWeight { name: "vac:vl:full", default: 1.0 },
+    ProdWeight { name: "vac:vl:freeze", default: 1.0 },
+    ProdWeight { name: "vac:vl:analyze", default: 1.5 },
+    ProdWeight { name: "vac:vl:fullanalyze", default: 1.0 },
+    ProdWeight { name: "vac:vl:freezeanalyze", default: 1.0 },
+    // VACUUM parenthesized option values.
+    ProdWeight { name: "vac:full:yes", default: 1.0 },
+    ProdWeight { name: "vac:full:no", default: 2.5 },
+    ProdWeight { name: "vac:ic:on", default: 1.0 },
+    ProdWeight { name: "vac:ic:off", default: 1.0 },
+    ProdWeight { name: "vac:ic:auto", default: 1.0 },
+    ProdWeight { name: "vac:pt:on", default: 1.0 },
+    ProdWeight { name: "vac:pt:off", default: 1.0 },
+    ProdWeight { name: "vac:pm:on", default: 1.0 },
+    ProdWeight { name: "vac:pm:off", default: 1.0 },
+    ProdWeight { name: "vac:tr:on", default: 1.0 },
+    ProdWeight { name: "vac:tr:off", default: 1.0 },
+    ProdWeight { name: "vac:par:0", default: 1.0 },
+    ProdWeight { name: "vac:par:1", default: 1.0 },
+    ProdWeight { name: "vac:par:2", default: 1.0 },
+    ProdWeight { name: "vac:par:4", default: 0.5 },
+    ProdWeight { name: "vac:bul:small", default: 1.0 },
+    ProdWeight { name: "vac:bul:med", default: 1.0 },
+    ProdWeight { name: "vac:bul:big", default: 1.0 },
+    // ANALYZE option shapes.
+    ProdWeight { name: "vac:an:plain", default: 1.5 },
+    ProdWeight { name: "vac:an:cols", default: 1.5 },
+    ProdWeight { name: "vac:an:verbose", default: 1.0 },
+    ProdWeight { name: "vac:an:verbosecols", default: 1.0 },
+    ProdWeight { name: "vac:an:skiplocked", default: 1.0 },
+    ProdWeight { name: "vac:an:bul", default: 1.0 },
+    // CLUSTER shapes.
+    ProdWeight { name: "vac:cl:usingpk", default: 1.5 },
+    ProdWeight { name: "vac:cl:usingidx", default: 1.5 },
+    ProdWeight { name: "vac:cl:verboseidx", default: 1.0 },
+    ProdWeight { name: "vac:cl:noidx", default: 1.0 },
+    ProdWeight { name: "vac:cl:verbosenoidx", default: 1.0 },
+    // REINDEX shapes.
+    ProdWeight { name: "vac:ri:indexpk", default: 1.5 },
+    ProdWeight { name: "vac:ri:indexa", default: 1.5 },
+    ProdWeight { name: "vac:ri:verboseindex", default: 1.0 },
+    ProdWeight { name: "vac:ri:table", default: 1.5 },
+    ProdWeight { name: "vac:ri:verbosetable", default: 1.0 },
+    ProdWeight { name: "vac:ri:indexconc", default: 1.0 },
+    ProdWeight { name: "vac:ri:tableconc", default: 1.0 },
+    // Partitioned-maintenance propagation shapes.
+    ProdWeight { name: "vac:vp:vacuum", default: 1.5 },
+    ProdWeight { name: "vac:vp:analyze", default: 1.5 },
+    ProdWeight { name: "vac:vp:vacanalyze", default: 1.5 },
+    ProdWeight { name: "vac:vp:freeze", default: 1.0 },
+    ProdWeight { name: "vac:vp:leaf", default: 1.0 },
+    // Group-local REINDEX SCHEMA / TABLESPACE + dbstats shapes.
+    ProdWeight { name: "vac:rs:plain", default: 1.5 },
+    ProdWeight { name: "vac:rs:conc", default: 1.0 },
+    ProdWeight { name: "vac:rt:plain", default: 1.5 },
+    ProdWeight { name: "vac:rt:conc", default: 1.0 },
+    ProdWeight { name: "vac:ds:plain", default: 1.5 },
+    ProdWeight { name: "vac:ds:verbose", default: 1.0 },
+    // Deliberate error-identity combinations.
+    ProdWeight { name: "vac:bad:fullparallel", default: 1.0 },
+    ProdWeight { name: "vac:bad:fullbul", default: 1.0 },
+    ProdWeight { name: "vac:bad:statstable", default: 1.0 },
+    ProdWeight { name: "vac:bad:analyzeonlylist", default: 1.0 },
+    // seqident (SEQIDENT): sequence / GENERATED IDENTITY / serial group
+    // form selection and intra-group shape steering. create/alter/setval/
+    // currval carry the sequence.c nextval/currval/setval + ALTER surface;
+    // cycle/astype carry the wraparound + boundary (2200H) overflow arms;
+    // identity/altercol/serial carry the parse_utilcmd + tablecmds identity
+    // and serial-desugaring arms; owned/dropdep carry the ownership /
+    // dependency-cascade drain.
+    ProdWeight { name: "seqident:create", default: 2.0 },
+    ProdWeight { name: "seqident:astype", default: 1.5 },
+    ProdWeight { name: "seqident:cycle", default: 1.5 },
+    ProdWeight { name: "seqident:setval", default: 1.5 },
+    ProdWeight { name: "seqident:currval", default: 1.0 },
+    ProdWeight { name: "seqident:alter", default: 1.5 },
+    ProdWeight { name: "seqident:identity", default: 2.0 },
+    ProdWeight { name: "seqident:serial", default: 1.5 },
+    ProdWeight { name: "seqident:altercol", default: 1.5 },
+    ProdWeight { name: "seqident:owned", default: 1.0 },
+    ProdWeight { name: "seqident:dropdep", default: 1.0 },
+    // Ascending vs descending increment direction (create/cycle).
+    ProdWeight { name: "seqident:asc", default: 2.0 },
+    ProdWeight { name: "seqident:desc", default: 1.0 },
+    // CACHE 1 vs CACHE>1 (single-session values are identical either way;
+    // the arm still exercises the cache path).
+    ProdWeight { name: "seqident:cache1", default: 2.0 },
+    ProdWeight { name: "seqident:cachehi", default: 1.0 },
+    // GENERATED ALWAYS vs BY DEFAULT identity kind.
+    ProdWeight { name: "seqident:id:always", default: 1.0 },
+    ProdWeight { name: "seqident:id:bydefault", default: 1.0 },
+    // ritrig (RITRIG): referential-integrity FK-action / RI-trigger /
+    // constraint-validation shape selection. cascade+setnull+setdefault
+    // carry the ri_Cascade/ri_set drain; restrict+matchfull carry the
+    // ri_restrict + MATCH FULL partial-null arms; deferred+notvalid carry
+    // the deferred-check + validateForeignKeyConstraint arms; part carries
+    // the cross-partition RI routing; check/exclude/unique carry the sibling
+    // non-FK constraint identities.
+    ProdWeight { name: "ritrig:cascade", default: 2.5 },
+    ProdWeight { name: "ritrig:setnull", default: 2.0 },
+    ProdWeight { name: "ritrig:setdefault", default: 1.5 },
+    ProdWeight { name: "ritrig:restrict", default: 2.0 },
+    ProdWeight { name: "ritrig:matchfull", default: 1.5 },
+    ProdWeight { name: "ritrig:composite", default: 1.5 },
+    ProdWeight { name: "ritrig:selfref", default: 1.5 },
+    ProdWeight { name: "ritrig:deferred", default: 1.5 },
+    ProdWeight { name: "ritrig:notvalid", default: 1.5 },
+    ProdWeight { name: "ritrig:part", default: 1.5 },
+    ProdWeight { name: "ritrig:check", default: 1.0 },
+    ProdWeight { name: "ritrig:exclude", default: 1.0 },
+    ProdWeight { name: "ritrig:unique", default: 1.0 },
+    // deferred sub-shape split (satisfy-before-commit vs fail-at-commit vs
+    // force-immediate mid-txn).
+    ProdWeight { name: "ritrig:deferred:satisfy", default: 1.0 },
+    ProdWeight { name: "ritrig:deferred:commitfail", default: 1.0 },
+    ProdWeight { name: "ritrig:deferred:setimm", default: 1.0 },
+    // rangeops module (RANGEOPS): range/multirange operator + function +
+    // custom-range-type surface. Action mix (scalar dominant — the
+    // rangetypes.c operator/function fuel; mr carries multirangetypes.c;
+    // flags carries the bound-flag/canonicalization/infinite-edge surface;
+    // custom emits self-contained CREATE TYPE AS RANGE groups).
+    ProdWeight { name: "rangeops:scalar", default: 5.0 },
+    ProdWeight { name: "rangeops:mr", default: 3.0 },
+    ProdWeight { name: "rangeops:flags", default: 2.0 },
+    ProdWeight { name: "rangeops:agg", default: 1.5 },
+    ProdWeight { name: "rangeops:custom", default: 1.0 },
+    ProdWeight { name: "rangeops:err", default: 1.0 },
+    // rangeops: range scalar expression class.
+    ProdWeight { name: "ro:cmp", default: 4.0 },
+    ProdWeight { name: "ro:setop", default: 2.0 },
+    ProdWeight { name: "ro:elem", default: 2.0 },
+    ProdWeight { name: "ro:bounds", default: 3.0 },
+    ProdWeight { name: "ro:merge", default: 1.5 },
+    ProdWeight { name: "ro:hash", default: 1.0 },
+    // rangeops: multirange expression class.
+    ProdWeight { name: "ro:mr:op", default: 3.0 },
+    ProdWeight { name: "ro:mr:mixed", default: 2.5 },
+    ProdWeight { name: "ro:mr:bounds", default: 2.0 },
+    ProdWeight { name: "ro:mr:unnest", default: 1.5 },
+    ProdWeight { name: "ro:mr:ctor", default: 2.0 },
+    // rangeops: custom-range-type variant.
+    ProdWeight { name: "ro:ct:int", default: 2.0 },
+    ProdWeight { name: "ro:ct:float", default: 1.5 },
+    ProdWeight { name: "ro:ct:text", default: 1.5 },
+    // udt (UDT lane): user-defined-type family selection. domain carries the
+    // constraint-decision surface (the HIGH-severity target), so it keeps the
+    // highest share; enum carries the sort-order/ALTER-ADD-VALUE surface;
+    // composite carries the row-type I/O + ATTRIBUTE surgery.
+    ProdWeight { name: "udt:enum", default: 2.0 },
+    ProdWeight { name: "udt:composite", default: 2.0 },
+    ProdWeight { name: "udt:domain", default: 3.0 },
+    // Domain base type inside a domain group (int/text/numeric CHECK fuel).
+    ProdWeight { name: "udt:dom:int", default: 1.0 },
+    ProdWeight { name: "udt:dom:text", default: 1.0 },
+    ProdWeight { name: "udt:dom:num", default: 1.0 },
+    // Domain-over-domain vs flat domain (the nested inner+outer CHECK path).
+    ProdWeight { name: "udt:dom:nest", default: 1.0 },
+    ProdWeight { name: "udt:dom:flat", default: 1.0 },
+    // arrayops (Track-B): array operator/function/subscript drain. Top-level
+    // shapes.
+    ProdWeight { name: "arr:sub", default: 2.5 },
+    ProdWeight { name: "arr:dims", default: 1.5 },
+    ProdWeight { name: "arr:op", default: 2.5 },
+    ProdWeight { name: "arr:anyall", default: 1.5 },
+    ProdWeight { name: "arr:fn", default: 2.5 },
+    ProdWeight { name: "arr:str", default: 1.5 },
+    ProdWeight { name: "arr:agg", default: 1.5 },
+    ProdWeight { name: "arr:trim", default: 1.2 },
+    ProdWeight { name: "arr:ctor", default: 1.2 },
+    ProdWeight { name: "arr:update", default: 1.0 },
+    // arrayops: subscript sub-shapes.
+    ProdWeight { name: "arr:sub:elem", default: 1.2 },
+    ProdWeight { name: "arr:sub:slice", default: 1.2 },
+    ProdWeight { name: "arr:sub:md", default: 1.0 },
+    ProdWeight { name: "arr:sub:oob", default: 0.8 },
+    // arrayops: operator sub-shapes.
+    ProdWeight { name: "arr:op:contain", default: 1.2 },
+    ProdWeight { name: "arr:op:concat", default: 1.2 },
+    ProdWeight { name: "arr:op:cmp", default: 1.0 },
+    // arrayops: function sub-shapes.
+    ProdWeight { name: "arr:fn:mutate", default: 1.0 },
+    ProdWeight { name: "arr:fn:cat", default: 1.0 },
+    ProdWeight { name: "arr:fn:find", default: 1.0 },
+    ProdWeight { name: "arr:fn:replace", default: 1.0 },
+    ProdWeight { name: "arr:fn:fill", default: 0.8 },
+    ProdWeight { name: "arr:fn:fill:ok", default: 1.2 },
+    ProdWeight { name: "arr:fn:fill:err", default: 0.6 },
+    // arrayops: agg/unnest sub-shapes.
+    ProdWeight { name: "arr:agg:agg", default: 1.0 },
+    ProdWeight { name: "arr:agg:unnest", default: 1.0 },
+    ProdWeight { name: "arr:agg:ord", default: 1.0 },
+    // arrayops: trim/sample sub-shapes.
+    ProdWeight { name: "arr:trim:trim", default: 1.2 },
+    ProdWeight { name: "arr:trim:sample", default: 0.8 },
+    ProdWeight { name: "arr:trim:sample:ok", default: 1.2 },
+    ProdWeight { name: "arr:trim:sample:err", default: 0.6 },
+    // arrayops: constructor sub-shapes.
+    ProdWeight { name: "arr:ctor:ok", default: 1.2 },
+    ProdWeight { name: "arr:ctor:err", default: 0.8 },
+    // altertable (Track-B): ALTER TABLE rewrite/phase EXECUTION drain.
+    // Family selectors — the coltype/rewrite paths carry the ATRewriteTable
+    // mass, so they sit above the metadata-only families.
+    ProdWeight { name: "alt:coltype_using", default: 2.5 },
+    ProdWeight { name: "alt:coltype_norewrite", default: 1.0 },
+    ProdWeight { name: "alt:addcol_const", default: 1.5 },
+    ProdWeight { name: "alt:addcol_volatile", default: 1.5 },
+    ProdWeight { name: "alt:setdropdefault", default: 1.0 },
+    ProdWeight { name: "alt:notnull", default: 1.0 },
+    ProdWeight { name: "alt:setopts", default: 1.0 },
+    ProdWeight { name: "alt:dropcol", default: 1.0 },
+    ProdWeight { name: "alt:logged", default: 1.5 },
+    ProdWeight { name: "alt:generated", default: 1.5 },
+    ProdWeight { name: "alt:multi", default: 2.0 },
+    ProdWeight { name: "alt:coltype_indexed", default: 2.0 },
+    ProdWeight { name: "alt:inherit", default: 1.5 },
+    ProdWeight { name: "alt:replident", default: 1.0 },
+    ProdWeight { name: "alt:partition", default: 1.5 },
+    // Base-load row count.
+    ProdWeight { name: "alt:rows:200", default: 2.0 },
+    ProdWeight { name: "alt:rows:800", default: 1.5 },
+    ProdWeight { name: "alt:rows:2000", default: 1.0 },
+    // coltype (USING) transform shapes.
+    ProdWeight { name: "alt:cu:text2int", default: 1.5 },
+    ProdWeight { name: "alt:cu:int2text", default: 1.5 },
+    ProdWeight { name: "alt:cu:int2numeric", default: 1.5 },
+    ProdWeight { name: "alt:cu:text2bool", default: 1.0 },
+    ProdWeight { name: "alt:cu:int2bigint", default: 1.5 },
+    // coltype (no-rewrite / binary-coercible) shapes.
+    ProdWeight { name: "alt:cn:vc2text", default: 1.0 },
+    ProdWeight { name: "alt:cn:widen", default: 1.0 },
+    // ADD COLUMN (constant default) shapes.
+    ProdWeight { name: "alt:ac:int", default: 1.5 },
+    ProdWeight { name: "alt:ac:text", default: 1.0 },
+    ProdWeight { name: "alt:ac:bool", default: 1.0 },
+    ProdWeight { name: "alt:ac:numeric", default: 1.0 },
+    ProdWeight { name: "alt:ac:nodefault", default: 1.0 },
+    ProdWeight { name: "alt:ac:notnull", default: 1.0 },
+    // ADD COLUMN (volatile default) shapes.
+    ProdWeight { name: "alt:av:nextval", default: 1.5 },
+    ProdWeight { name: "alt:av:random", default: 1.0 },
+    // SET/DROP DEFAULT.
+    ProdWeight { name: "alt:dd:set", default: 1.0 },
+    ProdWeight { name: "alt:dd:drop", default: 1.0 },
+    // SET STORAGE/STATISTICS/COMPRESSION.
+    ProdWeight { name: "alt:so:storage_ext", default: 1.0 },
+    ProdWeight { name: "alt:so:storage_main", default: 1.0 },
+    ProdWeight { name: "alt:so:storage_plain", default: 1.0 },
+    ProdWeight { name: "alt:so:stats", default: 1.0 },
+    ProdWeight { name: "alt:so:compression", default: 1.0 },
+    // DROP COLUMN.
+    ProdWeight { name: "alt:dc:existing", default: 1.0 },
+    ProdWeight { name: "alt:dc:addrop", default: 1.0 },
+    // GENERATED STORED.
+    ProdWeight { name: "alt:gen:add", default: 1.5 },
+    ProdWeight { name: "alt:gen:addcol_then_gen", default: 1.0 },
+    // type change under an index.
+    ProdWeight { name: "alt:ci:plain", default: 1.0 },
+    ProdWeight { name: "alt:ci:unique", default: 1.5 },
+    // inheritance.
+    ProdWeight { name: "alt:inh:cascade_add", default: 1.5 },
+    ProdWeight { name: "alt:inh:only_set", default: 1.5 },
+    ProdWeight { name: "alt:inh:noinherit", default: 1.0 },
+    // replica identity.
+    ProdWeight { name: "alt:ri:full", default: 1.5 },
+    ProdWeight { name: "alt:ri:nothing", default: 1.0 },
+    ProdWeight { name: "alt:ri:default", default: 1.0 },
+    ProdWeight { name: "alt:ri:index", default: 1.5 },
+    // partitioned-parent propagation.
+    ProdWeight { name: "alt:pt:addcol", default: 1.5 },
+    ProdWeight { name: "alt:pt:setdefault", default: 1.0 },
+    ProdWeight { name: "alt:pt:coltype", default: 1.5 },
+    // byteaenc (BYTEAENC): bytea + encode/decode + encoding-convert drain.
+    // Top-level shape selection.
+    ProdWeight { name: "byteaenc:enc", default: 2.0 },
+    ProdWeight { name: "byteaenc:encerr", default: 1.5 },
+    ProdWeight { name: "byteaenc:getset", default: 1.8 },
+    ProdWeight { name: "byteaenc:ops", default: 2.0 },
+    ProdWeight { name: "byteaenc:cmp", default: 1.5 },
+    ProdWeight { name: "byteaenc:cast", default: 1.5 },
+    ProdWeight { name: "byteaenc:conv", default: 1.2 },
+    // enc sub-shapes.
+    ProdWeight { name: "byteaenc:enc:hex", default: 1.2 },
+    ProdWeight { name: "byteaenc:enc:b64", default: 1.2 },
+    ProdWeight { name: "byteaenc:enc:esc", default: 1.2 },
+    ProdWeight { name: "byteaenc:enc:rt", default: 1.0 },
+    // decode error sub-shapes.
+    ProdWeight { name: "byteaenc:err:hex", default: 1.0 },
+    ProdWeight { name: "byteaenc:err:b64", default: 1.0 },
+    ProdWeight { name: "byteaenc:err:esc", default: 1.0 },
+    ProdWeight { name: "byteaenc:err:fmt", default: 0.6 },
+    // get/set byte/bit sub-shapes.
+    ProdWeight { name: "byteaenc:gs:byte", default: 1.2 },
+    ProdWeight { name: "byteaenc:gs:bit", default: 1.2 },
+    ProdWeight { name: "byteaenc:gs:err", default: 0.9 },
+    // function/operator sub-shapes.
+    ProdWeight { name: "byteaenc:op:cat", default: 1.0 },
+    ProdWeight { name: "byteaenc:op:sub", default: 1.2 },
+    ProdWeight { name: "byteaenc:op:pos", default: 1.0 },
+    ProdWeight { name: "byteaenc:op:trim", default: 1.0 },
+    ProdWeight { name: "byteaenc:op:len", default: 1.0 },
+    ProdWeight { name: "byteaenc:op:overlay", default: 1.0 },
+    // comparison sub-shapes.
+    ProdWeight { name: "byteaenc:cmp:ops", default: 1.2 },
+    ProdWeight { name: "byteaenc:cmp:order", default: 0.8 },
+    ProdWeight { name: "byteaenc:cmp:fn", default: 1.0 },
+    // cast sub-shapes.
+    ProdWeight { name: "byteaenc:ca:text", default: 1.2 },
+    ProdWeight { name: "byteaenc:ca:int", default: 1.0 },
+    ProdWeight { name: "byteaenc:ca:guc", default: 1.0 },
+    // convert sub-shapes.
+    ProdWeight { name: "byteaenc:cv:roundtrip", default: 1.2 },
+    ProdWeight { name: "byteaenc:cv:bad", default: 0.8 },
+    // srf (Track-B SRF / nodeFunctionscan): production-family selection for
+    // the generate_series / generate_subscripts / unnest / ROWS FROM /
+    // string_to_table + SRF-context-error surface. Numeric generate_series
+    // stays in numx:series; this module owns the int4/int8/timestamp arms
+    // and the whole functionscan / ordinality / lockstep-tlist surface.
+    ProdWeight { name: "srf:gs_int", default: 1.5 },
+    ProdWeight { name: "srf:gs_ts", default: 1.5 },
+    ProdWeight { name: "srf:gs_err", default: 0.8 },
+    ProdWeight { name: "srf:subscripts", default: 1.2 },
+    ProdWeight { name: "srf:unnest1", default: 1.5 },
+    ProdWeight { name: "srf:unnest_multi", default: 1.3 },
+    ProdWeight { name: "srf:rowsfrom", default: 1.3 },
+    ProdWeight { name: "srf:tlist", default: 1.3 },
+    ProdWeight { name: "srf:lateral", default: 1.3 },
+    ProdWeight { name: "srf:s2t", default: 1.0 },
+    ProdWeight { name: "srf:case_err", default: 0.8 },
+    // stringfunc (STRINGFUNC lane): top-level string-function shape mix
+    // over varlena/oracle_compat/formatting/ascii. Every shape is one
+    // literal-driven scalar SELECT; err rides low per the findings-budget
+    // rule (deliberate matched-SQLSTATE arms).
+    ProdWeight { name: "strf:substr", default: 1.5 },
+    ProdWeight { name: "strf:overlay", default: 1.2 },
+    ProdWeight { name: "strf:pos", default: 1.0 },
+    ProdWeight { name: "strf:leftright", default: 1.0 },
+    ProdWeight { name: "strf:pad", default: 1.2 },
+    ProdWeight { name: "strf:trim", default: 1.5 },
+    ProdWeight { name: "strf:reprep", default: 1.0 },
+    ProdWeight { name: "strf:translate", default: 1.0 },
+    ProdWeight { name: "strf:split", default: 1.3 },
+    ProdWeight { name: "strf:concat", default: 1.0 },
+    ProdWeight { name: "strf:format", default: 1.3 },
+    ProdWeight { name: "strf:quote", default: 1.0 },
+    ProdWeight { name: "strf:case", default: 1.2 },
+    ProdWeight { name: "strf:asciichr", default: 1.0 },
+    ProdWeight { name: "strf:revstart", default: 1.0 },
+    ProdWeight { name: "strf:len", default: 1.0 },
+    ProdWeight { name: "strf:norm", default: 1.3 },
+    ProdWeight { name: "strf:hash", default: 1.0 },
+    ProdWeight { name: "strf:err", default: 0.4 },
+
+    // floatmath (Track-B): float4/float8 math-function + special-value
+    // drain over the float.c surface. Top-level shape mix, then per-family
+    // arms. Value probes return bare float (ulp compare); text-roundtrip
+    // and sign-of-zero arms return ::text (byte-exact); error arms match on
+    // SQLSTATE.
+    ProdWeight { name: "floatmath:trig", default: 2.0 },
+    ProdWeight { name: "floatmath:trigd", default: 2.0 },
+    ProdWeight { name: "floatmath:hyp", default: 1.5 },
+    ProdWeight { name: "floatmath:explog", default: 2.5 },
+    ProdWeight { name: "floatmath:round", default: 1.5 },
+    ProdWeight { name: "floatmath:arith", default: 2.0 },
+    ProdWeight { name: "floatmath:cmp", default: 1.5 },
+    ProdWeight { name: "floatmath:conv", default: 1.0 },
+    ProdWeight { name: "floatmath:wb", default: 1.2 },
+    ProdWeight { name: "floatmath:cast", default: 2.0 },
+    ProdWeight { name: "floatmath:text", default: 2.5 },
+    ProdWeight { name: "floatmath:special", default: 2.0 },
+    ProdWeight { name: "floatmath:agg", default: 0.8 },
+
+    ProdWeight { name: "floatmath:trig:one", default: 1.5 },
+    ProdWeight { name: "floatmath:trig:atan2", default: 1.0 },
+    ProdWeight { name: "floatmath:trig:err", default: 0.8 },
+
+    ProdWeight { name: "floatmath:trigd:one", default: 1.5 },
+    ProdWeight { name: "floatmath:trigd:atan2", default: 1.0 },
+    ProdWeight { name: "floatmath:trigd:err", default: 0.8 },
+
+    ProdWeight { name: "floatmath:hyp:ok", default: 1.2 },
+    ProdWeight { name: "floatmath:hyp:err", default: 0.8 },
+
+    ProdWeight { name: "floatmath:explog:ln", default: 1.2 },
+    ProdWeight { name: "floatmath:explog:exp", default: 1.2 },
+    ProdWeight { name: "floatmath:explog:pow", default: 1.2 },
+    ProdWeight { name: "floatmath:explog:sqrt", default: 1.2 },
+    ProdWeight { name: "floatmath:explog:err", default: 0.9 },
+
+    ProdWeight { name: "floatmath:round:core", default: 1.3 },
+    ProdWeight { name: "floatmath:round:op", default: 1.0 },
+
+    ProdWeight { name: "floatmath:arith:f8", default: 1.3 },
+    ProdWeight { name: "floatmath:arith:f4", default: 1.0 },
+    ProdWeight { name: "floatmath:arith:mixed", default: 1.0 },
+    ProdWeight { name: "floatmath:arith:err", default: 0.8 },
+
+    ProdWeight { name: "floatmath:cmp:f8", default: 1.2 },
+    ProdWeight { name: "floatmath:cmp:f4", default: 1.0 },
+    ProdWeight { name: "floatmath:cmp:mixed", default: 1.0 },
+
+    ProdWeight { name: "floatmath:conv:dr", default: 1.2 },
+    ProdWeight { name: "floatmath:conv:pi", default: 0.8 },
+
+    ProdWeight { name: "floatmath:wb:ok", default: 1.2 },
+    ProdWeight { name: "floatmath:wb:err", default: 0.9 },
+
+    ProdWeight { name: "floatmath:cast:toint", default: 1.2 },
+    ProdWeight { name: "floatmath:cast:tofloat", default: 1.2 },
+    ProdWeight { name: "floatmath:cast:err", default: 1.0 },
+
+    ProdWeight { name: "floatmath:text:roundtrip", default: 1.5 },
+    ProdWeight { name: "floatmath:text:parse", default: 1.2 },
+    ProdWeight { name: "floatmath:text:signzero", default: 1.0 },
+    ProdWeight { name: "floatmath:text:err", default: 0.8 },
+
+    ProdWeight { name: "floatmath:special:prop", default: 1.3 },
+    ProdWeight { name: "floatmath:special:cmp", default: 1.0 },
+
+    ProdWeight { name: "floatmath:agg:build", default: 1.2 },
+    ProdWeight { name: "floatmath:agg:stat", default: 1.0 },
+    // ruleutils (Track-B deparse drain): the pg_get_*def shape selection and
+    // the viewdef idempotence round-trip arm. viewdef/funcdef carry the
+    // heaviest deparse mass (wrap-column path, function-signature trio), so
+    // they sit above the fixed-shape probes.
+    ProdWeight { name: "ruleutils:viewdef", default: 1.4 },
+    ProdWeight { name: "ruleutils:indexdef", default: 1.0 },
+    ProdWeight { name: "ruleutils:constraintdef", default: 1.0 },
+    ProdWeight { name: "ruleutils:funcdef", default: 1.3 },
+    ProdWeight { name: "ruleutils:partkeydef", default: 0.8 },
+    ProdWeight { name: "ruleutils:statsdef", default: 0.8 },
+    ProdWeight { name: "ruleutils:exprdef", default: 1.0 },
+    ProdWeight { name: "ruleutils:formattype", default: 1.0 },
+    ProdWeight { name: "ruleutils:triggerdef", default: 1.0 },
+    ProdWeight { name: "ruleutils:ruledef", default: 1.0 },
+    ProdWeight { name: "ruleutils:idem", default: 1.0 },
+    ProdWeight { name: "ruleutils:noidem", default: 1.0 },
+    // cterec (Track-B): recursive-CTE SEARCH/CYCLE planning, data-modifying
+    // CTE and the sublink surface. Family split, then per-family shape
+    // picks. search_* and cycle_* carry the SET-column rewrite drain;
+    // union carries the distinct-working-table path; notin3vl/in3vl carry
+    // the three-valued sublink arms; toomany carries the 21000 error arm.
+    ProdWeight { name: "cterec:graph", default: 3.0 },
+    ProdWeight { name: "cterec:aux", default: 1.5 },
+    ProdWeight { name: "cterec:mat", default: 1.0 },
+    ProdWeight { name: "cterec:dml", default: 1.5 },
+    ProdWeight { name: "cterec:sublink", default: 3.0 },
+    ProdWeight { name: "cterec:union_all", default: 2.0 },
+    ProdWeight { name: "cterec:union", default: 1.0 },
+    ProdWeight { name: "cterec:search_none", default: 1.0 },
+    ProdWeight { name: "cterec:search_depth", default: 2.0 },
+    ProdWeight { name: "cterec:search_breadth", default: 2.0 },
+    ProdWeight { name: "cterec:cycle_none", default: 1.0 },
+    ProdWeight { name: "cterec:cycle_bool", default: 2.0 },
+    ProdWeight { name: "cterec:cycle_marked", default: 2.0 },
+    ProdWeight { name: "cterec:aux_plain", default: 1.0 },
+    ProdWeight { name: "cterec:aux_mat", default: 1.5 },
+    ProdWeight { name: "cterec:aux_nested", default: 1.5 },
+    ProdWeight { name: "cterec:dml_move", default: 1.0 },
+    ProdWeight { name: "cterec:dml_multi", default: 1.5 },
+    ProdWeight { name: "cterec:dml_visibility", default: 1.5 },
+    ProdWeight { name: "cterec:dml_chain", default: 1.0 },
+    ProdWeight { name: "cterec:any", default: 1.5 },
+    ProdWeight { name: "cterec:all", default: 1.5 },
+    ProdWeight { name: "cterec:rowcmp", default: 1.5 },
+    ProdWeight { name: "cterec:scalar", default: 1.0 },
+    ProdWeight { name: "cterec:toomany", default: 1.0 },
+    ProdWeight { name: "cterec:notin3vl", default: 2.0 },
+    ProdWeight { name: "cterec:in3vl", default: 2.0 },
+    ProdWeight { name: "cterec:corr_exists", default: 1.0 },
+    ProdWeight { name: "cterec:corr_in", default: 1.0 },
+    // castcoerce (CASTCOERCE): the cast/coercion drain. Single-SELECT
+    // productions carry the parser coercion core (explicit/typmod/unify/
+    // unknown/array/bincoerce/failed); the DDL-group productions carry the
+    // CREATE CAST / domain / enum / composite / assignment surfaces. The
+    // decision-surface producers (failed, unify's unresolvable arm) sit at
+    // a healthy weight — the coercion DECISION is the load-bearing compare.
+    ProdWeight { name: "castcoerce:explicit", default: 3.0 },
+    ProdWeight { name: "castcoerce:typmod", default: 3.0 },
+    ProdWeight { name: "castcoerce:unify", default: 2.0 },
+    ProdWeight { name: "castcoerce:unknown", default: 1.5 },
+    ProdWeight { name: "castcoerce:array", default: 2.0 },
+    ProdWeight { name: "castcoerce:bincoerce", default: 1.5 },
+    ProdWeight { name: "castcoerce:failed", default: 2.5 },
+    ProdWeight { name: "castcoerce:assign", default: 1.5 },
+    ProdWeight { name: "castcoerce:domain", default: 1.5 },
+    ProdWeight { name: "castcoerce:enum", default: 1.0 },
+    ProdWeight { name: "castcoerce:createcast", default: 1.0 },
+    ProdWeight { name: "castcoerce:composite", default: 1.0 },
+    // intops (INTOPS): int.c/int8.c boundary drain — shape selection.
+    ProdWeight { name: "intops:arith", default: 2.0 },
+    ProdWeight { name: "intops:div", default: 2.5 },
+    ProdWeight { name: "intops:unary", default: 1.5 },
+    ProdWeight { name: "intops:bit", default: 1.8 },
+    ProdWeight { name: "intops:gcdlcm", default: 1.5 },
+    ProdWeight { name: "intops:cast", default: 2.0 },
+    ProdWeight { name: "intops:parse", default: 1.8 },
+    ProdWeight { name: "intops:cmp", default: 1.2 },
+    ProdWeight { name: "intops:series", default: 1.5 },
+    ProdWeight { name: "intops:agg", default: 1.0 },
+    ProdWeight { name: "intops:inrange", default: 1.2 },
+    ProdWeight { name: "intops:misc", default: 1.2 },
+    // intops: arithmetic sub-shapes (over = overflow arms).
+    ProdWeight { name: "intops:ar:same", default: 1.5 },
+    ProdWeight { name: "intops:ar:cross", default: 1.2 },
+    ProdWeight { name: "intops:ar:over", default: 1.5 },
+    // intops: division sub-shapes.
+    ProdWeight { name: "intops:dv:op", default: 1.5 },
+    ProdWeight { name: "intops:dv:cross", default: 1.2 },
+    ProdWeight { name: "intops:dv:zero", default: 1.2 },
+    ProdWeight { name: "intops:dv:over", default: 1.2 },
+    // intops: unary sub-shapes.
+    ProdWeight { name: "intops:un:ok", default: 1.2 },
+    ProdWeight { name: "intops:un:over", default: 1.2 },
+    // intops: bit sub-shapes.
+    ProdWeight { name: "intops:bt:logic", default: 1.2 },
+    ProdWeight { name: "intops:bt:shift", default: 1.5 },
+    // intops: gcd/lcm sub-shapes.
+    ProdWeight { name: "intops:gl:ok", default: 1.0 },
+    ProdWeight { name: "intops:gl:over", default: 1.5 },
+    // intops: cast sub-shapes.
+    ProdWeight { name: "intops:ca:widen", default: 1.0 },
+    ProdWeight { name: "intops:ca:narrow", default: 1.0 },
+    ProdWeight { name: "intops:ca:bool", default: 0.8 },
+    ProdWeight { name: "intops:ca:err", default: 1.5 },
+    // intops: parse sub-shapes.
+    ProdWeight { name: "intops:pa:ok", default: 1.0 },
+    ProdWeight { name: "intops:pa:err", default: 1.5 },
+    ProdWeight { name: "intops:pa:out", default: 0.8 },
+    // intops: comparison sub-shapes.
+    ProdWeight { name: "intops:cm:same", default: 1.0 },
+    ProdWeight { name: "intops:cm:cross", default: 1.0 },
+    // intops: generate_series sub-shapes.
+    ProdWeight { name: "intops:se:ok", default: 1.0 },
+    ProdWeight { name: "intops:se:edge", default: 1.5 },
+    ProdWeight { name: "intops:se:err", default: 1.0 },
+    // intops: aggregate sub-shapes.
+    ProdWeight { name: "intops:ag:sum", default: 1.0 },
+    ProdWeight { name: "intops:ag:bit", default: 1.0 },
+    // intops: misc sub-shapes.
+    ProdWeight { name: "intops:mi:incdec", default: 1.2 },
+    ProdWeight { name: "intops:mi:fac", default: 1.0 },
+    ProdWeight { name: "intops:mi:hash", default: 0.8 },
+    // subplan (SUBPLAN-1): SubPlan/InitPlan execution drain. The module name
+    // fires per group; the shape names select the context battery. `ctx`
+    // (the SUBPLAN-1 heartland — subquery in every clause) carries the most
+    // weight; the rest are even.
+    ProdWeight { name: "subplan", default: 1.0 },
+    ProdWeight { name: "subplan:ctx", default: 2.0 },
+    ProdWeight { name: "subplan:sublink", default: 1.5 },
+    ProdWeight { name: "subplan:corr", default: 1.5 },
+    ProdWeight { name: "subplan:initplan", default: 1.5 },
+    ProdWeight { name: "subplan:agg", default: 1.0 },
+    ProdWeight { name: "subplan:gather", default: 1.0 },
+    // scalartypes (Track-B): niche fixed-width scalar-type drain. Top-level
+    // type split, then per-type shape split.
+    ProdWeight { name: "scl:money", default: 1.2 },
+    ProdWeight { name: "scl:uuid", default: 1.0 },
+    ProdWeight { name: "scl:lsn", default: 1.0 },
+    ProdWeight { name: "scl:tid", default: 0.8 },
+    ProdWeight { name: "scl:xid", default: 0.8 },
+    ProdWeight { name: "scl:mac8", default: 0.9 },
+    // money (cash.c) shapes.
+    ProdWeight { name: "scl:money:io", default: 1.2 },
+    ProdWeight { name: "scl:money:arith", default: 1.4 },
+    ProdWeight { name: "scl:money:cmp", default: 1.0 },
+    ProdWeight { name: "scl:money:agg", default: 0.8 },
+    ProdWeight { name: "scl:money:cast", default: 1.0 },
+    ProdWeight { name: "scl:money:words", default: 0.7 },
+    // uuid (uuid.c) shapes.
+    ProdWeight { name: "scl:uuid:io", default: 1.2 },
+    ProdWeight { name: "scl:uuid:ioerr", default: 0.8 },
+    ProdWeight { name: "scl:uuid:cmp", default: 1.0 },
+    ProdWeight { name: "scl:uuid:extract", default: 1.0 },
+    // pg_lsn (pg_lsn.c) shapes.
+    ProdWeight { name: "scl:lsn:io", default: 1.0 },
+    ProdWeight { name: "scl:lsn:arith", default: 1.2 },
+    ProdWeight { name: "scl:lsn:cmp", default: 1.0 },
+    // tid (tid.c) shapes.
+    ProdWeight { name: "scl:tid:io", default: 1.0 },
+    ProdWeight { name: "scl:tid:cmp", default: 1.0 },
+    // xid/xid8 (xid.c) shapes.
+    ProdWeight { name: "scl:xid:cmp", default: 1.2 },
+    ProdWeight { name: "scl:xid:conv", default: 1.0 },
+    // macaddr8 (mac8.c) shapes.
+    ProdWeight { name: "scl:mac8:io", default: 1.0 },
+    ProdWeight { name: "scl:mac8:ops", default: 1.2 },
+    ProdWeight { name: "scl:mac8:cmp", default: 1.0 },
+    // inherit (INHERIT lane): classic table-inheritance form selection.
+    // constraint/alter/dml carry the richest bookkeeping + recursion
+    // surface, so they weigh a touch higher.
+    ProdWeight { name: "inherit:basic", default: 1.0 },
+    ProdWeight { name: "inherit:multi", default: 1.2 },
+    ProdWeight { name: "inherit:constraint", default: 1.4 },
+    ProdWeight { name: "inherit:alter", default: 1.4 },
+    ProdWeight { name: "inherit:attach", default: 1.2 },
+    ProdWeight { name: "inherit:dml", default: 1.4 },
+    ProdWeight { name: "inherit:droptree", default: 0.8 },
+    // bitstring (varbit.c drain): top-level statement-shape selection. io/
+    // typmod/cast carry the input + coercion + int-cast width arms; cat/
+    // logic/shift the operator bodies; sub/overlay/pos the string ops;
+    // getset the subscript accessors; len/cmp/order the measurement,
+    // comparison and hash/ordering surface. The ok/err pair biases the
+    // deliberate matched-error arms low per the findings-budget rule.
+    ProdWeight { name: "bitstr:io", default: 1.5 },
+    ProdWeight { name: "bitstr:typmod", default: 1.5 },
+    ProdWeight { name: "bitstr:cast", default: 1.5 },
+    ProdWeight { name: "bitstr:cat", default: 1.2 },
+    ProdWeight { name: "bitstr:logic", default: 1.2 },
+    ProdWeight { name: "bitstr:shift", default: 1.2 },
+    ProdWeight { name: "bitstr:sub", default: 1.2 },
+    ProdWeight { name: "bitstr:overlay", default: 1.2 },
+    ProdWeight { name: "bitstr:pos", default: 1.0 },
+    ProdWeight { name: "bitstr:getset", default: 1.2 },
+    ProdWeight { name: "bitstr:len", default: 1.0 },
+    ProdWeight { name: "bitstr:cmp", default: 1.0 },
+    ProdWeight { name: "bitstr:order", default: 1.0 },
+    ProdWeight { name: "bitstr:ok", default: 4.0 },
+    ProdWeight { name: "bitstr:err", default: 1.0 },
+    // groupingsets (GROUPINGSETS lane): grouping-set execution-drain shape
+    // selection. rollup/cube/sets/mixed/nested carry the planner grouping-
+    // set expansion + parse_agg.c GROUPING() surface; chain forces the
+    // sorted AggState phase chain (enable_hashagg=off) and hashmix the
+    // hashed-set mix + hash-spill refill (work_mem='64kB') in nodeAgg.c;
+    // distinct/join/having/gorder carry the DISTINCT, join, HAVING
+    // NULL-vs-present and ORDER-BY-GROUPING() arms.
+    ProdWeight { name: "gs:rollup", default: 1.5 },
+    ProdWeight { name: "gs:cube", default: 1.5 },
+    ProdWeight { name: "gs:sets", default: 1.5 },
+    ProdWeight { name: "gs:mixed", default: 1.3 },
+    ProdWeight { name: "gs:nested", default: 1.2 },
+    ProdWeight { name: "gs:chain", default: 1.2 },
+    ProdWeight { name: "gs:hashmix", default: 1.2 },
+    ProdWeight { name: "gs:distinct", default: 1.0 },
+    ProdWeight { name: "gs:join", default: 1.0 },
+    ProdWeight { name: "gs:having", default: 1.3 },
+    ProdWeight { name: "gs:gorder", default: 1.0 },
+    // tablesample module: family selection. create leads until a fixture
+    // exists; the query families then dominate. bernoulli/system carry the
+    // tsmapi + nodeSamplescan drain; limit carries nodeLimit; distincton
+    // carries the DISTINCT ON first-row path; err carries the validation
+    // arms (incl. the bug-129 REPEATABLE-Var rejection).
+    ProdWeight { name: "tsm:create", default: 1.2 },
+    ProdWeight { name: "tsm:drop", default: 0.15 },
+    ProdWeight { name: "tsm:bernoulli", default: 3.0 },
+    ProdWeight { name: "tsm:system", default: 3.0 },
+    ProdWeight { name: "tsm:sameseed", default: 2.0 },
+    ProdWeight { name: "tsm:join", default: 2.0 },
+    ProdWeight { name: "tsm:inherit", default: 1.5 },
+    ProdWeight { name: "tsm:limit", default: 3.0 },
+    ProdWeight { name: "tsm:distincton", default: 2.5 },
+    ProdWeight { name: "tsm:err", default: 2.0 },
+    // tablesample sample shapes (bernoulli/system).
+    ProdWeight { name: "tsm:samp:plain", default: 1.0 },
+    ProdWeight { name: "tsm:samp:where", default: 1.0 },
+    ProdWeight { name: "tsm:samp:proj", default: 1.0 },
+    // tablesample nodeLimit shapes.
+    ProdWeight { name: "tsm:limit:only", default: 1.0 },
+    ProdWeight { name: "tsm:limit:offset", default: 1.0 },
+    ProdWeight { name: "tsm:limit:both", default: 1.0 },
+    ProdWeight { name: "tsm:limit:all", default: 1.0 },
+    ProdWeight { name: "tsm:limit:offend", default: 1.0 },
+    ProdWeight { name: "tsm:limit:fetch", default: 1.2 },
+    ProdWeight { name: "tsm:limit:fetchoff", default: 1.0 },
+    ProdWeight { name: "tsm:limit:ties", default: 1.4 },
+    ProdWeight { name: "tsm:limit:param", default: 1.2 },
+    // tablesample DISTINCT ON shapes.
+    ProdWeight { name: "tsm:don:single", default: 1.0 },
+    ProdWeight { name: "tsm:don:multi", default: 1.0 },
+    ProdWeight { name: "tsm:don:desc", default: 1.0 },
+    ProdWeight { name: "tsm:don:expr", default: 1.0 },
+    // tablesample error arms.
+    ProdWeight { name: "tsm:err:range", default: 1.2 },
+    ProdWeight { name: "tsm:err:nontable", default: 1.0 },
+    ProdWeight { name: "tsm:err:repvar", default: 1.2 },
+    ProdWeight { name: "tsm:err:distinct", default: 1.0 },
+    ProdWeight { name: "tsm:err:neglimit", default: 1.0 },
 ];
 
 /// Resolved weight vector, parallel to `PROD_WEIGHTS`.

@@ -102,6 +102,12 @@
 //! round-trips), richer datetime literal pools in `expr`, and the datetime
 //! determinism session pin (runner::DATETIME_GUC_PIN: TimeZone/DateStyle/
 //! IntervalStyle, applied to BOTH differential sides).
+//! `dtx` complements `dtm` with the datetime surface scalar SELECTs cannot
+//! reach: generate_series over timestamp/timestamptz (incl. the 4-arg
+//! zone-bucketing form), isfinite, interval/timestamp/time typmod
+//! adjustment (AdjustIntervalForTypmod / AdjustTimestampForTypmod field +
+//! precision specs), the timezone(zone, source) FUNCTION form (distinct C
+//! entry points from the AT TIME ZONE operator), and to_timestamp(epoch).
 //! A3 adds the adt-misc breadth module (`adtmisc`): ACL/privilege
 //! functions with self-contained GRANT/probe/REVOKE brackets over the
 //! objddl role pool, the varbit + varlena/bytea long tail, multirange
@@ -174,18 +180,39 @@
 //! purpose-built `fz_hp_N` fixture (autovacuum off, per-table fillfactor /
 //! toast_tuple_target picks) so every prune/vacuum/freeze transition is an
 //! explicit, byte-identical statement on both differential sides.
+//! GROUPINGSETS adds the grouping-set execution-drain module
+//! (`groupingsets`): ROLLUP/CUBE/GROUPING SETS with the empty grand-total
+//! set, the mixed cartesian expansion `GROUP BY a, ROLLUP (b, c), CUBE (d)`,
+//! nested grouping sets, the GROUPING() bitmask across SELECT/HAVING/ORDER
+//! BY, DISTINCT + grouping sets (both SELECT DISTINCT and GROUP BY
+//! DISTINCT), grouping sets over a join, and the sorted phase-chain
+//! (enable_hashagg=off) vs hashed-set-mix + hash-spill (work_mem='64kB')
+//! execution arms — targeting the nodeAgg.c grouping-set chains, the
+//! planner grouping-set expansion and parse_agg.c. Every probe projects a
+//! GROUPING() bitmask and carries a total ORDER BY over it plus every
+//! grouping column (NULLS LAST pinned), so the many NULL-extended output
+//! rows form a deterministic, byte-comparable multiset.
 
+pub mod aclrls;
 pub mod admin;
 pub mod adtmisc;
 pub mod agg;
+pub mod aggwin;
+pub mod arrayops;
+pub mod altertable;
+pub mod bitstring;
 pub mod boundary;
 pub mod btbrin;
+pub mod byteaenc;
+pub mod castcoerce;
 pub mod catalog;
 pub mod client;
 pub mod coll;
 pub mod concur;
 pub mod copybin;
+pub mod copyopts;
 pub mod copytext;
+pub mod cterec;
 pub mod cursor;
 pub mod dbddl;
 pub mod ddl;
@@ -193,24 +220,41 @@ pub mod diff;
 pub mod dml;
 pub mod dtm;
 pub mod dtmdec;
+pub mod dtx;
 pub mod einterp;
 pub mod exd;
 pub mod earm;
 pub mod ddldeep;
 pub mod earm2;
 pub mod earm3;
+pub mod earm4;
 pub mod explain;
+pub mod expreval;
 pub mod exr;
+pub mod exr2;
 pub mod expr;
+pub mod floatmath;
 pub mod geo;
+pub mod groupingsets;
 pub mod heap;
 pub mod idx;
+pub mod indexam;
+pub mod intops;
+pub mod inherit;
 pub mod join;
+pub mod jsonpath;
+pub mod largeobj;
+pub mod jsonfuncs;
+pub mod like;
 pub mod livecat;
+pub mod lockcursor;
+pub mod matview;
 pub mod mbconv;
 pub mod mbconv_data;
 pub mod merge;
+pub mod mergex;
 pub mod nodes;
+pub mod numeric;
 pub mod numx;
 pub mod objddl;
 pub mod objid;
@@ -221,32 +265,53 @@ pub mod opt3;
 pub mod par;
 pub mod part;
 pub mod partalt;
+pub mod partition;
 pub mod pgram;
+pub mod plancache;
 pub mod plansel;
+pub mod planner;
 pub mod plpg;
+pub mod plpg2;
 pub mod pubsub;
+pub mod rangeops;
 pub mod reduce;
+pub mod regex;
 pub mod render;
 pub mod rich;
+pub mod ritrig;
 pub mod rng;
 pub mod ruled;
+pub mod ruleutils;
 pub mod runner;
+pub mod scalartypes;
 pub mod scope;
+pub mod seqident;
 pub mod session;
 pub mod spill;
+pub mod srf;
 pub mod sqljson;
 pub mod ssi;
+pub mod stats;
 pub mod stem_data;
 pub mod stem_reach;
 pub mod stmt;
+pub mod stringfunc;
+pub mod subplan;
 pub mod subq;
+pub mod tablesample;
 pub mod toggles;
+pub mod triggers;
 pub mod tsdl;
+pub mod tsrank;
 pub mod txn;
+pub mod typeio;
 pub mod types_stmt;
+pub mod udt;
 pub mod util;
+pub mod vacuum;
 pub mod views;
 pub mod weights;
 pub mod win;
+pub mod winfunc;
 pub mod xnum;
 pub mod xproto;

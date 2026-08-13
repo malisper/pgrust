@@ -47,11 +47,22 @@ pub struct PlpgState {
     next_trig: u32,
     next_coll: u32,
     next_opc: u32,
+    /// Object counter for the plpg2 residual-arm drain module (crate::plpg2).
+    /// Objects there are group-local too; the counter only keeps names
+    /// session-unique so a failed drop can never collide a later create.
+    next_p2: u32,
 }
 
 impl PlpgState {
     pub fn new() -> PlpgState {
         PlpgState::default()
+    }
+
+    /// Vend a session-unique object suffix for the plpg2 drain module.
+    pub fn next_p2(&mut self) -> u32 {
+        let n = self.next_p2;
+        self.next_p2 += 1;
+        n
     }
 }
 

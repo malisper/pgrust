@@ -19,33 +19,59 @@
 //! survives across groups). All randomness flows through `Gen::rng`, so
 //! same seed + same toggles/weights = byte-identical stream.
 
+use crate::aclrls::gen_aclrls_module;
 use crate::admin::gen_admin_module;
 use crate::adtmisc::gen_adtmisc_module;
+use crate::altertable::{gen_altertable_module, AltState};
 use crate::agg::gen_agg_stmt;
+use crate::aggwin::gen_aggwin_module;
+use crate::arrayops::gen_arrayops_module;
+use crate::castcoerce::gen_castcoerce_module;
+use crate::bitstring::gen_bitstring_module;
 use crate::catalog::{Catalog, Table};
 use crate::btbrin::gen_btbrin_module;
+use crate::byteaenc::gen_byteaenc_module;
 use crate::coll::{gen_coll_module, CollState};
+use crate::cterec::gen_cterec_module;
 use crate::cursor::{gen_cursor_module, CursorState};
 use crate::ddl::{gen_ddl_module, DdlState};
 use crate::dml::{gen_dml_module, DmlState};
 use crate::dtm::gen_dtm_module;
+use crate::dtx::gen_dtx_module;
 use crate::einterp::gen_einterp_module;
 use crate::exd::gen_exd_module;
 use crate::earm::gen_earm_module;
 use crate::ddldeep::gen_ddldeep_module;
 use crate::earm2::gen_earm2_module;
 use crate::earm3::gen_earm3_module;
+use crate::earm4::gen_earm4_module;
 use crate::explain::gen_explain_module;
+use crate::expreval::gen_expreval_module;
 use crate::exr::{gen_exr_module, ExrState};
+use crate::exr2::{gen_exr2_module, Exr2State};
+use crate::floatmath::gen_floatmath_module;
 use crate::geo::{gen_geo_module, GeoState};
+use crate::groupingsets::gen_groupingsets_module;
 use crate::heap::{gen_heap_module, HeapState};
+use crate::like::gen_like_module;
 use crate::idx::{gen_idx_module, IdxState};
+use crate::indexam::gen_indexam_module;
+use crate::intops::gen_intops_module;
+use crate::inherit::{gen_inherit_module, InheritState};
 use crate::join::gen_join_stmt;
+use crate::jsonpath::gen_jsonpath_module;
+use crate::lockcursor::gen_lockcursor_module;
+use crate::largeobj::{gen_largeobj_module, LargeObjState};
+use crate::jsonfuncs::gen_jsonfuncs_module;
+use crate::matview::{gen_matview_module, MatviewState};
 use crate::mbconv::gen_mbconv_module;
 use crate::merge::gen_merge_module;
+use crate::mergex::gen_mergex_module;
 use crate::nodes::gen_nodes_module;
 use crate::objddl::{gen_objddl_module, ObjState};
+use crate::numeric::gen_numeric_module;
 use crate::numx::gen_numx_module;
+use crate::scalartypes::gen_scalartypes_module;
 use crate::objid::gen_objid_module;
 use crate::obs::gen_obs_module;
 use crate::cfgm::gen_cfgm_module;
@@ -55,22 +81,42 @@ use crate::par::{gen_par_module, ParState};
 use crate::part::{gen_part_module, PartState};
 use crate::partalt::gen_partalt_module;
 use crate::pgram::gen_pgram_module;
+use crate::partition::gen_partition_module;
+use crate::plancache::{gen_plancache_module, PlanCacheState};
 use crate::plansel::{gen_plansel_module, PlanState};
+use crate::planner::gen_planner_module;
 use crate::plpg::{gen_plpg_module, PlpgState};
+use crate::plpg2::gen_plpg2_module;
 use crate::pubsub::gen_pubsub_module;
+use crate::regex::gen_regex_module;
+use crate::rangeops::{gen_rangeops_module, RangeopsState};
 use crate::render::{FromItem, OrderKey, SelectItem, SelectStmt};
+use crate::ritrig::{gen_ritrig_module, RiState};
 use crate::rng::Rng;
+use crate::ruleutils::gen_ruleutils_module;
 use crate::scope::{Scope, ScopeRel};
+use crate::seqident::{gen_seqident_module, SeqState};
 use crate::spill::{gen_spill_module, SpillState};
+use crate::stats::gen_stats_module;
+use crate::srf::gen_srf_module;
 use crate::sqljson::gen_sqljson_module;
+use crate::stringfunc::gen_stringfunc_module;
+use crate::subplan::gen_subplan_module;
 use crate::subq::gen_subq_stmt;
+use crate::triggers::gen_triggers_module;
+use crate::tablesample::{gen_tablesample_module, TablesampleState};
 use crate::tsdl::{gen_tsdl_module, TsState};
+use crate::tsrank::gen_tsrank_module;
 use crate::txn::gen_txn_module;
+use crate::typeio::gen_typeio_module;
 use crate::types_stmt::gen_types_module;
+use crate::udt::{gen_udt_module, UdtState};
 use crate::util::gen_util_module;
+use crate::vacuum::{gen_vacuum_module, VacState};
 use crate::views::{gen_views_module, ViewsState};
 use crate::weights::WeightTable;
 use crate::win::gen_win_stmt;
+use crate::winfunc::gen_winfunc_stmt;
 use crate::xnum::gen_xnum_module;
 
 pub struct Gen<'a> {
@@ -111,6 +157,10 @@ pub struct Gen<'a> {
     pub cursor: CursorState,
     /// Session-persistent views/rules model (crate::views); swapped in and
     pub views: ViewsState,
+    /// Session-persistent matview/view-DDL name counter (crate::matview —
+    /// all objects are group-local; only the counter persists); swapped in
+    /// and out by the session loop like `views`.
+    pub matview: MatviewState,
     /// Session-persistent geo-table model (crate::geo); swapped in and out
     /// by the session loop like `idx`.
     pub geo: GeoState,
@@ -129,12 +179,53 @@ pub struct Gen<'a> {
     /// (crate::plansel, LD7); swapped in and out by the session loop like
     /// `spill`.
     pub plan: PlanState,
+    /// Session-persistent plan-cache name counter (crate::plancache —
+    /// fixtures and prepared statements are group-local; only the counter
+    /// persists, so every name is session-unique); swapped in and out by
+    /// the session loop like `plpg`.
+    pub plancache: PlanCacheState,
     /// Session-persistent executor-residue fixture model (crate::exr,
     /// LD9); swapped in and out by the session loop like `spill`.
     pub exr: ExrState,
+    /// Session-persistent executor-residue round-2 fixture model
+    /// (crate::exr2, EXEC-RESIDUE); swapped in and out like `exr`.
+    pub exr2: Exr2State,
     /// Session-persistent heapam alt-path fixture model (crate::heap,
     /// W5-HEAP); swapped in and out by the session loop like `spill`.
     pub heap: HeapState,
+    /// Session-persistent large-object loid allocator (crate::largeobj);
+    /// swapped in and out by the session loop like `heap`.
+    pub largeobj: LargeObjState,
+    /// Session-persistent maintenance-fixture model (crate::vacuum, VACUUM
+    /// lane); swapped in and out by the session loop like `heap`.
+    pub vac: VacState,
+    /// Session-persistent sequence/identity/serial name counters
+    /// (crate::seqident; objects are group-local, only the counters
+    /// persist); swapped in and out by the session loop like `coll`.
+    pub seq: SeqState,
+    /// Session-persistent RI-module name counter (crate::ritrig — objects
+    /// are group-local; only the counter persists); swapped in and out by
+    /// the session loop like `coll`.
+    pub ritrig: RiState,
+    /// Session-persistent custom-range-type name counter (crate::rangeops —
+    /// objects are group-local; only the counter persists); swapped in and
+    /// out by the session loop like `plpg`/`coll`.
+    pub rangeops: RangeopsState,
+    /// Session-persistent user-defined-type name counters (crate::udt —
+    /// objects are group-local; only the counters persist); swapped in and
+    /// out by the session loop like `coll`.
+    pub udt: UdtState,
+    /// Session-persistent ALTER TABLE naming counter (crate::altertable);
+    /// swapped in and out by the session loop like `heap`.
+    pub altertable: AltState,
+    /// Session-persistent inheritance-module name counter (crate::inherit —
+    /// hierarchies are group-local; only the counter persists); swapped in
+    /// and out by the session loop like `coll`.
+    pub inherit: InheritState,
+    /// Session-persistent TABLESAMPLE/limit/distinct-on fixture model
+    /// (crate::tablesample); swapped in and out by the session loop like
+    /// `spill`.
+    pub tsm: TablesampleState,
     alias_n: u32,
     cte_n: u32,
 }
@@ -163,13 +254,25 @@ impl<'a> Gen<'a> {
             ts: TsState::new(),
             cursor: CursorState::new(),
             views: ViewsState::new(),
+            matview: MatviewState::new(),
             geo: GeoState::new(),
             plpg: PlpgState::new(),
             coll: CollState::new(),
             spill: SpillState::new(),
             plan: PlanState::new(),
+            plancache: PlanCacheState::new(),
             exr: ExrState::new(),
+            exr2: Exr2State::new(),
             heap: HeapState::new(),
+            largeobj: LargeObjState::new(),
+            vac: VacState::new(),
+            seq: SeqState::new(),
+            ritrig: RiState::new(),
+            rangeops: RangeopsState::new(),
+            udt: UdtState::new(),
+            altertable: AltState::new(),
+            inherit: InheritState::new(),
+            tsm: TablesampleState::new(),
             alias_n: 0,
             cte_n: 0,
         }
@@ -234,6 +337,7 @@ pub const STMT_MODULES: &[StmtModuleDef] = &[
     StmtModuleDef { name: "subq", generate: gen_subq_module },
     StmtModuleDef { name: "agg", generate: gen_agg_module },
     StmtModuleDef { name: "win", generate: gen_win_module },
+    StmtModuleDef { name: "winfunc", generate: gen_winfunc_module },
     StmtModuleDef { name: "dml", generate: gen_dml_module },
     StmtModuleDef { name: "merge", generate: gen_merge_module },
     StmtModuleDef { name: "txn", generate: gen_txn_module },
@@ -249,10 +353,14 @@ pub const STMT_MODULES: &[StmtModuleDef] = &[
     StmtModuleDef { name: "tsdl", generate: gen_tsdl_module },
     StmtModuleDef { name: "cursor", generate: gen_cursor_module },
     StmtModuleDef { name: "views", generate: gen_views_module },
+    StmtModuleDef { name: "matview", generate: gen_matview_module },
     StmtModuleDef { name: "geo", generate: gen_geo_module },
     StmtModuleDef { name: "dtm", generate: gen_dtm_module },
+    StmtModuleDef { name: "dtx", generate: gen_dtx_module },
     StmtModuleDef { name: "adtmisc", generate: gen_adtmisc_module },
     StmtModuleDef { name: "sqljson", generate: gen_sqljson_module },
+    StmtModuleDef { name: "jsonpath", generate: gen_jsonpath_module },
+    StmtModuleDef { name: "jsonfuncs", generate: gen_jsonfuncs_module },
     StmtModuleDef { name: "plpg", generate: gen_plpg_module },
     StmtModuleDef { name: "coll", generate: gen_coll_module },
     StmtModuleDef { name: "mbconv", generate: gen_mbconv_module },
@@ -268,7 +376,9 @@ pub const STMT_MODULES: &[StmtModuleDef] = &[
     StmtModuleDef { name: "plansel", generate: gen_plansel_module },
     StmtModuleDef { name: "earm2", generate: gen_earm2_module },
     StmtModuleDef { name: "earm3", generate: gen_earm3_module },
+    StmtModuleDef { name: "earm4", generate: gen_earm4_module },
     StmtModuleDef { name: "exr", generate: gen_exr_module },
+    StmtModuleDef { name: "exr2", generate: gen_exr2_module },
     StmtModuleDef { name: "numx", generate: gen_numx_module },
     StmtModuleDef { name: "pubsub", generate: gen_pubsub_module },
     StmtModuleDef { name: "ddldeep", generate: gen_ddldeep_module },
@@ -278,6 +388,45 @@ pub const STMT_MODULES: &[StmtModuleDef] = &[
     StmtModuleDef { name: "cfgm", generate: gen_cfgm_module },
     StmtModuleDef { name: "btbrin", generate: gen_btbrin_module },
     StmtModuleDef { name: "heap", generate: gen_heap_module },
+    StmtModuleDef { name: "stats", generate: gen_stats_module },
+    StmtModuleDef { name: "tsrank", generate: gen_tsrank_module },
+    StmtModuleDef { name: "planner", generate: gen_planner_module },
+    StmtModuleDef { name: "partition", generate: gen_partition_module },
+    StmtModuleDef { name: "triggers", generate: gen_triggers_module },
+    StmtModuleDef { name: "plpgsql", generate: gen_plpg2_module },
+    StmtModuleDef { name: "regex", generate: gen_regex_module },
+    StmtModuleDef { name: "mergex", generate: gen_mergex_module },
+    StmtModuleDef { name: "aggwin", generate: gen_aggwin_module },
+    StmtModuleDef { name: "indexam", generate: gen_indexam_module },
+    StmtModuleDef { name: "typeio", generate: gen_typeio_module },
+    StmtModuleDef { name: "aclrls", generate: gen_aclrls_module },
+    StmtModuleDef { name: "lockcursor", generate: gen_lockcursor_module },
+    StmtModuleDef { name: "largeobj", generate: gen_largeobj_module },
+    StmtModuleDef { name: "plancache", generate: gen_plancache_module },
+    StmtModuleDef { name: "vacuum", generate: gen_vacuum_module },
+    StmtModuleDef { name: "seqident", generate: gen_seqident_module },
+    StmtModuleDef { name: "ritrig", generate: gen_ritrig_module },
+    StmtModuleDef { name: "rangeops", generate: gen_rangeops_module },
+    StmtModuleDef { name: "udt", generate: gen_udt_module },
+    StmtModuleDef { name: "arrayops", generate: gen_arrayops_module },
+    StmtModuleDef { name: "altertable", generate: gen_altertable_module },
+    StmtModuleDef { name: "byteaenc", generate: gen_byteaenc_module },
+    StmtModuleDef { name: "srf", generate: gen_srf_module },
+    StmtModuleDef { name: "stringfunc", generate: gen_stringfunc_module },
+    StmtModuleDef { name: "floatmath", generate: gen_floatmath_module },
+    StmtModuleDef { name: "numeric", generate: gen_numeric_module },
+    StmtModuleDef { name: "ruleutils", generate: gen_ruleutils_module },
+    StmtModuleDef { name: "cterec", generate: gen_cterec_module },
+    StmtModuleDef { name: "castcoerce", generate: gen_castcoerce_module },
+    StmtModuleDef { name: "intops", generate: gen_intops_module },
+    StmtModuleDef { name: "expreval", generate: gen_expreval_module },
+    StmtModuleDef { name: "like", generate: gen_like_module },
+    StmtModuleDef { name: "subplan", generate: gen_subplan_module },
+    StmtModuleDef { name: "scalartypes", generate: gen_scalartypes_module },
+    StmtModuleDef { name: "inherit", generate: gen_inherit_module },
+    StmtModuleDef { name: "bitstring", generate: gen_bitstring_module },
+    StmtModuleDef { name: "groupingsets", generate: gen_groupingsets_module },
+    StmtModuleDef { name: "tablesample", generate: gen_tablesample_module },
 ];
 
 /// Produce one statement group from the named module (the toggle vector
@@ -323,6 +472,10 @@ fn gen_agg_module(g: &mut Gen) -> Vec<StmtKind> {
 
 fn gen_win_module(g: &mut Gen) -> Vec<StmtKind> {
     vec![StmtKind::Select(Box::new(gen_win_stmt(g)))]
+}
+
+fn gen_winfunc_module(g: &mut Gen) -> Vec<StmtKind> {
+    vec![StmtKind::Select(Box::new(gen_winfunc_stmt(g)))]
 }
 
 /// The expr module: a single-table SELECT (the F0 shape, now alias-scoped).

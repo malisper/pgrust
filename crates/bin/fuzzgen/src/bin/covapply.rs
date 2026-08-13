@@ -29,6 +29,12 @@ usage: covapply --port <n> [options] < statements.sql
                   through COPY FROM STDIN (FORMAT binary) — the coverage
                   driver for copyto.c/copyfromparse.c binary arms and the
                   *_send/*_recv families
+  --copyopts      run the single-engine COPY options-matrix deck (lane
+                  COPYOPTS): the option-error/validation arms plus
+                  control-char round-trip identity — the coverage driver
+                  for copy.c ProcessCopyOptions / defGetCopy* and the
+                  copyto.c text/csv out-function escape ladder. Sized by
+                  --copyopts-seed / --copyopts-count
 ";
 
 struct Args {
@@ -42,6 +48,9 @@ struct Args {
     copytext: bool,
     copytext_seed: u64,
     copytext_count: u32,
+    copyopts: bool,
+    copyopts_seed: u64,
+    copyopts_count: u32,
     dbddl: bool,
 }
 
@@ -57,6 +66,9 @@ fn parse_args() -> Result<Args, String> {
         copytext: false,
         copytext_seed: 0,
         copytext_count: 200,
+        copyopts: false,
+        copyopts_seed: 0,
+        copyopts_count: 200,
         dbddl: false,
     };
     let mut it = std::env::args().skip(1);
@@ -89,6 +101,17 @@ fn parse_args() -> Result<Args, String> {
                 args.copytext_count = value("--copytext-count")?
                     .parse()
                     .map_err(|e| format!("bad --copytext-count: {e}"))?
+            }
+            "--copyopts" => args.copyopts = true,
+            "--copyopts-seed" => {
+                args.copyopts_seed = value("--copyopts-seed")?
+                    .parse()
+                    .map_err(|e| format!("bad --copyopts-seed: {e}"))?
+            }
+            "--copyopts-count" => {
+                args.copyopts_count = value("--copyopts-count")?
+                    .parse()
+                    .map_err(|e| format!("bad --copyopts-count: {e}"))?
             }
             "--dbddl" => args.dbddl = true,
             "--help" | "-h" => {
@@ -169,6 +192,16 @@ fn run() -> Result<ExitCode, String> {
             args.copytext_count,
         );
         eprintln!("covapply: copytext applied={capplied} errors={cerrors}");
+    }
+    if args.copyopts {
+        // Simple-protocol connection for the same reason as --copytext.
+        let mut cex = ClientExecutor::connect_opts(&args.host, port, &args.db, &args.user, None)?;
+        let (capplied, cerrors) = fuzzgen::copyopts::run_single(
+            &mut cex,
+            args.copyopts_seed,
+            args.copyopts_count,
+        );
+        eprintln!("covapply: copyopts applied={capplied} errors={cerrors}");
     }
     if args.dbddl {
         let spec = fuzzgen::dbddl::ConnSpec {
