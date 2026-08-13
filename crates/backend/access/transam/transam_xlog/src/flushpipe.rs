@@ -34,17 +34,15 @@
 //!
 //! # Knob
 //!
-//! `PGRUST_FLUSH_PIPELINE` — DEFAULT OFF; arms on exactly `1`/`on` (t35
-//! exact-spelling law). OFF is structurally inert: the only knob-OFF cost
-//! is one memoized bool read at the commit flush call site
+//! `PGRUST_FLUSH_PIPELINE` — DEFAULT ON; `0`/`off` is the kill switch (t35
+//! exact-spelling law, inverted — Michael ruled the archive's HOLD-CONFIRM
+//! flip candidate 18e95a10b6 CONFIRMED after PR #1017 landed the pre-flip
+//! posture). Disarmed the pipeline is structurally inert: the only
+//! knob-OFF cost is one memoized bool read at the commit flush call site
 //! ([`crate::write::XLogFlushPipelined`] falls straight into the incumbent
 //! [`crate::write::XLogFlush`]) — the completion-walk hooks short-circuit
 //! on the same memo. `PGRUST_FLUSH_PIPELINE_TRACE=1` adds per-event LOG
 //! lines (e2e witnesses only; never default).
-//!
-//! (The archive tip carried a flip-to-ON candidate, 18e95a10b6, explicitly
-//! HOLD-CONFIRM pending Michael's flip-ladder ruling; this port keeps the
-//! pre-flip default-OFF posture.)
 //!
 //! # Protocol (the loom-modeled part)
 //!
@@ -120,13 +118,17 @@ pub const WAIT_EVENT_FLUSH_PIPELINE: u32 = PG_WAIT_IPC + 57;
 /// deadlock-watch class but long enough to never fire in a healthy run.
 const BACKSTOP_MS: i64 = 100;
 
-/// `PGRUST_FLUSH_PIPELINE` — default OFF, arms on exactly `1`/`on`.
+/// `PGRUST_FLUSH_PIPELINE` — DEFAULT ON (Michael's ruling on the archive
+/// flip candidate 18e95a10b6, 2026-08-13; PR #1017 landed the pre-flip
+/// posture). The kill switch disarms with exactly `0`/`off` (the t35
+/// exact-spelling law, inverted); `1`/`on` remain accepted explicit-ON
+/// spellings.
 pub fn flush_pipeline_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_FLUSH_PIPELINE").ok().as_deref().map(str::trim),
-            Some("1") | Some("on")
+            Some("0") | Some("off")
         )
     })
 }
@@ -1002,22 +1004,33 @@ mod tests {
 
     #[test]
     fn ticket_register_refuses_without_pipeline() {
-        // Unit process: knob unset AND no walwriter proc — G-d1-1(iii)
-        // fail-toward-incumbent at admission.
-        if std::env::var("PGRUST_FLUSH_PIPELINE").is_err() {
+        // G-d1-1(iii) fail-toward-incumbent at admission. FLIP-era posture
+        // (archive t49 compose 4d4836d90f): unset now means ARMED (the
+        // ruled inversion), and the armed path consults ProcGlobal —
+        // uninitializable in a bare unit process — so the refusal
+        // assertion runs only when the control arm is SPELLED (=0|off),
+        // per the flip's own off-spelling law. (The pre-flip test also
+        // only exercised the knob gate: unset returned at gate 1, never
+        // reaching ProcGlobal — coverage is unchanged, just re-spelled.)
+        // The refusal stays covered in-server by the knob-off e2e legs.
+        if matches!(
+            std::env::var("PGRUST_FLUSH_PIPELINE").ok().as_deref().map(str::trim),
+            Some("0") | Some("off")
+        ) {
             assert!(register_deferred(42, INVALID_PROC_NUMBER).is_none());
         }
     }
 
     #[test]
-    fn knob_default_off() {
-        // No env manipulation (memoized reads race across tests): assert
-        // the default posture of a clean test process.
+    fn knob_default_on() {
+        // Michael-ruled flip: env unset => armed (archive 18e95a10b6's §7
+        // inversion, CONFIRMED). No env manipulation (memoized reads race
+        // across tests), and no PIPE probes: with the knob armed they'd
+        // contend on the shared static pipe's spinlock with the walk tests
+        // (the pre-flip test used them as knob-off no-op pins; that
+        // posture is gone by design).
         if std::env::var("PGRUST_FLUSH_PIPELINE").is_err() {
-            assert!(!flush_pipeline_enabled());
-            assert!(pending_max().is_none());
-            // complete_up_to must be a no-op read (and not touch the list).
-            complete_up_to(u64::MAX);
+            assert!(flush_pipeline_enabled());
         }
     }
 }

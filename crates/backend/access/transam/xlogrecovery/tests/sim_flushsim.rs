@@ -1386,9 +1386,12 @@ fn flushsim_writer_child() {
     let nl = env_u32(NL_ENV, 1);
     let txns = env_u32(TXNS_ENV, 6);
     let mix = std::env::var(MIX_ENV).unwrap_or_else(|_| "sync".into());
-    let pipe_on = matches!(
+    // FLIP (Michael-ruled): parse mirrors production's inverted default
+    // (unset => armed); the harness always spells the posture explicitly
+    // anyway (writer_envs).
+    let pipe_on = !matches!(
         std::env::var("PGRUST_FLUSH_PIPELINE").ok().as_deref(),
-        Some("1") | Some("on")
+        Some("0") | Some("off")
     );
 
     // Parse the trigger ("ack:3" / "read:2" / "notify:1" / "end" / "none").
@@ -1934,9 +1937,12 @@ fn writer_envs(spec: &RunSpec, pack: &std::path::Path) -> Vec<(&'static str, Str
         // deterministically instead of hanging the sweep.
         ("PGRUST_SIM_VCEIL_S", "60".to_string()),
     ];
-    if spec.pipe {
-        envs.push(("PGRUST_FLUSH_PIPELINE", "1".to_string()));
-    }
+    // FLIP (Michael-ruled): the default is ON, so OFF trajectories must
+    // SPELL the control posture — an omitted var now means armed.
+    envs.push((
+        "PGRUST_FLUSH_PIPELINE",
+        if spec.pipe { "1" } else { "0" }.to_string(),
+    ));
     if !spec.hold.is_empty() {
         envs.push((HOLD_ENV, spec.hold.clone()));
     }
@@ -2401,7 +2407,7 @@ fn flushsim_deep_sweep() {
                         "DEEP-RED seed={seed} profile={profile} pipe={pipe} k={k} — repro: \
                          PGRUST_SIM_SEED={seed} PGRUST_SIM_SCHED=1 {K_ENV}={k} \
                          {PROFILE_ENV}={profile} {}",
-                        if pipe { "PGRUST_FLUSH_PIPELINE=1" } else { "" }
+                        if pipe { "PGRUST_FLUSH_PIPELINE=1" } else { "PGRUST_FLUSH_PIPELINE=0" }
                     );
                 }
                 k += stride;
