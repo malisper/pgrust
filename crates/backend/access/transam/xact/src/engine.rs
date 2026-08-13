@@ -158,7 +158,17 @@ fn RecordTransactionCommitGuts(xp: XsPtr, mcx: mcx::Mcx<'_>) -> PgResult<Transac
         || xp.with(|s| s.force_sync_commit)
         || !rels.is_empty()
     {
-        xlog_seams::xlog_flush::call(xlog_seams::xact_last_rec_end::call())?;
+        // GL-FLUSHPIPE-1: THE commit durability wait (C xact.c:1502). The
+        // dedicated seam routes it through the pipelined flush variant
+        // (identical to xlog_flush unless PGRUST_FLUSH_PIPELINE is armed;
+        // ordering after it — commit tree, proc array, locks, ack — is
+        // unchanged either way). Standalone-test worlds that install only
+        // xlog_flush keep the incumbent path.
+        if xlog_seams::xlog_flush_commit::is_installed() {
+            xlog_seams::xlog_flush_commit::call(xlog_seams::xact_last_rec_end::call())?;
+        } else {
+            xlog_seams::xlog_flush::call(xlog_seams::xact_last_rec_end::call())?;
+        }
         if mark_xid_committed {
             transam_seams::transaction_id_commit_tree::call(xid, &children)?;
         }

@@ -681,6 +681,29 @@ pub(crate) fn UpdateMinRecoveryPoint(lsn: XLogRecPtr, force: bool) -> PgResult<(
     Ok(())
 }
 
+/// The commit_delay gate (xlog.c:2881-2884), shared verbatim by
+/// [`XLogFlush`] and [`XLogFlushPipelined`]. Returns whether it slept (the
+/// caller then re-waits insertions, as C does).
+///
+/// The sleep rides `waiter::sleep` (GL-FLUSHSIM-1 negotiated ask §5.3.2):
+/// DST-schedulable (virtual clock), and native-equivalent — a pending
+/// unpark can end it early, exactly as C's pg_usleep returns early on
+/// EINTR (the delay is best-effort batching either way).
+fn commit_delay_gate_sleep() -> bool {
+    let commit_delay = guc_tables::vars::CommitDelay.read();
+    if commit_delay > 0
+        && init_small::globals::enableFsync()
+        && procarray_seams::minimum_active_backends::is_installed()
+        && procarray_seams::minimum_active_backends::call(
+            guc_tables::vars::CommitSiblings.read(),
+        )
+    {
+        waiter::sleep(std::time::Duration::from_micros(commit_delay as u64));
+        return true;
+    }
+    false
+}
+
 pub fn XLogFlush(record: XLogRecPtr) -> PgResult<()> {
     let ctl = XLogCtl();
 
@@ -731,20 +754,122 @@ pub fn XLogFlush(record: XLogRecPtr) -> PgResult<()> {
                 break;
             }
 
-            let commit_delay = guc_tables::vars::CommitDelay.read();
-            if commit_delay > 0
-                && init_small::globals::enableFsync()
-                && procarray_seams::minimum_active_backends::is_installed()
-                && procarray_seams::minimum_active_backends::call(
-                    guc_tables::vars::CommitSiblings.read(),
-                )
-            {
-                std::thread::sleep(std::time::Duration::from_micros(commit_delay as u64));
+            if commit_delay_gate_sleep() {
                 insertpos = WaitXLogInsertionsToFinish(insertpos);
             }
 
             XLogWrite((insertpos, insertpos), insert_tli, false)?;
             LWLockRelease(WALWriteLock())?;
+            // GL-FLUSHPIPE-1: this leader's flush may cover pipelined commit
+            // waiters; complete them (after the lock release — wakes must not
+            // lengthen the flush critical path). Knob-OFF cost: one memoized
+            // bool read.
+            crate::flushpipe::complete_up_to(LOGWRT_RESULT.get().1);
+            break;
+        }
+        Ok(())
+    })();
+
+    init_small::globals::EndCriticalSection();
+    loop_result?;
+
+    if LOGWRT_RESULT.get().1 < record {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            format!(
+                "xlog flush request {:X}/{:X} is not satisfied --- flushed only to {:X}/{:X}",
+                record >> 32,
+                record & 0xFFFF_FFFF,
+                LOGWRT_RESULT.get().1 >> 32,
+                LOGWRT_RESULT.get().1 & 0xFFFF_FFFF
+            ),
+        )));
+    }
+    Ok(())
+}
+
+/// GL-FLUSHPIPE-1 — [`XLogFlush`] for the sync-commit call site (xact.c:1502's
+/// `XLogFlush(XactLastRecEnd)`, and ONLY that site; every other flush caller
+/// keeps the incumbent path). Installed as the `xlog_flush_commit` seam.
+///
+/// Disarmed (knob off / no walwriter / no latch) this IS [`XLogFlush`] (one
+/// memoized bool read of overhead). Armed, the ONE behavioral change is the
+/// contended arm: where [`XLogFlush`] joins the WALWriteLock convoy
+/// (`LWLockAcquireOrWait` — the leader-follower herd), this registers the
+/// commit LSN on the pending-flush queue and parks for a DIRECTED completion
+/// ([`crate::flushpipe`]; walwriter is the guaranteed-progress flusher). The
+/// uncontended arm (conditional acquire won) is the incumbent leader half,
+/// line-for-line — including the commit_delay gate, which composes here
+/// exactly as in [`XLogFlush`]. Commit ordering, criticality, and the
+/// non-cancellable wait posture are all unchanged (letter §2: "v1 splits
+/// nothing").
+pub fn XLogFlushPipelined(record: XLogRecPtr) -> PgResult<()> {
+    if !crate::flushpipe::pipeline_available() {
+        return XLogFlush(record);
+    }
+
+    let ctl = XLogCtl();
+
+    // Parity prelude (XLogFlush).
+    if !XLogInsertAllowed() {
+        return UpdateMinRecoveryPoint(record, false);
+    }
+    if record <= LOGWRT_RESULT.get().1 {
+        return Ok(());
+    }
+
+    let insert_tli = ctl.InsertTimeLineID.load(Relaxed);
+    init_small::globals::StartCriticalSection();
+
+    // GL-ERRFIX-1 (E-2, the "escape being uncounted" half): balance the critical
+    // section on the `?`-escape paths exactly as [`XLogFlush`] above — the loop
+    // runs in a closure so EndCriticalSection is unconditional before any error
+    // from a lock op or XLogWrite propagates out (C's END_CRIT_SECTION is
+    // unconditional and an in-crit ereport promotes to PANIC).
+    let loop_result: PgResult<()> = (|| {
+        let mut write_rqst_ptr = record;
+        loop {
+            RefreshXLogWriteResult();
+            if record <= LOGWRT_RESULT.get().1 {
+                break;
+            }
+
+            ctl.info_lck.with(|| {
+                let w = ctl.LogwrtRqstWrite.load(Relaxed);
+                if write_rqst_ptr < w {
+                    write_rqst_ptr = w;
+                }
+            });
+            // As in XLogFlush: wait for in-flight insertions BEFORE taking the
+            // write lock, never while holding it.
+            let mut insertpos = WaitXLogInsertionsToFinish(write_rqst_ptr);
+
+            if !LWLockConditionalAcquire(WALWriteLock(), LW_EXCLUSIVE)? {
+                // A flush is in flight — the pipelining case. Register + park;
+                // the in-flight leader's walk (or walwriter) completes us.
+                // Completed => loop re-reads results and breaks covered.
+                // Retry (liveness re-arm, flusher-death windows) => same loop:
+                // we contend for the lock ourselves next lap, C's
+                // uncovered-follower-becomes-leader shape.
+                let _ = crate::flushpipe::wait_for_flush(record);
+                continue;
+            }
+
+            // LEADER arm — XLogFlush's got-the-lock half, verbatim.
+            RefreshXLogWriteResult();
+            if record <= LOGWRT_RESULT.get().1 {
+                LWLockRelease(WALWriteLock())?;
+                break;
+            }
+
+            if commit_delay_gate_sleep() {
+                insertpos = WaitXLogInsertionsToFinish(insertpos);
+            }
+
+            XLogWrite((insertpos, insertpos), insert_tli, false)?;
+            LWLockRelease(WALWriteLock())?;
+            crate::flushpipe::count_leader_flush();
+            crate::flushpipe::complete_up_to(LOGWRT_RESULT.get().1);
             break;
         }
         Ok(())
@@ -896,7 +1021,27 @@ pub fn XLogBackgroundFlush(pacing: &mut WalFlushPacing) -> PgResult<bool> {
         flexible = false;
     }
 
+    // GL-FLUSHPIPE-1 (armed only; knob-OFF cost one memoized bool read):
+    // pipelined commit waiters are SYNC durability requests — raise the
+    // write request to the pending max (which can exceed both LogwrtRqst
+    // and asyncXactLSN: a mid-page commit record bumps neither) and treat
+    // the cycle as flush-forced below, bypassing the async batching
+    // deliberately built into the pacing.
+    let pending_force = crate::flushpipe::pending_max()
+        .filter(|p| *p > LOGWRT_RESULT.get().1);
+    if let Some(p) = pending_force {
+        if write_rqst_write < p {
+            write_rqst_write = p;
+        }
+        flexible = false;
+    }
+
     if write_rqst_write <= LOGWRT_RESULT.get().1 {
+        // GL-FLUSHPIPE-1 safety drain: nothing to flush, but a registrant
+        // covered by an earlier flush may still be parked (e.g. its
+        // completer raced its link — the fence pair makes one side win,
+        // and this cycle is the guaranteed winner's backstop).
+        crate::flushpipe::complete_up_to(LOGWRT_RESULT.get().1);
         if OPEN_LOG_FILE.get() >= 0
             && !XLByteInPrevSeg(LOGWRT_RESULT.get().0, OPEN_LOG_SEG_NO.get(), wal_segment_size())
         {
@@ -910,6 +1055,10 @@ pub fn XLogBackgroundFlush(pacing: &mut WalFlushPacing) -> PgResult<bool> {
         write_rqst_write as i64 / XLOG_BLCKSZ as i64 - LOGWRT_RESULT.get().1 as i64 / XLOG_BLCKSZ as i64;
     let flush_after = guc_tables::vars::WalWriterFlushAfter.read();
     let delay_us = guc_tables::vars::WalWriterDelay.read() as i64 * 1000;
+
+    // Pending commit waiters force the flush leg: flush_after=0 takes the
+    // pacing's always-flush arm (and stamps its clock), C ordering intact.
+    let flush_after = if pending_force.is_some() { 0 } else { flush_after };
 
     if wal_flush_pacing_decide(pacing, now, flushblocks, flush_after, delay_us) {
         write_rqst_flush = write_rqst_write;
@@ -928,6 +1077,10 @@ pub fn XLogBackgroundFlush(pacing: &mut WalFlushPacing) -> PgResult<bool> {
     LWLockRelease(WALWriteLock())?;
 
     init_small::globals::EndCriticalSection();
+
+    // GL-FLUSHPIPE-1: complete pipelined commit waiters this cycle's flush
+    // covered (after the lock release; no-op when the knob is off).
+    crate::flushpipe::complete_up_to(LOGWRT_RESULT.get().1);
 
     // Wake up walsenders now that we've released heavily contended locks.
     WalSndWakeupProcessRequests(true, !crate::insert::RecoveryInProgress());

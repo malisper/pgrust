@@ -22,6 +22,7 @@ crc32c = { path = "../../../../port/crc32c" }
 controldata_utils = { path = "../../../../common/controldata_utils" }
 fd = { path = "../../../storage/file/fd" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
+waiter = { path = "../../../storage/ipc/waiter" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
 lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
 latch = { path = "../../../storage/ipc/latch" }
@@ -76,3 +77,8 @@ libc = "0.2"
 shmem = { path = "../../../storage/ipc/shmem" }
 aio_seams = { path = "../../../storage/aio/aio_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+
+[lints.rust]
+# `pgrust_sim` (non-default cfg): the GL-FLUSHSIM-1 mutation seam in
+# flushpipe.rs lives behind it; empty/absent in production builds.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

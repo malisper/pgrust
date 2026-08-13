@@ -43,6 +43,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // GL-FLUSHPIPE-1: XLogFlush for the sync-commit durability wait —
+    // xact.c:1502's `XLogFlush(XactLastRecEnd)` call site ONLY (every
+    // other flush caller uses xlog_flush above). Behaviorally identical to
+    // xlog_flush unless PGRUST_FLUSH_PIPELINE is armed, in which case the
+    // contended wait rides the pending-flush queue instead of the
+    // WALWriteLock convoy (transam_xlog::flushpipe).
+    pub fn xlog_flush_commit(record: XLogRecPtr) -> PgResult<()>
+);
+
+seam_core::seam!(
     pub fn count_ckpt_slru_written()
 );
 

@@ -22,6 +22,14 @@
 //!      never loses a wake, and the retire-on-return discipline leaves NO
 //!      handle residue for the next ownership epoch (proc-slot/pool-thread
 //!      reuse; the 2026-07 dev-profile "concurrent waiters" wedge shape).
+//!   6. flushpipe-over-Waiter (GL-FLUSHPIPE-1) — a mirror of the
+//!      pending-flush queue's register/complete Dekker
+//!      (transam_xlog::flushpipe): a commit registrant either self-serves
+//!      on the published flush result or is completed by a flusher's walk,
+//!      in every interleaving, with the timeout backstop disabled; plus
+//!      partial coverage (an uncovering flush neither completes early nor
+//!      strands) and one-walk-completes-multiple (two registrants, hint
+//!      coherence).
 #![cfg(loom)]
 
 use loom::sync::atomic::{fence, AtomicI32, AtomicU64, Ordering};
@@ -763,7 +771,241 @@ fn uring_wait_backstop_races_live_completer() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. LWLock wakeup flag handoff (GL-TESTFIX-1 F-R1-5).
+// flushpipe-over-Waiter (GL-FLUSHPIPE-1).
+//
+// Mirror of crates/backend/access/transam/transam_xlog/src/flushpipe.rs's
+// register/complete protocol: the pending-flush queue (link under lock +
+// min_pending hint) and the flush publication (logFlushResult store + walk)
+// form a Dekker pair over two SeqCst fences — a flusher either sees the
+// registrant's link (its walk completes the node) or the registrant's
+// post-link recheck sees the published flush result (it self-serves under
+// the lock). The models run with the production park loop's TIMEOUT BACKSTOP
+// DISABLED (untimed parks): they prove the fence pair alone, loom's deadlock
+// detector being the lost-wake oracle.
+//
+// Expressibility translations, as in ModelSema above (loom carries recency
+// for RMWs, not for SC stores — the GL-STMTTASK-3 semaphore lesson): the
+// production logFlushResult publication (Release store serialized by
+// WALWriteLock) is fetch_max(SeqCst) — equal-or-stronger and monotonic like
+// the lock-serialized original; the min_pending hint write (fence-guarded
+// plain store under the spinlock) is swap(SeqCst); the completed
+// publication (Release store whose production recency rides the
+// latch-mutex release/acquire chain into the woken waiter) is swap(SeqCst);
+// the fence-guarded loads are fetch_add(0, SeqCst). The intrusive-list
+// mechanics themselves are pinned by flushpipe's own unit tests; THESE
+// models own the interleavings.
+// KEEP IN SYNC with flushpipe.rs (module doc cross-references this file).
+// ---------------------------------------------------------------------------
+
+/// The queue mirror: linked nodes are indices present in `list` (sorted by
+/// LSN), min_pending mirrors the lock-free skip hint.
+struct ModelPipe {
+    list: loom::sync::Mutex<Vec<usize>>,
+    min_pending: AtomicU64,
+    flush_result: AtomicU64,
+}
+
+struct ModelPipeNode {
+    lsn: u64,
+    completed: AtomicU64, // 0/1 (AtomicBool shape; u64 for the RMW reads)
+    slot: Arc<Slot>,
+    token: u32,
+}
+
+impl ModelPipe {
+    fn new() -> Self {
+        ModelPipe {
+            list: loom::sync::Mutex::new(Vec::new()),
+            min_pending: AtomicU64::new(u64::MAX),
+            flush_result: AtomicU64::new(0),
+        }
+    }
+
+    fn refresh_hint(&self, list: &[usize], nodes: &[ModelPipeNode]) {
+        let min = list.iter().map(|&i| nodes[i].lsn).min().unwrap_or(u64::MAX);
+        // RMW where production is a fence-disciplined plain store (header
+        // translation note).
+        self.min_pending.swap(min, Ordering::SeqCst);
+    }
+
+    /// flushpipe::wait_for_flush (backstop disabled).
+    fn register_and_wait(&self, nodes: &[ModelPipeNode], me: usize) {
+        {
+            let mut list = self.list.lock().unwrap();
+            let pos = list
+                .iter()
+                .position(|&i| nodes[i].lsn > nodes[me].lsn)
+                .unwrap_or(list.len());
+            list.insert(pos, me);
+            self.refresh_hint(&list, nodes);
+        }
+        // Registrant fence: pairs with the flusher's post-publish fence.
+        fence(Ordering::SeqCst);
+        if self.flush_result.fetch_add(0, Ordering::SeqCst) >= nodes[me].lsn {
+            let self_unlinked = {
+                let mut list = self.list.lock().unwrap();
+                match list.iter().position(|&i| i == me) {
+                    Some(pos) => {
+                        list.remove(pos);
+                        self.refresh_hint(&list, nodes);
+                        true
+                    }
+                    None => false, // a completer collected us; wake imminent
+                }
+            };
+            if self_unlinked {
+                return;
+            }
+        }
+        // (Production also kicks the walwriter latch here; the model's
+        // flusher threads are the guaranteed progress.)
+        while nodes[me].completed.fetch_add(0, Ordering::SeqCst) == 0 {
+            let r = nodes[me].slot.park_core(None, None, &CLOCK);
+            assert!(matches!(r, ParkResult::Notified | ParkResult::Recheck));
+        }
+    }
+
+    /// XLogWrite-tail publication + flushpipe::complete_up_to.
+    fn publish_and_complete(&self, nodes: &[ModelPipeNode], flushed: u64) {
+        self.flush_result.fetch_max(flushed, Ordering::SeqCst);
+        // Flusher fence: pairs with the registrant's post-link fence.
+        fence(Ordering::SeqCst);
+        if self.min_pending.fetch_add(0, Ordering::SeqCst) > flushed {
+            return;
+        }
+        let covered: Vec<usize> = {
+            let mut list = self.list.lock().unwrap();
+            let covered: Vec<usize> =
+                list.iter().copied().filter(|&i| nodes[i].lsn <= flushed).collect();
+            list.retain(|&i| nodes[i].lsn > flushed);
+            self.refresh_hint(&list, nodes);
+            covered
+        };
+        for i in covered {
+            // Production order: completed publication THEN SetLatch (swap
+            // per the header translation note).
+            nodes[i].completed.swap(1, Ordering::SeqCst);
+            nodes[i].slot.unpark_token(nodes[i].token);
+        }
+    }
+}
+
+fn model_pipe_node(lsn: u64) -> ModelPipeNode {
+    let slot = fresh_slot();
+    let token = slot.issue_token();
+    ModelPipeNode { lsn, completed: AtomicU64::new(0), slot, token }
+}
+
+#[test]
+fn flushpipe_register_vs_flush_no_lost_wake() {
+    loom::model(|| {
+        let pipe = Arc::new(ModelPipe::new());
+        let nodes = Arc::new(vec![model_pipe_node(100)]);
+
+        // One flusher whose flush covers the registrant, at EVERY point
+        // relative to the registration (publish-before-link => registrant
+        // self-serves; link-before-publish => the walk completes it; the
+        // straddles => the fence pair forces one side to win). Deadlock =
+        // lost wake.
+        let flusher = {
+            let pipe = Arc::clone(&pipe);
+            let nodes = Arc::clone(&nodes);
+            thread::spawn(move || {
+                pipe.publish_and_complete(&nodes, 150);
+            })
+        };
+
+        pipe.register_and_wait(&nodes, 0);
+        // Exit licenses (module-doc invariants): durable at return, never
+        // linked at return.
+        assert!(pipe.flush_result.load(Ordering::SeqCst) >= nodes[0].lsn);
+        assert!(!pipe.list.lock().unwrap().contains(&0));
+
+        flusher.join().unwrap();
+    });
+}
+
+#[test]
+fn flushpipe_partial_coverage_never_completes_early() {
+    // The list-mutex + slot ops make these two models branch-heavy;
+    // unbounded exploration is minutes-scale, out of family with the other
+    // waiter models. Bounded per the runtime-model precedent
+    // (preemption_bound = Some(3); loom guidance: real bugs surface within
+    // 2-3 preemptions — the register/complete deadlock this file's history
+    // caught reproduced at bound 3 in seconds).
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.check(|| {
+        let pipe = Arc::new(ModelPipe::new());
+        let nodes = Arc::new(vec![model_pipe_node(200)]);
+
+        // The first flush (150) does NOT cover the registrant (its walk
+        // must neither complete nor strand it — min_pending 200 > 150 is
+        // the correct skip); the second (250) does. The registrant must
+        // return exactly once, only after 250 is published.
+        let flusher = {
+            let pipe = Arc::clone(&pipe);
+            let nodes = Arc::clone(&nodes);
+            thread::spawn(move || {
+                pipe.publish_and_complete(&nodes, 150);
+                pipe.publish_and_complete(&nodes, 250);
+            })
+        };
+
+        pipe.register_and_wait(&nodes, 0);
+        assert!(
+            pipe.flush_result.load(Ordering::SeqCst) >= 200,
+            "returned before its covering flush was published"
+        );
+        assert!(!pipe.list.lock().unwrap().contains(&0));
+
+        flusher.join().unwrap();
+        assert_eq!(pipe.min_pending.load(Ordering::SeqCst), u64::MAX);
+    });
+}
+
+#[test]
+fn flushpipe_one_walk_completes_multiple_in_lsn_order() {
+    // Bounded like flushpipe_partial_coverage_never_completes_early (the
+    // 4-thread space is the largest of the three models).
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.check(|| {
+        let pipe = Arc::new(ModelPipe::new());
+        let nodes = Arc::new(vec![model_pipe_node(100), model_pipe_node(200)]);
+
+        // Two concurrent registrants, one covering flush: every
+        // interleaving of the two links, the two rechecks, and the single
+        // walk must complete both (walk-collects or self-serve each).
+        let reg_b = {
+            let pipe = Arc::clone(&pipe);
+            let nodes = Arc::clone(&nodes);
+            thread::spawn(move || {
+                pipe.register_and_wait(&nodes, 1);
+                assert!(pipe.flush_result.load(Ordering::SeqCst) >= 200);
+            })
+        };
+        let flusher = {
+            let pipe = Arc::clone(&pipe);
+            let nodes = Arc::clone(&nodes);
+            thread::spawn(move || {
+                pipe.publish_and_complete(&nodes, 250);
+            })
+        };
+
+        pipe.register_and_wait(&nodes, 0);
+        assert!(pipe.flush_result.load(Ordering::SeqCst) >= 100);
+
+        reg_b.join().unwrap();
+        flusher.join().unwrap();
+        assert!(pipe.list.lock().unwrap().is_empty());
+        assert_eq!(pipe.min_pending.load(Ordering::SeqCst), u64::MAX);
+    });
+}
+
+
+// ---------------------------------------------------------------------------
+// 7. LWLock wakeup flag handoff (GL-TESTFIX-1 F-R1-5).
 //
 // Mirror of lwlock's LWLockWakeup drain vs a woken waiter's re-enqueue: the
 // waker proclist_delete's the waiter's NON-ATOMIC wait-link node, then
@@ -817,5 +1059,288 @@ fn lwlock_wakeup_flag_handoff_orders_link_writes() {
         link.with_mut(|p| unsafe { *p = 0x1 });
 
         waker.join().unwrap();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// deferred-ticket-over-Waiter (inc-5(d) d1; GL-FLUSHPIPE-1 §8.6 G-d1-2 —
+// the 4 mandatory models).
+//
+// Mirror of flushpipe.rs's DEFERRED registration (heap ticket + registry):
+// REGISTRY REMOVAL IS THE CLAIM (a loom Mutex<Vec> mirrors the SpinLock'd
+// Vec; exactly one remover per ticket) and ONLY the remover performs the
+// PENDING->COMPLETED transition; the single tail host owns
+// COMPLETED->CONSUMED. Both transitions are swap()s with asserts on the
+// swapped-out value — the RMW dialect law (G-d1-2; loom carries recency
+// for RMWs, not SC stores — 3 on-record incidents). Same Dekker pair as
+// ModelPipe (post-link fence vs post-publish fence). The registrant and
+// tail host share a thread here (the worker->session handoff edge is the
+// RG completion edge, proven by its own models); the BACKSTOP laps are
+// modeled as explicit deterministic branches (loom cannot time out — the
+// production timeout only chooses WHEN the branch runs, not WHAT it does).
+// KEEP IN SYNC with flushpipe.rs (module doc cross-references this file).
+// ---------------------------------------------------------------------------
+
+const TK_PENDING: u64 = 0;
+const TK_COMPLETED: u64 = 1;
+const TK_CONSUMED: u64 = 2;
+
+struct ModelTicket {
+    lsn: u64,
+    state: AtomicU64,
+    slot: Arc<Slot>,
+    token: u32,
+}
+
+struct ModelTicketPipe {
+    registry: loom::sync::Mutex<Vec<usize>>,
+    min_pending: AtomicU64,
+    flush_result: AtomicU64,
+}
+
+fn model_ticket(lsn: u64) -> ModelTicket {
+    let slot = fresh_slot();
+    let token = slot.issue_token();
+    ModelTicket { lsn, state: AtomicU64::new(TK_PENDING), slot, token }
+}
+
+impl ModelTicketPipe {
+    fn new() -> Self {
+        ModelTicketPipe {
+            registry: loom::sync::Mutex::new(Vec::new()),
+            min_pending: AtomicU64::new(u64::MAX),
+            flush_result: AtomicU64::new(0),
+        }
+    }
+
+    fn refresh_hint(&self, reg: &[usize], tickets: &[ModelTicket]) {
+        let min = reg.iter().map(|&i| tickets[i].lsn).min().unwrap_or(u64::MAX);
+        self.min_pending.swap(min, Ordering::SeqCst);
+    }
+
+    /// flushpipe::DeferredRegistry::claim — removal IS the claim.
+    fn claim(&self, tickets: &[ModelTicket], me: usize) -> bool {
+        let mut reg = self.registry.lock().unwrap();
+        match reg.iter().position(|&i| i == me) {
+            Some(pos) => {
+                reg.remove(pos);
+                self.refresh_hint(&reg, tickets);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// flushpipe::register_deferred (registrant RETURNS; no park).
+    fn register(&self, tickets: &[ModelTicket], me: usize) {
+        {
+            let mut reg = self.registry.lock().unwrap();
+            reg.push(me);
+            self.refresh_hint(&reg, tickets);
+        }
+        fence(Ordering::SeqCst);
+        if self.flush_result.fetch_add(0, Ordering::SeqCst) >= tickets[me].lsn
+            && self.claim(tickets, me)
+        {
+            // Born-covered self-claim: claimant owns PENDING->COMPLETED.
+            assert_eq!(tickets[me].state.swap(TK_COMPLETED, Ordering::SeqCst), TK_PENDING);
+        }
+    }
+
+    /// flushpipe::complete_deferred_up_to (+ the publication).
+    fn publish_and_complete(&self, tickets: &[ModelTicket], flushed: u64) {
+        self.flush_result.fetch_max(flushed, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        if self.min_pending.fetch_add(0, Ordering::SeqCst) > flushed {
+            return;
+        }
+        let claimed: Vec<usize> = {
+            let mut reg = self.registry.lock().unwrap();
+            let claimed: Vec<usize> =
+                reg.iter().copied().filter(|&i| tickets[i].lsn <= flushed).collect();
+            reg.retain(|&i| tickets[i].lsn > flushed);
+            self.refresh_hint(&reg, tickets);
+            claimed
+        };
+        for i in claimed {
+            assert_eq!(tickets[i].state.swap(TK_COMPLETED, Ordering::SeqCst), TK_PENDING);
+            tickets[i].slot.unpark_token(tickets[i].token);
+        }
+    }
+
+    /// flushpipe::ticket_wait, PARK path (backstop disabled — models 1/2).
+    fn wait_consume(&self, tickets: &[ModelTicket], me: usize) {
+        loop {
+            if tickets[me].state.fetch_add(0, Ordering::SeqCst) == TK_COMPLETED {
+                assert_eq!(
+                    tickets[me].state.swap(TK_CONSUMED, Ordering::SeqCst),
+                    TK_COMPLETED,
+                    "single consumer"
+                );
+                return;
+            }
+            let r = tickets[me].slot.park_core(None, None, &CLOCK);
+            assert!(matches!(r, ParkResult::Notified | ParkResult::Recheck));
+        }
+    }
+
+    /// flushpipe::ticket_wait, one BACKSTOP lap taken deterministically
+    /// (models 3/4): covered => self-claim+complete; uncovered => claim =
+    /// Retry (true) / claimed-by-completer => fall through to consume.
+    /// Returns true on Retry (ticket dead, caller re-flushes inline).
+    fn backstop_then_consume(&self, tickets: &[ModelTicket], me: usize) -> bool {
+        if tickets[me].state.fetch_add(0, Ordering::SeqCst) != TK_COMPLETED {
+            if self.flush_result.fetch_add(0, Ordering::SeqCst) >= tickets[me].lsn {
+                if self.claim(tickets, me) {
+                    assert_eq!(
+                        tickets[me].state.swap(TK_COMPLETED, Ordering::SeqCst),
+                        TK_PENDING
+                    );
+                }
+            } else if self.claim(tickets, me) {
+                // Uncovered re-arm: ticket unlinked and dead (G-d1-1).
+                assert_eq!(tickets[me].state.fetch_add(0, Ordering::SeqCst), TK_PENDING);
+                return true;
+            }
+        }
+        self.wait_consume(tickets, me);
+        false
+    }
+}
+
+/// Model 1 — register vs flush publication: the Dekker pair; a covering
+/// flush at ANY point relative to registration never strands the ticket
+/// (deadlock = lost wake).
+#[test]
+fn ticket_register_vs_flush_no_lost_wake() {
+    loom::model(|| {
+        let pipe = Arc::new(ModelTicketPipe::new());
+        let tickets = Arc::new(vec![model_ticket(100)]);
+
+        let flusher = {
+            let pipe = Arc::clone(&pipe);
+            let tickets = Arc::clone(&tickets);
+            thread::spawn(move || {
+                pipe.publish_and_complete(&tickets, 150);
+            })
+        };
+
+        pipe.register(&tickets, 0);
+        pipe.wait_consume(&tickets, 0);
+        assert_eq!(tickets[0].state.load(Ordering::SeqCst), TK_CONSUMED);
+        assert!(!pipe.registry.lock().unwrap().contains(&0));
+
+        flusher.join().unwrap();
+    });
+}
+
+/// Model 2 — consume-exactly-once vs completer mark: the completer's
+/// COMPLETED swap and wake race the consumer's swap; the swapped-out
+/// asserts are the exactly-once teeth.
+#[test]
+fn ticket_consume_exactly_once_vs_completer_mark() {
+    loom::model(|| {
+        let pipe = Arc::new(ModelTicketPipe::new());
+        let tickets = Arc::new(vec![model_ticket(100)]);
+        // Pre-registered (registration's own races are model 1).
+        {
+            let mut reg = pipe.registry.lock().unwrap();
+            reg.push(0);
+            pipe.refresh_hint(&reg, &tickets);
+        }
+
+        let flusher = {
+            let pipe = Arc::clone(&pipe);
+            let tickets = Arc::clone(&tickets);
+            thread::spawn(move || {
+                pipe.publish_and_complete(&tickets, 100);
+            })
+        };
+
+        pipe.wait_consume(&tickets, 0);
+        assert_eq!(tickets[0].state.load(Ordering::SeqCst), TK_CONSUMED);
+
+        flusher.join().unwrap();
+        assert_eq!(pipe.min_pending.load(Ordering::SeqCst), u64::MAX);
+    });
+}
+
+/// Model 3 — retry re-arm (crash/flusher-death class) vs a late covering
+/// flush: exactly one claimant wins; Retry leaves the ticket PENDING and
+/// unlinked (the caller re-flushes inline — nothing can complete it
+/// afterwards); a losing waiter falls through and consumes.
+#[test]
+fn ticket_retry_rearm_vs_completer_claim() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.check(|| {
+        let pipe = Arc::new(ModelTicketPipe::new());
+        let tickets = Arc::new(vec![model_ticket(200)]);
+        {
+            let mut reg = pipe.registry.lock().unwrap();
+            reg.push(0);
+            pipe.refresh_hint(&reg, &tickets);
+        }
+
+        // The flusher publishes a COVERING flush concurrently with the
+        // waiter's backstop lap that (racing it) may still read the
+        // pre-publication flush_result and take the uncovered-Retry arm.
+        let flusher = {
+            let pipe = Arc::clone(&pipe);
+            let tickets = Arc::clone(&tickets);
+            thread::spawn(move || {
+                pipe.publish_and_complete(&tickets, 250);
+            })
+        };
+
+        let retried = pipe.backstop_then_consume(&tickets, 0);
+        if retried {
+            // The waiter claimed first: the ticket is dead-PENDING and
+            // unlinked; the completer's walk must NOT have completed it.
+            assert_eq!(tickets[0].state.load(Ordering::SeqCst), TK_PENDING);
+        } else {
+            assert_eq!(tickets[0].state.load(Ordering::SeqCst), TK_CONSUMED);
+        }
+        assert!(!pipe.registry.lock().unwrap().contains(&0));
+
+        flusher.join().unwrap();
+    });
+}
+
+/// Model 4 (the review's added model) — completer walk vs the waiter's
+/// covered-backstop self-claim: both are legal claimants of a covered
+/// ticket; registry removal arbitrates, exactly one performs
+/// PENDING->COMPLETED, the waiter always exits CONSUMED.
+#[test]
+fn ticket_completer_vs_backstop_selfserve_claim_race() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.check(|| {
+        let pipe = Arc::new(ModelTicketPipe::new());
+        let tickets = Arc::new(vec![model_ticket(100)]);
+        {
+            let mut reg = pipe.registry.lock().unwrap();
+            reg.push(0);
+            pipe.refresh_hint(&reg, &tickets);
+        }
+        // Flush ALREADY covering: the waiter's backstop lap self-claims
+        // while the completer's walk claims concurrently.
+        pipe.flush_result.fetch_max(150, Ordering::SeqCst);
+
+        let flusher = {
+            let pipe = Arc::clone(&pipe);
+            let tickets = Arc::clone(&tickets);
+            thread::spawn(move || {
+                pipe.publish_and_complete(&tickets, 150);
+            })
+        };
+
+        let retried = pipe.backstop_then_consume(&tickets, 0);
+        assert!(!retried, "covered ticket must never Retry");
+        assert_eq!(tickets[0].state.load(Ordering::SeqCst), TK_CONSUMED);
+        assert!(!pipe.registry.lock().unwrap().contains(&0));
+
+        flusher.join().unwrap();
+        assert_eq!(pipe.min_pending.load(Ordering::SeqCst), u64::MAX);
     });
 }

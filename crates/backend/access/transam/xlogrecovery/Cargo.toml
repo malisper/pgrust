@@ -163,6 +163,12 @@ nbtree_xlog = { path = "../../nbtree/nbtree_xlog" }
 pruneheap = { path = "../../heap/pruneheap" }
 arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
 execindexing = { path = "../../../executor/execindexing" }
+# GL-FLUSHSIM-1 (tests/sim_flushsim.rs): the multi-session commit-path
+# trajectory sim needs the REAL park/wake stack (the crash-sweep rig stubs
+# it — correct single-threaded, wrong for concurrent committers).
+pg_sema = { path = "../../../port/pg_sema" }
+s_lock = { path = "../../../storage/lmgr/s_lock" }
+waiter = { path = "../../../storage/ipc/waiter" }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"] }

@@ -948,7 +948,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      own stack pages — it cannot migrate with a session by definition
     //      (the stack is the thread's); safe to lose (worst case a page
     //      range is charged conservatively). Non-session on the substance.
-    assert_eq!(count_tree(crates), 564, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 565, re-pinned at the GL-FLUSHPIPE-1 port (archive/main-t56-20260729
+    //      46f8b5b3b6 — the GL-FLUSHSIM-1 commit-path trajectory sim):
+    //   +1 access/transam/xlogrecovery/tests/sim_flushsim.rs —
+    //      CURRENT_COMMIT: the sim harness's per-thread (actor, j, xid,
+    //      claims_sync) tag for the commit in flight, letting the
+    //      product-called notify hooks (async_seams) attribute delivery to
+    //      the committing actor. Test-harness scratch behind
+    //      #![cfg(pgrust_sim)] in a tests/ target — ABSENT from product
+    //      codegen; counted only because the census counter is textual.
+    //      Not a session_sources row.
+    assert_eq!(count_tree(crates), 565, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
