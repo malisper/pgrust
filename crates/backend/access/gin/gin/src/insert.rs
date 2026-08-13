@@ -46,7 +46,10 @@ pub(crate) fn with_insert_scratch<R>(
 /// initGinState through the relcache rd_amcache slot (rule 5; C caches per
 /// statement in ii_AmCache, the relcache slot has the same invalidation).
 pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
-    if let Some(g) = rel.rd_amcache_gin.get() {
+    // Copy out (516B, same bytes the pre-box Cell::get moved) so no RefCell
+    // borrow is held across the state build.
+    let cached: Option<RdAmCacheGin> = rel.rd_amcache_gin.borrow().as_deref().copied();
+    if let Some(g) = cached {
         let mut cols = [GinColState {
             opclass: GinOpclass::JsonbOps,
             elem_cmp: GinElemCmp::None,
@@ -139,7 +142,7 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
             key_len: col.key_len,
         };
     }
-    rel.rd_amcache_gin.set(Some(RdAmCacheGin {
+    *rel.rd_amcache_gin.borrow_mut() = Some(Box::new(RdAmCacheGin {
         natts: state.natts,
         cols: cached_cols,
     }));

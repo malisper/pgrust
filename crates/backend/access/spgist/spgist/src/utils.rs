@@ -175,8 +175,8 @@ fn get_index_input_type(index: &Relation<'_>) -> PgResult<Oid> {
 /// spgGetCache. Reads/installs the rd_amcache_spgist slot on the relcache
 /// entry (rule-5 cache); callers get a snapshot and write mutations back.
 pub fn spgGetCache(index: &Relation<'_>) -> PgResult<SpGistCache> {
-    if let Some(cache) = index.rd_amcache_spgist.get() {
-        return Ok(cache);
+    if let Some(cache) = index.rd_amcache_spgist.borrow().as_deref() {
+        return Ok(*cache);
     }
 
     let mut cache = SpGistCache::default();
@@ -249,13 +249,13 @@ pub fn spgGetCache(index: &Relation<'_>) -> PgResult<SpGistCache> {
         unlock_release(metabuffer)?;
     }
 
-    index.rd_amcache_spgist.set(Some(cache));
+    *index.rd_amcache_spgist.borrow_mut() = Some(Box::new(cache));
     Ok(cache)
 }
 
 #[inline]
 pub(crate) fn set_cache(index: &Relation<'_>, cache: SpGistCache) {
-    index.rd_amcache_spgist.set(Some(cache));
+    *index.rd_amcache_spgist.borrow_mut() = Some(Box::new(cache));
 }
 
 /// getSpGistTupleDesc; the copy arm serves compress opclasses (leaf type !=
@@ -372,7 +372,7 @@ fn page_is_empty(page: &PageRef<'_>) -> bool {
 
 /// SpGistUpdateMetaPage: push lastUsedPages back if the conditional lock wins.
 pub fn SpGistUpdateMetaPage(index: &Relation<'_>) -> PgResult<()> {
-    let Some(cache) = index.rd_amcache_spgist.get() else {
+    let Some(cache) = index.rd_amcache_spgist.borrow().as_deref().copied() else {
         return Ok(());
     };
     let metabuffer = bufmgr::read_buffer::call(index, SPGIST_METAPAGE_BLKNO)?;

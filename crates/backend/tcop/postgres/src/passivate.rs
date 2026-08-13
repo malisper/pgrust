@@ -70,12 +70,19 @@ pub(crate) fn IdlePassivate() -> PgResult<()> {
     let plans = plancache::ReleaseIdleGenericPlans();
     catcache::ResetCatalogCaches()?;
     let rels = relcache::PassivateRelationCache()?;
+    // Wave-4 arena diet: the operator-lookup memo rebuilds from catcache on
+    // next use (same rebuild-through-L2 contract as the caches above).
+    parse_oper::PassivateOprCache();
     let trimmed = mcx::passivate_trim();
+    // Wave-4 stack discipline: after every cache drop (the drops themselves
+    // dip the stack), release the dead dirty stack pages below the current
+    // frame. Safety argument + platform gating: stack_mem module doc.
+    let stack = crate::stack_mem::release_idle_stack();
     elog::elog(
         types_error::DEBUG1,
         format!(
             "idle passivation: dropped {rels} relcache entries, {plans} generic plans, \
-             reset catcache, allocator trim{}",
+             reset catcache, allocator trim{}, stack release {stack} bytes",
             if trimmed { "" } else { " (no release hook)" }
         ),
     )?;

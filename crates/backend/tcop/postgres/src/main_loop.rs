@@ -988,6 +988,11 @@ fn run_one_iteration_inner<'mcx>(mcx: Mcx<'mcx>, state: &mut LoopState) -> PgRes
         // A fire that raced the arriving command must not passivate right
         // before we execute it.
         init_small::globals::SetIdlePassivateTimeoutPending(false);
+        // Wave-4 stack discipline, reactivation half (macOS accounting):
+        // re-mark any stack range the passivation released so pages the
+        // arriving command re-dirties are charged again. TLS-check no-op
+        // when no passivation released anything.
+        crate::stack_mem::reuse_idle_stack();
     }
 
     check_for_interrupts()?;

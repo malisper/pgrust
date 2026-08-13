@@ -61,6 +61,13 @@ pub fn set_allocator_stats(f: fn() -> AllocatorStats) {
     ALLOC_STATS.store(f as *mut (), Ordering::Release);
 }
 
+/// Wave-4 floor census: the `pgrust: memctx` dump reports the allocator's
+/// process-wide rss/commit next to phys_footprint so allocator retention is
+/// separable from stacks and other VM regions.
+pub fn read_allocator_stats() -> Option<AllocatorStats> {
+    allocator_stats()
+}
+
 fn allocator_stats() -> Option<AllocatorStats> {
     let p = ALLOC_STATS.load(Ordering::Acquire);
     if p.is_null() {

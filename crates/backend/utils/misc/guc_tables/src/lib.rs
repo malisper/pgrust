@@ -280,6 +280,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::idle_passivate_timeout,
         set: backing::set_idle_passivate_timeout,
     });
+    vars::idle_passivate_stack.install(GucVarAccessors {
+        get: backing::idle_passivate_stack,
+        set: backing::set_idle_passivate_stack,
+    });
     vars::catcache_size_limit.install(GucVarAccessors {
         get: backing::catcache_size_limit,
         set: backing::set_catcache_size_limit,

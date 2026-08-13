@@ -75,12 +75,14 @@ fn table_counts_match_compiled_backend_shape() {
     // connection-scaling GUC-ification pass (pgrust-only, same doc):
     //   Int +2 catcache_size_limit, relcache_size_limit (-> 176),
     //   Bool +1 shared_catalog_cache (-> 138) = 469.
-    assert_eq!(ConfigureNamesBool.len(), 138);
+    // connection-scaling wave 4 (floor work, same doc):
+    //   Bool +1 idle_passivate_stack (-> 139) = 470.
+    assert_eq!(ConfigureNamesBool.len(), 139);
     assert_eq!(ConfigureNamesInt.len(), 176);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 79);
     assert_eq!(ConfigureNamesEnum.len(), 48);
-    assert_eq!(all_settings().count(), 469);
+    assert_eq!(all_settings().count(), 470);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

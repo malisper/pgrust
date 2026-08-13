@@ -263,6 +263,8 @@ pub static connection_queue_size: GucIntVar = GucSlot::new("connection_queue_siz
 pub static connection_queue_timeout: GucIntVar = GucSlot::new("connection_queue_timeout");
 // pgrust-only (docs/design/connection-scaling.md D3.4): idle passivation.
 pub static idle_passivate_timeout: GucIntVar = GucSlot::new("idle_passivate_timeout");
+// pgrust-only (connection-scaling wave 4): stack release at passivation.
+pub static idle_passivate_stack: GucBoolVar = GucSlot::new("idle_passivate_stack");
 // pgrust-only (docs/design/connection-scaling.md D3.1): bounded L1 caches.
 pub static catcache_size_limit: GucIntVar = GucSlot::new("catcache_size_limit");
 pub static relcache_size_limit: GucIntVar = GucSlot::new("relcache_size_limit");

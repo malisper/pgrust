@@ -63,7 +63,7 @@ fn db_pending(dboid: u32) -> Option<database::PgStat_StatDBEntry> {
             objid: 0,
         };
         match st.pending.get(&key) {
-            Some(PendingData::Database(d)) => Some(*d),
+            Some(PendingData::Database(d)) => Some(**d),
             _ => None,
         }
     })

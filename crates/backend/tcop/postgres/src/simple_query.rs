@@ -289,6 +289,30 @@ fn memctx_dump() -> PgResult<()> {
         ::mcx::global_footprint::bytes()
     ))?;
 
+    // Wave-4 floor census: this backend thread's stack — region size, the
+    // dirtied high-water (the footprint the bootstrap dip left behind), and
+    // current residency (mincore scan; stack_mem module doc).
+    match crate::stack_mem::stack_census() {
+        Some(s) => say(format!(
+            "memctx: stack region_kb={} depth_now_kb={} resident_kb={} dirty_kb={} high_water_kb={}",
+            s.region_bytes / 1024,
+            s.depth_now / 1024,
+            s.resident_bytes / 1024,
+            s.dirty_bytes / 1024,
+            s.high_water / 1024
+        ))?,
+        None => say("memctx: stack census unavailable on this platform".to_string())?,
+    }
+
+    // Wave-4 floor census: allocator-committed bytes (process-wide) beside
+    // phys_footprint separates mimalloc retention from stacks/VM regions.
+    if let Some(a) = memwatchdog::read_allocator_stats() {
+        say(format!(
+            "memctx: allocator current_rss={} current_commit={} (process-wide)",
+            a.current_rss, a.current_commit
+        ))?;
+    }
+
     tcop_dest::NullCommand(elog::config::where_to_send_output())
 }
 

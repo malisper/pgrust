@@ -19,7 +19,11 @@ pub(crate) fn RelationInvalidateRelation(rel: &RelationData<'static>) {
     rel.rd_isvalid.set(false);
     rel.rd_amcache.set(None);
     *rel.rd_amcache_hash.borrow_mut() = None;
-    rel.rd_amcache_gin.set(None);
+    *rel.rd_amcache_gin.borrow_mut() = None;
+    // C frees rd_amcache wholesale; the spgist arm was the one slot this
+    // clear missed (wave-4 find — stale opclass config after DDL, plus a
+    // harmless stale lastUsedPages hint).
+    *rel.rd_amcache_spgist.borrow_mut() = None;
     *rel.rd_indexlist.borrow_mut() = None;
     *rel.rd_trigdesc.borrow_mut() = None;
     crate::rules::forget(rel.rd_id);

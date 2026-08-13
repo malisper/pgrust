@@ -299,6 +299,16 @@ int_var!(
     set_relcache_size_limit,
     512
 );
+// Wave-4 stack discipline: release dead dirty stack pages at idle
+// passivation (madvise; per-OS gating + safety argument in
+// tcop/postgres/src/stack_mem.rs). Subordinate to idle_passivate_timeout;
+// PGRUST_PASSIVATE_STACK env override wins when set.
+bool_var!(
+    B_idle_passivate_stack,
+    idle_passivate_stack,
+    set_idle_passivate_stack,
+    true
+);
 // D3.2 shared immutable L2 catalog cache (+ the wave-3a init-file routing,
 // folded in: init-file loads adopt/install shared cores iff the L2 is on;
 // PGRUST_L2_INITFILE=0 remains a harness-only splitter). PGC_POSTMASTER:

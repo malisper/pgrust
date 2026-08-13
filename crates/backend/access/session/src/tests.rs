@@ -941,7 +941,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      interning registry, a rederivable cache keyed by the shared
     //      core pointer; a fresh thread re-interns on first touch. Cache,
     //      not session identity; not a session_sources row.
-    assert_eq!(count_tree(crates), 563, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 564, re-pinned at the wave-4 floor landing (stack passivation):
+    //   +1 tcop/postgres/src/stack_mem.rs — RELEASED: the macOS range a
+    //      passivation marked MADV_FREE-reusable, pending a REUSE charge at
+    //      reactivation. Per-thread accounting scratch tied to the thread's
+    //      own stack pages — it cannot migrate with a session by definition
+    //      (the stack is the thread's); safe to lose (worst case a page
+    //      range is charged conservatively). Non-session on the substance.
+    assert_eq!(count_tree(crates), 564, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

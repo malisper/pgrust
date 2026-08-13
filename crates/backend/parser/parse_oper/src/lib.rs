@@ -28,6 +28,14 @@ pub struct Operator {
 const NAMEDATALEN: usize = 64;
 const MAX_CACHED_PATH_LEN: usize = 16;
 
+// Wave-4 floor census: C sizes its OprCache dynahash at 256 entries, but
+// dynahash pre-allocates lazily where hashbrown pre-allocates buckets —
+// with_capacity_in(256) dirtied 512 x 145B buckets (~72KB, the census's
+// "Operator lookup cache" line) in every backend that ever looked up an
+// operator. Start tiny and let demand grow the table (the warmed pgbench
+// census used 69 operators; a doubling from 16 costs one µs-scale rehash).
+const OPR_CACHE_INIT_CAPACITY: usize = 16;
+
 // Zero-filled unused bytes keep hashing stable (C's MemSet'd OprCacheKey).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct OprCacheKey {
@@ -63,7 +71,7 @@ fn with_opr_cache<R>(f: impl FnOnce(&mut PgHashMap<'static, OprCacheKey, Oid>) -
                 Datum::null(),
             )?;
             *slot = Some(ManuallyDrop::new(OprCache {
-                map: PgHashMap::with_capacity_in(256, mcx),
+                map: PgHashMap::with_capacity_in(OPR_CACHE_INIT_CAPACITY, mcx),
             }));
         }
         Ok(f(&mut slot.as_mut().unwrap().map))
@@ -74,6 +82,19 @@ fn InvalidateOprCacheCallBack(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
     OPR_CACHE.with(|cell| {
         if let Some(cache) = cell.borrow_mut().as_mut() {
             cache.map.clear();
+        }
+    });
+}
+
+/// Wave-4 idle passivation (docs/design/connection-scaling.md): drop the
+/// memo AND its bucket estate (clear() keeps capacity; a warmed session's
+/// map holds ~64-128 buckets x 145B). Entries rebuild from catcache — the
+/// exact rebuild an OPERNAMENSP/CASTSOURCETARGET inval already forces.
+pub fn PassivateOprCache() {
+    OPR_CACHE.with(|cell| {
+        if let Some(cache) = cell.borrow_mut().as_mut() {
+            let mcx = *cache.map.allocator();
+            cache.map = PgHashMap::with_capacity_in(OPR_CACHE_INIT_CAPACITY, mcx);
         }
     });
 }

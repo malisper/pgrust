@@ -703,6 +703,12 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // deliberately no separate init-file GUC; PGRUST_L2_INITFILE stays a
     // harness-only splitter). PGC_POSTMASTER: flipping mid-life would desync
     // generation views against live L1 state.
+    // pgrust-only (connection-scaling wave 4): at idle passivation, also
+    // release the dead dirty pages of the backend thread's stack (madvise;
+    // per-OS gating and the safety argument live in
+    // tcop/postgres/src/stack_mem.rs). No effect while
+    // idle_passivate_timeout = 0.
+    GucBoolSetting { name: "idle_passivate_stack", context: PGC_SIGHUP, group: CONN_AUTH_SETTINGS, short_desc: Some("Releases idle stack memory when a session passivates."), long_desc: Some("At idle passivation, dirty thread-stack pages below the parked frame are returned to the operating system. No effect when idle_passivate_timeout is 0."), flags: 0, variable: &vars::idle_passivate_stack, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "shared_catalog_cache", context: PGC_POSTMASTER, group: RESOURCES_MEM, short_desc: Some("Enables the shared catalog cache from which sessions adopt relation and catalog cache entries."), long_desc: Some("When off, every session builds all cache entries privately from the system catalogs, as stock PostgreSQL does."), flags: 0, variable: &vars::shared_catalog_cache, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.memory_watchdog_dump (pgrust-only, GL-MEMWATCH-1): on a threshold
     // breach, additionally signal every live backend to log its memory-context

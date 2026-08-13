@@ -60,9 +60,13 @@ pub struct RelationData<'mcx> {
     pub rd_amcache_hash: RefCell<Option<std::boxed::Box<types_hash::HashMetaPageData>>>,
     // C rd_amcache, gin arm (resolved opclass dispatch; gin crate owns the
     // tag mapping — 0 == jsonb_ops).
-    pub rd_amcache_gin: Cell<Option<RdAmCacheGin>>,
+    // Boxed (wave-4 shell diet): the 516B GIN state was inline in EVERY
+    // RelationData while only GIN indexes ever populate it — ~80KB/conn of
+    // dead shell bytes across a warmed session's entries.
+    pub rd_amcache_gin: RefCell<Option<std::boxed::Box<RdAmCacheGin>>>,
     // C rd_amcache, spgist arm (SpGistCache POD: opclass config + lastUsedPages).
-    pub rd_amcache_spgist: Cell<Option<types_spgist::SpGistCache>>,
+    // Boxed for the same reason as the gin arm (128B inline, spgist-only use).
+    pub rd_amcache_spgist: RefCell<Option<std::boxed::Box<types_spgist::SpGistCache>>>,
     // C rd_support: nkey x amsupport support-proc OIDs, row-major.
     pub rd_support: PgVec<'mcx, Oid>,
     // C rd_support/rd_supportinfo (rule-5 cache), resolved once per column;

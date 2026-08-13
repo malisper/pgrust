@@ -297,7 +297,7 @@ pub(crate) fn pgstat_prep_database_pending_in<'a>(
         objid: 0,
     };
     match st.prep_pending_entry(key) {
-        PendingData::Database(db) => db,
+        PendingData::Database(db) => &mut **db,
         _ => unreachable!("database key holds non-database pending data"),
     }
 }

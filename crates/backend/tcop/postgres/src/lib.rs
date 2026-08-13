@@ -14,6 +14,7 @@ pub mod admission;
 pub mod extended_query;
 pub mod main_loop;
 pub(crate) mod passivate;
+pub(crate) mod stack_mem;
 pub mod simple_query;
 pub mod single_user;
 pub mod stdio_wire;

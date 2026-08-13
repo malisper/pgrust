@@ -40,11 +40,15 @@ pub struct PgStat_HashKey {
     pub objid: u64,
 }
 
+// Wave-4 floor census: the largest inline variant sizes EVERY bucket slot
+// of the pending map, so the 264B PgStat_StatDBEntry (and the 80B+
+// subscription entry) is boxed — at most a handful of database/subscription
+// entries ever exist per backend, while the map's buckets are paid up front.
 pub enum PendingData {
     Relation(RelationPendingPtr),
-    Database(database::PgStat_StatDBEntry),
+    Database(PgBox<'static, database::PgStat_StatDBEntry>),
     Function(crate::function::PgStat_FunctionCounts),
-    Subscription(crate::subscription::PgStat_BackendSubEntry),
+    Subscription(PgBox<'static, crate::subscription::PgStat_BackendSubEntry>),
 }
 
 // C's PgStat_TableStatus lives at a stable palloc'd address that
@@ -117,11 +121,16 @@ fn new_pending_data(key: PgStat_HashKey, mcx: Mcx<'static>) -> PendingData {
     if key.kind == PGSTAT_KIND_RELATION {
         PendingData::Relation(RelationPendingPtr::new(mcx))
     } else if key.kind == PGSTAT_KIND_DATABASE {
-        PendingData::Database(database::PgStat_StatDBEntry::default())
+        PendingData::Database(
+            mcx::alloc_in(mcx, database::PgStat_StatDBEntry::default()).expect("out of memory"),
+        )
     } else if key.kind == PGSTAT_KIND_FUNCTION {
         PendingData::Function(crate::function::PgStat_FunctionCounts::default())
     } else if key.kind == PGSTAT_KIND_SUBSCRIPTION {
-        PendingData::Subscription(crate::subscription::PgStat_BackendSubEntry::default())
+        PendingData::Subscription(
+            mcx::alloc_in(mcx, crate::subscription::PgStat_BackendSubEntry::default())
+                .expect("out of memory"),
+        )
     } else {
         panic!("pending entry for unported stats kind {:?}", key.kind)
     }
@@ -163,7 +172,12 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut PgStatState) -> R) -> R {
             let m = ctx.mcx();
             ManuallyDrop::new(PgStatState {
                 ctx,
-                pending: PgHashMap::with_capacity_in(PGSTAT_ENTRY_REF_HASH_SIZE, m),
+                // Wave-4 floor census: C's PGSTAT_ENTRY_REF_HASH_SIZE (128)
+                // sizes a dynahash that allocates lazily; pre-sizing
+                // hashbrown to it dirtied ~74KB of buckets in every backend
+                // at bootstrap (catalog scans count stats). Start small —
+                // demand grows the table; a doubling is a µs-scale rehash.
+                pending: PgHashMap::with_capacity_in(16, m),
                 pending_order: PgVec::new_in(m),
                 xact_stack: PgVec::new_in(m),
             })
