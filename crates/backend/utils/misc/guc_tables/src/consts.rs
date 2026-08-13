@@ -96,6 +96,11 @@ pub const INTSTYLE_POSTGRES_VERBOSE: i32 = 1;
 pub const INTSTYLE_SQL_STANDARD: i32 = 2;
 pub const IOMETHOD_SYNC: i32 = 0;
 pub const IOMETHOD_WORKER: i32 = 1;
+// C enum IoMethod's IOMETHOD_IO_URING ordinal. Not listed in
+// IO_METHOD_OPTIONS yet (io_uring stays unlisted until inc-2), so no GUC
+// source can select it today — it exists so io_method-gated code (the uring
+// prefetch route in bufmgr) states its enabling condition explicitly.
+pub const IOMETHOD_IO_URING: i32 = 2;
 pub const LOG: i32 = types_error::LOG.0;
 pub const LOGSTMT_ALL: i32 = 3;
 pub const LOGSTMT_DDL: i32 = 1;

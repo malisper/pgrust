@@ -20,6 +20,11 @@ static READV_SIZES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::ne
 static TEST_IO_MAX_COMBINE_LIMIT: AtomicI32 = AtomicI32::new(16);
 // Widens the BM_IO_IN_PROGRESS window so a second reader lands in WaitIO.
 const SLOW_READ_REL: u32 = 9400;
+// Error injection: smgr_startreadv fails for this rel while the flag is set —
+// the shape of mdstartreadv's own pre-stage failures (past-EOF read, fd
+// resolve error): raised between StartBufferIO and the pgaio stage.
+const ERROR_READ_REL: u32 = 9461;
+static READ_ERROR_INJECT: AtomicBool = AtomicBool::new(false);
 
 // Large enough that the batched-read pin cap (GetAdditionalPinLimit ~
 // NBuffers/(MaxBackends+aux) - REFCOUNT_ARRAY_ENTRIES) still allows the full
@@ -177,6 +182,13 @@ fn setup_once() {
             READV_SIZES.lock().unwrap().push(pages.len());
             if rlb.locator.relNumber == SLOW_READ_REL {
                 std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            if rlb.locator.relNumber == ERROR_READ_REL
+                && READ_ERROR_INJECT.load(Ordering::Relaxed)
+            {
+                // Pre-stage failure: BM_IO_IN_PROGRESS is already set and an
+                // AIO handle is acquired, but nothing was handed to pgaio.
+                return Err(Box::new(PgError::error("injected pre-stage read failure")));
             }
             let fd = fake_rel_fd(rlb.locator.relNumber, blocknum, pages.len() as u32);
             // The real smgrstartreadv holds interrupts across the fd resolve
@@ -1539,4 +1551,147 @@ fn buffer_sync_scratch_oom_is_error_not_panic() {
     .join()
     .expect("no panic")
     .expect("BufferSync succeeds once memory is available");
+}
+
+// Shared fixture for the uring-prefetch policy/fence tests: an
+// uring_available seam under test control, an smgr_start_buffer_read arm
+// that panics if ever reached (standing in for any defect below the route),
+// and an always-succeeding advisory smgr_prefetch fallback.
+static URING_ON: AtomicBool = AtomicBool::new(false);
+
+fn setup_uring_prefetch_seams() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        aio_seams::uring_available::set(|| URING_ON.load(Ordering::Relaxed));
+        smgr_seams::smgr_start_buffer_read::set(|_rl, _fork, _blk, _buf| {
+            panic!("simulated smgr start_buffer_read guard panic")
+        });
+        smgr_seams::smgr_prefetch::set(|_rl, _fork, _blk, _n| Ok(true));
+    });
+}
+
+// The io_method contract (archil-neon incident, first defect): with
+// io_method=sync — the wedged cluster's setting, and the boot default —
+// PrefetchSharedBuffer must NOT take the uring route just because the ring
+// initialized; it takes the advisory smgr_prefetch fallback, like C. The
+// panic seam below is the route's tripwire: if the gate leaks, this test
+// dies in the seam instead of falling back.
+#[test]
+fn prefetch_with_io_method_sync_never_takes_the_uring_route() {
+    let _g = setup();
+    setup_uring_prefetch_seams();
+    assert_eq!(aio_core::io_method(), guc_tables::consts::IOMETHOD_SYNC);
+    let smgr = RelFileLocatorBackend {
+        locator: rloc(9462),
+        backend: INVALID_PROC_NUMBER,
+    };
+    URING_ON.store(true, Ordering::Relaxed);
+    let res = PrefetchSharedBuffer(smgr, RELPERSISTENCE_PERMANENT, ForkNumber::MAIN_FORKNUM, 0);
+    URING_ON.store(false, Ordering::Relaxed);
+    let res = res.unwrap();
+    assert!(
+        !types_core::BufferIsValid(res.recent_buffer),
+        "block was never read; nothing may be resident"
+    );
+    assert!(res.initiated_io, "the advisory smgr_prefetch fallback must be taken");
+}
+
+// The archil-neon cluster deadlock (2026-08): an smgr start_buffer_read arm
+// that believed itself unreachable panicked with BM_IO_IN_PROGRESS freshly
+// set by uring::start_read — and that IO has NO owner any cleanup path knows
+// about (remember_owner=false: no resowner AbortBufferIO entry; the ring
+// never saw it, so no drain clears it). The flag leaked forever and every
+// later toucher of the buffer parked on its IO condvar (forensics: backend
+// stuck in WaitReadBuffers -> WaitIO with no armed io_wref, the rest of the
+// cluster queued behind it). The fence in uring::start_read now terminates
+// the IO and unpins before re-raising.
+#[test]
+fn uring_prefetch_seam_panic_leaves_no_orphaned_buffer_io() {
+    let _g = setup();
+    setup_write_seams(); // victim eviction during BufferAlloc may flush
+    setup_uring_prefetch_seams();
+    let rel = 9460u32;
+    let smgr = RelFileLocatorBackend {
+        locator: rloc(rel),
+        backend: INVALID_PROC_NUMBER,
+    };
+    URING_ON.store(true, Ordering::Relaxed);
+    guc_tables::vars::io_method.write(guc_tables::consts::IOMETHOD_IO_URING);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PrefetchSharedBuffer(smgr, RELPERSISTENCE_PERMANENT, ForkNumber::MAIN_FORKNUM, 0)
+    }));
+    guc_tables::vars::io_method.write(guc_tables::consts::IOMETHOD_SYNC);
+    URING_ON.store(false, Ordering::Relaxed);
+    assert!(res.is_err(), "the seam panic must still propagate (crash semantics)");
+    // Regression heart: without the fence this read parks forever in
+    // WaitIO on the orphaned BM_IO_IN_PROGRESS (the deadlock); with it the
+    // IO was terminated and the block reads normally.
+    let desc_state = {
+        let tag = crate::read::init_buffer_tag(smgr.locator, ForkNumber::MAIN_FORKNUM, 0);
+        let hash = crate::buf_table::BufTableHashCode(&tag);
+        let partition_lock = crate::buf_table::BufMappingPartitionLock(hash);
+        lwlock::LWLockAcquire(partition_lock, lwlock::LW_SHARED, globals::MyProcNumber()).unwrap();
+        let buf_id = crate::buf_table::BufTableLookup(&tag, hash).unwrap();
+        lwlock::LWLockRelease(partition_lock).unwrap();
+        (buf_id >= 0).then(|| GetBufferDescriptor(buf_id).state.load(Ordering::Acquire))
+    };
+    if let Some(state) = desc_state {
+        assert_eq!(
+            state & types_storage::buf::BM_IO_IN_PROGRESS,
+            0,
+            "panic across StartBufferIO leaked BM_IO_IN_PROGRESS — the archil-neon wedge"
+        );
+        assert_eq!(state & BUF_REFCOUNT_MASK, 0, "victim pin leaked across the panic");
+    }
+    let b = read_blk(rel, 0);
+    ReleaseBuffer(b).unwrap();
+    AtEOXact_Buffers(true);
+}
+
+// Second face of the archil-neon incident (io_method=sync leg): a read error
+// raised BETWEEN StartBufferIO and the pgaio stage (mdstartreadv's own
+// pre-stage failures live exactly there) must be fully undone by the abort
+// ceremony — pgaio error cleanup + resowner release — leaving the buffer's
+// BM_IO_IN_PROGRESS cleared and the block readable, never a permanent
+// IPC/BufferIo wedge for the next toucher.
+#[test]
+fn read_error_before_stage_is_cleaned_by_abort_and_buffer_stays_usable() {
+    let _g = setup();
+    use types_resowner::{ResourceOwner, RESOURCE_RELEASE_BEFORE_LOCKS};
+    let save = resowner::CurrentResourceOwner();
+    let owner = resowner::ResourceOwnerCreate(ResourceOwner::NULL, "read-error-test").unwrap();
+    resowner::SetCurrentResourceOwner(owner);
+
+    READ_ERROR_INJECT.store(true, Ordering::Relaxed);
+    let res = ReadBufferWithoutRelcache(
+        rloc(ERROR_READ_REL),
+        ForkNumber::MAIN_FORKNUM,
+        0,
+        ReadBufferMode::Normal,
+        None,
+        true,
+    );
+    READ_ERROR_INJECT.store(false, Ordering::Relaxed);
+    let err = res.expect_err("injected read failure must surface as an ERROR");
+    assert!(
+        err.message.contains("injected pre-stage read failure"),
+        "unexpected error: {}",
+        err.message
+    );
+
+    // The abort ceremony pieces that matter for buffer IO state.
+    aio_core::pgaio_error_cleanup();
+    resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_BEFORE_LOCKS, false, true).unwrap();
+    resowner::SetCurrentResourceOwner(save);
+    resowner::ResourceOwnerDelete(owner);
+
+    // The wedge check: nobody may be left waiting on an orphaned
+    // BM_IO_IN_PROGRESS — the block must read normally (pre-cleanup this
+    // parks forever in WaitIO, the IPC/BufferIo hang).
+    let b = read_blk(ERROR_READ_REL, 0);
+    let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+    assert!(state & BM_VALID != 0);
+    assert_eq!(state & types_storage::buf::BM_IO_IN_PROGRESS, 0);
+    ReleaseBuffer(b).unwrap();
+    AtEOXact_Buffers(true);
 }

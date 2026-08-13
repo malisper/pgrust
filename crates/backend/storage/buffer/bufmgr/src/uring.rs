@@ -35,7 +35,28 @@ pub fn start_read(
         return Ok(Some(PrefetchOutcome::Cached));
     }
     let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
-    match smgr_seams::smgr_start_buffer_read::call(smgr, forknum, blkno, buffer) {
+    // Panic fence: between StartBufferIO and the ring handoff this buffer's
+    // BM_IO_IN_PROGRESS has NO owner that any cleanup path knows about —
+    // remember_owner=false means no resowner AbortBufferIO entry, and the
+    // ring drain (AtEOXact_Buffers) only clears IOs that reached a ring
+    // slot. A panic escaping the smgr seam here therefore leaks
+    // BM_IO_IN_PROGRESS forever and every later toucher of the buffer
+    // sleeps on its IO condvar — a cluster-wide wedge (the archil-neon
+    // deadlock: an smgr start_buffer_read arm that believed itself
+    // unreachable panicked right here). Terminate the IO and drop the pin
+    // before letting the panic keep crashing.
+    let seam_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        smgr_seams::smgr_start_buffer_read::call(smgr, forknum, blkno, buffer)
+    }));
+    let seam_result = match seam_result {
+        Ok(r) => r,
+        Err(payload) => {
+            TerminateBufferIO(desc, false, BM_IO_ERROR, false, false);
+            UnpinBuffer(desc);
+            std::panic::resume_unwind(payload);
+        }
+    };
+    match seam_result {
         Ok(true) => {
             // Pin ownership moves to the ring slot (C: AIO holds its own pin);
             // collect/drain on this thread is the only unpinner.

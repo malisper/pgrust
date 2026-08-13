@@ -3,8 +3,10 @@
 //! thread-per-backend model): bufmgr pins the victim and sets
 //! BM_IO_IN_PROGRESS, we submit the SQE (wref armed first), and ANY thread may
 //! drain a ring's completions (C's deadlock rule: whoever waits completes).
-//! Divergence from C 18: availability-gated, not io_method-gated; fadvise
-//! stays the fallback where the ring is absent.
+//! Like C 18, the route is io_method-gated: PrefetchSharedBuffer takes it
+//! only under io_method=io_uring (AND uring_available()); fadvise stays the
+//! fallback everywhere else. It was availability-gated only until the
+//! archil-neon incident showed io_method=sync clusters issuing ring reads.
 //!
 //! M1 §2.9 (parallelism-redesign): every in-flight slot carries a
 //! `waiter::io::IoToken`; reaping completes it (unpark-all). Runtime-pool

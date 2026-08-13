@@ -82,7 +82,7 @@ pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
-fn init_buffer_tag(rlocator: RelFileLocator, forknum: ForkNumber, blkno: BlockNumber) -> buftag {
+pub(crate) fn init_buffer_tag(rlocator: RelFileLocator, forknum: ForkNumber, blkno: BlockNumber) -> buftag {
     buftag {
         spcOid: rlocator.spcOid,
         dbOid: rlocator.dbOid,
@@ -1262,7 +1262,20 @@ pub fn PrefetchSharedBuffer(
     if fd::io_direct_flags() & types_storage::IO_DIRECT_DATA != 0 {
         return Ok(PrefetchBufferResult { recent_buffer: InvalidBuffer, initiated_io: false });
     }
-    if aio_seams::uring_available::is_installed() && aio_seams::uring_available::call() {
+    // The uring route engages only when the effective io_method selects it
+    // (C 18: io_uring serves IO only under io_method=io_uring). It used to be
+    // gated purely on uring_available() — ring-init success, true on any
+    // Linux with liburing — so io_method=sync clusters still issued async
+    // ring reads behind the user's back (the archil-neon incident: that
+    // route reached an smgr arm believing itself unreachable because
+    // check_io_method had rejected uring, and panicked mid-BufferIO).
+    // check_io_method does not accept "io_uring" yet (unlisted until inc-2),
+    // so today this route is test-only and every prefetch degrades to the
+    // advisory smgr_prefetch fallback below — C's behavior for sync/worker.
+    if aio_core::io_method() == guc_tables::consts::IOMETHOD_IO_URING
+        && aio_seams::uring_available::is_installed()
+        && aio_seams::uring_available::call()
+    {
         match crate::uring::start_read(smgr, relpersistence, forknum, blkno)? {
             Some(PrefetchOutcome::Issued) => {
                 return Ok(PrefetchBufferResult {
