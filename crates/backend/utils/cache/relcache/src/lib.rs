@@ -6,6 +6,7 @@ pub mod indexlist;
 mod trigdesc;
 pub mod initfile;
 pub mod invalidate;
+pub mod l2core;
 pub mod local;
 pub mod indexattr;
 pub mod fkeylist;
@@ -55,6 +56,10 @@ const INITRELCACHESIZE: usize = 400;
 pub(crate) struct RelCacheEnt {
     pub(crate) rel: Rc<RelationData<'static>>,
     pub(crate) nailed: bool,
+    /// LRU stamp for D3.1 capped eviction: bumped from `RelcacheState::
+    /// lru_clock` on every cache hit. No C counterpart (C never bounds the
+    /// relcache).
+    pub(crate) last_used: core::cell::Cell<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +90,8 @@ pub(crate) struct RelcacheState {
     pub(crate) invals_received: i64,
     pub(crate) critical_relcaches_built: bool,
     pub(crate) critical_shared_relcaches_built: bool,
+    /// Monotonic hit counter feeding `RelCacheEnt::last_used` (D3.1).
+    pub(crate) lru_clock: u64,
 }
 
 thread_local! {
@@ -128,6 +135,7 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut RelcacheState) -> R) -> R {
                 invals_received: 0,
                 critical_relcaches_built: false,
                 critical_shared_relcaches_built: false,
+                lru_clock: 0,
             })
         });
         f(st)
@@ -179,6 +187,91 @@ pub fn criticalRelcachesBuilt() -> bool {
 
 pub fn criticalSharedRelcachesBuilt() -> bool {
     with_state(|st| st.critical_shared_relcaches_built)
+}
+
+/// D3.1 entry cap on `id_cache` (this backend's relcache). C has no
+/// counterpart — the C relcache grows without bound. Evicting an unpinned,
+/// un-nailed, no-subxact-state entry is semantically identical to a relcache
+/// invalidation arriving for it while unpinned (RelationFlushRelation's
+/// RelationClearRelation arm): the next open rebuilds it from the catalogs.
+/// 0 disables. GUC `relcache_size_limit` (PGC_SIGHUP — read on every cap
+/// check, so a reload applies to the next insertion), with a
+/// PGRUST_RELCACHE_CAP env override for harnesses (env wins if set; cached at
+/// first read — the test suites and scripts set it before spawning backends).
+pub(crate) fn relcache_cap() -> usize {
+    static ENV: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    if let Some(v) = *ENV.get_or_init(|| {
+        std::env::var("PGRUST_RELCACHE_CAP").ok().and_then(|v| v.trim().parse().ok())
+    }) {
+        return v;
+    }
+    guc_tables::backing::relcache_size_limit().max(0) as usize
+}
+
+// The default (512, the relcache_size_limit boot value in guc_tables) is
+// sized from the D3.0 census (notes/connection-scaling-measurements.md): the
+// warmed pgbench+catalog workload holds 151 entries (~0.6MB global heap
+// + ~110KB context); 512 (~3.4x, ~2MB ceiling at ~4KB/entry) keeps ordinary
+// sessions eviction-free while bounding many-relation growth.
+
+/// D3.4 idle passivation (docs/design/connection-scaling.md): drop every
+/// unpinned, un-nailed, no-subxact-state relcache entry plus all the derived
+/// side caches, and prune the L2 mirror registry. Reactivation is the L2
+/// adopt path (shells over shared cores, µs per entry). Returns entries
+/// cleared. Caller guarantees idle-not-in-transaction.
+pub fn PassivateRelationCache() -> types_error::PgResult<usize> {
+    let cleared = store::passivate_all()?;
+    with_state(|st| {
+        st.rules_cache.clear();
+        st.policies_cache.clear();
+        st.indexattr_cache.clear();
+        st.statext_cache.clear();
+        st.fkey_cache.clear();
+        st.deform_jit_cache.clear();
+        // Weak refs to dropped lineages: prune now rather than lazily.
+        st.stale_refs.retain(|_, v| {
+            v.retain(|w| w.strong_count() > 0);
+            !v.is_empty()
+        });
+    });
+    l2core::prune_mirrors();
+    Ok(cleared)
+}
+
+/// D3.0 census tooling: this thread's relcache size, by count and by the
+/// global-heap bytes the mcx context census cannot see (each entry is an
+/// `Rc<RelationData>` + `Rc<TupleDescData>` on the global allocator; their
+/// PgVec/PgString innards live in CacheMemoryContext and ARE context-counted).
+pub struct RelCacheCensus {
+    pub entries: usize,
+    pub nailed: usize,
+    pub invalid: usize,
+    pub stale_lineages: usize,
+    pub side_cache_entries: usize,
+    pub est_heap_bytes: usize,
+}
+
+pub fn RelationCacheCensus() -> RelCacheCensus {
+    with_state(|st| {
+        let entries = st.id_cache.len();
+        let nailed = st.id_cache.values().filter(|e| e.nailed).count();
+        let invalid = st.id_cache.values().filter(|e| !e.rel.rd_isvalid.get()).count();
+        let stale_lineages: usize =
+            st.stale_refs.values().map(|v| v.iter().filter(|w| w.strong_count() > 0).count()).sum();
+        let side_cache_entries = st.rules_cache.len()
+            + st.policies_cache.len()
+            + st.indexattr_cache.len()
+            + st.statext_cache.len()
+            + st.fkey_cache.len()
+            + st.deform_jit_cache.len();
+        // Rc box = strong+weak counts (16) + payload; TupleDescData Rc per
+        // entry (shared descs undercount — this is an upper-bound estimate).
+        let rc_hdr = 16usize;
+        let est_heap_bytes = (entries + stale_lineages)
+            * (rc_hdr + core::mem::size_of::<RelationData<'static>>())
+            + entries * (rc_hdr + core::mem::size_of::<types_tuple::TupleDescData<'static>>());
+        RelCacheCensus { entries, nailed, invalid, stale_lineages, side_cache_entries, est_heap_bytes }
+    })
 }
 
 pub fn init_seams() {

@@ -70,6 +70,10 @@ pub(crate) fn install_shared_stubs() {
         });
         lock_seams::lock_release::set(|_, _, _| Ok(true));
         lock_seams::mark_lock_clear::set(|_, _| {});
+        // No-op arm (lock/predicate test precedent): the ready path arms the
+        // D3.4 idle-passivation one-shot whenever idle_passivate_timeout > 0
+        // (default 60s), so session tests need the seam present.
+        timeout_seams::enable_timeout_after::set(|_, _| Ok(()));
         timeout_seams::disable_timeouts::set(|_| {});
         timeout_seams::disable_all_timeouts::set(|_| Ok(()));
         timeout_seams::get_timeout_active::set(|_| false);
@@ -614,6 +618,7 @@ fn run_session(input: Vec<u8>) -> Vec<u8> {
         send_ready_for_query: true,
         idle_in_transaction_timeout_enabled: false,
         idle_session_timeout_enabled: false,
+        idle_passivate_timeout_enabled: false,
     };
 
     for _ in 0..200 {

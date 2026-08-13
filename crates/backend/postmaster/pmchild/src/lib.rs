@@ -59,8 +59,14 @@ pub fn MaxLivePostmasterChildren() -> i32 {
 pub fn InitPostmasterChildSlots() {
     let mut pool_sizes = [0i32; BACKEND_NUM_TYPES];
     // Extra headroom for authenticating connections; WAL senders share the pool.
+    // D6 (docs/design/connection-scaling.md): a queued over-limit connection
+    // parks on its backend thread holding its pmchild slot (and nothing
+    // else), so the queue capacity is additional pool headroom — without it
+    // the burst the queue exists to absorb would fall through to the
+    // dead-end 53300 backstop this feature replaces.
     pool_sizes[BackendType::Backend as usize] = 2
-        * (init_small::globals::MaxConnections() + guc_tables::vars::max_wal_senders.read());
+        * (init_small::globals::MaxConnections() + guc_tables::vars::max_wal_senders.read())
+        + guc_tables::vars::connection_queue_size.read();
     pool_sizes[BackendType::AutovacWorker as usize] =
         guc_tables::vars::autovacuum_worker_slots.read();
     pool_sizes[BackendType::BgWorker as usize] = init_small::globals::max_worker_processes();

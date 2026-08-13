@@ -180,4 +180,8 @@ pub fn init_seams() {
         set: set_debug_discard_caches,
     });
     inval_seams::accept_invalidation_messages::set(local::AcceptInvalidationMessages);
+    // D3.2 overlay rule (coarse form): a session holding unbroadcast
+    // invalidation messages modified a catalog this transaction; it must
+    // build cache entries privately (no L2 read or publish) until commit.
+    l2cache::set_pending_invals_probe(|| TransactionHasPendingInvalidationMessages());
 }

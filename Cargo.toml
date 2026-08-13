@@ -196,6 +196,7 @@ members = [
     "crates/common/relpath_seams",
     "crates/common/relpath",
     "crates/backend/utils/cache/inval",
+    "crates/backend/utils/cache/l2cache",
     "crates/backend/access/common/bufmask",
     "crates/backend/executor/execreplication",
     "crates/backend/executor/execreplication_seams",

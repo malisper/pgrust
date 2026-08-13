@@ -229,6 +229,30 @@ pub(crate) fn take_recycled_blocks() -> alloc::vec::Vec<Block> {
     }
 }
 
+/// D3.4 idle passivation: free this thread's parked keeper blocks (context
+/// churn parks up to MAX_FREE_CONTEXTS × INIT_BLOCK_SIZE here — retained
+/// allocator memory an idle backend should not hold). Global-pool arm
+/// (PGRUST_MCX_POOL_STRIPE=0) drains the shared pool instead: coarser blast
+/// radius, but this is a passivation-only cold call.
+pub(crate) fn trim_recycled_blocks() {
+    #[cfg(not(test))]
+    {
+        #[cfg(feature = "std")]
+        if crate::local_pool_on() {
+            let _ = KEEPER_TLS.try_with(|s| s.drain_all());
+            return;
+        }
+        if let Some(all) = KEEPER_POOL.stack.try_with(core::mem::take) {
+            for v in all {
+                for b in v {
+                    // SAFETY: parked keepers own their blocks; sole free.
+                    unsafe { b.free() };
+                }
+            }
+        }
+    }
+}
+
 #[inline]
 pub(crate) fn recycle_blocks(blocks: alloc::vec::Vec<Block>) {
     #[cfg(test)]

@@ -269,6 +269,7 @@ fn found(cache: &mut crate::CatCache<'_>, bucket: usize, slot: u32) -> ProbeRet 
     unsafe { cache.ct_move_head_hot(bucket, slot) };
     // SAFETY: `slot` came off the bucket walk (live slot).
     let ct = unsafe { cache.tuples.get_unchecked_mut(slot as usize) };
+    ct.hot = true; // clock reference bit (D3.1 capped eviction)
     if ct.negative {
         ProbeRet::negative()
     } else {
@@ -301,9 +302,155 @@ fn search_internal<K: ProbeKeys>(cache_id: i32, keys: &K) -> PgResult<Option<Cat
     }
 }
 
-/// `SearchCatCacheMiss`.
+/// `SearchCatCacheMiss`, D3.2 head: consult the shared L2 before scanning the
+/// catalogs; on L2 miss, take the per-key build gate so a warming herd builds
+/// each entry once. Bypass (straight to a private catalog scan): kill switch,
+/// bootstrap, uncommitted-DDL sessions and parallel workers
+/// (l2cache::private_build_mode — the overlay rule), and recursive builds.
 #[cold]
 fn search_miss(cache_id: i32, hash_value: u32, keys: &[CatCKey<'_>; 4]) -> PgResult<Option<CatCTuple>> {
+    if !l2cache::enabled()
+        || miscinit_seams::is_bootstrap_processing_mode::call()
+        || l2cache::private_build_mode()
+    {
+        return search_miss_scan(cache_id, hash_value, keys);
+    }
+    let (relisshared, kinds, nkeys) = with_state(|st| {
+        let c = st.cache(cache_id);
+        (c.cc_relisshared, c.cc_kind, c.cc_nkeys)
+    });
+    let db = if relisshared {
+        types_core::InvalidOid
+    } else {
+        init_small::globals::MyDatabaseId()
+    };
+    let l2key = l2cache::L2Key {
+        kind: l2cache::KIND_CAT,
+        id: cache_id as u32,
+        db,
+        hash: hash_value,
+    };
+    let domain = l2cache::Domain::Cat(cache_id);
+    // The reader's generation as of its last processed invalidation: an
+    // unprocessed queued inval must keep serving the older entry (no forward
+    // time-travel mid-transaction), and a processed one already advanced this.
+    let gen = l2cache::view_gen(domain);
+    loop {
+        if let Some(v) =
+            l2cache::lookup(l2key, gen, |a| crate::l2::entry_matches(a, &kinds, nkeys, keys))
+        {
+            let ent = v
+                .downcast::<crate::l2::CatL2Entry>()
+                .expect("KIND_CAT entries are CatL2Entry");
+            return Ok(install_l2(cache_id, hash_value, &ent));
+        }
+        match l2cache::acquire_gate(l2key, gen) {
+            // Another thread built it (or the bounded wait expired): re-check.
+            l2cache::GateOutcome::Waited => continue,
+            l2cache::GateOutcome::Recursive => {
+                return search_miss_scan(cache_id, hash_value, keys)
+            }
+            l2cache::GateOutcome::Owner(_guard) => {
+                let built = scan_to_l2(cache_id, hash_value, keys)?;
+                // Publish only if no generation bump raced the build: the scan
+                // ran under this thread's own catalog snapshot, and a
+                // concurrent DDL commit could have put either version in it —
+                // data of uncertain generation must not be stamped with ours.
+                let publish =
+                    l2cache::current_gen(domain) == gen && !l2cache::private_build_mode();
+                let ent = if publish {
+                    let v: std::sync::Arc<dyn core::any::Any + Send + Sync> = built.clone();
+                    l2cache::insert(l2key, gen, v, built.approx_bytes(), |a| {
+                        crate::l2::entry_matches(a, &kinds, nkeys, keys)
+                    })
+                    .downcast::<crate::l2::CatL2Entry>()
+                    .expect("KIND_CAT entries are CatL2Entry")
+                } else {
+                    built
+                };
+                return Ok(install_l2(cache_id, hash_value, &ent));
+            }
+        }
+    }
+}
+
+/// Install an L1 entry aliasing a shared L2 body; pin and return positives.
+fn install_l2(
+    cache_id: i32,
+    hash_value: u32,
+    ent: &std::sync::Arc<crate::l2::CatL2Entry>,
+) -> Option<CatCTuple> {
+    let negative = ent.negative;
+    let pinned = with_state(|st| {
+        let slot = crate::graph::install_from_l2(st, cache_id, hash_value, ent);
+        if negative {
+            None
+        } else {
+            let cache = st.cache_mut(cache_id);
+            let ct = &mut cache.tuples[slot as usize];
+            ct.refcount += 1;
+            Some(pin_entry(cache_id, slot, ct))
+        }
+    });
+    pinned
+}
+
+/// The catalog-scan half of the L2-owner path: like `search_miss_scan`, but
+/// the result is a shareable L2 body (a found tuple or a negative entry).
+fn scan_to_l2(
+    cache_id: i32,
+    hash_value: u32,
+    keys: &[CatCKey<'_>; 4],
+) -> PgResult<std::sync::Arc<crate::l2::CatL2Entry>> {
+    let (reloid, indexoid, nkeys) = with_state(|st| {
+        let c = st.cache(cache_id);
+        (c.cc_reloid, c.cc_indexoid, c.cc_nkeys)
+    });
+
+    let scratch = mcx::MemoryContext::new("SearchCatCacheMiss");
+    let scan_mcx = scratch.mcx();
+    let cur_skey = build_scan_keys(scan_mcx, cache_id, nkeys, keys)?;
+
+    let relation = table::table_open(scan_mcx, reloid, types_storage::lock::AccessShareLock)?;
+    let index_ok = init::IndexScanOK(cache_id);
+
+    let mut built: Option<std::sync::Arc<crate::l2::CatL2Entry>> = None;
+    let mut create_err: Option<Box<types_error::PgError>> = None;
+    /* C's do-while(stale): a mid-flatten invalidation restarts the scan. */
+    loop {
+        let mut stale = false;
+        genam_seams::systable_scan_catalog::call(
+            &relation,
+            indexoid,
+            index_ok,
+            &cur_skey[..nkeys as usize],
+            &mut |ntp| {
+                match crate::graph::l2_entry_from_scan(cache_id, ntp, hash_value) {
+                    Ok(Some(e)) => built = Some(e),
+                    Ok(None) => stale = true,
+                    Err(e) => create_err = Some(e),
+                }
+                Ok(false) /* break: assume only one match */
+            },
+        )?;
+        if !stale || create_err.is_some() {
+            break;
+        }
+    }
+    table::table_close(relation, types_storage::lock::AccessShareLock)?;
+    drop(scratch);
+    if let Some(e) = create_err {
+        return Err(e);
+    }
+    Ok(match built {
+        Some(e) => e,
+        None => crate::l2::build_negative(cache_id, keys),
+    })
+}
+
+/// `SearchCatCacheMiss` (pre-D3.2 body): private catalog scan into L1.
+#[cold]
+fn search_miss_scan(cache_id: i32, hash_value: u32, keys: &[CatCKey<'_>; 4]) -> PgResult<Option<CatCTuple>> {
     let (reloid, indexoid, nkeys) = with_state(|st| {
         let c = st.cache(cache_id);
         (c.cc_reloid, c.cc_indexoid, c.cc_nkeys)

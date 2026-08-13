@@ -5,10 +5,10 @@ use types_core::BackendType;
 
 // One backend slot per test thread that calls my_backend(); keep headroom
 // over the my_backend() call-site count or InitProcess FATALs mid-suite.
-const MAX_CONNECTIONS: i32 = 16;
+const MAX_CONNECTIONS: i32 = 24;
 // Bump when claim_other() call sites grow: the claimable simulated-backend
-// range is MAX_BACKENDS - MAX_CONNECTIONS (13 today for 13 claim_other()s).
-const MAX_WORKER_PROCESSES: i32 = 6;
+// range is MAX_BACKENDS - MAX_CONNECTIONS (16 today for 16 claim_other()s).
+const MAX_WORKER_PROCESSES: i32 = 9;
 const NUM_SPECIAL: i32 = types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
 
@@ -1130,4 +1130,82 @@ fn count_other_db_backends_sigterms_conflicting_autovacuum() {
     let proc = GetPGProcByNumber(other);
     proc.pid.store(0, Relaxed);
     proc.statusFlags.store(0, Relaxed);
+}
+
+// D3.5: arrays start small (SNAPSHOT_ARRAY_INITIAL), grow on observed demand
+// with a build restart, and the demand window decays back after the spike.
+#[test]
+fn snapshot_arrays_demand_grow_and_decay() {
+    let _g = test_lock();
+    let me = my_backend();
+    let mcx = leaked_mcx();
+
+    const NSUB: usize = types_storage::storage::PGPROC_MAX_CACHED_SUBXIDS;
+    // Three writers each with a full (non-overflowed) subxid cache: 192
+    // subxids > the 64-entry initial subxip, forcing the grow-retry path.
+    let mut others = Vec::new();
+    let mut expected_subs = Vec::new();
+    for i in 0..3u32 {
+        let other = claim_other();
+        let top: TransactionId = 2000 + i * 100;
+        let proc = GetPGProcByNumber(other);
+        proc.xid.value.store(top, Relaxed);
+        proc.pgxactoff.store(-1, Relaxed);
+        let mut cache = proc.subxids.get();
+        for j in 0..NSUB {
+            cache.xids[j] = top + 1 + j as TransactionId;
+            expected_subs.push(top + 1 + j as TransactionId);
+        }
+        proc.subxids.set(cache);
+        proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
+            count: NSUB as u8,
+            overflowed: false,
+        });
+        ProcArrayAdd(other).unwrap();
+        others.push((other, top));
+    }
+    TransamVariables()
+        .latestCompletedXid
+        .store(FullTransactionId::from_epoch_and_xid(0, 3000).value, Relaxed);
+
+    let mut snap = fresh_snapshot(mcx);
+    assert_eq!(snap.subxip.capacity(), 0, "sentinel starts unallocated");
+    take_snapshot(&mut snap, mcx);
+
+    // Contents identical to what C's worst-case prealloc would produce.
+    assert_eq!(snap.xcnt, 3);
+    assert!(!snap.suboverflowed);
+    assert_eq!(snap.subxcnt as usize, 3 * NSUB);
+    for sub in &expected_subs {
+        assert!(snap.subxip.contains(sub), "missing subxid {sub}");
+    }
+    // The array grew past its initial size, but nowhere near the C worst case.
+    assert!(snap.subxip.capacity() >= 3 * NSUB);
+    assert!(snap.xip.capacity() <= GetMaxSnapshotXidCount());
+    assert!(snap.subxip.capacity() < GetMaxSnapshotSubxidCount());
+
+    // Demand high-water reflects the spike.
+    let (_, subxip_target) = SnapshotArrayDecayTargets();
+    assert!(subxip_target >= 3 * NSUB, "spike demand not recorded");
+
+    // Spike ends; enough post-spike snapshots + window rotations and the
+    // decay target falls back to the floor.
+    for (other, top) in others {
+        other_proc_end(other, top);
+        let proc = GetPGProcByNumber(other);
+        proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
+            count: 0,
+            overflowed: false,
+        });
+    }
+    let mut floor = (usize::MAX, usize::MAX);
+    for _ in 0..(2 * SNAPSHOT_DEMAND_WINDOW_XACTS) {
+        take_snapshot(&mut snap, mcx);
+        floor = SnapshotArrayDecayTargets();
+    }
+    assert_eq!(floor.0, SNAPSHOT_ARRAY_INITIAL, "xip target did not decay");
+    assert_eq!(floor.1, SNAPSHOT_ARRAY_INITIAL, "subxip target did not decay");
+
+    GetPGProcByNumber(me).xmin.value.store(0, Relaxed);
+    set_transaction_xmin(InvalidTransactionId);
 }

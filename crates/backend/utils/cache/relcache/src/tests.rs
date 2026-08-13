@@ -1135,3 +1135,116 @@ fn fkey_list_caches_and_invalidation_forgets() {
     assert!(!Rc::ptr_eq(&a, &c));
     assert_eq!(FKEY_SCANS.with(|c| c.get()), 2);
 }
+
+// ---------------------------------------------------------------------------
+// D3.1 capped eviction (LRU over unpinned, un-nailed, subid-free entries)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cap_evicts_lru_unreferenced_only() {
+    install();
+    with_state(|st| st.critical_relcaches_built = true);
+    for (oid, name) in [(17001, "e1"), (17002, "e2"), (17003, "e3"), (17004, "e4")] {
+        seed(oid, name, RELKIND_RELATION);
+    }
+    // Build 4 entries; hold a reference to e2; e1 is oldest by last hit.
+    drop(get(17001));
+    let held = get(17002);
+    drop(get(17003));
+    drop(get(17004));
+    // Re-touch e3 and e4 so e1 is the LRU eligible entry.
+    drop(get(17003));
+    drop(get(17004));
+
+    let n = with_state(|st| st.id_cache.len());
+    // Cap out exactly two entries. Eligible LRU order: e1 (oldest), then e3.
+    // e2 is pinned (held Rc) and must survive even though it is older than e3/e4.
+    store::enforce_cap_at(n - 2).unwrap();
+    assert!(!with_state(|st| st.id_cache.contains_key(&17001)), "LRU entry not evicted");
+    assert!(with_state(|st| st.id_cache.contains_key(&17002)), "pinned entry evicted");
+    assert!(!with_state(|st| st.id_cache.contains_key(&17003)), "second-LRU entry not evicted");
+    assert!(with_state(|st| st.id_cache.contains_key(&17004)));
+    drop(held);
+}
+
+#[test]
+fn cap_exempts_new_in_transaction_and_dropped_entries() {
+    install();
+    with_state(|st| st.critical_relcaches_built = true);
+    for (oid, name) in [(17011, "x1"), (17012, "x2"), (17013, "x3")] {
+        seed(oid, name, RELKIND_RELATION);
+    }
+    let created = get(17011);
+    created.rd_createSubid.set(3); // new in this transaction
+    drop(created);
+    let dropped = get(17012);
+    dropped.rd_droppedSubid.set(3);
+    dropped.rd_isvalid.set(false);
+    drop(dropped);
+    drop(get(17013));
+
+    // Cap of 1 entry over the whole cache: only x3 is eligible.
+    store::enforce_cap_at(1).unwrap();
+    assert!(with_state(|st| st.id_cache.contains_key(&17011)), "new-in-xact entry evicted");
+    assert!(with_state(|st| st.id_cache.contains_key(&17012)), "dropped-pending entry evicted");
+    assert!(!with_state(|st| st.id_cache.contains_key(&17013)));
+    // Repair subid state for this thread's shared cache.
+    with_state(|st| {
+        if let Some(e) = st.id_cache.get(&17011) {
+            e.rel.rd_createSubid.set(types_core::InvalidSubTransactionId);
+        }
+        if let Some(e) = st.id_cache.get(&17012) {
+            e.rel.rd_droppedSubid.set(types_core::InvalidSubTransactionId);
+        }
+    });
+}
+
+#[test]
+fn cap_never_evicts_nailed() {
+    install();
+    with_state(|st| st.critical_relcaches_built = true);
+    for cat in schemapg::LOCAL_BOOTSTRAP_CATALOGS {
+        crate::build::formrdesc(cat).unwrap();
+    }
+    seed(17021, "y1", RELKIND_RELATION);
+    drop(get(17021));
+    store::enforce_cap_at(1).unwrap();
+    // The nailed catalogs survive any cap; the plain relation goes first.
+    let (_, nailed) = store::lookup_ent(types_core::RELATION_RELATION_ID).unwrap();
+    assert!(nailed);
+    assert!(!with_state(|st| st.id_cache.contains_key(&17021)));
+}
+
+// D3.2 audit aid: byte split of a relcache entry between the shareable core
+// and the per-thread shell (run with --nocapture).
+#[test]
+fn l2core_byte_audit() {
+    use core::mem::size_of;
+    let rd = size_of::<types_rel::RelationData<'static>>();
+    let td = size_of::<types_tuple::TupleDescData<'static>>();
+    let att = size_of::<types_tuple::FormData_pg_attribute>();
+    let cat = size_of::<types_tuple::CompactAttribute>();
+    let form = size_of::<types_rel::FormData_pg_class>();
+    let core = size_of::<crate::l2core::RelCoreShared>();
+    println!("RelationData={rd} TupleDescData={td} FormData_pg_attribute={att} CompactAttribute={cat} FormData_pg_class={form} RelCoreShared={core}");
+    for natts in [4usize, 10, 30] {
+        // Shell (per thread): RelationData + Rc boxes + tupdesc struct +
+        // compact copy. Shared (once per process): attrs array + core struct.
+        let shell = rd + 16 + td + 16 + natts * cat;
+        let shared = core + natts * att;
+        let pct = 100.0 * shared as f64 / (shell + shared) as f64;
+        println!("natts={natts}: shell_bytes={shell} shared_bytes={shared} shared_pct={pct:.0}%");
+    }
+}
+
+#[test]
+fn l2core_field_sizes() {
+    use core::mem::size_of;
+    println!("RdOptions={}", size_of::<types_rel::RdOptions>());
+    println!("RdAmCacheGin={}", size_of::<types_rel::RdAmCacheGin>());
+    println!("SpGistCache={}", size_of::<types_spgist::SpGistCache>());
+    println!("BTMeta={}", size_of::<types_rel::RdAmCacheBtree>());
+    println!("FormData_pg_index={}", size_of::<types_rel::FormData_pg_index<'static>>());
+    println!("LockInfoData={}", size_of::<types_rel::lock::LockInfoData>());
+    println!("SmgrHandle_opt={}", size_of::<Option<types_storage::smgr::SmgrHandle>>());
+}

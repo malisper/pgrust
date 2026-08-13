@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod connqueue;
 pub mod globals;
 
 use std::cell::Cell;
@@ -577,13 +578,29 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
 
     let list_id = freelist_id_for(backend_type);
 
+    // D6 (connqueue): while admission-queue waiters exist, a new regular
+    // backend must not barge past them to the freelist — divert it to the
+    // queue tail (the None arm below) to keep service order FIFO.
+    let queue_eligible =
+        backend_type == BackendType::Backend && list_id == FreeListId::Regular && connqueue::enabled();
+
+    // Read the waiter count BEFORE the spinlock (never block on a mutex
+    // under ProcStructLock); the race is benign — a spurious divert just
+    // joins the queue and pops on its first-iteration stall guard.
+    let divert = queue_eligible && connqueue::queued_count() > 0;
+
     spin_acquire(&ProcStructLock);
     s_lock_seams::set_spins_per_delay::call(hdr.spins_per_delay.get());
-    let popped = plist_pop_head(hdr, freelist(hdr, list_id), links_of);
+    let popped = if divert {
+        None
+    } else {
+        plist_pop_head(hdr, freelist(hdr, list_id), links_of)
+    };
     ProcStructLock.unlock();
 
-    let Some(procno) = popped else {
-        if backend_type == BackendType::WalSender {
+    let procno = match popped {
+        Some(procno) => procno,
+        None if backend_type == BackendType::WalSender => {
             let max_wal_senders = PROC_CONFIG.get().map_or(0, |cfg| cfg.max_wal_senders);
             return Err(Box::new(
                 PgError::new(
@@ -595,10 +612,23 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
                 .with_sqlstate(ERRCODE_TOO_MANY_CONNECTIONS),
             ));
         }
-        return Err(Box::new(
-            PgError::new(FATAL, "sorry, too many clients already")
-                .with_sqlstate(ERRCODE_TOO_MANY_CONNECTIONS),
-        ));
+        // D6: park on the connection admission queue instead of the
+        // immediate 53300 (docs/design/connection-scaling.md §D6). The
+        // waiter holds no PGPROC/snapshot/locks; it returns admitted (with
+        // a popped procno), errors out (timeout/queue-full/shutdown), or
+        // never returns (client hangup → silent proc_exit inside).
+        None if queue_eligible => connqueue::queue_for_slot(|| {
+            spin_acquire(&ProcStructLock);
+            let popped = plist_pop_head(hdr, freelist(hdr, list_id), links_of);
+            ProcStructLock.unlock();
+            popped
+        })?,
+        None => {
+            return Err(Box::new(
+                PgError::new(FATAL, "sorry, too many clients already")
+                    .with_sqlstate(ERRCODE_TOO_MANY_CONNECTIONS),
+            ));
+        }
     };
 
     MY_PROC.set(procno);
@@ -652,7 +682,11 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
     pg_sema_seams::pg_semaphore_reset::call(procno);
     ipc_seams::on_shmem_exit::call(ProcKill, 0);
     lwlock::InitLWLockAccess();
-    deadlock_seams::init_dead_lock_checking::call()
+    // D3.5: the deadlock-check workspace (~94KB, max_connections-scaled) is
+    // no longer allocated here; it is lazy at the first deadlock check
+    // (deadlock/InitDeadLockChecking, reached via lock::CheckDeadLock and
+    // RememberSimpleDeadLock).
+    Ok(())
 }
 
 pub fn InitProcessPhase2() -> PgResult<()> {
@@ -896,6 +930,9 @@ pub fn KillRetainedProc() {
     spin_acquire(&ProcStructLock);
     plist_push_tail(hdr, freelist(hdr, list), procno, links_of);
     ProcStructLock.unlock();
+    if list == FreeListId::Regular {
+        connqueue::slot_released();
+    }
 }
 
 pub fn RemoveProcFromArray(_code: i32, _arg: usize) {
@@ -967,10 +1004,14 @@ pub fn ProcKill(_code: i32, _arg: usize) {
                 let list = leader.procgloballist.get().expect("leader freelist");
                 spin_acquire(&ProcStructLock);
                 leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
-                if leader.pid.load(Relaxed) == 0 {
+                let pushed = leader.pid.load(Relaxed) == 0;
+                if pushed {
                     plist_push_head(hdr, freelist(hdr, list), leader_no, links_of);
                 }
                 ProcStructLock.unlock();
+                if pushed && list == FreeListId::Regular {
+                    connqueue::slot_released();
+                }
             } else {
                 leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
             }
@@ -1044,15 +1085,23 @@ pub fn ProcKill(_code: i32, _arg: usize) {
     // Still being a group leader here means we exited before our children
     // AND the last member has not yet run its empty transition; that
     // member returns this PGPROC instead (its arm will read pid==0).
+    let mut pushed = false;
     if proc.lockGroupLeader.load(Relaxed) == INVALID_PROC_NUMBER {
         debug_assert!(plist_is_empty(&proc.lockGroupMembers));
         plist_push_tail(hdr, freelist(hdr, list), procno, links_of);
+        pushed = true;
     }
     hdr.spins_per_delay
         .set(s_lock_seams::update_spins_per_delay::call(
             hdr.spins_per_delay.get(),
         ));
     ProcStructLock.unlock();
+
+    // D6 (connqueue): a regular PGPROC just became available — wake the
+    // head admission-queue waiter (outside the spinlock, wake-one).
+    if pushed && list == FreeListId::Regular {
+        connqueue::slot_released();
+    }
 
     // C: kill(AutovacuumLauncherPid) only when a launcher runs; none can while
     // AutoVacLauncherMain is unported; guarded.
@@ -1123,10 +1172,14 @@ pub fn LeaveLockGroup() {
         let list = leader.procgloballist.get().expect("leader freelist");
         spin_acquire(&ProcStructLock);
         leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
-        if leader.pid.load(Relaxed) == 0 {
+        let pushed = leader.pid.load(Relaxed) == 0;
+        if pushed {
             plist_push_head(hdr, freelist(hdr, list), leader_no, links_of);
         }
         ProcStructLock.unlock();
+        if pushed && list == FreeListId::Regular {
+            connqueue::slot_released();
+        }
     }
     lwlock::LWLockRelease(leader_lwlock).expect("partition unlock in LeaveLockGroup");
 }

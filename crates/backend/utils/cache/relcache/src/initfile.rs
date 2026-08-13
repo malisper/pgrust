@@ -190,7 +190,7 @@ fn finish_relcache_entries() -> PgResult<()> {
             rd_opfamily: mcx::PgVec::new_in(crate::cache_mcx()),
             rd_indoption: mcx::PgVec::new_in(crate::cache_mcx()),
             rd_indcollation: mcx::PgVec::new_in(crate::cache_mcx()),
-            rd_options: scanned.options,
+            rd_options: scanned.options.map(Box::new),
             pgstat_enabled: core::cell::Cell::new(rel.pgstat_enabled.get()),
             // C SWAPFIELD keeps pgstat_info across the rebuild; same key, gen
             // still governs validity.
@@ -751,7 +751,7 @@ pub(crate) fn encode_entry(buf: &mut Buf<'_>, rel: &RelationData<'static>, naile
     for a in rel.rd_att.attrs.iter() {
         put_attr(buf, a);
     }
-    put_options(buf, &rel.rd_options);
+    put_options(buf, &rel.rd_options.as_deref().copied());
     if rel.rd_rel.relkind == RELKIND_INDEX {
         put_index(buf, rel.rd_index.as_ref().expect("index entry without rd_index"));
         put_oid_vec(buf, &rel.rd_opcintype);
@@ -871,7 +871,7 @@ fn parse_entry(rd: &mut Rd<'_>, mcx: Mcx<'static>) -> Option<(RelationData<'stat
         rd_opfamily: opfamily,
         rd_indoption: indoption,
         rd_indcollation: indcollation,
-        rd_options,
+        rd_options: rd_options.map(Box::new),
         pgstat_enabled: core::cell::Cell::new(false),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
@@ -892,16 +892,29 @@ fn parse_entry(rd: &mut Rd<'_>, mcx: Mcx<'static>) -> Option<(RelationData<'stat
 // std Vec: droppy Rc payloads can't live in arena collections (rd_supportinfo
 // precedent); boot-only scratch.
 type ParsedEntries = Vec<(RelationData<'static>, bool)>;
+/// (entry, nailed, start byte offset, end byte offset) — the span allows the
+/// L2-routing loader to re-parse a single entry into CacheMemoryContext when
+/// it cannot ride a shared core (the private fallback arm).
+type ParsedEntriesSpans = Vec<(RelationData<'static>, bool, usize, usize)>;
 
 pub(crate) fn parse_init_file(data: &[u8], mcx: Mcx<'static>) -> Option<(ParsedEntries, usize, usize)> {
+    let (rels, nr, ni) = parse_init_file_spans(data, mcx)?;
+    Some((rels.into_iter().map(|(d, n, _, _)| (d, n)).collect(), nr, ni))
+}
+
+fn parse_init_file_spans(
+    data: &[u8],
+    mcx: Mcx<'static>,
+) -> Option<(ParsedEntriesSpans, usize, usize)> {
     let mut rd = Rd { b: data, off: 0 };
     if rd.i32()? != RELCACHE_INIT_FILEMAGIC || rd.u32()? != RELCACHE_INIT_FORMAT {
         return None;
     }
-    let mut rels = ParsedEntries::new();
+    let mut rels = ParsedEntriesSpans::new();
     let mut nailed_rels = 0usize;
     let mut nailed_indexes = 0usize;
     while !rd.at_end() {
+        let start = rd.off;
         let (data, nailed) = parse_entry(&mut rd, mcx)?;
         // Recompute physical addressing: relmapped rels and CREATE DATABASE
         // copies must not trust the stored relfilenumber.
@@ -913,41 +926,30 @@ pub(crate) fn parse_init_file(data: &[u8], mcx: Mcx<'static>) -> Option<(ParsedE
                 nailed_rels += 1;
             }
         }
-        rels.push((data, nailed));
+        rels.push((data, nailed, start, rd.off));
     }
     Some((rels, nailed_rels, nailed_indexes))
 }
 
-fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
-    let Some(path) = init_file_path(shared) else {
-        return Ok(false);
-    };
-    // vfs-routed (provider-seam reroute): init files are datadir domain;
-    // std::fs would bypass the sim namespace.
-    let path_s = path.to_str().expect("datadir paths are UTF-8");
-    let Ok(bytes) = fd::read_whole_file(path_s) else {
-        return Ok(false);
-    };
-    // A newer C pg_internal.init beside ours means a C backend served this
-    // datadir after we wrote our file; C's DDL unlinks only its own name, so
-    // ours may be stale — rebuild. (Under sim, vfs mtimes are all zero and
-    // no C backend can enter the sim world, so this never fires there.)
-    let mtime_of = |p: &Path| -> Option<(i64, i64)> {
-        let mut st = fd::FileInfo::zeroed();
-        (fd::pg_stat(p.to_str()?, &mut st) == 0).then_some((st.mtime_sec, st.mtime_nsec))
-    };
-    if let (Some(ours), Some(theirs)) = (
-        mtime_of(&path),
-        mtime_of(&path.with_file_name(C_RELCACHE_INIT_FILENAME)),
-    ) {
-        if theirs > ours {
-            return Ok(false);
-        }
-    }
-    let mcx = crate::cache_mcx();
-    let Some((rels, nailed_rels, nailed_indexes)) = parse_init_file(&bytes, mcx) else {
-        return Ok(false);
-    };
+/// Wave-3a: route init-file entries through the shared L2 cores
+/// (install-or-adopt). GUC-wise this is FOLDED into `shared_catalog_cache`
+/// (no separate GUC — the routing is just the L2's install/adopt path applied
+/// at init-file load, and shipping it as part of the L2 keeps one operator
+/// knob). PGRUST_L2_INITFILE=0 remains a harness-only splitter that reverts
+/// to fully-private deserialization while leaving the rest of the L2 on;
+/// PGRUST_L2_CACHE=0 / shared_catalog_cache=off disable it with everything
+/// else.
+fn initfile_l2_routing() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENV.get_or_init(|| match std::env::var("PGRUST_L2_INITFILE") {
+        Ok(v) => v.trim() != "0",
+        Err(_) => true,
+    }) && l2cache::enabled()
+        && !l2cache::private_build_mode()
+}
+
+/// The expected-nailed-counts sanity check shared by both load arms.
+fn nailed_counts_ok(shared: bool, nailed_rels: usize, nailed_indexes: usize) -> PgResult<bool> {
     let (exp_rels, exp_indexes) = if shared {
         (NUM_CRITICAL_SHARED_RELS, NUM_CRITICAL_SHARED_INDEXES)
     } else {
@@ -964,8 +966,233 @@ fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
         )?;
         return Ok(false);
     }
-    for (data, nailed) in rels {
-        store::insert(Rc::new(data), nailed, false)?;
+    Ok(true)
+}
+
+/// Wave-3a: install-or-adopt shared cores for init-file entries.
+///
+/// # Generation care (why publishing file content into L2 is sound)
+///
+/// The file represents committed catalog state as of when it was written, and
+/// every DDL that could invalidate an init-file member unlinks BOTH init
+/// files under RelCacheInitLock *before* bumping the L2 generation and
+/// queueing its sinval messages (RelationCacheInitFilePreInvalidate →
+/// inval send → PostInvalidate; write_relcache_init_file rechecks under the
+/// same lock). The loader therefore reads the file bytes AND snapshots the
+/// relcache generation stripes while holding RelCacheInitLock (shared): if
+/// the file exists under the lock, no unlink-protected DDL has invalidated
+/// its content since it was written, so the content is current at exactly the
+/// snapshotted generations. A DDL committing after we release the lock bumps
+/// past our snapshot — our publishes land at the superseded generation, which
+/// laggard readers may legitimately still see (staleness-until-Accept, the
+/// D3.2 semantics) and post-inval readers can never reach.
+///
+/// PUBLISH is restricted to rels for which the unlink invariant actually
+/// holds — RelationIdIsInInitFile(relid) — because only their invalidations
+/// unlink the file. (Every local-file entry passes by construction — the
+/// write path filters on the same predicate; in the shared file the handful
+/// of critical shared indexes without syscache support fall to the private
+/// arm.) ADOPTING an existing core at the snapshotted generation is safe for
+/// any entry: whoever published it did so under the miss-path publish rules.
+///
+/// The first backend to load thus installs cores; every later backend's load
+/// finds and aliases them — shells over core arrays, exactly as the miss
+/// path builds them (~0.4-0.5MB/conn of formerly-private relcache bulk).
+fn load_entries_via_l2(bytes: &[u8], shared: bool, gens: &[u64]) -> PgResult<bool> {
+    use crate::l2core::{shell_from_core, RelCoreShared};
+
+    // Two passes so the per-backend DIRTY footprint of a load stays at the
+    // scratch high-water (~one entry), not the whole file: phys_footprint
+    // counts dirtied-then-freed pages, and a full parse of every entry costs
+    // as many dirty pages as the old private load did — which is exactly the
+    // byte win this routing exists to deliver. Pass 1 validates the file and
+    // records entry spans, resetting the scratch context per entry (aset
+    // reset keeps only the keeper block, so pages are re-used, not re-
+    // dirtied). Pass 2 installs: an adopted core needs no parse at all; only
+    // the first backend (publisher) and the private-arm entries re-parse.
+    let mut scratch = MemoryContext::new("RelCacheInitFileScratch");
+    // SAFETY (both passes): lifetime-erased handle to a context that outlives
+    // every use — each parsed entry is dropped before the next reset()/the
+    // function returns, and nothing installed in the relcache references the
+    // scratch arena: shared cores are deep copies on the global heap
+    // (RelCoreShared::from_built), shells allocate in CacheMemoryContext and
+    // alias only core-owned memory, and the private-fallback arm parses its
+    // byte span into CacheMemoryContext instead.
+    macro_rules! scratch_mcx {
+        () => {
+            unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(scratch.mcx()) }
+        };
+    }
+
+    // Pass 1: validate every entry + the nailed census before touching any
+    // cache state (a torn file must never half-install).
+    let mut rd = Rd { b: bytes, off: 0 };
+    if rd.i32() != Some(RELCACHE_INIT_FILEMAGIC) || rd.u32() != Some(RELCACHE_INIT_FORMAT) {
+        return Ok(false);
+    }
+    // (start, end, relid, nailed)
+    let mut metas: Vec<(usize, usize, Oid, bool)> = Vec::new();
+    let mut nailed_rels = 0usize;
+    let mut nailed_indexes = 0usize;
+    while !rd.at_end() {
+        let start = rd.off;
+        let tmp: Mcx<'static> = scratch_mcx!();
+        let Some((data, nailed)) = parse_entry(&mut rd, tmp) else {
+            return Ok(false);
+        };
+        // Same reject-the-file semantics the private loader gives a physaddr
+        // failure (parse_init_file_spans's `.ok()?`).
+        if build::RelationInitPhysicalAddr(&data).is_err() {
+            return Ok(false);
+        }
+        if nailed {
+            if data.rd_rel.relkind == RELKIND_INDEX {
+                nailed_indexes += 1;
+            } else {
+                nailed_rels += 1;
+            }
+        }
+        metas.push((start, rd.off, data.rd_id, nailed));
+        drop(data);
+        scratch.reset();
+    }
+    if !nailed_counts_ok(shared, nailed_rels, nailed_indexes)? {
+        return Ok(false);
+    }
+
+    // Shared catalogs are keyed db=InvalidOid (loaded before MyDatabaseId is
+    // set, and identical for every database); local entries use the same
+    // (relid, MyDatabaseId) key the miss path publishes under.
+    let db = if shared { types_core::InvalidOid } else { init_small::globals::MyDatabaseId() };
+    let parse_span = |mcx: Mcx<'static>, start: usize, end: usize| -> PgResult<(RelationData<'static>, bool)> {
+        let mut rd = Rd { b: &bytes[..end], off: start };
+        let Some((data, nailed)) = parse_entry(&mut rd, mcx) else {
+            // Unreachable: the same bytes parsed in pass 1.
+            return Err(Box::new(
+                PgError::error("init file entry failed to re-parse".to_string())
+                    .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+            ));
+        };
+        // Recompute physical addressing: relmapped rels and CREATE DATABASE
+        // copies must not trust the stored relfilenumber.
+        build::RelationInitPhysicalAddr(&data)?;
+        Ok((data, nailed))
+    };
+
+    // Pass 2: install. Adopt-hit entries never parse; publish/private arms do.
+    for &(start, end, relid, nailed) in metas.iter() {
+        let gen = gens[l2cache::rel_stripe_of(relid)];
+        let key = l2cache::L2Key { kind: l2cache::KIND_REL, id: relid, db, hash: 0 };
+        let core: Option<std::sync::Arc<RelCoreShared>> = if let Some(v) =
+            l2cache::lookup(key, gen, |a| a.is::<RelCoreShared>())
+        {
+            Some(v.downcast().expect("KIND_REL entries are RelCoreShared"))
+        } else if RelationIdIsInInitFile(relid) {
+            // Publisher arm: parse into scratch, deep-copy to a shared core.
+            let tmp: Mcx<'static> = scratch_mcx!();
+            let (data, _) = parse_span(tmp, start, end)?;
+            let built = RelCoreShared::from_built(&data).map(|c| {
+                let sz = c.approx_bytes();
+                let v: std::sync::Arc<dyn core::any::Any + Send + Sync> = std::sync::Arc::new(c);
+                l2cache::insert(key, gen, v, sz, |a| a.is::<RelCoreShared>())
+                    .downcast()
+                    .expect("KIND_REL entries are RelCoreShared")
+            });
+            drop(data);
+            scratch.reset();
+            built
+        } else {
+            None
+        };
+        match core {
+            Some(core) => {
+                let rel = Rc::new(shell_from_core(&core)?);
+                store::insert(Rc::clone(&rel), nailed, false)?;
+                rel.rd_isvalid.set(true);
+            }
+            None => {
+                // Private arm: not shareable (or not unlink-protected) —
+                // parse this entry's bytes into CacheMemoryContext, i.e.
+                // exactly today's load for this one entry.
+                let (data, nailed2) = parse_span(crate::cache_mcx(), start, end)?;
+                debug_assert_eq!(nailed2, nailed);
+                store::insert(Rc::new(data), nailed2, false)?;
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
+    let Some(path) = init_file_path(shared) else {
+        return Ok(false);
+    };
+    // vfs-routed (provider-seam reroute): init files are datadir domain;
+    // std::fs would bypass the sim namespace.
+    let path_s = path.to_str().expect("datadir paths are UTF-8");
+    // A newer C pg_internal.init beside ours means a C backend served this
+    // datadir after we wrote our file; C's DDL unlinks only its own name, so
+    // ours may be stale — rebuild. (Under sim, vfs mtimes are all zero and
+    // no C backend can enter the sim world, so this never fires there.)
+    let mtime_fresh = || -> bool {
+        let mtime_of = |p: &Path| -> Option<(i64, i64)> {
+            let mut st = fd::FileInfo::zeroed();
+            (fd::pg_stat(p.to_str()?, &mut st) == 0).then_some((st.mtime_sec, st.mtime_nsec))
+        };
+        match (mtime_of(&path), mtime_of(&path.with_file_name(C_RELCACHE_INIT_FILENAME))) {
+            (Some(ours), Some(theirs)) => theirs <= ours,
+            _ => true,
+        }
+    };
+
+    if initfile_l2_routing() {
+        // Cheap unlocked probe first: the common no-file case (fresh datadir,
+        // post-DDL rebuild) must not touch the LWLock at all.
+        if fd::read_whole_file(path_s).is_err() {
+            return Ok(false);
+        }
+        // Re-read + generation snapshot under RelCacheInitLock (shared): see
+        // load_entries_via_l2's generation-care contract. Concurrent loaders
+        // proceed in parallel; only DDL pre-invalidate and file writes hold
+        // it exclusively, briefly.
+        let lock = lwlock::main_lock(RELCACHE_INIT_LOCK_OFFSET);
+        lwlock::LWLockAcquire(lock, lwlock::LW_SHARED, init_small::globals::MyProcNumber())?;
+        let got = (|| {
+            let bytes = fd::read_whole_file(path_s).ok()?;
+            if !mtime_fresh() {
+                return None;
+            }
+            Some((bytes, l2cache::rel_gen_snapshot()))
+        })();
+        lwlock::LWLockRelease(lock)?;
+        let Some((bytes, gens)) = got else {
+            return Ok(false);
+        };
+        if !load_entries_via_l2(&bytes, shared, &gens)? {
+            return Ok(false);
+        }
+        // The parse scratch context just died into the thread-local allocator
+        // heap; hand its segments back now. Without this the routed load's
+        // whole byte win hides as per-thread mimalloc retention (measured:
+        // warmed-100 footprint flat despite 139 entries turning into shells).
+        let _ = mcx::release_retained();
+    } else {
+        let Ok(bytes) = fd::read_whole_file(path_s) else {
+            return Ok(false);
+        };
+        if !mtime_fresh() {
+            return Ok(false);
+        }
+        let mcx = crate::cache_mcx();
+        let Some((rels, nailed_rels, nailed_indexes)) = parse_init_file(&bytes, mcx) else {
+            return Ok(false);
+        };
+        if !nailed_counts_ok(shared, nailed_rels, nailed_indexes)? {
+            return Ok(false);
+        }
+        for (data, nailed) in rels {
+            store::insert(Rc::new(data), nailed, false)?;
+        }
     }
     with_state(|st| {
         if shared {
@@ -987,6 +1214,12 @@ fn could_not_write(e: std::io::Error) -> Box<PgError> {
     )
 }
 
+// Wave-3a decision: the write path stays serialized from the L1 RelationData
+// entries, NOT from L2 cores. Shells alias core arrays, so encode_entry reads
+// the identical bytes either way; writes are rare (only the first backend
+// after the file goes missing), and serializing from cores would need a
+// core for every entry including the private-arm ones — complexity for zero
+// byte savings on a cold path.
 fn write_relcache_init_file(shared: bool) -> PgResult<()> {
     if with_state(|st| st.invals_received != 0) {
         return Ok(());

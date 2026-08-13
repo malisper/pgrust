@@ -1046,6 +1046,68 @@ fn GetSnapshotDataReuse(
     true
 }
 
+// D3.5 (docs/design/connection-scaling.md): C sizes xip/subxip once to the
+// worst case (GetMaxSnapshotXidCount / GetMaxSnapshotSubxidCount ≈ 290KB per
+// backend at max_connections=500, ~3MB at 5000) precisely so the fill in
+// GetSnapshotData can never overflow. Those arrays live in per-backend static
+// snapshots, making them the single largest idle-memory line item, so pgrust
+// demand-sizes instead: arrays start at SNAPSHOT_ARRAY_INITIAL and grow
+// geometrically. The no-overflow invariant is kept by checking capacity
+// against the observed demand BEFORE filling — on a shortfall the
+// ProcArrayLock is released, the array grows (failing exactly as the old
+// first-call reserve / C's palloc would), and the build restarts. Nothing is
+// published before a restart point, so a retry is pure re-execution; capacity
+// grows monotonically toward the C worst case, so the loop terminates.
+// Snapshot contents are identical to C's.
+const SNAPSHOT_ARRAY_INITIAL: usize = 64;
+
+// Decay bookkeeping (per-thread): the failure mode of demand sizing is one
+// concurrency spike inflating every backend's snapshot arrays forever, so
+// GetSnapshotData records each build's demand into a windowed high-water and
+// snapmgr shrinks retained capacity toward it at transaction end.
+const SNAPSHOT_DEMAND_WINDOW_XACTS: u32 = 32;
+
+#[derive(Clone, Copy, Default)]
+struct SnapshotArrayDemand {
+    xip: usize,
+    subxip: usize,
+}
+
+thread_local! {
+    static SNAP_DEMAND_CUR: Cell<SnapshotArrayDemand> =
+        const { Cell::new(SnapshotArrayDemand { xip: 0, subxip: 0 }) };
+    static SNAP_DEMAND_PREV: Cell<SnapshotArrayDemand> =
+        const { Cell::new(SnapshotArrayDemand { xip: 0, subxip: 0 }) };
+    static SNAP_DEMAND_XACTS: Cell<u32> = const { Cell::new(0) };
+}
+
+fn record_snapshot_demand(xip: usize, subxip: usize) {
+    let cur = SNAP_DEMAND_CUR.get();
+    SNAP_DEMAND_CUR.set(SnapshotArrayDemand {
+        xip: cur.xip.max(xip),
+        subxip: cur.subxip.max(subxip),
+    });
+}
+
+/// Advance the demand window (call once per transaction end) and return the
+/// (xip, subxip) capacities worth retaining: the high-water over the current
+/// and previous windows, floored at the initial size. Purely thread-local.
+pub fn SnapshotArrayDecayTargets() -> (usize, usize) {
+    let xacts = SNAP_DEMAND_XACTS.get() + 1;
+    if xacts >= SNAPSHOT_DEMAND_WINDOW_XACTS {
+        SNAP_DEMAND_XACTS.set(0);
+        SNAP_DEMAND_PREV.set(SNAP_DEMAND_CUR.replace(SnapshotArrayDemand::default()));
+    } else {
+        SNAP_DEMAND_XACTS.set(xacts);
+    }
+    let cur = SNAP_DEMAND_CUR.get();
+    let prev = SNAP_DEMAND_PREV.get();
+    (
+        cur.xip.max(prev.xip).max(SNAPSHOT_ARRAY_INITIAL),
+        cur.subxip.max(prev.subxip).max(SNAPSHOT_ARRAY_INITIAL),
+    )
+}
+
 pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgResult<()> {
     let arrayP = procArray();
     let hdr = ProcGlobal();
@@ -1054,11 +1116,21 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
     let myprocno = MyProc().expect("GetSnapshotData requires MyProc");
     let my_proc = GetPGProcByNumber(myprocno);
 
-    // First call for this struct: size the arrays once, reuse forever (C shape).
+    // First call for this struct: small demand-sized arrays (D3.5 above),
+    // grown in the build loop when observed demand exceeds them.
     if snapshot.xip.capacity() == 0 {
-        reserve_exact(&mut snapshot.xip, GetMaxSnapshotXidCount(), mcx)?;
-        debug_assert_eq!(snapshot.subxip.capacity(), 0);
-        reserve_exact(&mut snapshot.subxip, GetMaxSnapshotSubxidCount(), mcx)?;
+        reserve_exact(
+            &mut snapshot.xip,
+            SNAPSHOT_ARRAY_INITIAL.min(GetMaxSnapshotXidCount()),
+            mcx,
+        )?;
+    }
+    if snapshot.subxip.capacity() == 0 {
+        reserve_exact(
+            &mut snapshot.subxip,
+            SNAPSHOT_ARRAY_INITIAL.min(GetMaxSnapshotSubxidCount()),
+            mcx,
+        )?;
     }
 
     if GetSnapshotDataReuse(snapshot, my_proc, tv) {
@@ -1066,6 +1138,7 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
         return Ok(());
     }
 
+    'build: loop {
     LWLockAcquire(pa_lock, LW_SHARED, myprocno)?;
 
     let latest_completed = FullTransactionId::from_u64(tv.latestCompletedXid.load(Relaxed));
@@ -1090,12 +1163,20 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
     let mut count = 0usize;
     let mut subcount = 0usize;
     let mut suboverflowed = false;
+    let mut xip_demand = 0usize;
 
     if !snapshot.takenDuringRecovery {
         let num_procs = arrayP.numProcs.get() as usize;
+        xip_demand = num_procs;
+        if num_procs > snapshot.xip.capacity() {
+            // Cold (D3.5): xip demand exceeds capacity — grow unlocked, rebuild.
+            LWLockRelease(pa_lock)?;
+            grow_snapshot_array(&mut snapshot.xip, num_procs, GetMaxSnapshotXidCount(), mcx)?;
+            continue 'build;
+        }
         let xip_ptr = snapshot.xip.as_mut_ptr();
         let subxip_ptr = snapshot.subxip.as_mut_ptr();
-        debug_assert!(num_procs <= snapshot.xip.capacity());
+        let subxip_cap = snapshot.subxip.capacity();
 
         for pgxactoff in 0..num_procs {
             // Fetch xid just once - see GetNewTransactionId.
@@ -1132,14 +1213,27 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
                 } else {
                     let nsubxids = substate.count as usize;
                     if nsubxids > 0 {
+                        if subcount + nsubxids > subxip_cap {
+                            // Cold (D3.5): subxip demand exceeds capacity —
+                            // grow unlocked (geometric, so a deep spike costs
+                            // O(log) rebuilds), rebuild from scratch.
+                            LWLockRelease(pa_lock)?;
+                            grow_snapshot_array(
+                                &mut snapshot.subxip,
+                                subcount + nsubxids,
+                                GetMaxSnapshotSubxidCount(),
+                                mcx,
+                            )?;
+                            continue 'build;
+                        }
                         let pgprocno = arrayP.pgprocnos[pgxactoff].get();
                         let proc = &hdr.allProcs[pgprocno as usize];
 
                         fence(Ordering::Acquire); // pairs with GetNewTransactionId
                         // SAFETY: the owner only appends subxids (never
                         // removes under ProcArrayLock), the count was fetched
-                        // once, and subxip has TOTAL_MAX_CACHED_SUBXIDS
-                        // capacity; mirrors C's locked memcpy.
+                        // once, and subcount + nsubxids <= subxip_cap was
+                        // checked above; mirrors C's locked memcpy.
                         unsafe {
                             let src = (*proc.subxids.ptr()).xids.as_ptr();
                             core::ptr::copy_nonoverlapping(
@@ -1154,6 +1248,15 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
             }
         }
     } else {
+        // D3.5: recovery demand cannot be bounded before the fill — the
+        // startup process appends to KnownAssignedXids lock-free even while
+        // we hold the shared lock — so keep C's worst case here. Hot-standby
+        // backends only; a primary backend never takes this branch.
+        if snapshot.subxip.capacity() < GetMaxSnapshotSubxidCount() {
+            LWLockRelease(pa_lock)?;
+            reserve_exact(&mut snapshot.subxip, GetMaxSnapshotSubxidCount(), mcx)?;
+            continue 'build;
+        }
         let subxip_ptr = snapshot.subxip.as_mut_ptr();
         debug_assert!(arrayP.maxKnownAssignedXids as usize <= snapshot.subxip.capacity());
         subcount = known_assigned::KnownAssignedXidsGetAndSetXmin(
@@ -1245,22 +1348,53 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
     snapshot.regd_count.set(0);
     snapshot.copied = false;
 
+    record_snapshot_demand(
+        xip_demand,
+        if snapshot.takenDuringRecovery {
+            // Recovery capacity is pinned at the worst case (see above);
+            // report it as demand so decay never shrinks it while in recovery.
+            GetMaxSnapshotSubxidCount()
+        } else {
+            subcount
+        },
+    );
+
     #[cfg(debug_assertions)]
     {
         SNAPSHOT_FULL_BUILDS.set(SNAPSHOT_FULL_BUILDS.get() + 1);
         reuse_trace("full");
     }
 
-    Ok(())
+    return Ok(());
+    } // 'build
 }
 
+// Reserve up to a TOTAL capacity of `n`, failing exactly as C's palloc does
+// (mcx OOM error). Contents ([0..len]) are preserved.
 fn reserve_exact<'m>(
     v: &mut PgVec<'m, TransactionId>,
     n: usize,
     _mcx: Mcx<'m>,
 ) -> PgResult<()> {
-    v.try_reserve_exact(n)
+    let add = n.saturating_sub(v.len());
+    v.try_reserve_exact(add)
         .map_err(|_| Box::new(_mcx.oom(n * core::mem::size_of::<TransactionId>())))
+}
+
+// D3.5 growth: geometric (>= 2x) so a ramping spike restarts the snapshot
+// build O(log) times, clamped to the C worst case, never below the demand
+// that triggered it. Cold by construction — steady state never gets here.
+#[cold]
+#[inline(never)]
+fn grow_snapshot_array<'m>(
+    v: &mut PgVec<'m, TransactionId>,
+    needed: usize,
+    max: usize,
+    mcx: Mcx<'m>,
+) -> PgResult<()> {
+    debug_assert!(needed > v.capacity());
+    let target = needed.max(v.capacity().saturating_mul(2)).min(max).max(needed);
+    reserve_exact(v, target, mcx)
 }
 
 // Split so the fast exits stay a frameless leaf with register returns; the

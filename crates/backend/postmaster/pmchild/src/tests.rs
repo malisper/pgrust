@@ -22,6 +22,13 @@ fn bringup() -> MutexGuard<'static, ()> {
             get: || AV_SLOTS.load(Relaxed),
             set: |v| AV_SLOTS.store(v, Relaxed),
         });
+        // D6: InitPostmasterChildSlots adds connection_queue_size headroom
+        // to the Backend pool; 0 here = queue off, formula unchanged.
+        static QUEUE_SIZE: AtomicI32 = AtomicI32::new(0);
+        guc_tables::vars::connection_queue_size.install(guc_tables::GucVarAccessors {
+            get: || QUEUE_SIZE.load(Relaxed),
+            set: |v| QUEUE_SIZE.store(v, Relaxed),
+        });
         shmem::init_seams();
         init_seams();
         init_small::globals::SetMaxConnections(100);

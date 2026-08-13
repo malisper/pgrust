@@ -358,7 +358,7 @@ fn test_relation_opts<'mcx>(
         rd_indoption: PgVec::new_in(mcx),
         rd_indcollation: PgVec::new_in(mcx),
         rd_options: user_catalog
-            .then(|| ::types_rel::reloptions::RdOptions::Std(user_catalog_std_options())),
+            .then(|| Box::new(::types_rel::reloptions::RdOptions::Std(user_catalog_std_options()))),
         pgstat_enabled: std::cell::Cell::new(true),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),

@@ -844,6 +844,8 @@ pub fn AtEOXact_Snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()> {
         s.secondary = None;
         s.first_snapshot_set = false;
 
+        decay_snapshot_arrays_locked(s);
+
         (leftover_registered, leftover_active)
     });
 
@@ -864,6 +866,41 @@ pub fn AtEOXact_Snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()> {
     }
     debug_assert!(reset_xmin || my_proc_xmin() == 0);
     Ok(())
+}
+
+// D3.5 decay (docs/design/connection-scaling.md): GetSnapshotData demand-sizes
+// the xip/subxip arrays, so without decay one concurrency spike would inflate
+// every backend's static snapshots forever. At each transaction end, shrink
+// retained capacity toward procarray's recent demand high-water, with 2x
+// hysteresis so steady-state workloads never touch the allocator.
+fn decay_snapshot_arrays_locked(s: &mut SnapMgrState) {
+    let (xip_target, subxip_target) = procarray::SnapshotArrayDecayTargets();
+    for slot in [
+        &mut s.current_data,
+        &mut s.secondary_data,
+        &mut s.catalog_data,
+    ] {
+        // A still-aliased static (outstanding handle) is skipped this round.
+        if let Some(snap) = Rc::get_mut(slot) {
+            shrink_retained(&mut snap.xip, xip_target);
+            shrink_retained(&mut snap.subxip, subxip_target);
+        }
+    }
+    // Copies right-size at copy time, but the freelist retains spike-era
+    // capacity; drop oversized entries (C's FreeSnapshot pfrees outright).
+    s.copy_freelist.retain(|c| {
+        c.xip.capacity() <= xip_target.saturating_mul(2)
+            && c.subxip.capacity() <= subxip_target.saturating_mul(2)
+    });
+}
+
+fn shrink_retained(v: &mut PgVec<'static, TransactionId>, target: usize) {
+    // Contents [0..len] must survive: the reuse fastpath revalidates against
+    // the retained snapshot, and stale-but-referenced statics keep their xids.
+    let target = target.max(v.len());
+    if v.capacity() > target.saturating_mul(2) {
+        v.shrink_to(target);
+    }
 }
 
 pub fn XactHasExportedSnapshots() -> bool {
@@ -1322,6 +1359,8 @@ pub fn XidInMVCCSnapshot(xid: TransactionId, snapshot: &SnapshotData<'_>) -> PgR
 }
 
 pub fn init_seams() {
+    // D3.2: decoding-time catalog reads must never enter the shared L2 cache.
+    l2cache::set_historic_snapshot_probe(HistoricSnapshotActive);
     snapmgr_seams::invalidate_catalog_snapshot::set(InvalidateCatalogSnapshot);
     snapmgr_seams::snapshot_set_command_id::set(SnapshotSetCommandId);
     snapmgr_seams::at_eoxact_snapshot::set(AtEOXact_Snapshot);

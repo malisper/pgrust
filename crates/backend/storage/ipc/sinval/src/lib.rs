@@ -316,6 +316,16 @@ pub fn SharedInvalBackendInit(sendOnly: bool) -> PgResult<()> {
         st.my_procno.set(my);
     });
 
+    // D3.2: nextMsgNum = maxMsgNum skips every already-queued message BY
+    // DESIGN (a fresh backend has no caches to invalidate) — but the L2
+    // generation view must still cover those messages' bumps, or a stale
+    // shared entry could be served for DDL this backend will never hear
+    // about. Registration ran under the sinval write lock, synchronizing
+    // with every insert we skipped (and each bump precedes its insert), so
+    // adopting the current global generations HERE is exact. This also
+    // re-adopts after any pre-registration L2 use on this thread.
+    l2cache::readopt_views();
+
     ipc_seams::on_shmem_exit::call(cleanup_invalidation_state_callback, 0);
     Ok(())
 }
@@ -516,6 +526,12 @@ fn SIGetDataEntries(seg: SISeg, data: &mut [SharedInvalidationMessage]) -> PgRes
     Ok(n as i32)
 }
 
+// Debug bisect knob (D3.2 stressor): skip the hasMessages early-exit probe.
+fn sinval_no_fastpath() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_SINVAL_NO_FASTPATH").is_ok_and(|v| v.trim() == "1"))
+}
+
 pub fn ReceiveSharedInvalidMessages(
     inval_function: &mut dyn FnMut(&SharedInvalidationMessage) -> PgResult<()>,
     reset_function: &mut dyn FnMut() -> PgResult<()>,
@@ -531,7 +547,7 @@ pub fn ReceiveSharedInvalidMessages(
         // re-checks everything under SInvalReadLock.
         if st.nextmsg.get() >= st.nummsgs.get() && !st.catchup_pending.get() {
             let procno = st.my_procno.get();
-            if procno >= 0 {
+            if procno >= 0 && !sinval_no_fastpath() {
                 let seg = st.seg.get().expect("shared invalidation memory is not attached");
                 if !seg.proc_states()[procno as usize].hasMessages.load(SeqCst) {
                     return Ok(());

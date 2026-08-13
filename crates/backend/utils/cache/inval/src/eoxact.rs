@@ -80,12 +80,53 @@ pub(crate) fn process_group_locally(
     process_group_with(&group, LocalExecuteInvalidationMessage)
 }
 
+pub(crate) fn l2_bump_debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_L2_DEBUG").is_ok_and(|v| v.trim() == "1"))
+}
+
+// D3.2: bump the L2 generation of every domain a message batch touches,
+// STRICTLY BEFORE the batch enters the shared sinval queue. Any backend that
+// later processes one of these messages re-syncs its view from the global
+// counters, so the bump must already be visible then — otherwise an L1 drop
+// could be undone by an L2 hit at the stale generation. The bump also adopts
+// the new generation as the sender's own view (its caches reflect the new
+// state; atomics only, safe under the live state borrow).
+pub(crate) fn l2_bump_for_messages(msgs: &[SharedInvalidationMessage]) {
+    for msg in msgs {
+        match *msg {
+            SharedInvalidationMessage::Catcache(m) => {
+                l2cache::bump(l2cache::Domain::Cat(m.id as i32));
+            }
+            SharedInvalidationMessage::Catalog(_) => l2cache::bump_all_cat(),
+            SharedInvalidationMessage::Relcache(m) => {
+                if m.relId == types_core::InvalidOid {
+                    l2cache::bump_all_rel();
+                } else {
+                    l2cache::bump(l2cache::Domain::Rel(m.relId));
+                    if l2_bump_debug() {
+                        eprintln!(
+                            "L2DBG bump rel={} newgen={} thr={:?}",
+                            m.relId,
+                            l2cache::current_gen(l2cache::Domain::Rel(m.relId)),
+                            std::thread::current().id()
+                        );
+                    }
+                }
+            }
+            // Snapshot/Smgr/Relmap/RelSync invalidate nothing the L2 stores.
+            _ => {}
+        }
+    }
+}
+
 // sinval send never re-enters inval: dense subgroup slices go straight to the
 // seam under the live borrow — alloc-free, like C.
 fn send_group(state: &InvalState<'_>, group: &InvalidationMsgsGroup) -> PgResult<()> {
     for subgroup in [CAT_CACHE_MSGS, REL_CACHE_MSGS] {
         let msgs = subgroup_slice(&state.msg_arrays, group, subgroup);
         if !msgs.is_empty() {
+            l2_bump_for_messages(msgs);
             sinval_seams::send_shared_invalid_messages::call(msgs)?;
         }
     }
@@ -391,6 +432,7 @@ pub fn ProcessCommittedInvalidationMessages(
         }
     }
 
+    l2_bump_for_messages(msgs);
     sinval_seams::send_shared_invalid_messages::call(msgs)?;
 
     if relcache_init_file_inval {

@@ -17,6 +17,8 @@ pub(crate) fn probe(relation_id: Oid) -> Probe {
     with_state(|st| match st.id_cache.get(&relation_id) {
         None => Probe::Miss,
         Some(ent) => {
+            st.lru_clock += 1;
+            ent.last_used.set(st.lru_clock);
             let rel = &ent.rel;
             if rel.rd_droppedSubid.get() != InvalidSubTransactionId {
                 debug_assert!(!rel.rd_isvalid.get());
@@ -78,8 +80,129 @@ pub fn RelationIdGetRelation(relationId: Oid) -> PgResult<Option<Rc<RelationData
             );
             Ok(Some(rebuilt))
         }
-        Probe::Miss => crate::build::RelationBuildDesc(relationId, true),
+        Probe::Miss => {
+            // D3.2: the shared-core L2 sits under the miss; the hit paths
+            // above are untouched.
+            let built = if crate::l2core::l2_active() {
+                crate::l2core::miss_via_l2(relationId)?
+            } else {
+                crate::build::RelationBuildDesc(relationId, true)?
+            };
+            // D3.1: the miss path is the only place user queries grow the
+            // cache; enforce the entry cap here, never mid-build (nested
+            // opens see a non-empty in_progress list and skip).
+            enforce_cap()?;
+            Ok(built)
+        }
     }
+}
+
+/// D3.1 cap enforcement: when `id_cache` exceeds the cap, clear the
+/// least-recently-used eligible entries. Eligibility mirrors exactly the
+/// conditions under which RelationFlushRelation would CLEAR (not rebuild) an
+/// entry on an incoming invalidation: not nailed, refcount zero on the
+/// current lineage, and no in-transaction subid state (new-in-transaction /
+/// new-relfilelocator / dropped entries are exempt, as in C's flush logic) —
+/// so an eviction is indistinguishable from an invalidation that arrived
+/// while the entry was unpinned, minus the rebuild the next open performs.
+pub(crate) fn enforce_cap() -> PgResult<()> {
+    enforce_cap_at(crate::relcache_cap())
+}
+
+pub(crate) fn enforce_cap_at(cap: usize) -> PgResult<()> {
+    if cap == 0 {
+        return Ok(());
+    }
+    let victims: Vec<Oid> = with_state(|st| {
+        // in_progress non-empty = we are inside somebody's RelationBuildDesc;
+        // defer to the top-level miss that triggered it. Pre-critical phases
+        // (bootstrap, init file load) never evict.
+        if st.id_cache.len() <= cap
+            || !st.in_progress.is_empty()
+            || !st.critical_relcaches_built
+        {
+            return Vec::new();
+        }
+        let excess = st.id_cache.len() - cap;
+        let mut eligible: Vec<(u64, Oid)> = st
+            .id_cache
+            .iter()
+            .filter_map(|(oid, ent)| {
+                (!ent.nailed
+                    && Rc::strong_count(&ent.rel) == 1
+                    && ent.rel.rd_createSubid.get() == InvalidSubTransactionId
+                    && ent.rel.rd_newRelfilelocatorSubid.get() == InvalidSubTransactionId
+                    && ent.rel.rd_firstRelfilelocatorSubid.get() == InvalidSubTransactionId
+                    && ent.rel.rd_droppedSubid.get() == InvalidSubTransactionId)
+                    .then(|| (ent.last_used.get(), *oid))
+            })
+            .collect();
+        eligible.sort_unstable();
+        eligible.truncate(excess);
+        eligible.into_iter().map(|(_, oid)| oid).collect()
+    });
+    for oid in victims {
+        // Re-verify per victim: clearing entry N can run side-cache forgets
+        // but never takes new references; still, stay in lockstep with the
+        // live state exactly like RelationCacheInvalidate's phase-2 loop.
+        let Some((rel, nailed)) = lookup_ent(oid) else { continue };
+        if nailed
+            || !refcount_zero(&rel, 1)
+            || rel.rd_createSubid.get() != InvalidSubTransactionId
+            || rel.rd_firstRelfilelocatorSubid.get() != InvalidSubTransactionId
+            || rel.rd_droppedSubid.get() != InvalidSubTransactionId
+        {
+            continue;
+        }
+        crate::invalidate::RelationClearRelation(oid, &rel)?;
+    }
+    Ok(())
+}
+
+/// D3.4 idle passivation: clear EVERY eligible entry — the enforce_cap_at
+/// eligibility (evicting an unpinned, un-nailed, no-subxact-state entry ≡ an
+/// invalidation arriving while it was unpinned); nailed, pinned, and
+/// in-transaction entries survive. Returns the number cleared. Caller
+/// guarantees idle-not-in-transaction, where nothing should be pinned — the
+/// debug assert checks exactly that.
+pub(crate) fn passivate_all() -> PgResult<usize> {
+    let victims: Vec<Oid> = with_state(|st| {
+        if !st.in_progress.is_empty() || !st.critical_relcaches_built {
+            return Vec::new();
+        }
+        st.id_cache
+            .iter()
+            .filter_map(|(oid, ent)| {
+                let eligible = !ent.nailed
+                    && Rc::strong_count(&ent.rel) == 1
+                    && ent.rel.rd_createSubid.get() == InvalidSubTransactionId
+                    && ent.rel.rd_newRelfilelocatorSubid.get() == InvalidSubTransactionId
+                    && ent.rel.rd_firstRelfilelocatorSubid.get() == InvalidSubTransactionId
+                    && ent.rel.rd_droppedSubid.get() == InvalidSubTransactionId;
+                debug_assert!(
+                    eligible || ent.nailed,
+                    "pinned/in-transaction relcache entry at idle passivation: {oid}"
+                );
+                eligible.then_some(*oid)
+            })
+            .collect()
+    });
+    let mut cleared = 0usize;
+    for oid in victims {
+        // Re-verify per victim, exactly as enforce_cap_at does.
+        let Some((rel, nailed)) = lookup_ent(oid) else { continue };
+        if nailed
+            || !refcount_zero(&rel, 1)
+            || rel.rd_createSubid.get() != InvalidSubTransactionId
+            || rel.rd_firstRelfilelocatorSubid.get() != InvalidSubTransactionId
+            || rel.rd_droppedSubid.get() != InvalidSubTransactionId
+        {
+            continue;
+        }
+        crate::invalidate::RelationClearRelation(oid, &rel)?;
+        cleared += 1;
+    }
+    Ok(cleared)
 }
 
 // RelationCacheInsert. Dropping a replaced zero-ref entry is
@@ -90,13 +213,17 @@ pub(crate) fn insert(
     replace_allowed: bool,
 ) -> PgResult<()> {
     let relid = rel.rd_id;
-    let leaked = with_state(|st| match st.id_cache.insert(relid, RelCacheEnt { rel, nailed }) {
+    let leaked = with_state(|st| {
+        st.lru_clock += 1;
+        let last_used = core::cell::Cell::new(st.lru_clock);
+        match st.id_cache.insert(relid, RelCacheEnt { rel, nailed, last_used }) {
         Some(old) => {
             debug_assert!(replace_allowed);
             crate::note_stale(st, &old.rel);
             (!refcount_zero(&old.rel, 0)).then(|| String::from(old.rel.name()))
         }
         None => None,
+        }
     });
     if let Some(name) = leaked {
         if !miscinit_seams::is_bootstrap_processing_mode::call() {

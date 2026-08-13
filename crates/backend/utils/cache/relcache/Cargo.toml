@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+guc_tables = { path = "../../misc/guc_tables" }
 fd = { path = "../../../storage/file/fd" }
 libc = "0.2"
 types_relscan = { path = "../../../access/index/relscan" }
@@ -32,6 +33,7 @@ catalog_storage_seams = { path = "../../../catalog/storage_seams" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 inval_seams = { path = "../inval_seams" }
+l2cache = { path = "../l2cache" }
 relcache_build_seams = { path = "../relcache_build_seams" }
 relmapper_seams = { path = "../relmapper_seams" }
 syscache_seams = { path = "../syscache_seams" }
@@ -42,3 +44,4 @@ xact_seams = { path = "../../../access/transam/xact_seams" }
 
 [dev-dependencies]
 catalog_seams = { path = "../../../catalog/catalog_seams" }
+types_spgist = { path = "../../../../_support/types/types_spgist" }

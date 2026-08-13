@@ -44,7 +44,11 @@ pub struct RelationData<'mcx> {
     pub rd_opfamily: PgVec<'mcx, Oid>,
     pub rd_indoption: PgVec<'mcx, i16>,
     pub rd_indcollation: PgVec<'mcx, Oid>,
-    pub rd_options: Option<RdOptions>,
+    // Boxed (D3.2 shell diet): RdOptions is a Copy enum whose largest variant
+    // (PgrcolumnarOptions' inline key/codec buffers) is ~2.5KB — carried
+    // inline it dominated sizeof(RelationData) (3.9KB) for every relation,
+    // options or not. Most relations have None and pay nothing.
+    pub rd_options: Option<std::boxed::Box<RdOptions>>,
     pub pgstat_enabled: Cell<bool>,
     // C rd->pgstat_info: (gen, counts) raw link into pgstat's pending relation
     // entry; dereferenceable only while gen matches pgstat's relation-pending
@@ -202,7 +206,7 @@ impl<'mcx> RelationData<'mcx> {
         // C's RelationGetParallelWorkers reads StdRdOptions; pgrcolumnar carries
         // the same option in its own parse struct (same -1 = unset contract).
         match self.rd_options.as_ref() {
-            Some(o) => match o {
+            Some(o) => match &**o {
                 crate::reloptions::RdOptions::Std(opts) => opts.parallel_workers,
                 crate::reloptions::RdOptions::Pgrcolumnar(opts) => opts.parallel_workers,
                 _ => defaultpw,
@@ -450,7 +454,7 @@ mod tests {
 
         assert_eq!(rel.get_fillfactor(HEAP_DEFAULT_FILLFACTOR), 100);
         assert_eq!(rel.get_target_page_free_space(HEAP_DEFAULT_FILLFACTOR), 0);
-        rel.rd_options = Some(RdOptions::Std(std_options(70)));
+        rel.rd_options = Some(Box::new(RdOptions::Std(std_options(70))));
         assert_eq!(rel.get_fillfactor(HEAP_DEFAULT_FILLFACTOR), 70);
         assert_eq!(rel.get_target_page_usage(HEAP_DEFAULT_FILLFACTOR), BLCKSZ * 70 / 100);
         assert_eq!(

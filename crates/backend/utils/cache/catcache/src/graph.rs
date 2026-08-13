@@ -88,6 +88,7 @@ impl<'mcx> CatCache<'mcx> {
         let ct = &mut self.tuples[slot as usize];
         ct.payload = core::ptr::null_mut();
         ct.payload_len = 0;
+        ct.shared = None;
         ct.next = self.ct_free;
         ct.prev = NONE;
         ct.refcount = 0;
@@ -249,11 +250,11 @@ pub(crate) fn rehash_cat_cache_lists<'mcx>(mcx: mcx::Mcx<'mcx>, cache: &mut CatC
 
 /// `CatCacheRemoveCTup`.
 pub(crate) fn remove_ct(st: &mut CatCacheState<'_>, cache_id: i32, slot: u32) {
-    let (c_list, hv, payload, payload_len) = {
+    let (c_list, hv, payload, payload_len, is_shared) = {
         let cache = st.cache(cache_id);
         let ct = &cache.tuples[slot as usize];
         debug_assert_eq!(ct.refcount, 0);
-        (ct.c_list, ct.hash_value, ct.payload, ct.payload_len)
+        (ct.c_list, ct.hash_value, ct.payload, ct.payload_len, ct.shared.is_some())
     };
     if c_list != NONE {
         st.cache_mut(cache_id).tuples[slot as usize].dead = true;
@@ -264,7 +265,11 @@ pub(crate) fn remove_ct(st: &mut CatCacheState<'_>, cache_id: i32, slot: u32) {
     let cache = st.cache_mut(cache_id);
     let bi = hash_index(hv, cache.cc_nbuckets);
     cache.ct_unlink(bi, slot);
-    payload_free(mcx, payload, payload_len);
+    if !is_shared {
+        payload_free(mcx, payload, payload_len);
+    }
+    // Shared payloads: ct_slot_free drops the Arc (the buffer lives while any
+    // thread's L1 or the L2 map still references it).
     cache.ct_slot_free(slot);
     cache.cc_ntup -= 1;
     st.ch_ntup -= 1;
@@ -587,6 +592,7 @@ pub(crate) fn create_entry_positive(
         refcount: 0,
         dead: false,
         negative: false,
+        hot: true,
         next: NONE,
         prev: NONE,
         c_list: NONE,
@@ -596,6 +602,7 @@ pub(crate) fn create_entry_positive(
         t_tableoid: ntp.t_tableOid,
         payload: buf.as_ptr(),
         payload_len: payload_len as u32,
+        shared: None,
     };
     let cache = st.cache_mut(cache_id);
     let slot = cache.ct_alloc(ct);
@@ -604,6 +611,7 @@ pub(crate) fn create_entry_positive(
     cache.cc_ntup += 1;
     st.ch_ntup += 1;
     maybe_rehash(st, cache_id);
+    enforce_cap(st, cache_id, slot);
     Ok(slot)
 }
 
@@ -629,6 +637,67 @@ pub(crate) fn create_entry_from_scan(
         return Ok(None);
     }
     with_state(|st| create_entry_positive(st, cache_id, flat.as_tuple(), hash_value)).map(Some)
+}
+
+/// D3.2: the `HeapTupleHasExternal` arm for L2-shaped builds; same
+/// in-progress/stale contract as `create_entry_from_scan`, but the result is
+/// a shareable Arc, not an L1 slot.
+pub(crate) fn l2_entry_from_scan(
+    cache_id: i32,
+    ntp: &HeapTupleData<'_>,
+    hash_value: u32,
+) -> PgResult<Option<std::sync::Arc<crate::l2::CatL2Entry>>> {
+    if !ntp.has_external() {
+        return crate::l2::build_positive(cache_id, ntp).map(Some);
+    }
+    let tupdesc = with_state(|st| st.cache(cache_id).cc_tupdesc)
+        .expect("catcache: entry created before phase-2 init");
+    with_state(|st| push_in_progress(st, cache_id, hash_value, false));
+    let scratch = mcx::MemoryContext::new("catcache toast_flatten_tuple");
+    let flat = heaptoast::toast_flatten_tuple(scratch.mcx(), ntp, tupdesc);
+    let dead = with_state(pop_in_progress);
+    let flat = flat?;
+    if dead {
+        return Ok(None);
+    }
+    crate::l2::build_positive(cache_id, flat.as_tuple()).map(Some)
+}
+
+/// D3.2: install an L1 entry whose payload aliases a shared L2 body. The slot
+/// is linked at its bucket head with refcount 0, exactly like
+/// `CatalogCacheCreateEntry`; only the payload ownership differs.
+pub(crate) fn install_from_l2(
+    st: &mut CatCacheState<'_>,
+    cache_id: i32,
+    hash_value: u32,
+    ent: &std::sync::Arc<crate::l2::CatL2Entry>,
+) -> u32 {
+    let ct = CatCTup {
+        hash_value,
+        refcount: 0,
+        dead: false,
+        negative: ent.negative,
+        hot: true,
+        next: NONE,
+        prev: NONE,
+        c_list: NONE,
+        keys: ent.keys,
+        t_len: ent.t_len,
+        t_self: ent.t_self,
+        t_tableoid: ent.t_tableoid,
+        payload: ent.payload.as_ptr(),
+        payload_len: ent.payload.len() as u32,
+        shared: Some(std::sync::Arc::clone(ent)),
+    };
+    let cache = st.cache_mut(cache_id);
+    let slot = cache.ct_alloc(ct);
+    let bi = hash_index(hash_value, cache.cc_nbuckets);
+    cache.ct_push_head(bi, slot);
+    cache.cc_ntup += 1;
+    st.ch_ntup += 1;
+    maybe_rehash(st, cache_id);
+    enforce_cap(st, cache_id, slot);
+    slot
 }
 
 /// `CatalogCacheCreateEntry` (negative): `CatCacheCopyKeys` into `payload`.
@@ -671,6 +740,7 @@ pub(crate) fn create_entry_negative(
         refcount: 0,
         dead: false,
         negative: true,
+        hot: true,
         next: NONE,
         prev: NONE,
         c_list: NONE,
@@ -680,6 +750,7 @@ pub(crate) fn create_entry_negative(
         t_tableoid: 0,
         payload: buf.as_ptr(),
         payload_len: byref_len as u32,
+        shared: None,
     };
     let cache = st.cache_mut(cache_id);
     let slot = cache.ct_alloc(ct);
@@ -688,7 +759,78 @@ pub(crate) fn create_entry_negative(
     cache.cc_ntup += 1;
     st.ch_ntup += 1;
     maybe_rehash(st, cache_id);
+    enforce_cap(st, cache_id, slot);
     Ok(slot)
+}
+
+/// D3.1 cap enforcement: evict-on-insert-above-cap with a clock sweep over
+/// the slot arenas of every cache (SLRU-style; the reference bit is
+/// `CatCTup::hot`, set by every hit). Eviction of an unpinned entry is
+/// exactly what `CatCacheInvalidate` does to a refcount==0 entry — remove it
+/// and let the next probe rescan the catalog — so no new semantics exist
+/// here; the cap only changes WHEN that removal happens.
+///
+/// Exemptions (never evicted): pinned entries (refcount > 0), members of a
+/// live CatCList (c_list != NONE — the list's lifetime pins its members,
+/// mirroring C's list-member protection in CatCacheRemoveCTup), dead entries
+/// awaiting their last unpin, and the just-created `protect` slot (its
+/// caller's refcount++ happens after creation returns).
+pub(crate) fn enforce_cap(st: &mut CatCacheState<'_>, protect_cache: i32, protect_slot: u32) {
+    enforce_cap_at(st, crate::catcache_cap(), protect_cache, protect_slot)
+}
+
+pub(crate) fn enforce_cap_at(
+    st: &mut CatCacheState<'_>,
+    cap: i32,
+    protect_cache: i32,
+    protect_slot: u32,
+) {
+    if cap <= 0 || st.ch_ntup <= cap {
+        return;
+    }
+    // Two full revolutions max: pass 1 may only clear hot bits; if pass 2
+    // finds nothing evictable everything live is pinned/hot — give up rather
+    // than spin (the cache runs above cap until entries unpin).
+    let total_slots: usize = st.caches.iter().flatten().map(|c| c.tuples.len()).sum();
+    let mut budget = 2 * (total_slots + st.caches.len() + 1);
+    while st.ch_ntup > cap && budget > 0 {
+        budget -= 1;
+        if st.clock_cache >= st.caches.len() {
+            st.clock_cache = 0;
+            st.clock_slot = 0;
+        }
+        let (advance_cache, evict) = match &mut st.caches[st.clock_cache] {
+            Some(cache) if st.clock_slot < cache.tuples.len() => {
+                let slot = st.clock_slot as u32;
+                st.clock_slot += 1;
+                let ct = &mut cache.tuples[slot as usize];
+                let live = !ct.payload.is_null();
+                let exempt = ct.refcount > 0
+                    || ct.c_list != NONE
+                    || ct.dead
+                    || (cache.id == protect_cache && slot == protect_slot);
+                if live && !exempt {
+                    if ct.hot {
+                        ct.hot = false;
+                        (false, None)
+                    } else {
+                        (false, Some((cache.id, slot)))
+                    }
+                } else {
+                    (false, None)
+                }
+            }
+            _ => (true, None),
+        };
+        if advance_cache {
+            st.clock_cache += 1;
+            st.clock_slot = 0;
+            continue;
+        }
+        if let Some((cache_id, slot)) = evict {
+            remove_ct(st, cache_id, slot);
+        }
+    }
 }
 
 pub(crate) fn maybe_rehash(st: &mut CatCacheState<'_>, cache_id: i32) {

@@ -348,6 +348,13 @@ impl<T> LocalStack<T> {
         self.items.set(v);
     }
 
+    /// D3.4 idle passivation: dispose everything parked here, now.
+    pub(crate) fn drain_all(&self) {
+        for it in self.items.take() {
+            (self.dispose)(it);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         let v = self.items.take();
@@ -936,6 +943,30 @@ pub fn release_retained() -> bool {
     } else {
         false
     }
+}
+
+/// D3.4 idle passivation trim (docs/design/connection-scaling.md): return
+/// this thread's retained allocator memory — the parked aset keeper blocks
+/// (up to 100 × 8KiB of context-churn residue), the Acct-node and
+/// children-vec pools — then run the allocator release hook (mi_collect) so
+/// freed-but-retained segments leave RSS. Cold by contract: call only from an
+/// idle backend; the pools refill lazily on the next query.
+///
+/// What this deliberately does NOT do: release free chunks inside live aset
+/// contexts. Aset blocks are freed only at context reset/drop (aset.rs); a
+/// mid-life block release would need per-chunk block back-pointers on the hot
+/// dealloc path — rejected for a passivation-only win (the retained high-water
+/// of the long-lived contexts is bounded and measured in the D3.4 notes).
+#[cold]
+#[inline(never)]
+pub fn passivate_trim() -> bool {
+    aset::trim_recycled_blocks();
+    #[cfg(all(feature = "std", not(test)))]
+    if local_pool_on() {
+        let _ = tls_pools::ACCT.try_with(|s| s.drain_all());
+        let _ = tls_pools::CHILD_VECS.try_with(|s| s.drain_all());
+    }
+    release_retained()
 }
 
 pub struct MemoryContext {

@@ -237,7 +237,7 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
             rd_opfamily: opfamily,
             rd_indoption: indoption,
             rd_indcollation: indcollation,
-            rd_options: scanned.options,
+            rd_options: scanned.options.map(Box::new),
             pgstat_enabled: Cell::new(false),
             pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
             rd_amcache: Default::default(),

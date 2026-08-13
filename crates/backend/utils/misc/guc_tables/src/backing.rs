@@ -251,6 +251,64 @@ int_var!(
     set_pgrust_memory_watchdog_limit,
     0
 );
+// Connection-scaling admission control (docs/design/connection-scaling.md
+// D1 + D6). All process-global cells per this file's header law:
+// max_active_queries and connection_queue_timeout are PGC_SIGHUP (read on
+// every gated statement start / queue tick), connection_queue_size is
+// PGC_POSTMASTER (it sizes the pmchild backend pool at boot).
+int_var!(
+    I_max_active_queries,
+    max_active_queries,
+    set_max_active_queries,
+    0
+);
+int_var!(
+    I_connection_queue_size,
+    connection_queue_size,
+    set_connection_queue_size,
+    0
+);
+// D3.4 idle passivation: PGC_SIGHUP, read once per idle-period arm.
+int_var!(
+    I_idle_passivate_timeout,
+    idle_passivate_timeout,
+    set_idle_passivate_timeout,
+    60
+);
+int_var!(
+    I_connection_queue_timeout,
+    connection_queue_timeout,
+    set_connection_queue_timeout,
+    5000
+);
+// D3.1 bounded L1 caches: both PGC_SIGHUP — the enforcement points
+// (catcache/relcache evict-on-insert) read the cell on every cap check, so
+// a reload applies to the next insertion. Defaults sized from the D3.0
+// census (notes/connection-scaling-measurements.md): ~3x the warmed
+// pgbench+catalog workload. The PGRUST_CATCACHE_CAP / PGRUST_RELCACHE_CAP
+// env vars remain harness overrides (env wins if set; cached at first read).
+int_var!(
+    I_catcache_size_limit,
+    catcache_size_limit,
+    set_catcache_size_limit,
+    2048
+);
+int_var!(
+    I_relcache_size_limit,
+    relcache_size_limit,
+    set_relcache_size_limit,
+    512
+);
+// D3.2 shared immutable L2 catalog cache (+ the wave-3a init-file routing,
+// folded in: init-file loads adopt/install shared cores iff the L2 is on;
+// PGRUST_L2_INITFILE=0 remains a harness-only splitter). PGC_POSTMASTER:
+// flipping it mid-life would desync generation views against live L1 state.
+bool_var!(
+    B_shared_catalog_cache,
+    shared_catalog_cache,
+    set_shared_catalog_cache,
+    true
+);
 // pgrust-only (docs/design/test-views.md D1): the ephemeral-database
 // janitor. Both are process-global cells per this file's header law —
 // prefix is PGC_POSTMASTER, grace PGC_SIGHUP (the janitor thread runs the

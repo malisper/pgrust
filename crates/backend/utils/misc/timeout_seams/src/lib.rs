@@ -13,7 +13,9 @@ pub const IDLE_SESSION_TIMEOUT: TimeoutId = 9;
 pub const IDLE_STATS_UPDATE_TIMEOUT: TimeoutId = 10;
 pub const CLIENT_CONNECTION_CHECK_TIMEOUT: TimeoutId = 11;
 pub const STARTUP_PROGRESS_TIMEOUT: TimeoutId = 12;
-pub const USER_TIMEOUT: TimeoutId = 13;
+/// pgrust-only (docs/design/connection-scaling.md D3.4): idle passivation.
+pub const IDLE_PASSIVATE_TIMEOUT: TimeoutId = 13;
+pub const USER_TIMEOUT: TimeoutId = 14;
 pub const MAX_TIMEOUTS: TimeoutId = USER_TIMEOUT + 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

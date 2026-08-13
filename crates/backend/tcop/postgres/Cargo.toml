@@ -35,6 +35,10 @@ pqformat = { path = "../../libpq/pqformat" }
 fastpath = { path = "../fastpath" }
 init_small = { path = "../../utils/init/init_small" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+# D1 max_active_queries admission gate (admission.rs): FIFO CV park + the
+# custom MaxActiveQueries wait event.
+condition_variable = { path = "../../storage/lmgr/condition_variable" }
+waitevent = { path = "../../utils/activity/waitevent" }
 lock = { path = "../../storage/lmgr/lock" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }
 types_storage = { path = "../../../_support/types/types_storage" }
@@ -54,6 +58,10 @@ guc_file = { path = "../../utils/misc/guc_file" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 pgstat = { path = "../../utils/activity/pgstat" }
 plancache = { path = "../../utils/cache/plancache" }
+catcache = { path = "../../utils/cache/catcache" }
+l2cache = { path = "../../utils/cache/l2cache" }
+relcache = { path = "../../utils/cache/relcache" }
+mcxt_stats = { path = "../../utils/mmgr/mcxt_stats" }
 prepare_seams = { path = "../../commands/prepare_seams" }
 printtup = { path = "../../access/common/printtup" }
 types_fmgr = { path = "../../../_support/types/fmgr" }

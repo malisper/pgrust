@@ -627,6 +627,9 @@ pub fn RemoveFromWaitQueue(procno: ProcNumber, hashcode: u32) {
 /// DEADLOCK_TIMEOUT expiry: check for a deadlock and, if hard, boot ourselves
 /// off the lock.
 pub fn CheckDeadLock() -> PgResult<()> {
+    // Lazy deadlock workspace (D3.5): allocate BEFORE taking every partition
+    // lock — keeps C's "the check itself never allocates" invariant.
+    deadlock_seams::init_dead_lock_checking::call()?;
     let procno = my_procno();
     for i in 0..NUM_LOCK_PARTITIONS as usize {
         lwlock::LWLockAcquire(LockHashPartitionLockByIndex(i), lwlock::LW_EXCLUSIVE, procno)?;

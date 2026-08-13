@@ -577,6 +577,10 @@ pub fn InitPostgres(
             timeout_seams::IDLE_STATS_UPDATE_TIMEOUT,
             IdleStatsUpdateTimeoutHandler,
         );
+        timeout_seams::register_timeout::call(
+            timeout_seams::IDLE_PASSIVATE_TIMEOUT,
+            IdlePassivateTimeoutHandler,
+        );
     }
 
     if !init_small::globals::IsUnderPostmaster() {
@@ -1141,6 +1145,13 @@ pub fn IdleSessionTimeoutHandler() {
 
 pub fn IdleStatsUpdateTimeoutHandler() {
     init_small::globals::SetIdleStatsUpdateTimeoutPending(true);
+    init_small::globals::SetInterruptPending(true);
+    set_latch_on_my_latch();
+}
+
+// pgrust-only (docs/design/connection-scaling.md D3.4): idle passivation.
+pub fn IdlePassivateTimeoutHandler() {
+    init_small::globals::SetIdlePassivateTimeoutPending(true);
     init_small::globals::SetInterruptPending(true);
     set_latch_on_my_latch();
 }

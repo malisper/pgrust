@@ -222,6 +222,8 @@ pub(crate) struct LoopState {
     pub(crate) send_ready_for_query: bool,
     pub(crate) idle_in_transaction_timeout_enabled: bool,
     pub(crate) idle_session_timeout_enabled: bool,
+    /// D3.4 idle passivation timer armed for the current idle period.
+    pub(crate) idle_passivate_timeout_enabled: bool,
 }
 
 pub(crate) fn error_recovery(
@@ -372,6 +374,20 @@ fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
             timeout_seams::enable_timeout_after::call(
                 timeout_seams::IDLE_SESSION_TIMEOUT,
                 idle_session_timeout,
+            )?;
+        }
+
+        // D3.4 idle passivation: one-shot timer per idle period, armed only
+        // when truly idle (not in a transaction). Fires once → the
+        // ProcessInterrupts arm passivates → the backend keeps waiting; no
+        // re-arm until the next command completes and we come back here.
+        let passivate_secs = crate::passivate::idle_passivate_secs();
+        if passivate_secs > 0 {
+            init_small::globals::SetIdlePassivateTimeoutPending(false);
+            state.idle_passivate_timeout_enabled = true;
+            timeout_seams::enable_timeout_after::call(
+                timeout_seams::IDLE_PASSIVATE_TIMEOUT,
+                passivate_secs.saturating_mul(1000),
             )?;
         }
     }
@@ -837,6 +853,7 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
         send_ready_for_query: true,
         idle_in_transaction_timeout_enabled: false,
         idle_session_timeout_enabled: false,
+        idle_passivate_timeout_enabled: false,
     };
 
     loop {
@@ -964,6 +981,13 @@ fn run_one_iteration_inner<'mcx>(mcx: Mcx<'mcx>, state: &mut LoopState) -> PgRes
     if state.idle_session_timeout_enabled {
         timeout_seams::disable_timeout::call(timeout_seams::IDLE_SESSION_TIMEOUT, false)?;
         state.idle_session_timeout_enabled = false;
+    }
+    if state.idle_passivate_timeout_enabled {
+        timeout_seams::disable_timeout::call(timeout_seams::IDLE_PASSIVATE_TIMEOUT, false)?;
+        state.idle_passivate_timeout_enabled = false;
+        // A fire that raced the arriving command must not passivate right
+        // before we execute it.
+        init_small::globals::SetIdlePassivateTimeoutPending(false);
     }
 
     check_for_interrupts()?;

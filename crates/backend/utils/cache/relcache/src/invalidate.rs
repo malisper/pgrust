@@ -53,7 +53,10 @@ fn replace_entry(relid: Oid, newrel: &Rc<RelationData<'static>>) {
         let old = match st.id_cache.get_mut(&relid) {
             Some(ent) => Some(core::mem::replace(&mut ent.rel, Rc::clone(newrel))),
             None => {
-                st.id_cache.insert(relid, RelCacheEnt { rel: Rc::clone(newrel), nailed: false });
+                st.lru_clock += 1;
+                let last_used = core::cell::Cell::new(st.lru_clock);
+                st.id_cache
+                    .insert(relid, RelCacheEnt { rel: Rc::clone(newrel), nailed: false, last_used });
                 None
             }
         };
@@ -181,7 +184,7 @@ fn RelationReloadIndexInfo(
         rd_opfamily: opfamily,
         rd_indoption: indoption,
         rd_indcollation: indcollation,
-        rd_options: scanned.options,
+        rd_options: scanned.options.map(Box::new),
         pgstat_enabled: Cell::new(false),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
@@ -283,7 +286,7 @@ fn RelationReloadNailed(
         rd_opfamily: mcx::PgVec::new_in(cache_mcx()),
         rd_indoption: mcx::PgVec::new_in(cache_mcx()),
         rd_indcollation: mcx::PgVec::new_in(cache_mcx()),
-        rd_options: scanned.options,
+        rd_options: scanned.options.map(Box::new),
         pgstat_enabled: Cell::new(false),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),

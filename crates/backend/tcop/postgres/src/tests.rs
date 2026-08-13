@@ -393,6 +393,7 @@ fn error_recovery_escalates_instead_of_recovering_inside_critical_section() {
         send_ready_for_query: true,
         idle_in_transaction_timeout_enabled: false,
         idle_session_timeout_enabled: false,
+        idle_passivate_timeout_enabled: false,
     };
 
     g::SetCritSectionCount(1);

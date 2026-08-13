@@ -531,6 +531,30 @@ pub fn DropCachedPlan(h: CachedPlanSourceHandle) {
     }
 }
 
+/// D3.4 idle passivation (docs/design/connection-scaling.md): drop the
+/// generic plan of every saved source. The source itself — query text, parse
+/// trees, param types, the prepared-statement identity — survives untouched;
+/// the next execution replans, exactly as after any plancache invalidation.
+/// A plan still referenced elsewhere merely loses the source's reference and
+/// frees when its holder releases (C ReleaseGenericPlan semantics) — but at
+/// idle-not-in-transaction no plan should be in use. Returns plans dropped.
+pub fn ReleaseIdleGenericPlans() -> usize {
+    let handles: Vec<CachedPlanSourceHandle> = with_cache(|pc| {
+        if pc.torn_down {
+            return Vec::new();
+        }
+        pc.saved_plan_list.clone()
+    });
+    let mut dropped = 0usize;
+    for h in handles {
+        if with_source(h, |src| src.gplan.is_some()) {
+            ReleaseGenericPlan(h);
+            dropped += 1;
+        }
+    }
+    dropped
+}
+
 fn ReleaseGenericPlan(h: CachedPlanSourceHandle) {
     let gplan = with_source(h, |src| src.gplan.take());
     if let Some(plan) = gplan {
@@ -1850,4 +1874,17 @@ pub fn ResetPlanCache() {
             }
         }
     });
+}
+
+/// D3.0 census tooling: live plancache registry counts for this backend.
+/// (Each source/query/plan owns a root MemoryContext already visible in the
+/// context forest; this adds the entry counts the forest can't show.)
+pub fn PlanCacheCensus() -> (usize, usize, usize) {
+    with_cache(|pc| {
+        (
+            pc.sources.iter().flatten().count(),
+            pc.plans.iter().flatten().count(),
+            pc.saved_plan_list.len(),
+        )
+    })
 }

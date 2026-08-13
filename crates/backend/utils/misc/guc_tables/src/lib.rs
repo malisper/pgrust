@@ -264,6 +264,34 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_ephemeral_db_prefix,
         set: backing::set_pgrust_ephemeral_db_prefix,
     });
+    vars::max_active_queries.install(GucVarAccessors {
+        get: backing::max_active_queries,
+        set: backing::set_max_active_queries,
+    });
+    vars::connection_queue_size.install(GucVarAccessors {
+        get: backing::connection_queue_size,
+        set: backing::set_connection_queue_size,
+    });
+    vars::connection_queue_timeout.install(GucVarAccessors {
+        get: backing::connection_queue_timeout,
+        set: backing::set_connection_queue_timeout,
+    });
+    vars::idle_passivate_timeout.install(GucVarAccessors {
+        get: backing::idle_passivate_timeout,
+        set: backing::set_idle_passivate_timeout,
+    });
+    vars::catcache_size_limit.install(GucVarAccessors {
+        get: backing::catcache_size_limit,
+        set: backing::set_catcache_size_limit,
+    });
+    vars::relcache_size_limit.install(GucVarAccessors {
+        get: backing::relcache_size_limit,
+        set: backing::set_relcache_size_limit,
+    });
+    vars::shared_catalog_cache.install(GucVarAccessors {
+        get: backing::shared_catalog_cache,
+        set: backing::set_shared_catalog_cache,
+    });
     vars::pgrust_ephemeral_db_grace.install(GucVarAccessors {
         get: backing::pgrust_ephemeral_db_grace,
         set: backing::set_pgrust_ephemeral_db_grace,

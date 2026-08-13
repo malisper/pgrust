@@ -111,7 +111,18 @@ fn filled<T: Copy + Default>(mcx: Mcx<'static>, n: usize) -> PgVec<'static, T> {
     v
 }
 
+// D3.5 (docs/design/connection-scaling.md): lazy and idempotent. C allocates
+// this ~94KB max_connections-scaled workspace at backend start; deadlock
+// checks are rare, so pgrust allocates at the first one instead. Trigger
+// sites: lock::CheckDeadLock (before it takes every partition lock — the C
+// prealloc rationale of never allocating while holding them all is kept) and
+// RememberSimpleDeadLock (under ONE partition lock; safe in pgrust because
+// mcx allocation is infallible — OOM aborts — cannot elog, and takes no
+// LWLocks, so nothing can deadlock or error while the lock is held).
 pub fn InitDeadLockChecking() -> PgResult<()> {
+    if WORKSPACE.with(|w| w.borrow().is_some()) {
+        return Ok(());
+    }
     let max_backends = MaxBackends() as usize;
     let mcx = backend_mcx();
     let ws = Workspace {
@@ -665,6 +676,11 @@ pub fn RememberSimpleDeadLock(
     locktag: LOCKTAG,
     blocker: ProcNumber,
 ) {
+    // Lazy-workspace trigger site (see InitDeadLockChecking): the caller
+    // holds one lock partition LWLock; the allocation cannot error or take
+    // LWLocks, so this is safe, and it is the only way this path can run
+    // before any full deadlock check has.
+    InitDeadLockChecking().expect("workspace allocation is infallible");
     WORKSPACE.with(|w| {
         let mut ws = w.borrow_mut();
         let ws = ws.as_mut().expect("InitDeadLockChecking not run");

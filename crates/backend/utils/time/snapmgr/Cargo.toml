@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+l2cache = { path = "../../cache/l2cache" }
 fd = { path = "../../../storage/file/fd" }
 libc = "0.2"
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }

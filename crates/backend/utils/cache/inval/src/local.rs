@@ -12,6 +12,16 @@ use crate::CALLBACKS;
 pub fn LocalExecuteInvalidationMessage(msg: &SharedInvalidationMessage) -> PgResult<()> {
     match *msg {
         SharedInvalidationMessage::Catcache(m) => {
+            // D3.2: L1 entries for this key drop below, so this thread's L2
+            // view of the domain must advance in the same step — a later L1
+            // miss must not resurrect the pre-inval entry. The sync sits
+            // OUTSIDE the database filter deliberately: a backend still
+            // starting up (MyDatabaseId unset) consumes and discards its
+            // future database's messages here, and skipping the sync would
+            // leave its view permanently behind those messages' bumps (the
+            // D3.2 stressor's stale-shape failure). Advancing the view on a
+            // foreign-db message is harmless — lookups are db-keyed.
+            l2cache::sync_view(l2cache::Domain::Cat(m.id as i32));
             if m.dbId == init_small::globals::MyDatabaseId() || m.dbId == InvalidOid {
                 snapmgr_seams::invalidate_catalog_snapshot::call();
                 syscache_seams::sys_cache_invalidate::call(m.id as i32, m.hashValue)?;
@@ -30,6 +40,10 @@ fn local_execute_other(msg: &SharedInvalidationMessage) -> PgResult<()> {
     match *msg {
         SharedInvalidationMessage::Catcache(_) => unreachable!("dispatched inline"),
         SharedInvalidationMessage::Catalog(m) => {
+            // Catalog-wide flush: the sender bumped every cat domain
+            // (catId -> cache-id mapping is not visible here either way).
+            // Outside the db filter — see the Catcache arm.
+            l2cache::sync_view_all_cat();
             if m.dbId == my_database_id || m.dbId == InvalidOid {
                 snapmgr_seams::invalidate_catalog_snapshot::call();
                 // CatalogCacheFlushCatalog calls CallSyscacheCallbacks as needed.
@@ -37,6 +51,20 @@ fn local_execute_other(msg: &SharedInvalidationMessage) -> PgResult<()> {
             }
         }
         SharedInvalidationMessage::Relcache(m) => {
+            // View sync outside the db filter — see the Catcache arm.
+            if m.relId == InvalidOid {
+                l2cache::sync_view_all_rel();
+            } else {
+                l2cache::sync_view(l2cache::Domain::Rel(m.relId));
+                if crate::eoxact::l2_bump_debug() {
+                    eprintln!(
+                        "L2DBG sync rel={} view={} thr={:?}",
+                        m.relId,
+                        l2cache::view_gen(l2cache::Domain::Rel(m.relId)),
+                        std::thread::current().id()
+                    );
+                }
+            }
             if m.dbId == my_database_id || m.dbId == InvalidOid {
                 if m.relId == InvalidOid {
                     relcache_seams::relation_cache_invalidate::call(false)?;
@@ -83,6 +111,10 @@ fn local_execute_other(msg: &SharedInvalidationMessage) -> PgResult<()> {
 }
 
 pub fn InvalidateSystemCachesExtended(debug_discard: bool) -> PgResult<()> {
+    // Blanket reset (sinval overflow / debug_discard): every L1 entry drops,
+    // so adopt the current global generations wholesale. Nothing global
+    // changed — an overflow is a local event — hence sync, never bump.
+    l2cache::sync_view_all();
     snapmgr_seams::invalidate_catalog_snapshot::call();
     catcache_seams::reset_catalog_caches_ext::call(debug_discard)?;
     relcache_seams::relation_cache_invalidate::call(debug_discard)?; /* gets smgr and relmap too */

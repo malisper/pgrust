@@ -256,6 +256,18 @@ pub static logical_decoding_work_mem: GucIntVar = GucSlot::new("logical_decoding
 pub static maintenance_io_concurrency: GucIntVar = GucSlot::new("maintenance_io_concurrency");
 pub static maintenance_work_mem: GucIntVar = GucSlot::new("maintenance_work_mem");
 pub static max_active_replication_origins: GucIntVar = GucSlot::new("max_active_replication_origins");
+// pgrust-only (docs/design/connection-scaling.md D1): statement-admission gate.
+pub static max_active_queries: GucIntVar = GucSlot::new("max_active_queries");
+// pgrust-only (docs/design/connection-scaling.md D6): connection admission queue.
+pub static connection_queue_size: GucIntVar = GucSlot::new("connection_queue_size");
+pub static connection_queue_timeout: GucIntVar = GucSlot::new("connection_queue_timeout");
+// pgrust-only (docs/design/connection-scaling.md D3.4): idle passivation.
+pub static idle_passivate_timeout: GucIntVar = GucSlot::new("idle_passivate_timeout");
+// pgrust-only (docs/design/connection-scaling.md D3.1): bounded L1 caches.
+pub static catcache_size_limit: GucIntVar = GucSlot::new("catcache_size_limit");
+pub static relcache_size_limit: GucIntVar = GucSlot::new("relcache_size_limit");
+// pgrust-only (docs/design/connection-scaling.md D3.2): shared immutable L2.
+pub static shared_catalog_cache: GucBoolVar = GucSlot::new("shared_catalog_cache");
 pub static max_files_per_process: GucIntVar = GucSlot::new("max_files_per_process");
 pub static max_function_args: GucIntVar = GucSlot::new("max_function_args");
 pub static max_identifier_length: GucIntVar = GucSlot::new("max_identifier_length");

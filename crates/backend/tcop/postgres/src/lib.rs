@@ -10,8 +10,10 @@ use ::elog::ereport;
 use ::types_error::{ErrorLocation, PgResult, ERRCODE_QUERY_CANCELED, ERROR, FATAL};
 use ::types_storage::storage::ProcSignalReason;
 
+pub mod admission;
 pub mod extended_query;
 pub mod main_loop;
+pub(crate) mod passivate;
 pub mod simple_query;
 pub mod single_user;
 pub mod stdio_wire;
@@ -581,6 +583,18 @@ pub fn ProcessInterrupts() -> PgResult<()> {
     {
         g::SetIdleStatsUpdateTimeoutPending(false);
         pgstat::pending::pgstat_report_stat(true);
+    }
+
+    // D3.4 idle passivation: once per idle period (the timer is one-shot);
+    // the backend continues waiting for the next command afterwards.
+    if g::IdlePassivateTimeoutPending() {
+        g::SetIdlePassivateTimeoutPending(false);
+        if DoingCommandRead()
+            && !xact::IsTransactionOrTransactionBlock()
+            && crate::passivate::idle_passivate_secs() > 0
+        {
+            crate::passivate::IdlePassivate()?;
+        }
     }
 
     if g::ProcSignalBarrierPending() {

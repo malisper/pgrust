@@ -249,3 +249,184 @@ mod state_kernel {
         let _ = with_state(|st| st.caches.len());
     }
 }
+
+// ---------------------------------------------------------------------------
+// D3.1 capped eviction (clock sweep over the slot arenas)
+// ---------------------------------------------------------------------------
+
+fn k1(v: u32) -> [CatCKey<'static>; 4] {
+    [oid_key(v), CatCKey::UNUSED, CatCKey::UNUSED, CatCKey::UNUSED]
+}
+
+fn probe_has(id: i32, v: u32) -> bool {
+    match SearchCatCache1(id, oid_key(v)) {
+        Ok(Some(t)) => {
+            ReleaseCatCache(t);
+            true
+        }
+        _ => false,
+    }
+}
+
+#[test]
+fn cap_evicts_down_to_cap_and_spares_pinned() {
+    let id = fresh_id();
+    testing::init_cache_bare(id, 1, KINDS1, 4, None);
+    let img = tiny_image();
+    for v in 1..=8u32 {
+        testing::insert_positive(id, &k1(v), &img);
+    }
+    let base = with_state(|st| st.ch_ntup);
+
+    // Pin two entries (refcount > 0 = exempt).
+    let p1 = SearchCatCache1(id, oid_key(3)).unwrap().expect("hit");
+    let p2 = SearchCatCache1(id, oid_key(7)).unwrap().expect("hit");
+
+    let target = base - 4;
+    with_state(|st| crate::graph::enforce_cap_at(st, target, -1, NONE));
+    assert_eq!(with_state(|st| st.ch_ntup), target);
+    assert_eq!(with_state(|st| st.cache(id).cc_ntup), 4);
+
+    // The pinned entries survived and are still probeable.
+    assert!(probe_has(id, 3));
+    assert!(probe_has(id, 7));
+    ReleaseCatCache(p1);
+    ReleaseCatCache(p2);
+}
+
+#[test]
+fn cap_prefers_cold_entries_over_hot() {
+    let id = fresh_id();
+    testing::init_cache_bare(id, 1, KINDS1, 8, None);
+    let img = tiny_image();
+    for v in 1..=6u32 {
+        testing::insert_positive(id, &k1(v), &img);
+    }
+    // Cool 3..6 by hand; 1 and 2 keep their reference bit, so a sweep that
+    // needs two evictions must take from the cold set.
+    with_state(|st| {
+        let c = st.cache_mut(id);
+        for ct in c.tuples.iter_mut() {
+            if !ct.payload.is_null() && ct.keys[0].as_u32() >= 3 {
+                ct.hot = false;
+            }
+        }
+    });
+    let target = with_state(|st| st.ch_ntup) - 2;
+    with_state(|st| crate::graph::enforce_cap_at(st, target, -1, NONE));
+    assert_eq!(with_state(|st| st.ch_ntup), target);
+    assert!(probe_has(id, 1), "hot entry evicted before cold ones");
+    assert!(probe_has(id, 2), "hot entry evicted before cold ones");
+}
+
+#[test]
+fn cap_gives_up_when_everything_is_pinned() {
+    let id = fresh_id();
+    testing::init_cache_bare(id, 1, KINDS1, 4, None);
+    let img = tiny_image();
+    let mut pins = Vec::new();
+    for v in 1..=5u32 {
+        testing::insert_positive(id, &k1(v), &img);
+        pins.push(SearchCatCache1(id, oid_key(v)).unwrap().expect("hit"));
+    }
+    with_state(|st| crate::graph::enforce_cap_at(st, 1, -1, NONE));
+    // Nothing evictable: the cache legitimately runs above cap.
+    assert_eq!(with_state(|st| st.cache(id).cc_ntup), 5);
+    for p in pins {
+        ReleaseCatCache(p);
+    }
+}
+
+#[test]
+fn cap_protects_the_just_created_slot() {
+    let id = fresh_id();
+    testing::init_cache_bare(id, 1, KINDS1, 4, None);
+    let img = tiny_image();
+    for v in 1..=4u32 {
+        testing::insert_positive(id, &k1(v), &img);
+    }
+    // Find key 4's slot and protect it through a sweep that takes all it can.
+    let slot4 = with_state(|st| {
+        let c = st.cache(id);
+        (0..c.tuples.len() as u32)
+            .find(|&s| {
+                let ct = &c.tuples[s as usize];
+                !ct.payload.is_null() && ct.keys[0].as_u32() == 4
+            })
+            .expect("slot of key 4")
+    });
+    let target = with_state(|st| st.ch_ntup) - 3;
+    with_state(|st| crate::graph::enforce_cap_at(st, target, id, slot4));
+    assert_eq!(with_state(|st| st.cache(id).cc_ntup), 1);
+    assert!(probe_has(id, 4), "protected slot was evicted");
+}
+
+// -- D3.2 shared L2 bodies -------------------------------------------------
+
+#[test]
+fn l2_negative_build_match_and_install() {
+    let id = fresh_id();
+    let kinds = [CCFastKind::Name, CCFastKind::Int4, CCFastKind::Int4, CCFastKind::Int4];
+    testing::init_cache_bare(id, 2, kinds, 4, None);
+
+    let keys = [CatCKey::Bytes(b"some_rel"), oid_key(2200), CatCKey::UNUSED, CatCKey::UNUSED];
+    let other = [CatCKey::Bytes(b"other_rel"), oid_key(2200), CatCKey::UNUSED, CatCKey::UNUSED];
+    let ent = crate::l2::build_negative(id, &keys);
+    assert!(ent.negative);
+
+    // Full logical-key matching against the shared body (byref + word keys).
+    assert!(crate::l2::entry_matches(ent.as_ref(), &kinds, 2, &keys));
+    assert!(!crate::l2::entry_matches(ent.as_ref(), &kinds, 2, &other));
+
+    // probe_keys reproduces the entry's own logical keys.
+    let probes = ent.probe_keys(&kinds, 2);
+    assert!(crate::l2::entry_matches(ent.as_ref(), &kinds, 2, &probes));
+
+    // Install as an L1 entry aliasing the shared payload; a probe now sees a
+    // negative hit through the completely unchanged L1 walk.
+    let hash = compute_hash_value(&kinds, 2, &keys);
+    with_state(|st| crate::graph::install_from_l2(st, id, hash, &ent));
+    assert_eq!(std::sync::Arc::strong_count(&ent), 2, "L1 holds the Arc");
+    let r = SearchCatCache2(id, keys[0], keys[1]).unwrap();
+    assert!(r.is_none(), "negative entry answers without a miss");
+
+    // Invalidation removes the L1 alias and releases the Arc.
+    crate::graph::CatCacheInvalidate(id, hash);
+    assert_eq!(std::sync::Arc::strong_count(&ent), 1, "eviction drops the Arc");
+}
+
+#[test]
+fn l2_shared_entry_survives_l1_eviction_while_pinned_elsewhere() {
+    let id = fresh_id();
+    testing::init_cache_bare(id, 1, KINDS1, 4, None);
+    // A fake shared positive body: negative:false with a prefixed image.
+    let img = tiny_image();
+    let keys = [oid_key(777), CatCKey::UNUSED, CatCKey::UNUSED, CatCKey::UNUSED];
+    let hash = compute_hash_value(&KINDS1, 1, &keys);
+    let ent = {
+        let buf = crate::l2::AlignedBytes::new_zeroed(crate::IMG_PREFIX + img.len());
+        // SAFETY: fresh buffer of IMG_PREFIX + img.len() bytes.
+        unsafe {
+            core::ptr::write(buf.as_ptr().add(12).cast::<u32>(), img.len() as u32);
+            core::ptr::copy_nonoverlapping(img.as_ptr(), buf.as_ptr().add(crate::IMG_PREFIX), img.len());
+        }
+        std::sync::Arc::new(crate::l2::CatL2Entry {
+            keys: [Datum::from_oid(777), Datum::null(), Datum::null(), Datum::null()],
+            negative: false,
+            t_len: img.len() as u32,
+            t_self: types_tuple::ItemPointerData::new(0, 1),
+            t_tableoid: 1,
+            payload: buf,
+        })
+    };
+    with_state(|st| crate::graph::install_from_l2(st, id, hash, &ent));
+
+    // Pin it (C's refcount), then invalidate: the entry goes dead-but-pinned,
+    // and the shared body must stay alive until the pin releases.
+    let pin = SearchCatCache1(id, oid_key(777)).unwrap().expect("hit");
+    assert_eq!(pin.tuple().t_len, img.len() as u32);
+    crate::graph::CatCacheInvalidate(id, hash);
+    assert_eq!(std::sync::Arc::strong_count(&ent), 2, "pinned: Arc still held");
+    ReleaseCatCache(pin);
+    assert_eq!(std::sync::Arc::strong_count(&ent), 1, "unpin frees the alias");
+}

@@ -1,0 +1,10 @@
+[package]
+name = "l2cache"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+guc_tables = { path = "../../misc/guc_tables" }
+types_core = { path = "../../../../_support/types/types_core" }
+parallel_seams = { path = "../../../access/transam/parallel_seams" }

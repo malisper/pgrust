@@ -68,6 +68,14 @@ fn loc(line: i32, func: &'static str) -> ErrorLocation {
     ErrorLocation::new("src/backend/tcop/backend_startup.c", line, func)
 }
 
+// The startup-window SIGTERM disposition (see backend_main): the minimal
+// die() core — flag the pending death and let the next interrupt drain
+// (the D6 queue tick's check_for_interrupts) turn it into the FATAL unwind.
+fn startup_window_die() {
+    init_small::globals::SetProcDiePending(true);
+    init_small::globals::SetInterruptPending(true);
+}
+
 // BackendMain (backend_startup.c) — never returns.
 pub fn backend_main(startup_data: &StartupData) -> ! {
     let StartupData::Backend(bsdata) = *startup_data else {
@@ -79,13 +87,32 @@ pub fn backend_main(startup_data: &StartupData) -> ! {
     let top = MemoryContext::new("TopMemoryContext");
     let result = (|| -> PgResult<()> {
         backend_initialize(top.mcx(), &client_sock, bsdata.can_accept_connections)?;
+        // Between here and PostgresMain's install_thread_signal_handlers
+        // the thread has no SIGTERM disposition, so a fast-shutdown
+        // broadcast would pend undrainable. That window used to be
+        // microseconds; the D6 admission queue (a park inside InitProcess)
+        // can stretch it to connection_queue_timeout — give SIGTERM C's
+        // startup-window meaning (process_startup_packet_die's effect:
+        // flag ProcDie and let the interrupt drain unwind us) so a queued
+        // waiter dies within one queue tick. PostgresMain replaces this
+        // with the full die() moments later.
+        procsignal::pqsignal_thread(
+            procsignal::signums::SIGTERM,
+            procsignal::ThreadSignalHandler::Simple(startup_window_die),
+        );
         lmgr_proc::InitProcess(miscinit::GetMyBackendType())?;
         Ok(())
     })();
 
     let my_pid = init_small::globals::MyProcPid();
-    if result.is_err() {
-        // The FATAL was reported by the elog machinery; C's proc_exit(1).
+    if let Err(err) = result {
+        // ereport-raised FATALs already emitted and proc_exited inside
+        // errfinish; what reaches this arm is the hand-built kind
+        // (InitProcess's 53300 family, the D6 queue timeout), which carries
+        // no emission of its own. Emit it so the client gets the
+        // ErrorResponse C sends ("sorry, too many clients already" used to
+        // die here as a bare connection reset); then C's proc_exit(1).
+        elog::emit_error_report_for(&err);
         ipc_seams::proc_exit::call(1, my_pid)
     }
 

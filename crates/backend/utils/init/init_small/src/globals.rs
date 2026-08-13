@@ -75,6 +75,9 @@ scalar_global! {
     PARALLEL_MESSAGE_PENDING, ParallelMessagePending, SetParallelMessagePending, bool, false;
     IDLE_STATS_UPDATE_TIMEOUT_PENDING, IdleStatsUpdateTimeoutPending,
         SetIdleStatsUpdateTimeoutPending, bool, false;
+    // pgrust-only (docs/design/connection-scaling.md D3.4): idle passivation.
+    IDLE_PASSIVATE_TIMEOUT_PENDING, IdlePassivateTimeoutPending,
+        SetIdlePassivateTimeoutPending, bool, false;
 
     INTERRUPT_HOLDOFF_COUNT, InterruptHoldoffCount, SetInterruptHoldoffCount, uint32, 0;
     QUERY_CANCEL_HOLDOFF_COUNT, QueryCancelHoldoffCount, SetQueryCancelHoldoffCount, uint32, 0;

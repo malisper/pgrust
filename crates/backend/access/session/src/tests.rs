@@ -923,7 +923,25 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      every product build. The product-side uploaded manifest is
     //      session-owned in WalSndCtlData (slot-keyed), not thread-local, per
     //      the Q2 ruling — so it is NOT a TLS-census entry at all.
-    assert_eq!(count_tree(crates), 559, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 563, re-pinned at the connection-scaling landing (admission gate +
+    //      shared L2 catalog cache + demand-sized snapshots):
+    //   +1 storage/ipc/procarray/src/lib.rs — SNAP_DEMAND_CUR/PREV/XACTS
+    //      (D3.5): per-thread high-water sizing history for demand-sized
+    //      snapshot arrays. Pure perf heuristic: a fresh thread rederives
+    //      its high-water marks from the next snapshots; safe to lose,
+    //      nothing an envelope could capture or restore.
+    //   +1 tcop/postgres/src/admission.rs — DEPTH: per-thread admission
+    //      reentrancy counter, nonzero only inside a running query and
+    //      never live across a session boundary; nothing to hand off.
+    //   +1 utils/cache/l2cache/src/lib.rs — VIEW_INIT/CAT_VIEW/REL_VIEW:
+    //      per-thread L2 generation views (coherence markers). A fresh
+    //      thread sees 0 and revalidates against the shared generation
+    //      counters; safe to lose, non-session by construction.
+    //   +1 utils/cache/relcache/src/l2core.rs — TD_MIRRORS: tupdesc-mirror
+    //      interning registry, a rederivable cache keyed by the shared
+    //      core pointer; a fresh thread re-interns on first touch. Cache,
+    //      not session identity; not a session_sources row.
+    assert_eq!(count_tree(crates), 563, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

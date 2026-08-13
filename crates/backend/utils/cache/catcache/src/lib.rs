@@ -5,6 +5,7 @@ pub mod compute;
 mod graph;
 mod init;
 mod inval;
+mod l2;
 mod list;
 mod search;
 pub mod testing;
@@ -41,6 +42,10 @@ pub(crate) struct CatCTup {
     pub refcount: i32,
     pub dead: bool,
     pub negative: bool,
+    /// Clock-eviction reference bit (D3.1, no C counterpart: C never bounds
+    /// the catcache). Set on every hit and at creation; cleared by the
+    /// sweep hand. Lives in struct padding — size unchanged.
+    pub hot: bool,
     pub next: u32,
     pub prev: u32,
     pub c_list: u32,
@@ -52,6 +57,10 @@ pub(crate) struct CatCTup {
     /// does); positive entries: `IMG_PREFIX` header, then the image.
     pub payload: *mut u8,
     pub payload_len: u32,
+    /// D3.2: when the entry came from the shared L2 cache, `payload` aliases
+    /// this Arc's buffer (the image exists once per process); `None` means a
+    /// private mcx allocation freed by `payload_free`.
+    pub shared: Option<std::sync::Arc<l2::CatL2Entry>>,
 }
 
 /// C's in-entry HeapTupleData: t_self +0, t_tableoid +8, t_len +12, image +16.
@@ -121,7 +130,35 @@ pub(crate) struct CatCacheState<'mcx> {
     pub caches: PgVec<'mcx, Option<CatCache<'mcx>>>,
     pub ch_ntup: i32,
     pub in_progress: PgVec<'mcx, CatCInProgress>,
+    /// Clock hand for capped eviction (D3.1): (cache index, tuple slot).
+    pub clock_cache: usize,
+    pub clock_slot: usize,
 }
+
+/// D3.1 entry cap over `ch_ntup` (all catcaches of this backend combined).
+/// C has no counterpart — the C catcache grows without bound for the life of
+/// the process. Evicting an unpinned entry is semantically identical to that
+/// entry's invalidation arriving while unpinned (CatCacheInvalidate removes
+/// refcount==0 entries outright): the next probe re-reads the catalog.
+/// 0 disables. GUC `catcache_size_limit` (PGC_SIGHUP — this is read on every
+/// cap check, so a reload applies to the next insertion), with a
+/// PGRUST_CATCACHE_CAP env override for harnesses (env wins if set; cached at
+/// first read — the test suites and scripts set it before spawning backends).
+pub(crate) fn catcache_cap() -> i32 {
+    static ENV: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+    if let Some(v) = *ENV.get_or_init(|| {
+        std::env::var("PGRUST_CATCACHE_CAP").ok().and_then(|v| v.trim().parse().ok())
+    }) {
+        return v;
+    }
+    guc_tables::backing::catcache_size_limit()
+}
+
+// The default (2048, the catcache_size_limit boot value in guc_tables) is
+// sized from the D3.0 census (notes/connection-scaling-measurements.md): the
+// warmed pgbench+catalog workload holds ~690 entries (~200KB) across all
+// caches; 2048 (~3x, ~600KB ceiling at ~300B/entry) keeps ordinary sessions
+// eviction-free while bounding catalog-churn / many-object growth.
 
 bind!(pub(crate) CatCacheStateTy => CatCacheState<'mcx>);
 
@@ -157,6 +194,8 @@ fn state_init(slot: &mut Option<ManuallyDrop<McxOwned<CatCacheStateTy>>>) {
                 caches: PgVec::new_in(mcx),
                 ch_ntup: 0,
                 in_progress: PgVec::new_in(mcx),
+                clock_cache: 0,
+                clock_slot: 0,
             })
         },
     )
@@ -308,6 +347,63 @@ pub(crate) fn payload_free(mcx: Mcx<'_>, ptr: *mut u8, len: u32) {
     // SAFETY: `ptr` came from `payload_alloc(mcx, len)` and is freed once
     // (CatCacheRemoveCTup/CList is the only caller and clears the slot).
     unsafe { mcx.deallocate(NonNull::new_unchecked(ptr), layout) };
+}
+
+/// One catcache's census row (D3.0 memory-census tooling).
+pub struct CatCacheCensusRow {
+    pub id: i32,
+    pub relname: Option<String>,
+    pub ntup: i32,
+    pub nlist: i32,
+    pub pinned: i32,
+    /// Entries whose payload aliases the shared L2 (bytes counted once
+    /// process-wide in l2cache::stats, excluded from payload_bytes).
+    pub shared: i32,
+    pub payload_bytes: usize,
+    /// Slot-arena + bucket-array footprint charged to CacheMemoryContext.
+    pub arena_bytes: usize,
+}
+
+/// This thread's catcache census: (total live tuples, per-cache rows).
+pub fn CatCacheCensus() -> (i32, Vec<CatCacheCensusRow>) {
+    with_state(|st| {
+        let mut rows = Vec::new();
+        for cache in st.caches.iter().flatten() {
+            let mut payload = 0usize;
+            let mut pinned = 0i32;
+            let mut shared = 0i32;
+            for ct in cache.tuples.iter() {
+                if !ct.payload.is_null() {
+                    if ct.shared.is_some() {
+                        shared += 1;
+                    } else {
+                        payload += ct.payload_len as usize;
+                    }
+                    if ct.refcount > 0 || ct.c_list != NONE {
+                        pinned += 1;
+                    }
+                }
+            }
+            for cl in cache.lists.iter() {
+                if !cl.payload.is_null() {
+                    payload += cl.payload_len as usize;
+                }
+            }
+            rows.push(CatCacheCensusRow {
+                id: cache.id,
+                relname: cache.cc_relname.as_ref().map(|s| s.as_str().to_string()),
+                ntup: cache.cc_ntup,
+                nlist: cache.cc_nlist,
+                pinned,
+                shared,
+                payload_bytes: payload,
+                arena_bytes: cache.tuples.capacity() * core::mem::size_of::<CatCTup>()
+                    + cache.lists.capacity() * core::mem::size_of::<CatCList<'_>>()
+                    + (cache.cc_bucket.capacity() + cache.cc_lbucket.capacity()) * 4,
+            });
+        }
+        (st.ch_ntup, rows)
+    })
 }
 
 pub fn init_seams() {

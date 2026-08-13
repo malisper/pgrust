@@ -67,12 +67,20 @@ fn table_counts_match_compiled_backend_shape() {
     // covdiff E1-A (pgrust-only): Bool +1 pgrust.explain_runtime_verdicts
     //   (-> 137) = 462 — EXPLAIN display gate for runtime refusal verdicts,
     //   default off (C-parity default output).
-    assert_eq!(ConfigureNamesBool.len(), 137);
-    assert_eq!(ConfigureNamesInt.len(), 170);
+    // connection-scaling D1+D6 (pgrust-only, docs/design/
+    //   connection-scaling.md): Int +3 max_active_queries,
+    //   connection_queue_size, connection_queue_timeout (-> 173) = 465.
+    // connection-scaling D3.4 (pgrust-only, same doc): Int +1
+    //   idle_passivate_timeout (-> 174) = 466.
+    // connection-scaling GUC-ification pass (pgrust-only, same doc):
+    //   Int +2 catcache_size_limit, relcache_size_limit (-> 176),
+    //   Bool +1 shared_catalog_cache (-> 138) = 469.
+    assert_eq!(ConfigureNamesBool.len(), 138);
+    assert_eq!(ConfigureNamesInt.len(), 176);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 79);
     assert_eq!(ConfigureNamesEnum.len(), 48);
-    assert_eq!(all_settings().count(), 462);
+    assert_eq!(all_settings().count(), 469);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

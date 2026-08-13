@@ -31,3 +31,9 @@ autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+# D6 connection admission queue (connqueue.rs): LOG lines, hangup poll,
+# shutdown-interrupt drain, silent reap.
+types_dest = { path = "../../../../_support/types/types_dest" }
+elog = { path = "../../../utils/error/elog" }
+pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }

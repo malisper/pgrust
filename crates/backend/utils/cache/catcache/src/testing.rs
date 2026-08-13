@@ -76,6 +76,7 @@ pub fn insert_positive(cache_id: i32, keys: &[CatCKey<'_>; 4], image: &[u8]) {
             refcount: 0,
             dead: false,
             negative: false,
+            hot: true,
             next: NONE,
             prev: NONE,
             c_list: NONE,
@@ -85,6 +86,7 @@ pub fn insert_positive(cache_id: i32, keys: &[CatCKey<'_>; 4], image: &[u8]) {
             t_tableoid,
             payload: buf.as_ptr(),
             payload_len: total as u32,
+            shared: None,
         };
         let cache = st.cache_mut(cache_id);
         let slot = cache.ct_alloc(ct);

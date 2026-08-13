@@ -203,6 +203,95 @@ fn crash_backend_injection(args: &str) -> PgResult<()> {
     tcop_dest::NullCommand(elog::config::where_to_send_output())
 }
 
+// D3.0 memory-census debug command (`pgrust: memctx`, superuser-gated like
+// the crash injections): dump the CURRENT backend thread's memory estate as
+// NOTICE rows — the mcx context forest (what pg_backend_memory_contexts
+// shows) plus the cache-entry counts and global-heap bytes the context view
+// cannot see (relcache entries are Rc allocations on the global allocator;
+// catcache/plancache registry counts). notes/connection-scaling-measurements.md.
+fn memctx_dump() -> PgResult<()> {
+    use types_error::NOTICE;
+    if !superuser_seams::superuser::call()? {
+        return Err(ereport(ERROR)
+            .errmsg("pgrust: memctx requires superuser")
+            .into_error()
+            .into());
+    }
+    let say = |msg: String| -> PgResult<()> {
+        ereport(NOTICE).errmsg(msg).finish(loc(0, "memctx_dump")).map(|_| ())
+    };
+
+    // Context forest (chunk-exact charges; block slack not included).
+    fn walk(t: &::mcx::TreeStats, depth: usize, out: &mut Vec<String>, tot: &mut (usize, usize)) {
+        let total = t.arena_footprint.max(t.used);
+        tot.0 += total;
+        tot.1 += t.used;
+        out.push(format!(
+            "{:indent$}{}: total={} used={} blocks={} [{}]",
+            "", t.name, total, t.used, t.nblocks.max(1), t.kind,
+            indent = depth * 2
+        ));
+        for c in &t.children {
+            walk(c, depth + 1, out, tot);
+        }
+    }
+    let mut lines = Vec::new();
+    let mut tot = (0usize, 0usize);
+    for root in mcxt_stats::backend_context_forest() {
+        walk(&root, 0, &mut lines, &mut tot);
+    }
+    say(format!("memctx: context forest ({} roots): grand total={} used={}",
+        lines.len(), tot.0, tot.1))?;
+    for l in lines {
+        say(l)?;
+    }
+
+    let rc = relcache::RelationCacheCensus();
+    say(format!(
+        "memctx: relcache entries={} nailed={} invalid={} stale_lineages={} side_cache_entries={} est_global_heap_bytes={}",
+        rc.entries, rc.nailed, rc.invalid, rc.stale_lineages, rc.side_cache_entries,
+        rc.est_heap_bytes
+    ))?;
+    let (mirrors, mirrors_live) = relcache::l2core::MirrorCensus();
+    say(format!(
+        "memctx: relcache l2 shells: tupdesc_mirrors={mirrors} live={mirrors_live}"
+    ))?;
+
+    let (ch_ntup, rows) = catcache::CatCacheCensus();
+    let payload: usize = rows.iter().map(|r| r.payload_bytes).sum();
+    let arena: usize = rows.iter().map(|r| r.arena_bytes).sum();
+    let shared: i32 = rows.iter().map(|r| r.shared).sum();
+    say(format!(
+        "memctx: catcache total_tuples={ch_ntup} shared_tuples={shared} private_payload_bytes={payload} arena_bytes={arena}"
+    ))?;
+    let mut rows = rows;
+    rows.sort_by_key(|r| core::cmp::Reverse(r.payload_bytes + r.arena_bytes));
+    for r in rows.iter().take(15) {
+        say(format!(
+            "memctx:   cache id={} rel={} ntup={} nlist={} pinned={} shared={} payload={} arena={}",
+            r.id,
+            r.relname.as_deref().unwrap_or("?"),
+            r.ntup, r.nlist, r.pinned, r.shared, r.payload_bytes, r.arena_bytes
+        ))?;
+    }
+
+    let (nsrc, nplan, nsaved) = plancache::PlanCacheCensus();
+    say(format!("memctx: plancache sources={nsrc} plans={nplan} saved={nsaved}"))?;
+
+    // D3.2: the process-global L2 (counted once per process, not per backend).
+    let l2 = ::l2cache::stats();
+    say(format!(
+        "memctx: l2cache entries={} bytes={} hits={} misses={} inserts={} herd_waits={} (process-wide)",
+        l2.entries, l2.bytes, l2.hits, l2.misses, l2.inserts, l2.herd_waits
+    ))?;
+    say(format!(
+        "memctx: process-wide context blocks={} bytes",
+        ::mcx::global_footprint::bytes()
+    ))?;
+
+    tcop_dest::NullCommand(elog::config::where_to_send_output())
+}
+
 // GL-MEMWATCH-1: the deliberate context hog behind the developer GUC
 // pgrust.memory_watchdog_test_hog. Allocates (and touches — RSS must grow)
 // `mb` one-MB slabs into a session-lifetime "WatchdogTestHog" context and
@@ -230,6 +319,22 @@ fn watchdog_test_hog(mb: usize) {
     }
 }
 
+// `pgrust: admission stats` — one NOTICE with the D1 gate and D6 queue
+// counters, then an empty-query response. Read-only, always available.
+fn admission_stats_command() -> PgResult<()> {
+    let (active, waiters, total_waits, total_wait_us) = crate::admission::stats();
+    let (queued, total_queued, served, timeouts, hangups) = lmgr_proc::connqueue::stats();
+    ereport(types_error::NOTICE)
+        .errmsg(format!(
+            "admission stats: max_active_queries active={active} waiters={waiters} \
+             total_waits={total_waits} total_wait_ms={} | connection_queue queued={queued} \
+             total_queued={total_queued} served={served} timeouts={timeouts} hangups={hangups}",
+            total_wait_us / 1000,
+        ))
+        .finish(loc(0, "admission_stats_command"))?;
+    tcop_dest::NullCommand(elog::config::where_to_send_output())
+}
+
 pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgResult<()> {
     // Crash-restart test injection: PANIC-class fault on demand, env-gated so
     // the surface is inert in production (notes/crash-restart-design.md).
@@ -249,6 +354,19 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
         if std::env::var_os("PGRUST_CRASH_TEST").is_some() {
             return crash_backend_injection(args);
         }
+    }
+
+    // Admission-control observability (connection-scaling D1+D6): read-only
+    // counter dump over the pgrust: debug command channel. Deliberately
+    // ahead of the admission gate below — the diagnostic must not queue.
+    if query_string == "pgrust: admission stats" {
+        return admission_stats_command();
+    }
+    // D3.0 memory-census probe: dump this backend's memory estate (contexts
+    // + cache entry counts) as NOTICEs. Superuser-gated, read-only.
+    // (psql sends "stmt;" — accept an optional trailing semicolon.)
+    if query_string.trim().trim_end_matches(';').trim_end() == "pgrust: memctx" {
+        return memctx_dump();
     }
 
     // GL-MEMWATCH-1 test instrumentation (developer GUC, default 0 = one
@@ -271,6 +389,14 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
         backend_status_seams::BackendState::STATE_RUNNING,
         Some(query_string),
     );
+
+    // D1 max_active_queries gate (docs/design/connection-scaling.md §D1):
+    // acquired for the whole message scope, AFTER activity reporting (so a
+    // waiter shows active with its query and the MaxActiveQueries wait
+    // event in pg_stat_activity) but BEFORE the transaction starts, any
+    // snapshot is taken, or any lock acquired; the guard's drop releases
+    // on every exit path (Ok, Err unwind, panic).
+    let _admission = crate::admission::acquire_for_statement()?;
 
     if save_log_statement_stats {
         ResetUsage();

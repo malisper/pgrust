@@ -888,6 +888,15 @@ pub fn exec_execute_message<'mcx>(
         backend_status_seams::BackendState::STATE_RUNNING,
         Some(source_text),
     );
+
+    // D1 max_active_queries gate (docs/design/connection-scaling.md §D1):
+    // the extended-protocol execution entry, gated exactly like
+    // exec_simple_query — after activity reporting (waiters visible in
+    // pg_stat_activity as active on MaxActiveQueries), before the
+    // transaction/snapshot/locks (everything above is session-local portal
+    // bookkeeping); the guard's drop releases on every exit path.
+    let _admission = crate::admission::acquire_for_statement()?;
+
     {
         let stmts = portal.borrow().stmts;
         if !stmts.is_null() {
