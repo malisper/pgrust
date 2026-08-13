@@ -2,9 +2,12 @@
 // state, so every shared field is an atomic or an UnsafeCell slot. C's plain
 // accesses under SInval{Read,Write}Lock map to Relaxed (the LWLock provides
 // the ordering, as in C); C's tolerated unlocked hasMessages read
-// (sinvaladt.c:483-495) is an Acquire load paired with the sender's Release
-// store; maxMsgNum keeps C's msgnumLock spinlock as the publication barrier
-// for buffer slots (sinvaladt.c:95-101).
+// (sinvaladt.c:483-495) is a SeqCst load paired with the sender's SeqCst
+// store — SeqCst, not Acquire/Release, because it must also pair with the
+// SeqCst fast-path strong-lock-count protocol (lock/src/fastpath.rs), where C
+// relies on its full-barrier spinlocks/LWLocks; maxMsgNum keeps C's
+// msgnumLock spinlock as the publication barrier for buffer slots
+// (sinvaladt.c:95-101).
 #![allow(non_snake_case)]
 
 use std::cell::{Cell, RefCell, UnsafeCell};
@@ -12,7 +15,7 @@ use std::mem::size_of;
 use std::ptr::NonNull;
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicUsize,
-    Ordering::{Acquire, Relaxed, Release},
+    Ordering::{Acquire, Relaxed, Release, SeqCst},
 };
 
 use elog::elog;
@@ -451,7 +454,12 @@ pub fn SIInsertDataEntries(data: &[SharedInvalidationMessage]) -> PgResult<()> {
             let procno = seg.pgprocnos()[i].load(Relaxed);
             seg.proc_states()[procno as usize]
                 .hasMessages
-                .store(true, Release);
+                // SeqCst: pairs with the SeqCst strong-lock-count protocol
+                // (lock/src/fastpath.rs) so a backend whose fast-path grant
+                // observes a strong locker's release also observes this
+                // store — an invalidation must never be missed past a
+                // freshly granted lock.
+                .store(true, SeqCst);
         }
 
         LWLockRelease(write_lock)?;
@@ -463,7 +471,7 @@ fn SIGetDataEntries(seg: SISeg, data: &mut [SharedInvalidationMessage]) -> PgRes
     let my = MyProcNumber();
     let state = &seg.proc_states()[my as usize];
 
-    if !state.hasMessages.load(Acquire) {
+    if !state.hasMessages.load(SeqCst) {
         return Ok(0);
     }
 
@@ -525,7 +533,7 @@ pub fn ReceiveSharedInvalidMessages(
             let procno = st.my_procno.get();
             if procno >= 0 {
                 let seg = st.seg.get().expect("shared invalidation memory is not attached");
-                if !seg.proc_states()[procno as usize].hasMessages.load(Acquire) {
+                if !seg.proc_states()[procno as usize].hasMessages.load(SeqCst) {
                     return Ok(());
                 }
             }

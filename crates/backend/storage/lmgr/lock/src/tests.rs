@@ -428,3 +428,94 @@ fn dlist_kernel_roundtrip() {
         drop(Box::from_raw(c));
     }
 }
+
+// Regression: the fastpath-lock/sinval memory-ordering contract
+// (XPROTO: strong-lock release must publish the releaser's earlier sinval
+// hasMessages store to any backend whose fast-path grant observes the
+// release).
+//
+// C barrier contract this encodes (PostgreSQL 18, verbatim):
+//   - lock.c:991-997: "LWLockAcquire acts as a memory sequencing point, so
+//     it's safe to assume that any strong locker whose increment to
+//     FastPathStrongRelationLocks->counts becomes visible after we test it
+//     has yet to begin to transfer fast-path locks." The count read itself
+//     (lock.c:999) is unlocked; the increment/decrement sit under
+//     SpinLockAcquire/SpinLockRelease (lock.c:1837-1841, 1869-1874).
+//   - s_lock.h:59-77: TAS() must fence so later loads/stores can't move
+//     above the acquisition, and S_UNLOCK() so earlier loads AND stores
+//     can't move below the release — full hardware fences on weakly-ordered
+//     platforms.
+//   - sinvaladt.c:425-437: "Releasing SInvalWriteLock will enforce a full
+//     memory barrier, so these (unlocked) [hasMessages=true] changes will be
+//     committed to memory before we exit the function."
+// So in C, a weak locker that observes the strong-count decrement is
+// guaranteed (full barriers on both sides) to also observe the hasMessages
+// store the DDL backend made before releasing its strong lock. Rust's
+// Acquire/Release Spinlock (types_storage/src/storage.rs: tas = swap(1,
+// Acquire), unlock = store(0, Release)) plus a plain SyncCell count read
+// gives NO such edge: nothing forbids the count decrement becoming visible
+// before the earlier hasMessages store on ARM. The fix pairs SeqCst count
+// transitions (fastpath.rs) with SeqCst hasMessages ops (sinval), restoring
+// the C guarantee: observing the decrement implies observing every store the
+// releasing backend made before it.
+//
+// The test drives the ported protocol shape directly: a "DDL" thread stores
+// a SeqCst flag (standing for sinval's hasMessages) and then decrements the
+// strong-lock count; a "weak locker" thread that observes the count reach
+// zero must observe the flag. Deterministic under the fixed SeqCst pairing;
+// under the old plain-read/Acq-Rel code this assert could fail on
+// weakly-ordered hardware (the explore-branch stressor saw 1-4 misses per
+// ~3000 probes on Apple Silicon) and the unlocked SyncCell read was a data
+// race outright.
+#[test]
+fn strong_lock_release_publishes_prior_sinval_store() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
+
+    setup();
+
+    // A partition no LOCKTAG in this test suite is known to hash into;
+    // foreign traffic would only lengthen the count==0 wait, not corrupt it.
+    const PART: u32 = 1013;
+    const ROUNDS: usize = 500;
+
+    static HAS_MESSAGES: AtomicBool = AtomicBool::new(false);
+    static ROUND_START: AtomicUsize = AtomicUsize::new(0);
+    static ROUND_DONE: AtomicUsize = AtomicUsize::new(0);
+
+    let reader = std::thread::spawn(|| {
+        for i in 1..=ROUNDS {
+            while ROUND_START.load(SeqCst) < i {
+                std::thread::yield_now();
+            }
+            // C's unlocked fast-path probe (lock.c:999): once the strong
+            // locker's release (count back to zero) is visible ...
+            while crate::fastpath::strong_lock_count(PART) != 0 {
+                std::thread::yield_now();
+            }
+            // ... its pre-release invalidation flag must be visible too.
+            assert!(
+                HAS_MESSAGES.load(SeqCst),
+                "round {i}: observed strong-lock release without the \
+                 preceding sinval store — fastpath/sinval ordering broken"
+            );
+            ROUND_DONE.store(i, SeqCst);
+        }
+    });
+
+    for i in 1..=ROUNDS {
+        HAS_MESSAGES.store(false, SeqCst);
+        // Strong locker: count up (BeginStrongLockAcquire) ...
+        crate::fastpath::increment_strong_lock_count_partition(PART);
+        ROUND_START.store(i, SeqCst);
+        // ... queue the invalidation (SIInsertDataEntries hasMessages=true,
+        // done before the lock release) ...
+        HAS_MESSAGES.store(true, SeqCst);
+        // ... release the strong lock (count back down).
+        crate::fastpath::decrement_strong_lock_count_partition(PART);
+        while ROUND_DONE.load(SeqCst) < i {
+            std::thread::yield_now();
+        }
+    }
+    reader.join().unwrap();
+}

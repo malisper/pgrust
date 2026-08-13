@@ -28,10 +28,25 @@ pub(crate) fn FastPathStrongLockHashPartition(hashcode: u32) -> u32 {
 
 struct FastPathStrongRelationLockData {
     mutex: Spinlock,
-    count: [SyncCell<u32>; FAST_PATH_STRONG_LOCK_HASH_PARTITIONS],
+    // Atomics with SeqCst transitions, NOT SyncCell + the spinlock alone: the
+    // unlocked fast-path read below is the ONLY synchronization edge between
+    // a strong locker's release and a weak locker that then fast-path-grants
+    // without ever touching shared lock state. C gets this for free because
+    // its spinlocks/atomics are documented full memory barriers; Rust
+    // Acquire/Release spinlocks are weaker, and on ARM the plain
+    // count-decrement could become visible BEFORE the releasing backend's
+    // earlier sinval hasMessages store — the weak locker then fast-paths,
+    // AcceptInvalidationMessages sees a stale-false hasMessages, and a
+    // just-invalidated cache entry survives past a freshly granted lock
+    // (found by the D3.2 shared-L2 concurrent-DDL stressor, ~1/3000 probes on
+    // Apple Silicon). SeqCst count ops + SeqCst hasMessages ops (sinval)
+    // restore C's guarantee: observing the decrement implies observing every
+    // store the releasing backend made before it.
+    count: [std::sync::atomic::AtomicU32; FAST_PATH_STRONG_LOCK_HASH_PARTITIONS],
 }
 
-const ZERO_COUNT: SyncCell<u32> = SyncCell::new(0);
+#[allow(clippy::declare_interior_mutable_const)]
+const ZERO_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 static FAST_PATH_STRONG_RELATION_LOCKS: FastPathStrongRelationLockData =
     FastPathStrongRelationLockData {
@@ -55,22 +70,26 @@ fn strong_spin_acquire() {
 }
 
 pub(crate) fn strong_lock_count(fasthashcode: u32) -> u32 {
-    // C reads the count unlocked after an LWLock memory-sequencing point.
-    FAST_PATH_STRONG_RELATION_LOCKS.count[fasthashcode as usize].get()
+    // C reads the count unlocked after an LWLock memory-sequencing point;
+    // SeqCst here pairs with the SeqCst decrement + sinval hasMessages ops
+    // (see FastPathStrongRelationLockData) to keep invalidation delivery
+    // ordered before a fast-path grant that observes the release.
+    FAST_PATH_STRONG_RELATION_LOCKS.count[fasthashcode as usize]
+        .load(std::sync::atomic::Ordering::SeqCst)
 }
 
 pub(crate) fn increment_strong_lock_count_partition(fasthashcode: u32) {
     strong_spin_acquire();
-    let cell = &FAST_PATH_STRONG_RELATION_LOCKS.count[fasthashcode as usize];
-    cell.set(cell.get() + 1);
+    FAST_PATH_STRONG_RELATION_LOCKS.count[fasthashcode as usize]
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     FAST_PATH_STRONG_RELATION_LOCKS.mutex.unlock();
 }
 
 pub(crate) fn decrement_strong_lock_count_partition(fasthashcode: u32) {
     strong_spin_acquire();
-    let cell = &FAST_PATH_STRONG_RELATION_LOCKS.count[fasthashcode as usize];
-    debug_assert!(cell.get() > 0);
-    cell.set(cell.get() - 1);
+    let prev = FAST_PATH_STRONG_RELATION_LOCKS.count[fasthashcode as usize]
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    debug_assert!(prev > 0);
     FAST_PATH_STRONG_RELATION_LOCKS.mutex.unlock();
 }
 
@@ -83,7 +102,7 @@ pub(crate) fn decrement_strong_lock_count(hashcode: u32) {
 pub(crate) fn reset_strong_locks_after_crash() {
     FAST_PATH_STRONG_RELATION_LOCKS.mutex.unlock();
     for cell in FAST_PATH_STRONG_RELATION_LOCKS.count.iter() {
-        cell.set(0);
+        cell.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
