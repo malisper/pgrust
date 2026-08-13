@@ -930,9 +930,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      snapshot arrays. Pure perf heuristic: a fresh thread rederives
     //      its high-water marks from the next snapshots; safe to lose,
     //      nothing an envelope could capture or restore.
-    //   +1 tcop/postgres/src/admission.rs — DEPTH: per-thread admission
-    //      reentrancy counter, nonzero only inside a running query and
-    //      never live across a session boundary; nothing to hand off.
+    //   +1 tcop/postgres/src/admission.rs — DEPTH + SLOT_HELD +
+    //      EXIT_HOOK_ARMED (one thread_local! site): admission reentrancy
+    //      counter, the transaction-grain gate slot (SOAK3 §6a fix:
+    //      SLOT_HELD is live between the statements of an open
+    //      transaction — but an open transaction pins its thread exactly
+    //      like PGPROC lock state, so it cannot migrate with a session by
+    //      definition; released by guard drop / Sync / error recovery /
+    //      on_proc_exit), and the once-per-backend exit-hook flag.
     //   +1 utils/cache/l2cache/src/lib.rs — VIEW_INIT/CAT_VIEW/REL_VIEW:
     //      per-thread L2 generation views (coherence markers). A fresh
     //      thread sees 0 and revalidates against the shared generation

@@ -302,6 +302,12 @@ pub(crate) fn error_recovery(
 
     set_xact_started(false);
 
+    // D1 transaction-grain admission, release point (3): if the abort above
+    // ended the transaction (single-statement or implicit-block error), the
+    // slot returns here; an explicit block survives in TBLOCK_ABORT and
+    // keeps its slot until the client's ROLLBACK.
+    crate::admission::release_if_txn_over();
+
     if pqcomm::pq_is_reading_msg() {
         return Err(ereport(FATAL)
             .errcode(ERRCODE_PROTOCOL_VIOLATION)
@@ -673,6 +679,9 @@ fn dispatch_message<'mcx>(
             pqformat::pq_getmsgend(input_message)?;
             xact::EndImplicitTransactionBlock();
             simple_query::finish_xact_command()?;
+            // D1 transaction-grain admission, release point (2): Sync ends a
+            // pipeline's (implicit) transaction outside any statement guard.
+            crate::admission::release_if_txn_over();
             crate::stmt_trace::probe("s.commit");
             state.send_ready_for_query = true;
         }
