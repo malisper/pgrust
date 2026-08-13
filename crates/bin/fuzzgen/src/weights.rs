@@ -1447,20 +1447,35 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "spill:sort:desc", default: 1.5 },
     ProdWeight { name: "spill:sort:bounded", default: 1.0 },
     ProdWeight { name: "spill:sort:abbrev", default: 1.5 },
+    // W5 r2: narrow sort at 256kB — grow_memtuples growth/clamp edges.
+    ProdWeight { name: "spill:sort:grow", default: 1.5 },
     // spill: serial hash-join arms.
     ProdWeight { name: "spill:hj:inner", default: 2.0 },
     ProdWeight { name: "spill:hj:skew", default: 2.0 },
     ProdWeight { name: "spill:hj:rows", default: 1.5 },
     ProdWeight { name: "spill:hj:outer", default: 1.5 },
     ProdWeight { name: "spill:hj:antisemi", default: 1.5 },
+    // W5 r2: right-fill/right-semi/right-anti, oversized build tuples,
+    // bucket-grow (nbatch==1), and empty-side early-out arms.
+    ProdWeight { name: "spill:hj:right", default: 1.5 },
+    ProdWeight { name: "spill:hj:bigtuple", default: 1.5 },
+    ProdWeight { name: "spill:hj:growbuckets", default: 1.5 },
+    ProdWeight { name: "spill:hj:empty", default: 1.0 },
     // spill: HashAgg spill shapes.
     ProdWeight { name: "spill:ha:wrap", default: 2.0 },
     ProdWeight { name: "spill:ha:distinct", default: 1.5 },
     ProdWeight { name: "spill:ha:gsets", default: 1.5 },
+    // W5 r2: AGG_MIXED (sorted rollup chain + hashed set) multi-phase.
+    ProdWeight { name: "spill:ha:mixed", default: 1.5 },
     // spill: sort-based aggregation shapes.
     ProdWeight { name: "spill:ga:group", default: 2.0 },
     ProdWeight { name: "spill:ga:distinct", default: 1.5 },
     ProdWeight { name: "spill:ga:oset", default: 1.5 },
+    // W5 r2: FILTER+strict-NULL transitions, hypothetical-set aggregates,
+    // low-cardinality DATUM sort (abbrev abort).
+    ProdWeight { name: "spill:ga:filter", default: 1.5 },
+    ProdWeight { name: "spill:ga:hypo", default: 1.5 },
+    ProdWeight { name: "spill:ga:dpad", default: 1.5 },
     // spill: window-over-spilled-tuplestore shapes.
     ProdWeight { name: "spill:win:rowsframe", default: 2.0 },
     ProdWeight { name: "spill:win:part", default: 1.5 },
@@ -1936,6 +1951,113 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "cfgm:clienc", default: 1.0 },
     ProdWeight { name: "cfgm:ok", default: 6.0 },
     ProdWeight { name: "cfgm:err", default: 1.0 },
+    // btbrin (W5-BTBRIN) shape picks: btree ALT-PATH + BRIN drain arms.
+    // Even weights — the drain wants each shape exercised roughly equally
+    // since every one covers a disjoint C region.
+    ProdWeight { name: "btbrin:keys", default: 1.0 },
+    ProdWeight { name: "btbrin:uniq", default: 1.0 },
+    ProdWeight { name: "btbrin:scan", default: 1.0 },
+    ProdWeight { name: "btbrin:split", default: 1.0 },
+    ProdWeight { name: "btbrin:pagedel", default: 1.0 },
+    ProdWeight { name: "btbrin:build", default: 1.0 },
+    ProdWeight { name: "btbrin:brinup", default: 1.0 },
+    ProdWeight { name: "btbrin:brininc", default: 1.0 },
+    ProdWeight { name: "btbrin:brinmm", default: 1.0 },
+    ProdWeight { name: "btbrin:brinmaint", default: 1.0 },
+    ProdWeight { name: "btbrin:opfam", default: 1.0 },
+    // heap (W5-HEAP): the heapam alt-path drain module. Action mix biased
+    // toward the tuple-state churn arms (hot/nonhot/abort/lock) with vacuum/
+    // cluster/toast at modest weight (each is a whole-heap or bulk group).
+    ProdWeight { name: "heap:create", default: 1.5 },
+    ProdWeight { name: "heap:drop", default: 0.3 },
+    ProdWeight { name: "heap:hot", default: 3.0 },
+    ProdWeight { name: "heap:nonhot", default: 2.5 },
+    ProdWeight { name: "heap:abortchurn", default: 2.0 },
+    ProdWeight { name: "heap:lock", default: 2.0 },
+    ProdWeight { name: "heap:toastwrite", default: 1.5 },
+    ProdWeight { name: "heap:toastread", default: 1.5 },
+    ProdWeight { name: "heap:toastupd", default: 1.5 },
+    ProdWeight { name: "heap:vacuum", default: 2.0 },
+    ProdWeight { name: "heap:trunc", default: 1.0 },
+    ProdWeight { name: "heap:allvis", default: 1.5 },
+    ProdWeight { name: "heap:newpage", default: 1.0 },
+    ProdWeight { name: "heap:cic", default: 1.0 },
+    ProdWeight { name: "heap:cluster", default: 1.0 },
+    ProdWeight { name: "heap:tid", default: 1.5 },
+    ProdWeight { name: "heap:serial", default: 1.5 },
+    // create picks (fillfactor / base-load rows / toast_tuple_target /
+    // storage class / replica identity).
+    ProdWeight { name: "heap:ff:30", default: 1.5 },
+    ProdWeight { name: "heap:ff:70", default: 1.0 },
+    ProdWeight { name: "heap:ff:100", default: 1.0 },
+    ProdWeight { name: "heap:rows:1500", default: 1.5 },
+    ProdWeight { name: "heap:rows:3000", default: 1.5 },
+    ProdWeight { name: "heap:rows:6000", default: 1.0 },
+    ProdWeight { name: "heap:tt:default", default: 1.0 },
+    ProdWeight { name: "heap:tt:256", default: 1.0 },
+    ProdWeight { name: "heap:st:extended", default: 2.0 },
+    ProdWeight { name: "heap:st:main", default: 1.0 },
+    ProdWeight { name: "heap:st:plain", default: 1.0 },
+    ProdWeight { name: "heap:ri:default", default: 1.5 },
+    ProdWeight { name: "heap:ri:full", default: 1.0 },
+    // non-HOT update shapes.
+    ProdWeight { name: "heap:nonhot:key", default: 2.0 },
+    ProdWeight { name: "heap:nonhot:pk", default: 1.0 },
+    ProdWeight { name: "heap:nonhot:both", default: 1.5 },
+    // aborted-write shapes.
+    ProdWeight { name: "heap:abort:rollback", default: 2.0 },
+    ProdWeight { name: "heap:abort:savepoint", default: 2.0 },
+    ProdWeight { name: "heap:abort:insabort", default: 1.0 },
+    // tuple lock modes and shapes.
+    ProdWeight { name: "heap:lock:keyshare", default: 1.5 },
+    ProdWeight { name: "heap:lock:share", default: 1.5 },
+    ProdWeight { name: "heap:lock:nokeyupd", default: 1.5 },
+    ProdWeight { name: "heap:lock:update", default: 1.5 },
+    ProdWeight { name: "heap:lock:plain", default: 1.5 },
+    ProdWeight { name: "heap:lock:upgrade", default: 1.5 },
+    ProdWeight { name: "heap:lock:abortlock", default: 1.5 },
+    ProdWeight { name: "heap:lock:lockwrite", default: 2.0 },
+    // toast write / read / update shapes.
+    ProdWeight { name: "heap:tw:comp", default: 2.0 },
+    ProdWeight { name: "heap:tw:incomp", default: 2.0 },
+    ProdWeight { name: "heap:tw:both", default: 1.5 },
+    ProdWeight { name: "heap:tr:slice", default: 2.0 },
+    ProdWeight { name: "heap:tr:len", default: 1.5 },
+    ProdWeight { name: "heap:tr:full", default: 1.0 },
+    ProdWeight { name: "heap:tr:size", default: 1.5 },
+    ProdWeight { name: "heap:tu:append", default: 1.5 },
+    ProdWeight { name: "heap:tu:null", default: 1.0 },
+    ProdWeight { name: "heap:tu:plaincol", default: 1.5 },
+    ProdWeight { name: "heap:tu:delins", default: 1.5 },
+    // vacuum variants.
+    ProdWeight { name: "heap:vac:plain", default: 2.0 },
+    ProdWeight { name: "heap:vac:freeze", default: 1.5 },
+    ProdWeight { name: "heap:vac:minage", default: 1.5 },
+    ProdWeight { name: "heap:vac:skip", default: 1.5 },
+    ProdWeight { name: "heap:vac:indexoff", default: 1.5 },
+    ProdWeight { name: "heap:vac:indexon", default: 1.5 },
+    ProdWeight { name: "heap:vac:verbose", default: 1.0 },
+    // create-index-concurrently, cluster, tid-scan shapes.
+    ProdWeight { name: "heap:cic:conc", default: 1.5 },
+    ProdWeight { name: "heap:cic:plain", default: 1.5 },
+    ProdWeight { name: "heap:cluster:pk", default: 1.5 },
+    ProdWeight { name: "heap:cluster:k", default: 1.5 },
+    ProdWeight { name: "heap:cluster:full", default: 1.5 },
+    ProdWeight { name: "heap:tid:eq", default: 1.5 },
+    ProdWeight { name: "heap:tid:range", default: 1.5 },
+    // partalt (W5-PART): partition-prune / partitionwise ALT-PATH shape
+    // selection. clauses+runtime carry the partprune.c match/step drain;
+    // pwjmerge+pwagg carry the partition_bounds_merge / pwise-grouping
+    // mass; multilevel+reparam carry the hierarchical-prune and
+    // reparameterize_path_by_child arms; hashfn carries
+    // satisfies_hash_partition + partition deparse.
+    ProdWeight { name: "partalt:clauses", default: 1.6 },
+    ProdWeight { name: "partalt:runtime", default: 1.5 },
+    ProdWeight { name: "partalt:multilevel", default: 1.3 },
+    ProdWeight { name: "partalt:pwjmerge", default: 1.4 },
+    ProdWeight { name: "partalt:pwagg", default: 1.3 },
+    ProdWeight { name: "partalt:reparam", default: 1.3 },
+    ProdWeight { name: "partalt:hashfn", default: 1.0 },
 ];
 
 /// Resolved weight vector, parallel to `PROD_WEIGHTS`.

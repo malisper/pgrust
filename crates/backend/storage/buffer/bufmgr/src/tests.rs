@@ -15,6 +15,9 @@ use super::*;
 static SMGR_READS: AtomicU64 = AtomicU64::new(0);
 static REL_READS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
 static READV_SIZES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+// Settable backing for the PGC_POSTMASTER io_max_combine_limit GUC so tests can
+// drive the clamp (default 16 matches the harness's prior fixed accessor).
+static TEST_IO_MAX_COMBINE_LIMIT: AtomicI32 = AtomicI32::new(16);
 // Widens the BM_IO_IN_PROGRESS window so a second reader lands in WaitIO.
 const SLOW_READ_REL: u32 = 9400;
 
@@ -265,7 +268,10 @@ fn setup_once() {
         init_seams();
         aio_core::init_seams();
         guc_tables::vars::io_max_combine_limit.install_if_absent(
-            guc_tables::GucVarAccessors { get: || 16, set: |_| {} },
+            guc_tables::GucVarAccessors {
+                get: || TEST_IO_MAX_COMBINE_LIMIT.load(Ordering::Relaxed),
+                set: |v| TEST_IO_MAX_COMBINE_LIMIT.store(v, Ordering::Relaxed),
+            },
         );
         aio_core::AioShmemSize().unwrap();
         aio_core::AioShmemInit().unwrap();
@@ -368,6 +374,60 @@ fn batched_read_caps_by_hint_and_combine_limit() {
     let (b, _) = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 200, 1, None).unwrap();
     assert_eq!(*READV_SIZES.lock().unwrap().last().unwrap(), 1);
     ReleaseBuffer(b).unwrap();
+}
+
+// Regression for W5-CFGENC-F1 / CFG2-F4 / W4-F2: the USERSET io_combine_limit
+// must never size a batched read larger than the PGC_POSTMASTER
+// io_max_combine_limit, which sizes the AIO handle-data region. An unclamped
+// batch is an out-of-bounds heap write in a release build (debug_asserts off),
+// so this test asserts the *observed* batch size (READV_SIZES) is clamped and
+// the reads complete with valid results — it does not rely on any debug_assert.
+#[test]
+fn io_combine_limit_clamped_to_io_max_combine_limit() {
+    let _g = setup();
+    let smgr = RelFileLocatorBackend {
+        locator: rloc(9455),
+        backend: INVALID_PROC_NUMBER,
+    };
+
+    let restore_max = TEST_IO_MAX_COMBINE_LIMIT.load(Ordering::Relaxed);
+
+    // Trigger CFG2-F4: io_max_combine_limit (4) < io_combine_limit (32).
+    // The batch must clamp to io_max (4), not the raw 32.
+    TEST_IO_MAX_COMBINE_LIMIT.store(4, Ordering::Relaxed);
+    crate::gucs::set_io_combine_limit_guc(32);
+    assert_eq!(crate::gucs::io_combine_limit(), 4, "effective limit = min(32, 4)");
+    let (b, _) = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 0, 10_000, None).unwrap();
+    let sz = *READV_SIZES.lock().unwrap().last().unwrap();
+    assert!(sz <= 4, "batch {sz} must not exceed io_max_combine_limit 4");
+    let page = buffer_page_ref(b);
+    assert!(!page.is_new(), "clamped batched read still returns a valid page");
+    ReleaseBuffer(b).unwrap();
+
+    // Trigger W5-CFGENC-F1 / startup case: io_max_combine_limit = 1 with the
+    // default io_combine_limit (16) — no SET io_combine_limit runs to re-clamp.
+    // The batch must degrade to single-block reads, not overrun a 1-block region.
+    TEST_IO_MAX_COMBINE_LIMIT.store(1, Ordering::Relaxed);
+    crate::gucs::set_io_combine_limit_guc(16);
+    assert_eq!(crate::gucs::io_combine_limit(), 1, "effective limit = min(16, 1)");
+    let (b, _) = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 100, 10_000, None).unwrap();
+    let sz = *READV_SIZES.lock().unwrap().last().unwrap();
+    assert_eq!(sz, 1, "io_max_combine_limit 1 forces single-block reads");
+    ReleaseBuffer(b).unwrap();
+
+    // Trigger W4-F2: io_combine_limit = 17 alone (io_max at default 16). The
+    // raw 17 exceeds both io_max and the region; clamp to 16.
+    TEST_IO_MAX_COMBINE_LIMIT.store(16, Ordering::Relaxed);
+    crate::gucs::set_io_combine_limit_guc(17);
+    assert_eq!(crate::gucs::io_combine_limit(), 16, "effective limit = min(17, 16)");
+    let (b, _) = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 200, 10_000, None).unwrap();
+    let sz = *READV_SIZES.lock().unwrap().last().unwrap();
+    assert!(sz <= 16, "batch {sz} must not exceed io_max_combine_limit 16");
+    ReleaseBuffer(b).unwrap();
+
+    // Restore harness defaults for subsequent serialized tests.
+    crate::gucs::set_io_combine_limit_guc(16);
+    TEST_IO_MAX_COMBINE_LIMIT.store(restore_max, Ordering::Relaxed);
 }
 
 #[test]

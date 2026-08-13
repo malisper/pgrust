@@ -12,6 +12,7 @@ use crate::ddl::{DdlEventKind, DdlState};
 use crate::dml::DmlState;
 use crate::objddl::ObjState;
 use crate::geo::GeoState;
+use crate::heap::HeapState;
 use crate::idx::IdxState;
 use crate::par::ParState;
 use crate::plansel::PlanState;
@@ -94,6 +95,7 @@ pub fn run_session_probed(cfg: &SessionConfig, catalog: &Catalog) -> SessionOutp
     let mut spill_state = SpillState::new();
     let mut plan_state = PlanState::new();
     let mut exr_state = ExrState::new();
+    let mut heap_state = HeapState::new();
     let mut geo_state = GeoState::new();
     let mut ts_state = TsState::new();
     let mut cursor_state = CursorState::new();
@@ -124,6 +126,7 @@ pub fn run_session_probed(cfg: &SessionConfig, catalog: &Catalog) -> SessionOutp
             std::mem::swap(&mut g.spill, &mut spill_state);
             std::mem::swap(&mut g.plan, &mut plan_state);
             std::mem::swap(&mut g.exr, &mut exr_state);
+            std::mem::swap(&mut g.heap, &mut heap_state);
             std::mem::swap(&mut g.geo, &mut geo_state);
             std::mem::swap(&mut g.ts, &mut ts_state);
             std::mem::swap(&mut g.cursor, &mut cursor_state);
@@ -143,6 +146,7 @@ pub fn run_session_probed(cfg: &SessionConfig, catalog: &Catalog) -> SessionOutp
             std::mem::swap(&mut g.spill, &mut spill_state);
             std::mem::swap(&mut g.plan, &mut plan_state);
             std::mem::swap(&mut g.exr, &mut exr_state);
+            std::mem::swap(&mut g.heap, &mut heap_state);
             std::mem::swap(&mut g.geo, &mut geo_state);
             std::mem::swap(&mut g.ts, &mut ts_state);
             std::mem::swap(&mut g.views, &mut views_state);
@@ -157,6 +161,7 @@ pub fn run_session_probed(cfg: &SessionConfig, catalog: &Catalog) -> SessionOutp
             .chain(spill_state.take_events())
             .chain(plan_state.take_events())
             .chain(exr_state.take_events())
+            .chain(heap_state.take_events())
             .chain(geo_state.take_events())
             .chain(views_state.take_events())
         {
@@ -315,7 +320,7 @@ mod tests {
         // the two new battery modules emit chunky groups that dilute the
         // per-module draw further; explain needs the longer stream to
         // reliably fire at this seed.
-        let long = run_session(&SessionConfig { budget: 1400, ..cfg(12) }, &cat);
+        let long = run_session(&SessionConfig { budget: 1800, ..cfg(12) }, &cat);
         let all: Vec<String> = long.iter().flat_map(|s| s.productions.clone()).collect();
         for prefix in [
             "colref",
@@ -371,10 +376,11 @@ mod tests {
         let mut c = cfg(9);
         c.toggles = ToggleVector::parse(
             "expr=off,joins=off,subq=off,agg=off,win=off,dml=on,txn=off,\
-             ddl=off,types=off,explain=off,util=off,part=off,\
+             ddl=off,types=off,explain=off,util=off,part=off,partalt=off,\
              objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
              nodes=off,obs=off,objid=off,einterp=off,exd=off,spill=off,\
-             earm=off,plansel=off,earm2=off,exr=off,numx=off,pubsub=off,pgram=off,opt2=off,cfgm=off",
+             earm=off,plansel=off,earm2=off,exr=off,numx=off,pubsub=off,pgram=off,opt2=off,cfgm=off,\
+             heap=off",
         )
         .unwrap();
         c.weights = WeightTable::parse(
@@ -388,8 +394,11 @@ mod tests {
             std::collections::HashMap::new();
         for s in &stmts {
             let Some(rest) = s.sql.strip_prefix("INSERT INTO ") else { continue };
+            // Only single-row VALUES inserts carry a directly-parseable pk;
+            // bulk INSERT ... SELECT into other modules' disjoint fixtures
+            // is noise for this dml-allocator check, so skip it.
+            let Some((_, vals)) = s.sql.split_once(" VALUES (") else { continue };
             let table = rest.split(' ').next().unwrap().to_string();
-            let vals = s.sql.split_once(" VALUES (").unwrap().1;
             let pk = vals.split(',').next().unwrap().to_string();
             pks_by_table.entry(table).or_default().push(pk);
         }
@@ -511,8 +520,10 @@ mod tests {
         // this budget. Re-bumped 5000 -> 5800 when the CFG-lane cfgm
         // module joined the registry, then 5800 -> 6600 when the W4-WALK
         // lane's 11 einterp:w4:* shapes (some large, e.g. the hazard/
-        // wholerow batteries) enlarged average einterp group size.
-        c.budget = 6600;
+        // wholerow batteries) enlarged average einterp group size, then
+        // 6600 -> 8000 when the W5-PART partalt module joined (further
+        // per-module dilution).
+        c.budget = 8000;
         let outp = run_session_probed(&c, &cat);
         let idx_windows: Vec<_> = outp
             .ddl_windows
@@ -597,7 +608,7 @@ mod tests {
         // (round-6 par/coll/mbconv/xnum, round-7 nodes/obs/ssi/admin,
         // round-3 line-drain plansel/earm2/exr/numx/pubsub dilute
         // per-module traffic).
-        c.budget = 6500;
+        c.budget = 7800;
         let outp = run_session_probed(&c, &cat);
         let part_windows: Vec<_> = outp
             .ddl_windows

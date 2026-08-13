@@ -952,7 +952,18 @@ pub(crate) fn ReadBuffer_batched(
     // Without this, a seqscan on a tiny pool pins it whole and any concurrent
     // (or own) allocation dies with "no unpinned buffers available".
     let pin_room = 1 + crate::extend::GetAdditionalPinLimit() as usize;
-    let cap = (crate::gucs::io_combine_limit().clamp(1, MAX_READ_BATCH as i32) as usize)
+    // io_combine_limit() already clamps to io_max_combine_limit; re-apply the
+    // io_max_combine_limit bound here explicitly so the batch derived at this
+    // point can never exceed the io_max_combine_limit-sized AIO handle-data
+    // region regardless of how the effective limit is sourced (W5-CFGENC-F1:
+    // an unclamped batch is a release-build out-of-bounds heap write).
+    let io_max = if guc_tables::vars::io_max_combine_limit.installed() {
+        guc_tables::vars::io_max_combine_limit.read().max(1)
+    } else {
+        i32::MAX
+    };
+    let cap = (crate::gucs::io_combine_limit().min(io_max).clamp(1, MAX_READ_BATCH as i32)
+        as usize)
         .min(nblocks_hint.max(1) as usize)
         .min(pin_room);
 

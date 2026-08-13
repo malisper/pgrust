@@ -42,6 +42,12 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // persistent objects like ddl; the deep coverage comes from OTHER
     // modules targeting its parents, so the selection weight stays low.
     ModuleSpec { name: "part", default_weight: 0.6 },
+    // partalt (W5-PART) drains the ALT-PATH residue around partition
+    // pruning / partitionwise join+agg over its own self-contained,
+    // group-local fz_pa_* fixtures (created and dropped in-group); no
+    // persistent catalog growth, so the selection weight can sit near
+    // the query-module default.
+    ModuleSpec { name: "partalt", default_weight: 0.6 },
     // objddl churns cluster-global objects (roles) and per-db types/stats;
     // several picks emit 3-4 statement groups (SET ROLE brackets, stats
     // create+ANALYZE+probe, coltab), so the weight sits below default.
@@ -197,6 +203,20 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // subtransactions per statement, so the weight sits low (drain arms
     // enable it explicitly via --modules cfgm=on:N).
     ModuleSpec { name: "cfgm", default_weight: 0.3 },
+    // btbrin (W5-BTBRIN) drains btree ALT-PATH (dedup/split/page-delete/
+    // parallel-build/unique-check) and BRIN (summarize/desummarize/
+    // autosummarize/inclusion/minmax_multi) residue behind GUC + data-
+    // size forcing; groups run 20-60 statements over dedicated fz_bb_*
+    // fixtures — opt2-like low weight, enabled explicitly for drain
+    // legs via --modules btbrin=on:N.
+    ModuleSpec { name: "btbrin", default_weight: 0.3 },
+    // heap (W5-HEAP) emits single-session heapam alt-path drain groups over
+    // a purpose-built fz_hp_N fixture (HOT/prune churn, aborted/locked-only
+    // overwrite arms, toast write/read/delete, vacuumlazy freeze/truncate,
+    // CLUSTER/VACUUM FULL, CIC validate scans, TID + serializable-read
+    // entries). A create pick builds a churn-heavy table and vacuum/cluster
+    // picks walk the whole heap, so it sits at a low weight like spill.
+    ModuleSpec { name: "heap", default_weight: 0.5 },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -357,11 +377,11 @@ mod tests {
             ToggleVector::parse(
                 "expr=off,joins=off,subq=off,agg=off,win=off,dml=off,merge=off,\
                  txn=off,ddl=off,types=off,explain=off,util=off,part=off,\
-                 objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
+                 partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
                  dtm=off,adtmisc=off,sqljson=off,plpg=off,coll=off,mbconv=off,\
              xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,\
                  plansel=off,earm2=off,exr=off,numx=off,pubsub=off,ddldeep=off,\
-                 pgram=off,opt2=off,opt3=off,cfgm=off,earm3=off"
+                 pgram=off,opt2=off,opt3=off,cfgm=off,earm3=off,btbrin=off,heap=off"
             )
             .is_err()
         );
@@ -372,11 +392,11 @@ mod tests {
         let tv = ToggleVector::parse(
             "expr=on,joins=off,subq=off,agg=off,win=off,dml=off,merge=off,\
              txn=off,ddl=off,types=off,explain=off,util=off,part=off,\
-             objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
+             partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,geo=off,\
              dtm=off,adtmisc=off,sqljson=off,plpg=off,coll=off,mbconv=off,\
              xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,\
              plansel=off,earm2=off,exr=off,numx=off,pubsub=off,ddldeep=off,\
-             pgram=off,opt2=off,opt3=off,cfgm=off,earm3=off",
+             pgram=off,opt2=off,opt3=off,cfgm=off,earm3=off,btbrin=off,heap=off",
         )
         .unwrap();
         let mut rng = Rng::new(5);

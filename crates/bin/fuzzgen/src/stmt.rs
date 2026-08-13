@@ -23,6 +23,7 @@ use crate::admin::gen_admin_module;
 use crate::adtmisc::gen_adtmisc_module;
 use crate::agg::gen_agg_stmt;
 use crate::catalog::{Catalog, Table};
+use crate::btbrin::gen_btbrin_module;
 use crate::coll::{gen_coll_module, CollState};
 use crate::cursor::{gen_cursor_module, CursorState};
 use crate::ddl::{gen_ddl_module, DdlState};
@@ -37,6 +38,7 @@ use crate::earm3::gen_earm3_module;
 use crate::explain::gen_explain_module;
 use crate::exr::{gen_exr_module, ExrState};
 use crate::geo::{gen_geo_module, GeoState};
+use crate::heap::{gen_heap_module, HeapState};
 use crate::idx::{gen_idx_module, IdxState};
 use crate::join::gen_join_stmt;
 use crate::mbconv::gen_mbconv_module;
@@ -51,6 +53,7 @@ use crate::opt2::gen_opt2_module;
 use crate::opt3::gen_opt3_module;
 use crate::par::{gen_par_module, ParState};
 use crate::part::{gen_part_module, PartState};
+use crate::partalt::gen_partalt_module;
 use crate::pgram::gen_pgram_module;
 use crate::plansel::{gen_plansel_module, PlanState};
 use crate::plpg::{gen_plpg_module, PlpgState};
@@ -129,6 +132,9 @@ pub struct Gen<'a> {
     /// Session-persistent executor-residue fixture model (crate::exr,
     /// LD9); swapped in and out by the session loop like `spill`.
     pub exr: ExrState,
+    /// Session-persistent heapam alt-path fixture model (crate::heap,
+    /// W5-HEAP); swapped in and out by the session loop like `spill`.
+    pub heap: HeapState,
     alias_n: u32,
     cte_n: u32,
 }
@@ -163,6 +169,7 @@ impl<'a> Gen<'a> {
             spill: SpillState::new(),
             plan: PlanState::new(),
             exr: ExrState::new(),
+            heap: HeapState::new(),
             alias_n: 0,
             cte_n: 0,
         }
@@ -235,6 +242,7 @@ pub const STMT_MODULES: &[StmtModuleDef] = &[
     StmtModuleDef { name: "explain", generate: gen_explain_module },
     StmtModuleDef { name: "util", generate: gen_util_module },
     StmtModuleDef { name: "part", generate: gen_part_module },
+    StmtModuleDef { name: "partalt", generate: gen_partalt_module },
     StmtModuleDef { name: "objddl", generate: gen_objddl_module },
     StmtModuleDef { name: "idx", generate: gen_idx_module },
     StmtModuleDef { name: "par", generate: gen_par_module },
@@ -268,6 +276,8 @@ pub const STMT_MODULES: &[StmtModuleDef] = &[
     StmtModuleDef { name: "opt2", generate: gen_opt2_module },
     StmtModuleDef { name: "opt3", generate: gen_opt3_module },
     StmtModuleDef { name: "cfgm", generate: gen_cfgm_module },
+    StmtModuleDef { name: "btbrin", generate: gen_btbrin_module },
+    StmtModuleDef { name: "heap", generate: gen_heap_module },
 ];
 
 /// Produce one statement group from the named module (the toggle vector

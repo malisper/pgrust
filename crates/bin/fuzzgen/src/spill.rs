@@ -264,9 +264,21 @@ fn gen_sort(g: &mut Gen) -> Vec<StmtKind> {
             "spill:sort:desc",
             "spill:sort:bounded",
             "spill:sort:abbrev",
+            "spill:sort:grow",
         ],
     );
     g.fire(shape);
+    // W5 r2 (spill:sort:grow): a NARROW sort at 256kB work_mem lets the
+    // memtuples array double repeatedly before the spill flips state —
+    // the grow_memtuples growth/clamp edges 64kB can never reach (at 64kB
+    // the first growth attempt already busts availMem).
+    if shape == "spill:sort:grow" {
+        let body = format!(
+            "SELECT count(*), sum(x.pk::int8) FROM \
+             (SELECT pk FROM {t} ORDER BY (pk * 37) % 24001, pk) x;"
+        );
+        return bracket(&[("work_mem", "'256kB'")], vec![StmtKind::Raw(body)]);
+    }
     let body = match shape {
         // Row-returning external sort, total order.
         // Keys deliberately unindexed (txt/num): an indexed prefix flips
@@ -316,11 +328,21 @@ fn gen_scroll(g: &mut Gen) -> Vec<StmtKind> {
     let a = 100 + g.rng.below(900);
     let b = 10 + g.rng.below(200);
     let abs = 1000 + g.rng.below(5000);
+    // W5 r2: an EMPTY spilling sort under the same scroll choreography —
+    // the tuplesort_gettuple_common / tuplestore empty-scan edge lines
+    // (FETCH FORWARD/BACKWARD/ABSOLUTE over zero tuples) that a populated
+    // cursor can never reach.
+    let pred = if g.rng.chance(1, 6) {
+        g.fire("spill:scroll:emptypred");
+        " WHERE pk < 0"
+    } else {
+        ""
+    };
     let mut stmts = vec![
         StmtKind::Raw("BEGIN;".to_string()),
         StmtKind::Raw("SET LOCAL work_mem = '64kB';".to_string()),
         StmtKind::Raw(format!(
-            "DECLARE {cur} SCROLL CURSOR FOR SELECT pk, k_int FROM {t} ORDER BY k_int, pk;"
+            "DECLARE {cur} SCROLL CURSOR FOR SELECT pk, k_int FROM {t}{pred} ORDER BY k_int, pk;"
         )),
         StmtKind::Raw(format!("FETCH FORWARD {a} FROM {cur};")),
         StmtKind::Raw(format!("FETCH BACKWARD {b} FROM {cur};")),
@@ -335,6 +357,14 @@ fn gen_scroll(g: &mut Gen) -> Vec<StmtKind> {
         stmts.push(StmtKind::Raw(format!("FETCH BACKWARD 17 FROM {cur};")));
         stmts.push(StmtKind::Raw(format!("MOVE ABSOLUTE 0 IN {cur};")));
         stmts.push(StmtKind::Raw(format!("FETCH FORWARD 3 FROM {cur};")));
+    }
+    if g.rng.chance(1, 2) {
+        // W5 r2: pure backward MOVEs (skip, no fetch) over the spilled
+        // random-access sort — the backward skiptuples/seek edges.
+        g.fire("spill:scroll:backmove");
+        stmts.push(StmtKind::Raw(format!("MOVE BACKWARD 30 IN {cur};")));
+        stmts.push(StmtKind::Raw(format!("MOVE BACKWARD ALL IN {cur};")));
+        stmts.push(StmtKind::Raw(format!("FETCH FORWARD 2 FROM {cur};")));
     }
     stmts.push(StmtKind::Raw(format!("CLOSE {cur};")));
     stmts.push(StmtKind::Raw("COMMIT;".to_string()));
@@ -367,6 +397,14 @@ fn gen_hold(g: &mut Gen) -> Vec<StmtKind> {
         StmtKind::Raw(format!("FETCH BACKWARD 40 FROM {cur};")),
         StmtKind::Raw(format!("MOVE FORWARD ALL IN {cur};")),
         StmtKind::Raw(format!("FETCH BACKWARD 11 FROM {cur};")),
+        // W5 r2: holdStore seek matrix — FIRST/LAST are absolute seeks on
+        // the spilled tuplestore (tuplestore_select/copy_read_pointer +
+        // backward tape walks), MOVE BACKWARD is a backward skip.
+        StmtKind::Raw(format!("MOVE BACKWARD 25 IN {cur};")),
+        StmtKind::Raw(format!("FETCH FIRST FROM {cur};")),
+        StmtKind::Raw(format!("FETCH LAST FROM {cur};")),
+        StmtKind::Raw(format!("MOVE BACKWARD ALL IN {cur};")),
+        StmtKind::Raw(format!("FETCH FORWARD 7 FROM {cur};")),
         StmtKind::Raw(format!("CLOSE {cur};")),
     ]
 }
@@ -383,9 +421,41 @@ fn gen_hashjoin(g: &mut Gen) -> Vec<StmtKind> {
     let t = g.spill.tables[ti].name.clone();
     let shape = g.weights.pick(
         g.rng,
-        &["spill:hj:inner", "spill:hj:skew", "spill:hj:rows", "spill:hj:outer", "spill:hj:antisemi"],
+        &[
+            "spill:hj:inner",
+            "spill:hj:skew",
+            "spill:hj:rows",
+            "spill:hj:outer",
+            "spill:hj:antisemi",
+            "spill:hj:right",
+            "spill:hj:bigtuple",
+            "spill:hj:growbuckets",
+            "spill:hj:empty",
+        ],
     );
     g.fire(shape);
+    // W5 r2 (spill:hj:growbuckets): the ONE shape that must NOT batch —
+    // ExecHashIncreaseNumBuckets only runs while nbatch==1. Roomy
+    // work_mem + a stats-blind always-true build-side filter
+    // (length(pad) > 39, planner defaults it to ~1/3 selectivity): the
+    // underestimated build triples past nbuckets and the bucket array
+    // doubles mid-build instead of batching.
+    if shape == "spill:hj:growbuckets" {
+        let body = format!(
+            "SELECT count(*), sum(b.k_int::int8) FROM {t} a \
+             JOIN (SELECT pk, k2, k_int FROM {t} WHERE length(pad) > 39) b \
+             ON a.k2 = b.k2 WHERE a.pk <= 2000;"
+        );
+        return bracket(
+            &[
+                ("enable_nestloop", "off"),
+                ("enable_mergejoin", "off"),
+                ("work_mem", "'16MB'"),
+                ("hash_mem_multiplier", "1"),
+            ],
+            vec![StmtKind::Raw(body)],
+        );
+    }
     let body = match shape {
         // Dup-heavy inner join: both sides too big for 64kB — batch growth
         // during build + batch files on both sides.
@@ -426,6 +496,55 @@ fn gen_hashjoin(g: &mut Gen) -> Vec<StmtKind> {
                     "SELECT count(*), count(a.pk), count(b.pk) FROM {t} a \
                      FULL JOIN (SELECT pk, k2 FROM {t} WHERE k_int < 120) b \
                      ON a.pk = b.pk WHERE a.k_int < 250 OR a.k_int IS NULL;"
+                )
+            }
+        }
+        // W5 r2: RIGHT JOIN / right-semi / right-anti (JOIN_RIGHT_* fill
+        // and match-flag arms — the hashed side carries the fill duty).
+        "spill:hj:right" => match g.rng.below(3) {
+            0 => format!(
+                "SELECT count(*), count(a.pk) FROM \
+                 (SELECT pk, k2 FROM {t} WHERE k_int < 40) a \
+                 RIGHT JOIN {t} b ON a.k2 = b.k2 WHERE b.pk <= 6000;"
+            ),
+            // Tiny distinct outer vs huge EXISTS side: the planner hashes
+            // the big side (Right Semi Join under 64kB, multi-batch).
+            1 => format!(
+                "SELECT count(*) FROM (SELECT DISTINCT k2 FROM {t} WHERE k_int < 30) a \
+                 WHERE EXISTS (SELECT 1 FROM {t} b WHERE b.k2 = a.k2);"
+            ),
+            _ => format!(
+                "SELECT count(*) FROM (SELECT DISTINCT k2 FROM {t} WHERE k_int < 30) a \
+                 WHERE NOT EXISTS (SELECT 1 FROM {t} b WHERE b.k2 = a.k2 AND b.k_int > 490);"
+            ),
+        },
+        // W5 r2: oversized build tuples (> HASH_CHUNK_THRESHOLD) — the
+        // dense_alloc separate-chunk arm plus oversized batch-file writes.
+        // The wide value is computed in-flight (never toasted), ~8.3kB.
+        // Build side pk<=120 / outer a.pk<=1200: the ~8.3kB value still
+        // exceeds HASH_CHUNK_THRESHOLD (separate-chunk arm + oversized
+        // batch-file writes fire at ANY row count), trimmed so the join
+        // finishes under the 10s debug-B statement_timeout (W5 r2: the
+        // original 300x5000 shape timed out on debug B — 57014, not a
+        // result diff).
+        "spill:hj:bigtuple" => format!(
+            "SELECT count(*), sum(length(b.big))::int8 FROM {t} a \
+             JOIN (SELECT k2, repeat('q', 8300 + (pk % 41)::int) AS big \
+                   FROM {t} WHERE pk <= 120) b \
+             ON a.k2 = b.k2 WHERE a.pk <= 1200;"
+        ),
+        // W5 r2: empty-side early-out arms (empty build hashtable /
+        // outer-relation-empty checks in ExecHashJoinImpl).
+        "spill:hj:empty" => {
+            if g.rng.chance(1, 2) {
+                format!(
+                    "SELECT count(*) FROM {t} a JOIN \
+                     (SELECT pk, k2 FROM {t} WHERE k_int < 0) b ON a.k2 = b.k2;"
+                )
+            } else {
+                format!(
+                    "SELECT count(*) FROM (SELECT pk, k2 FROM {t} WHERE k_int < 0) a \
+                     JOIN {t} b ON a.k2 = b.k2;"
                 )
             }
         }
@@ -526,9 +645,26 @@ fn gen_hashagg(g: &mut Gen) -> Vec<StmtKind> {
     let ti = need_table!(g);
     g.fire("spill:hashagg");
     let t = g.spill.tables[ti].name.clone();
-    let shape =
-        g.weights.pick(g.rng, &["spill:ha:wrap", "spill:ha:distinct", "spill:ha:gsets"]);
+    let shape = g.weights.pick(
+        g.rng,
+        &["spill:ha:wrap", "spill:ha:distinct", "spill:ha:gsets", "spill:ha:mixed"],
+    );
     g.fire(shape);
+    // W5 r2 (spill:ha:mixed): grouping sets with BOTH strategies live —
+    // enable_sort stays ON so the planner builds an AGG_MIXED plan (a
+    // sorted rollup chain plus a hashed set), the multi-phase
+    // ExecInitAgg / initialize_phase arms the sort-off variant shadows.
+    if shape == "spill:ha:mixed" {
+        let body = format!(
+            "SELECT count(*), sum(c) FROM \
+             (SELECT k2, k_int, (pk % 512) AS p9, count(*) AS c FROM {t} \
+              GROUP BY GROUPING SETS (ROLLUP (k2, k_int), (p9))) s;"
+        );
+        return bracket(
+            &[("work_mem", "'64kB'"), ("hash_mem_multiplier", "1")],
+            vec![StmtKind::Raw(body)],
+        );
+    }
     let body = match shape {
         // ~8k spilled groups, outer wrap order-independent.
         "spill:ha:wrap" => {
@@ -570,9 +706,46 @@ fn gen_groupagg(g: &mut Gen) -> Vec<StmtKind> {
     let ti = need_table!(g);
     g.fire("spill:groupagg");
     let t = g.spill.tables[ti].name.clone();
-    let shape = g.weights.pick(g.rng, &["spill:ga:group", "spill:ga:distinct", "spill:ga:oset"]);
+    let shape = g.weights.pick(
+        g.rng,
+        &[
+            "spill:ga:group",
+            "spill:ga:distinct",
+            "spill:ga:oset",
+            "spill:ga:filter",
+            "spill:ga:hypo",
+            "spill:ga:dpad",
+        ],
+    );
     g.fire(shape);
     let body = match shape {
+        // W5 r2: FILTER + strict-transition NULL fuel — advance_
+        // transition_function's null-transValue and skipped-input arms
+        // (NULLIF makes real NULLs; FILTER gates rows per aggregate).
+        "spill:ga:filter" => format!(
+            "SELECT (pk % 71) AS gk, sum(k_int) FILTER (WHERE k_int % 7 = 0), \
+             count(DISTINCT NULLIF(k_int, 3)), max(NULLIF(txt, 'p5')), \
+             count(k_int) FILTER (WHERE k_int > 497) \
+             FROM {t} GROUP BY 1 ORDER BY 1;"
+        ),
+        // W5 r2: hypothetical-set aggregates — the direct-args +
+        // sorted-input walk (process_ordered_aggregate_multi with the
+        // hypothetical extra column, AggGetTempMemoryContext). Ratio
+        // outputs are single exact divisions — deterministic on both
+        // sides (not accumulation-order float, B1-safe).
+        "spill:ga:hypo" => format!(
+            "SELECT rank(250, 'p500') WITHIN GROUP (ORDER BY k_int, txt), \
+             dense_rank(120) WITHIN GROUP (ORDER BY k_int), \
+             percent_rank(60) WITHIN GROUP (ORDER BY k_int), \
+             cume_dist(77) WITHIN GROUP (ORDER BY k_int) FROM {t};"
+        ),
+        // W5 r2: whole-table DATUM sorts over LOW-cardinality text — pad
+        // has only 7 distinct values, so the abbreviated-key cardinality
+        // collapse fires removeabbrev_datum mid-sort (the heap-sort twin
+        // is spill:sort:abbrev).
+        "spill:ga:dpad" => {
+            format!("SELECT count(DISTINCT pad), count(DISTINCT txt) FROM {t};")
+        }
         // Per-group ordered/DISTINCT transitions over sorted groups; the
         // string_agg input carries TWO sort columns (ordered-multi arm).
         // Unindexed grouping expression: GROUP BY k2 rides the k2 index
@@ -621,9 +794,14 @@ fn gen_window(g: &mut Gen) -> Vec<StmtKind> {
         // temp re-reads from the frame pointers). Aggregate-wrapped —
         // nothing order-sensitive crosses the wire.
         "spill:win:rowsframe" => {
-            let p = 700 + g.rng.below(600);
-            let f = 700 + g.rng.below(600);
-            let cap = 4000 + g.rng.below(2500);
+            // Frame + cap sized to spill the windowagg tuplestore (pad-wide
+            // tuples spill at 64kB after a few hundred rows) while staying
+            // well under the differential/coverage 10s statement_timeout on
+            // a DEBUG B build (W5 r2: the original 700-1300 frame over 6500
+            // rows blew the timeout on debug B — 57014, not a result diff).
+            let p = 150 + g.rng.below(200);
+            let f = 150 + g.rng.below(200);
+            let cap = 1500 + g.rng.below(1000);
             format!(
                 "SELECT max(s), min(s) FROM (SELECT sum(length(pad)) OVER \
                  (ORDER BY pk ROWS BETWEEN {p} PRECEDING AND {f} FOLLOWING) AS s \
@@ -645,7 +823,8 @@ fn gen_window(g: &mut Gen) -> Vec<StmtKind> {
         // RANGE frame with EXCLUDE over the spilled buffer; frame sums are
         // membership-based (order-independent) — deterministic.
         _ => {
-            let cap = 4000 + g.rng.below(2000);
+            // Trimmed to spill-but-fast on debug B (see win:rowsframe note).
+            let cap = 1500 + g.rng.below(1000);
             format!(
                 "SELECT max(s) FROM (SELECT sum(length(pad)) OVER (ORDER BY k_int \
                  RANGE BETWEEN 25 PRECEDING AND 25 FOLLOWING EXCLUDE TIES) AS s \
@@ -712,7 +891,12 @@ fn gen_memoize(g: &mut Gen) -> Vec<StmtKind> {
     let ti = need_table!(g);
     g.fire("spill:memoize");
     let t = g.spill.tables[ti].name.clone();
-    let cap = 1500 + g.rng.below(1500);
+    // Eviction fires independent of row count (the stats-blind filter
+    // undersizes the cache regardless); cap trimmed so the starved-cache
+    // join finishes under the 10s debug-B statement_timeout (W5 r2: the
+    // original 1500-3000 cap timed out on debug B — 57014, not a result
+    // diff).
+    let cap = 800 + g.rng.below(700);
     // The stats-blind `length(b.pad) > 39` filter (always true, planner
     // defaults it to 1/3 selectivity) undersizes the estimated cache
     // entries, so the planner keeps the Memoize node at 64kB while the

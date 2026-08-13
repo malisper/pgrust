@@ -162,11 +162,24 @@
 //! merging/full-join reconsideration, eval_const_expressions deep arms,
 //! rare index-clause matches, and a broadened GUC matrix — draining the
 //! `optimizer-arms` residue LD7 left).
+//! W5-HEAP adds the heapam alt-path drain module (`heap`): single-session
+//! forcing of the backend/access/heap + toast residue — HOT-chain churn and
+//! opportunistic prune, non-HOT / KEYS_UPDATED index-churn, aborted/locked-
+//! only overwrite arms (rollback + savepoint subxact residue), single-
+//! backend tuple locking / lock-upgrade MultiXact, the toast write/read/
+//! delete surface across storage classes, vacuumlazy (prune/freeze/truncate/
+//! new-or-empty/index-cleanup/verbose), CLUSTER + VACUUM FULL over dirty
+//! heaps, CREATE INDEX [CONCURRENTLY] validate/build scans, TID scans and
+//! the serializable-read HeapCheckForSerializableConflictOut entry — over a
+//! purpose-built `fz_hp_N` fixture (autovacuum off, per-table fillfactor /
+//! toast_tuple_target picks) so every prune/vacuum/freeze transition is an
+//! explicit, byte-identical statement on both differential sides.
 
 pub mod admin;
 pub mod adtmisc;
 pub mod agg;
 pub mod boundary;
+pub mod btbrin;
 pub mod catalog;
 pub mod client;
 pub mod coll;
@@ -190,6 +203,7 @@ pub mod explain;
 pub mod exr;
 pub mod expr;
 pub mod geo;
+pub mod heap;
 pub mod idx;
 pub mod join;
 pub mod livecat;
@@ -206,6 +220,7 @@ pub mod opt2;
 pub mod opt3;
 pub mod par;
 pub mod part;
+pub mod partalt;
 pub mod pgram;
 pub mod plansel;
 pub mod plpg;
