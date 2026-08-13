@@ -1149,7 +1149,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
     }
 
     // CopyReadBinaryData: short count only at EOF.
-    fn copy_read_binary_data(&mut self, dest: &mut [u8]) -> PgResult<usize> {
+    pub(crate) fn copy_read_binary_data(&mut self, dest: &mut [u8]) -> PgResult<usize> {
         let nbytes = dest.len();
         let avail = self.raw_buf_len - self.raw_buf_index;
         if avail >= nbytes {
@@ -1178,7 +1178,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
     }
 
     // CopyGetInt32/CopyGetInt16: network byte order; None at EOF.
-    fn copy_get_int32(&mut self) -> PgResult<Option<i32>> {
+    pub(crate) fn copy_get_int32(&mut self) -> PgResult<Option<i32>> {
         let mut b = [0u8; 4];
         if self.copy_read_binary_data(&mut b)? != 4 {
             return Ok(None);
@@ -1186,7 +1186,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         Ok(Some(i32::from_be_bytes(b)))
     }
 
-    fn copy_get_int16(&mut self) -> PgResult<Option<i16>> {
+    pub(crate) fn copy_get_int16(&mut self) -> PgResult<Option<i16>> {
         let mut b = [0u8; 2];
         if self.copy_read_binary_data(&mut b)? != 2 {
             return Ok(None);
@@ -1227,7 +1227,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
     }
 
     // CopyReadBinaryAttribute's data load: fld_size bytes into binary_attr_buf.
-    fn read_binary_attr_data(&mut self, fld_size: usize) -> PgResult<()> {
+    pub(crate) fn read_binary_attr_data(&mut self, fld_size: usize) -> PgResult<()> {
         self.binary_attr_buf.reset();
         let mut remaining = fld_size;
         loop {
@@ -1497,5 +1497,193 @@ pub mod bench_internals {
 
     pub fn raw_fields<'a>(st: &'a CopyFromState<'_, '_>) -> (&'a [i32], &'a [u8]) {
         (&st.raw_fields, &st.attribute_buf)
+    }
+
+    // ---- VENDOR-COPY differential-fuzz entry points (fuzz-vendor-copy) ----
+    //
+    // Reachable, encoding-carved runners over the SHIPPED COPY field parse,
+    // for the copyframe_{text,binary}_diff oracles (csrc/pg_copyframe_io.c,
+    // verbatim REL_18_3). They return the parsed fields or the rejecting
+    // error's class, mapped to the same small ints the C oracle records:
+    //   0 = accepted, 3 = 54000 program-limit, 5 = 22P04 bad-copy,
+    //   99 = any other sqlstate (forces a divergence to surface).
+
+    /// Map a shipped PgError's sqlstate to the C oracle's error class.
+    fn errclass(e: &types_error::PgError) -> i32 {
+        let s = e.sqlstate();
+        if s == types_error::ERRCODE_BAD_COPY_FILE_FORMAT {
+            5
+        } else if s == types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED {
+            3
+        } else if s == types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE {
+            7 // pg_verify_mbstr embedded-NUL rejection (SQL_ASCII)
+        } else {
+            99
+        }
+    }
+
+    /// `CopyReadAttributesText` over `line`. Ok(fields) or Err(errclass).
+    /// Each field is `None` (SQL NULL) or its cstring bytes (up to the first
+    /// NUL), exactly the `fields_of` contract in tests.rs.
+    pub fn parse_text(
+        mcx: Mcx<'_>,
+        delim: u8,
+        null_print: &'static str,
+        max_fields: usize,
+        line: &[u8],
+    ) -> Result<Vec<Option<Vec<u8>>>, i32> {
+        let mut st = readattrs_state(mcx, delim, null_print, max_fields.max(1));
+        vec_append_bytes(&mut st.line_buf, line).unwrap();
+        match st.copy_read_attributes_text() {
+            Ok(n) => {
+                let (offs, buf) = raw_fields(&st);
+                let fields = (0..n)
+                    .map(|i| {
+                        let off = offs[i];
+                        if off < 0 {
+                            return None;
+                        }
+                        let rest = &buf[off as usize..];
+                        let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+                        Some(rest[..end].to_vec())
+                    })
+                    .collect();
+                Ok(fields)
+            }
+            Err(e) => Err(errclass(&e)),
+        }
+    }
+
+    /// Binary COPY per-field framing over a preloaded `data` stream. Mirrors
+    /// `copy_from_binary_one_row`'s field loop but calls the SHIPPED
+    /// primitives (`copy_get_int16`/`copy_get_int32`/`read_binary_attr_data`
+    /// — the byte-consuming code where an OOB/panic on a malformed length
+    /// word would occur) and CARVES `receive_function_call` (framing, not
+    /// typreceive; the recv surface is EDGE2's, 0 findings). Ok(fields) or
+    /// Err(errclass); an empty vec is the accepted "no more rows" / EOF-marker
+    /// verdict.
+    pub fn parse_binary(
+        mcx: Mcx<'_>,
+        data: &[u8],
+        nattrs: usize,
+    ) -> Result<Vec<Option<Vec<u8>>>, i32> {
+        let mut st = readattrs_state(mcx, b'\t', "\\N", nattrs.max(1));
+        // Binary mode: disables the text raw/input-buf aliasing asserts in
+        // copy_load_raw_buf so a truncated/oversize field loads cleanly.
+        st.opts.binary = true;
+        // A truncated/oversize field drains raw_buf and calls copy_load_raw_buf
+        // -> copy_get_data; give it a source that yields 0 (clean EOF) instead
+        // of the default File{fd:-1}, which would try a real read.
+        st.src = CopySrc::Callback { cb: Box::new(|_buf, _min| Ok(0)) };
+        // Preload the whole stream into raw_buf (full RAW_BUF_SIZE+1 capacity
+        // so copy_load_raw_buf's `raw_buf[nbytes]=0` is always in bounds), and
+        // pin EOF so no fd read is attempted when a short field drains it.
+        st.raw_buf = mcx::vec_from_elem_in(mcx, 0u8, super::RAW_BUF_SIZE + 1);
+        let n = data.len().min(super::RAW_BUF_SIZE);
+        st.raw_buf[..n].copy_from_slice(&data[..n]);
+        st.raw_buf_len = n;
+        st.raw_buf_index = 0;
+        st.raw_reached_eof = true;
+
+        let mut run = || -> Result<Vec<Option<Vec<u8>>>, Box<types_error::PgError>> {
+            let Some(fld_count) = st.copy_get_int16()? else {
+                return Ok(Vec::new()); // EOF before a row: "no more rows"
+            };
+            if fld_count == -1 {
+                let mut dummy = [0u8; 1];
+                if st.copy_read_binary_data(&mut dummy)? > 0 {
+                    return Err(super::bad_copy_format("received copy data after EOF marker"));
+                }
+                return Ok(Vec::new());
+            }
+            if fld_count as i64 != nattrs as i64 {
+                return Err(Box::new(
+                    types_error::PgError::error(format!(
+                        "row field count is {fld_count}, expected {nattrs}"
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_BAD_COPY_FILE_FORMAT),
+                ));
+            }
+            let mut fields = Vec::with_capacity(nattrs);
+            for _ in 0..nattrs {
+                let Some(fld_size) = st.copy_get_int32()? else {
+                    return Err(super::unexpected_eof_in_copy_data());
+                };
+                if fld_size == -1 {
+                    fields.push(None);
+                } else {
+                    if fld_size < 0 {
+                        return Err(super::bad_copy_format("invalid field size"));
+                    }
+                    st.read_binary_attr_data(fld_size as usize)?;
+                    fields.push(Some(st.binary_attr_buf.as_bytes().to_vec()));
+                }
+            }
+            Ok(fields)
+        };
+        run().map_err(|e| errclass(&e))
+    }
+
+    /// COPY line/row framing over a preloaded stream (VENDOR-COPYROW). Drives
+    /// the SHIPPED `copy_read_line` (fromparse.rs) the way the COPY-from loop
+    /// does — repeatedly reading a raw line until EOF — for the
+    /// `copyrow_diff` oracle (csrc/pg_copyframe_io.c cpf_copy_read_lines,
+    /// verbatim REL_18_3 CopyReadLine/CopyReadLineText). Runs under the default
+    /// server encoding PG_SQL_ASCII with no transcoding (input_buf aliases
+    /// raw_buf), exactly mirroring the C shim's preload.
+    ///
+    /// Returns `Ok((lines, saw_eof))` — each line's content with its EOL marker
+    /// already stripped (the `line_buf` image CopyReadLine leaves), and whether
+    /// the terminating read returned EOF (a clean end, a `\.` marker, or an
+    /// unterminated trailing line) — or `Err(errclass)` on a rejected stream
+    /// (bad-copy framing 5, program-limit 3, or embedded-NUL encoding 7).
+    pub fn parse_lines(
+        mcx: Mcx<'_>,
+        data: &[u8],
+        is_csv: bool,
+        delim: u8,
+        quote: u8,
+        escape: u8,
+    ) -> Result<(Vec<Vec<u8>>, bool), i32> {
+        let mut st = readattrs_state(mcx, delim, "\\N", 1);
+        st.opts.csv_mode = is_csv;
+        st.opts.quote = quote;
+        st.opts.escape = escape;
+        st.opts.delim = delim;
+        // No-transcoding SQL_ASCII path (file_encoding 0, set by
+        // readattrs_state): input_buf stays None so the reader reads raw_buf.
+        st.need_transcoding = false;
+        // Preload the whole stream into raw_buf with the guaranteed NUL pad at
+        // [raw_buf_len] (copy_load_raw_buf's `raw_buf[nbytes]=0`), pin EOF so no
+        // source read is attempted, and give it a source that yields 0 anyway.
+        st.raw_buf = mcx::vec_from_elem_in(mcx, 0u8, data.len() + 1);
+        st.raw_buf[..data.len()].copy_from_slice(data);
+        st.raw_buf_len = data.len();
+        st.raw_buf_index = 0;
+        st.raw_reached_eof = true;
+        st.input_buf = None;
+        st.input_buf_index = 0;
+        st.input_buf_len = 0;
+        st.input_reached_eof = false;
+        st.input_reached_error = false;
+        st.src = CopySrc::Callback { cb: Box::new(|_buf, _min| Ok(0)) };
+
+        let mut run = || -> Result<(Vec<Vec<u8>>, bool), Box<types_error::PgError>> {
+            let mut lines: Vec<Vec<u8>> = Vec::new();
+            loop {
+                let done = st.copy_read_line(is_csv)?;
+                if done && st.line_buf.is_empty() {
+                    // Clean end of input (or a bare `\.` marker on its own line).
+                    return Ok((lines, true));
+                }
+                let line: &[u8] = &st.line_buf;
+                lines.push(line.to_vec());
+                if done {
+                    // The emitted line was the last (unterminated tail / pre-\.).
+                    return Ok((lines, true));
+                }
+            }
+        };
+        run().map_err(|e| errclass(&e))
     }
 }

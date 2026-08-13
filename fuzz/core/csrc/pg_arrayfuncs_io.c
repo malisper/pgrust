@@ -301,9 +301,15 @@ DatumGetFloat8(Datum X)
 #define ERRCODE_NULL_VALUE_NOT_ALLOWED 6
 #define ERRCODE_INVALID_PARAMETER_VALUE 7
 #define ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE 8
+/* array_recv (VENDOR-ARRAYRECV wire lane) errcode classes. Distinct from the
+ * text-path classes above so a wire-lane divergence is unambiguous. */
+#define ERRCODE_INVALID_BINARY_REPRESENTATION 10	/* 22P03 */
+#define ERRCODE_DATATYPE_MISMATCH 11				/* 42804 */
+#define ERRCODE_PROTOCOL_VIOLATION 12				/* 08P01 */
 
 static _Thread_local jmp_buf pg_afx_jmp;
 
+__attribute__((noreturn))
 static void
 pg_afx_raise(void)
 {
@@ -1746,6 +1752,7 @@ typedef struct StringInfoData
 	char	   *data;
 	int			len;
 	int			maxlen;
+	int			cursor;			/* read position (pq_getmsg* / array_recv) */
 } StringInfoData;
 typedef StringInfoData *StringInfo;
 
@@ -1755,6 +1762,7 @@ initStringInfo(StringInfo str)
 	str->maxlen = 1024;
 	str->data = palloc(str->maxlen);
 	str->len = 0;
+	str->cursor = 0;
 	str->data[0] = '\0';
 }
 
@@ -5209,6 +5217,227 @@ ArrayGetIntegerTypmods(ArrayType *arr, int *n)
 	return result;
 }
 
+/* ====================================================================== */
+/* VENDOR-ARRAYRECV: binary array receive path (array_recv/ReadArrayBinary) */
+/* Transcribed from arrayfuncs.c @ 62d6c7d3df (REL_18_3). The my_extra/      */
+/* ArrayMetaState typcache caching block of array_recv is EXCISED — the      */
+/* driver supplies pinned element metadata via pg_afx_fill_meta, exactly as  */
+/* the text path (array_in) does. Every ndim/flags/dimension/element-count/  */
+/* item-length check is verbatim; the overflow guards live in the already-   */
+/* vendored ArrayGetNItems / ArrayCheckBounds above.                          */
+/* ====================================================================== */
+
+#define FirstGenbkiObjectId 10000
+
+/*
+ * pqcomm/pqformat readers (backend/libpq/pqformat.c): big-endian,
+ * cursor-advancing. Underflow raises ERRCODE_PROTOCOL_VIOLATION with
+ * "insufficient data left in message", matching pq_getmsgbytes.
+ */
+static const char *
+pg_afx_pq_getmsgbytes(StringInfo msg, int datalen)
+{
+	const char *result;
+
+	if (datalen < 0 || datalen > (msg->len - msg->cursor))
+	{
+		errcode(ERRCODE_PROTOCOL_VIOLATION);
+		pg_afx_raise();
+	}
+	result = &msg->data[msg->cursor];
+	msg->cursor += datalen;
+	return result;
+}
+
+static unsigned int
+pg_afx_pq_getmsgint(StringInfo msg, int b)
+{
+	unsigned int result;
+	const unsigned char *p;
+
+	switch (b)
+	{
+		case 1:
+			p = (const unsigned char *) pg_afx_pq_getmsgbytes(msg, 1);
+			result = p[0];
+			break;
+		case 2:
+			p = (const unsigned char *) pg_afx_pq_getmsgbytes(msg, 2);
+			result = ((unsigned int) p[0] << 8) | (unsigned int) p[1];
+			break;
+		case 4:
+			p = (const unsigned char *) pg_afx_pq_getmsgbytes(msg, 4);
+			result = ((unsigned int) p[0] << 24) | ((unsigned int) p[1] << 16)
+				| ((unsigned int) p[2] << 8) | (unsigned int) p[3];
+			break;
+		default:
+			abort();
+	}
+	return result;
+}
+
+/*
+ * ReceiveFunctionCall shim (fmgr.c): strict receive proc, so a NULL buffer
+ * (the itemlen == -1 NULL element) returns (Datum) 0 without calling.
+ * elemsel 0 = int4recv (int.c: pq_getmsgint(buf,4)); elemsel 1 = textrecv
+ * (varlena.c: copy the remaining element bytes into a 4B-header varlena).
+ */
+static Datum
+pg_afx_ReceiveFunctionCall(FmgrInfo *flinfo, StringInfo buf, Oid typioparam,
+						   int32 typmod)
+{
+	(void) typioparam;
+	(void) typmod;
+	if (buf == NULL)
+		return (Datum) 0;		/* strict: NULL element */
+	if (flinfo->elemsel == 0)
+	{
+		int32		v = (int32) pg_afx_pq_getmsgint(buf, 4);
+
+		return Int32GetDatum(v);
+	}
+	else if (flinfo->elemsel == 1)
+	{
+		int			nbytes = buf->len - buf->cursor;
+		const char *p = pg_afx_pq_getmsgbytes(buf, nbytes);
+
+		return pg_afx_make_text(p, (size_t) nbytes);
+	}
+	abort();					/* recv driver only drives int4 / text */
+}
+
+/*
+ * ReadArrayBinary (arrayfuncs.c). We read each element into a phony
+ * StringInfo pointing at the correct slice of the input buffer; unlike the
+ * verbatim source we do NOT scribble a NUL terminator (both element recv
+ * procs read exactly len-cursor bytes and never rely on the terminator),
+ * which is behaviour-identical and avoids mutating the caller's buffer.
+ */
+static void
+pg_afx_ReadArrayBinary(StringInfo buf, int nitems, FmgrInfo *receiveproc,
+					   Oid typioparam, int32 typmod, Datum *values, bool *nulls)
+{
+	int			i;
+
+	for (i = 0; i < nitems; i++)
+	{
+		int			itemlen;
+		StringInfoData elem_buf;
+
+		itemlen = (int) pg_afx_pq_getmsgint(buf, 4);
+		if (itemlen < -1 || itemlen > (buf->len - buf->cursor))
+		{
+			errcode(ERRCODE_INVALID_BINARY_REPRESENTATION);
+			pg_afx_raise();
+		}
+
+		if (itemlen == -1)
+		{
+			values[i] = pg_afx_ReceiveFunctionCall(receiveproc, NULL,
+												   typioparam, typmod);
+			nulls[i] = true;
+			continue;
+		}
+
+		elem_buf.data = &buf->data[buf->cursor];
+		elem_buf.maxlen = itemlen + 1;
+		elem_buf.len = itemlen;
+		elem_buf.cursor = 0;
+
+		buf->cursor += itemlen;
+
+		values[i] = pg_afx_ReceiveFunctionCall(receiveproc, &elem_buf,
+											   typioparam, typmod);
+		nulls[i] = false;
+
+		if (elem_buf.cursor != itemlen)
+		{
+			errcode(ERRCODE_INVALID_BINARY_REPRESENTATION);
+			pg_afx_raise();
+		}
+	}
+}
+
+/*
+ * array_recv (arrayfuncs.c). spec_element_type / typlen / typbyval / typalign
+ * / typioparam / receive proc all come from the pinned meta.
+ */
+static Datum
+pg_afx_array_recv(StringInfo buf, int elemsel, int32 typmod)
+{
+	ArrayMetaState m;
+	Oid			spec_element_type;
+	Oid			element_type;
+	int			i,
+				nitems;
+	int			ndim,
+				flags,
+				dim[MAXDIM],
+				lBound[MAXDIM];
+	Datum	   *dataPtr;
+	bool	   *nullsPtr;
+	ArrayType  *retval;
+
+	pg_afx_fill_meta(&m, elemsel);
+	spec_element_type = m.element_type;
+
+	/* Get the array header information */
+	ndim = (int) pg_afx_pq_getmsgint(buf, 4);
+	if (ndim < 0)				/* we do allow zero-dimension arrays */
+	{
+		errcode(ERRCODE_INVALID_BINARY_REPRESENTATION);
+		pg_afx_raise();
+	}
+	if (ndim > MAXDIM)
+	{
+		errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+		pg_afx_raise();
+	}
+
+	flags = (int) pg_afx_pq_getmsgint(buf, 4);
+	if (flags != 0 && flags != 1)
+	{
+		errcode(ERRCODE_INVALID_BINARY_REPRESENTATION);
+		pg_afx_raise();
+	}
+
+	/* Check element type recorded in the data */
+	element_type = pg_afx_pq_getmsgint(buf, 4);		/* sizeof(Oid) == 4 */
+	if (element_type != spec_element_type)
+	{
+		/* Complain only if both OIDs are in the built-in range */
+		if (element_type < FirstGenbkiObjectId
+			&& spec_element_type < FirstGenbkiObjectId)
+		{
+			errcode(ERRCODE_DATATYPE_MISMATCH);
+			pg_afx_raise();
+		}
+		element_type = spec_element_type;
+	}
+
+	for (i = 0; i < ndim; i++)
+	{
+		dim[i] = (int) pg_afx_pq_getmsgint(buf, 4);
+		lBound[i] = (int) pg_afx_pq_getmsgint(buf, 4);
+	}
+
+	/* This checks for overflow of array dimensions */
+	nitems = ArrayGetNItems(ndim, dim);
+	ArrayCheckBounds(ndim, dim, lBound);
+
+	if (nitems == 0)
+		return PointerGetDatum(construct_empty_array(element_type));
+
+	dataPtr = (Datum *) palloc(nitems * sizeof(Datum));
+	nullsPtr = (bool *) palloc(nitems * sizeof(bool));
+	pg_afx_ReadArrayBinary(buf, nitems, &m.proc, m.typioparam, typmod,
+						   dataPtr, nullsPtr);
+
+	retval = construct_md_array(dataPtr, nullsPtr, ndim, dim, lBound,
+								element_type, m.typlen, m.typbyval, m.typalign);
+	return PointerGetDatum(retval);
+}
+
 /* ========== SECTION 3: fuzz-facing driver entries (NOT Postgres code) ===== */
 
 /*
@@ -5234,6 +5463,36 @@ pg_diff_array_in(int elemsel, const char *str, int32 typmod,
 
 	PG_AFX_ENTRY();
 	d = array_in(pstrdup(str), elemsel, typmod);
+	a = (ArrayType *) DatumGetPointer(d);
+	*out_img = (unsigned char *) a;
+	*out_len = VARSIZE(a);
+	return 0;
+}
+
+/*
+ * VENDOR-ARRAYRECV entry: decode a raw binary array wire image via the
+ * verbatim array_recv path. Returns 0 (image in out_img / out_len) or the
+ * errcode class on a clean reject. elemsel must be 0 (int4) or 1 (text).
+ */
+int
+pg_diff_array_recv(int elemsel, const unsigned char *wire, size_t wire_len,
+				   int32 typmod, unsigned char **out_img, size_t *out_len)
+{
+	StringInfoData buf;
+	Datum		d;
+	ArrayType  *a;
+
+	PG_AFX_ENTRY();
+	/* Copy the wire into arena memory (one spare byte for the phony-buffer
+	 * convention headroom; the readers never read past len). */
+	buf.data = palloc(wire_len + 1);
+	memcpy(buf.data, wire, wire_len);
+	buf.data[wire_len] = '\0';
+	buf.len = (int) wire_len;
+	buf.maxlen = (int) wire_len + 1;
+	buf.cursor = 0;
+
+	d = pg_afx_array_recv(&buf, elemsel, typmod);
 	a = (ArrayType *) DatumGetPointer(d);
 	*out_img = (unsigned char *) a;
 	*out_len = VARSIZE(a);

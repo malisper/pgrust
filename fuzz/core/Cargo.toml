@@ -29,6 +29,9 @@ stack_depth_core = { path = "../../crates/backend/utils/misc/stack_depth_core" }
 readfuncs = { path = "../../crates/backend/nodes/readfuncs" }
 outfuncs = { path = "../../crates/backend/nodes/outfuncs" }
 copyfuncs = { path = "../../crates/backend/nodes/copyfuncs" }
+# VENDOR-COPY (fuzz-vendor-copy): shipped COPY field parse (bench_internals
+# entry points) vs verbatim REL_18_3 C (csrc/pg_copyframe_io.c). Q8-F1.
+copy_cmd = { path = "../../crates/backend/commands/copy" }
 # Differential targets (shipped Rust vs vendored C oracle in csrc/):
 adt_float = { path = "../../crates/backend/utils/adt/float" }
 adt_geo = { path = "../../crates/backend/utils/adt/geo" }
@@ -38,6 +41,9 @@ hashfn = { path = "../../crates/common/hashfn" }
 scalar_seams = { path = "../../crates/backend/utils/adt/scalar_seams" }
 types_fmgr = { path = "../../crates/_support/types/fmgr" }
 datum = { path = "../../crates/_support/types/datum" }
+# statsblob_diff: extended-statistics on-disk bytea deserializers (attacker
+# surface via PG18 stats restore). mcx/datum/types_error already declared.
+statistics = { path = "../../crates/backend/statistics/statistics" }
 varlena = { path = "../../crates/backend/utils/adt/varlena" }
 # vlbytea_diff: shipped bytea_substring/bytea_overlay slice through the
 # detoast_attr_slice seam; installing the production seam makes those value

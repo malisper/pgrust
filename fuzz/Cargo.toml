@@ -539,6 +539,14 @@ test = false
 doc = false
 bench = false
 
+# statsblob_diff: extended-statistics on-disk bytea deserializers.
+[[bin]]
+name = "statsblob_diff"
+path = "fuzz_targets/statsblob_diff.rs"
+test = false
+doc = false
+bench = false
+
 # nodesfam_diff (p1-nodes): the node-walker family — readfuncs/outfuncs/
 # copyfuncs over ONE shared node-universe fixture (round-trip self-oracle +
 # C differential). Corpus: fuzz/corpus/nodesfam_diff (per-label validated
@@ -695,6 +703,14 @@ bench = false
 [[bin]]
 name = "snapio_diff"
 path = "fuzz_targets/snapio_diff.rs"
+test = false
+doc = false
+bench = false
+
+# pglz_diff (VENDOR-TOAST): TOAST decompression OOB / decompression-bomb surface.
+[[bin]]
+name = "pglz_diff"
+path = "fuzz_targets/pglz_diff.rs"
 test = false
 doc = false
 bench = false

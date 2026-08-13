@@ -99,6 +99,10 @@ fn main() {
         // SCAFFOLD-TODO #error paste site in csrc/pg_define_io.c is filled
         // with verbatim vendored C (README-TODO-define_diff.md step 1).
         .file("csrc/pg_define_io.c")
+        // statext_diff oracle (statsblob lane): verbatim 18.3 statext
+        // ndistinct/dependencies/mcv deserializers — attacker-surface via
+        // PG18 stats restore. See csrc/pg_statext_io.c header.
+        .file("csrc/pg_statext_io.c")
         // oracle-serialization holder check (fuzz plumbing; see the
         // file header + scripts/lint-oracle-serial.py)
         .file("csrc/pg_oracle_guard.c")
@@ -279,6 +283,17 @@ fn main() {
         // VENDOR lane: verbatim varbit.c bit_in/varbit_in text-input parsers
         // — the un-vendored hand-rolled-parser bug class (varbit_io_diff).
         .file("csrc/pg_varbit_io.c")
+        // VENDOR-COPY lane: verbatim copyfromparse.c COPY field framing —
+        // CopyReadAttributesText (text split/de-escape) + CopyReadBinaryData
+        // / CopyGetInt / CopyReadBinaryAttribute fld_size framing (binary).
+        // The Q8-F1 memory-safety surface EDGE2 flagged as un-vendored; the
+        // COPY_FIELD_LEN bank fires here (copyframe_text_diff /
+        // copyframe_binary_diff). Self-shimmed TU, cpf_-prefixed exports.
+        .file("csrc/pg_copyframe_io.c")
+        // pglz_diff oracle (VENDOR-TOAST): verbatim src/common/pg_lzcompress.c
+        // pglz_decompress — the TOAST decompression OOB/bomb surface
+        // (provenance + lz4/zstd block rationale in csrc/pg_pglz_io.c header).
+        .file("csrc/pg_pglz_io.c")
         .file("csrc/pg_network_io.c")
         .file("csrc/pg_uuid_io.c")
         .file("csrc/pg_mac_io.c")
@@ -288,6 +303,10 @@ fn main() {
         .file("csrc/pg_bool.c")
         .file("csrc/pg_pseudotypes.c")
         .file("csrc/pg_lsn_oracle.c")
+        // wire_length_diff oracle: verbatim REL_18_3 FE/BE message-length
+        // framing arithmetic (ProcessStartupPacket + pq_getmessage length
+        // words). Freestanding (stdint.h only), so it rides the main build.
+        .file("csrc/pg_wireframe_oracle.c")
         .file("csrc/pg_enc_tables.c")
         .file("csrc/ryu/d2s.c")
         .file("csrc/ryu/f2s.c")

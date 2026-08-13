@@ -402,6 +402,17 @@ pub fn edge_drivers() -> Vec<(&'static str, fn(&[u8]))> {
         ("vlbytea_diff", crate::vlbytea_diff),
         // VENDOR lane: the newly-vendored hand-rolled bit/varbit text parser.
         ("varbit_io_diff", crate::varbit_io_diff),
+        // VENDOR-COPY lane: the newly-vendored COPY field framing (Q8-F1).
+        // The COPY_FIELD_LEN bank sprays through the binary driver here.
+        (
+            "copyframe_text_diff",
+            crate::copyframe_diff::copyframe_text_diff as fn(&[u8]),
+        ),
+        ("copyframe_binary_diff", crate::copyframe_diff::copyframe_binary_diff),
+        // VENDOR-COPYROW lane: the newly-vendored COPY line/row framing
+        // (CopyReadLine/CopyReadLineText) — the raw-line reader that splits
+        // COPY input into rows before field parsing (VENDOR-COPY #937 follow-on).
+        ("copyrow_diff", crate::copyrow_diff::copyrow_diff),
         ("vlmisc_diff", crate::vlmisc_diff),
         ("arrayfuncs_diff", crate::arrayfuncs_diff),
         ("array_userfuncs_diff", crate::array_userfuncs_diff),
@@ -493,14 +504,18 @@ pub fn wire_campaign_seeds(selectors: u8) -> Vec<Vec<u8>> {
 /// ST3/Q8 risk surface — the length-field paths, as opposed to the (already
 /// hardened) ADT text-input surface swept by [`edge_drivers`].
 ///
-/// GAP (not vendored in this harness, so uncoverable here): the frontend
-/// startup-packet path (`ProcessStartupPacket` / `pq_getmessage` outer
-/// length) and the COPY text/binary row loop (`CopyReadBinaryData`,
-/// `NextCopyFromRawFields`) have no verbatim-C oracle in `csrc/` — recorded in
-/// findings-edge2.md as a future-vendoring lane, NOT silently skipped.
+/// PARTIAL GAP: the COPY text/binary row loop (`CopyReadBinaryData`,
+/// `NextCopyFromRawFields`) still has no verbatim-C oracle in `csrc/` —
+/// recorded in findings-edge2.md as a future-vendoring lane, NOT silently
+/// skipped. The frontend startup-packet / `pq_getmessage` OUTER length word
+/// (the ST3 `i32::from_be_bytes(len) - 4` surface) IS now vendored — see
+/// `wire_length_diff` below and csrc/pg_wireframe_oracle.c (VENDOR-WIRE lane).
 pub fn wire_drivers() -> Vec<(&'static str, fn(&[u8]))> {
     vec![
         ("snapio_diff", crate::snapio_diff as fn(&[u8])),
+        // VENDOR-WIRE: FE/BE message-length framing (startup + getmessage
+        // outer length) vs verbatim REL_18_3 C — the ST3 length-word surface.
+        ("wire_length_diff", crate::wire_length_diff),
         ("rangetypes_diff", crate::rangetypes_diff),
         ("multirangetypes_diff", crate::multirangetypes_diff),
         // rowtypes_diff (record_recv column count) is NOT here: it pins

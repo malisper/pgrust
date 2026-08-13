@@ -628,6 +628,11 @@ pub use vlbytea_diff::vlbytea_diff;
 pub mod vlmisc_diff;
 pub use vlmisc_diff::vlmisc_diff;
 
+// pglz_diff (VENDOR-TOAST): pgrust `pglz::pglz_decompress` vs verbatim C
+// pglz_decompress — the TOAST decompression OOB / decompression-bomb surface.
+pub mod pglz_diff;
+pub use pglz_diff::pglz_diff;
+
 // quote_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-quote_diff.md.
 pub mod quote_diff;
 pub use quote_diff::quote_diff;
@@ -659,6 +664,10 @@ pub use json_diff::json_diff;
 // arrayfuncs_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-arrayfuncs_diff.md.
 pub mod arrayfuncs_diff;
 pub use arrayfuncs_diff::arrayfuncs_diff;
+
+// arrayrecv_diff (VENDOR-ARRAYRECV): binary array receive length/dim-field lane.
+pub mod arrayrecv_diff;
+pub use arrayrecv_diff::arrayrecv_diff;
 // mbconv_diff: encoding-conversion family (p1-lanez) — differential fuzz +
 // native exhaustive-diff driver vs the proofs/mbconv vendored 18.3 C.
 pub mod mbconv_diff;
@@ -861,6 +870,12 @@ pub use contriba_diff::contriba_diff;
 pub mod define_diff;
 pub use define_diff::define_diff;
 
+// statext_diff (statsblob lane): extended-statistics on-disk bytea
+// deserializers (ndistinct/dependencies/mcv) vs verbatim 18.3 C
+// (csrc/pg_statext_io.c). Attacker surface via PG18 stats restore.
+pub mod statext_diff;
+pub use statext_diff::statext_diff;
+
 // nodesfam_diff (p1-nodes): readfuncs/outfuncs/copyfuncs node walkers vs
 // vendored 18.3 C (read->out->copy->out round-trip, all planes).
 pub mod nodesfam_diff;
@@ -881,6 +896,8 @@ pub use int_diff::int_diff;
 // VENDOR lane: bit_in/varbit_in text-parser differential (the un-vendored
 // hand-rolled-parser bug class — ST3/Q8 surface).
 pub mod varbit_io_diff;
+pub mod copyframe_diff;
+pub mod copyrow_diff;
 pub use varbit_io_diff::varbit_io_diff;
 
 // edge: shared adversarial edge-value bank + cross-cutting injection harness
@@ -895,6 +912,13 @@ pub mod parser;
 // network_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-network_diff.md.
 pub mod network_diff;
 pub use network_diff::network_diff;
+
+// wire_length_diff (VENDOR-WIRE lane): FE/BE message-length FRAMING arithmetic
+// (ProcessStartupPacket + pq_getmessage outer length words) vs verbatim
+// REL_18_3 C. Closes the ST3 length-word GAP EDGE2 recorded in
+// edge::wire_drivers. See wire_length_diff.rs + csrc/pg_wireframe_oracle.c.
+pub mod wire_length_diff;
+pub use wire_length_diff::wire_length_diff;
 
 // pgcryptofam (p1-pgcryptofam): FFI surface of the verbatim 18.3
 // contrib/pgcrypto crypt()/gen_salt()/armor oracle (csrc/pgcryptofam/).
