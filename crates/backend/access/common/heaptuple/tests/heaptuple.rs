@@ -599,6 +599,93 @@ fn too_many_columns_is_sqlstate_54011() {
 }
 
 #[test]
+fn modify_tuple_by_cols_invalid_attnum_is_sqlstate_xx000() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let desc = make_desc(mcx, &[attr(4, true, 4), attr(4, true, 4)]);
+    let values = [Datum::from_i32(1), Datum::from_i32(2)];
+    let isnull = [false; 2];
+    let orig = heap_form_tuple(mcx, &desc, &values, &isnull).unwrap();
+
+    for attnum in [0, 3, -1] {
+        let Err(err) = heap_modify_tuple_by_cols(
+            mcx,
+            orig.as_tuple(),
+            &desc,
+            &[attnum],
+            &[Datum::from_i32(9)],
+            &[false],
+        ) else {
+            panic!("expected error for attnum {attnum}")
+        };
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.message(), format!("invalid column number {attnum}"));
+    }
+}
+
+#[test]
+fn form_expanded_object_flattens() {
+    use datum::expandeddatum::{
+        eoh_init_header, eohp_get_rw_datum, ExpandedObjectHeader, ExpandedObjectMethods,
+    };
+
+    #[repr(C)]
+    struct FakeExpanded {
+        hdr: ExpandedObjectHeader,
+        payload: [u8; 8],
+    }
+
+    unsafe fn fake_flat_size(_eohptr: *mut ExpandedObjectHeader) -> usize {
+        12
+    }
+    unsafe fn fake_flatten(eohptr: *mut ExpandedObjectHeader, result: *mut u8, n: usize) {
+        assert_eq!(n, 12);
+        let obj = eohptr as *mut FakeExpanded;
+        let word = set_varsize_4b_word(12);
+        core::ptr::copy_nonoverlapping(word.to_ne_bytes().as_ptr(), result, 4);
+        core::ptr::copy_nonoverlapping((*obj).payload.as_ptr(), result.add(4), 8);
+    }
+    static METHODS: ExpandedObjectMethods = ExpandedObjectMethods {
+        get_flat_size: fake_flat_size,
+        flatten_into: fake_flatten,
+    };
+
+    let obj = Box::into_raw(Box::new(FakeExpanded {
+        hdr: ExpandedObjectHeader::empty(),
+        payload: *b"abcdefgh",
+    }));
+    unsafe {
+        eoh_init_header(
+            core::ptr::addr_of_mut!((*obj).hdr),
+            &METHODS,
+            core::ptr::null(),
+        );
+    }
+    let d = unsafe { eohp_get_rw_datum(core::ptr::addr_of!((*obj).hdr)) };
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let desc = make_desc(mcx, &[attr(4, true, 4), attr(-1, false, 4)]);
+    let values = [Datum::from_i32(1), d];
+    let isnull = [false, false];
+    let tup = heap_form_tuple(mcx, &desc, &values, &isnull).unwrap();
+    assert!(!tup.has_external());
+    assert_eq!(heap_compute_data_size(&desc, &values, &isnull), 16);
+
+    let mut out = [Datum::null(); 2];
+    let mut nulls = [true; 2];
+    heap_deform_tuple(tup.as_tuple(), &desc, &mut out, &mut nulls);
+    assert_eq!(out[0].as_i32(), 1);
+    assert!(!nulls[1]);
+    unsafe {
+        let p = out[1].as_usize() as *const u8;
+        assert_eq!(types_tuple::varatt::varsize_any(p), 12);
+        assert_eq!(core::slice::from_raw_parts(p.add(4), 8), b"abcdefgh");
+    }
+    drop(unsafe { Box::from_raw(obj) });
+}
+
+#[test]
 fn wide_bitmap_form_roundtrip() {
     // 11 attrs -> 2-byte bitmap, hoff = MAXALIGN(25) = 32.
     let ctx = MemoryContext::new("t");

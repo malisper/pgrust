@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use ::datum::Datum;
 use ::mcx::{vec_with_capacity_in, Mcx};
 use ::types_core::InvalidOid;
-use ::types_error::{PgError, PgResult, ERRCODE_TOO_MANY_COLUMNS};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_TOO_MANY_COLUMNS};
 use ::types_tuple::tupmacs::{att_addlength_datum, att_datum_alignby};
 use ::types_tuple::{
     heap_deform_tuple, HeapTupleData, HeapTupleHeaderData, ItemPointerData, ItemPointerSetInvalid,
@@ -23,6 +23,16 @@ fn too_many_columns(natts: usize) -> Box<PgError> {
             "number of columns ({natts}) exceeds limit ({MaxTupleAttributeNumber})"
         ))
         .with_sqlstate(ERRCODE_TOO_MANY_COLUMNS),
+    )
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn invalid_column_number(attnum: i32) -> Box<PgError> {
+    Box::new(
+        PgError::error(alloc::format!("invalid column number {attnum}"))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
 }
 
@@ -271,7 +281,7 @@ pub fn heap_modify_tuple_by_cols<'mcx>(
     let mut newTuple = with_deformed(mcx, tuple, tupleDesc, |values, isnull| {
         for (i, &attnum) in replCols.iter().enumerate() {
             if attnum <= 0 || attnum > natts as i32 {
-                panic!("invalid column number {attnum}");
+                return Err(invalid_column_number(attnum));
             }
             values[(attnum - 1) as usize] = replValues[i];
             isnull[(attnum - 1) as usize] = replIsnull[i];

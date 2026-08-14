@@ -1,3 +1,4 @@
+use ::datum::expandeddatum::{datum_get_eohp, eoh_flatten_into, eoh_get_flat_size};
 use ::datum::Datum;
 use ::types_tuple::tupmacs::{
     att_addlength_datum, att_datum_alignby, att_nominal_alignby, store_att_byval,
@@ -10,12 +11,6 @@ use ::types_tuple::varatt::{
 use ::types_tuple::{
     bits8, CompactAttribute, TupleDescData, HEAP_HASEXTERNAL, HEAP_HASNULL, HEAP_HASVARWIDTH,
 };
-
-#[cold]
-#[inline(never)]
-pub(crate) fn expanded_object_unsupported() -> ! {
-    panic!("expanded-object flatten: datum::expandeddatum vocabulary landed; heap_compute_data_size/heap_fill_tuple two-pass flatten arms not wired here")
-}
 
 /// Data-area size of a tuple to be constructed; by-ref datums must be live.
 #[inline]
@@ -45,7 +40,8 @@ pub fn heap_compute_data_size(
             if attlen == -1 && attispackable && varatt_can_make_short(p) {
                 data_length += varatt_converted_short_size(p);
             } else if attlen == -1 && varatt_is_external_expanded(p) {
-                expanded_object_unsupported();
+                data_length = att_nominal_alignby(data_length, attalignby);
+                data_length += eoh_get_flat_size(datum_get_eohp(val));
             } else {
                 data_length = att_datum_alignby(data_length, attalignby, attlen, val);
                 data_length = att_addlength_datum(data_length, attlen, val);
@@ -106,11 +102,15 @@ pub(crate) unsafe fn fill_val(
         *infomask |= HEAP_HASVARWIDTH;
         if varatt_is_1b_e(val) {
             if varatt_is_external_expanded(val) {
-                expanded_object_unsupported();
+                let eoh = datum_get_eohp(datum);
+                *off = att_nominal_alignby(*off, attalignby);
+                data_length = eoh_get_flat_size(eoh);
+                eoh_flatten_into(eoh, base.add(*off), data_length);
+            } else {
+                *infomask |= HEAP_HASEXTERNAL;
+                data_length = varsize_external(val);
+                core::ptr::copy_nonoverlapping(val, base.add(*off), data_length);
             }
-            *infomask |= HEAP_HASEXTERNAL;
-            data_length = varsize_external(val);
-            core::ptr::copy_nonoverlapping(val, base.add(*off), data_length);
         } else if varatt_is_1b(val) {
             data_length = varsize_1b(val);
             core::ptr::copy_nonoverlapping(val, base.add(*off), data_length);
