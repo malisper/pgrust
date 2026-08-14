@@ -96,6 +96,8 @@ arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 hashfn = { path = "../../../common/hashfn" }
 tupdesc = { path = "../../access/common/tupdesc" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
+coerce = { path = "../../parser/coerce" }
+format_type = { path = "../../utils/adt/format_type" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
 queryenvironment = { path = "../../utils/misc/queryenvironment" }
 snapmgr = { path = "../../utils/time/snapmgr" }

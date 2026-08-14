@@ -8,7 +8,10 @@ use ::datum::{Datum, NullableDatum};
 use ::execexpr::{exec_eval_expr, exec_init_expr_subplans, ExprState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
-use ::types_error::{PgError, PgResult, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_TOO_MANY_ARGUMENTS,
+};
 use ::types_fmgr::{
     ExprDoneCond, FmgrInfo, LocalFcinfo, ReturnSetInfo, SFRM_Materialize, SFRM_ValuePerCall,
     SetFunctionReturnMode, TRACK_FUNC_ALL,
@@ -21,17 +24,15 @@ use crate::procnode::{
 };
 use crate::typefromtl::exec_type_from_tl;
 
-// C sizes the fcinfo per call (SizeForFunctionCallInfo(nargs), up to
-// FUNC_MAX_ARGS); this inline frame caps the SRF arg count instead — the
-// init-time guard below rejects wider calls.
-const PROJECT_SET_MAX_ARGS: usize = 8;
+// C sizes fcinfo with SizeForFunctionCallInfo(nargs) up to FUNC_MAX_ARGS.
+const PROJECT_SET_FCINFO_ARGS: usize = types_core::FUNC_MAX_ARGS;
 
 // SetExprState; args_valid is C's setArgsValid, result_desc/result_slot/
 // result_store are funcResultDesc/funcResultSlot/funcResultStore.
 struct SrfElem<'mcx> {
     flinfo: FmgrInfo,
     args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
-    fcinfo: LocalFcinfo<PROJECT_SET_MAX_ARGS>,
+    fcinfo: LocalFcinfo<PROJECT_SET_FCINFO_ARGS>,
     rsinfo: ReturnSetInfo,
     args_valid: bool,
     result_desc: Option<Rc<::types_tuple::TupleDescData<'mcx>>>,
@@ -91,13 +92,10 @@ pub fn exec_init_project_set<'mcx>(
             };
             let elem = match srf_parts {
                 Some((srf_funcid, srf_args, srf_inputcollid)) => {
-                    if srf_args.len() > PROJECT_SET_MAX_ARGS {
-                        panic!(
-                            "ExecInitFunctionResultSet: {}-argument SRF — widen the fcinfo \
-                         frame",
-                            srf_args.len()
-                        );
+                    if srf_args.len() > types_core::FUNC_MAX_ARGS {
+                        return Err(too_many_args());
                     }
+                    init_sexpr_acl(mcx, srf_funcid)?;
                     let mut args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
                     for arg in srf_args {
                         // Query-context args replace C's argContext: by-ref arg
@@ -112,7 +110,7 @@ pub fn exec_init_project_set<'mcx>(
                     // consumers read arg types off the call expression.
                     flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, expr)?);
                     debug_assert!(flinfo.fn_retset);
-                    let mut fcinfo = LocalFcinfo::<PROJECT_SET_MAX_ARGS>::new(srf_inputcollid);
+                    let mut fcinfo = LocalFcinfo::<PROJECT_SET_FCINFO_ARGS>::new(srf_inputcollid);
                     fcinfo.nargs = srf_args.len() as i16;
                     let resolved = funcapi::get_expr_result_type(mcx, Some(expr))?;
                     let (result_desc, returns_tuple) = match resolved.class {
@@ -518,6 +516,15 @@ fn exec_make_function_result_set<'mcx>(
                         .expect("rsinfo.setResult downcasts to Tuplestore");
                     store.rescan()?;
                     srf.result_store = Some(store);
+                    if let Some(set_desc) = srf.rsinfo.setDesc {
+                        // SAFETY: setDesc contract — live for this call.
+                        let src = unsafe {
+                            set_desc.cast::<::types_tuple::TupleDescData<'_>>().as_ref()
+                        };
+                        if let Some(expected) = srf.result_desc.as_ref() {
+                            tupledesc_match(expected, src)?;
+                        }
+                    }
                     // C: a RECORD SRF's read slot comes from rsinfo.setDesc.
                     if srf.result_slot.is_none() {
                         let Some(set_desc) = srf.rsinfo.setDesc else {
@@ -550,8 +557,79 @@ fn setof_record_not_accepted() -> Box<PgError> {
         PgError::error(
             "function returning setof record called in context that cannot accept type record",
         )
-        .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
     )
+}
+
+fn init_sexpr_acl(mcx: Mcx<'_>, foid: types_core::Oid) -> PgResult<()> {
+    const PROCEDURE_RELATION_ID: types_core::Oid = 1255;
+    const ACL_EXECUTE: u64 = 1 << 7;
+    const ACLCHECK_OK: i32 = 0;
+    let userid = miscinit_seams::get_user_id::call();
+    let aclresult =
+        aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, foid, userid, ACL_EXECUTE)?;
+    if aclresult != ACLCHECK_OK {
+        let name = lsyscache::get_func_name(mcx, foid)?;
+        let name = name.as_ref().map(|n| n.as_str()).unwrap_or("(unknown)");
+        return Err(Box::new(
+            PgError::error(format!("permission denied for function {name}"))
+                .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+    Ok(())
+}
+
+fn too_many_args() -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "cannot pass more than {} arguments to a function",
+            types_core::FUNC_MAX_ARGS
+        ))
+        .with_sqlstate(ERRCODE_TOO_MANY_ARGUMENTS),
+    )
+}
+
+fn tupledesc_mismatch(detail: String) -> Box<PgError> {
+    Box::new(
+        PgError::error("function return row and query-specified return row do not match")
+            .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+            .with_detail(detail),
+    )
+}
+
+fn tupledesc_match(
+    dst_tupdesc: &::types_tuple::TupleDescData<'_>,
+    src_tupdesc: &::types_tuple::TupleDescData<'_>,
+) -> PgResult<()> {
+    if dst_tupdesc.natts != src_tupdesc.natts {
+        let (s, d) = (src_tupdesc.natts, dst_tupdesc.natts);
+        let noun = if s == 1 { "attribute" } else { "attributes" };
+        return Err(tupledesc_mismatch(format!(
+            "Returned row contains {s} {noun}, but query expects {d}."
+        )));
+    }
+    for i in 0..dst_tupdesc.natts as usize {
+        let dattr = &dst_tupdesc.attrs[i];
+        let sattr = &src_tupdesc.attrs[i];
+        if ::coerce::IsBinaryCoercible(sattr.atttypid, dattr.atttypid)? {
+            continue;
+        }
+        if !dattr.attisdropped {
+            return Err(tupledesc_mismatch(format!(
+                "Returned type {} at ordinal position {}, but query expects {}.",
+                ::format_type::format_type_be(sattr.atttypid)?,
+                i + 1,
+                ::format_type::format_type_be(dattr.atttypid)?,
+            )));
+        }
+        if dattr.attlen != sattr.attlen || dattr.attalign != sattr.attalign {
+            return Err(tupledesc_mismatch(format!(
+                "Physical storage mismatch on dropped attribute at ordinal position {}.",
+                i + 1
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[track_caller]

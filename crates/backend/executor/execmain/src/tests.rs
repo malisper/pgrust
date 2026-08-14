@@ -5431,6 +5431,23 @@ mod rowmode_ab {
     }
 
     #[test]
+    fn nine_arg_tlist_srf_inits() {
+        install_seams();
+        install_rowmode_seams();
+        let mcx = leaked_mcx();
+        let mut args = NodeList::make1(mcx, mk_int4_const(mcx, 0)).unwrap();
+        for i in 1..9 {
+            args.lappend(mcx, mk_int4_const(mcx, i)).unwrap();
+        }
+        let pstmt = mk_ps_pstmt(mcx, &[mk_srf(mcx, F_GENERATE_SERIES_INT4, args)]);
+        with_exec_data(pstmt, |data, pstmt| {
+            exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                .unwrap()
+                .unwrap();
+        });
+    }
+
+    #[test]
     fn ab_strict_null_arg_empty_set() {
         // generate_series is strict: a NULL arg yields the empty set (the
         // ExecMakeFunctionResultSet strict arm), not a NULL row.
