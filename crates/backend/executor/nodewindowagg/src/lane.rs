@@ -206,11 +206,17 @@ pub fn lane_window_accept<'mcx>(
     // Partition boundary check — spool_tuples' own compare + reset cadence.
     if state.plan.partNumCols > 0 {
         let same = {
-            let WindowAggStateData { ref mut part_eq, ref mut first_part_slot, .. } = *state;
-            let outer_slot = estate.slot_mut(tuple);
-            let mut slots =
-                EvalSlots { scan: None, inner: Some(first_part_slot), outer: Some(outer_slot) };
-            exec_qual(part_eq.as_deref_mut(), &mut slots)?
+            let WindowAggStateData { ref mut part_eq, ref mut first_part_slot, tmpcontext, .. } =
+                *state;
+            let eq = part_eq.as_deref_mut().expect("partNumCols > 0 has part_eq");
+            if crate::expr_needs_driver(eq) {
+                crate::exec_qual_inner_outer_id(eq, estate, tmpcontext, tuple, first_part_slot)?
+            } else {
+                let outer_slot = estate.slot_mut(tuple);
+                let mut slots =
+                    EvalSlots { scan: None, inner: Some(first_part_slot), outer: Some(outer_slot) };
+                exec_qual(Some(eq), &mut slots)?
+            }
         };
         estate.reset_expr_context(state.tmpcontext);
         if !same {
@@ -235,11 +241,17 @@ pub fn lane_window_accept<'mcx>(
         true
     } else {
         let r = {
-            let WindowAggStateData { ref mut ord_eq, ref mut agg_row_slot, .. } = *state;
-            let outer_slot = estate.slot_mut(tuple);
-            let mut slots =
-                EvalSlots { scan: None, inner: Some(agg_row_slot), outer: Some(outer_slot) };
-            exec_qual(ord_eq.as_deref_mut(), &mut slots)?
+            let WindowAggStateData { ref mut ord_eq, ref mut agg_row_slot, tmpcontext, .. } =
+                *state;
+            let eq = ord_eq.as_deref_mut().expect("ord_eq present");
+            if crate::expr_needs_driver(eq) {
+                crate::exec_qual_inner_outer_id(eq, estate, tmpcontext, tuple, agg_row_slot)?
+            } else {
+                let outer_slot = estate.slot_mut(tuple);
+                let mut slots =
+                    EvalSlots { scan: None, inner: Some(agg_row_slot), outer: Some(outer_slot) };
+                exec_qual(Some(eq), &mut slots)?
+            }
         };
         estate.reset_expr_context(state.tmpcontext);
         r
@@ -341,7 +353,7 @@ pub fn lane_window_emit_next<'mcx>(
     }
     drive.emit_pos += 1;
     // The node's own projection, both arms (exec_window_agg's tail).
-    if state.proj.has_subplan() {
+    if crate::expr_needs_driver(&state.proj) {
         let ecxt = state.ps_ExprContext;
         let result = state.ps_ResultTupleSlot;
         let WindowAggStateData { ref mut proj, ref mut scan_slot, .. } = *state;
@@ -415,12 +427,7 @@ fn begin_partition<'mcx>(
         let outer_slot = estate.slot_mut(t);
         exectuples::exec_copy_slot(&mut state.first_part_slot, outer_slot, mcx, mcx)?;
     }
-    // A row exists here — the deps-hoist cadence of exec_window_agg (C never
-    // reads these params on an empty input).
-    if !state.deps_hoisted {
-        state.hoist_pending_initplans(estate)?;
-        state.deps_hoisted = true;
-    }
+    // A row exists here — C never reads these params on an empty input.
     // Aggregates restart on the partition's first row (the row engine's
     // currentpos == 0 arm), BEFORE its transition.
     if state.numaggs > 0 {
@@ -477,7 +484,7 @@ fn spool_and_transition<'mcx>(
     if state.numaggs > 0 {
         {
             let et = state.evaltrans.as_mut().expect("numaggs > 0 implies evaltrans");
-            if et.has_subplan() {
+            if crate::expr_needs_driver(et) {
                 // C eval_windowaggregates: tmpcontext->ecxt_outertuple =
                 // agg_row_slot before advance_windowaggregate — a SubPlan in
                 // an agg argument evaluates through the ExprContext triple
@@ -514,7 +521,7 @@ fn transition_first_part_row<'mcx>(
         let WindowAggStateData { ref mut evaltrans, ref mut first_part_slot, tmpcontext, .. } =
             *state;
         let et = evaltrans.as_mut().expect("numaggs > 0 implies evaltrans");
-        if et.has_subplan() {
+        if crate::expr_needs_driver(et) {
             ::executils::exec_eval_expr_with_subplans_outer(
                 et,
                 first_part_slot,
@@ -662,11 +669,17 @@ pub fn lane_framed_accept<'mcx>(
     // first row, its reset cadence, then the buffer append).
     if state.plan.partNumCols > 0 {
         let same = {
-            let WindowAggStateData { ref mut part_eq, ref mut first_part_slot, .. } = *state;
-            let outer_slot = estate.slot_mut(tuple);
-            let mut slots =
-                EvalSlots { scan: None, inner: Some(first_part_slot), outer: Some(outer_slot) };
-            exec_qual(part_eq.as_deref_mut(), &mut slots)?
+            let WindowAggStateData { ref mut part_eq, ref mut first_part_slot, tmpcontext, .. } =
+                *state;
+            let eq = part_eq.as_deref_mut().expect("partNumCols > 0 has part_eq");
+            if crate::expr_needs_driver(eq) {
+                crate::exec_qual_inner_outer_id(eq, estate, tmpcontext, tuple, first_part_slot)?
+            } else {
+                let outer_slot = estate.slot_mut(tuple);
+                let mut slots =
+                    EvalSlots { scan: None, inner: Some(first_part_slot), outer: Some(outer_slot) };
+                exec_qual(Some(eq), &mut slots)?
+            }
         };
         estate.reset_expr_context(state.tmpcontext);
         if !same {
@@ -774,10 +787,6 @@ pub fn lane_framed_emit_next<'mcx>(
         return Ok(None);
     }
     let mut fetch = framed_no_fetch();
-    if !state.deps_hoisted {
-        state.hoist_pending_initplans(estate)?;
-        state.deps_hoisted = true;
-    }
     estate.reset_expr_context(state.ps_ExprContext);
     {
         let mcx = estate.es_query_cxt;
@@ -839,7 +848,7 @@ pub fn lane_framed_emit_next<'mcx>(
             state.eval_windowaggregates_framed(estate, &mut fetch)?;
         }
     }
-    if state.proj.has_subplan() {
+    if crate::expr_needs_driver(&state.proj) {
         let ecxt = state.ps_ExprContext;
         let result = state.ps_ResultTupleSlot;
         let WindowAggStateData { ref mut proj, ref mut scan_slot, .. } = *state;

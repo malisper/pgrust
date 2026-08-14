@@ -1546,9 +1546,10 @@ pub fn exec_init_agg<'mcx>(
     })?;
     let merge = match (&perhash, &evaltrans, &merge_outer_desc) {
         (Some(ph), Some(et), Some(od)) => {
-            let has_subplan = et.has_subplan()
+            let has_subplan = trans_needs_driver(et)
                 || proj.has_subplan()
-                || qual.as_deref().is_some_and(|q| q.has_subplan());
+                || !proj.param_exec_deps().is_empty()
+                || qual.as_deref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty());
             merge::init_finalize_merge(
                 node,
                 estate,
@@ -2781,7 +2782,7 @@ fn agg_refill_hash_table<'mcx>(
             let AggStateData { perhash, evaltrans, .. } = node;
             let ph = perhash.as_mut().unwrap();
             let et = evaltrans.as_mut().unwrap();
-            if et.has_subplan() {
+            if trans_needs_driver(et) {
                 ::executils::exec_eval_expr_with_subplans_outer(
                     et,
                     &mut ph.spill.rslot,
@@ -3787,35 +3788,13 @@ fn copy_scratch_datum<'m>(
     Ok(Datum::from_usize(buf.as_ptr() as usize))
 }
 
-/// `ExecAgg` -> `agg_retrieve_direct` (nodeAgg.c), single-group arm: drain the
-/// outer child through the transition program, then finalize and project the
-// C resolves an initplan's PARAM_EXEC lazily inside ExecEvalParamExec; this
-// executor hoists instead: any pending initplan a program depends on runs
-// before the drive evaluates it (noderesult.c pattern).
-// RESIDUAL eager arm: the transition-eval (evaltrans) and grouping-sets
-// programs run through fused per-row kernels with no suspension driver in
-// reach, so their pending initplan params are still force-run up front
-// rather than lazily at first fetch (C ExecEvalParamExec). HAVING quals and
-// the result projection are NOT hoisted here — they ride the suspension
-// driver and stay C-lazy (untaken COALESCE/CASE arms leave initplans
-// un-run).
-fn hoist_pending_initplans<'mcx>(
-    node: &mut AggStateData<'mcx>,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<()> {
-    let mut deps: Vec<u32> = Vec::new();
-    if let Some(et) = node.evaltrans.as_deref() {
-        deps.extend_from_slice(et.param_exec_deps());
-    }
-    if let Some(gs) = node.gsets.as_deref() {
-        gs.collect_param_deps(&mut deps);
-    }
-    if !deps.is_empty() {
-        ::executils::exec_eval_param_exec_params(estate, &deps)?;
-    }
-    Ok(())
+#[inline]
+pub(crate) fn trans_needs_driver(et: &ExprState<'_>) -> bool {
+    et.has_subplan() || !et.param_exec_deps().is_empty()
 }
 
+/// `ExecAgg` -> `agg_retrieve_direct` (nodeAgg.c), single-group arm: drain the
+/// outer child through the transition program, then finalize and project the
 /// one result row. Zero input rows still produce a row (C contract).
 pub fn exec_agg<'mcx, F>(
     node: &mut AggStateData<'mcx>,
@@ -3828,7 +3807,6 @@ where
     if node.agg_done {
         return Ok(None);
     }
-    hoist_pending_initplans(node, estate)?;
     if node.gsets.is_some() {
         return gsets::exec_agg_gsets(node, estate, &mut fetch_outer);
     }
@@ -3849,7 +3827,7 @@ where
     while let Some(outer_id) = fetch_outer(estate)? {
         estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
         let et = node.evaltrans.as_mut().unwrap();
-        if et.has_subplan() {
+        if trans_needs_driver(et) {
             ::executils::exec_eval_expr_with_subplans(et, estate, node.tmpcontext)?;
         } else {
             let outer_slot = estate.slot_mut(outer_id);
@@ -3923,7 +3901,10 @@ pub fn agg_batch_drainable(node: &AggStateData<'_>) -> bool {
         && node.merge.is_none()
         && node.pertrans_sort.is_empty()
         && (node.plan.aggstrategy == AGG_PLAIN || node.plan.aggstrategy == AGG_HASHED)
-        && node.evaltrans.as_deref().is_some_and(|et| !et.has_subplan())
+        && node
+            .evaltrans
+            .as_deref()
+            .is_some_and(|et| !trans_needs_driver(et))
 }
 
 /// Outer-slot deform prefix the batched drive reads per row (evaltrans
@@ -4845,7 +4826,7 @@ pub fn batch_emit_resolve(node: &AggStateData<'_>) -> Option<BatchEmitPlan> {
     if !node.pertrans_sort.is_empty() || node.plan.aggstrategy != AGG_HASHED {
         return None;
     }
-    if node.proj.has_subplan() {
+    if node.proj.has_subplan() || !node.proj.param_exec_deps().is_empty() {
         return None;
     }
     let ph = node.perhash.as_ref()?;
@@ -6821,7 +6802,7 @@ where
             let AggStateData { persort, evaltrans, .. } = node;
             let ps = persort.as_mut().expect("sorted Agg has persort");
             let et = evaltrans.as_mut().unwrap();
-            if et.has_subplan() {
+            if trans_needs_driver(et) {
                 ::executils::exec_eval_expr_with_subplans_outer(
                     et,
                     &mut ps.first_slot,
@@ -6863,7 +6844,7 @@ where
                 break;
             }
             let et = evaltrans.as_mut().unwrap();
-            if et.has_subplan() {
+            if trans_needs_driver(et) {
                 estate.ecxt_mut(tmpcontext).ecxt_outertuple = Some(outer_id);
                 ::executils::exec_eval_expr_with_subplans(et, estate, tmpcontext)?;
             } else {
@@ -6938,9 +6919,14 @@ where
     while let Some(outer_id) = fetch_outer(estate)? {
         estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
         if lookup_hash_entry(node, estate, outer_id)? {
-            let outer_slot = estate.slot_mut(outer_id);
-            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-            exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+            let et = node.evaltrans.as_mut().unwrap();
+            if trans_needs_driver(et) {
+                ::executils::exec_eval_expr_with_subplans(et, estate, node.tmpcontext)?;
+            } else {
+                let outer_slot = estate.slot_mut(outer_id);
+                let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+                exec_eval_expr(et, &mut slots)?;
+            }
         }
         estate.reset_expr_context(node.tmpcontext);
     }

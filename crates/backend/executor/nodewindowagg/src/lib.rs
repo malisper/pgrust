@@ -13,9 +13,9 @@ use std::rc::Rc;
 
 use ::datum::{Datum, NullableDatum};
 use ::execexpr::{
-    exec_build_grouping_equal,
-    exec_eval_expr, exec_init_expr, exec_init_qual, exec_project, exec_qual, expr_type, AggBind,
-    AggPerGroup, AggTransSpec, EvalSlots, ExprState, WinBind,
+    exec_build_grouping_equal, exec_eval_expr, exec_init_expr, exec_init_qual, exec_project,
+    exec_qual, exec_qual_outcome, expr_type, AggBind, AggPerGroup, AggTransSpec, EvalSlots,
+    ExprState, QualOutcome, SuspendKind, WinBind,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{vec_with_capacity_in, MemoryContext, PgBox, PgVec};
@@ -238,11 +238,136 @@ pub struct WindowAggStateData<'mcx> {
     use_pass_through: bool,
     top_window: bool,
     all_first: bool,
-    deps_hoisted: bool,
     partition_spooled: bool,
     more_partitions: bool,
     next_partition: bool,
     status: WaStatus,
+}
+
+#[inline]
+pub(crate) fn expr_needs_driver(et: &ExprState<'_>) -> bool {
+    et.has_subplan() || !et.param_exec_deps().is_empty()
+}
+
+fn eval_offset_expr<'mcx>(
+    state: &mut ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+) -> PgResult<NullableDatum> {
+    if expr_needs_driver(state) {
+        ::executils::exec_eval_expr_with_subplans(state, estate, ecxt)
+    } else {
+        let mut slots = EvalSlots::default();
+        exec_eval_expr(state, &mut slots)
+    }
+}
+
+pub(crate) fn exec_qual_inner_outer_id<'mcx>(
+    state: &mut ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    outer_id: ExecSlotId,
+    inner: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    let mut resume = None;
+    loop {
+        let outcome = {
+            let r = resume.take();
+            let outer = estate.slot_mut(outer_id);
+            let mut slots = EvalSlots { scan: None, inner: Some(&mut *inner), outer: Some(outer) };
+            exec_qual_outcome(state, &mut slots, r)?
+        };
+        match outcome {
+            QualOutcome::Done(b) => return Ok(b),
+            QualOutcome::Suspended(s) => {
+                let r = match s.kind {
+                    SuspendKind::ParamExec(pid) => {
+                        ::executils::exec_set_param_plan(estate, pid)?;
+                        NullableDatum::null()
+                    }
+                    SuspendKind::SubPlan(ss) => ::executils::run_subplan_eval(ss, estate, ecxt)?,
+                };
+                resume = Some(s.resume_with(r));
+            }
+        }
+    }
+}
+
+fn exec_qual_two_slots<'mcx>(
+    state: &mut ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    outer: &mut SlotData<'mcx>,
+    inner: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    let mut resume = None;
+    loop {
+        let outcome = {
+            let r = resume.take();
+            let mut slots = EvalSlots { scan: None, inner: Some(&mut *inner), outer: Some(&mut *outer) };
+            exec_qual_outcome(state, &mut slots, r)?
+        };
+        match outcome {
+            QualOutcome::Done(b) => return Ok(b),
+            QualOutcome::Suspended(s) => {
+                let r = match s.kind {
+                    SuspendKind::ParamExec(pid) => {
+                        ::executils::exec_set_param_plan(estate, pid)?;
+                        NullableDatum::null()
+                    }
+                    SuspendKind::SubPlan(ss) => ::executils::run_subplan_eval(ss, estate, ecxt)?,
+                };
+                resume = Some(s.resume_with(r));
+            }
+        }
+    }
+}
+
+fn exec_window_result_qual<'mcx>(
+    state: Option<&mut ExprState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    result_id: ExecSlotId,
+    scan_slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    let Some(state) = state else {
+        return Ok(true);
+    };
+    if !expr_needs_driver(state) {
+        let result_slot = estate.slot_mut(result_id);
+        let mut slots = EvalSlots {
+            scan: Some(result_slot),
+            inner: None,
+            outer: Some(scan_slot),
+        };
+        return exec_qual(Some(state), &mut slots);
+    }
+    let mut resume = None;
+    loop {
+        let outcome = {
+            let r = resume.take();
+            let result_slot = estate.slot_mut(result_id);
+            let mut slots = EvalSlots {
+                scan: Some(result_slot),
+                inner: None,
+                outer: Some(&mut *scan_slot),
+            };
+            exec_qual_outcome(state, &mut slots, r)?
+        };
+        match outcome {
+            QualOutcome::Done(b) => return Ok(b),
+            QualOutcome::Suspended(s) => {
+                let r = match s.kind {
+                    SuspendKind::ParamExec(pid) => {
+                        ::executils::exec_set_param_plan(estate, pid)?;
+                        NullableDatum::null()
+                    }
+                    SuspendKind::SubPlan(ss) => ::executils::run_subplan_eval(ss, estate, ecxt)?,
+                };
+                resume = Some(s.resume_with(r));
+            }
+        }
+    }
 }
 
 #[track_caller]
@@ -918,7 +1043,6 @@ pub fn exec_init_window_agg<'mcx>(
         use_pass_through: !node.topWindow || node.partNumCols > 0,
         top_window: node.topWindow,
         all_first: true,
-        deps_hoisted: false,
         partition_spooled: false,
         more_partitions: false,
         next_partition: true,
@@ -1432,13 +1556,24 @@ impl<'mcx> WindowAggStateData<'mcx> {
             };
             if self.plan.partNumCols > 0 {
                 let same = {
-                    let outer_slot = estate.slot_mut(outer_id);
-                    let mut slots = EvalSlots {
-                        scan: None,
-                        inner: Some(&mut self.first_part_slot),
-                        outer: Some(outer_slot),
-                    };
-                    exec_qual(self.part_eq.as_deref_mut(), &mut slots)?
+                    let eq = self.part_eq.as_deref_mut().expect("partNumCols > 0 has part_eq");
+                    if expr_needs_driver(eq) {
+                        exec_qual_inner_outer_id(
+                            eq,
+                            estate,
+                            self.tmpcontext,
+                            outer_id,
+                            &mut self.first_part_slot,
+                        )?
+                    } else {
+                        let outer_slot = estate.slot_mut(outer_id);
+                        let mut slots = EvalSlots {
+                            scan: None,
+                            inner: Some(&mut self.first_part_slot),
+                            outer: Some(outer_slot),
+                        };
+                        exec_qual(Some(eq), &mut slots)?
+                    }
                 };
                 estate.reset_expr_context(self.tmpcontext);
                 if !same {
@@ -1484,8 +1619,12 @@ impl<'mcx> WindowAggStateData<'mcx> {
         let Some(ord_eq) = ord_eq else {
             return Ok(true);
         };
-        let mut slots = EvalSlots { scan: None, inner: Some(slot2), outer: Some(slot1) };
-        let r = exec_qual(Some(ord_eq), &mut slots)?;
+        let r = if expr_needs_driver(ord_eq) {
+            exec_qual_two_slots(ord_eq, estate, tmpcontext, slot1, slot2)?
+        } else {
+            let mut slots = EvalSlots { scan: None, inner: Some(slot2), outer: Some(slot1) };
+            exec_qual(Some(ord_eq), &mut slots)?
+        };
         estate.reset_expr_context(tmpcontext);
         Ok(r)
     }
@@ -2258,75 +2397,16 @@ impl<'mcx> WindowAggStateData<'mcx> {
         Ok(1)
     }
 
-    // RESIDUAL eager arm: WindowAgg programs (projection, equality, trans,
-    // runcondition, qual, per-function args/filters) evaluate through
-    // node-local fused paths with no suspension driver in reach, so pending
-    // initplan params are still force-run before the node evaluates them
-    // rather than lazily at first PARAM_EXEC fetch (C ExecEvalParamExec,
-    // execExprInterp.c:3053). Divergence needs an erroring initplan inside
-    // an untaken short-circuit arm of one of these window expressions.
-    // all_first-gated: a rescan that re-marks exec_plan also resets
-    // all_first; a fully-empty partition input still hoists only after a
-    // first spooled row exists.
-    fn hoist_pending_initplans(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
-        let mut deps: Vec<u32> = Vec::new();
-        for state in [
-            Some(&*self.proj),
-            self.part_eq.as_deref(),
-            self.ord_eq.as_deref(),
-            self.evaltrans.as_deref(),
-            self.runcondition.as_deref(),
-            self.qual.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            deps.extend_from_slice(state.param_exec_deps());
-        }
-        for pf in self.perfunc.iter() {
-            for a in pf.argstates.iter() {
-                deps.extend_from_slice(a.param_exec_deps());
-            }
-        }
-        for pa in self.peragg.iter() {
-            for a in pa.argstates.iter() {
-                deps.extend_from_slice(a.param_exec_deps());
-            }
-            if let Some(f) = pa.filterstate.as_deref() {
-                deps.extend_from_slice(f.param_exec_deps());
-            }
-        }
-        if !deps.is_empty() {
-            ::executils::exec_eval_param_exec_params(estate, &deps)?;
-        }
-        Ok(())
-    }
-
     // calculate_frame_offsets (nodeWindowAgg.c); by-ref offset values get
     // C's query-lifespan datumCopy (the eval context resets below).
     fn calculate_frame_offsets(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         debug_assert!(self.all_first);
         let fo = self.frameOptions;
         let mcx = estate.es_query_cxt;
-        {
-            // C evaluates the offset exprs before any row is fetched;
-            // every other dep waits for a first spooled row (hoist below).
-            let mut deps: Vec<u32> = Vec::new();
-            for state in
-                [self.start_offset_state.as_deref(), self.end_offset_state.as_deref()]
-                    .into_iter()
-                    .flatten()
-            {
-                deps.extend_from_slice(state.param_exec_deps());
-            }
-            if !deps.is_empty() {
-                ::executils::exec_eval_param_exec_params(estate, &deps)?;
-            }
-        }
+        let ecxt = self.ps_ExprContext;
         if fo & FRAMEOPTION_START_OFFSET != 0 {
             let state = self.start_offset_state.as_deref_mut().expect("startOffset ExprState");
-            let mut slots = EvalSlots::default();
-            let nd = exec_eval_expr(state, &mut slots)?;
+            let nd = eval_offset_expr(state, estate, ecxt)?;
             if nd.isnull {
                 return Err(frame_offset_null(true));
             }
@@ -2341,8 +2421,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
         }
         if fo & FRAMEOPTION_END_OFFSET != 0 {
             let state = self.end_offset_state.as_deref_mut().expect("endOffset ExprState");
-            let mut slots = EvalSlots::default();
-            let nd = exec_eval_expr(state, &mut slots)?;
+            let nd = eval_offset_expr(state, estate, ecxt)?;
             if nd.isnull {
                 return Err(frame_offset_null(false));
             }
@@ -2824,7 +2903,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             {
                 let Self { ref mut evaltrans, ref mut agg_row_slot, tmpcontext, .. } = *self;
                 let et = evaltrans.as_mut().unwrap();
-                if et.has_subplan() {
+                if expr_needs_driver(et) {
                     ::executils::exec_eval_expr_with_subplans_outer(
                         et,
                         agg_row_slot,
@@ -3007,7 +3086,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
         };
         let pa = &mut peragg[aggno];
         for (i, st) in pa.argstates.iter_mut().enumerate() {
-            out[i] = if st.has_subplan() {
+            out[i] = if expr_needs_driver(st) {
                 ::executils::exec_eval_expr_with_subplans_outer(st, slot, estate, tmpcontext)?
             } else {
                 let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut *slot) };
@@ -3040,7 +3119,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             WhichSlot::Temp1 => temp_slot_1,
             WhichSlot::Temp2 => temp_slot_2,
         };
-        let res = if f.has_subplan() {
+        let res = if expr_needs_driver(f) {
             ::executils::exec_eval_expr_with_subplans_outer(f, slot, estate, tmpcontext)?
         } else {
             let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut *slot) };
@@ -3455,12 +3534,6 @@ where
             }
         }
 
-        // A row exists here — C never reads these params on an empty input.
-        if !state.deps_hoisted {
-            state.hoist_pending_initplans(estate)?;
-            state.deps_hoisted = true;
-        }
-
         estate.reset_expr_context(state.ps_ExprContext);
 
         {
@@ -3530,7 +3603,7 @@ where
         // C force-updates framehead/frametail/grouptail pointers and trims
         // the tuplestore here; trim is unported, so the pointers stay lazy.
 
-        if state.proj.has_subplan() {
+        if expr_needs_driver(&state.proj) {
             let ecxt = state.ps_ExprContext;
             let result = state.ps_ResultTupleSlot;
             let WindowAggStateData { ref mut proj, ref mut scan_slot, .. } = *state;
@@ -3545,15 +3618,10 @@ where
 
         if state.status == WaStatus::Run {
             let result_id = state.ps_ResultTupleSlot;
+            let ecxt = state.ps_ExprContext;
             let rc_pass = {
                 let WindowAggStateData { ref mut runcondition, ref mut scan_slot, .. } = *state;
-                let result_slot = estate.slot_mut(result_id);
-                let mut slots = EvalSlots {
-                    scan: Some(result_slot),
-                    inner: None,
-                    outer: Some(scan_slot),
-                };
-                exec_qual(runcondition.as_deref_mut(), &mut slots)?
+                exec_window_result_qual(runcondition.as_deref_mut(), estate, ecxt, result_id, scan_slot)?
             };
             if !rc_pass {
                 if state.use_pass_through {
@@ -3576,13 +3644,7 @@ where
             }
             let qual_pass = {
                 let WindowAggStateData { ref mut qual, ref mut scan_slot, .. } = *state;
-                let result_slot = estate.slot_mut(result_id);
-                let mut slots = EvalSlots {
-                    scan: Some(result_slot),
-                    inner: None,
-                    outer: Some(scan_slot),
-                };
-                exec_qual(qual.as_deref_mut(), &mut slots)?
+                exec_window_result_qual(qual.as_deref_mut(), estate, ecxt, result_id, scan_slot)?
             };
             if !qual_pass {
                 continue;
@@ -3656,7 +3718,6 @@ pub fn exec_rescan_window_agg<'mcx>(
 ) {
     node.status = WaStatus::Run;
     node.all_first = true;
-    node.deps_hoisted = false;
     node.release_partition(estate);
     let mcx = estate.es_query_cxt;
     exectuples::exec_clear_tuple(&mut node.first_part_slot, mcx);
@@ -3698,7 +3759,7 @@ mcx::forget_safe_struct!(
         aggregatedbase, aggregatedupto, spooled_rows,
         start_offset_value, end_offset_value, start_offset_typlen,
         start_offset_byval, end_offset_typlen, end_offset_byval,
-        use_pass_through, top_window, all_first, deps_hoisted,
+        use_pass_through, top_window, all_first,
         partition_spooled, more_partitions, next_partition, status;
         ps_ResultTupleDesc, proj, part_eq, ord_eq, buffer, scan_slot,
         first_part_slot, agg_row_slot, temp_slot_1, temp_slot_2,
