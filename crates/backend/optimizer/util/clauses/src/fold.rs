@@ -1049,7 +1049,7 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 }
             }
         }
-        NodeTag::T_CoerceToDomainValue => Ok(None),
+        NodeTag::T_CoerceToDomainValue | NodeTag::T_SetToDefault => Ok(None),
         NodeTag::T_Var
         | NodeTag::T_Const
         | NodeTag::T_RangeTblRef

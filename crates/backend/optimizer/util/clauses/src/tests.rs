@@ -709,6 +709,36 @@ fn minmax<'mcx>(mcx: Mcx<'mcx>, least: bool, args: &[Node<'mcx>]) -> Node<'mcx> 
 }
 
 #[test]
+fn eval_const_set_to_default_is_identity() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let def = Node::mk(
+        mcx,
+        types_nodes::primnodes::SetToDefault {
+            typeId: 23,
+            typeMod: -1,
+            collation: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let out = eval_const_expressions(mcx, def).unwrap();
+    assert!(out.as_set_to_default().is_some());
+
+    let te = Node::mk_target_entry(mcx, def, 1, None, false).unwrap();
+    let tlist = Node::mk_list(mcx, NodeList::make1(mcx, te).unwrap()).unwrap();
+    let folded = eval_const_expressions(mcx, tlist).unwrap();
+    let te_out = folded.as_list().unwrap().nth(0).as_target_entry().unwrap();
+    assert!(te_out.expr.as_set_to_default().is_some());
+
+    let row = Node::mk_list(mcx, NodeList::make1(mcx, def).unwrap()).unwrap();
+    let values = Node::mk_list(mcx, NodeList::make1(mcx, row).unwrap()).unwrap();
+    let folded = eval_const_expressions(mcx, values).unwrap();
+    let cell = folded.as_list().unwrap().nth(0).as_list().unwrap().nth(0);
+    assert!(cell.as_set_to_default().is_some());
+}
+
+#[test]
 fn eval_const_minmax_nonconst_keeps_node() {
     let ctx = cx();
     let mcx = ctx.mcx();
