@@ -3,7 +3,7 @@ use std::sync::Once;
 use mcx::{Mcx, MemoryContext, PgVec};
 use stringinfo::StringInfo;
 
-use crate::from::{CopyFromState, CopySrc};
+use crate::from::{copy_from_error_context, CopyFromState, CopySrc};
 use crate::fromparse::{EolType, RAW_BUF_SIZE};
 use crate::to::copy_attribute_out_text;
 use crate::CopyFormatOptions;
@@ -183,6 +183,32 @@ fn read_attributes_text_decodes_escapes_and_nulls() {
     // Octal/hex partials and passthrough of unknown escapes.
     let f = split_line(b"\\8\\x\\q", b'\t', "\\N");
     assert_eq!(f, vec![Some(b"8xq".to_vec())]);
+}
+
+#[test]
+fn q8_f1_hex_escape_is_22021_not_slice_panic() {
+    setup_fd();
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
+    let mcx = test_ctx().mcx();
+    let mut st = mk_state(mcx, b'\t', "\\N");
+    mcx::vec_append_bytes(&mut st.line_buf, b"2\t\\xdd").unwrap();
+    let err = st.copy_read_attributes_text().unwrap_err();
+    assert_eq!(
+        err.sqlstate(),
+        types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
+    );
+    assert!(err.message().contains("invalid byte sequence"));
+
+    st.cur_attidx = Some(0);
+    st.cur_attval_off = Some(2);
+    st.cur_lineno = 2;
+    st.relname = "fzmin2".into();
+    st.line_buf_valid = true;
+    let wrapped = copy_from_error_context(&st, err);
+    assert_eq!(
+        wrapped.sqlstate(),
+        types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
+    );
 }
 
 #[test]

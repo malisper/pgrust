@@ -1492,27 +1492,39 @@ pub fn copy_from_error_context(
         };
         return Box::new(e.add_context(ctx));
     }
-    let ctx = match cstate.cur_attidx {
-        Some(m) => {
-            let attname = cstate.attname(m);
-            match cstate.cur_attval_off {
-                Some(off) => {
-                    let bytes = &cstate.attribute_buf[off as usize..];
-                    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                    let attval = limit_printout_length(&bytes[..nul]);
-                    format!("COPY {relname}, line {lineno}, column {attname}: \"{attval}\"")
-                }
-                None => {
-                    format!("COPY {relname}, line {lineno}, column {attname}: null input")
+    let stale_attval = cstate
+        .cur_attval_off
+        .is_some_and(|off| (off as usize) >= cstate.attribute_buf.len());
+    let ctx = if stale_attval {
+        if cstate.line_buf_valid {
+            let lineval = limit_printout_length(&cstate.line_buf);
+            format!("COPY {relname}, line {lineno}: \"{lineval}\"")
+        } else {
+            format!("COPY {relname}, line {lineno}")
+        }
+    } else {
+        match cstate.cur_attidx {
+            Some(m) => {
+                let attname = cstate.attname(m);
+                match cstate.cur_attval_off {
+                    Some(off) => {
+                        let bytes = &cstate.attribute_buf[off as usize..];
+                        let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                        let attval = limit_printout_length(&bytes[..nul]);
+                        format!("COPY {relname}, line {lineno}, column {attname}: \"{attval}\"")
+                    }
+                    None => {
+                        format!("COPY {relname}, line {lineno}, column {attname}: null input")
+                    }
                 }
             }
-        }
-        None => {
-            if cstate.line_buf_valid {
-                let lineval = limit_printout_length(&cstate.line_buf);
-                format!("COPY {relname}, line {lineno}: \"{lineval}\"")
-            } else {
-                format!("COPY {relname}, line {lineno}")
+            None => {
+                if cstate.line_buf_valid {
+                    let lineval = limit_printout_length(&cstate.line_buf);
+                    format!("COPY {relname}, line {lineno}: \"{lineval}\"")
+                } else {
+                    format!("COPY {relname}, line {lineno}")
+                }
             }
         }
     };

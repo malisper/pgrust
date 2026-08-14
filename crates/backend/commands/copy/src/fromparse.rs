@@ -939,6 +939,10 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         for d in self.defaults.iter_mut() {
             *d = false;
         }
+        // Q8-F1: C keeps a pointer into the prior row; our offset into a
+        // subsequently clear()ed attribute_buf is a slice panic.
+        self.cur_attidx = None;
+        self.cur_attval_off = None;
 
         if self.opts.binary {
             if !self.copy_from_binary_one_row(row_mcx, values, nulls)? {
