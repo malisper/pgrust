@@ -18,7 +18,7 @@ use types_portal::CMDTAG_SELECT;
 
 use prepare::*;
 use types_error::{PgResult, ERRCODE_DUPLICATE_PSTATEMENT, ERRCODE_INVALID_PSTATEMENT_DEFINITION, ERRCODE_UNDEFINED_PSTATEMENT};
-use types_nodes::parsenodes::{DeallocateStmt, ExecuteStmt, PrepareStmt};
+use types_nodes::parsenodes::{DeallocateStmt, ExecuteStmt, NotifyStmt, PrepareStmt};
 use types_nodes::rawnodes::RawStmt;
 use types_portal::{ParamListHandle, QueryCompletion, QueryEnvHandle, CURSOR_OPT_PARALLEL_OK};
 
@@ -439,6 +439,54 @@ fn execute_with_wrong_parameter_count_is_42601() {
     .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
     assert!(err.message().contains("wrong number of parameters"));
+}
+
+// C ExplainExecuteQuery calls ExplainOneUtility for CMD_UTILITY (prepare.c
+// 659-664). Unfixed: panic. Live via protocol Parse of SHOW/SET/NOTIFY
+// then EXPLAIN EXECUTE, or a rule rewrite to NOTIFY.
+#[test]
+fn explain_execute_utility_invokes_callback() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let raw_notify = node_mk(
+        &ctx,
+        NotifyStmt { conditionname: Some("d140"), payload: None },
+    );
+    let raw = RawStmt { stmt: Some(raw_notify), stmt_location: 0, stmt_len: 0 };
+    let plansource =
+        plancache::CreateCachedPlan(Some(&raw), "NOTIFY d140", CommandTag::SELECT).unwrap();
+    let qmcx = plancache::SourceQueryMcx(plansource);
+    let notify = Node::mk(
+        qmcx,
+        NotifyStmt { conditionname: Some("d140"), payload: None },
+    )
+    .unwrap();
+    let mut qlist = mcx::PgVec::new_in(qmcx);
+    qlist.push(Query {
+        commandType: CmdType::CMD_UTILITY,
+        canSetTag: true,
+        utilityStmt: Some(notify),
+        ..Query::default()
+    });
+    plancache::CompleteCachedPlan(plansource, qlist, &[], CURSOR_OPT_PARALLEL_OK, true).unwrap();
+    StorePreparedStatement("eu", plansource, true).unwrap();
+
+    let exec = ExecuteStmt { name: Some("eu"), params: NodeList::nil() };
+    let mut saw_utility = false;
+    ExplainExecuteQuery(
+        ctx.mcx(),
+        &exec,
+        "EXPLAIN EXECUTE eu",
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        &mut |pstmt, _, _, _, _| {
+            assert_eq!(pstmt.commandType, CmdType::CMD_UTILITY);
+            saw_utility = true;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(saw_utility);
 }
 
 #[test]

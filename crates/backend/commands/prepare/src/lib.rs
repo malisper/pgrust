@@ -486,12 +486,6 @@ pub fn ExplainExecuteQuery<'mcx>(
     let last = stmts.len().saturating_sub(1);
     let mut result = Ok(());
     for (i, pstmt) in stmts.iter().enumerate() {
-        if pstmt.commandType == types_nodes::nodes_enums::CmdType::CMD_UTILITY {
-            panic!(
-                "ExplainExecuteQuery (prepare.c): utility statement in cached plan \
-                 list (rules lane)"
-            );
-        }
         result = explain_one_plan(pstmt, query_string, param_li, planduration, i == last);
         if result.is_err() {
             break;

@@ -374,6 +374,21 @@ fn ExplainOneUtility<'mcx>(
                     if mem_counters.is_none() {
                         mem_counters = mem_before.map(|b| mem_counters_since(mcx, b));
                     }
+                    if pstmt.commandType == CmdType::CMD_UTILITY {
+                        ExplainOneUtility(
+                            mcx,
+                            pstmt.utilityStmt,
+                            into,
+                            es,
+                            query_string,
+                            param_li,
+                            query_env,
+                        )?;
+                        if !is_last {
+                            ExplainSeparatePlans(es)?;
+                        }
+                        return Ok(());
+                    }
                     ExplainOnePlanRef(
                         mcx,
                         pstmt,
