@@ -60,8 +60,10 @@ pub enum SortComparator {
     Interval,
     /// `bpcharfastcmp_c` (varstr_sortsupport bpchar arm, collate-is-C only).
     BpcharC,
-    /// `namefastcmp_c` (btnamesortsupport); no abbreviation (sort-perf lane).
+    /// `namefastcmp_c` (btnamesortsupport, collate-is-C); no abbreviation.
     NameC,
+    /// `namefastcmp_locale` (btnamesortsupport non-C); no abbreviation (C too).
+    NameLocale(&'static pg_locale::PgLocale),
     /// `varlenafastcmp_locale`: resolved-once locale, no abbreviation (C too:
     /// pg_strxfrm_enabled false for libc), no last-pair result cache (order-
     /// identical; extra strcoll on repeated pairs — CATALOG watch).
@@ -163,6 +165,16 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
             };
             namefastcmp_c(a, b)
         }
+        SortComparator::NameLocale(locale) => {
+            // SAFETY: as NameC.
+            let (a, b) = unsafe {
+                (
+                    &*(x.as_usize() as *const [u8; 64]),
+                    &*(y.as_usize() as *const [u8; 64]),
+                )
+            };
+            varstrfastcmp_locale(name_cstr(a), name_cstr(b), locale, false)
+        }
         // SAFETY: as TextC.
         SortComparator::TextLocale(locale) => unsafe {
             with_varlena_payload(x, |a| {
@@ -226,6 +238,11 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
              (use apply_sort_comparator_in)"
         ),
     }
+}
+
+fn name_cstr(n: &[u8; 64]) -> &[u8] {
+    let len = n.iter().position(|&b| b == 0).unwrap_or(64);
+    &n[..len]
 }
 
 // C namefastcmp_c: strncmp(NameStr, NameStr, NAMEDATALEN).
@@ -563,7 +580,7 @@ pub fn comparator_for_opfamily(
         }
         F_BTTEXT_PATTERN_SORTSUPPORT => SortComparator::TextC,
         F_BTBPCHAR_PATTERN_SORTSUPPORT => SortComparator::BpcharC,
-        F_BTNAMESORTSUPPORT => SortComparator::NameC,
+        F_BTNAMESORTSUPPORT => name_comparator(collation)?,
         // bytea_sortsupport forces the C collation (byteas carry NULs).
         F_BYTEA_SORTSUPPORT => SortComparator::TextC,
         F_UUID_SORTSUPPORT => SortComparator::Uuid,
@@ -665,6 +682,17 @@ pub fn comparator_for_gist_index_col(opfamily: Oid, opcintype: Oid) -> PgResult<
     }
 }
 
+// C btnamesortsupport → varstr_sortsupport(NAMEOID, collid).
+fn name_comparator(collation: Oid) -> PgResult<SortComparator> {
+    varlena::check_collation_set(collation)?;
+    let locale = pg_locale::pg_newlocale_from_collation(collation)?;
+    Ok(if locale.collate_is_c {
+        SortComparator::NameC
+    } else {
+        SortComparator::NameLocale(locale)
+    })
+}
+
 // varstr_sortsupport (varlena.c) comparator selection.
 fn varstr_comparator(bpchar: bool, collation: Oid) -> PgResult<SortComparator> {
     varlena::check_collation_set(collation)?;
@@ -699,7 +727,7 @@ pub fn comparator_for_index_col(
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
         F_BTINT2SORTSUPPORT => SortComparator::Int16,
         F_BTOIDSORTSUPPORT => SortComparator::Uint32,
-        F_BTNAMESORTSUPPORT => SortComparator::NameC,
+        F_BTNAMESORTSUPPORT => name_comparator(collation)?,
         F_BTTEXTSORTSUPPORT | F_BPCHAR_SORTSUPPORT => {
             varstr_comparator(ssup_proc == F_BPCHAR_SORTSUPPORT, collation)?
         }
@@ -745,4 +773,35 @@ pub fn comparator_for_index_col(
              in pg_amproc.dat and unlisted procs ride the BTORDER_PROC shim (ssup.rs:708)"
         ),
     })
+}
+
+#[cfg(test)]
+mod name_ssup_tests {
+    use super::*;
+    use types_core::C_COLLATION_OID;
+    use types_error::ERRCODE_INDETERMINATE_COLLATION;
+
+    #[test]
+    fn name_comparator_c_is_namec() {
+        assert!(matches!(
+            name_comparator(C_COLLATION_OID).unwrap(),
+            SortComparator::NameC
+        ));
+    }
+
+    #[test]
+    fn name_comparator_invalid_oid_is_indeterminate() {
+        let err = name_comparator(0).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_INDETERMINATE_COLLATION);
+    }
+
+    #[test]
+    fn namefastcmp_c_is_byte_order() {
+        let mut zebra = [0u8; 64];
+        zebra[..5].copy_from_slice(b"Zebra");
+        let mut apple = [0u8; 64];
+        apple[..5].copy_from_slice(b"apple");
+        assert!(namefastcmp_c(&zebra, &apple) < 0);
+        assert_eq!(name_cstr(&zebra), b"Zebra");
+    }
 }

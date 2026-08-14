@@ -707,7 +707,9 @@ macro_rules! dispatch_cmp {
                     $body
                 }
                 // strcoll dominates locale compares; nothing to fold.
-                SortComparator::TextLocale(_) | SortComparator::BpcharLocale(_) => {
+                SortComparator::TextLocale(_)
+                | SortComparator::BpcharLocale(_)
+                | SortComparator::NameLocale(_) => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
                     $body
                 }
