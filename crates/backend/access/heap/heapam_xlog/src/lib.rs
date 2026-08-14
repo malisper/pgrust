@@ -1186,7 +1186,130 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
     Ok(())
 }
 
+/// heap_mask (heapam_xlog.c) — mask a heap page's non-WAL-logged fields so a
+/// standby/recovered image can be byte-compared against the primary under
+/// `wal_consistency_checking`. Faithful port of PostgreSQL REL_18_3.
+pub fn heap_mask(pagedata: &mut [u8], blkno: types_core::BlockNumber) -> PgResult<()> {
+    use bufmask::MASK_MARKER;
+    use types_tuple::{HEAP_XACT_MASK, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID};
+
+    // MAXALIGN over MAXIMUM_ALIGNOF (8), matching C's MAXALIGN.
+    #[inline]
+    fn maxalign(len: usize) -> usize {
+        (len + 7) & !7
+    }
+
+    bufmask::mask_page_lsn_and_checksum(pagedata);
+    bufmask::mask_page_hint_bits(pagedata);
+    bufmask::mask_unused_space(pagedata);
+
+    let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
+    // SAFETY: `pagedata` is a full BLCKSZ page image, exclusively borrowed here.
+    let mut pm = unsafe { PageMut::from_raw(ptr) };
+    let maxoff = pm.as_ref().max_offset_number();
+    for off in 1..=maxoff {
+        let iid = pm.as_ref().item_id(off);
+        // page_item = (char *) (page + ItemIdGetOffset(iid))
+        // SAFETY: item offset is within the page for a used line pointer.
+        let page_item = unsafe { pm.as_mut_ptr().add(iid.lp_off() as usize) };
+
+        if iid.is_normal() {
+            // SAFETY: a normal line pointer references a HeapTupleHeaderData
+            // laid out at page_item; the item's storage is within the page.
+            let page_htup = unsafe { &mut *(page_item as *mut HeapTupleHeaderData) };
+
+            // If xmin is not yet frozen, ignore hint-bit differences (they can
+            // be set without emitting WAL); otherwise still mask xmax hints.
+            if !page_htup.xmin_frozen() {
+                page_htup.t_infomask &= !HEAP_XACT_MASK;
+            } else {
+                page_htup.t_infomask &= !HEAP_XMAX_INVALID;
+                page_htup.t_infomask &= !HEAP_XMAX_COMMITTED;
+            }
+
+            // Replay sets Command Id to FirstCommandId; mask t_cid. Writing a
+            // union field is safe in Rust.
+            page_htup.t_choice.t_heap.t_field3 = MASK_MARKER as u32;
+
+            // Speculative tuples carry a per-backend token in t_ctid on the
+            // primary and are never WAL-logged; redo sets t_ctid to (blkno,
+            // off). Match that so the comparison ignores the token.
+            if page_htup.is_speculative() {
+                types_tuple::ItemPointerSet(&mut page_htup.t_ctid, blkno, off);
+            }
+            // NB: HeapTupleHeaderIndicatesMovedPartitions is left untouched
+            // (WAL-logged, must stay in sync).
+        }
+
+        // Ignore padding bytes after a non-MAXALIGNed item.
+        if iid.has_storage() {
+            let len = iid.lp_len() as usize;
+            let padlen = maxalign(len) - len;
+            if padlen > 0 {
+                // SAFETY: [page_item+len, page_item+MAXALIGN(len)) lies within
+                // the item's page storage.
+                unsafe { core::ptr::write_bytes(page_item.add(len), MASK_MARKER, padlen) };
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn init_seams() {}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+    use types_storage::bufpage::PAI_IS_HEAP;
+    use types_tuple::{HEAP_XACT_MASK, HEAP_XMAX_COMMITTED, HEAP_XMIN_COMMITTED};
+
+    #[repr(align(8))]
+    struct P([u8; BLCKSZ]);
+
+    fn pm(p: &mut P) -> PageMut<'_> {
+        let ptr = core::ptr::NonNull::new(p.0.as_mut_ptr()).unwrap();
+        // SAFETY: owned MAXALIGNed BLCKSZ image, exclusively borrowed.
+        unsafe { PageMut::from_raw(ptr) }
+    }
+
+    #[test]
+    fn heap_mask_clears_hint_bits_cid_lsn_and_is_idempotent() {
+        let mut p = P([0u8; BLCKSZ]);
+        {
+            let mut page = pm(&mut p);
+            page.init(0);
+            // Non-MAXALIGNed item length so the padding path also runs.
+            let body = [0xAAu8; SizeofHeapTupleHeader + 3];
+            page.add_item(&body, 0, PAI_IS_HEAP).unwrap();
+            page.set_lsn(0x1122_3344_5566_7788);
+            let off = page.as_ref().item_id(1).lp_off() as usize;
+            // SAFETY: normal item stores a HeapTupleHeaderData at `off`.
+            let htup = unsafe { &mut *(page.as_mut_ptr().add(off) as *mut HeapTupleHeaderData) };
+            htup.t_infomask = HEAP_XMIN_COMMITTED | HEAP_XMAX_COMMITTED;
+            htup.t_choice.t_heap.t_field3 = 0xDEAD_BEEF;
+        }
+
+        heap_mask(&mut p.0, 0).unwrap();
+
+        let masked = p.0;
+        {
+            let page = pm(&mut p);
+            assert_eq!(page.as_ref().lsn(), 0);
+            let off = page.as_ref().item_id(1).lp_off() as usize;
+            // SAFETY: as above.
+            let htup = unsafe { &*(page.as_ref().as_ptr().add(off) as *const HeapTupleHeaderData) };
+            // xmin not frozen -> whole HEAP_XACT_MASK cleared.
+            assert_eq!(htup.t_infomask & HEAP_XACT_MASK, 0);
+            // command id masked.
+            assert_eq!(unsafe { htup.t_choice.t_heap.t_field3 }, 0);
+        }
+
+        // Idempotent: masking an already-masked page is a no-op.
+        let mut p2 = P(masked);
+        heap_mask(&mut p2.0, 0).unwrap();
+        assert_eq!(p2.0, masked);
+    }
+}
 
 #[cfg(test)]
 mod tests;

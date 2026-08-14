@@ -25,6 +25,7 @@ xlogreader = { path = "../xlogreader" }
 xlogprefetcher = { path = "../xlogprefetcher" }
 xlogreader_seams = { path = "../xlogreader_seams" }
 xlogutils = { path = "../xlogutils" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 transam_xlog = { path = "../transam_xlog" }
 xlogrecovery_seams = { path = "../xlogrecovery_seams" }
 ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }

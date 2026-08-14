@@ -13,7 +13,8 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use elog::{elog, ereport};
-use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
+use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo, BLCKSZ};
+use types_storage::{BufferIsValid, InvalidBuffer, ReadBufferMode};
 use types_error::{
     ErrorLevel, ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERROR, FATAL, LOG, PANIC,
     WARNING,
@@ -1715,34 +1716,128 @@ fn xlogrecovery_redo(rec: &mut Recovery) -> PgResult<()> {
 
 const XLR_CHECK_CONSISTENCY: u8 = 0x02;
 
-// verifyBackupPageConsistency (xlogrecovery.c:2483) is not yet ported: C
-// re-reads each replayed block, applies the rmgr's rm_mask when one exists
-// (masking is optional per-rmgr; C compares either way) and byte-compares it
-// against the primary's page image, elog(FATAL) on mismatch. pgrust pins
-// wal_consistency_checking empty, so flagged records only appear when
-// replaying WAL written by a C primary that has the GUC on — a supported
-// deployment shape. Until the check is ported, skip it (replay itself is
-// unaffected; the pages were applied normally) and say so loudly ONCE per
-// startup instead of aborting the startup process. Full port is tracked as
-// a follow-up in the unported-panic inventory (A4).
-static CONSISTENCY_CHECK_SKIP_WARNED: AtomicBool = AtomicBool::new(false);
-
-fn skip_unported_consistency_check(rmid: u8, info: u8, end_lsn: u64) {
-    if !CONSISTENCY_CHECK_SKIP_WARNED.swap(true, Relaxed) {
-        let _ = elog(
-            WARNING,
-            format!(
-                "WAL record at {} (rmid {}, info {:#04x}) requests a page consistency check \
-                 (wal_consistency_checking was enabled on the primary), which is not yet \
-                 implemented; skipping this and all later consistency checks — WAL replay \
-                 itself is unaffected, but replayed pages are not being cross-verified \
-                 against the primary's page images",
-                lsn_fmt(end_lsn),
-                rmid,
-                info
-            ),
-        );
+// verifyBackupPageConsistency (xlogrecovery.c:2483): after a record whose
+// xl_info carries XLR_CHECK_CONSISTENCY is replayed, re-read each referenced
+// block, restore the record's full-page image into a scratch page, apply the
+// owning rmgr's rm_mask (when one exists) to BOTH the just-replayed buffer and
+// the restored image, and byte-compare. A mismatch is a FATAL — the intended
+// behavior of wal_consistency_checking, distinguishing a real replay bug from
+// a masking-only difference.
+//
+// Blocks whose image was actually applied during redo (BKPIMAGE_APPLY) are
+// skipped: comparing a page against the image it was just restored from is
+// vacuous. Resource managers with no rm_mask still have their raw pages
+// compared, exactly as C does (the mask is optional; the comparison is not).
+fn verify_backup_page_consistency(rec: &mut Recovery, rmid: u8) -> PgResult<()> {
+    // Records with no block references need no consistency check.
+    if !rec.reader.XLogRecHasAnyBlockRefs() {
+        return Ok(());
     }
+
+    let rm_mask = rmgr::GetRmgr(rmid)?.rm_mask;
+    let end_rec_ptr = rec.reader.v.EndRecPtr;
+    let max_block_id = rec.reader.XLogRecMaxBlockId();
+
+    // The rmgr masks cast page bytes to typed page structs (line pointers,
+    // HeapTupleHeaderData, ...) that require MAXALIGN (8-byte) alignment, so
+    // the scratch pages must match C's palloc'd BLCKSZ buffers — a bare
+    // `[u8; BLCKSZ]` on the stack is only byte-aligned.
+    #[repr(align(8))]
+    struct AlignedPage([u8; BLCKSZ]);
+    let mut replay = AlignedPage([0u8; BLCKSZ]);
+    let mut primary = AlignedPage([0u8; BLCKSZ]);
+    let replay_image = &mut replay.0;
+    let primary_image = &mut primary.0;
+
+    for block_id in 0..=max_block_id as u8 {
+        let Some((rlocator, forknum, blkno, _prefetch)) =
+            rec.reader.XLogRecGetBlockTagExtended(block_id)
+        else {
+            // No block reference with this id.
+            continue;
+        };
+
+        debug_assert!(rec.reader.XLogRecHasBlockImage(block_id));
+
+        if rec.reader.XLogRecBlockImageApply(block_id) {
+            // The image was replayed into the page, so comparing it against
+            // itself would be vacuous.
+            continue;
+        }
+
+        // Read the current (post-redo) contents into replay_image.
+        let buf = xlogutils::XLogReadBufferExtended(
+            rlocator,
+            forknum,
+            blkno,
+            ReadBufferMode::NormalNoLog,
+            InvalidBuffer,
+        )?;
+        if !BufferIsValid(buf) {
+            continue;
+        }
+        bufmgr_seams::lock_buffer::call(buf, bufmgr_seams::BUFFER_LOCK_EXCLUSIVE)?;
+        let page_ptr = bufmgr_seams::buffer_get_page::call(buf);
+        // SAFETY: buf is pinned and exclusively locked; its page is BLCKSZ.
+        unsafe {
+            std::ptr::copy_nonoverlapping(page_ptr.as_ptr(), replay_image.as_mut_ptr(), BLCKSZ);
+        }
+        // UnlockReleaseBuffer: no longer needed now that a copy is in hand.
+        bufmgr_seams::lock_buffer::call(buf, bufmgr_seams::BUFFER_LOCK_UNLOCK)?;
+        bufmgr_seams::release_buffer::call(buf)?;
+
+        // If the block LSN is already ahead of this record, contents can't be
+        // expected to match (recovery was restarted over this block).
+        if page_lsn(replay_image) > end_rec_ptr {
+            continue;
+        }
+
+        // Restore the record's backup image into primary_image.
+        if !rec.reader.RestoreBlockImage(block_id, primary_image) {
+            let msg = rec
+                .reader
+                .errormsg()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "could not restore block image".to_string());
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_INTERNAL_ERROR)
+                .errmsg_internal(msg)
+                .finish(ErrorLocation::new(
+                    file!(),
+                    line!() as i32,
+                    "verify_backup_page_consistency",
+                ))?;
+        }
+
+        // Mask both images before comparing, when the rmgr defines a mask.
+        if let Some(mask) = rm_mask {
+            mask(replay_image, blkno)?;
+            mask(primary_image, blkno)?;
+        }
+
+        if replay_image[..] != primary_image[..] {
+            elog(
+                FATAL,
+                format!(
+                    "inconsistent page found, rel {}/{}/{}, forknum {}, blkno {}",
+                    rlocator.spcOid,
+                    rlocator.dbOid,
+                    rlocator.relNumber,
+                    forknum as i32 as u32,
+                    blkno
+                ),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+// pd_lsn is two u32 halves (PageXLogRecPtr): xlogid @0, xrecoff @4.
+fn page_lsn(page: &[u8]) -> XLogRecPtr {
+    let hi = u32::from_ne_bytes(page[0..4].try_into().unwrap());
+    let lo = u32::from_ne_bytes(page[4..8].try_into().unwrap());
+    ((hi as u64) << 32) | lo as u64
 }
 
 fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult<()> {
@@ -1819,7 +1914,7 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
     // C: if ((record->xl_info & XLR_CHECK_CONSISTENCY) != 0)
     //         verifyBackupPageConsistency(xlogreader);
     if info & XLR_CHECK_CONSISTENCY != 0 {
-        skip_unported_consistency_check(rmid, info, rec.reader.v.EndRecPtr);
+        verify_backup_page_consistency(rec, rmid)?;
     }
 
     LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);

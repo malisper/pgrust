@@ -77,3 +77,46 @@ pub fn seq_redo(record: &mut XLogReaderState) -> PgResult<()> {
     bufmgr_seams::lock_buffer::call(buffer, bufmgr_seams::BUFFER_LOCK_UNLOCK)?;
     bufmgr_seams::release_buffer::call(buffer)
 }
+
+/// seq_mask (sequence.c) — mask a sequence page for
+/// `wal_consistency_checking`. Faithful port of PostgreSQL REL_18_3: only the
+/// LSN/checksum and the free space are masked (the sequence tuple itself is
+/// fully WAL-logged on every change).
+pub fn seq_mask(page: &mut [u8], _blkno: types_core::BlockNumber) -> PgResult<()> {
+    bufmask::mask_page_lsn_and_checksum(page);
+    bufmask::mask_unused_space(page);
+    Ok(())
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+
+    #[repr(align(8))]
+    struct P([u8; BLCKSZ]);
+
+    fn pm(p: &mut P) -> PageMut<'_> {
+        let ptr = core::ptr::NonNull::new(p.0.as_mut_ptr()).unwrap();
+        // SAFETY: owned MAXALIGNed BLCKSZ image, exclusively borrowed.
+        unsafe { PageMut::from_raw(ptr) }
+    }
+
+    #[test]
+    fn seq_mask_zeroes_lsn_and_is_idempotent() {
+        let mut p = P([0u8; BLCKSZ]);
+        {
+            let mut page = pm(&mut p);
+            seq_page_init(&mut page);
+            page.set_lsn(0xABCD_1234_5678);
+        }
+        seq_mask(&mut p.0, 0).unwrap();
+        let masked = p.0;
+        {
+            let page = pm(&mut p);
+            assert_eq!(page.as_ref().lsn(), 0);
+        }
+        let mut p2 = P(masked);
+        seq_mask(&mut p2.0, 0).unwrap();
+        assert_eq!(p2.0, masked);
+    }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "pagemask"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pagemask"
+path = "src/main.rs"
+
+[dependencies]
+types_core = { path = "../../_support/types/types_core" }
+rmgr = { path = "../../backend/access/transam/rmgr" }

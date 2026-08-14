@@ -95,16 +95,6 @@ macro_rules! unported_redo {
     )+};
 }
 
-macro_rules! unported_mask {
-    ($($name:ident => $unit:literal;)+) => {$(
-        #[cold]
-        #[inline(never)]
-        fn $name(_pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
-            panic!(concat!("rmgr callback not ported: ", stringify!($name), " — land ", $unit))
-        }
-    )+};
-}
-
 fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
     dbcommands_seams::dbase_redo::call(record)
 }
@@ -122,12 +112,6 @@ fn replorigin_redo(record: &mut XLogReaderState) -> PgResult<()> {
 // btree/gin/gist/spgist rm_startup/rm_cleanup only allocate the recovery
 // scratch their redo callbacks read; the rows carry None (gin/gist/spgist
 // redo still loud; btree redo uses stack scratch instead of C's opCtx).
-unported_mask! {
-    heap_mask => "backend-access-heap-heapam-xlog";
-    btree_mask => "backend-access-nbtree-nbtxlog";
-    seq_mask => "backend-commands-sequence";
-    brin_mask => "backend-access-brin-xlog";
-}
 
 // rmgrlist.h rows, in declaration order (rm_decode column omitted; see crate
 // docs).
@@ -220,7 +204,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
         rm_identify: rmgrdesc::heapdesc::heap2_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(heap_mask),
+        rm_mask: Some(heapam_xlog::heap_mask),
     },
     RmgrData {
         rm_name: "Heap",
@@ -229,7 +213,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
         rm_identify: rmgrdesc::heapdesc::heap_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(heap_mask),
+        rm_mask: Some(heapam_xlog::heap_mask),
     },
     RmgrData {
         rm_name: "Btree",
@@ -238,7 +222,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
         rm_identify: rmgrdesc::nbtdesc::btree_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(btree_mask),
+        rm_mask: Some(nbtree_xlog::btree_mask),
     },
     RmgrData {
         rm_name: "Hash",
@@ -274,7 +258,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
         rm_identify: rmgrdesc::seqdesc::seq_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(seq_mask),
+        rm_mask: Some(sequence_xlog::seq_mask),
     },
     RmgrData {
         rm_name: "SPGist",
@@ -292,7 +276,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
         rm_identify: rmgrdesc::brindesc::brin_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(brin_mask),
+        rm_mask: Some(brin_xlog::brin_mask),
     },
     RmgrData {
         rm_name: "CommitTs",
@@ -374,4 +358,21 @@ pub fn RmgrNotFound(rmid: RmgrId) -> PgResult<()> {
         .finish(ErrorLocation::new(file!(), line!() as i32, "RmgrNotFound"))
 }
 
-pub fn init_seams() {}
+// check_wal_consistency_checking (xlog.c) only accepts the resource managers
+// that carry an rm_mask; every other name (and every rmid without a mask) is
+// rejected. C rebuilds this (name, rmid) set on the fly from RmgrTable each
+// check; pgrust does the same here — a cold GUC-check path, no caching — and
+// hands it to transam_xlog's GUC check hook through a seam (a direct rmgr ->
+// transam_xlog dep would cycle through xloginsert/xlogreader).
+fn maskable_rmgrs() -> Vec<(&'static str, u8)> {
+    RmgrTable
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.rm_mask.is_some())
+        .map(|(rmid, r)| (r.rm_name, rmid as u8))
+        .collect()
+}
+
+pub fn init_seams() {
+    transam_xlog_seams::wal_consistency_maskable_rmgrs::set(maskable_rmgrs);
+}

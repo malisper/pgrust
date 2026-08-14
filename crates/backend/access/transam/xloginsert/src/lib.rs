@@ -173,7 +173,7 @@ struct Assembled {
 fn assemble(
     scratch: &mut Scratch,
     rmid: u8,
-    info: u8,
+    mut info: u8,
     redo_rec_ptr: XLogRecPtr,
     do_page_writes: bool,
     record_flags: u8,
@@ -190,8 +190,14 @@ fn assemble(
     let mut sp = SizeOfXLogRecord;
     let hdr = &mut scratch.hdr[..];
 
-    // wal_consistency_checking[] is pinned all-false (transam_xlog panics on
-    // a non-empty setting), so no per-rmid probe here.
+    // XLogRecordAssemble (xloginsert.c:580): force consistency checks for this
+    // record when the GUC selected its resource manager. Done before the block
+    // loop so `include_image` below picks up XLR_CHECK_CONSISTENCY, forcing a
+    // full-page image for every block even when crash recovery wouldn't need
+    // one.
+    if transam_xlog::wal_consistency_checking(rmid) {
+        info |= XLR_CHECK_CONSISTENCY;
+    }
 
     for (i, blk) in blocks.iter().enumerate() {
         // C indexes registered_buffers by block_id; unchecked disorder here

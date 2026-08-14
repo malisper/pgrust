@@ -141,6 +141,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // The maskable resource managers (rmgr.c): (rm_name, rmid) for every
+    // builtin rmgr whose rm_mask != NULL. check_wal_consistency_checking
+    // (xlog.c) matches its list tokens (or "all") against exactly these.
+    // Sourced from RmgrTable in the rmgr crate; transam_xlog cannot depend on
+    // rmgr directly (it would cycle through xloginsert/xlogreader).
+    pub fn wal_consistency_maskable_rmgrs() -> Vec<(&'static str, u8)>
+);
+
+seam_core::seam!(
     // DataChecksumsEnabled() (xlog.c): ControlFile->data_checksum_version > 0.
     pub fn data_checksums_enabled() -> bool
 );

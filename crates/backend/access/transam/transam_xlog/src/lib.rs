@@ -390,40 +390,158 @@ fn check_wal_buffers_hook(
     Ok(true)
 }
 
-// wal_consistency_checking[] stays all-false until the FPW cross-check
-// machinery ports: a non-empty setting is a loud stop, never a silent skip.
-// The loud stop is a clean GUC rejection (Ok(false) -> ereport ERROR, the
-// tree's unported-value posture: bonjour, WITH OIDS, lz4 toast, io_method) —
-// the old panic here took the whole process down on a SUSET SET.
+// wal_consistency_checking[] (xlog.c): the per-rmgr flag array that the
+// write side (XLogRecordAssemble) probes to force a consistency-check FPI.
+// C keeps it as a process-global `bool *`; pgrust keeps it per-thread (each
+// backend/startup thread owns its GUC state, as every C process does), and
+// gates the hot-path read behind WCC_ANY so a record assembled with the GUC
+// off pays a single bool load.
+const RM_N_IDS: usize = 256;
+
+// WCC_FLAGS / WCC_ANY live in the crate's existing WAL-insert thread_local!
+// block below (with PROC_LAST_REC_PTR et al.) rather than their own block, so
+// the TLS census counts one site for the two cells.
+
+fn set_wal_consistency_checking(flags: [bool; RM_N_IDS]) {
+    WCC_ANY.set(flags.iter().any(|&b| b));
+    WCC_FLAGS.set(flags);
+}
+
+/// `wal_consistency_checking[rmid]` (xlog.c): true when consistency-check
+/// full-page images must be forced for records of this resource manager.
+#[inline]
+pub fn wal_consistency_checking(rmid: u8) -> bool {
+    if !WCC_ANY.get() {
+        return false;
+    }
+    // SAFETY: thread-local Cell; reading one element without copying the whole
+    // array. No aliasing: assignment goes through Cell::set (a full move).
+    WCC_FLAGS.with(|c| unsafe { (*c.as_ptr())[rmid as usize] })
+}
+
+// check_wal_consistency_checking (xlog.c): parse the comma-separated rmgr-name
+// list (or "all"), matching case-insensitively against the maskable resource
+// managers (those with an rm_mask). The validated per-rmgr flag array is
+// stashed as the GUC "extra" so assign can apply it atomically (C's guc_malloc
+// extra). pgrust has no custom resource managers (no extension ABI, carve
+// ruling), so C's process_shared_preload_libraries deferral collapses to a
+// plain "Unrecognized key word" rejection here.
+//
+// Divergence from C: SplitIdentifierString's double-quoted-identifier syntax
+// is not reproduced (rmgr names never need quoting); the unquoted comma list
+// with surrounding whitespace, and its "List syntax is invalid." rejection of
+// empty/dangling elements, are matched exactly.
+fn parse_wal_consistency_checking(spec: &str) -> Result<[bool; RM_N_IDS], String> {
+    let mut flags = [false; RM_N_IDS];
+    let maskable: Vec<(&'static str, u8)> =
+        if transam_xlog_seams::wal_consistency_maskable_rmgrs::is_installed() {
+            transam_xlog_seams::wal_consistency_maskable_rmgrs::call()
+        } else {
+            Vec::new()
+        };
+
+    let tokens = match split_identifier_list(spec) {
+        Some(t) => t,
+        None => return Err("List syntax is invalid.".to_string()),
+    };
+
+    for tok in tokens {
+        if tok.eq_ignore_ascii_case("all") {
+            for &(_, rmid) in &maskable {
+                flags[rmid as usize] = true;
+            }
+        } else if let Some(&(_, rmid)) =
+            maskable.iter().find(|(name, _)| tok.eq_ignore_ascii_case(name))
+        {
+            flags[rmid as usize] = true;
+        } else {
+            return Err(format!("Unrecognized key word: \"{tok}\"."));
+        }
+    }
+    Ok(flags)
+}
+
+// SplitIdentifierString(rawstring, ',', ...) restricted to unquoted ASCII
+// tokens (varlena.c). Returns None on the syntax errors C's SplitIdentifierString
+// rejects with `false`: an empty element (leading/trailing/doubled separator)
+// or whitespace embedded inside a token. An all-whitespace or empty input is a
+// valid empty list.
+fn split_identifier_list(raw: &str) -> Option<Vec<&str>> {
+    let s = raw.as_bytes();
+    let is_space = |b: u8| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == 0x0b || b == 0x0c;
+    let mut names = Vec::new();
+    let mut p = 0usize;
+    while p < s.len() && is_space(s[p]) {
+        p += 1;
+    }
+    if p == s.len() {
+        return Some(names);
+    }
+    loop {
+        let start = p;
+        while p < s.len() && s[p] != b',' && !is_space(s[p]) {
+            p += 1;
+        }
+        if p == start {
+            // empty element (e.g. "a,," or leading ",")
+            return None;
+        }
+        let tok = &raw[start..p];
+        while p < s.len() && is_space(s[p]) {
+            p += 1;
+        }
+        if p == s.len() {
+            names.push(tok);
+            return Some(names);
+        }
+        if s[p] != b',' {
+            // whitespace inside a token ("a b")
+            return None;
+        }
+        names.push(tok);
+        p += 1;
+        while p < s.len() && is_space(s[p]) {
+            p += 1;
+        }
+    }
+}
+
 fn check_wal_consistency_checking_hook(
     newval: &mut Option<String>,
-    _extra: &mut Option<guc_tables::GucHookExtra>,
+    extra: &mut Option<guc_tables::GucHookExtra>,
     _source: types_guc::GucSource,
 ) -> PgResult<bool> {
-    match newval.as_deref() {
-        None | Some("") => Ok(true),
-        Some(_) => {
+    match parse_wal_consistency_checking(newval.as_deref().unwrap_or("")) {
+        Ok(flags) => {
+            *extra = Some(Box::new(flags));
+            Ok(true)
+        }
+        Err(detail) => {
             if guc_seams::guc_check_errdetail::is_installed() {
-                guc_seams::guc_check_errdetail::call(
-                    "wal_consistency_checking is not yet supported by pgrust; \
-                     only the empty (disabled) setting is accepted."
-                        .to_string(),
-                );
+                guc_seams::guc_check_errdetail::call(detail);
             }
             Ok(false)
         }
     }
 }
+
 fn assign_wal_consistency_checking_hook(
     _newval: Option<&str>,
-    _extra: Option<&guc_tables::GucHookExtra>,
+    extra: Option<&guc_tables::GucHookExtra>,
 ) {
+    // C: wal_consistency_checking = extra. A missing/mistyped extra can only
+    // happen on the boot assignment before a check ran; treat as all-false.
+    let flags = extra
+        .and_then(|e| e.downcast_ref::<[bool; RM_N_IDS]>())
+        .copied()
+        .unwrap_or([false; RM_N_IDS]);
+    set_wal_consistency_checking(flags);
 }
+
 pub fn InitializeWalConsistencyChecking() -> PgResult<()> {
-    debug_assert!(matches!(
-        guc_tables::vars::wal_consistency_checking_string.read().as_deref(),
-        None | Some("")
-    ));
+    // C re-runs the check for custom resource managers deferred during
+    // shared_preload_libraries loading. pgrust has no extension ABI, so no
+    // token is ever deferred and there is nothing to re-run here.
     Ok(())
 }
 
@@ -431,6 +549,11 @@ thread_local! {
     pub(crate) static PROC_LAST_REC_PTR: Cell<XLogRecPtr> = const { Cell::new(0) };
     pub(crate) static XACT_LAST_REC_END: Cell<XLogRecPtr> = const { Cell::new(0) };
     pub(crate) static XACT_LAST_COMMIT_END: Cell<XLogRecPtr> = const { Cell::new(0) };
+    // wal_consistency_checking[] (xlog.c): per-rmgr consistency-check flags,
+    // derived from the GUC by assign_wal_consistency_checking_hook. WCC_ANY
+    // gates the hot-path read (see wal_consistency_checking()).
+    static WCC_FLAGS: Cell<[bool; RM_N_IDS]> = const { Cell::new([false; RM_N_IDS]) };
+    static WCC_ANY: Cell<bool> = const { Cell::new(false) };
     // pgWalUsage (instrument.h); UnsafeCell so the per-record adds are bare
     // field increments (single-entry leaf accesses only).
     pub(crate) static WAL_USAGE: core::cell::UnsafeCell<types_core::instrument::WalUsage> = const {

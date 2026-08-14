@@ -1104,7 +1104,86 @@ pub fn btree_redo(record: &mut XLogReaderState) -> PgResult<()> {
     }
 }
 
+/// btree_mask (nbtxlog.c) — mask a btree page's non-WAL-logged fields for
+/// `wal_consistency_checking`. Faithful port of PostgreSQL REL_18_3.
+pub fn btree_mask(pagedata: &mut [u8], _blkno: types_core::BlockNumber) -> PgResult<()> {
+    use types_nbtree::{P_ISLEAF, BTP_HAS_GARBAGE, BTP_SPLIT_END};
+
+    bufmask::mask_page_lsn_and_checksum(pagedata);
+    bufmask::mask_page_hint_bits(pagedata);
+    bufmask::mask_unused_space(pagedata);
+
+    let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
+    // SAFETY: `pagedata` is a full BLCKSZ page image, exclusively borrowed here.
+    let pm = unsafe { PageMut::from_raw(ptr) };
+    let mut maskopaq = page_opaque(&pm.as_ref());
+    let is_leaf = P_ISLEAF(&maskopaq);
+    drop(pm);
+
+    // LP_DEAD hint bits on leaf pages are set without WAL.
+    if is_leaf {
+        bufmask::mask_lp_flags(pagedata);
+    }
+
+    // BTP_HAS_GARBAGE is an unlogged hint; BTP_SPLIT_END and btpo_cycleid are
+    // not restored by btree_xlog_split on the right sibling.
+    maskopaq.btpo_flags &= !BTP_HAS_GARBAGE;
+    maskopaq.btpo_flags &= !BTP_SPLIT_END;
+    maskopaq.btpo_cycleid = 0;
+
+    let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
+    // SAFETY: as above.
+    let mut pm = unsafe { PageMut::from_raw(ptr) };
+    write_opaque(&mut pm, &maskopaq);
+    Ok(())
+}
+
 pub fn init_seams() {}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+    use types_nbtree::{BTP_HAS_GARBAGE, BTP_LEAF, BTP_SPLIT_END};
+
+    #[repr(align(8))]
+    struct P([u8; BLCKSZ]);
+
+    fn pm(p: &mut P) -> PageMut<'_> {
+        let ptr = core::ptr::NonNull::new(p.0.as_mut_ptr()).unwrap();
+        // SAFETY: owned MAXALIGNed BLCKSZ image, exclusively borrowed.
+        unsafe { PageMut::from_raw(ptr) }
+    }
+
+    #[test]
+    fn btree_mask_clears_unlogged_flags_and_cycleid_idempotent() {
+        let mut p = P([0u8; BLCKSZ]);
+        {
+            let mut page = pm(&mut p);
+            page.init(SizeOfBtreeOpaque);
+            page.set_lsn(0x0102_0304_0506_0708);
+            let mut op = page_opaque(&page.as_ref());
+            op.btpo_flags = BTP_LEAF | BTP_HAS_GARBAGE | BTP_SPLIT_END;
+            op.btpo_cycleid = 42;
+            write_opaque(&mut page, &op);
+        }
+
+        btree_mask(&mut p.0, 0).unwrap();
+
+        let masked = p.0;
+        {
+            let page = pm(&mut p);
+            assert_eq!(page.as_ref().lsn(), 0);
+            let op = page_opaque(&page.as_ref());
+            assert_eq!(op.btpo_flags & (BTP_HAS_GARBAGE | BTP_SPLIT_END), 0);
+            assert_eq!(op.btpo_cycleid, 0);
+            assert_eq!(op.btpo_flags & BTP_LEAF, BTP_LEAF); // logged flag preserved
+        }
+
+        let mut p2 = P(masked);
+        btree_mask(&mut p2.0, 0).unwrap();
+        assert_eq!(p2.0, masked);
+    }
+}
 
 #[cfg(test)]
 mod tests;

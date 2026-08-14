@@ -2579,6 +2579,7 @@ name = "brin_xlog"
 version = "0.1.0"
 dependencies = [
  "brin_pageops",
+ "bufmask",
  "bufmgr_seams",
  "types_brin",
  "types_core",
@@ -7438,6 +7439,7 @@ dependencies = [
  "backend_progress_seams",
  "backend_status_seams",
  "be_fsstubs_seams",
+ "bufmask",
  "bufmgr_seams",
  "catalog_index_seams",
  "catalog_seams",
@@ -9451,6 +9453,7 @@ version = "0.1.0"
 dependencies = [
  "aio_seams",
  "autovacuum_seams",
+ "bufmask",
  "bufmgr_seams",
  "catalog_seams",
  "condition_variable_seams",
@@ -10903,6 +10906,14 @@ dependencies = [
  "types_tuple",
  "varlena",
  "wchar",
+]
+
+[[package]]
+name = "pagemask"
+version = "0.0.0"
+dependencies = [
+ "rmgr",
+ "types_core",
 ]
 
 [[package]]
@@ -16407,6 +16418,7 @@ dependencies = [
 name = "sequence_xlog"
 version = "0.1.0"
 dependencies = [
+ "bufmask",
  "bufmgr_seams",
  "types_core",
  "types_error",

@@ -271,3 +271,69 @@ pub fn brin_redo(record: &mut XLogReaderState) -> PgResult<()> {
         other => Err(panic_err(format!("brin_redo: unknown op code {other}"))),
     }
 }
+
+/// brin_mask (brin_xlog.c) — mask a BRIN page's non-WAL-logged fields for
+/// `wal_consistency_checking`. Faithful port of PostgreSQL REL_18_3.
+pub fn brin_mask(pagedata: &mut [u8], _blkno: types_core::BlockNumber) -> PgResult<()> {
+    bufmask::mask_page_lsn_and_checksum(pagedata);
+    bufmask::mask_page_hint_bits(pagedata);
+
+    let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
+    // SAFETY: `pagedata` is a full BLCKSZ page image, exclusively borrowed here.
+    let pm = unsafe { PageMut::from_raw(ptr) };
+    let r = pm.as_ref();
+    // Regular pages have real unused space; meta pages only when pd_lower was
+    // set (revmap pages fill their "unused" region and must not be masked).
+    let do_unused = BRIN_IS_REGULAR_PAGE(&r)
+        || (BRIN_IS_META_PAGE(&r) && r.pd_lower() as usize > SizeOfPageHeaderData);
+    drop(pm);
+
+    if do_unused {
+        bufmask::mask_unused_space(pagedata);
+    }
+
+    // BRIN_EVACUATE_PAGE is not WAL-logged; mask it.
+    let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
+    // SAFETY: as above.
+    let mut pm = unsafe { PageMut::from_raw(ptr) };
+    let flags = BrinPageFlags(&pm.as_ref());
+    BrinSetPageFlags(&mut pm, flags & !BRIN_EVACUATE_PAGE);
+    Ok(())
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+    use types_core::BLCKSZ;
+
+    #[repr(align(8))]
+    struct P([u8; BLCKSZ]);
+
+    fn pm(p: &mut P) -> PageMut<'_> {
+        let ptr = core::ptr::NonNull::new(p.0.as_mut_ptr()).unwrap();
+        // SAFETY: owned MAXALIGNed BLCKSZ image, exclusively borrowed.
+        unsafe { PageMut::from_raw(ptr) }
+    }
+
+    #[test]
+    fn brin_mask_clears_evacuate_flag_and_lsn_idempotent() {
+        let mut p = P([0u8; BLCKSZ]);
+        {
+            let mut page = pm(&mut p);
+            brin_page_init(&mut page, BRIN_PAGETYPE_REGULAR);
+            page.set_lsn(0x1111_2222_3333);
+            let f = BrinPageFlags(&page.as_ref());
+            BrinSetPageFlags(&mut page, f | BRIN_EVACUATE_PAGE);
+        }
+        brin_mask(&mut p.0, 0).unwrap();
+        let masked = p.0;
+        {
+            let page = pm(&mut p);
+            assert_eq!(page.as_ref().lsn(), 0);
+            assert_eq!(BrinPageFlags(&page.as_ref()) & BRIN_EVACUATE_PAGE, 0);
+        }
+        let mut p2 = P(masked);
+        brin_mask(&mut p2.0, 0).unwrap();
+        assert_eq!(p2.0, masked);
+    }
+}

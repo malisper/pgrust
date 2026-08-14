@@ -621,33 +621,76 @@ fn xlog_fileslop_clamps_to_wal_size_bounds() {
     });
 }
 
-#[test]
-fn wal_consistency_checking_hook_rejects_cleanly() {
-    // Any non-empty value refuses via the GUC protocol (Ok(false) -> clean
-    // ERROR at SET / FATAL at boot), never a panic: the FPW cross-check is
-    // unported and a silent accept would be a silent skip.
+// A stand-in maskable-rmgr table so the parse can resolve real names without
+// pulling the whole rmgr crate into these unit tests. Ids mirror rmgrlist.h
+// (Heap=10, Btree=11, BRIN=18).
+fn test_maskable_rmgrs() -> Vec<(&'static str, u8)> {
+    vec![("Heap", 10), ("Btree", 11), ("BRIN", 18)]
+}
+
+fn check(spec: Option<&str>) -> (bool, Option<guc_tables::GucHookExtra>) {
+    let mut newval = spec.map(|s| s.to_string());
     let mut extra = None;
-    for v in ["all", "heap", "nonsense"] {
-        let mut newval = Some(v.to_string());
-        assert_eq!(
-            crate::check_wal_consistency_checking_hook(
-                &mut newval,
-                &mut extra,
-                types_guc::GucSource::PGC_S_TEST,
-            )
-            .unwrap(),
-            false,
-            "non-empty \"{v}\" must refuse"
-        );
+    let ok = crate::check_wal_consistency_checking_hook(
+        &mut newval,
+        &mut extra,
+        types_guc::GucSource::PGC_S_TEST,
+    )
+    .unwrap();
+    (ok, extra)
+}
+
+fn flags_of(extra: &Option<guc_tables::GucHookExtra>) -> [bool; crate::RM_N_IDS] {
+    *extra
+        .as_ref()
+        .unwrap()
+        .downcast_ref::<[bool; crate::RM_N_IDS]>()
+        .unwrap()
+}
+
+#[test]
+fn wal_consistency_checking_hook_accepts_and_parses() {
+    transam_xlog_seams::wal_consistency_maskable_rmgrs::set(test_maskable_rmgrs);
+
+    // Disabled settings: accepted, all-false.
+    for spec in [None, Some(""), Some("   ")] {
+        let (ok, extra) = check(spec);
+        assert!(ok, "{spec:?} must be accepted");
+        assert!(flags_of(&extra).iter().all(|&b| !b), "{spec:?} => all false");
     }
-    // The disabled settings stay accepted.
-    for newval in [None, Some(String::new())] {
-        let mut newval = newval;
-        assert!(crate::check_wal_consistency_checking_hook(
-            &mut newval,
-            &mut extra,
-            types_guc::GucSource::PGC_S_TEST,
-        )
-        .unwrap());
+
+    // "all" selects exactly the maskable rmgrs.
+    let (ok, extra) = check(Some("all"));
+    assert!(ok);
+    let f = flags_of(&extra);
+    assert!(f[10] && f[11] && f[18]);
+    assert_eq!(f.iter().filter(|&&b| b).count(), 3);
+
+    // Case-insensitive single name, and a whitespace-padded comma list.
+    let (ok, extra) = check(Some("HeAp"));
+    assert!(ok);
+    let f = flags_of(&extra);
+    assert!(f[10] && !f[11] && !f[18]);
+
+    let (ok, extra) = check(Some("  heap ,  brin "));
+    assert!(ok);
+    let f = flags_of(&extra);
+    assert!(f[10] && f[18] && !f[11]);
+
+    // Unknown keyword and malformed list are rejected (Ok(false)).
+    for bad in ["nonsense", "heap,,brin", "heap,", ",heap", "he ap"] {
+        let (ok, _) = check(Some(bad));
+        assert!(!ok, "{bad:?} must be rejected");
     }
+
+    // assign applies the parsed array to the per-thread flag state.
+    let (_ok, extra) = check(Some("brin"));
+    crate::assign_wal_consistency_checking_hook(Some("brin"), extra.as_ref());
+    assert!(crate::wal_consistency_checking(18));
+    assert!(!crate::wal_consistency_checking(10));
+
+    // Clearing the GUC turns the hot-path gate back off.
+    let (_ok, extra) = check(Some(""));
+    crate::assign_wal_consistency_checking_hook(Some(""), extra.as_ref());
+    assert!(!crate::wal_consistency_checking(18));
 }

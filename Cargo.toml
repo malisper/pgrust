@@ -304,6 +304,7 @@ members = [
     "crates/backend/access/transam/rmgr",
     "crates/backend/access/rmgrdesc",
     "crates/bin/waldesc",
+    "crates/bin/pagemask",
     "crates/bin/pg_combinebackup",
     "crates/bin/pg_walsummary",
     "crates/bin/psql",
