@@ -639,3 +639,58 @@ fn preload_list_parsing_matches_split_directories_string() {
 
     preload::session_preload_libraries_string_set(Some("".into()));
 }
+
+/// local_preload_libraries is restricted: only $libdir/plugins/<basename>.
+/// C load_libraries(..., true) + check_restricted_library_name.
+/// Unfixed: no restricted flag → 58P01 file-miss (or a builtin load).
+#[test]
+fn local_preload_libraries_rejects_paths_outside_plugins() {
+    setup();
+
+    preload::local_preload_libraries_string_set(Some("$libdir/foo".into()));
+    let err = preload::process_session_preload_libraries().unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INSUFFICIENT_PRIVILEGE);
+    assert_eq!(
+        err.message(),
+        "access to library \"$libdir/foo\" is not allowed"
+    );
+
+    preload::local_preload_libraries_string_set(Some("../evil".into()));
+    let err = preload::process_session_preload_libraries().unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INSUFFICIENT_PRIVILEGE);
+    assert_eq!(
+        err.message(),
+        "access to library \"../evil\" is not allowed"
+    );
+
+    preload::local_preload_libraries_string_set(Some("foo/bar".into()));
+    let err = preload::process_session_preload_libraries().unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INSUFFICIENT_PRIVILEGE);
+    assert_eq!(
+        err.message(),
+        "access to library \"foo/bar\" is not allowed"
+    );
+
+    preload::local_preload_libraries_string_set(Some("no_such_plugin".into()));
+    let err = preload::process_session_preload_libraries().unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_FILE);
+    assert!(
+        err.message()
+            .contains("could not access file \"$libdir/plugins/no_such_plugin\""),
+        "{}",
+        err.message()
+    );
+
+    preload::session_preload_libraries_string_set(Some("$libdir/foo".into()));
+    preload::local_preload_libraries_string_set(Some("".into()));
+    let err = preload::process_session_preload_libraries().unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_FILE);
+    assert!(
+        err.message().contains("could not access file \"$libdir/foo\""),
+        "{}",
+        err.message()
+    );
+
+    preload::session_preload_libraries_string_set(Some("".into()));
+    preload::local_preload_libraries_string_set(Some("".into()));
+}

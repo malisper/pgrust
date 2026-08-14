@@ -3,9 +3,13 @@ use std::sync::RwLock;
 
 use elog::ereport;
 use guc_tables::{vars, GucVarAccessors};
-use types_error::{PgResult, ERRCODE_SYNTAX_ERROR, LOG};
+use types_error::{
+    ErrorLocation, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR, ERROR, LOG,
+};
 
 use crate::process::loc;
+
+const PLUGIN_PREFIX: &str = "$libdir/plugins/";
 
 static SHARED_PRELOAD_LIBRARIES: RwLock<Option<String>> = RwLock::new(None);
 static PRELOAD_CONTRIB: RwLock<Option<String>> = RwLock::new(None);
@@ -36,10 +40,27 @@ fn string_get(cell: &'static RwLock<Option<String>>) -> Option<String> {
     }
 }
 
+// Restricted local_preload_libraries: only $libdir/plugins/<basename>.
+fn check_restricted_library_name(name: &str) -> PgResult<()> {
+    if !name.starts_with(PLUGIN_PREFIX)
+        || pg_path::first_dir_separator(&name[PLUGIN_PREFIX.len()..]).is_some()
+    {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg(format!("access to library \"{name}\" is not allowed"))
+            .finish(ErrorLocation::new(
+                "src/backend/utils/fmgr/dfmgr.c",
+                525,
+                "check_restricted_library_name",
+            ));
+    }
+    Ok(())
+}
+
 // load_libraries (miscinit.c): names resolve through the dfmgr
 // builtin-library registry (no dlopen); an unknown name errors like C's
 // "could not access file".
-fn load_libraries(libraries: Option<&str>, gucname: &str) -> PgResult<()> {
+fn load_libraries(libraries: Option<&str>, gucname: &str, restricted: bool) -> PgResult<()> {
     let Some(list) = libraries else { return Ok(()) };
     if list.is_empty() {
         return Ok(()); // nothing to do
@@ -59,7 +80,13 @@ fn load_libraries(libraries: Option<&str>, gucname: &str) -> PgResult<()> {
     };
     for name in &elemlist {
         // C's SplitDirectoriesString canonicalize_path()s each name.
-        let name = pg_path::canonicalize_path(name);
+        let mut name = pg_path::canonicalize_path(name);
+        if restricted && pg_path::first_dir_separator(&name).is_none() {
+            name = format!("{PLUGIN_PREFIX}{name}");
+        }
+        if restricted {
+            check_restricted_library_name(&name)?;
+        }
         dfmgr::load_file(&name)?;
     }
     Ok(())
@@ -70,6 +97,7 @@ pub fn process_shared_preload_libraries() -> PgResult<()> {
     let r = load_libraries(
         string_get(&SHARED_PRELOAD_LIBRARIES).as_deref(),
         "shared_preload_libraries",
+        false,
     );
     IN_PROGRESS.set(false);
     r?;
@@ -87,7 +115,7 @@ pub fn process_preload_contrib() -> PgResult<()> {
     // Same boot window as shared_preload_libraries: a pg_init loaded here may
     // install hooks/shmem exactly as if preloaded.
     IN_PROGRESS.set(true);
-    let r = load_libraries(Some(&list), "preload_contrib");
+    let r = load_libraries(Some(&list), "preload_contrib", false);
     IN_PROGRESS.set(false);
     r
 }
@@ -105,10 +133,12 @@ pub fn process_session_preload_libraries() -> PgResult<()> {
     load_libraries(
         session_preload_libraries_string_get().as_deref(),
         "session_preload_libraries",
+        false,
     )?;
     load_libraries(
         local_preload_libraries_string_get().as_deref(),
         "local_preload_libraries",
+        true,
     )?;
     Ok(())
 }
