@@ -37,6 +37,16 @@ impl TriggerFmgrCache {
     }
 }
 
+// C TriggerEnabled UPDATE-OF: bms_is_member(att, NULL) is false.
+fn update_of_cols_match(tgattr: &[i16], cols: Option<&Bitmapset<'_>>) -> bool {
+    let Some(cols) = cols else {
+        return false;
+    };
+    tgattr
+        .iter()
+        .any(|&a| cols.is_member(a as i32 - FirstLowInvalidHeapAttributeNumber))
+}
+
 // TriggerEnabled's tgenabled gate (trigger.c:3488-3500); tgattr/tgqual are
 // the caller's to handle.
 pub fn TriggerEnabled(t: &Trigger<'_>) -> bool {
@@ -190,13 +200,7 @@ pub struct TriggerWhenEval<'a, 'mcx> {
 impl<'a, 'mcx> TriggerWhenEval<'a, 'mcx> {
     fn attr_gate(&self, trigger: &Trigger<'_>, event: u32) -> bool {
         if trigger.tgnattr > 0 && event & TRIGGER_EVENT_OPMASK == TRIGGER_EVENT_UPDATE {
-            let cols = self
-                .modified_cols
-                .expect("UPDATE trigger firing path supplies modifiedCols");
-            return trigger
-                .tgattr
-                .iter()
-                .any(|&a| cols.is_member(a as i32 - FirstLowInvalidHeapAttributeNumber));
+            return update_of_cols_match(trigger.tgattr.as_slice(), self.modified_cols);
         }
         true
     }
@@ -600,4 +604,33 @@ fn returned_null(fn_oid: types_core::Oid) -> Box<PgError> {
         PgError::error(format!("trigger function {fn_oid} returned null value"))
             .with_sqlstate(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Born-RED: the old attr_gate `.expect("UPDATE trigger firing path
+    // supplies modifiedCols")` panicked here. C TriggerEnabled with
+    // modifiedCols=NULL skips the UPDATE OF trigger (bms_is_member is false).
+    #[test]
+    fn update_of_null_modified_cols_skips() {
+        assert!(!update_of_cols_match(&[1, 2], None));
+    }
+
+    #[test]
+    fn update_of_empty_set_skips() {
+        let cols = Bitmapset::empty();
+        assert!(!update_of_cols_match(&[1], Some(&cols)));
+    }
+
+    #[test]
+    fn update_of_matching_col_fires() {
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut cols = Bitmapset::empty();
+        cols.add_member(mcx, 1 - FirstLowInvalidHeapAttributeNumber).unwrap();
+        assert!(update_of_cols_match(&[1], Some(&cols)));
+        assert!(!update_of_cols_match(&[2], Some(&cols)));
+    }
 }

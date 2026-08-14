@@ -1182,12 +1182,37 @@ fn do_insert<'mcx>(
     Ok(())
 }
 
+// worker.c:2606-2626: populate updatedCols so per-column triggers can fire.
+// Encoded as ExecGetAllUpdatedCols (attno - FirstLowInvalidHeapAttributeNumber).
+fn apply_updated_cols<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    entry: &LogicalRepRelMapEntry,
+    newtup: &LogicalRepTupleData,
+) -> PgResult<types_nodes::Bitmapset<'mcx>> {
+    use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+    let mut cols = types_nodes::Bitmapset::empty();
+    for i in 0..rel.rd_att.natts as usize {
+        let att = rel.rd_att.attr(i);
+        let remote = entry.attrmap.get(i).copied().unwrap_or(-1);
+        if att.attisdropped || remote < 0 {
+            continue;
+        }
+        let m = remote as usize;
+        if m < newtup.colstatus.len() && newtup.colstatus[m] != LOGICALREP_COLUMN_UNCHANGED {
+            cols.add_member(mcx, (i as i32 + 1) - FirstLowInvalidHeapAttributeNumber)?;
+        }
+    }
+    Ok(cols)
+}
+
 // ExecSimpleRelationUpdate rendering (execReplication.c:651).
 fn do_update<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     searchslot: &mut SlotData<'mcx>,
     slot: &mut SlotData<'mcx>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     use tableam_vocab::TU_UpdateIndexes;
 
@@ -1233,13 +1258,12 @@ fn do_update<'mcx>(
         execindexing::ExecCloseIndices(index_state)?;
     }
 
-    // AFTER ROW UPDATE triggers (execReplication.c:715): C passes no
-    // source/destination rels (this is an in-place update), no transition
-    // capture, and no updated-cols set.
+    // AFTER ROW UPDATE triggers (execReplication.c:715): C ExecARUpdateTriggers
+    // reads ExecGetAllUpdatedCols off the estate that worker.c:2606 filled.
     if let Some(t) = trig.as_mut() {
         let td = t.td.clone();
         let new_tid = slot.base().tts_tid;
-        let mut when = trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols: None };
+        let mut when = trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols };
         trigger::ExecARUpdateTriggers(
             mcx,
             rel,
@@ -1254,7 +1278,7 @@ fn do_update<'mcx>(
             false,
             None,
             None,
-            None,
+            modified_cols,
         )?;
     }
     Ok(())
@@ -1415,7 +1439,8 @@ fn apply_handle_tuple_routing<'mcx>(
                 || execpartition::exec_partition_check(mcx, &mut check_cache, &partrel, &mut newslot)?
             {
                 // Yes: simply UPDATE the partition.
-                do_update(mcx, &partrel, &mut localslot, &mut newslot)
+                let updated = apply_updated_cols(mcx, &partrel, &part_entry, newtup)?;
+                do_update(mcx, &partrel, &mut localslot, &mut newslot, Some(&updated))
             } else {
                 // Move the tuple into the new partition (worker.c:3285):
                 // DELETE from the old partition, re-route via the root, and
@@ -1572,7 +1597,8 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         let mut modfuncs = InFuncs::new(rel.rd_att.natts as usize);
         let mut newslot = tableam_real::table_slot_create(mcx, &rel)?;
         slot_modify_data(mcx, &mut newslot, &mut localslot, &entry, &rel, &upd.newtup, &mut modfuncs)?;
-        do_update(mcx, &rel, &mut localslot, &mut newslot)?;
+        let updated = apply_updated_cols(mcx, &rel, &entry, &upd.newtup)?;
+        do_update(mcx, &rel, &mut localslot, &mut newslot, Some(&updated))?;
     } else {
         let (nsp, name) =
             (&entry.remoterel.nspname, &entry.remoterel.relname);
