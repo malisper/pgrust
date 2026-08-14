@@ -299,6 +299,10 @@ pub fn analyze_rel(
         onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
         return Ok(());
     }
+    if onerel.is_other_temp() {
+        onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+        return Ok(());
+    }
     if onerel.rd_id == STATISTIC_RELATION_ID {
         onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
         return Ok(());
@@ -633,9 +637,15 @@ fn do_analyze_rel<'mcx>(
         totaldeadrows = 0.0;
         prows.len() as i32
     } else if inh {
+        let elevel = if params.options & VACOPT_VERBOSE != 0 {
+            types_error::INFO
+        } else {
+            types_error::DEBUG2
+        };
         acquire_inherited_sample_rows(
             anl_mcx,
             onerel,
+            elevel,
             &mut rows,
             targrows,
             &mut totalrows,
@@ -1862,6 +1872,7 @@ fn inherited_pgrcolumnar_footer_ndv<'mcx>(
 fn acquire_inherited_sample_rows<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
+    elevel: types_error::ErrorLevel,
     rows: &mut PgVec<'mcx, HeapTupleData<'mcx>>,
     targrows: i32,
     totalrows: &mut f64,
@@ -1880,11 +1891,15 @@ fn acquire_inherited_sample_rows<'mcx>(
         return Ok(0);
     }
 
-    let mut children: PgVec<'_, (Relation<'mcx>, f64)> =
+    let mut children: PgVec<'_, (Relation<'mcx>, f64, Option<AcquireSampleRowsFn>)> =
         PgVec::with_capacity_in(table_oids.len(), mcx);
     let mut totalblocks = 0.0f64;
     for &child_oid in table_oids.iter() {
         let childrel = table::table_open(mcx, child_oid, NO_LOCK)?;
+        if childrel.is_other_temp() {
+            table::table_close(childrel, ACCESS_SHARE_LOCK)?;
+            continue;
+        }
         match childrel.rd_rel.relkind {
             RELKIND_RELATION | RELKIND_MATVIEW => {
                 let relpages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
@@ -1892,11 +1907,22 @@ fn acquire_inherited_sample_rows<'mcx>(
                     ForkNumber::MAIN_FORKNUM,
                 )?;
                 totalblocks += relpages as f64;
-                children.push((childrel, relpages as f64));
+                children.push((childrel, relpages as f64, None));
             }
-            RELKIND_FOREIGN_TABLE => panic!(
-                "acquire_inherited_sample_rows (analyze.c): foreign-table child (FDW lane)"
-            ),
+            RELKIND_FOREIGN_TABLE => {
+                let kind = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, childrel.rd_id)?;
+                let ok = match FDW_ANALYZE_ROUTINES[kind.index()].get() {
+                    Some(r) => (r.analyze_foreign_table)(mcx, &childrel)?,
+                    None => None,
+                };
+                match ok {
+                    Some((f, pages)) => {
+                        totalblocks += pages as f64;
+                        children.push((childrel, pages as f64, Some(f)));
+                    }
+                    None => table::table_close(childrel, ACCESS_SHARE_LOCK)?,
+                }
+            }
             _ => {
                 debug_assert!(childrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
                 let lmode = if child_oid == onerel.rd_id { NO_LOCK } else { ACCESS_SHARE_LOCK };
@@ -1912,7 +1938,7 @@ fn acquire_inherited_sample_rows<'mcx>(
     pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_TOTAL, children.len() as i64);
 
     let mut numrows: i32 = 0;
-    for (i, (childrel, childblocks)) in children.into_iter().enumerate() {
+    for (i, (childrel, childblocks, acquirefunc)) in children.into_iter().enumerate() {
         pgstat_progress_update_multi_param(
             &[
                 PROGRESS_ANALYZE_CURRENT_CHILD_TABLE_RELID,
@@ -1930,14 +1956,18 @@ fn acquire_inherited_sample_rows<'mcx>(
                 let base = rows.len();
                 let mut trows = 0.0f64;
                 let mut tdrows = 0.0f64;
-                let childrows = acquire_sample_rows(
-                    mcx,
-                    &childrel,
-                    rows,
-                    childtargrows,
-                    &mut trows,
-                    &mut tdrows,
-                )?;
+                let childrows = if let Some(f) = acquirefunc {
+                    f(mcx, &childrel, elevel, rows, childtargrows, &mut trows, &mut tdrows)?
+                } else {
+                    acquire_sample_rows(
+                        mcx,
+                        &childrel,
+                        rows,
+                        childtargrows,
+                        &mut trows,
+                        &mut tdrows,
+                    )?
+                };
 
                 if childrows > 0 && !tupdesc::equalRowTypes(childrel.descr(), onerel.descr()) {
                     if let Some(map) =
