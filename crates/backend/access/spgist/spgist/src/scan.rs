@@ -938,7 +938,9 @@ pub fn spggetbitmap(
 /// spggettuple.
 pub fn spggettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgResult<bool> {
     if dir != ::types_scan::sdir::ForwardScanDirection {
-        panic!("SP-GiST only supports forward scan direction");
+        return Err(Box::new(PgError::error(
+            "SP-GiST only supports forward scan direction".to_string(),
+        )));
     }
 
     let want_itup = scan.xs_want_itup;

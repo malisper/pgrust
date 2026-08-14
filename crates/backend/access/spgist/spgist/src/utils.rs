@@ -243,7 +243,7 @@ pub fn spgGetCache(index: &Relation<'_>) -> PgResult<SpGistCache> {
         let metadata = read_meta(&buf_page_mut(metabuffer).as_ref());
         if metadata.magicNumber != SPGIST_MAGIC_NUMBER {
             unlock_release(metabuffer)?;
-            panic!("index \"{}\" is not an SP-GiST index", index.name());
+            return Err(not_spgist_index(index));
         }
         cache.lastUsedPages = metadata.lastUsedPages;
         unlock_release(metabuffer)?;
@@ -755,6 +755,16 @@ fn index_row_too_big(size: usize, max: usize) -> Box<PgError> {
         ))
         .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
     )
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn not_spgist_index(index: &Relation<'_>) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "index \"{}\" is not an SP-GiST index",
+        index.name()
+    )))
 }
 
 #[cold]

@@ -22,7 +22,20 @@ pub fn prepare_skip_support_from_opclass(
         return Ok(None);
     }
 
-    let mut sksup = match proc {
+    let mut sksup = match skip_support_for_proc(proc) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    if reverse {
+        core::mem::swap(&mut sksup.low_elem, &mut sksup.high_elem);
+        core::mem::swap(&mut sksup.decrement, &mut sksup.increment);
+    }
+    Ok(Some(sksup))
+}
+
+fn skip_support_for_proc(proc: Oid) -> Option<SkipSupportData> {
+    Some(match proc {
         6402 => SkipSupportData {
             low_elem: Datum::from_i16(i16::MIN),
             high_elem: Datum::from_i16(i16::MAX),
@@ -35,8 +48,7 @@ pub fn prepare_skip_support_from_opclass(
             decrement: nbt_compare::int4_decrement,
             increment: nbt_compare::int4_increment,
         },
-        // 6409 timestamp_skipsupport: DT_NOBEGIN/DT_NOEND are i64::MIN/MAX,
-        // so the int8 kernels are exact.
+        // 6409 timestamp_skipsupport: DT_NOBEGIN/DT_NOEND are i64::MIN/MAX.
         6404 | 6409 => SkipSupportData {
             low_elem: Datum::from_i64(i64::MIN),
             high_elem: Datum::from_i64(i64::MAX),
@@ -67,16 +79,11 @@ pub fn prepare_skip_support_from_opclass(
             decrement: nbt_compare::bool_decrement,
             increment: nbt_compare::bool_increment,
         },
+        6410 => return None,
         other => panic!(
             "unported: skip support proc {other} (skipsupport.c dispatch; by-ref types need an allocator seam)"
         ),
-    };
-
-    if reverse {
-        core::mem::swap(&mut sksup.low_elem, &mut sksup.high_elem);
-        core::mem::swap(&mut sksup.decrement, &mut sksup.increment);
-    }
-    Ok(Some(sksup))
+    })
 }
 
 #[cfg(test)]
@@ -106,5 +113,11 @@ mod tests {
         assert!(flow);
         adt_date::date_decrement(Datum::from_i32(adt_date::DATEVAL_NOBEGIN), &mut flow);
         assert!(flow);
+    }
+
+    #[test]
+    fn uuid_skipsupport_degrades_without_allocator() {
+        assert!(skip_support_for_proc(6403).is_some());
+        assert!(skip_support_for_proc(6410).is_none());
     }
 }
