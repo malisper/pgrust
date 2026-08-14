@@ -339,6 +339,10 @@ pub fn typenameTypeId<'mcx>(
         }
         arr
     };
+    // C LookupTypeNameExtended validates typmod decoration even when the
+    // caller (typenameTypeId) discards the value, and does so BEFORE
+    // typenameType's shell check.
+    typenameTypeMod(mcx, pstate, tn, typoid)?;
     match syscache_seams::pg_type_isdefined::call(typoid)? {
         Some(true) => {}
         // unported: C's typenameTypeId path (typenameType) raises exactly
@@ -362,6 +366,10 @@ pub fn LookupTypeNameOidExtended<'mcx>(
     if tn.names.is_nil() {
         // LookupTypeName pre-resolved arm (makeTypeNameFromOid consumers).
         assert!(tn.typeOid != InvalidOid, "TypeName without names or typeOid");
+        // C LookupTypeNameExtended validates typmod decoration even though
+        // LookupTypeNameOid discards the value, and does so BEFORE any
+        // shell-type decision.
+        typenameTypeMod(mcx, None, tn, tn.typeOid)?;
         match syscache_seams::pg_type_isdefined::call(tn.typeOid)? {
             Some(true) => {}
             // unported: C's LookupTypeNameOid returns shell types (their DDL
@@ -384,6 +392,7 @@ pub fn LookupTypeNameOidExtended<'mcx>(
             }
             return Err(type_does_not_exist(&typeNameToString(tn)?));
         }
+        typenameTypeMod(mcx, None, tn, typoid)?;
         match syscache_seams::pg_type_isdefined::call(typoid)? {
             Some(true) => {}
             // unported: same shell-type USE divergence as the lanes above.
@@ -408,6 +417,9 @@ pub fn LookupTypeNameOidExtended<'mcx>(
         }
         arr
     };
+    // C LookupTypeNameExtended validates typmod decoration even when the
+    // caller (LookupTypeNameOid) discards the value.
+    typenameTypeMod(mcx, None, tn, typoid)?;
     match syscache_seams::pg_type_isdefined::call(typoid)? {
         Some(true) => {}
         // unported: C's LookupTypeNameOid returns shell types (their DDL
@@ -3976,6 +3988,27 @@ mod tests {
         assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
         let err = typenameTypeId(mcx, None, tn).unwrap_err();
         assert_eq!(err.message(), expect);
+    }
+
+    #[test]
+    fn lookup_typename_oid_validates_typmods_on_preresolved() {
+        // C LookupTypeNameOid → LookupTypeNameExtended always runs
+        // typenameTypeMod when the type is found. INT4 has no typmodin.
+        install_type_seams();
+        let mcx = ctx().mcx();
+        let mut tn = Node::build::<TypeName>(mcx).unwrap();
+        let mut typmods = NodeList::nil();
+        typmods.lappend(mcx, Node::mk_string(mcx, "5").unwrap()).unwrap();
+        tn.names = NodeList::nil();
+        tn.typmods = typmods;
+        tn.typeOid = INT4OID;
+        tn.typemod = -1;
+        tn.location = -1;
+        let tn = tn.seal().as_variant::<TypeName>().unwrap();
+
+        let err = LookupTypeNameOid(mcx, tn).unwrap_err();
+        assert_eq!(err.message(), "type modifier is not allowed for type \"integer\"");
+        assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
     }
 
     #[test]
