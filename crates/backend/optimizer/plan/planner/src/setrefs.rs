@@ -242,7 +242,6 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             if r.plan.lefttree.is_some() {
                 set_upper_references(run, plan, rtoffset)?;
             } else {
-                debug_assert!(r.plan.qual.is_nil());
                 // A childless Result can carry unresolved ROWID_VAR Vars (a
                 // target relation emptied by constraint exclusion); replace
                 // them with typed NULLs as C does before fix_scan_list.
@@ -267,9 +266,22 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                         .expect("TargetEntry");
                     }
                 }
-                if let Some(tl) = fix_scan_list(run, &r.plan.targetlist, rtoffset, r.plan.plan_rows)? {
+                let r = plan.as_result().unwrap();
+                let tl = fix_scan_list(run, &r.plan.targetlist, rtoffset, r.plan.plan_rows)?;
+                let qual = fix_scan_list(run, &r.plan.qual, rtoffset, 2.0 * r.plan.plan_rows)?;
+                if tl.is_some() || qual.is_some() {
                     // SAFETY: exclusive plan-tree ownership (prologue note).
-                    unsafe { plan.with_plan_mut(|p| p.targetlist = tl) }.expect("plan node");
+                    unsafe {
+                        plan.with_plan_mut(|p| {
+                            if let Some(tl) = tl {
+                                p.targetlist = tl;
+                            }
+                            if let Some(q) = qual {
+                                p.qual = q;
+                            }
+                        })
+                    }
+                    .expect("plan node");
                 }
             }
             if let Some(rcq) = plan.as_result().unwrap().resconstantqual {
@@ -644,10 +656,11 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
             let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
             let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-            if let Some(tf) = s.tablefunc {
-                fix_scan_expr_walker(run, tf)?;
-            }
-            if rtoffset != 0 || tl.is_some() || qual.is_some() {
+            let new_tf = match s.tablefunc {
+                Some(tf) => Some(fix_scan_expr(run, tf, rtoffset, 1.0)?),
+                None => None,
+            };
+            if rtoffset != 0 || tl.is_some() || qual.is_some() || new_tf.is_some() {
                 // SAFETY: exclusive plan-tree ownership (prologue note).
                 unsafe {
                     plan.with_mut::<types_nodes::plannodes::TableFuncScan, _>(|s| {
@@ -656,6 +669,9 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                         }
                         if let Some(q) = qual {
                             s.scan.plan.qual = q;
+                        }
+                        if let Some(tf) = new_tf {
+                            s.tablefunc = Some(tf);
                         }
                         s.scan.scanrelid += rtoffset as u32;
                     })
@@ -812,13 +828,31 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 }
                 .expect("WindowAgg node");
             }
-            if let Some(off) = w.startOffset {
-                fix_frame_offset(run, off, rtoffset)?;
-            }
-            if let Some(off) = w.endOffset {
-                fix_frame_offset(run, off, rtoffset)?;
-            }
             set_upper_references(run, plan, rtoffset)?;
+            let w = plan.as_window_agg().unwrap();
+            let new_start = match w.startOffset {
+                Some(off) => Some(fix_scan_expr(run, off, rtoffset, 1.0)?),
+                None => None,
+            };
+            let w = plan.as_window_agg().unwrap();
+            let new_end = match w.endOffset {
+                Some(off) => Some(fix_scan_expr(run, off, rtoffset, 1.0)?),
+                None => None,
+            };
+            if new_start.is_some() || new_end.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::WindowAgg, _>(|p| {
+                        if let Some(s) = new_start {
+                            p.startOffset = Some(s);
+                        }
+                        if let Some(e) = new_end {
+                            p.endOffset = Some(e);
+                        }
+                    })
+                }
+                .expect("WindowAgg node");
+            }
             let w = plan.as_window_agg().unwrap();
             let nexec = w.plan.plan_rows;
             let fixed_rc = fix_scan_list(run, &w.runCondition, rtoffset, nexec)?;
@@ -880,11 +914,28 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let l = plan.as_limit().unwrap();
             set_dummy_tlist_references(run, plan, rtoffset)?;
             debug_assert!(l.plan.qual.is_nil());
-            if let Some(off) = l.limitOffset {
-                fix_scan_expr_walker(run, off)?;
-            }
-            if let Some(cnt) = l.limitCount {
-                fix_scan_expr_walker(run, cnt)?;
+            let new_off = match l.limitOffset {
+                Some(off) => Some(fix_scan_expr(run, off, rtoffset, 1.0)?),
+                None => None,
+            };
+            let l = plan.as_limit().unwrap();
+            let new_cnt = match l.limitCount {
+                Some(cnt) => Some(fix_scan_expr(run, cnt, rtoffset, 1.0)?),
+                None => None,
+            };
+            if new_off.is_some() || new_cnt.is_some() {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::Limit, _>(|p| {
+                        if let Some(o) = new_off {
+                            p.limitOffset = Some(o);
+                        }
+                        if let Some(c) = new_cnt {
+                            p.limitCount = Some(c);
+                        }
+                    })
+                }
+                .expect("Limit node");
             }
         }
         NodeTag::T_NestLoop => {
@@ -2412,7 +2463,13 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
-        other => panic!("fix_upper_expr_mutator (setrefs.c): {other:?}; M3 expression lane"),
+        _ => {
+            let mcx = run.mcx;
+            let mut m = |n: Node<'mcx>| -> PgResult<Option<Node<'mcx>>> {
+                fix_upper_expr(run, n, subplan_tlist, rtoffset, newvarno, num_exec).map(Some)
+            };
+            Ok(nodes_core::expression_tree_mutator(mcx, node, &mut m)?.unwrap_or(node))
+        }
     }
 }
 
@@ -2461,21 +2518,6 @@ fn search_indexed_tlist_for_var<'mcx>(
     panic!("variable not found in subplan target list");
 }
 
-// fix_scan_expr over a WindowAgg frame offset: offsets are Var-free (parser
-// enforced), so C's mutator leg is the identity copy; the walker leg covers
-// fix_expr_common bookkeeping.
-fn fix_frame_offset<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    off: Node<'mcx>,
-    rtoffset: i32,
-) -> PgResult<()> {
-    let _ = rtoffset;
-    fix_scan_expr_walker(run, off)
-}
-
-// fix_scan_expr (setrefs.c): rtoffset==0 walks in place (fix_expr_common
-// only, returns None); rtoffset>0 is the subplan pass and takes C's mutator
-// leg, rebuilding the expressions with renumbered varnos.
 // fix_windowagg_condition_expr / set_windowagg_runcondition_references
 // (setrefs.c): a WindowFunc in the runcondition becomes a Var (varno 0)
 // reading the value from the slot the projection just stored it into.
@@ -2540,6 +2582,44 @@ fn fix_scan_list<'mcx>(
         out.lappend(run.mcx, fix_scan_expr_mutator(run, node, rtoffset, num_exec)?)?;
     }
     Ok(Some(out))
+}
+
+// fix_scan_expr (setrefs.c): rtoffset==0 walks in place; otherwise the
+// mutator rebuilds with remapped varnos (also AlternativeSubPlan / minmax
+// / PHV / MULTIEXPR).
+fn fix_scan_expr<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+    rtoffset: i32,
+    num_exec: f64,
+) -> PgResult<Node<'mcx>> {
+    if rtoffset == 0
+        && !run.glob.has_alternative_subplans
+        && run.root.minmax_aggs.is_empty()
+        && run.glob.last_ph_id == 0
+        && run.root.multiexpr_params.is_empty()
+    {
+        fix_scan_expr_walker(run, node)?;
+        Ok(node)
+    } else {
+        fix_scan_expr_mutator(run, node, rtoffset, num_exec)
+    }
+}
+
+// C: fix_expr_common then expression_tree_mutator. Used for Aggref after a
+// failed minmax Param rewrite, and for node types the hand-rolled match
+// does not list (XmlExpr, TableFunc, NamedArgExpr, …).
+fn scan_expr_mutate_children<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+    rtoffset: i32,
+    num_exec: f64,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let mut m = |n: Node<'mcx>| -> PgResult<Option<Node<'mcx>>> {
+        fix_scan_expr_mutator(run, n, rtoffset, num_exec).map(Some)
+    };
+    Ok(nodes_core::expression_tree_mutator(mcx, node, &mut m)?.unwrap_or(node))
 }
 
 // fix_param_node (setrefs.c): PARAM_MULTIEXPR Params encode
@@ -2619,9 +2699,11 @@ fn fix_scan_expr_mutator<'mcx>(
             fix_scan_expr_mutator(run, phv.phexpr, rtoffset, num_exec)
         }
         NodeTag::T_Aggref => {
-            let prm = find_minmax_agg_replacement_param(&run.root, node)
-                .expect("Aggref outside a minmax Result reaches fix_upper_expr");
-            Ok(*run.root.expr_node(prm))
+            if let Some(prm) = find_minmax_agg_replacement_param(&run.root, node) {
+                return Ok(*run.root.expr_node(prm));
+            }
+            record_plan_function_dependency(run, node.as_aggref().unwrap().aggfnoid)?;
+            scan_expr_mutate_children(run, node, rtoffset, num_exec)
         }
         NodeTag::T_TargetEntry => {
             let tle = node.as_target_entry().unwrap();
@@ -3263,7 +3345,7 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
-        other => panic!("fix_scan_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
+        _ => scan_expr_mutate_children(run, node, rtoffset, num_exec),
     }
 }
 
@@ -3557,7 +3639,19 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_ReturningExpr => {
             fix_scan_expr_walker(run, node.as_returning_expr().unwrap().retexpr)
         }
-        other => panic!("fix_scan_expr_walker (setrefs.c): {other:?}; M2 expression lane"),
+        _ => {
+            struct W<'a, 'mcx> {
+                run: &'a mut PlannerRun<'mcx>,
+            }
+            impl<'a, 'mcx> nodes_core::NodeWalker<'mcx> for W<'a, 'mcx> {
+                fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+                    fix_scan_expr_walker(self.run, node)?;
+                    Ok(false)
+                }
+            }
+            nodes_core::expression_tree_walker(node, &mut W { run })?;
+            Ok(())
+        }
     }
 }
 
@@ -4765,7 +4859,23 @@ fn fix_join_expr_mutator<'mcx>(
                 },
             )
         }
-        other => panic!("fix_join_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
+        _ => {
+            let mcx = run.mcx;
+            let mut m = |n: Node<'mcx>| -> PgResult<Option<Node<'mcx>>> {
+                fix_join_expr_mutator(
+                    run,
+                    n,
+                    outer_tlist,
+                    inner_tlist,
+                    rtoffset,
+                    nrm_match,
+                    acceptable_rel,
+                    num_exec,
+                )
+                .map(Some)
+            };
+            Ok(nodes_core::expression_tree_mutator(mcx, node, &mut m)?.unwrap_or(node))
+        }
     }
 }
 
@@ -5275,4 +5385,71 @@ pub(crate) fn find_minmax_agg_replacement_param<'mcx>(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod scan_mutator_tests {
+    use crate::run::PlannerRun;
+    use mcx::MemoryContext;
+    use types_nodes::list::NodeList;
+    use types_nodes::primnodes::{TableFunc, TableFuncType, XmlExpr, XmlExprOp, XmlOptionType};
+    use types_nodes::Node;
+
+    fn bump() -> MemoryContext {
+        MemoryContext::new_bump("setrefs-d46")
+    }
+
+    #[test]
+    fn mutator_remaps_var_inside_xmlexpr() {
+        let cx = bump();
+        let mcx = cx.mcx();
+        let mut run = PlannerRun::new(mcx);
+        let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let xml = Node::mk(
+            mcx,
+            XmlExpr {
+                op: XmlExprOp::IS_XMLELEMENT,
+                name: Some("foo"),
+                named_args: NodeList::nil(),
+                arg_names: NodeList::nil(),
+                args: NodeList::make1(mcx, var).unwrap(),
+                xmloption: XmlOptionType::XMLOPTION_CONTENT,
+                indent: false,
+                r#type: 142,
+                typmod: -1,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let out = super::fix_scan_expr_mutator(&mut run, xml, 1, 1.0).unwrap();
+        let inner = out.as_xml_expr().unwrap().args.nth(0).as_var().unwrap();
+        assert_eq!(inner.varno, 2);
+        assert_eq!(inner.varnosyn, 2);
+    }
+
+    #[test]
+    fn mutator_remaps_var_inside_tablefunc() {
+        let cx = bump();
+        let mcx = cx.mcx();
+        let mut run = PlannerRun::new(mcx);
+        let var = Node::mk_var(mcx, 1, 1, 25, -1, 100, 0).unwrap();
+        let tf = Node::mk(
+            mcx,
+            TableFunc {
+                functype: TableFuncType::TFT_XMLTABLE,
+                docexpr: Some(var),
+                ..TableFunc::default()
+            },
+        )
+        .unwrap();
+        let out = super::fix_scan_expr_mutator(&mut run, tf, 1, 1.0).unwrap();
+        let inner = out
+            .as_table_func()
+            .unwrap()
+            .docexpr
+            .unwrap()
+            .as_var()
+            .unwrap();
+        assert_eq!(inner.varno, 2);
+    }
 }
