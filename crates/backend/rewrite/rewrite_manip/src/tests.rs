@@ -4,7 +4,7 @@ use types_nodes::primnodes::{Aggref, SubLink, SubLinkType, Var};
 use types_nodes::{Node, NodeList, NodeTag};
 
 use crate::{
-    contain_aggs_of_level, locate_agg_of_level, ReplaceVarsFromTargetList,
+    checkExprHasSubLink, contain_aggs_of_level, locate_agg_of_level, ReplaceVarsFromTargetList,
     ReplaceVarsNoMatchOption,
 };
 
@@ -29,6 +29,21 @@ fn sublink_over_agg(mcx: mcx::Mcx<'_>, levelsup: u32, location: i32) -> Node<'_>
         },
     )
     .unwrap()
+}
+
+// C checkExprHasSubLink uses query_or_expression_tree_walker with
+// QTW_IGNORE_RC_SUBQUERIES, so a Query whose only SubLink lives in a
+// window-frame offset is true. A visit-only walker returns false (T_Query
+// is a no-op in expression_tree_walker).
+#[test]
+fn check_expr_has_sublink_walks_window_offsets() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut wc = Node::build::<WindowClause>(mcx).unwrap();
+    wc.startOffset = Some(sublink_over_agg(mcx, 0, 1));
+    let mut q = Node::build::<Query>(mcx).unwrap();
+    q.windowClause = NodeList::make1(mcx, wc.seal()).unwrap();
+    assert!(checkExprHasSubLink(q.seal()).unwrap());
 }
 
 #[test]

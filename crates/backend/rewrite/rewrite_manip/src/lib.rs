@@ -1050,8 +1050,11 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for HasSubLink {
 
 pub fn checkExprHasSubLink<'mcx>(node: Node<'mcx>) -> PgResult<bool> {
     let mut w = HasSubLink;
-    use nodes_core::NodeWalker as _;
-    w.visit(node)
+    nodes_core::query_or_expression_tree_walker(
+        node,
+        &mut w,
+        nodes_core::QTW_IGNORE_RC_SUBQUERIES,
+    )
 }
 
 pub fn checkExprHasSubLink_opt<'mcx>(node: Option<Node<'mcx>>) -> PgResult<bool> {

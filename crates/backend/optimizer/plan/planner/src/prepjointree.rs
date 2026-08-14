@@ -2652,61 +2652,71 @@ fn replace_vars_in_query_value<'mcx>(
         newq.rtable = new_rtable;
     }
 
+    // C query_tree_mutator walks WindowClause offsets even without
+    // QTW_EXAMINE_SORTGROUP. query_cells_copy shares the WindowClause
+    // nodes, so a hit rebuilds the list cell.
+    let mut new_wcs = NodeList::nil();
+    let mut wc_changed = false;
+    for wc_node in &newq.windowClause {
+        let wc = wc_node.as_window_clause().expect("windowClause cell");
+        let new_start = match wc.startOffset {
+            None => None,
+            Some(x) => replace_var_expr_su(mcx, x, varno, tlist, lateral, ph, su)?,
+        };
+        let new_end = match wc.endOffset {
+            None => None,
+            Some(x) => replace_var_expr_su(mcx, x, varno, tlist, lateral, ph, su)?,
+        };
+        if new_start.is_some() || new_end.is_some() {
+            wc_changed = true;
+            let nw = types_nodes::parsenodes::WindowClause {
+                name: wc.name,
+                refname: wc.refname,
+                partitionClause: wc.partitionClause.clone_in(mcx)?,
+                orderClause: wc.orderClause.clone_in(mcx)?,
+                frameOptions: wc.frameOptions,
+                startOffset: new_start.or(wc.startOffset),
+                endOffset: new_end.or(wc.endOffset),
+                startInRangeFunc: wc.startInRangeFunc,
+                endInRangeFunc: wc.endInRangeFunc,
+                inRangeColl: wc.inRangeColl,
+                inRangeAsc: wc.inRangeAsc,
+                inRangeNullsFirst: wc.inRangeNullsFirst,
+                winref: wc.winref,
+                copiedOrder: wc.copiedOrder,
+            };
+            new_wcs.lappend(mcx, Node::mk(mcx, nw)?)?;
+        } else {
+            new_wcs.lappend(mcx, wc_node)?;
+        }
+    }
+    if wc_changed {
+        changed = true;
+        newq.windowClause = new_wcs;
+    }
+
     if !changed {
         return Ok(None);
     }
-    // replace_rte_variables_mutator's inserted_sublink leg: a replacement
-    // expression spliced into this sub-Query may carry a SubLink; without the
-    // flag the sub-planner skips SS_process_sublinks and the raw SubLink
-    // reaches cost_qual_eval.
+    // replace_rte_variables_mutator's inserted_sublink: C ORs checkExprHasSubLink
+    // on each replacement (query_tree_mutator, flags 0). Nested RTE/CTE
+    // Queries set their own flag via the recursive arm; this header only
+    // needs this query's expression fields (QTW_IGNORE_RC_SUBQUERIES).
     if !newq.hasSubLinks {
-        let jt_has = match newq.jointree {
-            None => false,
-            Some(jt) => {
-                let mut found = rewrite_manip::checkExprHasSubLink_opt(jt.quals)?;
-                for child in &jt.fromlist {
-                    if found {
-                        break;
-                    }
-                    found = rewrite_manip::checkExprHasSubLink(child)?;
+        struct HasSubLink;
+        impl<'mcx> nodes_core::NodeWalker<'mcx> for HasSubLink {
+            fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+                if node.node_tag() == NodeTag::T_SubLink {
+                    return Ok(true);
                 }
-                found
-            }
-        };
-        // rtable expressions are this query's own (C query_tree_walker
-        // QTW_EXAMINE_RTES): a replacement spliced into a FUNCTION/VALUES
-        // RTE carries the SubLink too.
-        let mut rt_has = false;
-        for srte_node in &newq.rtable {
-            let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
-            rt_has = match srte.rtekind {
-                RTEKind::RTE_FUNCTION => {
-                    let mut found = false;
-                    for f_node in &srte.functions {
-                        let rtf = f_node.as_range_tbl_function().expect("functions cell");
-                        if rewrite_manip::checkExprHasSubLink_opt(rtf.funcexpr)? {
-                            found = true;
-                            break;
-                        }
-                    }
-                    found
-                }
-                RTEKind::RTE_VALUES => {
-                    rewrite_manip::checkExprHasSubLink_list(&srte.values_lists)?
-                }
-                _ => false,
-            };
-            if rt_has {
-                break;
+                nodes_core::expression_tree_walker(node, self)
             }
         }
-        newq.hasSubLinks = jt_has
-            || rt_has
-            || rewrite_manip::checkExprHasSubLink_list(&newq.targetList)?
-            || rewrite_manip::checkExprHasSubLink_list(&newq.returningList)?
-            || rewrite_manip::checkExprHasSubLink_opt(newq.havingQual)?
-            || rewrite_manip::checkExprHasSubLink_opt(newq.limitOffset)?
-            || rewrite_manip::checkExprHasSubLink_opt(newq.limitCount)?;
+        newq.hasSubLinks = nodes_core::query_tree_walker(
+            &newq,
+            &mut HasSubLink,
+            nodes_core::QTW_IGNORE_RC_SUBQUERIES,
+        )?;
     }
     Ok(Some(newq))
 }
@@ -4806,4 +4816,148 @@ pub fn expand_generated_columns_in_expr<'mcx>(
         clauses::walker::expression_tree_mutator(mcx, node, &mut |n| walk(mcx, n, rel, varno))
     }
     Ok(walk(mcx, node, rel, varno)?.unwrap_or(node))
+}
+
+#[cfg(test)]
+mod qtw_tests {
+    use super::*;
+    use mcx::MemoryContext;
+    use types_nodes::nodes_enums::CmdType;
+    use types_nodes::parsenodes::TableSampleClause;
+    use types_nodes::primnodes::{SubLink, SubLinkType};
+
+    fn scalar_sublink<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+        let c = Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(1), false, true).unwrap();
+        let tle = Node::mk_target_entry(mcx, c, 1, None, false).unwrap();
+        let mut q = Node::build::<Query>(mcx).unwrap();
+        q.commandType = CmdType::CMD_SELECT;
+        q.targetList = NodeList::make1(mcx, tle).unwrap();
+        q.jointree = Some(
+            mcx::alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap(),
+        );
+        Node::mk(
+            mcx,
+            SubLink {
+                subLinkType: SubLinkType::EXPR_SUBLINK,
+                subLinkId: 0,
+                testexpr: None,
+                operName: NodeList::nil(),
+                subselect: q.seal(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    // C replace_rte_variables ORs checkExprHasSubLink on the replacement
+    // wherever query_tree_mutator splices it. The old hand-rolled hasSubLinks
+    // scan skipped TABLESAMPLE; a SubLink spliced there left the flag false.
+    #[test]
+    fn pulled_up_sublink_in_tablesample_sets_has_sublinks() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 1).unwrap();
+        let tsc = Node::mk(
+            mcx,
+            TableSampleClause {
+                tsmhandler: 0,
+                args: NodeList::make1(mcx, var).unwrap(),
+                repeatable: None,
+            },
+        )
+        .unwrap();
+        let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_RELATION;
+        rte.tablesample = Some(tsc);
+        let q = Query {
+            commandType: CmdType::CMD_SELECT,
+            rtable: NodeList::make1(mcx, rte.seal()).unwrap(),
+            jointree: Some(
+                mcx::alloc_leak_in(
+                    mcx,
+                    FromExpr {
+                        fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap())
+                            .unwrap(),
+                        quals: None,
+                    },
+                )
+                .unwrap(),
+            ),
+            targetList: NodeList::make1(
+                mcx,
+                Node::mk_target_entry(
+                    mcx,
+                    Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(0), false, true)
+                        .unwrap(),
+                    1,
+                    None,
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            ..Query::default()
+        };
+        let leaked = mcx::alloc_leak_in(mcx, q).unwrap();
+        let tlist = NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, scalar_sublink(mcx), 1, None, false).unwrap(),
+        )
+        .unwrap();
+        let newq = replace_vars_in_query_value(mcx, leaked, 1, &tlist, false, None, 1)
+            .unwrap()
+            .expect("tablesample Var replaced");
+        assert!(newq.hasSubLinks);
+    }
+
+    #[test]
+    fn pulled_up_sublink_in_window_offset_sets_has_sublinks() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 1).unwrap();
+        let mut wc = Node::build::<types_nodes::parsenodes::WindowClause>(mcx).unwrap();
+        wc.startOffset = Some(var);
+        let q = Query {
+            commandType: CmdType::CMD_SELECT,
+            jointree: Some(
+                mcx::alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None })
+                    .unwrap(),
+            ),
+            windowClause: NodeList::make1(mcx, wc.seal()).unwrap(),
+            targetList: NodeList::make1(
+                mcx,
+                Node::mk_target_entry(
+                    mcx,
+                    Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(0), false, true)
+                        .unwrap(),
+                    1,
+                    None,
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            ..Query::default()
+        };
+        let leaked = mcx::alloc_leak_in(mcx, q).unwrap();
+        let tlist = NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, scalar_sublink(mcx), 1, None, false).unwrap(),
+        )
+        .unwrap();
+        let newq = replace_vars_in_query_value(mcx, leaked, 1, &tlist, false, None, 1)
+            .unwrap()
+            .expect("window offset Var replaced");
+        assert!(newq.hasSubLinks);
+        assert_eq!(
+            newq.windowClause
+                .nth(0)
+                .as_window_clause()
+                .unwrap()
+                .startOffset
+                .unwrap()
+                .node_tag(),
+            NodeTag::T_SubLink
+        );
+    }
 }
