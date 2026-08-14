@@ -285,6 +285,9 @@ fn parse_fcall_arguments<'mcx>(
         if argsize == -1 {
             fcinfo.set_arg_null(i);
         } else {
+            // C parse_fcall_arguments: argsize != -1 ⇒ isnull=false before I/O.
+            // LocalFcinfo::fresh starts every slot as NullableDatum::null().
+            fcinfo.args[i].isnull = false;
             if argsize < 0 {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_PROTOCOL_VIOLATION)
