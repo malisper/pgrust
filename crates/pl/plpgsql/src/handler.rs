@@ -1116,10 +1116,18 @@ fn plpgsql_validator(
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
     let funcoid = fcinfo.args[0].value.as_oid();
-    let _ = flinfo;
 
-    // CheckFunctionValidatorAccess: object_aclcheck EXECUTE — superuser
-    // fast path per repo convention (sql validator precedent).
+    // CheckFunctionValidatorAccess (fmgr.c:2145, pl_handler.c): reject when this
+    // validator is invoked on a function of another language (42501 language
+    // mismatch), or when the caller lacks USAGE on the language / EXECUTE on the
+    // function. C reads the validator's own OID off fcinfo->flinfo->fn_oid; a
+    // validator reached through CREATE FUNCTION always carries it
+    // (ProcedureCreate → fmgr_info(languageValidator) → FmgrInfo::invoke passes
+    // Some(flinfo)). Returns false only for future expansion, matching C's bool.
+    let validator_oid = flinfo.as_deref().map_or(types_core::InvalidOid, |f| f.fn_oid);
+    if !pg_proc::check_function_validator_access(validator_oid, funcoid)? {
+        return Ok(Datum::null());
+    }
 
     let info = read_proc_row(funcoid)?;
     // Pseudotype result disallowed except TRIGGER, EVTTRIGGER, RECORD, VOID,
@@ -1871,6 +1879,73 @@ mod tests {
         )
         .unwrap();
         CHECKED.with(|c| assert_eq!(*c.borrow(), vec![(0xbeef, false, 1234)]));
+    }
+
+    // Wiring witness: plpgsql_validator must gate through
+    // CheckFunctionValidatorAccess (fmgr.c:2145) BEFORE it compiles anything.
+    // Invoked on a function of another language, C raises 42501 (the language
+    // mismatch: "language validation function N called for language L instead
+    // of M"). The pre-fix stub skipped the gate and fell through to
+    // plpgsql_compile, which raised 42601 (syntax error) on the non-plpgsql
+    // source — the differential gap SQL-CONSOLIDATE found for
+    // `plpgsql_validator('int4abs'::regproc)`. Only the mismatch arm is
+    // exercised here: it returns before check_function_validator_access reaches
+    // the user-id/ACL seams, so this pins the wire-up with just the two pg_proc
+    // syscache seams. The ACL and mismatch SEMANTICS themselves are covered by
+    // pg_proc's validator_access unit tests.
+    #[test]
+    fn validator_rejects_foreign_language_function_with_42501() {
+        use std::sync::Once;
+
+        // Stand-ins: plpgsql is created dynamically so its lanvalidator OID is
+        // not a fixed constant; any value != the target language's lanvalidator
+        // trips the mismatch, exactly as the runtime flinfo->fn_oid would.
+        const PLPGSQL_VALIDATOR_OID: Oid = 100_001;
+        const INTERNAL_LANG: Oid = 12;
+        const INTERNAL_VALIDATOR_OID: Oid = 2246; // fmgr_internal_validator
+        const FOREIGN_FUNC: Oid = 100_100; // an internal-language function, e.g. int4abs
+
+        static SEAMS: Once = Once::new();
+        SEAMS.call_once(|| {
+            syscache_seams::lookup_pg_proc_fmgr::set(|funcoid| {
+                assert_eq!(funcoid, FOREIGN_FUNC);
+                Ok(Some(syscache_seams::PgProcFmgrShape {
+                    prolang: INTERNAL_LANG,
+                    prorettype: 23,
+                    pronargs: 1,
+                    proisstrict: true,
+                    proretset: false,
+                    prosecdef: false,
+                    proconfig_isnull: true,
+                }))
+            });
+            syscache_seams::lookup_pg_language_fmgr::set(|langoid| {
+                assert_eq!(langoid, INTERNAL_LANG);
+                Ok(Some(syscache_seams::PgLanguageFmgrShape {
+                    lanplcallfoid: 0,
+                    laninline: 0,
+                    lanvalidator: INTERNAL_VALIDATOR_OID,
+                }))
+            });
+        });
+
+        let mut flinfo = FmgrInfo::unresolved();
+        flinfo.fn_oid = PLPGSQL_VALIDATOR_OID;
+        let mut fcinfo = fmgr::LocalFcinfo::<1>::new(types_core::InvalidOid);
+        fcinfo.args[0] = datum::NullableDatum {
+            value: Datum::from_oid(FOREIGN_FUNC),
+            isnull: false,
+        };
+
+        let e = plpgsql_validator(Some(&mut flinfo), &mut fcinfo).unwrap_err();
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INSUFFICIENT_PRIVILEGE);
+        assert_eq!(
+            e.message(),
+            format!(
+                "language validation function {PLPGSQL_VALIDATOR_OID} called for language \
+                 {INTERNAL_LANG} instead of {INTERNAL_VALIDATOR_OID}"
+            )
+        );
     }
 }
 
