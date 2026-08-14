@@ -477,8 +477,23 @@ pub(crate) fn clause_selectivity_node_ext<'mcx>(
             sjinfo,
             use_extended_stats,
         ),
-        // C's catch-all default: no way to estimate, use 0.5.
-        NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan | NodeTag::T_Param => Ok(0.5),
+        NodeTag::T_Param => {
+            let subst = clauses::estimate_expression_value_with_params(
+                run.mcx,
+                clause,
+                run.glob.bound_params,
+            )?;
+            if let Some(c) = subst.as_const() {
+                Ok(if c.constisnull || !c.constvalue.as_bool() {
+                    0.0
+                } else {
+                    1.0
+                })
+            } else {
+                Ok(0.5)
+            }
+        }
+        NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan => Ok(0.5),
         // C's final else, verbatim:
         //
         //     /*

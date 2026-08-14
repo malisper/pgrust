@@ -95,7 +95,15 @@ pub fn estimate_expression_value<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    let cx = ece_context(mcx, true, ParamListHandle::NULL);
+    estimate_expression_value_with_params(mcx, node, ParamListHandle::NULL)
+}
+
+pub fn estimate_expression_value_with_params<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    bound_params: ParamListHandle,
+) -> PgResult<Node<'mcx>> {
+    let cx = ece_context(mcx, true, bound_params);
     Ok(ece_mutator(node, &cx)?.unwrap_or(node))
 }
 

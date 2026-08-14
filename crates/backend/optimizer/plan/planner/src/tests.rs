@@ -25,6 +25,13 @@ pub(crate) fn install_fixtures() {
         postgres_seams::check_for_interrupts::set(|| Ok(()));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
+                16 => Some(PgTypeShape {
+                    typlen: 1,
+                    typbyval: true,
+                    typalign: b'c' as i8,
+                    typstorage: b'p' as i8,
+                    typcollation: 0,
+                }),
                 23 => Some(PgTypeShape {
                     typlen: 4,
                     typbyval: true,
@@ -7564,6 +7571,65 @@ mod unhandled_qual_nodes_take_boolvarsel {
     #[test]
     fn subscripting_ref_qual_plans() {
         plans_with_qual(subscript_qual);
+    }
+}
+
+// clausesel.c Param arm: estimate_expression_value substitutes a bound
+// PARAM_EXTERN (estimate mode, not only PARAM_FLAG_CONST). `$1 OR pk = 42`
+// with $1 = false is then OR(0, 1/ntuples) → 1 row. The port returned 0.5
+// for every Param, so the same qual estimated 5000 rows.
+mod bound_param_or_eq_uses_param_arm {
+    use super::*;
+    use types_nodes::primnodes::{BoolExpr, BoolExprType, Param, ParamKind};
+    use types_portal::params::{self, ParamExternData};
+
+    fn param_or_eq<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+        let param = Node::mk(
+            mcx,
+            Param {
+                paramkind: ParamKind::PARAM_EXTERN,
+                paramid: 1,
+                paramtype: 16,
+                paramtypmod: -1,
+                paramcollid: 0,
+                location: -1,
+            },
+        )
+        .unwrap();
+        Node::mk(
+            mcx,
+            BoolExpr {
+                boolop: BoolExprType::OR_EXPR,
+                args: NodeList::make2(mcx, param, eq_qual(mcx, 1, 42)).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn false_param_or_eq_estimates_one_row() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let params = [ParamExternData {
+            value: Datum::from_bool(false),
+            isnull: false,
+            pflags: 0,
+            ptype: 16,
+        }];
+        let handle = unsafe { params::register(&params) };
+        let parse = table_query(mcx, Some(param_or_eq(mcx)));
+        let stmt = planner(
+            mcx,
+            leak_q(mcx, parse),
+            "SELECT * FROM t WHERE $1 OR pk = 42",
+            CURSOR_OPT_PARALLEL_OK,
+            handle,
+        )
+        .unwrap();
+        params::free(handle);
+        let plan = stmt.planTree.unwrap().as_plan().expect("planTree is a Plan");
+        assert_eq!(plan.plan_rows, 1.0);
     }
 }
 

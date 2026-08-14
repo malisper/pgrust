@@ -30,8 +30,9 @@ pub use classify::{
 pub use fold::negate_clause;
 pub use srf_inline::inline_set_returning_function;
 pub use fold::{
-    all_arguments_const, estimate_expression_value, eval_const_expressions,
-    eval_const_expressions_with_params, expand_function_arguments, make_bool_const,
+    all_arguments_const, estimate_expression_value, estimate_expression_value_with_params,
+    eval_const_expressions, eval_const_expressions_with_params, expand_function_arguments,
+    make_bool_const,
 };
 pub fn init_seams() {
     clauses_seams::eval_const_expressions::set(fold::eval_const_expressions);
