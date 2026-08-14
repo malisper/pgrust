@@ -3,8 +3,8 @@ extern crate std;
 use std::sync::Once;
 
 use mcx::{Mcx, MemoryContext};
-use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry};
-use types_nodes::primnodes::{FromExpr, Var};
+use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry, WindowClause};
+use types_nodes::primnodes::{FromExpr, OpExpr, SubLink, SubLinkType, Var};
 use types_nodes::{Bitmapset, Node, NodeList};
 use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
 
@@ -188,6 +188,135 @@ fn pull_vars_of_level_links_matching_vars() {
     let l1 = pull_vars_of_level(mcx, expr, 1).unwrap();
     assert_eq!(l1.len(), 1);
     assert_eq!(l1.nth(0).as_var().unwrap().varno, 2);
+}
+
+fn dummy_rte(mcx: Mcx<'_>) -> Node<'_> {
+    Node::mk(mcx, RangeTblEntry::default()).unwrap()
+}
+
+fn join_rte<'a>(mcx: Mcx<'a>, alias: Node<'a>) -> Node<'a> {
+    let mut rte = RangeTblEntry::default();
+    rte.rtekind = RTEKind::RTE_JOIN;
+    rte.joinaliasvars = NodeList::make1(mcx, alias).unwrap();
+    Node::mk(mcx, rte).unwrap()
+}
+
+fn rtable_with_join<'a>(mcx: Mcx<'a>, alias: Node<'a>) -> NodeList<'a> {
+    NodeList::make2(mcx, dummy_rte(mcx), join_rte(mcx, alias)).unwrap()
+}
+
+fn query_tlist_var<'a>(mcx: Mcx<'a>, v: Node<'a>) -> Node<'a> {
+    let te = Node::mk_target_entry(mcx, v, 1, None, false).unwrap();
+    let mut q = Query::default();
+    q.targetList = NodeList::make1(mcx, te).unwrap();
+    q.jointree = Some(Node::mk_mut(mcx, FromExpr::default()).unwrap().seal_ref());
+    Node::mk_mut(mcx, q).unwrap().seal()
+}
+
+fn tlist_var(node: Node<'_>) -> &Var<'_> {
+    node.as_query()
+        .unwrap()
+        .targetList
+        .nth(0)
+        .as_target_entry()
+        .unwrap()
+        .expr
+        .as_var()
+        .unwrap()
+}
+
+#[test]
+fn flatten_join_alias_vars_expands_query_level_join_var() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let rtable = rtable_with_join(mcx, var(mcx, 1, 2, 0));
+    let q = query_tlist_var(mcx, var(mcx, 2, 1, 1));
+    let out = flatten_join_alias_vars(mcx, &rtable, None, None, q).unwrap();
+    let v = tlist_var(out);
+    assert_eq!(v.varno, 1);
+    assert_eq!(v.varattno, 2);
+    assert_eq!(v.varlevelsup, 1);
+}
+
+#[test]
+fn flatten_join_alias_vars_expands_sublink_subselect() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let rtable = rtable_with_join(mcx, var(mcx, 1, 2, 0));
+    let sub = query_tlist_var(mcx, var(mcx, 2, 1, 1));
+    let sl = Node::mk(
+        mcx,
+        SubLink {
+            subLinkType: SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: sub,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let out = flatten_join_alias_vars(mcx, &rtable, None, None, sl).unwrap();
+    let v = tlist_var(out.as_sub_link().unwrap().subselect);
+    assert_eq!(v.varno, 1);
+    assert_eq!(v.varattno, 2);
+    assert_eq!(v.varlevelsup, 1);
+}
+
+#[test]
+fn flatten_join_alias_unsupported_expr_is_ereport() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let rtable = rtable_with_join(mcx, Node::mk(mcx, OpExpr::default()).unwrap());
+    let mut nulling = Bitmapset::empty();
+    nulling.add_member(mcx, 5).unwrap();
+    let v = Node::mk(
+        mcx,
+        Var {
+            varno: 2,
+            varattno: 1,
+            vartype: 23,
+            varnullingrels: nulling,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let err = flatten_join_alias_vars(mcx, &rtable, None, None, v).unwrap_err();
+    assert!(err.message().contains("unsupported join alias expression"));
+}
+
+#[test]
+fn flatten_group_exprs_rewrites_window_start_offset() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let mut group = RangeTblEntry::default();
+    group.rtekind = RTEKind::RTE_GROUP;
+    group.groupexprs = NodeList::make1(mcx, var(mcx, 2, 1, 0)).unwrap();
+    let mut outer = Query::default();
+    outer.rtable = NodeList::make1(mcx, Node::mk(mcx, group).unwrap()).unwrap();
+    outer.jointree = Some(Node::mk_mut(mcx, FromExpr::default()).unwrap().seal_ref());
+
+    let mut wc = WindowClause::default();
+    wc.startOffset = Some(var(mcx, 1, 1, 1));
+    let mut inner = Query::default();
+    inner.windowClause = NodeList::make1(mcx, Node::mk(mcx, wc).unwrap()).unwrap();
+    inner.jointree = Some(Node::mk_mut(mcx, FromExpr::default()).unwrap().seal_ref());
+    let inner_node = Node::mk_mut(mcx, inner).unwrap().seal();
+
+    let out = flatten_group_exprs(mcx, &outer, inner_node).unwrap();
+    let start = out
+        .as_query()
+        .unwrap()
+        .windowClause
+        .nth(0)
+        .as_window_clause()
+        .unwrap()
+        .startOffset
+        .unwrap();
+    let v = start.as_var().unwrap();
+    assert_eq!(v.varno, 2);
+    assert_eq!(v.varattno, 1);
+    assert_eq!(v.varlevelsup, 1);
 }
 
 #[test]

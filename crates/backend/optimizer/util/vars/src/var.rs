@@ -518,35 +518,67 @@ pub struct FjavRoot<'a> {
     pub last_ph_id: &'a core::cell::Cell<u32>,
 }
 
-// flatten_join_alias_vars (var.c): join alias Vars are replaced by copies of
-// the joinaliasvars expression (whole-row by a RowExpr over them);
-// nullingrels transfer via the standard-expression adjustment or, with root
-// (planner path), a PlaceHolderVar wrapper. IncrementVarSublevelsUp for
-// aliases carried into subqueries stays loud.
-pub fn flatten_join_alias_vars<'mcx>(
+struct FjavCtx<'a, 'mcx> {
     mcx: Mcx<'mcx>,
-    rtable: &NodeList<'mcx>,
+    rtable: &'a NodeList<'mcx>,
     jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
-    root: Option<&FjavRoot<'_>>,
+    root: Option<&'a FjavRoot<'a>>,
+    sublevels_up: i32,
+    possible_sublink: bool,
+    inserted_sublink: bool,
+}
+
+pub fn flatten_join_alias_vars<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    rtable: &'a NodeList<'mcx>,
+    jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
+    root: Option<&'a FjavRoot<'a>>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    Ok(fjav_mutate(mcx, rtable, jointree, root, node)?.unwrap_or(node))
+    let mut ctx = FjavCtx {
+        mcx,
+        rtable,
+        jointree,
+        root,
+        sublevels_up: 0,
+        possible_sublink: true,
+        inserted_sublink: true,
+    };
+    Ok(fjav_mutate(&mut ctx, node)?.unwrap_or(node))
+}
+
+fn fjav_shift_copy<'mcx>(
+    ctx: &mut FjavCtx<'_, 'mcx>,
+    src: Node<'mcx>,
+    location: i32,
+) -> PgResult<Node<'mcx>> {
+    let newvar = fjav_copy(ctx.mcx, src)?;
+    if ctx.sublevels_up != 0 {
+        rewrite_manip::IncrementVarSublevelsUp(newvar, ctx.sublevels_up, 0)?;
+    }
+    if newvar.as_var().is_some() {
+        // SAFETY: fjav_copy returned a fresh node.
+        unsafe {
+            newvar
+                .with_mut::<types_nodes::Var, _>(|x| x.location = location)
+                .unwrap();
+        }
+    }
+    Ok(fjav_mutate(ctx, newvar)?.unwrap_or(newvar))
 }
 
 fn fjav_mutate<'mcx>(
-    mcx: Mcx<'mcx>,
-    rtable: &NodeList<'mcx>,
-    jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
-    root: Option<&FjavRoot<'_>>,
+    ctx: &mut FjavCtx<'_, 'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Option<Node<'mcx>>> {
     match node.node_tag() {
         NodeTag::T_Var => {
             let v = node.as_var().unwrap();
-            if v.varlevelsup != 0 {
+            if v.varlevelsup as i32 != ctx.sublevels_up {
                 return Ok(None);
             }
-            let rte = rtable
+            let rte = ctx
+                .rtable
                 .nth(v.varno as usize - 1)
                 .as_range_tbl_entry()
                 .expect("rtable cell");
@@ -559,21 +591,12 @@ fn fjav_mutate<'mcx>(
                 let mut fields = NodeList::nil();
                 let mut colnames = NodeList::nil();
                 for (av, cn) in rte.joinaliasvars.iter().zip(eref.colnames.iter()) {
-                    let newvar = fjav_copy(mcx, av)?;
-                    if newvar.as_var().is_some() {
-                        // SAFETY: fjav_copy returned a fresh node.
-                        unsafe {
-                            newvar
-                                .with_mut::<types_nodes::Var, _>(|x| x.location = v.location)
-                                .unwrap();
-                        }
-                    }
-                    let newvar = fjav_mutate(mcx, rtable, jointree, root, newvar)?.unwrap_or(newvar);
-                    fields.lappend(mcx, newvar)?;
-                    colnames.lappend(mcx, cn)?;
+                    let newvar = fjav_shift_copy(ctx, av, v.location)?;
+                    fields.lappend(ctx.mcx, newvar)?;
+                    colnames.lappend(ctx.mcx, cn)?;
                 }
                 let rowexpr = Node::mk(
-                    mcx,
+                    ctx.mcx,
                     types_nodes::RowExpr {
                         args: fields,
                         row_typeid: v.vartype,
@@ -582,104 +605,384 @@ fn fjav_mutate<'mcx>(
                         location: v.location,
                     },
                 )?;
-                return Ok(Some(add_nullingrels_if_needed(mcx, jointree, root, rowexpr, v)?));
+                return Ok(Some(add_nullingrels_if_needed(ctx, rowexpr, v)?));
             }
             debug_assert!(v.varattno > 0);
             let aliasvar = rte.joinaliasvars.nth(v.varattno as usize - 1);
-            let newvar = fjav_copy(mcx, aliasvar)?;
-            if newvar.as_var().is_some() {
-                // SAFETY: fjav_copy returned a fresh node.
-                unsafe {
-                    newvar
-                        .with_mut::<types_nodes::Var, _>(|x| x.location = v.location)
-                        .unwrap();
-                }
+            let newvar = fjav_shift_copy(ctx, aliasvar, v.location)?;
+            if ctx.possible_sublink && !ctx.inserted_sublink {
+                ctx.inserted_sublink = rewrite_manip::checkExprHasSubLink(newvar)?;
             }
-            let newvar = fjav_mutate(mcx, rtable, jointree, root, newvar)?.unwrap_or(newvar);
-            Ok(Some(add_nullingrels_if_needed(mcx, jointree, root, newvar, v)?))
+            Ok(Some(add_nullingrels_if_needed(ctx, newvar, v)?))
         }
         NodeTag::T_PlaceHolderVar => {
             let phv = node.as_place_holder_var().unwrap();
-            let new_expr = fjav_mutate(mcx, rtable, jointree, root, phv.phexpr)?.unwrap_or(phv.phexpr);
-            // sublevels_up is pinned at 0 here (Query descent is loud below),
-            // so C's phlevelsup == sublevels_up test is phlevelsup == 0.
-            let phrels = if phv.phlevelsup == 0 {
-                alias_relid_set(rtable, jointree, &phv.phrels, mcx)?
+            let new_expr = fjav_mutate(ctx, phv.phexpr)?.unwrap_or(phv.phexpr);
+            let phrels = if phv.phlevelsup as i32 == ctx.sublevels_up {
+                alias_relid_set(ctx.rtable, ctx.jointree, &phv.phrels, ctx.mcx)?
             } else {
-                phv.phrels.clone_in(mcx)?
+                phv.phrels.clone_in(ctx.mcx)?
             };
             Ok(Some(Node::mk(
-                mcx,
+                ctx.mcx,
                 types_nodes::primnodes::PlaceHolderVar {
                     phexpr: new_expr,
                     phrels,
-                    phnullingrels: phv.phnullingrels.clone_in(mcx)?,
+                    phnullingrels: phv.phnullingrels.clone_in(ctx.mcx)?,
                     phid: phv.phid,
                     phlevelsup: phv.phlevelsup,
                 },
             )?))
         }
-        NodeTag::T_Query => {
-            // A subquery matters here only if it references a join RTE of an
-            // upper level; the sublevels bookkeeping is unported, so scan and
-            // stay loud only when the rewrite would change anything.
-            let q = node.as_query().unwrap();
-            assert_subquery_free_of_upper_join_vars(rtable, q)?;
-            Ok(None)
+        NodeTag::T_SubLink => {
+            let sl = node.as_sub_link().unwrap();
+            let new_test = match sl.testexpr {
+                None => None,
+                Some(te) => fjav_mutate(ctx, te)?,
+            };
+            let new_sub = fjav_query_descend(ctx, sl.subselect.as_query().expect("SubLink holds a Query"))?;
+            if new_test.is_none() && new_sub.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                ctx.mcx,
+                types_nodes::primnodes::SubLink {
+                    subLinkType: sl.subLinkType,
+                    subLinkId: sl.subLinkId,
+                    testexpr: new_test.or(sl.testexpr),
+                    operName: sl.operName.clone_in(ctx.mcx)?,
+                    subselect: new_sub.unwrap_or(sl.subselect),
+                    location: sl.location,
+                },
+            )?))
         }
-        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
-            fjav_mutate(mcx, rtable, jointree, root, n)
-        }),
+        NodeTag::T_Query => fjav_query_descend(ctx, node.as_query().expect("Query")),
+        _ => {
+            let mcx = ctx.mcx;
+            nodes_core::expression_tree_mutator(mcx, node, &mut |n| fjav_mutate(ctx, n))
+        }
     }
 }
 
-fn assert_subquery_free_of_upper_join_vars<'mcx>(
-    outer_rtable: &NodeList<'mcx>,
+fn fjav_query_has_join_alias_vars<'mcx>(
+    ctx: &FjavCtx<'_, 'mcx>,
     q: &'mcx Query<'mcx>,
-) -> PgResult<()> {
-    struct W<'a, 'mcx> {
-        outer_rtable: &'a NodeList<'mcx>,
-        levels: i64,
+) -> PgResult<bool> {
+    struct W<'a, 'x> {
+        rtable: &'a NodeList<'x>,
+        sublevels_up: i32,
+        found: bool,
     }
     impl<'mcx> NodeWalker<'mcx> for W<'_, 'mcx> {
         fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-            match node.node_tag() {
-                NodeTag::T_Var => {
-                    let v = node.as_var().unwrap();
-                    if v.varlevelsup as i64 == self.levels {
-                        let rte = self
-                            .outer_rtable
-                            .nth(v.varno as usize - 1)
-                            .as_range_tbl_entry()
-                            .expect("rtable cell");
-                        if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
-                            panic!(
-                                "flatten_join_alias_vars (var.c): join alias Var under a \
-                                 subquery (IncrementVarSublevelsUp leg) — join-using residue"
-                            );
-                        }
+            if let Some(v) = node.as_var() {
+                if v.varlevelsup as i32 == self.sublevels_up {
+                    let rte = self
+                        .rtable
+                        .nth(v.varno as usize - 1)
+                        .as_range_tbl_entry()
+                        .expect("rtable cell");
+                    if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
+                        self.found = true;
+                        return Ok(true);
                     }
-                    Ok(false)
                 }
-                NodeTag::T_Query => {
-                    let sub = node.as_query().unwrap();
-                    self.levels += 1;
-                    let r = query_tree_walker(sub, self, nodes_core::QTW_IGNORE_JOINALIASES);
-                    self.levels -= 1;
-                    r
-                }
-                _ => expression_tree_walker(node, self),
+                return Ok(false);
             }
+            if let Some(q) = node.as_query() {
+                self.sublevels_up += 1;
+                let r = query_tree_walker(q, self, nodes_core::QTW_IGNORE_JOINALIASES);
+                self.sublevels_up -= 1;
+                return r;
+            }
+            expression_tree_walker(node, self)
         }
-        fn visit_query_ref(&mut self, sub: &'mcx Query<'mcx>) -> PgResult<bool> {
-            self.levels += 1;
-            let r = query_tree_walker(sub, self, nodes_core::QTW_IGNORE_JOINALIASES);
-            self.levels -= 1;
+        fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+            self.sublevels_up += 1;
+            let r = query_tree_walker(q, self, nodes_core::QTW_IGNORE_JOINALIASES);
+            self.sublevels_up -= 1;
             r
         }
     }
-    let mut w = W { outer_rtable, levels: 1 };
+    let mut w = W {
+        rtable: ctx.rtable,
+        sublevels_up: ctx.sublevels_up + 1,
+        found: false,
+    };
     query_tree_walker(q, &mut w, nodes_core::QTW_IGNORE_JOINALIASES)?;
+    Ok(w.found)
+}
+
+fn fjav_query_descend<'mcx>(
+    ctx: &mut FjavCtx<'_, 'mcx>,
+    q: &'mcx Query<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    if !fjav_query_has_join_alias_vars(ctx, q)? {
+        return Ok(None);
+    }
+    let qnode = rewrite_manip::copy_query_node(ctx.mcx, q)?;
+    fjav_query_inplace(ctx, qnode)?;
+    Ok(Some(qnode))
+}
+
+fn fjav_query_inplace<'mcx>(ctx: &mut FjavCtx<'_, 'mcx>, qnode: Node<'mcx>) -> PgResult<()> {
+    let mcx = ctx.mcx;
+    let q = qnode.as_query().expect("Query");
+    ctx.sublevels_up += 1;
+    let save_inserted = ctx.inserted_sublink;
+    ctx.inserted_sublink = q.hasSubLinks;
+
+    let new_target = fjav_list(ctx, &q.targetList)?;
+    let new_returning = fjav_list(ctx, &q.returningList)?;
+    let new_having = fjav_opt(ctx, q.havingQual)?;
+    let new_limit_off = fjav_opt(ctx, q.limitOffset)?;
+    let new_limit_cnt = fjav_opt(ctx, q.limitCount)?;
+    let new_setops = fjav_opt(ctx, q.setOperations)?;
+    let new_merge_join = fjav_opt(ctx, q.mergeJoinCondition)?;
+    if let Some(oc) = q.onConflict {
+        fjav_onconflict_inplace(ctx, oc)?;
+    }
+    for wco_node in &q.withCheckOptions {
+        let wco = wco_node.as_with_check_option().expect("withCheckOptions cell");
+        if let Some(new_qual) = fjav_opt(ctx, wco.qual)? {
+            // SAFETY: exclusive copy from fjav_query_descend.
+            unsafe {
+                wco_node.with_mut::<types_nodes::parsenodes::WithCheckOption, _>(|w| {
+                    w.qual = Some(new_qual)
+                })
+            }
+            .expect("WithCheckOption");
+        }
+    }
+    for action_node in &q.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        let new_qual = fjav_opt(ctx, action.qual)?;
+        let new_tlist = fjav_list(ctx, &action.targetList)?;
+        if new_qual.is_some() || new_tlist.is_some() {
+            // SAFETY: exclusive copy from fjav_query_descend.
+            unsafe {
+                action_node.with_mut::<types_nodes::MergeAction, _>(|a| {
+                    if new_qual.is_some() {
+                        a.qual = new_qual;
+                    }
+                    if let Some(t) = new_tlist {
+                        a.targetList = t;
+                    }
+                })
+            }
+            .expect("MergeAction");
+        }
+    }
+    for wc_node in &q.windowClause {
+        let wc = wc_node.as_window_clause().expect("windowClause cell");
+        let new_start = fjav_opt(ctx, wc.startOffset)?;
+        let new_end = fjav_opt(ctx, wc.endOffset)?;
+        if new_start.is_some() || new_end.is_some() {
+            // SAFETY: exclusive copy from fjav_query_descend.
+            unsafe {
+                wc_node.with_mut::<types_nodes::parsenodes::WindowClause, _>(|w| {
+                    if new_start.is_some() {
+                        w.startOffset = new_start;
+                    }
+                    if new_end.is_some() {
+                        w.endOffset = new_end;
+                    }
+                })
+            }
+            .expect("WindowClause");
+        }
+    }
+    let new_jointree = match q.jointree {
+        None => None,
+        Some(jt) => {
+            let fl = fjav_list(ctx, &jt.fromlist)?;
+            let quals = fjav_opt(ctx, jt.quals)?;
+            if fl.is_some() || quals.is_some() {
+                Some(mcx::alloc_leak_in(
+                    mcx,
+                    types_nodes::primnodes::FromExpr {
+                        fromlist: match fl {
+                            Some(l) => l,
+                            None => jt.fromlist.clone_in(mcx)?,
+                        },
+                        quals: quals.or(jt.quals),
+                    },
+                )?)
+            } else {
+                None
+            }
+        }
+    };
+    for cte_node in &q.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        if let Some(cq) = cte.ctequery {
+            if fjav_query_has_join_alias_vars(ctx, cq.as_query().expect("Query"))? {
+                fjav_query_inplace(ctx, cq)?;
+            }
+        }
+    }
+    for rte_node in &q.rtable {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        match rte.rtekind {
+            types_nodes::parsenodes::RTEKind::RTE_SUBQUERY => {
+                if let Some(sub) = rte.subquery {
+                    if let Some(newsub) = fjav_query_descend(ctx, sub)? {
+                        let newsub = newsub.as_query().expect("Query");
+                        // SAFETY: exclusive copy from fjav_query_descend.
+                        unsafe {
+                            rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                                r.subquery = Some(newsub)
+                            })
+                        }
+                        .expect("RangeTblEntry");
+                    }
+                }
+            }
+            types_nodes::parsenodes::RTEKind::RTE_FUNCTION => {
+                if let Some(l) = fjav_list(ctx, &rte.functions)? {
+                    // SAFETY: exclusive copy from fjav_query_descend.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.functions = l
+                        })
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            types_nodes::parsenodes::RTEKind::RTE_TABLEFUNC => {
+                if let Some(tf) = rte.tablefunc {
+                    if let Some(new) = fjav_mutate(ctx, tf)? {
+                        // SAFETY: exclusive copy from fjav_query_descend.
+                        unsafe {
+                            rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                                r.tablefunc = Some(new)
+                            })
+                        }
+                        .expect("RangeTblEntry");
+                    }
+                }
+            }
+            types_nodes::parsenodes::RTEKind::RTE_VALUES => {
+                if let Some(l) = fjav_list(ctx, &rte.values_lists)? {
+                    // SAFETY: exclusive copy from fjav_query_descend.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.values_lists = l
+                        })
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            _ => {}
+        }
+        if let Some(l) = fjav_list(ctx, &rte.securityQuals)? {
+            // SAFETY: exclusive copy from fjav_query_descend.
+            unsafe {
+                rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.securityQuals = l
+                })
+            }
+            .expect("RangeTblEntry");
+        }
+    }
+
+    let inserted = ctx.inserted_sublink;
+    ctx.inserted_sublink = save_inserted;
+    ctx.sublevels_up -= 1;
+
+    // SAFETY: qnode is the exclusive copy from fjav_query_descend.
+    unsafe {
+        qnode.with_mut::<Query, _>(|qm| {
+            if let Some(t) = new_target {
+                qm.targetList = t;
+            }
+            if let Some(r) = new_returning {
+                qm.returningList = r;
+            }
+            if new_having.is_some() {
+                qm.havingQual = new_having;
+            }
+            if new_limit_off.is_some() {
+                qm.limitOffset = new_limit_off;
+            }
+            if new_limit_cnt.is_some() {
+                qm.limitCount = new_limit_cnt;
+            }
+            if new_setops.is_some() {
+                qm.setOperations = new_setops;
+            }
+            if new_merge_join.is_some() {
+                qm.mergeJoinCondition = new_merge_join;
+            }
+            if let Some(jt) = new_jointree {
+                qm.jointree = Some(jt);
+            }
+            qm.hasSubLinks |= inserted;
+        })
+    }
+    .expect("Query");
+    Ok(())
+}
+
+fn fjav_list<'mcx>(
+    ctx: &mut FjavCtx<'_, 'mcx>,
+    list: &NodeList<'mcx>,
+) -> PgResult<Option<NodeList<'mcx>>> {
+    let mut changed = false;
+    let mut out = NodeList::nil();
+    for item in list.iter() {
+        match fjav_mutate(ctx, item)? {
+            Some(new) => {
+                changed = true;
+                out.lappend(ctx.mcx, new)?;
+            }
+            None => out.lappend(ctx.mcx, item)?,
+        }
+    }
+    Ok(if changed { Some(out) } else { None })
+}
+
+fn fjav_opt<'mcx>(
+    ctx: &mut FjavCtx<'_, 'mcx>,
+    node: Option<Node<'mcx>>,
+) -> PgResult<Option<Node<'mcx>>> {
+    match node {
+        None => Ok(None),
+        Some(n) => fjav_mutate(ctx, n),
+    }
+}
+
+fn fjav_onconflict_inplace<'mcx>(
+    ctx: &mut FjavCtx<'_, 'mcx>,
+    oc_node: Node<'mcx>,
+) -> PgResult<()> {
+    let oc = oc_node.as_on_conflict_expr().expect("OnConflictExpr");
+    let arbiter_elems = fjav_list(ctx, &oc.arbiterElems)?;
+    let arbiter_where = fjav_opt(ctx, oc.arbiterWhere)?;
+    let set = fjav_list(ctx, &oc.onConflictSet)?;
+    let oc_where = fjav_opt(ctx, oc.onConflictWhere)?;
+    let excl_tlist = fjav_list(ctx, &oc.exclRelTlist)?;
+    // SAFETY: exclusive copy from fjav_query_descend.
+    unsafe {
+        oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+            if let Some(v) = arbiter_elems {
+                o.arbiterElems = v;
+            }
+            if arbiter_where.is_some() {
+                o.arbiterWhere = arbiter_where;
+            }
+            if let Some(v) = set {
+                o.onConflictSet = v;
+            }
+            if oc_where.is_some() {
+                o.onConflictWhere = oc_where;
+            }
+            if let Some(v) = excl_tlist {
+                o.exclRelTlist = v;
+            }
+        })
+    }
+    .expect("OnConflictExpr");
     Ok(())
 }
 
@@ -888,14 +1191,14 @@ fn fjav_copy<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
     }
 }
 
-// add_nullingrels_if_needed (var.c). With root (planner path) a non-standard
-// expression gets a PlaceHolderVar wrapper carrying the nullingrels; without
-// root (parser path) C reaches elog "unsupported join alias expression",
-// unreachable because the parser only builds standard alias expressions.
+// add_nullingrels_if_needed (var.c). Parser path (root=None) ereports on a
+// non-standard alias; planner wraps it in a PlaceHolderVar.
+fn unsupported_join_alias() -> Box<PgError> {
+    Box::new(PgError::error("unsupported join alias expression".to_string()))
+}
+
 fn add_nullingrels_if_needed<'mcx>(
-    mcx: Mcx<'mcx>,
-    jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
-    root: Option<&FjavRoot<'_>>,
+    ctx: &mut FjavCtx<'_, 'mcx>,
     newnode: Node<'mcx>,
     oldvar: &types_nodes::Var<'mcx>,
 ) -> PgResult<Node<'mcx>> {
@@ -903,28 +1206,20 @@ fn add_nullingrels_if_needed<'mcx>(
         return Ok(newnode);
     }
     if is_standard_join_alias_expression(newnode, oldvar) {
-        adjust_standard_join_alias_expression(mcx, newnode, oldvar)?;
+        adjust_standard_join_alias_expression(ctx.mcx, newnode, oldvar)?;
         return Ok(newnode);
     }
-    let Some(root) = root else {
-        panic!(
-            "add_nullingrels_if_needed (var.c): non-standard join alias expression \
-             on the root == NULL path — C elog 'unsupported join alias expression'"
-        );
+    let Some(root) = ctx.root else {
+        return Err(unsupported_join_alias());
     };
-    // sublevels_up is pinned at 0 (fjav_mutate's Var guard), so C's levelsup
-    // is 0 and its levelsup != 0 error leg is unreachable.
-    debug_assert_eq!(oldvar.varlevelsup, 0);
-    let mut phrels = pull_varnos_of_level(mcx, newnode, 0)?;
+    let mut phrels = pull_varnos_of_level(ctx.mcx, newnode, oldvar.varlevelsup as i32)?;
     if phrels.is_empty() {
-        // Variable-free: evaluate below the join oldvar is an alias for
-        // (get_relids_for_join minus the join relid itself).
-        let jt = jointree.unwrap_or_else(|| {
-            panic!(
-                "add_nullingrels_if_needed (var.c): get_relids_for_join on a \
-                 caller without the query jointree"
-            )
-        });
+        if oldvar.varlevelsup != 0 {
+            return Err(unsupported_join_alias());
+        }
+        let Some(jt) = ctx.jointree else {
+            return Err(unsupported_join_alias());
+        };
         let mut jtnode = None;
         for child in &jt.fromlist {
             jtnode = find_jointree_node_for_rel(child, oldvar.varno);
@@ -932,21 +1227,20 @@ fn add_nullingrels_if_needed<'mcx>(
                 break;
             }
         }
-        let jtnode =
-            jtnode.unwrap_or_else(|| panic!("could not find join node {}", oldvar.varno));
-        join_relids_no_inner(mcx, jtnode, &mut phrels)?;
+        let Some(jtnode) = jtnode else {
+            return Err(unsupported_join_alias());
+        };
+        join_relids_no_inner(ctx.mcx, jtnode, &mut phrels)?;
         phrels.del_member(oldvar.varno);
         assert!(!phrels.is_empty());
     }
-    // make_placeholder_expr (placeholder.c): phid = ++lastPHId; phlevelsup
-    // and phnullingrels fixed up by this caller.
     root.last_ph_id.set(root.last_ph_id.get() + 1);
     Node::mk(
-        mcx,
+        ctx.mcx,
         types_nodes::primnodes::PlaceHolderVar {
             phexpr: newnode,
             phrels,
-            phnullingrels: oldvar.varnullingrels.clone_in(mcx)?,
+            phnullingrels: oldvar.varnullingrels.clone_in(ctx.mcx)?,
             phid: root.last_ph_id.get(),
             phlevelsup: oldvar.varlevelsup,
         },
@@ -1047,14 +1341,8 @@ fn adjust_standard_join_alias_expression<'mcx>(
     }
 }
 
-// flatten_group_exprs (var.c:951-1101), the root == NULL arm (deparse and
-// qual-pushdown analysis; the planner's root != NULL arm with
-// mark_nullable_by_grouping lives in planner/flatten_group.rs): GROUP-RTE
-// Vars are replaced by the referenced grouping expressions. At
-// sublevels_up == 0 the replacement is shared, not copied - the arena share
-// is our copy model and every consumer here is read-only. Below a subquery
-// the replacement is a fresh copy with its variable levels shifted down,
-// C's copyObject + IncrementVarSublevelsUp(newnode, sublevels_up, 0).
+// flatten_group_exprs (var.c), root == NULL arm. Planner mark_nullable
+// lives in planner/flatten_group.rs. Level-0 replacements are shared.
 pub fn flatten_group_exprs<'mcx>(
     mcx: Mcx<'mcx>,
     query: &Query<'mcx>,
@@ -1229,9 +1517,7 @@ fn fge_mutate<'mcx>(
                 )?)),
             }
         }
-        // expression_tree_mutator (nodes_core) rebuilds a SubLink for a
-        // changed testexpr but does not descend subselect; C's Query arm
-        // (query_tree_mutator one level down) is the descent below.
+        // nodes_core mutator skips SubLink.subselect; C mutates both.
         NodeTag::T_SubLink => {
             let sl = node.as_sub_link().unwrap();
             let new_test = match sl.testexpr {
@@ -1258,16 +1544,11 @@ fn fge_mutate<'mcx>(
         NodeTag::T_Query => {
             fge_query_descend(ctx, node.as_query().expect("Query"))
         }
-        // flatten_group_exprs_mutator's default arm: expression_tree_mutator.
         _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| fge_mutate(ctx, n)),
     }
 }
 
-// The sub-Query descent of flatten_group_exprs_mutator: C runs
-// query_tree_mutator (QTW_IGNORE_GROUPEXPRS) with sublevels_up bumped; the
-// copying mutator is realized as a whole-Query out/read deep copy walked in
-// place, taken only when a grouped Var of the flatten level actually occurs
-// below (the common untouched subquery stays shared). None = unchanged.
+// Query descent: copy once, walk in place. None = unchanged.
 fn fge_query_descend<'mcx>(
     ctx: &mut FgeCtx<'_, 'mcx>,
     q: &'mcx Query<'mcx>,
@@ -1327,10 +1608,6 @@ fn fge_query_has_grouped_vars<'mcx>(
     Ok(w.found)
 }
 
-// query_tree_mutator legs of the descent, applied in place through the
-// exclusive copy made by fge_query_descend. windowClause frame offsets and
-// the sort/group/distinct clauses carry no expressions; nested GROUP RTEs
-// keep their exprs (QTW_IGNORE_GROUPEXPRS).
 fn fge_query_inplace<'mcx>(ctx: &mut FgeCtx<'_, 'mcx>, qnode: Node<'mcx>) -> PgResult<()> {
     use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
     let mcx = ctx.mcx;
@@ -1343,6 +1620,86 @@ fn fge_query_inplace<'mcx>(ctx: &mut FgeCtx<'_, 'mcx>, qnode: Node<'mcx>) -> PgR
     let new_limit_off = fge_opt(ctx, q.limitOffset)?;
     let new_limit_cnt = fge_opt(ctx, q.limitCount)?;
     let new_setops = fge_opt(ctx, q.setOperations)?;
+    let new_merge_join = fge_opt(ctx, q.mergeJoinCondition)?;
+    if let Some(oc_node) = q.onConflict {
+        let oc = oc_node.as_on_conflict_expr().expect("OnConflictExpr");
+        let arbiter_elems = fge_list(ctx, &oc.arbiterElems)?;
+        let arbiter_where = fge_opt(ctx, oc.arbiterWhere)?;
+        let set = fge_list(ctx, &oc.onConflictSet)?;
+        let oc_where = fge_opt(ctx, oc.onConflictWhere)?;
+        let excl_tlist = fge_list(ctx, &oc.exclRelTlist)?;
+        // SAFETY: exclusive copy from fge_query_descend.
+        unsafe {
+            oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+                if let Some(v) = arbiter_elems {
+                    o.arbiterElems = v;
+                }
+                if arbiter_where.is_some() {
+                    o.arbiterWhere = arbiter_where;
+                }
+                if let Some(v) = set {
+                    o.onConflictSet = v;
+                }
+                if oc_where.is_some() {
+                    o.onConflictWhere = oc_where;
+                }
+                if let Some(v) = excl_tlist {
+                    o.exclRelTlist = v;
+                }
+            })
+        }
+        .expect("OnConflictExpr");
+    }
+    for wco_node in &q.withCheckOptions {
+        let wco = wco_node.as_with_check_option().expect("withCheckOptions cell");
+        if let Some(new_qual) = fge_opt(ctx, wco.qual)? {
+            // SAFETY: exclusive copy from fge_query_descend.
+            unsafe {
+                wco_node.with_mut::<types_nodes::parsenodes::WithCheckOption, _>(|w| {
+                    w.qual = Some(new_qual)
+                })
+            }
+            .expect("WithCheckOption");
+        }
+    }
+    for action_node in &q.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        let new_qual = fge_opt(ctx, action.qual)?;
+        let new_tlist = fge_list(ctx, &action.targetList)?;
+        if new_qual.is_some() || new_tlist.is_some() {
+            // SAFETY: exclusive copy from fge_query_descend.
+            unsafe {
+                action_node.with_mut::<types_nodes::MergeAction, _>(|a| {
+                    if new_qual.is_some() {
+                        a.qual = new_qual;
+                    }
+                    if let Some(t) = new_tlist {
+                        a.targetList = t;
+                    }
+                })
+            }
+            .expect("MergeAction");
+        }
+    }
+    for wc_node in &q.windowClause {
+        let wc = wc_node.as_window_clause().expect("windowClause cell");
+        let new_start = fge_opt(ctx, wc.startOffset)?;
+        let new_end = fge_opt(ctx, wc.endOffset)?;
+        if new_start.is_some() || new_end.is_some() {
+            // SAFETY: exclusive copy from fge_query_descend.
+            unsafe {
+                wc_node.with_mut::<types_nodes::parsenodes::WindowClause, _>(|w| {
+                    if new_start.is_some() {
+                        w.startOffset = new_start;
+                    }
+                    if new_end.is_some() {
+                        w.endOffset = new_end;
+                    }
+                })
+            }
+            .expect("WindowClause");
+        }
+    }
     let new_jointree = match q.jointree {
         None => None,
         Some(jt) => {
@@ -1433,6 +1790,7 @@ fn fge_query_inplace<'mcx>(ctx: &mut FgeCtx<'_, 'mcx>, qnode: Node<'mcx>) -> PgR
         || new_limit_off.is_some()
         || new_limit_cnt.is_some()
         || new_setops.is_some()
+        || new_merge_join.is_some()
         || new_jointree.is_some()
     {
         // SAFETY: qnode is the exclusive copy made by fge_query_descend.
@@ -1455,6 +1813,9 @@ fn fge_query_inplace<'mcx>(ctx: &mut FgeCtx<'_, 'mcx>, qnode: Node<'mcx>) -> PgR
                 }
                 if new_setops.is_some() {
                     qm.setOperations = new_setops;
+                }
+                if new_merge_join.is_some() {
+                    qm.mergeJoinCondition = new_merge_join;
                 }
                 if let Some(jt) = new_jointree {
                     qm.jointree = Some(jt);

@@ -156,8 +156,8 @@ pub fn subquery_planner<'mcx>(
             }
             RTEKind::RTE_SUBQUERY => {
                 // Simple subqueries were pulled up above; retained ones plan
-                // recursively in set_subquery_pathlist (their expressions are
-                // preprocessed inside that subroot, never here — C matches).
+                // recursively in set_subquery_pathlist. LATERAL + join RTEs
+                // still need flatten_join_alias_vars here.
             }
             RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_TABLEFUNC => {
                 // Expression preprocessing happens in the post-tlist rtable
@@ -338,6 +338,9 @@ pub fn subquery_planner<'mcx>(
     // Per-RTE expression preprocessing runs after the top-level lists
     // (planner.c:1007) so SubPlan numbering matches C. Outlined off the
     // subquery_planner hot body (select1 instruction bracket).
+    if run.root.hasJoinRTEs && run.root.hasLateralRTEs {
+        needs_rte_expr_pre = true;
+    }
     if needs_rte_expr_pre {
         preprocess_rte_expressions(run, parse, has_sublinks)?;
     }
@@ -825,6 +828,31 @@ fn preprocess_rte_expressions<'mcx>(
                             r.tablesample = ts
                         })
                     };
+                }
+            }
+            RTEKind::RTE_SUBQUERY => {
+                if rte.lateral && run.root.hasJoinRTEs {
+                    if let Some(sub) = rte.subquery {
+                        let last_ph_id = core::cell::Cell::new(run.glob.last_ph_id);
+                        let sub_node = rewrite_manip::copy_query_node(mcx, sub)?;
+                        let new_sub = vars::flatten_join_alias_vars(
+                            mcx,
+                            &parse.rtable,
+                            parse.jointree,
+                            Some(&vars::FjavRoot {
+                                last_ph_id: &last_ph_id,
+                            }),
+                            sub_node,
+                        )?;
+                        run.glob.last_ph_id = last_ph_id.get();
+                        let new_ref = new_sub.as_query().expect("Query");
+                        // SAFETY: pre-seal Query owned by this invocation.
+                        unsafe {
+                            rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                                r.subquery = Some(new_ref)
+                            })
+                        };
+                    }
                 }
             }
             RTEKind::RTE_FUNCTION => {
