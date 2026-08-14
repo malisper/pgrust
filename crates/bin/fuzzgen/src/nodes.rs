@@ -311,6 +311,16 @@ fn body(g: &mut Gen, shape: &str) -> Vec<StmtKind> {
                 ),
             };
             out.push(raw(mkview));
+            if matches!(arm, "nodes:storedview:search" | "nodes:storedview:cycle") {
+                // LD1-F1 (FIXED, PR fix-searchcycle-deparse): deparsing a
+                // recursive-CTE SEARCH/CYCLE view whose recursive term JOINs
+                // over the self-reference used to crash the backend (parser
+                // dropped the hidden ordering/mark/path columns from the join
+                // RTE, overrunning ruleutils colinfo). Now byte-identical to C,
+                // so the viewdef sweep is un-skipped for these arms.
+                out.push(raw("SELECT pg_get_viewdef('ns_vv'::regclass);"));
+                out.push(raw("SELECT pg_get_viewdef('ns_vv'::regclass, true);"));
+            }
             out.push(raw(probe));
             out.push(raw("DROP VIEW ns_vv;"));
             out.push(raw("DROP TABLE ns_vt;"));

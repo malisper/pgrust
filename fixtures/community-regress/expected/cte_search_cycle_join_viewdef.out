@@ -1,0 +1,183 @@
+-- Finding LD1-F1: pg_get_viewdef of a view whose body is a recursive CTE
+-- with a SEARCH or CYCLE clause AND an explicit JOIN over the self-reference
+-- crashed the backend with "assertion failed: i < colinfo.colnames.len()".
+--
+-- Root cause was in the parser, not ruleutils: extractRemainingColumns
+-- (parse_clause.c) must emit the SEARCH/CYCLE hidden output columns of the
+-- self-reference into the join's column list (they are only star-invisible,
+-- via p_dontexpand, in expandNSItemVars). pgrust wrongly skipped p_dontexpand
+-- columns there, so the stored join RTE was short of its child and deparse
+-- overran. The community with.sql SEARCH/CYCLE views use a comma-join, so
+-- they never exercised the explicit-JOIN path.
+--
+-- Differential-vs-C: every line below is byte-diffed against frozen C 18.3
+-- output (cpg-ref REL_18_3@62d6c7d).
+CREATE TABLE ldf1_edge (id int, parent int);
+INSERT INTO ldf1_edge VALUES (1, NULL), (2, 1), (3, 2);
+-- SEARCH + explicit JOIN over the recursive self-reference.
+CREATE VIEW ldf1_v_search AS
+  WITH RECURSIVE s (id) AS (
+    SELECT id FROM ldf1_edge
+    UNION ALL
+    SELECT e.id FROM ldf1_edge e JOIN s ON e.parent = s.id)
+  SEARCH DEPTH FIRST BY id SET ord
+  SELECT id FROM s;
+SELECT pg_get_viewdef('ldf1_v_search'::regclass);
+                  pg_get_viewdef                   
+---------------------------------------------------
+  WITH RECURSIVE s(id) AS (                       +
+          SELECT ldf1_edge.id                     +
+            FROM ldf1_edge                        +
+         UNION ALL                                +
+          SELECT e.id                             +
+            FROM (ldf1_edge e                     +
+              JOIN s s_1 ON ((e.parent = s_1.id)))+
+         ) SEARCH DEPTH FIRST BY id SET ord       +
+  SELECT id                                       +
+    FROM s;
+(1 row)
+
+SELECT pg_get_viewdef('ldf1_v_search'::regclass, true);
+                pg_get_viewdef                
+----------------------------------------------
+  WITH RECURSIVE s(id) AS (                  +
+          SELECT ldf1_edge.id                +
+            FROM ldf1_edge                   +
+         UNION ALL                           +
+          SELECT e.id                        +
+            FROM ldf1_edge e                 +
+              JOIN s s_1 ON e.parent = s_1.id+
+         ) SEARCH DEPTH FIRST BY id SET ord  +
+  SELECT id                                  +
+    FROM s;
+(1 row)
+
+-- the SEARCH ordering column stays invisible to SELECT *
+SELECT * FROM ldf1_v_search ORDER BY id;
+ id 
+----
+  1
+  2
+  2
+  3
+  3
+  3
+(6 rows)
+
+-- CYCLE + explicit JOIN over the recursive self-reference.
+CREATE VIEW ldf1_v_cycle AS
+  WITH RECURSIVE s (id) AS (
+    SELECT id FROM ldf1_edge
+    UNION ALL
+    SELECT e.id FROM ldf1_edge e JOIN s ON e.parent = s.id)
+  CYCLE id SET is_cycle USING path
+  SELECT id FROM s;
+SELECT pg_get_viewdef('ldf1_v_cycle'::regclass);
+                  pg_get_viewdef                   
+---------------------------------------------------
+  WITH RECURSIVE s(id) AS (                       +
+          SELECT ldf1_edge.id                     +
+            FROM ldf1_edge                        +
+         UNION ALL                                +
+          SELECT e.id                             +
+            FROM (ldf1_edge e                     +
+              JOIN s s_1 ON ((e.parent = s_1.id)))+
+         ) CYCLE id SET is_cycle USING path       +
+  SELECT id                                       +
+    FROM s;
+(1 row)
+
+SELECT pg_get_viewdef('ldf1_v_cycle'::regclass, true);
+                pg_get_viewdef                
+----------------------------------------------
+  WITH RECURSIVE s(id) AS (                  +
+          SELECT ldf1_edge.id                +
+            FROM ldf1_edge                   +
+         UNION ALL                           +
+          SELECT e.id                        +
+            FROM ldf1_edge e                 +
+              JOIN s s_1 ON e.parent = s_1.id+
+         ) CYCLE id SET is_cycle USING path  +
+  SELECT id                                  +
+    FROM s;
+(1 row)
+
+SELECT * FROM ldf1_v_cycle ORDER BY id;
+ id 
+----
+  1
+  2
+  2
+  3
+  3
+  3
+(6 rows)
+
+-- SEARCH BREADTH FIRST + JOIN USING over the self-reference.
+CREATE VIEW ldf1_v_search_breadth AS
+  WITH RECURSIVE s (id) AS (
+    SELECT id FROM ldf1_edge
+    UNION ALL
+    SELECT e.id FROM ldf1_edge e JOIN s USING (id))
+  SEARCH BREADTH FIRST BY id SET ord
+  SELECT id FROM s;
+SELECT pg_get_viewdef('ldf1_v_search_breadth'::regclass);
+                pg_get_viewdef                
+----------------------------------------------
+  WITH RECURSIVE s(id) AS (                  +
+          SELECT ldf1_edge.id                +
+            FROM ldf1_edge                   +
+         UNION ALL                           +
+          SELECT e.id                        +
+            FROM (ldf1_edge e                +
+              JOIN s s_1 USING (id))         +
+         ) SEARCH BREADTH FIRST BY id SET ord+
+  SELECT id                                  +
+    FROM s;
+(1 row)
+
+-- Regression guard: a plain recursive CTE with an explicit JOIN over the
+-- self-reference (no SEARCH/CYCLE) must still round-trip.
+CREATE VIEW ldf1_v_plain AS
+  WITH RECURSIVE s (id) AS (
+    SELECT id FROM ldf1_edge
+    UNION ALL
+    SELECT e.id FROM ldf1_edge e JOIN s ON e.parent = s.id)
+  SELECT id FROM s;
+SELECT pg_get_viewdef('ldf1_v_plain'::regclass);
+                  pg_get_viewdef                   
+---------------------------------------------------
+  WITH RECURSIVE s(id) AS (                       +
+          SELECT ldf1_edge.id                     +
+            FROM ldf1_edge                        +
+         UNION ALL                                +
+          SELECT e.id                             +
+            FROM (ldf1_edge e                     +
+              JOIN s s_1 ON ((e.parent = s_1.id)))+
+         )                                        +
+  SELECT id                                       +
+    FROM s;
+(1 row)
+
+-- Re-parse round-trip: recreating the view from its own deparsed body must
+-- deparse identically.
+CREATE VIEW ldf1_v_search_rt AS
+  WITH RECURSIVE s(id) AS (
+           SELECT ldf1_edge.id
+             FROM ldf1_edge
+          UNION ALL
+           SELECT e.id
+             FROM (ldf1_edge e
+               JOIN s s_1 ON ((e.parent = s_1.id)))
+          ) SEARCH DEPTH FIRST BY id SET ord
+   SELECT id
+     FROM s;
+SELECT pg_get_viewdef('ldf1_v_search_rt'::regclass)
+     = pg_get_viewdef('ldf1_v_search'::regclass) AS reparse_matches;
+ reparse_matches 
+-----------------
+ t
+(1 row)
+
+DROP VIEW ldf1_v_search_rt, ldf1_v_plain, ldf1_v_search_breadth, ldf1_v_cycle, ldf1_v_search;
+DROP TABLE ldf1_edge;

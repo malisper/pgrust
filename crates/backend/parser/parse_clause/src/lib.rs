@@ -765,8 +765,16 @@ fn extractRemainingColumns<'mcx>(
     for (i, colname_node) in src_colnames.iter().enumerate() {
         let colname = colname_node.as_string().expect("eref colnames are String nodes").sval;
         let attnum = i as i32 + 1;
-        // Dropped columns carry empty names.
-        if colname.is_empty() || src_nscolumns[i].p_dontexpand || prevcols.is_member(attnum) {
+        // Dropped columns carry empty names; already-merged USING columns are
+        // in prevcols. C's extractRemainingColumns (parse_clause.c) emits every
+        // other column, INCLUDING p_dontexpand columns (the SEARCH/CYCLE hidden
+        // output columns of a recursive-CTE self-reference). p_dontexpand only
+        // suppresses `SELECT *` expansion, which happens later in
+        // expandNSItemVars; the per-column flag is copied into res_nscolumns
+        // below, so the star-invisibility is preserved for the join too.
+        // Skipping them here instead produced a join RTE whose column list was
+        // short of its child's, which crashed ruleutils deparse of such views.
+        if colname.is_empty() || prevcols.is_member(attnum) {
             continue;
         }
         src_colnos.lappend(mcx, attnum)?;
