@@ -9,7 +9,8 @@
 //! schedules) so the property suites can exercise adversarial inputs.
 //!
 //! C ground truth: REL_18_3 vacuumlazy.c `heap_vac_scan_next_block` /
-//! `find_next_unskippable_block` (:1571/:1676) for the skip rules;
+//! `find_next_unskippable_block` (:1571/:1676) for the skip rules
+//! (eager region reset + remaining_fails admission included);
 //! LVRelState counters (:313-357) for the fold classes (sums, XID mins,
 //! block max, bool OR).
 
@@ -24,6 +25,9 @@ use types_core::xact::{MultiXactIdPrecedes, TransactionIdIsNormal, TransactionId
 /// scanned anyway (kernel readahead beats the seek + rescan-risk math).
 pub const SKIP_PAGES_THRESHOLD: u32 = 32;
 
+/// C vacuumlazy.c:250 — eager-scan region width (blocks).
+pub const EAGER_SCAN_REGION_SIZE: u32 = 4096;
+
 /// Visibility-map bit layout parity (visibilitymap.h). The wiring increment
 /// asserts these against the `visibilitymap` crate's constants; the pure
 /// units keep the crate dependency-thin.
@@ -35,8 +39,7 @@ pub const VM_ALL_FROZEN: u8 = 0x02;
 // ---------------------------------------------------------------------------
 
 /// Inputs to the skip-map build; mirrors the LVRelState fields the C skip
-/// logic reads. The eager-scan inputs are deliberately absent (not ported at
-/// base; §3.4 reserves region hard boundaries when it lands).
+/// logic reads, including eager-scan region state (vacuumlazy.c:366-410).
 #[derive(Clone, Copy, Debug)]
 pub struct SkipMapParams {
     pub rel_pages: u32,
@@ -46,6 +49,12 @@ pub struct SkipMapParams {
     pub aggressive: bool,
     /// false under DISABLE_PAGE_SKIPPING — nothing is skipped.
     pub skipwithvm: bool,
+    /// `InvalidBlockNumber` disables eager admission (aggressive / small /
+    /// success-capped / rate-0). Otherwise the first block of the next
+    /// eager region (C `next_eager_scan_region_start`).
+    pub next_eager_scan_region_start: u32,
+    pub eager_scan_remaining_fails: u32,
+    pub eager_scan_max_fails_per_region: u32,
 }
 
 /// One admitted (unskippable-or-short-run) block: the granule unit.
@@ -55,6 +64,9 @@ pub struct ScanBlock {
     /// C's VAC_BLK_ALL_VISIBLE_ACCORDING_TO_VM side channel: the VM
     /// ALL_VISIBLE bit observed at skip-decision time.
     pub all_visible_according_to_vm: bool,
+    /// C's VAC_BLK_WAS_EAGER_SCANNED: all-visible not-frozen, admitted
+    /// because the region's failure budget was still open.
+    pub was_eager_scanned: bool,
 }
 
 /// The per-round granule space: every block the round will scan, ascending,
@@ -75,6 +87,10 @@ pub struct VacuumBlockSource {
     /// would over-suppress relfrozenxid advancement (safe but breaks the
     /// on/off parity oracle).
     skip_runs: Vec<(u64, bool)>,
+    /// Eager-walk state after the last classified block (pessimistic:
+    /// remaining_fails decrements at admission, not after prune).
+    pub eager_scan_remaining_fails: u32,
+    pub next_eager_scan_region_start: u32,
 }
 
 impl VacuumBlockSource {
@@ -92,6 +108,7 @@ impl VacuumBlockSource {
     ///   - not ALL_VISIBLE => unskippable
     ///   - ALL_FROZEN => skippable (:1739)
     ///   - aggressive => unskippable (:1746 — av-not-af must be scanned)
+    ///   - eager remaining_fails > 0 => unskippable + was_eager_scanned (:1754)
     ///   - else skippable, and the run remembers it held an av-not-af page
     ///     (:1764 `*skipsallvis = true`)
     ///
@@ -102,6 +119,8 @@ impl VacuumBlockSource {
         let mut entries = Vec::new();
         let mut skipsallvis = false;
         let mut skip_runs: Vec<(u64, bool)> = Vec::new();
+        let mut remaining_fails = p.eager_scan_remaining_fails;
+        let mut next_region = p.next_eager_scan_region_start;
 
         // Pending maximal skippable run: [run_start, b) with its av-not-af
         // marker. Flushed when an unskippable block (or the end) is reached.
@@ -124,7 +143,11 @@ impl VacuumBlockSource {
                 } else {
                     // Short run: scanned anyway, all-visible per the VM.
                     for b in start..end {
-                        entries.push(ScanBlock { block: b, all_visible_according_to_vm: true });
+                        entries.push(ScanBlock {
+                            block: b,
+                            all_visible_according_to_vm: true,
+                            was_eager_scanned: false,
+                        });
                     }
                 }
             }
@@ -136,10 +159,25 @@ impl VacuumBlockSource {
             let all_frozen = status & VM_ALL_FROZEN != 0;
             let last = b == p.rel_pages - 1;
 
-            let skippable = !last
-                && p.skipwithvm
-                && all_visible
-                && (all_frozen || !p.aggressive);
+            if b >= next_region {
+                remaining_fails = p.eager_scan_max_fails_per_region;
+                next_region = next_region.wrapping_add(EAGER_SCAN_REGION_SIZE);
+            }
+
+            let mut was_eager_scanned = false;
+            let skippable = if last || !p.skipwithvm || !all_visible {
+                false
+            } else if all_frozen {
+                true
+            } else if p.aggressive {
+                false
+            } else if remaining_fails > 0 {
+                was_eager_scanned = true;
+                remaining_fails -= 1;
+                false
+            } else {
+                true
+            };
 
             if skippable {
                 let avnotaf = !all_frozen;
@@ -149,7 +187,11 @@ impl VacuumBlockSource {
                 }
             } else {
                 flush_run(&mut run, b, &mut entries, &mut skipsallvis, &mut skip_runs);
-                entries.push(ScanBlock { block: b, all_visible_according_to_vm: all_visible });
+                entries.push(ScanBlock {
+                    block: b,
+                    all_visible_according_to_vm: all_visible,
+                    was_eager_scanned,
+                });
             }
         }
         // A trailing skippable run is impossible: the last block is never
@@ -157,7 +199,14 @@ impl VacuumBlockSource {
         // or resume >= rel_pages yields an empty map.)
         debug_assert!(run.is_none() || p.resume_block >= p.rel_pages);
 
-        VacuumBlockSource { entries, skipsallvis, rel_pages: p.rel_pages, skip_runs }
+        VacuumBlockSource {
+            entries,
+            skipsallvis,
+            rel_pages: p.rel_pages,
+            skip_runs,
+            eager_scan_remaining_fails: remaining_fails,
+            next_eager_scan_region_start: next_region,
+        }
     }
 
     pub fn entries(&self) -> &[ScanBlock] {

@@ -48,45 +48,61 @@ fn reference_scan(p: &SkipMapParams, vmap: &[u8]) -> (Vec<ScanBlock>, bool) {
     let mut out = Vec::new();
     let mut skippedallvis = false;
     let mut next_block = p.resume_block;
+    let mut remaining_fails = p.eager_scan_remaining_fails;
+    let mut next_region = p.next_eager_scan_region_start;
     while next_block < p.rel_pages {
-        // find_next_unskippable_block from next_block
         let mut b = next_block;
         let mut skipsallvis = false;
+        let mut was_eager_scanned = false;
         let (next_unskippable, unskippable_allvis) = loop {
             let status = vm(b);
             let av = status & VM_ALL_VISIBLE != 0;
             let af = status & VM_ALL_FROZEN != 0;
+            if b >= next_region {
+                remaining_fails = p.eager_scan_max_fails_per_region;
+                next_region = next_region.wrapping_add(EAGER_SCAN_REGION_SIZE);
+            }
             if b == p.rel_pages - 1 {
-                break (b, av); // last block: never skippable (:1728)
+                break (b, av);
             }
             if !p.skipwithvm {
-                break (b, av); // DISABLE_PAGE_SKIPPING (:1732)
+                break (b, av);
             }
             if !av {
                 break (b, av);
             }
-            if !af {
-                if p.aggressive {
-                    break (b, av); // av-not-af unskippable when aggressive (:1746)
-                }
-                skipsallvis = true; // (:1764)
+            if af {
+                b += 1;
+                continue;
             }
+            if p.aggressive {
+                break (b, av);
+            }
+            if remaining_fails > 0 {
+                was_eager_scanned = true;
+                remaining_fails -= 1;
+                break (b, av);
+            }
+            skipsallvis = true;
             b += 1;
         };
         if next_unskippable - next_block >= SKIP_PAGES_THRESHOLD {
             if skipsallvis {
-                skippedallvis = true; // committed only when actually skipped (:1628)
+                skippedallvis = true;
             }
             next_block = next_unskippable;
         }
-        // Case 2 (:1633): short-run blocks are scanned, all-visible per VM.
         for blk in next_block..next_unskippable {
-            out.push(ScanBlock { block: blk, all_visible_according_to_vm: true });
+            out.push(ScanBlock {
+                block: blk,
+                all_visible_according_to_vm: true,
+                was_eager_scanned: false,
+            });
         }
-        // Case 3 (:1645): the unskippable block itself.
         out.push(ScanBlock {
             block: next_unskippable,
             all_visible_according_to_vm: unskippable_allvis,
+            was_eager_scanned,
         });
         next_block = next_unskippable + 1;
     }
@@ -101,7 +117,15 @@ fn check_equivalence(p: &SkipMapParams, vmap: &[u8]) {
 }
 
 fn params(rel_pages: u32, resume: u32, aggressive: bool, skipwithvm: bool) -> SkipMapParams {
-    SkipMapParams { rel_pages, resume_block: resume, aggressive, skipwithvm }
+    SkipMapParams {
+        rel_pages,
+        resume_block: resume,
+        aggressive,
+        skipwithvm,
+        next_eager_scan_region_start: ::types_core::InvalidBlockNumber,
+        eager_scan_remaining_fails: 0,
+        eager_scan_max_fails_per_region: 0,
+    }
 }
 
 const AV: u8 = VM_ALL_VISIBLE;
@@ -180,8 +204,29 @@ fn skipmap_source_contract() {
     assert_eq!(src.startup_c0(), 16);
     // Default boundaries: one claim may span the whole space.
     assert_eq!(src.next_boundary_after(0), 5);
-    assert_eq!(src.block_of(1), ScanBlock { block: 1, all_visible_according_to_vm: true });
+    assert_eq!(
+        src.block_of(1),
+        ScanBlock { block: 1, all_visible_according_to_vm: true, was_eager_scanned: false }
+    );
     assert!(!src.skipsallvis());
+}
+
+#[test]
+fn skipmap_eager_admits_av_not_af() {
+    let mut p = params(40, 0, false, true);
+    p.next_eager_scan_region_start = 0;
+    p.eager_scan_remaining_fails = 2;
+    p.eager_scan_max_fails_per_region = 2;
+    let vm = vec![AV; 40];
+    let src = VacuumBlockSource::build(&p, |b| vm[b as usize]);
+    let eager: Vec<u32> = src
+        .entries()
+        .iter()
+        .filter(|e| e.was_eager_scanned)
+        .map(|e| e.block)
+        .collect();
+    assert_eq!(eager, vec![0, 1], "pessimistic fail budget admits two av-not-af pages");
+    assert!(src.skipsallvis(), "remaining av-not-af run is skipped");
 }
 
 /// Independent reference for the inc-2 partial-commit surface: the same

@@ -367,6 +367,8 @@ pub fn ExecVacuum<'mcx>(
         params.multixact_freeze_table_age = 0;
     }
 
+    params.max_eager_freeze_failure_rate = vacuum_max_eager_freeze_failure_rate_guc();
+
     // vacuum.c:440: no strategy for FULL / ONLY_DATABASE_STATS unless ANALYZE.
     let bstrategy = if params.options & (VACOPT_ONLY_DATABASE_STATS | VACOPT_FULL) == 0
         || params.options & VACOPT_ANALYZE != 0

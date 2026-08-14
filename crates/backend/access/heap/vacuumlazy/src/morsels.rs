@@ -237,6 +237,9 @@ fn build_source(vacrel: &mut LVRelState<'_, '_>, resume_block: BlockNumber) -> P
         resume_block,
         aggressive: vacrel.aggressive,
         skipwithvm: vacrel.skipwithvm,
+        next_eager_scan_region_start: vacrel.next_eager_scan_region_start,
+        eager_scan_remaining_fails: vacrel.eager_scan_remaining_fails,
+        eager_scan_max_fails_per_region: vacrel.eager_scan_max_fails_per_region,
     };
     let mut vmbuf = VmBuffer::new();
     let mut err: Option<Box<PgError>> = None;
@@ -258,7 +261,11 @@ fn build_source(vacrel: &mut LVRelState<'_, '_>, resume_block: BlockNumber) -> P
     vmbuf.release();
     match err {
         Some(e) => Err(e),
-        None => Ok(source),
+        None => {
+            vacrel.eager_scan_remaining_fails = source.eager_scan_remaining_fails;
+            vacrel.next_eager_scan_region_start = source.next_eager_scan_region_start;
+            Ok(source)
+        }
     }
 }
 
@@ -432,6 +439,11 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         // Skip decisions below the resume point are consumed (jumped over
         // for good); later ones are re-decided by the next round's map.
         vacrel.skippedallvis |= source.skipsallvis_before(resume_g);
+        let eager_end = resume_g.min(source.entries().len() as u64) as usize;
+        vacrel.eager_scanned_pages += source.entries()[..eager_end]
+            .iter()
+            .filter(|e| e.was_eager_scanned)
+            .count() as BlockNumber;
         clock.finalize_ns += t_finalize.elapsed().as_nanos() as u64;
 
         // The round's resume point, FIXED before any leader drain: on a
@@ -678,6 +690,7 @@ fn leader_deferred_block(
     }
 
     if got_cleanup_lock {
+        let mut vm_page_frozen = false;
         lazy_scan_prune(
             &env,
             folds,
@@ -688,7 +701,9 @@ fn leader_deferred_block(
             &mut vmbuffer,
             av,
             &mut has_lpdead_items,
+            &mut vm_page_frozen,
         )?;
+        let _ = vm_page_frozen;
     }
 
     if env.nindexes == 0 || !*do_index_vacuuming || !has_lpdead_items {
@@ -1030,6 +1045,7 @@ impl VacScanShared {
                     return Ok(());
                 }
             } else {
+                let mut vm_page_frozen = false;
                 lazy_scan_prune(
                     &env,
                     &mut wcx.folds,
@@ -1040,7 +1056,9 @@ impl VacScanShared {
                     &mut wcx.vmbuffer,
                     all_visible_according_to_vm,
                     &mut has_lpdead_items,
+                    &mut vm_page_frozen,
                 )?;
+                let _ = vm_page_frozen;
             }
 
             if env.nindexes == 0 || !self.do_index_vacuuming || !has_lpdead_items {

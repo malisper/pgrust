@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use ::mcx::MemoryContext;
-use ::types_core::{Buffer, GlobalVisStateHandle};
+use ::tableam_vocab::{VacOptValue, VacuumParams};
+use ::types_core::{Buffer, ForkNumber, GlobalVisStateHandle};
 use ::types_rel::{FormData_pg_class, RELKIND_RELATION};
 use ::types_storage::bufpage::PAI_IS_HEAP;
 use ::types_tuple::NameData;
@@ -301,7 +302,16 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
         current_block: InvalidBlockNumber,
         next_unskippable_block: InvalidBlockNumber,
         next_unskippable_allvis: false,
+        next_unskippable_eager_scanned: false,
         next_unskippable_vmbuffer: VmBuffer::new(),
+        eager_scanned_pages: 0,
+        next_eager_scan_region_start: InvalidBlockNumber,
+        eager_scan_remaining_successes: 0,
+        eager_scan_max_fails_per_region: 0,
+        eager_scan_remaining_fails: 0,
+        dbname: String::new(),
+        relnamespace: String::new(),
+        relname: String::new(),
     }
 }
 
@@ -706,4 +716,175 @@ fn morsel_verified_round_drains_all_runs_and_deferred() {
     let store_items = store_item_count(&dead_items);
     assert_eq!(store_items, 6);
     assert_eq!(info.num_items, store_items);
+}
+
+fn poke_vm_av_not_af(n_av: usize) {
+    let buf = fake_page(ForkNumber::VISIBILITYMAP_FORKNUM as u8, 0);
+    {
+        // SAFETY: exclusive test VM page.
+        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
+        pm.init(0);
+    }
+    let contents_off = (SizeOfPageHeaderData + 7) & !7;
+    let page = bufmgr_seams::buffer_get_page::call(buf);
+    for i in 0..n_av {
+        let byte = i / 4;
+        let shift = (i % 4) * 2;
+        unsafe {
+            *page.as_ptr().add(contents_off + byte) |= 0x01 << shift;
+        }
+    }
+    bufmgr_seams::release_buffer::call(buf).unwrap();
+}
+
+#[test]
+fn find_next_unskippable_eager_scans_av_not_af() {
+    let _s = serial();
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+    poke_vm_av_not_af(1);
+
+    let mut vr = vacrel(&rel, mcx);
+    vr.rel_pages = 40;
+    vr.nindexes = 0;
+    vr.eager_scan_remaining_fails = 1;
+    vr.eager_scan_max_fails_per_region = 1;
+    vr.next_eager_scan_region_start = InvalidBlockNumber;
+    vr.next_unskippable_block = InvalidBlockNumber;
+
+    let skips = find_next_unskippable_block(&mut vr).unwrap();
+    assert!(!skips);
+    assert_eq!(vr.next_unskippable_block, 0);
+    assert!(vr.next_unskippable_allvis);
+    assert!(
+        vr.next_unskippable_eager_scanned,
+        "C would eager-scan an all-visible not-frozen page when remaining_fails > 0"
+    );
+    vr.next_unskippable_vmbuffer.release();
+}
+
+#[test]
+fn find_next_unskippable_skips_av_not_af_when_eager_exhausted() {
+    let _s = serial();
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+    poke_vm_av_not_af(1);
+
+    let mut vr = vacrel(&rel, mcx);
+    vr.rel_pages = 40;
+    vr.nindexes = 0;
+    vr.eager_scan_remaining_fails = 0;
+    vr.next_eager_scan_region_start = InvalidBlockNumber;
+    vr.next_unskippable_block = InvalidBlockNumber;
+
+    let skips = find_next_unskippable_block(&mut vr).unwrap();
+    assert!(skips, "exhausted eager budget skips av-not-af");
+    assert_eq!(vr.next_unskippable_block, 1);
+    assert!(!vr.next_unskippable_eager_scanned);
+    vr.next_unskippable_vmbuffer.release();
+}
+
+#[test]
+fn eager_scan_setup_stays_disabled_for_small_rel_and_rate_zero() {
+    let _s = serial();
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+    let mut vr = vacrel(&rel, mcx);
+    vr.rel_pages = 100;
+    vr.cutoffs.relfrozenxid = 100;
+    vr.cutoffs.FreezeLimit = 200;
+    let params = VacuumParams {
+        options: 0,
+        freeze_min_age: -1,
+        freeze_table_age: -1,
+        multixact_freeze_min_age: -1,
+        multixact_freeze_table_age: -1,
+        is_wraparound: false,
+        log_min_duration: -1,
+        index_cleanup: VacOptValue::Auto,
+        truncate: VacOptValue::Disabled,
+        toast_parent: 0,
+        max_eager_freeze_failure_rate: 0.03,
+        nworkers: 0,
+    };
+    heap_vacuum_eager_scan_setup(&mut vr, &params).unwrap();
+    assert_eq!(vr.next_eager_scan_region_start, InvalidBlockNumber);
+    assert_eq!(vr.eager_scan_remaining_successes, 0);
+
+    vr.rel_pages = 8192;
+    let mut zero = params;
+    zero.max_eager_freeze_failure_rate = 0.0;
+    heap_vacuum_eager_scan_setup(&mut vr, &zero).unwrap();
+    assert_eq!(vr.next_eager_scan_region_start, InvalidBlockNumber);
+
+    vr.aggressive = true;
+    heap_vacuum_eager_scan_setup(&mut vr, &params).unwrap();
+    assert_eq!(vr.next_eager_scan_region_start, InvalidBlockNumber);
+}
+
+#[test]
+fn eager_scan_setup_enables_region_math() {
+    let _s = serial();
+    install_seams();
+    pg_prng_seams::global_prng_uint32::set(|| 100);
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+    poke_vm_av_not_af(5);
+
+    let mut vr = vacrel(&rel, mcx);
+    vr.rel_pages = 8192;
+    vr.cutoffs.relfrozenxid = 100;
+    vr.cutoffs.FreezeLimit = 200;
+    let params = VacuumParams {
+        options: 0,
+        freeze_min_age: -1,
+        freeze_table_age: -1,
+        multixact_freeze_min_age: -1,
+        multixact_freeze_table_age: -1,
+        is_wraparound: false,
+        log_min_duration: -1,
+        index_cleanup: VacOptValue::Auto,
+        truncate: VacOptValue::Disabled,
+        toast_parent: 0,
+        max_eager_freeze_failure_rate: 0.03,
+        nworkers: 0,
+    };
+    heap_vacuum_eager_scan_setup(&mut vr, &params).unwrap();
+    assert_eq!(vr.eager_scan_remaining_successes, 1);
+    assert_eq!(vr.next_eager_scan_region_start, 100);
+    assert_eq!(vr.eager_scan_max_fails_per_region, 122);
+    let ratio = 1.0 - 100.0f32 / 4096.0f32;
+    assert_eq!(vr.eager_scan_remaining_fails, (122.0f32 * ratio) as BlockNumber);
+}
+
+#[test]
+fn heap_vac_scan_next_block_flags_eager_page() {
+    let _s = serial();
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+    poke_vm_av_not_af(1);
+
+    let mut vr = vacrel(&rel, mcx);
+    vr.rel_pages = 40;
+    vr.nindexes = 0;
+    vr.eager_scan_remaining_fails = 1;
+    vr.eager_scan_max_fails_per_region = 1;
+    vr.next_eager_scan_region_start = InvalidBlockNumber;
+    vr.current_block = InvalidBlockNumber;
+    vr.next_unskippable_block = InvalidBlockNumber;
+
+    let (blk, allvis, eager) = heap_vac_scan_next_block(&mut vr).unwrap().unwrap();
+    assert_eq!(blk, 0);
+    assert!(allvis);
+    assert!(eager, "VERBOSE eagerly-scanned count is born here");
+    vr.next_unskippable_vmbuffer.release();
 }

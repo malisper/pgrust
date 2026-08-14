@@ -1,8 +1,7 @@
 //! vacuumlazy.c phases I (scan/prune/freeze), II (index vacuum via
 //! ambulkdelete), III (mark LP_UNUSED), and end-of-vacuum rel truncation,
-//! single-table lane. Loud named panics: eager scanning. C divergences
-//! (recorded): the read stream is collapsed to sync per-block reads (bitmap
-//! precedent).
+//! single-table lane. C divergences (recorded): the read stream is
+//! collapsed to sync per-block reads (bitmap precedent).
 //!
 //! Phase-I MORSELIZATION (docs/design/vacuum-morsels.md, inc-2): behind
 //! the morsel arm (default ON since train-21; `PGRUST_RUNTIME_VACUUM=0` kills, requires the runtime master switch) the
@@ -30,7 +29,8 @@ use ::tableam_vocab::{
     VacOptValue, VacuumCutoffs, VacuumParams, VACOPT_DISABLE_PAGE_SKIPPING, VACOPT_VERBOSE,
 };
 use ::types_core::xact::{
-    InvalidTransactionId, TransactionIdIsNormal, TransactionIdIsValid, TransactionIdPrecedes,
+    InvalidTransactionId, MultiXactIdPrecedes, TransactionIdIsNormal, TransactionIdIsValid,
+    TransactionIdPrecedes,
 };
 use ::types_core::{
     BlockNumber, Buffer, ForkNumber, GlobalVisStateHandle, InvalidBlockNumber, OffsetNumber, Size,
@@ -66,6 +66,8 @@ use ::visibilitymap::{
 };
 
 const SKIP_PAGES_THRESHOLD: BlockNumber = 32;
+const MAX_EAGER_FREEZE_SUCCESS_RATE: f64 = 0.2;
+const EAGER_SCAN_REGION_SIZE: BlockNumber = ::vacuum_morsels::EAGER_SCAN_REGION_SIZE;
 const FAILSAFE_EVERY_PAGES: BlockNumber = ((4u64 * 1024 * 1024 * 1024) / BLCKSZ as u64) as BlockNumber;
 const VACUUM_FSM_EVERY_PAGES: BlockNumber = ((8u64 * 1024 * 1024 * 1024) / BLCKSZ as u64) as BlockNumber;
 const REL_TRUNCATE_MINIMUM: BlockNumber = 1000;
@@ -147,7 +149,17 @@ pub struct LVRelState<'a, 'mcx> {
     current_block: BlockNumber,
     next_unskippable_block: BlockNumber,
     next_unskippable_allvis: bool,
+    next_unskippable_eager_scanned: bool,
     next_unskippable_vmbuffer: VmBuffer,
+
+    eager_scanned_pages: BlockNumber,
+    next_eager_scan_region_start: BlockNumber,
+    eager_scan_remaining_successes: BlockNumber,
+    eager_scan_max_fails_per_region: BlockNumber,
+    eager_scan_remaining_fails: BlockNumber,
+    dbname: String,
+    relnamespace: String,
+    relname: String,
 }
 
 /// GL-M41-2 per-phase wall clocks (trace-gated, PGRUST_VACUUM_TRACE=1):
@@ -267,10 +279,6 @@ pub fn heap_vacuum_rel<'mcx>(
         skipwithvm = false;
     }
 
-    // C divergence (recorded): heap_vacuum_eager_scan_setup is elided; eager
-    // scanning stays disabled (find_next_unskippable_block skips all-visible
-    // pages exactly as a normal vacuum with the failure cap exhausted).
-
     let mut vacrel = LVRelState {
         mcx,
         rel,
@@ -306,8 +314,18 @@ pub fn heap_vacuum_rel<'mcx>(
         current_block: InvalidBlockNumber,
         next_unskippable_block: InvalidBlockNumber,
         next_unskippable_allvis: false,
+        next_unskippable_eager_scanned: false,
         next_unskippable_vmbuffer: VmBuffer::new(),
+        eager_scanned_pages: 0,
+        next_eager_scan_region_start: InvalidBlockNumber,
+        eager_scan_remaining_successes: 0,
+        eager_scan_max_fails_per_region: 0,
+        eager_scan_remaining_fails: 0,
+        dbname: String::new(),
+        relnamespace: String::new(),
+        relname: String::new(),
     };
+    heap_vacuum_eager_scan_setup(&mut vacrel, params)?;
 
     // C snapshots db/namespace/rel names up front for instrumentation (the
     // error-context callback itself is elided in this port).
@@ -323,6 +341,9 @@ pub fn heap_vacuum_rel<'mcx>(
     } else {
         (String::new(), String::new(), String::new())
     };
+    vacrel.dbname = dbname.clone();
+    vacrel.relnamespace = relnamespace.clone();
+    vacrel.relname = relname.clone();
 
     if verbose {
         // C: aggressiveness gets its own dedicated VACUUM VERBOSE ereport.
@@ -516,10 +537,9 @@ pub fn heap_vacuum_rel<'mcx>(
 // The `instrument` report tail of heap_vacuum_rel (vacuumlazy.c:946): the
 // "finished vacuuming"/"automatic vacuum of table" multi-line summary at INFO
 // (VERBOSE) or LOG (autovacuum log_min_duration). Divergences recorded inline:
-// eager scanning is elided (always 0 eagerly scanned); the delay-time line
-// needs the vacuum-delay progress param (track_cost_delay_timing defaults
-// off); I/O timings come from the BufferUsage diff (the pgstat block-time
-// globals it mirrors).
+// the delay-time line needs the vacuum-delay progress param
+// (track_cost_delay_timing defaults off); I/O timings come from the
+// BufferUsage diff (the pgstat block-time globals it mirrors).
 #[allow(clippy::too_many_arguments)]
 fn vacuum_instrument_report(
     vacrel: &LVRelState<'_, '_>,
@@ -597,7 +617,7 @@ fn vacuum_instrument_report(
         new_rel_pages,
         vacrel.folds.counters.scanned_pages,
         pct(vacrel.folds.counters.scanned_pages),
-        0, // eager scanning elided in this port (heap_vacuum_eager_scan_setup)
+        vacrel.eager_scanned_pages,
     );
     let _ = writeln!(
         buf,
@@ -831,11 +851,69 @@ fn collect_dead_tids(vacrel: &LVRelState<'_, '_>) -> std::sync::Arc<[ItemPointer
     tids.into()
 }
 
+fn heap_vacuum_eager_scan_setup(
+    vacrel: &mut LVRelState<'_, '_>,
+    params: &VacuumParams,
+) -> PgResult<()> {
+    vacrel.next_eager_scan_region_start = InvalidBlockNumber;
+    vacrel.eager_scan_max_fails_per_region = 0;
+    vacrel.eager_scan_remaining_fails = 0;
+    vacrel.eager_scan_remaining_successes = 0;
+
+    if params.max_eager_freeze_failure_rate == 0.0 {
+        return Ok(());
+    }
+    if vacrel.aggressive {
+        return Ok(());
+    }
+    if vacrel.rel_pages < 2 * EAGER_SCAN_REGION_SIZE {
+        return Ok(());
+    }
+
+    let mut oldest_unfrozen_before_cutoff = false;
+    if TransactionIdIsNormal(vacrel.cutoffs.relfrozenxid)
+        && TransactionIdPrecedes(vacrel.cutoffs.relfrozenxid, vacrel.cutoffs.FreezeLimit)
+    {
+        oldest_unfrozen_before_cutoff = true;
+    }
+    if !oldest_unfrozen_before_cutoff
+        && vacrel.cutoffs.relminmxid != 0
+        && MultiXactIdPrecedes(vacrel.cutoffs.relminmxid, vacrel.cutoffs.MultiXactCutoff)
+    {
+        oldest_unfrozen_before_cutoff = true;
+    }
+    if !oldest_unfrozen_before_cutoff {
+        return Ok(());
+    }
+
+    let (allvisible, allfrozen) = visibilitymap_count(vacrel.rel)?;
+    vacrel.eager_scan_remaining_successes =
+        (MAX_EAGER_FREEZE_SUCCESS_RATE * allvisible.wrapping_sub(allfrozen) as f64) as BlockNumber;
+    if vacrel.eager_scan_remaining_successes == 0 {
+        return Ok(());
+    }
+
+    let randseed = pg_prng_seams::global_prng_uint32::call();
+    vacrel.next_eager_scan_region_start = randseed % EAGER_SCAN_REGION_SIZE;
+    debug_assert!(
+        params.max_eager_freeze_failure_rate > 0.0
+            && params.max_eager_freeze_failure_rate <= 1.0
+    );
+    vacrel.eager_scan_max_fails_per_region =
+        (params.max_eager_freeze_failure_rate * EAGER_SCAN_REGION_SIZE as f64) as BlockNumber;
+    let first_region_ratio =
+        1.0 - vacrel.next_eager_scan_region_start as f32 / EAGER_SCAN_REGION_SIZE as f32;
+    vacrel.eager_scan_remaining_fails =
+        (vacrel.eager_scan_max_fails_per_region as f32 * first_region_ratio) as BlockNumber;
+    Ok(())
+}
+
 fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32) -> PgResult<()> {
     let _ = mcx;
     let rel_pages = vacrel.rel_pages;
     let mut next_fsm_block_to_vacuum: BlockNumber = 0;
     let mut vmbuffer = VmBuffer::new();
+    let orig_eager_scan_success_limit = vacrel.eager_scan_remaining_successes;
 
     pgstat_progress_update_multi_param(
         &[
@@ -878,6 +956,7 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
         vacrel.next_unskippable_block = resume_block.wrapping_sub(1);
     }
     vacrel.next_unskippable_allvis = false;
+    vacrel.next_unskippable_eager_scanned = false;
 
     loop {
         vacuum_delay_point(false)?;
@@ -903,7 +982,8 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
             pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_SCAN_HEAP);
         }
 
-        let Some((next_blkno, all_visible_according_to_vm)) = heap_vac_scan_next_block(vacrel)?
+        let Some((next_blkno, all_visible_according_to_vm, was_eager_scanned)) =
+            heap_vac_scan_next_block(vacrel)?
         else {
             break;
         };
@@ -917,6 +997,9 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
             vacrel.bstrategy.clone(),
         )?;
         vacrel.folds.counters.scanned_pages += 1;
+        if was_eager_scanned {
+            vacrel.eager_scanned_pages += 1;
+        }
 
         pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno as i64);
 
@@ -943,6 +1026,14 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
             folds,
             dead_items,
             dead_items_info,
+            eager_scan_remaining_successes,
+            eager_scan_remaining_fails,
+            eager_scan_max_fails_per_region,
+            next_eager_scan_region_start,
+            verbose,
+            dbname,
+            relnamespace,
+            relname,
             ..
         } = &mut *vacrel;
         let env = ScanEnv {
@@ -971,6 +1062,7 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
         }
 
         let mut ndeleted = 0;
+        let mut vm_page_frozen = false;
         if got_cleanup_lock {
             ndeleted = lazy_scan_prune(
                 &env,
@@ -982,6 +1074,7 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
                 &mut vmbuffer,
                 all_visible_according_to_vm,
                 &mut has_lpdead_items,
+                &mut vm_page_frozen,
             )?;
         }
 
@@ -1002,6 +1095,39 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
         } else {
             bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
             bufmgr_seams::release_buffer::call(buf)?;
+        }
+
+        if got_cleanup_lock && was_eager_scanned {
+            debug_assert!(!env.aggressive);
+            if vm_page_frozen {
+                if *eager_scan_remaining_successes > 0 {
+                    *eager_scan_remaining_successes -= 1;
+                }
+                if *eager_scan_remaining_successes == 0 {
+                    if *eager_scan_max_fails_per_region > 0 {
+                        elog::ereport(if *verbose {
+                            ::types_error::INFO
+                        } else {
+                            ::types_error::DEBUG2
+                        })
+                        .errmsg(format!(
+                            "disabling eager scanning after freezing {} eagerly scanned blocks of relation \"{}.{}.{}\"",
+                            orig_eager_scan_success_limit,
+                            dbname, relnamespace, relname
+                        ))
+                        .finish(::types_error::ErrorLocation::new(
+                            "src/backend/access/heap/vacuumlazy.c",
+                            1431,
+                            "lazy_scan_heap",
+                        ))?;
+                    }
+                    *eager_scan_remaining_fails = 0;
+                    *next_eager_scan_region_start = InvalidBlockNumber;
+                    *eager_scan_max_fails_per_region = 0;
+                }
+            } else if *eager_scan_remaining_fails > 0 {
+                *eager_scan_remaining_fails -= 1;
+            }
         }
     }
 
@@ -1040,10 +1166,11 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
 }
 
 /// The read-stream callback collapsed to a direct call: returns the next
-/// block to scan and its VM status, or None at end of relation.
+/// block to scan, its VM all-visible bit, and whether it was eagerly
+/// scanned, or None at end of relation.
 fn heap_vac_scan_next_block(
     vacrel: &mut LVRelState<'_, '_>,
-) -> PgResult<Option<(BlockNumber, bool)>> {
+) -> PgResult<Option<(BlockNumber, bool, bool)>> {
     let mut next_block = vacrel.current_block.wrapping_add(1);
 
     if next_block >= vacrel.rel_pages {
@@ -1065,11 +1192,15 @@ fn heap_vac_scan_next_block(
 
     if next_block < vacrel.next_unskippable_block {
         vacrel.current_block = next_block;
-        Ok(Some((next_block, true)))
+        Ok(Some((next_block, true, false)))
     } else {
         debug_assert!(next_block == vacrel.next_unskippable_block);
         vacrel.current_block = next_block;
-        Ok(Some((next_block, vacrel.next_unskippable_allvis)))
+        Ok(Some((
+            next_block,
+            vacrel.next_unskippable_allvis,
+            vacrel.next_unskippable_eager_scanned,
+        )))
     }
 }
 
@@ -1077,6 +1208,8 @@ fn find_next_unskippable_block(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool
     let rel_pages = vacrel.rel_pages;
     let mut next_unskippable_block = vacrel.next_unskippable_block.wrapping_add(1);
     let mut skipsallvis = false;
+    let mut next_unskippable_eager_scanned = false;
+    let mut next_unskippable_allvis = false;
 
     loop {
         let mapbits = visibilitymap_get_status(
@@ -1084,20 +1217,22 @@ fn find_next_unskippable_block(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool
             next_unskippable_block,
             &mut vacrel.next_unskippable_vmbuffer,
         )?;
-        let next_unskippable_allvis = mapbits & VISIBILITYMAP_ALL_VISIBLE != 0;
+        next_unskippable_allvis = mapbits & VISIBILITYMAP_ALL_VISIBLE != 0;
+
+        if next_unskippable_block >= vacrel.next_eager_scan_region_start {
+            vacrel.eager_scan_remaining_fails = vacrel.eager_scan_max_fails_per_region;
+            vacrel.next_eager_scan_region_start =
+                vacrel.next_eager_scan_region_start.wrapping_add(EAGER_SCAN_REGION_SIZE);
+        }
 
         if !next_unskippable_allvis {
             debug_assert!(mapbits & VISIBILITYMAP_ALL_FROZEN == 0);
-            vacrel.next_unskippable_allvis = false;
             break;
         }
-        // The last block is always scanned (truncation opportunity check).
         if next_unskippable_block == rel_pages - 1 {
-            vacrel.next_unskippable_allvis = true;
             break;
         }
         if !vacrel.skipwithvm {
-            vacrel.next_unskippable_allvis = true;
             break;
         }
         if mapbits & VISIBILITYMAP_ALL_FROZEN != 0 {
@@ -1105,7 +1240,10 @@ fn find_next_unskippable_block(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool
             continue;
         }
         if vacrel.aggressive {
-            vacrel.next_unskippable_allvis = true;
+            break;
+        }
+        if vacrel.eager_scan_remaining_fails > 0 {
+            next_unskippable_eager_scanned = true;
             break;
         }
         skipsallvis = true;
@@ -1113,6 +1251,8 @@ fn find_next_unskippable_block(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool
     }
 
     vacrel.next_unskippable_block = next_unskippable_block;
+    vacrel.next_unskippable_allvis = next_unskippable_allvis;
+    vacrel.next_unskippable_eager_scanned = next_unskippable_eager_scanned;
     Ok(skipsallvis)
 }
 
@@ -1323,6 +1463,7 @@ fn lazy_scan_prune(
     vmbuffer: &mut VmBuffer,
     all_visible_according_to_vm: bool,
     has_lpdead_items: &mut bool,
+    vm_page_frozen: &mut bool,
 ) -> PgResult<i32> {
     let mut prune_options = HEAP_PAGE_PRUNE_FREEZE;
     if env.nindexes == 0 {
@@ -1412,9 +1553,11 @@ fn lazy_scan_prune(
             folds.counters.vm_new_visible_pages += 1;
             if all_frozen {
                 folds.counters.vm_new_visible_frozen_pages += 1;
+                *vm_page_frozen = true;
             }
         } else if old_vmbits & VISIBILITYMAP_ALL_FROZEN == 0 && all_frozen {
             folds.counters.vm_new_frozen_pages += 1;
+            *vm_page_frozen = true;
         }
     } else if all_visible_according_to_vm
         && !page.is_all_visible()
@@ -1453,8 +1596,10 @@ fn lazy_scan_prune(
         if old_vmbits & VISIBILITYMAP_ALL_VISIBLE == 0 {
             folds.counters.vm_new_visible_pages += 1;
             folds.counters.vm_new_visible_frozen_pages += 1;
+            *vm_page_frozen = true;
         } else {
             folds.counters.vm_new_frozen_pages += 1;
+            *vm_page_frozen = true;
         }
     }
 
