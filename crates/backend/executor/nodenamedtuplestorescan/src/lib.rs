@@ -6,7 +6,7 @@
 use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::Mcx;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::types_nodes::plannodes::NamedTuplestoreScan;
 use ::types_portal::TuplestoreHandle;
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
@@ -72,15 +72,13 @@ pub fn exec_init_named_tuplestore_scan<'mcx>(
     debug_assert!(node.scan.plan.lefttree.is_none() && node.scan.plan.righttree.is_none());
 
     let enrname = node.enrname.expect("NamedTuplestoreScan carries an enrname");
-    let enr = estate
+    let enr = match estate
         .es_queryEnv
         .and_then(|env| ::queryenvironment::get_ENR(env, enrname))
-        .unwrap_or_else(|| {
-            panic!(
-                "ExecInitNamedTuplestoreScan (nodeNamedtuplestorescan.c): executor \
-                 could not find named tuplestore \"{enrname}\""
-            )
-        });
+    {
+        Some(enr) => enr,
+        None => return Err(missing_named_tuplestore(enrname)),
+    };
     debug_assert!(!enr.reldata.is_null());
     let relation = enr.reldata;
     let tupdesc = ::queryenvironment::ENRMetadataGetTupDesc(mcx, &enr.md)?;
@@ -128,6 +126,42 @@ pub fn exec_rescan_named_tuplestore_scan<'mcx>(
     })
 }
 
+#[cold]
+#[inline(never)]
+fn missing_named_tuplestore(enrname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "executor could not find named tuplestore \"{enrname}\""
+        ))
+        .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
+
 mcx::forget_safe_struct!(
     NamedTuplestoreScanState<'_> { ss, relation, readptr },
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::mcx::MemoryContext;
+
+    #[test]
+    fn missing_named_tuplestore_is_ereport_not_panic() {
+        let ctx = MemoryContext::new("nts-missing-enr");
+        let mcx = ctx.mcx();
+        let node = NamedTuplestoreScan {
+            enrname: Some("olds"),
+            ..Default::default()
+        };
+        let mut estate = EStateData::new_in(mcx);
+        let err = exec_init_named_tuplestore_scan(mcx, &node, &mut estate, 0)
+            .err()
+            .expect("missing ENR must ereport");
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+        assert_eq!(
+            err.message(),
+            "executor could not find named tuplestore \"olds\""
+        );
+    }
+}
