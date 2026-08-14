@@ -410,10 +410,8 @@ fn cost_qual_eval_walker<'mcx>(
             }
             Ok(())
         }
-        // No C case: falls to C's expression_tree_walker default.
-        NodeTag::T_PlaceHolderVar => {
-            cost_qual_eval_walker(run.as_deref_mut(), node.as_place_holder_var().unwrap().phexpr, cost)
-        }
+        // PHV cost is charged once, on the reltarget that first computes it.
+        NodeTag::T_PlaceHolderVar => Ok(()),
         // No C case: falls to C's expression_tree_walker default.
         NodeTag::T_ReturningExpr => {
             cost_qual_eval_walker(run.as_deref_mut(), node.as_returning_expr().unwrap().retexpr, cost)
@@ -4033,6 +4031,20 @@ pub fn initial_cost_mergejoin(
     })
 }
 
+// Unique-ified outer has no duplicate keys, so no inner mark/restore rescans.
+fn mergejoin_rescanned_tuples(
+    outer_is_unique_path: bool,
+    skip_mark_restore: bool,
+    mergejointuples: f64,
+    inner_path_rows: f64,
+) -> f64 {
+    if outer_is_unique_path || skip_mark_restore {
+        0.0
+    } else {
+        (mergejointuples - inner_path_rows).max(0.0)
+    }
+}
+
 // approx_tuple_count (costsize.c).
 pub fn approx_tuple_count(
     run: &mut PlannerRun<'_>,
@@ -4103,11 +4115,16 @@ pub fn final_cost_mergejoin(
 
     let mergejointuples = approx_tuple_count(run, outer_path, inner_path, &mergeclauses)?;
 
-    let rescannedtuples = if path.skip_mark_restore {
-        0.0
-    } else {
-        (mergejointuples - inner_path_rows).max(0.0)
-    };
+    let outer_is_unique_path = matches!(
+        run.root.path(outer_path),
+        types_pathnodes::PathNode::UniquePath(_)
+    );
+    let rescannedtuples = mergejoin_rescanned_tuples(
+        outer_is_unique_path,
+        path.skip_mark_restore,
+        mergejointuples,
+        inner_path_rows,
+    );
     let rescanratio = 1.0 + rescannedtuples / inner_rows;
 
     let bare_inner_cost = inner_run_cost * rescanratio;
@@ -4411,6 +4428,26 @@ fn calc_joinrel_size_estimate<'mcx>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mergejoin_unique_outer_has_no_rescans() {
+        assert_eq!(
+            super::mergejoin_rescanned_tuples(true, false, 1000.0, 10.0),
+            0.0
+        );
+        assert_eq!(
+            super::mergejoin_rescanned_tuples(false, true, 1000.0, 10.0),
+            0.0
+        );
+        assert_eq!(
+            super::mergejoin_rescanned_tuples(false, false, 1000.0, 10.0),
+            990.0
+        );
+        assert_eq!(
+            super::mergejoin_rescanned_tuples(false, false, 5.0, 10.0),
+            0.0
+        );
+    }
+
     /// GL-GMLEADER-1 pins (the leader-consumption floor, exhaustive over
     /// the uplift's regions): the product defaults uplift GM rows to C's
     /// per-row rate; C-parity sessions (rate >= the floor) and
