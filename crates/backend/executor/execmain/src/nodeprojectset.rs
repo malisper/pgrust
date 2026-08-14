@@ -4,9 +4,9 @@
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use ::datum::Datum;
-use ::execexpr::{exec_eval_expr, exec_init_expr_subplans, EvalSlots, ExprState};
-use ::executils::{EStateData, ExecSlotId};
+use ::datum::{Datum, NullableDatum};
+use ::execexpr::{exec_eval_expr, exec_init_expr_subplans, ExprState};
+use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_error::{PgError, PgResult, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED};
 use ::types_fmgr::{
@@ -317,6 +317,27 @@ impl<'mcx> LaneProjectSet<'_, 'mcx> {
     }
 }
 
+/// C ExecEvalExpr over one ProjectSet tlist/arg program. Pending InitPlan
+/// PARAM_EXEC fetches ride the suspension driver (C ExecEvalParamExec);
+/// CASE/COALESCE jumps skip untaken arms, so those initplans stay un-run.
+fn eval_in_ecxt<'mcx>(
+    state: &mut ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    arm_per_tuple: Option<Mcx<'_>>,
+) -> PgResult<NullableDatum> {
+    if let Some(per_tuple) = arm_per_tuple {
+        // SAFETY: per-tuple context outlives this row's datums — consumed
+        // before the next reset (nodeagg precedent).
+        unsafe { state.arm_result_mcx_raw(per_tuple) };
+    }
+    if state.has_subplan() || !state.param_exec_deps().is_empty() {
+        ::executils::exec_eval_expr_with_subplans(state, estate, ecxt)
+    } else {
+        with_eval_slots(estate, ecxt, None, |slots, _, _| exec_eval_expr(state, slots))
+    }
+}
+
 /// `ExecProjectSRF` (nodeProjectSet.c): true iff a row was stored.
 fn exec_project_srf<'mcx>(
     node: &mut LaneProjectSet<'_, 'mcx>,
@@ -331,81 +352,52 @@ fn exec_project_srf<'mcx>(
         .base
         .ps_ResultTupleSlot
         .expect("ProjectSetState without result slot");
-    // RESIDUAL eager arm: SRF args and scalar tlist elems evaluate inside
-    // the with_eval_slots closure below with no suspension driver in reach,
-    // so their pending initplan params are still force-run up front rather
-    // than lazily at first PARAM_EXEC fetch (C ExecEvalParamExec,
-    // execExprInterp.c:3053). Divergence needs an erroring initplan inside
-    // an untaken short-circuit arm of a ProjectSet tlist element; ordering
-    // vs an earlier erroring elem is the only observable skew.
-    for elem in node.elems.iter() {
-        match elem {
-            Elem::Srf(srf) => {
-                for arg in srf.args.iter() {
-                    let deps = arg.param_exec_deps();
-                    if !deps.is_empty() {
-                        ::executils::exec_eval_param_exec_params(estate, deps)?;
-                    }
-                }
-            }
-            Elem::Scalar(state) => {
-                let deps = state.param_exec_deps();
-                if !deps.is_empty() {
-                    ::executils::exec_eval_param_exec_params(estate, deps)?;
-                }
-            }
-        }
-    }
+    let query_mcx = estate.es_query_cxt;
     let per_tuple: NonNull<MemoryContext> =
         NonNull::from(estate.ecxt(ecxt).per_tuple_mcx().context());
     *node.pending = false;
-    let elems = &mut *node.elems;
-    let elemdone = &mut *node.elemdone;
-    let pending = &mut *node.pending;
-    with_eval_slots(estate, ecxt, Some(result), |slots, rslot, mcx| {
-        let rslot = rslot.expect("result slot provided");
-        exectuples::exec_clear_tuple(rslot, mcx);
-        // SAFETY: the ExprContext lives in the estate for the whole query;
-        // only its slot-id triple is mutably borrowed by with_eval_slots.
+    {
+        let rslot = estate.slot_mut(result);
+        exectuples::exec_clear_tuple(rslot, query_mcx);
+    }
+    let mut hasresult = false;
+    let n = node.elems.len();
+    for i in 0..n {
+        // SAFETY: the ExprContext lives in the estate for the whole query.
         let per_tuple = unsafe { per_tuple.as_ref() }.mcx();
-        let mut hasresult = false;
-        for (i, elem) in elems.iter_mut().enumerate() {
-            let (value, isnull) = match elem {
-                Elem::Srf(srf) => {
-                    // Exhausted SRFs pad with NULLs until all are done.
-                    if continuing && elemdone[i] == ExprDoneCond::ExprEndResult {
-                        (Datum::null(), true)
-                    } else {
-                        let (v, vnull, isdone) =
-                            exec_make_function_result_set(srf, slots, per_tuple, mcx)?;
-                        elemdone[i] = isdone;
-                        if isdone != ExprDoneCond::ExprEndResult {
-                            hasresult = true;
-                        }
-                        if isdone == ExprDoneCond::ExprMultipleResult {
-                            *pending = true;
-                        }
-                        (v, vnull)
+        let (value, isnull) = match &mut node.elems[i] {
+            Elem::Srf(srf) => {
+                if continuing && node.elemdone[i] == ExprDoneCond::ExprEndResult {
+                    (Datum::null(), true)
+                } else {
+                    let (v, vnull, isdone) =
+                        exec_make_function_result_set(srf, estate, ecxt, per_tuple, query_mcx)?;
+                    node.elemdone[i] = isdone;
+                    if isdone != ExprDoneCond::ExprEndResult {
+                        hasresult = true;
                     }
+                    if isdone == ExprDoneCond::ExprMultipleResult {
+                        *node.pending = true;
+                    }
+                    (v, vnull)
                 }
-                Elem::Scalar(state) => {
-                    // SAFETY: per-tuple context outlives this row's datums —
-                    // consumed before the next reset (nodeagg precedent).
-                    unsafe { state.arm_result_mcx_raw(per_tuple) };
-                    let nd = exec_eval_expr(state, slots)?;
-                    elemdone[i] = ExprDoneCond::ExprSingleResult;
-                    (nd.value, nd.isnull)
-                }
-            };
-            let base = rslot.base_mut();
-            base.tts_values[i] = value;
-            base.tts_isnull[i] = isnull;
-        }
-        if hasresult {
-            exectuples::exec_store_virtual_tuple(rslot);
-        }
-        Ok(hasresult)
-    })
+            }
+            Elem::Scalar(state) => {
+                let nd = eval_in_ecxt(state, estate, ecxt, Some(per_tuple))?;
+                node.elemdone[i] = ExprDoneCond::ExprSingleResult;
+                (nd.value, nd.isnull)
+            }
+        };
+        let rslot = estate.slot_mut(result);
+        let base = rslot.base_mut();
+        base.tts_values[i] = value;
+        base.tts_isnull[i] = isnull;
+    }
+    if hasresult {
+        let rslot = estate.slot_mut(result);
+        exectuples::exec_store_virtual_tuple(rslot);
+    }
+    Ok(hasresult)
 }
 
 // C's "restart:" store-read leg: pop the next materialized row, or clear the
@@ -438,7 +430,8 @@ fn read_result_store<'mcx>(
 /// `ExecMakeFunctionResultSet` (execSRF.c).
 fn exec_make_function_result_set<'mcx>(
     srf: &mut SrfElem<'mcx>,
-    slots: &mut EvalSlots<'_, 'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
     per_tuple: Mcx<'_>,
     query_mcx: Mcx<'mcx>,
 ) -> PgResult<(Datum, bool, ExprDoneCond)> {
@@ -448,7 +441,9 @@ fn exec_make_function_result_set<'mcx>(
 
     if !srf.args_valid {
         for i in 0..srf.args.len() {
-            let nd = exec_eval_expr(&mut srf.args[i], slots)?;
+            // Query-context args (armed at init): by-ref arg datums must
+            // outlive per-tuple resets between rows. Do not re-arm.
+            let nd = eval_in_ecxt(&mut srf.args[i], estate, ecxt, None)?;
             if nd.isnull {
                 srf.fcinfo.set_arg_null(i);
             } else {

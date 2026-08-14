@@ -4629,25 +4629,22 @@ fn try_own_multibuild<'mcx>(
     // (see the single-join arm above): peek serially and refuse to the
     // serial arms on an empty probe side, so no build-side scan qual in the
     // whole tree is ever evaluated — C's serial executor short-circuits
-    // every build under the top join's empty outer. SeqScan outers only
-    // (a join-on-the-outer tree keeps the pre-peek behavior; the serial
-    // row path still applies C's order there after a refusal for any other
-    // reason).
-    if let crate::procnode::PlanStateNode::SeqScan(top_outer_ss) = &mut *hj.outer {
-        if ::nodehashjoin::lane_prefetch_wanted(&hj.state)
-            && !::nodehashjoin::lane_outer_parallel_aware(&hj.state)
-        {
-            let first = ::nodeseqscan::exec_seq_scan(top_outer_ss, estate)?;
-            ::nodeseqscan::exec_rescan_seq_scan(top_outer_ss, estate)?;
-            if first.is_none() {
-                lane_trace(
-                    "runtime-hashjoin: REFUSED multibuild (empty probe side — C empty-outer short-circuit) — serial arm",
-                );
-                refuse("empty-probe-shortcircuit");
-                return Ok(None);
-            }
-            ::nodehashjoin::lane_note_outer_not_empty(&mut hj.state);
+    // every build under the top join's empty outer. Peek the outer plan
+    // itself (SeqScan or nested HashJoin): a join-on-the-outer tree must
+    // not skip this, or inner builds under the top join run while C quits.
+    if ::nodehashjoin::lane_prefetch_wanted(&hj.state)
+        && !::nodehashjoin::lane_outer_parallel_aware(&hj.state)
+    {
+        let first = ::nodehashjoin::HashJoinOuter::exec_proc(&mut *hj.outer, estate)?;
+        ::nodehashjoin::HashJoinOuter::rescan(&mut *hj.outer, estate)?;
+        if first.is_none() {
+            lane_trace(
+                "runtime-hashjoin: REFUSED multibuild (empty probe side — C empty-outer short-circuit) — serial arm",
+            );
+            refuse("empty-probe-shortcircuit");
+            return Ok(None);
         }
+        ::nodehashjoin::lane_note_outer_not_empty(&mut hj.state);
     }
     router::tick(ArmClass::HashJoin, ArmCounter::Engaged);
     let sources: Vec<Arc<dyn runtime::MorselSource>> =
