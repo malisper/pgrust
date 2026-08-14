@@ -5,7 +5,8 @@ use types_nodes::equal::equal;
 use types_nodes::list::{NodeList, OidList};
 use types_nodes::plannodes::{Plan, PlannedStmt, Scan, SeqScan, Sort};
 use types_nodes::primnodes::{Alias, Const, RangeVar, Var, VarReturningType};
-use types_nodes::rawnodes::{DistinctClause, SelectStmt};
+use types_nodes::parsenodes::{ObjectType, Query};
+use types_nodes::rawnodes::{AlterExtensionContentsStmt, DistinctClause, SelectStmt};
 use types_nodes::{Node, NodeTag};
 
 use crate::copy_object;
@@ -268,6 +269,36 @@ fn select_stmt_distinct_and_lists() {
     };
     let cr = l.first().unwrap().as_variant::<types_nodes::rawnodes::ColumnRef>().unwrap();
     assert_eq!(cr.fields.first().unwrap().as_string().unwrap().sval, "a");
+}
+
+#[test]
+fn alter_extension_contents_stmt_copy_survives() {
+    let src_ctx = MemoryContext::new("src");
+    let dst_ctx = MemoryContext::new("dst");
+    let (smcx, dmcx) = (src_ctx.mcx(), dst_ctx.mcx());
+    let obj = Node::mk_string(smcx, "public.f").unwrap();
+    let stmt = Node::mk(
+        smcx,
+        AlterExtensionContentsStmt {
+            extname: Some("hstore"),
+            action: 1,
+            objtype: ObjectType::OBJECT_FUNCTION,
+            object: Some(obj),
+        },
+    )
+    .unwrap();
+    let q = Query {
+        utilityStmt: Some(stmt),
+        ..Query::default()
+    };
+    let copy = crate::copy_query(dmcx, &q).unwrap();
+    drop(src_ctx);
+    let u = copy.utilityStmt.expect("utilityStmt");
+    let s = u.as_variant::<AlterExtensionContentsStmt>().unwrap();
+    assert_eq!(s.extname, Some("hstore"));
+    assert_eq!(s.action, 1);
+    assert_eq!(s.objtype, ObjectType::OBJECT_FUNCTION);
+    assert_eq!(s.object.expect("object").as_string().unwrap().sval, "public.f");
 }
 
 #[test]

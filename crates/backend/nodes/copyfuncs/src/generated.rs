@@ -52,7 +52,8 @@ use types_nodes::parsenodes::{
     WithCheckOption, WithClause,
 };
 use types_nodes::rawnodes::{
-    A_ArrayExpr, A_Expr, A_Indices, A_Indirection, AlterEnumStmt, AlterExtensionStmt,
+    A_ArrayExpr, A_Expr, A_Indices, A_Indirection, AlterEnumStmt, AlterExtensionContentsStmt,
+    AlterExtensionStmt,
     AlterFdwStmt, AlterForeignServerStmt, AlterSeqStmt, AlterStatsStmt,
     AlterTSConfigurationStmt, AlterTSDictionaryStmt, AlterTypeStmt, AlterUserMappingStmt,
     CallStmt, ColumnDef, ColumnRef, CompositeTypeStmt, Constraint, ConstraintsSetStmt,
@@ -151,6 +152,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_AlterEventTrigStmt => {
             let s = node.as_variant::<AlterEventTrigStmt>().expect("AlterEventTrigStmt");
             Node::mk(mcx, copy_AlterEventTrigStmt(mcx, s)?)?
+        }
+        NodeTag::T_AlterExtensionContentsStmt => {
+            let s = node.as_variant::<AlterExtensionContentsStmt>().expect("AlterExtensionContentsStmt");
+            Node::mk(mcx, copy_AlterExtensionContentsStmt(mcx, s)?)?
         }
         NodeTag::T_AlterExtensionStmt => {
             let s = node.as_variant::<AlterExtensionStmt>().expect("AlterExtensionStmt");
@@ -1537,6 +1542,18 @@ pub(crate) fn copy_AlterEventTrigStmt<'d>(mcx: Mcx<'d>, s: &AlterEventTrigStmt<'
     Ok(AlterEventTrigStmt {
         trigname: opt_str_in(mcx, s.trigname)?,
         tgenabled: s.tgenabled,
+    })
+}
+
+pub(crate) fn copy_AlterExtensionContentsStmt<'d>(
+    mcx: Mcx<'d>,
+    s: &AlterExtensionContentsStmt<'_>,
+) -> PgResult<AlterExtensionContentsStmt<'d>> {
+    Ok(AlterExtensionContentsStmt {
+        extname: opt_str_in(mcx, s.extname)?,
+        action: s.action,
+        objtype: s.objtype,
+        object: copy_node_opt(mcx, s.object)?,
     })
 }
 
