@@ -306,6 +306,7 @@ fn like_support_rows_are_loud() {
 
 const COLL_LIBC_LATIN1: Oid = 40001;
 const COLL_BUILTIN_CUTF8: Oid = 40002;
+const COLL_ICU_EN: Oid = 40003;
 
 fn install_collation_stub() {
     use std::sync::Once;
@@ -323,6 +324,7 @@ fn install_collation_stub() {
                     None,
                 ),
                 COLL_BUILTIN_CUTF8 => (pg_locale::COLLPROVIDER_BUILTIN, None, None, Some("C.UTF-8")),
+                COLL_ICU_EN => (pg_locale::COLLPROVIDER_ICU, None, None, Some("en")),
                 _ => return Ok(None),
             };
             Ok(Some(syscache_seams::PgCollationLocaleRow {
@@ -382,5 +384,33 @@ fn ilike_sb_tolower_l_fold() {
     }
     assert!(texticlike(mcx, b"\xc4bc", b"\xe4b_", COLL_LIBC_LATIN1, &mut scratch).unwrap());
     assert!(!texticlike(mcx, b"\xc4bc", b"\xe9bc", COLL_LIBC_LATIN1, &mut scratch).unwrap());
+    utf8();
+}
+
+// C Generic_Text_IC_like: ICU forces lower() then MB_MatchText when the
+// database encoding is not UTF8. LATIN1 mblen is 1, so that is SB_MatchText.
+// Unfixed: mb_matchtext_unported (0A000) even though the SB matcher is live.
+#[test]
+fn ilike_icu_single_byte_uses_sb_matcher() {
+    latin1();
+    install_collation_stub();
+    let ctx = mcx::MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut scratch = IcScratch::default();
+    match texticlike(mcx, b"HELLO", b"hello", COLL_ICU_EN, &mut scratch) {
+        Ok(v) => assert!(v),
+        Err(e) => {
+            if e.message().contains("not yet implemented") {
+                panic!(
+                    "ILIKE ICU+LATIN1 hit mb_matchtext_unported; C lowers then SB-matches: {e}"
+                );
+            }
+            eprintln!("SKIP: ICU locale not available on this host ({e})");
+            utf8();
+            return;
+        }
+    }
+    assert!(texticlike(mcx, b"HeLLo", b"%ell%", COLL_ICU_EN, &mut scratch).unwrap());
+    assert!(!texticlike(mcx, b"HELLO", b"world", COLL_ICU_EN, &mut scratch).unwrap());
     utf8();
 }

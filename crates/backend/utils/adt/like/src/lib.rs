@@ -362,21 +362,25 @@ pub fn generic_text_ic_like(
             // str_tolower non-C tail).
             let pat = adt_oracle_compat::casemap::str_tolower(mcx, p, collation)?;
             let str_ = adt_oracle_compat::casemap::str_tolower(mcx, s, collation)?;
-            return if mbutils::GetDatabaseEncoding() == PG_UTF8 {
-                match_text::<Utf8Cs>(&str_, &pat, &LOCALE_NONE)
-            } else {
-                return Err(mb_matchtext_unported(mbutils::GetDatabaseEncoding()))
-            };
+            return match_lowered_ic(&str_, &pat);
         }
         lower_into(&mut scratch.p, p);
         lower_into(&mut scratch.s, s);
-        if mbutils::GetDatabaseEncoding() == PG_UTF8 {
-            match_text::<Utf8Cs>(&scratch.s, &scratch.p, &LOCALE_NONE)
-        } else {
-            return Err(mb_matchtext_unported(mbutils::GetDatabaseEncoding()))
-        }
+        match_lowered_ic(&scratch.s, &scratch.p)
     } else {
         match_text::<SbIc>(s, p, locale)
+    }
+}
+
+// C Generic_Text_IC_like after lower(): UTF8_MatchText else MB_MatchText,
+// locale=0. SB encodings have mblen=1 so MB ≡ SB; true non-UTF8 MB stays loud.
+fn match_lowered_ic(s: &[u8], p: &[u8]) -> PgResult<i32> {
+    if mbutils::GetDatabaseEncoding() == PG_UTF8 {
+        match_text::<Utf8Cs>(s, p, &LOCALE_NONE)
+    } else if mbutils::pg_database_encoding_max_length() == 1 {
+        match_text::<SbCs>(s, p, &LOCALE_NONE)
+    } else {
+        Err(mb_matchtext_unported(mbutils::GetDatabaseEncoding()))
     }
 }
 
