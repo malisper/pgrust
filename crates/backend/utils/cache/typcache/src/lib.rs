@@ -1208,7 +1208,8 @@ pub fn init_seams() {
     });
 }
 
-// C: equalRowTypes (attname/atttypid/atttypmod/natts).
+// C equalRowTypes (tupdesc.c): natts + tdtypeid + attname/typid/typmod/
+// collation/isdropped. tdtypeid is always RECORDOID on this path.
 fn row_types_equal(a: &types_tuple::TupleDescData<'_>, b: &[types_tuple::FormData_pg_attribute]) -> bool {
     if a.natts as usize != b.len() {
         return false;
@@ -1218,6 +1219,8 @@ fn row_types_equal(a: &types_tuple::TupleDescData<'_>, b: &[types_tuple::FormDat
         if x.attname.name_str() != y.attname.name_str()
             || x.atttypid != y.atttypid
             || x.atttypmod != y.atttypmod
+            || x.attcollation != y.attcollation
+            || x.attisdropped != y.attisdropped
         {
             return false;
         }
@@ -1267,10 +1270,16 @@ pub fn assign_record_type_identifier(type_id: Oid, typmod: i32) -> PgResult<u64>
     }
     let handle = with_state(|st| std::sync::Arc::clone(&st.record_registry));
     let reg = handle.lock().unwrap_or_else(|e| e.into_inner());
-    match usize::try_from(typmod).ok().and_then(|i| reg.entries.get(i)) {
-        Some(e) => Ok(e.id),
-        None => Err(record_type_not_registered()),
+    if let Some(e) = usize::try_from(typmod).ok().and_then(|i| reg.entries.get(i)) {
+        return Ok(e.id);
     }
+    // C: anonymous or unrecognized RECORD → a fresh identifier each call
+    // (typcache.c:2164-2165). Not an ereport.
+    drop(reg);
+    Ok(with_state(|st| {
+        st.tupledesc_id_counter += 1;
+        st.tupledesc_id_counter
+    }))
 }
 
 // C: ereport(ERRCODE_WRONG_OBJECT_TYPE, "type %s is not composite"). The

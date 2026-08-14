@@ -642,6 +642,55 @@ fn record_type_identifier_stable_until_inval() {
     assert_eq!(err.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
 }
 
+// C assign_record_type_identifier(RECORDOID, unrecognized typmod) returns a
+// new identifier each call (typcache.c:2164-2165). Not 42809.
+#[test]
+fn anonymous_record_identifier_is_fresh_each_call() {
+    install();
+    let id1 = assign_record_type_identifier(types_core::catalog::RECORDOID, -1).unwrap();
+    let id2 = assign_record_type_identifier(types_core::catalog::RECORDOID, -1).unwrap();
+    assert_ne!(id1, 0);
+    assert_ne!(id2, 0);
+    assert_ne!(id1, id2);
+}
+
+// C equalRowTypes also compares attcollation and attisdropped (tupdesc.c:796-800).
+#[test]
+fn record_typmod_distinguishes_collation_and_dropped() {
+    install();
+    let mcx_holder = ::mcx::MemoryContext::new("rowtype-equal-test");
+    let mcx = mcx_holder.mcx();
+    let rec = types_core::catalog::RECORDOID;
+    let mk = |collation: Oid, dropped: bool| {
+        let mut a = types_tuple::FormData_pg_attribute::default();
+        a.attname = name("x");
+        a.atttypid = INT4OID;
+        a.attnum = 1;
+        a.attlen = 4;
+        a.attbyval = true;
+        a.attalign = b'i' as i8;
+        a.atttypmod = -1;
+        a.attcollation = collation;
+        a.attisdropped = dropped;
+        let mut d = tupdesc::CreateTupleDesc(mcx, &[a]).unwrap();
+        d.tdtypeid = rec;
+        d
+    };
+    let mut same_a = mk(100, false);
+    let mut same_b = mk(100, false);
+    assign_record_type_typmod(&mut same_a).unwrap();
+    assign_record_type_typmod(&mut same_b).unwrap();
+    assert_eq!(same_a.tdtypmod, same_b.tdtypmod);
+
+    let mut other_coll = mk(200, false);
+    assign_record_type_typmod(&mut other_coll).unwrap();
+    assert_ne!(same_a.tdtypmod, other_coll.tdtypmod);
+
+    let mut dropped = mk(100, true);
+    assign_record_type_typmod(&mut dropped).unwrap();
+    assert_ne!(same_a.tdtypmod, dropped.tdtypmod);
+}
+
 // C: cache_record_field_properties composite arm walks the cached tupdesc;
 // all-int4 fields support equality/compare/hashing/extended hashing.
 #[test]
