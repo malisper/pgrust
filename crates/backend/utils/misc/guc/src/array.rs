@@ -75,10 +75,17 @@ pub fn validate_option_array_item(
         _ => {}
     }
 
+    // C guc.c:6780-6782: caller's privilege, not the variable's context.
+    // Passing the variable context skips POSTMASTER/SIGHUP and SUSET ACL.
+    let caller_context = if superuser_seams::superuser::call()? {
+        GucContext::PGC_SUSET
+    } else {
+        GucContext::PGC_USERSET
+    };
     set_config_option(
         name,
         value,
-        *context,
+        caller_context,
         GucSource::PGC_S_TEST,
         GUC_ACTION_SET,
         false,

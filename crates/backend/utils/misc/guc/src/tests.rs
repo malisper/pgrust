@@ -626,6 +626,21 @@ fn guc_array_add_validates_name_and_value() {
 }
 
 #[test]
+fn guc_array_add_rejects_postmaster_guc() {
+    array_setup();
+    // C validate_option_array_item calls set_config_option with
+    // superuser()?PGC_SUSET:PGC_USERSET (guc.c:6780-6782), never the
+    // variable's PGC_POSTMASTER context. Unfixed: Ok.
+    let e = GUCArrayAdd(&[], "max_connections", "100").unwrap_err();
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_CANT_CHANGE_RUNTIME_PARAM);
+    assert!(
+        e.message().contains("cannot be changed without restarting the server"),
+        "{}",
+        e.message()
+    );
+}
+
+#[test]
 fn process_guc_array_secdef_pushes_and_nest_pop_restores() {
     array_setup();
     assert_eq!(get_int("work_mem"), Some(4096));
