@@ -53,6 +53,26 @@ fn depth_check_trips_past_limit() {
 }
 
 #[test]
+fn boot_source_matches_c() {
+    assert_eq!(
+        boot_limit_and_source(101),
+        (101, GucSource::PGC_S_ENV_VAR)
+    );
+    assert_eq!(
+        boot_limit_and_source(2047),
+        (2047, GucSource::PGC_S_ENV_VAR)
+    );
+    assert_eq!(
+        boot_limit_and_source(2048),
+        (2048, GucSource::PGC_S_DYNAMIC_DEFAULT)
+    );
+    assert_eq!(
+        boot_limit_and_source(7680),
+        (2048, GucSource::PGC_S_DYNAMIC_DEFAULT)
+    );
+}
+
+#[test]
 fn assign_updates_bytes_only() {
     assign_max_stack_depth(2048);
     assert_eq!(max_stack_depth_bytes(), 2048 * 1024);
