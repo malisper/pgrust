@@ -658,6 +658,7 @@ fn pull_up_simple_values<'mcx>(
         parse.returningList = l;
     }
     parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &tlist, false, None)?;
+    replace_on_conflict_set_where(mcx, parse, varno, &tlist, false, None)?;
     debug_assert!(parse.mergeActionList.is_nil());
     let jt = parse.jointree.expect("jointree is a FromExpr");
     if let Some(q) = jt.quals {
@@ -1223,6 +1224,7 @@ fn pull_up_simple_subquery<'mcx>(
         }
         parse.mergeJoinCondition =
             replace_opt(mcx, parse.mergeJoinCondition, varno, &off_tlist, lateral, Some(&phc))?;
+        replace_on_conflict_set_where(mcx, parse, varno, &off_tlist, lateral, Some(&phc))?;
 
         // pullup_replace_vars over the jointree: substitute Vars in every qual
         // and splice the offset sub-jointree in place of the RangeTblRef.
@@ -2799,6 +2801,37 @@ fn replace_opt<'mcx>(
         None => Ok(None),
         Some(n) => Ok(Some(replace_var_expr(mcx, n, varno, tlist, lateral, ph)?.unwrap_or(n))),
     }
+}
+
+// perform_pullup_replace_vars (prepjointree.c:2449): onConflictSet/Where
+// can name the pulled-up rel. arbiterElems/Where and exclRelTlist cannot.
+fn replace_on_conflict_set_where<'mcx>(
+    mcx: Mcx<'mcx>,
+    parse: &mut Query<'mcx>,
+    varno: i32,
+    tlist: &NodeList<'mcx>,
+    lateral: bool,
+    ph: Option<&PullupPhCtx<'_, 'mcx>>,
+) -> PgResult<()> {
+    let Some(oc_node) = parse.onConflict else {
+        return Ok(());
+    };
+    let oc = oc_node.as_on_conflict_expr().expect("OnConflictExpr");
+    let on_conflict_set = clauses::walker::mutate_list(mcx, &oc.onConflictSet, &mut |n| {
+        replace_var_expr(mcx, n, varno, tlist, lateral, ph)
+    })?;
+    let on_conflict_where = replace_opt(mcx, oc.onConflictWhere, varno, tlist, lateral, ph)?;
+    // SAFETY: pre-seal tree owned by this planner invocation.
+    unsafe {
+        oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+            if let Some(l) = on_conflict_set {
+                o.onConflictSet = l;
+            }
+            o.onConflictWhere = on_conflict_where;
+        })
+    }
+    .expect("OnConflictExpr");
+    Ok(())
 }
 
 fn get_tle_by_resno<'a, 'mcx>(

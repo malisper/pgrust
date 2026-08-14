@@ -7780,6 +7780,87 @@ fn on_conflict_vars_are_replaced_by_generation_expressions() {
     assert_eq!(oc.exclRelIndex, 2);
 }
 
+// perform_pullup_replace_vars (prepjointree.c:2449) walks onConflictSet/Where.
+#[test]
+fn pullup_replaces_on_conflict_set_and_where() {
+    use types_nodes::parsenodes::RangeTblEntry;
+    use types_nodes::primnodes::{OnConflictAction, OnConflictExpr};
+
+    let ctx = MemoryContext::new("pullup-onconflict");
+    let mcx = ctx.mcx();
+    let c42 = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(42), false, true).unwrap();
+    let sub = Query {
+        commandType: CmdType::CMD_SELECT,
+        jointree: Some(alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap()),
+        targetList: NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, c42, 1, Some("x"), false).unwrap(),
+        )
+        .unwrap(),
+        ..Query::default()
+    };
+    let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+    rte.rtekind = RTEKind::RTE_SUBQUERY;
+    rte.subquery = Some(alloc_leak_in(mcx, sub).unwrap());
+    rte.inFromCl = true;
+    let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+    let parent_var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let oc = OnConflictExpr {
+        action: OnConflictAction::ONCONFLICT_UPDATE,
+        arbiterElems: NodeList::nil(),
+        arbiterWhere: None,
+        constraint: 0,
+        onConflictSet: NodeList::make1(
+            mcx,
+            Node::mk_target_entry(
+                mcx,
+                Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap(),
+                1,
+                None,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+        onConflictWhere: Some(Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap()),
+        exclRelIndex: 0,
+        exclRelTlist: NodeList::nil(),
+    };
+    let mut parse = Query {
+        commandType: CmdType::CMD_INSERT,
+        jointree: Some(
+            alloc_leak_in(
+                mcx,
+                FromExpr {
+                    fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+                    quals: None,
+                },
+            )
+            .unwrap(),
+        ),
+        rtable,
+        targetList: NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, parent_var, 1, Some("x"), false).unwrap(),
+        )
+        .unwrap(),
+        onConflict: Some(Node::mk(mcx, oc).unwrap()),
+        ..Query::default()
+    };
+    let mut run = crate::run::PlannerRun::new(mcx);
+    crate::prepjointree::pull_up_subqueries(&mut run, &mut parse).unwrap();
+    let oc = parse.onConflict.unwrap().as_on_conflict_expr().unwrap();
+    let is_c42 = |n: Node<'_>| n.as_const().is_some_and(|c| c.constvalue.as_i32() == 42);
+    assert!(
+        is_c42(oc.onConflictSet.nth(0).as_target_entry().unwrap().expr),
+        "onConflictSet still names the pulled-up subquery RTE"
+    );
+    assert!(
+        is_c42(oc.onConflictWhere.unwrap()),
+        "onConflictWhere still names the pulled-up subquery RTE"
+    );
+}
+
 // reparameterize_path's per-pathtype rebuild arms (pathnode.c:4242). Each
 // kind C rebuilds must produce a fresh, equivalently-costed path; the kinds
 // C has no arm for keep returning None (C's default `return NULL`).
