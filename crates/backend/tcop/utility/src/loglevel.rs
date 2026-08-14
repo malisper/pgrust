@@ -7,7 +7,7 @@ use types_nodes::plannodes::PlannedStmt;
 use types_nodes::rawnodes::{RawStmt, SelectStmt};
 use types_nodes::NodeTag;
 
-use crate::{loc, payload_gap};
+use crate::loc;
 
 pub fn GetCommandLogLevel(parsetree: Node<'_>) -> i32 {
     use NodeTag::*;
@@ -77,8 +77,13 @@ pub fn GetCommandLogLevel(parsetree: Node<'_>) -> i32 {
             LOGSTMT_ALL
         }
 
-        // C splits on stmt->is_from; the CopyStmt payload lands with copy.c.
-        T_CopyStmt => payload_gap("GetCommandLogLevel", "CopyStmt"),
+        T_CopyStmt => {
+            if parsetree.as_copy_stmt().unwrap().is_from {
+                LOGSTMT_MOD
+            } else {
+                LOGSTMT_ALL
+            }
+        }
 
         T_CreateSchemaStmt
         | T_CreateStmt

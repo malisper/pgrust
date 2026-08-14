@@ -148,6 +148,72 @@ fn command_log_levels() {
     )
     .unwrap();
     assert_eq!(GetCommandLogLevel(util_query), LOGSTMT_ALL);
+
+    let copy_from = Node::mk(
+        mcx,
+        types_nodes::parsenodes::CopyStmt { is_from: true, ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(GetCommandLogLevel(copy_from), LOGSTMT_MOD);
+    let copy_to = Node::mk(
+        mcx,
+        types_nodes::parsenodes::CopyStmt { is_from: false, ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(GetCommandLogLevel(copy_to), LOGSTMT_ALL);
+}
+
+#[test]
+fn create_command_tag_select_for_update() {
+    use types_nodes::nodes_enums::LockClauseStrength::*;
+    use types_nodes::parsenodes::RowMarkClause;
+    use types_nodes::plannodes::PlanRowMark;
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let rc = Node::mk(
+        mcx,
+        RowMarkClause {
+            rti: 1,
+            strength: LCS_FORUPDATE,
+            waitPolicy: types_nodes::nodes_enums::LockWaitPolicy::LockWaitBlock,
+            pushedDown: false,
+        },
+    )
+    .unwrap();
+    let query = Node::mk(
+        mcx,
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            rowMarks: types_nodes::list::NodeList::make1(mcx, rc).unwrap(),
+            ..Query::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(CreateCommandTag(query), CMDTAG_SELECT_FOR_UPDATE);
+
+    let pr = Node::mk(
+        mcx,
+        PlanRowMark {
+            rti: 1,
+            prti: 1,
+            rowmarkId: 1,
+            strength: LCS_FORSHARE,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let pstmt = Node::mk(
+        mcx,
+        PlannedStmt {
+            commandType: CmdType::CMD_SELECT,
+            rowMarks: types_nodes::list::NodeList::make1(mcx, pr).unwrap(),
+            ..PlannedStmt::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(CreateCommandTag(pstmt), CMDTAG_SELECT_FOR_SHARE);
 }
 
 #[test]

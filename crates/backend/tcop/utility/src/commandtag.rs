@@ -134,13 +134,7 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             };
             alter_object_type_command_tag(objtype)
         }
-        // AlterObjectTypeCommandTag over stmt->objectType.
-        T_AlterObjectDependsStmt => {
-            let stmt = parsetree
-                .as_variant::<types_nodes::parsenodes::AlterObjectDependsStmt>()
-                .expect("AlterObjectDependsStmt");
-            alter_object_type_command_tag(stmt.objectType)
-        }
+        T_AlterObjectDependsStmt => payload_gap("CreateCommandTag", "AlterObjectDependsStmt"),
         T_AlterObjectSchemaStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>()
@@ -203,7 +197,7 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 OBJECT_TSCONFIGURATION => CMDTAG_CREATE_TEXT_SEARCH_CONFIGURATION,
                 OBJECT_COLLATION => CMDTAG_CREATE_COLLATION,
                 OBJECT_ACCESS_METHOD => CMDTAG_CREATE_ACCESS_METHOD,
-                _ => payload_gap("CreateCommandTag", "DefineStmt"),
+                _ => CMDTAG_UNKNOWN,
             }
         }
         T_CompositeTypeStmt => CMDTAG_CREATE_TYPE,
@@ -327,12 +321,22 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
 
         T_PlannedStmt => {
             let stmt: &PlannedStmt<'_> = parsetree.as_variant().unwrap();
-            tag_for_command_type(stmt.commandType, stmt.rowMarks.len() != 0, stmt.utilityStmt)
+            tag_for_command_type(
+                stmt.commandType,
+                stmt.rowMarks.iter().next(),
+                stmt.utilityStmt,
+                CMDTAG_SELECT,
+            )
         }
 
         T_Query => {
             let stmt: &Query<'_> = parsetree.as_variant().unwrap();
-            tag_for_command_type(stmt.commandType, stmt.rowMarks.len() != 0, stmt.utilityStmt)
+            tag_for_command_type(
+                stmt.commandType,
+                stmt.rowMarks.iter().next(),
+                stmt.utilityStmt,
+                CMDTAG_UNKNOWN,
+            )
         }
 
         other => {
@@ -344,22 +348,30 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
     }
 }
 
-// The shared CMD_* body of the T_PlannedStmt / T_Query arms. The rowMarks
-// refinement (SELECT FOR ... variants) needs RowMarkClause/PlanRowMark, which
-// the FOR UPDATE grammar lane owns.
 fn tag_for_command_type(
     command_type: CmdType,
-    has_row_marks: bool,
+    first_row_mark: Option<Node<'_>>,
     utility_stmt: Option<Node<'_>>,
+    row_mark_unknown: CommandTag,
 ) -> CommandTag {
     match command_type {
-        CmdType::CMD_SELECT => {
-            if has_row_marks {
-                payload_gap("CreateCommandTag", "RowMarkClause/PlanRowMark")
-            } else {
-                CMDTAG_SELECT
+        CmdType::CMD_SELECT => match first_row_mark {
+            None => CMDTAG_SELECT,
+            Some(n) => {
+                use types_nodes::nodes_enums::LockClauseStrength::*;
+                let strength = n
+                    .as_plan_row_mark()
+                    .map(|r| r.strength)
+                    .or_else(|| n.as_row_mark_clause().map(|r| r.strength));
+                match strength {
+                    Some(LCS_FORKEYSHARE) => CMDTAG_SELECT_FOR_KEY_SHARE,
+                    Some(LCS_FORSHARE) => CMDTAG_SELECT_FOR_SHARE,
+                    Some(LCS_FORNOKEYUPDATE) => CMDTAG_SELECT_FOR_NO_KEY_UPDATE,
+                    Some(LCS_FORUPDATE) => CMDTAG_SELECT_FOR_UPDATE,
+                    _ => row_mark_unknown,
+                }
             }
-        }
+        },
         CmdType::CMD_UPDATE => CMDTAG_UPDATE,
         CmdType::CMD_INSERT => CMDTAG_INSERT,
         CmdType::CMD_DELETE => CMDTAG_DELETE,
