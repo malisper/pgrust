@@ -9,7 +9,7 @@ use types_error::{PgError, PgResult};
 use types_nodes::list::NodeList;
 use types_nodes::node_tree::Node;
 use types_nodes::nodes_enums::CmdType;
-use types_nodes::parsenodes::{Query, QuerySource, RTEKind, RangeTblEntry};
+use types_nodes::parsenodes::{Query, QuerySource, RTEKind, RangeTblEntry, RangeTblFunction, WindowClause};
 use types_nodes::primnodes::{CoercionForm, FuncExpr, Var};
 use types_rel::{
     AccessShareLock, FormData_pg_class, LockInfoData, LockRelId, NoLock, Relation, RelationData,
@@ -521,6 +521,62 @@ fn view_query<'mcx>(mcx: Mcx<'mcx>, view_oid: Oid) -> Query<'mcx> {
         .unwrap(),
     ));
     query
+}
+
+fn view_sublink<'mcx>(mcx: Mcx<'mcx>, view_oid: Oid) -> types_nodes::primnodes::SubLink<'mcx> {
+    types_nodes::primnodes::SubLink {
+        subLinkType: types_nodes::primnodes::SubLinkType::EXPR_SUBLINK,
+        subLinkId: 0,
+        testexpr: None,
+        operName: NodeList::nil(),
+        subselect: Node::mk(mcx, view_query(mcx, view_oid)).unwrap(),
+        location: -1,
+    }
+}
+
+fn assert_view_sublink_expanded(sublink: Node<'_>) {
+    let sl = sublink.as_sub_link().expect("SubLink");
+    let subq = sl.subselect.as_query().expect("sublink Query");
+    let rte = subq.rtable.nth(0).as_range_tbl_entry().expect("view RTE");
+    assert_eq!(rte.rtekind, RTEKind::RTE_SUBQUERY);
+    assert_eq!(rte.relid, VIEW);
+    assert!(rte.subquery.is_some());
+}
+
+#[test]
+fn view_in_window_frame_offset_sublink_is_expanded() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut query = select1(mcx);
+    let mut wc = Node::build::<WindowClause>(mcx).unwrap();
+    wc.startOffset = Some(Node::mk(mcx, view_sublink(mcx, VIEW)).unwrap());
+    query.windowClause = NodeList::make1(mcx, wc.seal()).unwrap();
+    query.hasSubLinks = true;
+    let results = QueryRewrite(mcx, query).unwrap();
+    assert_eq!(results.len(), 1);
+    let wc = results[0].windowClause.nth(0).as_window_clause().unwrap();
+    assert_view_sublink_expanded(wc.startOffset.expect("startOffset"));
+}
+
+#[test]
+fn view_in_function_rte_sublink_is_expanded() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut query = select1(mcx);
+    let mut rtf = Node::build::<RangeTblFunction>(mcx).unwrap();
+    rtf.funcexpr = Some(Node::mk(mcx, view_sublink(mcx, VIEW)).unwrap());
+    let mut func_rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+    func_rte.rtekind = RTEKind::RTE_FUNCTION;
+    func_rte.functions = NodeList::make1(mcx, rtf.seal()).unwrap();
+    query.rtable = NodeList::make1(mcx, func_rte.seal()).unwrap();
+    query.hasSubLinks = true;
+    let results = QueryRewrite(mcx, query).unwrap();
+    assert_eq!(results.len(), 1);
+    let func_rte = results[0].rtable.nth(0).as_range_tbl_entry().unwrap();
+    let rtf = func_rte.functions.nth(0).as_range_tbl_function().unwrap();
+    assert_view_sublink_expanded(rtf.funcexpr.expect("funcexpr"));
 }
 
 #[test]

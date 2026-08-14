@@ -1366,10 +1366,8 @@ fn fireRIRrules<'mcx>(
         table::table_close(rel, NoLock)?;
     }
 
-    // fireRIRonSubLink (rewriteHandler.c): recurse into sublink sub-selects.
-    // query_tree_walker needs &'mcx Query, so the expression-bearing fields
-    // are walked directly (rtable/CTE subqueries were handled above, as C's
-    // QTW_IGNORE_RC_SUBQUERIES arranges).
+    // fireRIRonSubLink (rewriteHandler.c). rtable/CTE subqueries were
+    // recursed above (C passes QTW_IGNORE_RC_SUBQUERIES for the same reason).
     if parsetree.hasSubLinks {
         struct W<'a, 'mcx> {
             mcx: Mcx<'mcx>,
@@ -1387,89 +1385,12 @@ fn fireRIRrules<'mcx>(
                 nodes_core::expression_tree_walker(node, self)
             }
         }
-        fn walk_jt<'mcx>(node: Node<'mcx>, w: &mut W<'_, 'mcx>) -> PgResult<()> {
-            match node.node_tag() {
-                NodeTag::T_RangeTblRef => {}
-                NodeTag::T_FromExpr => {
-                    let f = node.as_from_expr().expect("FromExpr");
-                    for child in &f.fromlist {
-                        walk_jt(child, w)?;
-                    }
-                    if let Some(q) = f.quals {
-                        w.visit(q)?;
-                    }
-                }
-                NodeTag::T_JoinExpr => {
-                    let j = node.as_join_expr().expect("JoinExpr");
-                    walk_jt(j.larg, w)?;
-                    walk_jt(j.rarg, w)?;
-                    if let Some(q) = j.quals {
-                        w.visit(q)?;
-                    }
-                }
-                other => panic!("fireRIRonSubLink (rewriteHandler.c): {other:?} jointree arm"),
-            }
-            Ok(())
-        }
-        use nodes_core::NodeWalker as _;
         let mut w = W { mcx, active_rirs, has_row_security: false };
-        for te in &parsetree.targetList {
-            w.visit(te)?;
-        }
-        for wco_node in &parsetree.withCheckOptions {
-            let wco = wco_node.as_with_check_option().expect("withCheckOptions cell");
-            if let Some(q) = wco.qual {
-                w.visit(q)?;
-            }
-        }
-        if let Some(oc_node) = parsetree.onConflict {
-            let oc = oc_node.as_on_conflict_expr().expect("OnConflictExpr");
-            for n in &oc.arbiterElems {
-                w.visit(n)?;
-            }
-            if let Some(n) = oc.arbiterWhere {
-                w.visit(n)?;
-            }
-            for n in &oc.onConflictSet {
-                w.visit(n)?;
-            }
-            if let Some(n) = oc.onConflictWhere {
-                w.visit(n)?;
-            }
-        }
-        if let Some(n) = parsetree.mergeJoinCondition {
-            w.visit(n)?;
-        }
-        for action_node in &parsetree.mergeActionList {
-            let action =
-                action_node.as_merge_action().expect("mergeActionList cell is a MergeAction");
-            if let Some(q) = action.qual {
-                w.visit(q)?;
-            }
-            for te in &action.targetList {
-                w.visit(te)?;
-            }
-        }
-        for te in &parsetree.returningList {
-            w.visit(te)?;
-        }
-        if let Some(jt) = parsetree.jointree {
-            for item in &jt.fromlist {
-                walk_jt(item, &mut w)?;
-            }
-            if let Some(q) = jt.quals {
-                w.visit(q)?;
-            }
-        }
-        if let Some(h) = parsetree.havingQual {
-            w.visit(h)?;
-        }
-        if let Some(n) = parsetree.limitOffset {
-            w.visit(n)?;
-        }
-        if let Some(n) = parsetree.limitCount {
-            w.visit(n)?;
-        }
+        nodes_core::query_tree_walker(
+            parsetree,
+            &mut w,
+            nodes_core::QTW_IGNORE_RC_SUBQUERIES,
+        )?;
         out.has_row_security |= w.has_row_security;
     }
 
