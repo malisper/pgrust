@@ -130,16 +130,22 @@ pub(crate) fn read_oidvector_attr<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<Pg
     Ok(argtypes)
 }
 
+// IsPolymorphicType (pg_type.h): IsPolymorphicTypeFamily1 ∪ Family2. This
+// deliberately EXCLUDES ANYOID ("any"): "any" is a pseudo-type but not a
+// polymorphic one, so fmgr_sql_validator's pseudo-type argument/return checks
+// must reject it (42P13 "SQL functions cannot ...") rather than wave it
+// through as polymorphic. Including ANYOID here let CREATE FUNCTION
+// f(VARIADIC "any") LANGUAGE sql be accepted, then panic at call time on the
+// fmgr_sql argument-count assertion (SQB-F2 / FTSRANK-X1).
 pub(crate) fn is_polymorphic(typid: Oid) -> bool {
     use types_core::catalog::{
         ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID,
         ANYCOMPATIBLENONARRAYOID, ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID,
-        ANYENUMOID, ANYMULTIRANGEOID, ANYNONARRAYOID, ANYOID, ANYRANGEOID,
+        ANYENUMOID, ANYMULTIRANGEOID, ANYNONARRAYOID, ANYRANGEOID,
     };
     matches!(
         typid,
-        ANYOID
-            | ANYELEMENTOID
+        ANYELEMENTOID
             | ANYARRAYOID
             | ANYNONARRAYOID
             | ANYENUMOID
@@ -523,7 +529,23 @@ pub fn fmgr_sql(
             }
             s.entry = Some(e.clone());
             e.owned.with(|es| -> PgResult<()> {
-                assert_eq!(nargs, es.argtypes.len(), "fmgr_sql: argument count mismatch");
+                // Defense-in-depth: with the definition-time pseudo-type check
+                // in fmgr_sql_validator (see is_polymorphic above), a SQL
+                // function can never carry a VARIADIC "any" argument, so the
+                // declared arg count always matches the call's nargs. Should a
+                // skewed catalog (e.g. binary upgrade, direct catalog edit)
+                // still reach here, raise a catchable error rather than panic
+                // in a SQL-reachable code path (SQB-F2 / FTSRANK-X1).
+                if nargs != es.argtypes.len() {
+                    return Err(efn(
+                        types_error::ERRCODE_INTERNAL_ERROR,
+                        format!(
+                            "fmgr_sql: argument count mismatch ({} passed, {} declared)",
+                            nargs,
+                            es.argtypes.len()
+                        ),
+                    ));
+                }
                 if s.params_buf.len() != nargs {
                     if !s.params_h.is_null() {
                         types_portal::params::free(s.params_h);
@@ -1367,4 +1389,49 @@ fn fc_fmgr_sql_validator(
         r.map_err(|e| validator_error_context(e, proname.as_str(), prosrc.as_str()))?;
     }
     Ok(Datum::null())
+}
+
+#[cfg(test)]
+mod is_polymorphic_tests {
+    use super::is_polymorphic;
+    use types_core::catalog::{
+        ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID,
+        ANYCOMPATIBLENONARRAYOID, ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID,
+        ANYENUMOID, ANYMULTIRANGEOID, ANYNONARRAYOID, ANYOID, ANYRANGEOID, INT4OID,
+    };
+
+    // Pinning regression for SQB-F2 / FTSRANK-X1. `is_polymorphic` mirrors C's
+    // IsPolymorphicType, which excludes ANYOID ("any"). When ANYOID was wrongly
+    // treated as polymorphic, fmgr_sql_validator's pseudo-type argument check
+    // was skipped, so `CREATE FUNCTION f(VARIADIC v "any") LANGUAGE sql` was
+    // accepted (C rejects it 42P13 "SQL functions cannot have arguments of type
+    // any") and then panicked at call time on the fmgr_sql argument-count
+    // assertion. These are plain `assert!`s (not debug_assert!), so the test is
+    // release-effective and fails against the pre-fix behavior.
+    #[test]
+    fn any_is_not_polymorphic() {
+        assert!(!is_polymorphic(ANYOID), "\"any\" (ANYOID) must NOT be polymorphic (C parity)");
+    }
+
+    #[test]
+    fn polymorphic_family_is_recognized() {
+        // Positive control: every member of IsPolymorphicTypeFamily1/2 is
+        // polymorphic, and a concrete type is not.
+        for t in [
+            ANYELEMENTOID,
+            ANYARRAYOID,
+            ANYNONARRAYOID,
+            ANYENUMOID,
+            ANYRANGEOID,
+            ANYMULTIRANGEOID,
+            ANYCOMPATIBLEOID,
+            ANYCOMPATIBLEARRAYOID,
+            ANYCOMPATIBLENONARRAYOID,
+            ANYCOMPATIBLERANGEOID,
+            ANYCOMPATIBLEMULTIRANGEOID,
+        ] {
+            assert!(is_polymorphic(t), "type {t} should be polymorphic");
+        }
+        assert!(!is_polymorphic(INT4OID), "int4 is a concrete type, not polymorphic");
+    }
 }
