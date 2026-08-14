@@ -1280,6 +1280,73 @@ fn dml_delete_self_modified_fails_without_wal() {
 }
 
 #[test]
+fn dml_delete_invisible_errmsg_is_c_exact() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(INVISIBLE_XMIN, 0, 1))], false)],
+    );
+    let rel = test_relation(mcx, oid);
+    let mut tmfd = TM_FailureData::default();
+    let err = dml::heap_delete(
+        &rel,
+        &ItemPointerData::new(0, 1),
+        7,
+        None,
+        true,
+        &mut tmfd,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(err.message(), "attempted to delete invisible tuple");
+    assert_eq!(
+        err.sqlstate(),
+        ::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+    );
+    quiesced();
+}
+
+#[test]
+fn dml_update_invisible_errmsg_is_c_exact() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(INVISIBLE_XMIN, 0, 1))], false)],
+    );
+    let rel = test_relation(mcx, oid);
+    let mut newtup = make_writable_tuple(&tuple_image(0, 0, 2));
+    let mut tmfd = TM_FailureData::default();
+    let mut lockmode = LockTupleMode::LockTupleNoKeyExclusive;
+    let mut update_indexes = TU_UpdateIndexes::TU_None;
+    let err = dml::heap_update(
+        &rel,
+        &ItemPointerData::new(0, 1),
+        &mut newtup,
+        7,
+        None,
+        true,
+        &mut tmfd,
+        &mut lockmode,
+        &mut update_indexes,
+    )
+    .unwrap_err();
+    assert_eq!(err.message(), "attempted to update invisible tuple");
+    assert_eq!(
+        err.sqlstate(),
+        ::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+    );
+    quiesced();
+}
+
+#[test]
 fn dml_hot_update_same_page() {
     install_dml_seams();
     let _serial = serial();

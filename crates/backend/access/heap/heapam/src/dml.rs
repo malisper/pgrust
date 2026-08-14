@@ -1426,7 +1426,7 @@ pub fn heap_delete(
         if result == TM_Result::TM_Invisible {
             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
             pin.release();
-            return Err(invisible_tuple("update"));
+            return Err(invisible_tuple("delete"));
         } else if result == TM_Result::TM_BeingModified && wait {
             let xwait = tp.t_data().xmax_raw();
             let infomask = tp.t_data().t_infomask;
@@ -2551,32 +2551,9 @@ pub fn heap_update(
         debug_assert!(result != TM_Result::TM_BeingModified || wait);
 
         if result == TM_Result::TM_Invisible {
-            // DEBUG(merge-lane triage): tuple forensics; revert to
-            // invisible_tuple("update") before delivery.
-            let td = oldtup.t_data();
-            let dbg_xmin = td.xmin_raw();
-            let dbg_is_cur = xact_seams::transaction_id_is_current_transaction_id::call(dbg_xmin);
-            let dbg_committed =
-                transam_seams::transaction_id_did_commit::call(dbg_xmin).unwrap_or(false);
-            let dbg = std::format!(
-                "attempted to update invisible tuple [rel={} tid=({},{}) xmin={} xmax={} \
-                 infomask={:#x} cid={} myxid={} xmin_is_current={} xmin_did_commit={}]",
-                relation.rd_id,
-                ItemPointerGetBlockNumber(otid),
-                ItemPointerGetOffsetNumber(otid),
-                dbg_xmin,
-                td.xmax_raw(),
-                td.t_infomask,
-                cid,
-                xid,
-                dbg_is_cur,
-                dbg_committed,
-            );
             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
             pin.release();
-            return Err(Box::new(
-                PgError::error(dbg).with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-            ));
+            return Err(invisible_tuple("update"));
         } else if result == TM_Result::TM_BeingModified && wait {
             let xwait = oldtup.t_data().xmax_raw();
             let infomask = oldtup.t_data().t_infomask;
