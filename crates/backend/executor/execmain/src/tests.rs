@@ -6311,6 +6311,57 @@ mod express_ab {
         crate::lanev2::express_set_for_tests(crate::lanev2::EXPRESS_OFF);
         scanfix::quiesced();
     }
+
+    /// C ExecIndexMarkPos (nodeIndexscan.c:855-861): under EPQ, a
+    /// `relsubs_rowmark` for the scan's rel means the index is never
+    /// opened — mark/restore are no-ops. The hoist only checked
+    /// `relsubs_slot`, so mergejoin mark during EPQ panicked
+    /// `mark before first fetch`.
+    #[test]
+    fn exec_index_mark_pos_epq_rowmark_is_noop() {
+        install_seams();
+        scanfix::install();
+        install_express_seams();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        let relid = 73000 + NEXT_EXPRESS_OID.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        let index_oid = relid + 1;
+        scanfix::register_indexed_table_2col(relid, index_oid, KV);
+        let pstmt = mk_point_pstmt(mcx, relid, index_oid, PointKey::ConstEq(20));
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+
+            let mut subs = None;
+            ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
+            {
+                let s = subs.as_mut().unwrap();
+                s.relsubs_rowmark[0] = Some(::executils::EpqRowMarkFetch::Reference { ctid_attno: 1 });
+            }
+            estate.es_epq = subs.take();
+            estate.es_epq_active = true;
+
+            crate::execami::exec_mark_pos(ps, estate)
+                .expect("C skips index_markpos when relsubs_rowmark is set");
+            crate::execami::exec_restr_pos(ps, estate)
+                .expect("C skips index_restrpos when relsubs_rowmark is set");
+
+            estate.es_epq_active = false;
+            let _ = estate.es_epq.take();
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        scanfix::quiesced();
+    }
 }
 
 // =============================================================================

@@ -828,9 +828,9 @@ fn accumulate_outer_chg<'mcx>(
 /// `ExecMarkPos` (execAmi.c): remember `node`'s current scan position. Only the
 /// mark-capable ported nodes have arms; the planner routes an unmarkable merge
 /// inner through a Sort/Material, so anything else is a loud panic.
-// ExecIndexMarkPos/RestrPos EPQ arm: with a test tuple for the scan's rel the
-// index is never touched, so mark/restore are no-ops (relsubs_done must
-// already be set — no caller marks before the first fetch).
+// ExecIndexMarkPos/RestrPos EPQ arm: with a test tuple or aux rowmark for
+// the scan's rel the index is never touched, so mark/restore are no-ops
+// (relsubs_done must already be set — no caller marks before the first fetch).
 fn epq_markrestore_noop(estate: &EStateData<'_>, scanrelid: u32, what: &str) -> bool {
     if !estate.es_epq_active {
         return false;
@@ -841,7 +841,7 @@ fn epq_markrestore_noop(estate: &EStateData<'_>, scanrelid: u32, what: &str) -> 
         .as_ref()
         .expect("EPQ active with installed relsubs");
     let idx = (scanrelid - 1) as usize;
-    if subs.relsubs_slot[idx].is_some() {
+    if subs.relsubs_slot[idx].is_some() || subs.relsubs_rowmark[idx].is_some() {
         assert!(
             subs.relsubs_done[idx],
             "unexpected {what} call in EPQ recheck"
