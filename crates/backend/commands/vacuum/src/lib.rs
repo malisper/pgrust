@@ -730,8 +730,8 @@ fn vacuum_rel<'mcx>(
         return Ok(true);
     }
 
-    // C divergence (recorded): LockRelationIdForSession is skipped — no toast
-    // recursion happens (loud below), so no cross-transaction lock is needed.
+    // Toast applies its own reloptions; do not inherit the parent's scribbles.
+    let mut toast_params = *params;
 
     let mut params = *params;
     let std_opts = rel.rd_options.as_ref().and_then(|o| o.std()).copied();
@@ -794,7 +794,6 @@ fn vacuum_rel<'mcx>(
     xact::CommitTransactionCommand()?;
 
     if toast_relid != InvalidOid {
-        let mut toast_params = params;
         toast_params.options |= VACOPT_PROCESS_MAIN;
         toast_params.toast_parent = relid;
         vacuum_rel(mcx, toast_relid, None, &toast_params, bstrategy)?;
