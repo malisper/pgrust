@@ -151,6 +151,50 @@ fn ungrouped_column_is_42803_with_column_name() {
 }
 
 #[test]
+fn ungrouped_wholerow_is_42803() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs.set(true);
+
+    let var = Node::mk_var(mcx, 1, 0, INT4OID, -1, InvalidOid, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("t"), false).unwrap();
+    let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
+
+    let err = parseCheckAggregates(mcx, &mut pstate, &mut qry).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
+    assert!(
+        err.message().contains(
+            "column \"t.*\" must appear in the GROUP BY clause or be used in an aggregate function"
+        ),
+        "{}",
+        err.message()
+    );
+}
+
+#[test]
+fn ungrouped_ctid_is_42803() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs.set(true);
+
+    let var = Node::mk_var(mcx, 1, -1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("ctid"), false).unwrap();
+    let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
+
+    let err = parseCheckAggregates(mcx, &mut pstate, &mut qry).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
+    assert!(
+        err.message().contains(
+            "column \"t.ctid\" must appear in the GROUP BY clause or be used in an aggregate function"
+        ),
+        "{}",
+        err.message()
+    );
+}
+
+#[test]
 fn var_inside_aggregate_passes_check() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();

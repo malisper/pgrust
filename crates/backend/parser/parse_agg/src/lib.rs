@@ -2055,17 +2055,35 @@ fn ungrouped_var_error(
     let relname = eref
         .aliasname
         .unwrap_or_else(|| panic!("check_ungrouped_columns (parse_agg.c): eref without aliasname"));
-    let attname = eref
-        .colnames
-        .nth(var.varattno as usize - 1)
-        .as_string()
-        .unwrap_or_else(|| {
-            panic!(
-                "check_ungrouped_columns (parse_agg.c): no eref colname for attno {}",
+    // C get_rte_attribute_name: InvalidAttrNumber → "*"; system attnums are
+    // the fixed SysAtt names (ctid/xmin/…); user columns use eref.colnames.
+    let attname = if var.varattno == 0 {
+        "*"
+    } else if var.varattno < 0 {
+        match var.varattno {
+            -1 => "ctid",
+            -2 => "xmin",
+            -3 => "cmin",
+            -4 => "xmax",
+            -5 => "cmax",
+            -6 => "tableoid",
+            _ => panic!(
+                "check_ungrouped_columns (parse_agg.c): invalid system attno {}",
                 var.varattno
-            )
-        })
-        .sval;
+            ),
+        }
+    } else {
+        eref.colnames
+            .nth(var.varattno as usize - 1)
+            .as_string()
+            .unwrap_or_else(|| {
+                panic!(
+                    "check_ungrouped_columns (parse_agg.c): no eref colname for attno {}",
+                    var.varattno
+                )
+            })
+            .sval
+    };
     let encoding = mbutils::GetDatabaseEncoding();
     let mut b = ereport(ERROR).errcode(ERRCODE_GROUPING_ERROR);
     if sublevels_up == 0 {
