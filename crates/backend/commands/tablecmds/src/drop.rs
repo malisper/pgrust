@@ -2,13 +2,15 @@
 // relation removeTypes.
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
-use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_TABLE, ERROR, NOTICE};
+use types_error::{
+    PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_TABLE, ERROR, NOTICE,
+};
 use types_nodes::parsenodes::{DropStmt, ObjectType};
 use rel_vocab::RangeVar;
 use types_nodes::NodeList;
 use types_rel::{AccessExclusiveLock, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
-fn makeRangeVarFromNameList<'mcx>(names: &NodeList<'mcx>) -> RangeVar<'mcx> {
+fn makeRangeVarFromNameList<'mcx>(names: &NodeList<'mcx>) -> PgResult<RangeVar<'mcx>> {
     let parts: Vec<&'mcx str> = names
         .iter()
         .map(|n| {
@@ -36,9 +38,20 @@ fn makeRangeVarFromNameList<'mcx>(names: &NodeList<'mcx>) -> RangeVar<'mcx> {
             rv.schemaname = Some(s);
             rv.relname = r;
         }
-        _ => panic!("improper relation name (too many dotted names)"),
+        _ => {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "improper relation name (too many dotted names): {}",
+                        parts.join(".")
+                    ),
+                )
+                .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+            ));
+        }
     }
-    rv
+    Ok(rv)
 }
 
 // dropmsgstringarray (tablecmds.c): (kind, nonexistent_code, noun, drop hint).
@@ -204,7 +217,7 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
 
     for cell in drop.objects.iter() {
         let names = cell.as_list().expect("DROP object is a name list");
-        let rel = makeRangeVarFromNameList(&names);
+        let rel = makeRangeVarFromNameList(&names)?;
 
         inval::local::AcceptInvalidationMessages()?;
 
@@ -399,4 +412,42 @@ fn RangeVarCallbackForDropRelation<'mcx>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod rangevar_from_name_list_tests {
+    use super::*;
+    use types_nodes::Node;
+
+    fn name_list<'mcx>(mcx: Mcx<'mcx>, parts: &[&'mcx str]) -> NodeList<'mcx> {
+        let mut list = NodeList::nil();
+        for p in parts {
+            list.lappend(mcx, Node::mk_string(mcx, p).unwrap()).unwrap();
+        }
+        list
+    }
+
+    #[test]
+    fn four_part_drop_name_is_syntax_error() {
+        let root = mcx::session_root("drop-dots");
+        let mcx = root.mcx();
+        let names = name_list(mcx, &["a", "b", "c", "d"]);
+        let e = makeRangeVarFromNameList(&names).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "improper relation name (too many dotted names): a.b.c.d"
+        );
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+    }
+
+    #[test]
+    fn three_part_drop_name_fills_catalog_schema_rel() {
+        let root = mcx::session_root("drop-three");
+        let mcx = root.mcx();
+        let names = name_list(mcx, &["cat", "sch", "rel"]);
+        let rv = makeRangeVarFromNameList(&names).unwrap();
+        assert_eq!(rv.catalogname, Some("cat"));
+        assert_eq!(rv.schemaname, Some("sch"));
+        assert_eq!(rv.relname, "rel");
+    }
 }
