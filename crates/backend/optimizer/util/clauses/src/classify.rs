@@ -466,10 +466,30 @@ struct ContainContextDependent {
 
 impl<'mcx> NodeWalker<'mcx> for ContainContextDependent {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-        // CaseExpr/ArrayCoerceExpr flag scoping lands with their vocab; the
-        // walker's deferred arm keeps those trees loud.
         if node.node_tag() == NodeTag::T_CaseTestExpr {
             return Ok(!self.casetestexpr_ok);
+        }
+        if let Some(ce) = node.as_case_expr() {
+            if ce.arg.is_some() {
+                let save = self.casetestexpr_ok;
+                self.casetestexpr_ok = true;
+                let res = expression_tree_walker(node, self);
+                self.casetestexpr_ok = save;
+                return res;
+            }
+        }
+        if let Some(ac) = node.as_array_coerce_expr() {
+            if self.visit(ac.arg)? {
+                return Ok(true);
+            }
+            let save = self.casetestexpr_ok;
+            self.casetestexpr_ok = true;
+            let res = match ac.elemexpr {
+                Some(e) => self.visit(e)?,
+                None => false,
+            };
+            self.casetestexpr_ok = save;
+            return Ok(res);
         }
         expression_tree_walker(node, self)
     }

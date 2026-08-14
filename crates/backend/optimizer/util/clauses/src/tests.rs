@@ -409,6 +409,65 @@ fn nonstrict_and_srf_rows() {
 }
 
 #[test]
+fn contain_context_dependent_scopes_casetestexpr() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let case_test = Node::mk(
+        mcx,
+        types_nodes::primnodes::CaseTestExpr { typeId: 23, typeMod: -1, collation: 0 },
+    )
+    .unwrap();
+    assert!(contain_context_dependent_node(case_test).unwrap());
+
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let ce = case_expr(
+        mcx,
+        Some(var),
+        &[case_when(mcx, case_test, int4_const(mcx, Some(1)))],
+        int4_const(mcx, Some(2)),
+    );
+    assert!(!contain_context_dependent_node(ce).unwrap());
+
+    let ce_noarg = case_expr(
+        mcx,
+        None,
+        &[case_when(mcx, case_test, int4_const(mcx, Some(1)))],
+        int4_const(mcx, Some(2)),
+    );
+    assert!(contain_context_dependent_node(ce_noarg).unwrap());
+
+    let ac_elem = Node::mk(
+        mcx,
+        types_nodes::ArrayCoerceExpr {
+            arg: var,
+            elemexpr: Some(case_test),
+            resulttype: 1007,
+            resulttypmod: -1,
+            resultcollid: 0,
+            coerceformat: types_nodes::CoercionForm::COERCE_EXPLICIT_CAST,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert!(!contain_context_dependent_node(ac_elem).unwrap());
+
+    let ac_arg = Node::mk(
+        mcx,
+        types_nodes::ArrayCoerceExpr {
+            arg: case_test,
+            elemexpr: Some(int4_const(mcx, Some(1))),
+            resulttype: 1007,
+            resulttypmod: -1,
+            resultcollid: 0,
+            coerceformat: types_nodes::CoercionForm::COERCE_EXPLICIT_CAST,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert!(contain_context_dependent_node(ac_arg).unwrap());
+}
+
+#[test]
 fn commute_op_expr_rewrites_clause_in_place() {
     let ctx = cx();
     let mcx = ctx.mcx();
