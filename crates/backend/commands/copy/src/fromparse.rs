@@ -43,6 +43,16 @@ fn bad_copy_format(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg.to_string()).with_sqlstate(ERRCODE_BAD_COPY_FILE_FORMAT))
 }
 
+// C's ReceiveCopyBinaryHeader ereports the header checks itself, so its
+// messages carry that routine in PG_DIAG_SOURCE_FUNCTION (wire 'R').
+fn bad_copy_header(msg: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(msg.to_string())
+            .with_sqlstate(ERRCODE_BAD_COPY_FILE_FORMAT)
+            .with_funcname("ReceiveCopyBinaryHeader"),
+    )
+}
+
 const PQ_SMALL_MESSAGE_LIMIT: i32 = 10000;
 const PQ_LARGE_MESSAGE_LIMIT: i32 = 0x3fffffff - 1;
 
@@ -273,7 +283,8 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                             PgError::error(format!(
                                 "unexpected message type 0x{other:02X} during COPY from stdin"
                             ))
-                            .with_sqlstate(ERRCODE_PROTOCOL_VIOLATION),
+                            .with_sqlstate(ERRCODE_PROTOCOL_VIOLATION)
+                            .with_funcname("CopyGetData"),
                         ))
                     }
                 };
@@ -296,7 +307,8 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                         let msg = String::from_utf8_lossy(&body[..nul]);
                         return Err(Box::new(
                             PgError::error(format!("COPY from stdin failed: {msg}"))
-                                .with_sqlstate(ERRCODE_QUERY_CANCELED),
+                                .with_sqlstate(ERRCODE_QUERY_CANCELED)
+                                .with_funcname("CopyGetData"),
                         ));
                     }
                     _ => continue, /* Flush/Sync: ignore */
@@ -1199,28 +1211,28 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         const BINARY_SIGNATURE: [u8; 11] = *b"PGCOPY\n\xff\r\n\0";
         let mut sig = [0u8; 11];
         if self.copy_read_binary_data(&mut sig)? != 11 || sig != BINARY_SIGNATURE {
-            return Err(bad_copy_format("COPY file signature not recognized"));
+            return Err(bad_copy_header("COPY file signature not recognized"));
         }
         let Some(mut flags) = self.copy_get_int32()? else {
-            return Err(bad_copy_format("invalid COPY file header (missing flags)"));
+            return Err(bad_copy_header("invalid COPY file header (missing flags)"));
         };
         if flags & (1 << 16) != 0 {
-            return Err(bad_copy_format("invalid COPY file header (WITH OIDS)"));
+            return Err(bad_copy_header("invalid COPY file header (WITH OIDS)"));
         }
         flags &= !(1 << 16);
         if flags >> 16 != 0 {
-            return Err(bad_copy_format(
+            return Err(bad_copy_header(
                 "unrecognized critical flags in COPY file header",
             ));
         }
         let ext_len = match self.copy_get_int32()? {
             Some(n) if n >= 0 => n,
-            _ => return Err(bad_copy_format("invalid COPY file header (missing length)")),
+            _ => return Err(bad_copy_header("invalid COPY file header (missing length)")),
         };
         let mut skip = [0u8; 1];
         for _ in 0..ext_len {
             if self.copy_read_binary_data(&mut skip)? != 1 {
-                return Err(bad_copy_format("invalid COPY file header (wrong length)"));
+                return Err(bad_copy_header("invalid COPY file header (wrong length)"));
             }
         }
         Ok(())

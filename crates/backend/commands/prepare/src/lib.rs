@@ -345,6 +345,7 @@ pub fn StorePreparedStatement(
             .errcode(ERRCODE_DUPLICATE_PSTATEMENT)
             .errmsg(format!("prepared statement \"{stmt_name}\" already exists"))
             .into_error()
+            .with_funcname("StorePreparedStatement")
             .into());
     }
     // SAFETY: dynahash returned a live PreparedStatementEntry-sized slot;
@@ -382,6 +383,7 @@ pub fn FetchPreparedStatement(
             .errcode(ERRCODE_UNDEFINED_PSTATEMENT)
             .errmsg(format!("prepared statement \"{stmt_name}\" does not exist"))
             .into_error()
+            .with_funcname("FetchPreparedStatement")
             .into());
     }
     Ok(entry)

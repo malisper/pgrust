@@ -320,3 +320,67 @@ fn getmsgend_rejects_leftover() {
     assert_eq!(err.message(), "invalid message format");
     assert_eq!(err.sqlstate(), ERRCODE_PROTOCOL_VIOLATION);
 }
+
+// --- PG_DIAG_SOURCE_FUNCTION (the wire 'R' field) --------------------------
+//
+// C reports every one of these through an ereport inside a named function, and
+// libpq clients read that name back as PG_DIAG_SOURCE_FUNCTION. The backend
+// wire differential (scripts/wire-differential.sh, probes mal-parse-huge-
+// nparams / mal-bind-bad-binary-param / mal-query-no-nul) caught these missing
+// against REL_18_3 and then caught a mislabel: C's pq_getmsgint has no bounds
+// check of its own -- it delegates to pq_copymsgbytes, so THAT is the routine
+// C names, for every integer width and for pq_getmsgint64.
+
+fn funcname_of(err: &types_error::PgError) -> Option<&str> {
+    err.location().and_then(|l| l.funcname.as_deref())
+}
+
+#[test]
+fn short_read_reports_c_routine_name() {
+    let f = setup();
+
+    let mut msg = recv(&f, b"");
+    let err = pq_getmsgbyte(&mut msg).unwrap_err();
+    assert_eq!(funcname_of(&err), Some("pq_getmsgbyte"));
+
+    for width in [1i32, 2, 4] {
+        let mut msg = recv(&f, b"");
+        let err = pq_getmsgint(&mut msg, width).unwrap_err();
+        assert_eq!(
+            funcname_of(&err),
+            Some("pq_copymsgbytes"),
+            "pq_getmsgint({width}) must name C's reporting routine"
+        );
+    }
+
+    let mut msg = recv(&f, b"\x01\x02");
+    let err = pq_getmsgint64(&mut msg).unwrap_err();
+    assert_eq!(funcname_of(&err), Some("pq_copymsgbytes"));
+
+    let mut msg = recv(&f, b"ab");
+    let err = pq_getmsgbytes(&mut msg, 8).unwrap_err();
+    assert_eq!(funcname_of(&err), Some("pq_getmsgbytes"));
+
+    let mut msg = recv(&f, b"ab");
+    let mut buf = [0u8; 8];
+    let err = pq_copymsgbytes(&mut msg, &mut buf).unwrap_err();
+    assert_eq!(funcname_of(&err), Some("pq_copymsgbytes"));
+}
+
+#[test]
+fn string_and_end_errors_report_c_routine_name() {
+    let f = setup();
+
+    let mut msg = recv(&f, b"abc");
+    let err = pq_getmsgstring(f.ctx.mcx(), &mut msg).unwrap_err();
+    assert_eq!(funcname_of(&err), Some("pq_getmsgstring"));
+
+    let mut msg = recv(&f, b"abc");
+    let err = pq_getmsgrawstring(&mut msg).unwrap_err();
+    assert_eq!(funcname_of(&err), Some("pq_getmsgrawstring"));
+
+    let mut msg = recv(&f, &[1, 2]);
+    pq_getmsgbyte(&mut msg).unwrap();
+    let err = pq_getmsgend(&msg).unwrap_err();
+    assert_eq!(funcname_of(&err), Some("pq_getmsgend"));
+}

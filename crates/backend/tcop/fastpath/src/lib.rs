@@ -83,6 +83,7 @@ fn fetch_fp_info<'mcx>(mcx: Mcx<'mcx>, func_id: Oid) -> PgResult<FpInfo> {
             .errcode(ERRCODE_UNDEFINED_FUNCTION)
             .errmsg(format!("function with OID {func_id} does not exist"))
             .into_error()
+            .with_funcname("fetch_fp_info")
             .into());
     };
     let fname = match syscache_seams::pg_proc_proname::call(func_id)? {
@@ -116,6 +117,7 @@ fn fetch_fp_info<'mcx>(mcx: Mcx<'mcx>, func_id: Oid) -> PgResult<FpInfo> {
             .errcode(ERRCODE_UNDEFINED_FUNCTION)
             .errmsg(format!("function with OID {func_id} does not exist"))
             .into_error()
+            .with_funcname("fetch_fp_info")
             .into());
     };
     argtypes[..sig_argtypes.len()].copy_from_slice(&sig_argtypes);

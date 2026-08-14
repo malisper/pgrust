@@ -78,11 +78,12 @@ fn lookup_plansource(stmt_name: &str) -> PgResult<CachedPlanSourceHandle> {
 }
 
 #[cold]
-fn aborted_xact_error() -> Box<types_error::PgError> {
+fn aborted_xact_error(funcname: &'static str) -> Box<types_error::PgError> {
     ereport(ERROR)
         .errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION)
         .errmsg("current transaction is aborted, commands ignored until end of transaction block")
         .into_error()
+        .with_funcname(funcname)
         .into()
 }
 
@@ -170,7 +171,7 @@ pub fn exec_parse_message<'mcx>(
     let psrc = if let Some(raw) = parsetree_list.first() {
         let stmt = raw.stmt.expect("RawStmt has a stmt");
         if xact::IsAbortedTransactionBlockState() && !IsTransactionExitStmt(Some(stmt)) {
-            return Err(aborted_xact_error());
+            return Err(aborted_xact_error("exec_parse_message"));
         }
 
         let tag = utility_seams::create_command_tag::call(stmt);
@@ -484,13 +485,14 @@ pub fn exec_bind_message<'mcx>(
                 plancache::CachedPlanNumParams(psrc)
             ))
             .into_error()
+            .with_funcname("exec_bind_message")
             .into());
     }
 
     if xact::IsAbortedTransactionBlockState()
         && (!plancache::CachedPlanIsTransactionExitStmt(psrc) || num_params != 0)
     {
-        return Err(aborted_xact_error());
+        return Err(aborted_xact_error("exec_bind_message"));
     }
 
     let mut reused = false;
@@ -637,7 +639,8 @@ pub fn exec_bind_message<'mcx>(
                                         "incorrect binary data format in bind parameter {}",
                                         paramno + 1
                                     ))
-                                    .into_error(),
+                                    .into_error()
+                                    .with_funcname("exec_bind_message"),
                             ))
                             .into());
                         }
@@ -948,7 +951,7 @@ pub fn exec_execute_message<'mcx>(
         let exit_ok = !stmts.is_null()
             && pquery::stmt_list::with(stmts, IsTransactionExitStmtList);
         if !exit_ok {
-            return Err(aborted_xact_error());
+            return Err(aborted_xact_error("exec_execute_message"));
         }
     }
 
@@ -1088,7 +1091,7 @@ pub fn exec_describe_statement_message<'mcx>(mcx: Mcx<'mcx>, stmt_name: &str) ->
     let result_desc = plancache::CachedPlanResultDesc(psrc);
 
     if xact::IsAbortedTransactionBlockState() && result_desc.is_some() {
-        return Err(aborted_xact_error());
+        return Err(aborted_xact_error("exec_describe_statement_message"));
     }
 
     if elog::config::where_to_send_output() != CommandDest::Remote {
@@ -1121,11 +1124,12 @@ pub fn exec_describe_portal_message<'mcx>(mcx: Mcx<'mcx>, portal_name: &str) -> 
             .errcode(ERRCODE_UNDEFINED_CURSOR)
             .errmsg(format!("portal \"{portal_name}\" does not exist"))
             .into_error()
+            .with_funcname("exec_describe_portal_message")
             .into());
     };
 
     if xact::IsAbortedTransactionBlockState() && portal.borrow().tupDesc.is_some() {
-        return Err(aborted_xact_error());
+        return Err(aborted_xact_error("exec_describe_portal_message"));
     }
 
     if elog::config::where_to_send_output() != CommandDest::Remote {

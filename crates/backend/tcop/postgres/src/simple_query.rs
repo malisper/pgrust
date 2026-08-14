@@ -467,6 +467,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
                 .errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION)
                 .errmsg("current transaction is aborted, commands ignored until end of transaction block")
                 .into_error()
+                .with_funcname("exec_simple_query")
                 .into());
         }
 

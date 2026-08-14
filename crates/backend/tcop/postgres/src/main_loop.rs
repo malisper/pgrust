@@ -106,6 +106,7 @@ fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
                 .errcode(ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg(format!("invalid frontend message type {other}"))
                 .into_error()
+                .with_funcname("SocketBackend")
                 .into());
         }
     };
@@ -313,6 +314,7 @@ pub(crate) fn error_recovery(
             .errcode(ERRCODE_PROTOCOL_VIOLATION)
             .errmsg("terminating connection because protocol synchronization was lost")
             .into_error()
+            .with_funcname("PostgresMain")
             .into());
     }
 
@@ -587,6 +589,7 @@ fn dispatch_message<'mcx>(
                         .errcode(ERRCODE_PROTOCOL_VIOLATION)
                         .errmsg(format!("invalid DESCRIBE message subtype {other}"))
                         .into_error()
+                        .with_funcname("PostgresMain")
                         .into());
                 }
             }
@@ -659,6 +662,7 @@ fn dispatch_message<'mcx>(
                         .errcode(ERRCODE_PROTOCOL_VIOLATION)
                         .errmsg(format!("invalid CLOSE message subtype {other}"))
                         .into_error()
+                        .with_funcname("PostgresMain")
                         .into());
                 }
             }
@@ -701,6 +705,7 @@ fn dispatch_message<'mcx>(
                 .errcode(ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg(format!("invalid frontend message type {other}"))
                 .into_error()
+                .with_funcname("PostgresMain")
                 .into());
         }
     }

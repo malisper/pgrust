@@ -191,7 +191,7 @@ pub fn pq_getmsgbyte(msg: &mut StringInfo<'_>) -> PgResult<i32> {
             msg.cursor = cursor + 1;
             Ok(b as i32)
         }
-        None => Err(protocol_violation("no data left in message")),
+        None => Err(protocol_violation("pq_getmsgbyte", "no data left in message")),
     }
 }
 
@@ -208,7 +208,10 @@ fn getmsg_fixed<const N: usize>(msg: &mut StringInfo<'_>) -> PgResult<[u8; N]> {
             msg.cursor = cursor + N;
             Ok(chunk)
         }
-        None => Err(protocol_violation("insufficient data left in message")),
+        None => Err(protocol_violation(
+            "pq_copymsgbytes",
+            "insufficient data left in message",
+        )),
     }
 }
 
@@ -240,7 +243,10 @@ pub fn pq_getmsgfloat8(msg: &mut StringInfo<'_>) -> PgResult<f64> {
 pub fn pq_getmsgbytes<'a>(msg: &'a mut StringInfo<'_>, datalen: usize) -> PgResult<&'a [u8]> {
     let cursor = msg.cursor;
     if datalen > msg.len().saturating_sub(cursor) || cursor > msg.len() {
-        return Err(protocol_violation("insufficient data left in message"));
+        return Err(protocol_violation(
+            "pq_getmsgbytes",
+            "insufficient data left in message",
+        ));
     }
     msg.cursor = cursor + datalen;
     Ok(&msg.as_bytes()[cursor..cursor + datalen])
@@ -257,7 +263,10 @@ pub fn pq_copymsgbytes(msg: &mut StringInfo<'_>, buf: &mut [u8]) -> PgResult<()>
             msg.cursor = cursor + datalen;
             Ok(())
         }
-        None => Err(protocol_violation("insufficient data left in message")),
+        None => Err(protocol_violation(
+            "pq_copymsgbytes",
+            "insufficient data left in message",
+        )),
     }
 }
 
@@ -270,7 +279,10 @@ pub fn pq_getmsgtext<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     let cursor = msg.cursor;
     if rawbytes > msg.len().saturating_sub(cursor) || cursor > msg.len() {
-        return Err(protocol_violation("insufficient data left in message"));
+        return Err(protocol_violation(
+            "pq_getmsgtext",
+            "insufficient data left in message",
+        ));
     }
     msg.cursor = cursor + rawbytes;
     let raw = &msg.as_bytes()[cursor..cursor + rawbytes];
@@ -300,12 +312,12 @@ impl PqString<'_, '_> {
 // C strlen()s from the cursor, safe only because of StringInfo's NUL
 // sentinel; "no NUL before len" fails C's cursor + slen >= len bound the same
 // way (strlen stops at the sentinel at index len).
-fn scan_cstring_len(msg: &StringInfo<'_>) -> PgResult<usize> {
+fn scan_cstring_len(funcname: &'static str, msg: &StringInfo<'_>) -> PgResult<usize> {
     let bytes = msg.as_bytes();
     let cursor = msg.cursor;
     match bytes.get(cursor..).and_then(|r| r.iter().position(|&b| b == 0)) {
         Some(slen) => Ok(slen),
-        None => Err(protocol_violation("invalid string in message")),
+        None => Err(protocol_violation(funcname, "invalid string in message")),
     }
 }
 
@@ -313,7 +325,7 @@ pub fn pq_getmsgstring<'a, 'mcx>(
     mcx: Mcx<'mcx>,
     msg: &'a mut StringInfo<'_>,
 ) -> PgResult<PqString<'a, 'mcx>> {
-    let slen = scan_cstring_len(msg)?;
+    let slen = scan_cstring_len("pq_getmsgstring", msg)?;
     let start = msg.cursor;
     msg.cursor = start + slen + 1;
     let raw = &msg.as_bytes()[start..start + slen];
@@ -324,7 +336,7 @@ pub fn pq_getmsgstring<'a, 'mcx>(
 }
 
 pub fn pq_getmsgrawstring<'a>(msg: &'a mut StringInfo<'_>) -> PgResult<&'a [u8]> {
-    let slen = scan_cstring_len(msg)?;
+    let slen = scan_cstring_len("pq_getmsgrawstring", msg)?;
     let start = msg.cursor;
     msg.cursor = start + slen + 1;
     Ok(&msg.as_bytes()[start..start + slen])
@@ -332,7 +344,7 @@ pub fn pq_getmsgrawstring<'a>(msg: &'a mut StringInfo<'_>) -> PgResult<&'a [u8]>
 
 pub fn pq_getmsgend(msg: &StringInfo<'_>) -> PgResult<()> {
     if msg.cursor != msg.len() {
-        return Err(protocol_violation("invalid message format"));
+        return Err(protocol_violation("pq_getmsgend", "invalid message format"));
     }
     Ok(())
 }
@@ -340,9 +352,14 @@ pub fn pq_getmsgend(msg: &StringInfo<'_>) -> PgResult<()> {
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn protocol_violation(msg: &'static str) -> Box<PgError> {
+// C reports every one of these through ereport inside a named function, so
+// the message carries that function in PG_DIAG_SOURCE_FUNCTION (the wire 'R'
+// field). The helper is shared here where C repeats the ereport per function,
+// so the caller's C name is threaded through rather than lost.
+fn protocol_violation(funcname: &'static str, msg: &'static str) -> Box<PgError> {
     PgError::error(msg)
         .with_sqlstate(ERRCODE_PROTOCOL_VIOLATION)
+        .with_funcname(funcname)
         .into()
 }
 

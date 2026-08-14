@@ -359,6 +359,7 @@ pub fn SendRowDescriptionMessage(
 fn unsupported_format_code(format: i16) -> Box<PgError> {
     PgError::error(format!("unsupported format code: {format}"))
         .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+        .with_funcname("printtup_prepare_info")
         .into()
 }
 
