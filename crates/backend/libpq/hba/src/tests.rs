@@ -592,3 +592,210 @@ fn samehost_matches_loopback_samenet_matches_subnet() {
     assert!(!check_same_host_or_net(&far, types_startup::ipCmpSameHost).unwrap());
     assert!(!check_same_host_or_net(&far, types_startup::ipCmpSameNet).unwrap());
 }
+
+// ========================================================================
+// authfuzz robustness harness (campaign sub-target 1, docs/authfuzz/charter.md)
+//
+// Feeds adversarial pg_hba.conf / pg_ident.conf bytes to the tokenizer +
+// line parsers and asserts the pgrust ST1 surface (next_token /
+// next_field_expand / tokenize_auth_file / parse_hba_line / parse_ident_line)
+// never panics and preserves its parse/err_msg invariants. This is the
+// pgrust half of the ST1 differential; the C-oracle ASan half runs on the
+// CI cluster against the verbatim hba.c tokenizer (see the charter). A panic here
+// is a pgrust robustness finding for docs/authfuzz/findings-hba.md.
+//
+// DOMAIN CARVE (hermetic, matches the guc_file harness precedent): inputs
+// containing case-insensitive "include" or a '@'-file reference are skipped
+// before the driver runs, so no include/@ expansion reaches disk IO or the
+// unset get_conf_files_in_dir seam. The whole next_token quote/NUL/comma/
+// continuation lexer plus both line parsers stay fully exercised.
+//
+// The driver is FAITHFUL to load_hba()/load_ident(): a tokenized line whose
+// err_msg is set is never handed to a line parser (mirrors the postmaster
+// loop; parse_*_line's debug_assert on non-empty fields only holds there).
+
+fn af_carved(b: &[u8]) -> bool {
+    b.windows(7).any(|w| w.eq_ignore_ascii_case(b"include")) || b.contains(&b'@')
+}
+
+/// Drive one input through the full ST1 pgrust surface at LOG elevel (errors
+/// are recorded into err_msg, never thrown, so every call returns Ok). Any
+/// panic unwinds into the test harness = a finding.
+fn af_drive(bytes: &[u8]) {
+    if af_carved(bytes) {
+        return;
+    }
+    let file = FileHandle { content: bytes.to_vec(), depth: 0 };
+    let mut lines = Vec::new();
+    tokenize_auth_file("authfuzz", &file, &mut lines, LOG, 0)
+        .expect("tokenize_auth_file must not throw at LOG");
+    for tl in lines.iter() {
+        // Faithful to load_hba/load_ident: skip lines the tokenizer flagged.
+        if tl.err_msg.is_some() {
+            continue;
+        }
+        let mut hb = tl.clone();
+        let _ = parse_hba_line(&mut hb, LOG).expect("parse_hba_line must not throw at LOG");
+        let mut id = tl.clone();
+        let _ = parse_ident_line(&mut id, LOG).expect("parse_ident_line must not throw at LOG");
+    }
+}
+
+// Adversarial seed corpus: valid + hostile pg_hba.conf / pg_ident.conf lines.
+// Addresses are kept numeric / keyword to avoid getaddrinfo DNS on hostnames
+// during the bounded local run (see charter "harness carves").
+const AF_SEEDS: &[&str] = &[
+    // --- valid, every reachable auth method ---
+    "local all all trust\n",
+    "local all all reject\n",
+    "host all all 0.0.0.0/0 password\n",
+    "host all all 127.0.0.1/32 md5\n",
+    "host all all ::1/128 scram-sha-256\n",
+    "hostssl all all 0.0.0.0/0 cert clientcert=verify-full\n",
+    "host all all 10.0.0.0/8 ident map=m1\n",
+    "local all all peer\n",
+    "host all all 192.168.0.0 255.255.0.0 trust\n",
+    "host all all samehost trust\n",
+    "host all all samenet scram-sha-256\n",
+    // --- build-rejected + deferred methods (must reject, not panic) ---
+    "host all all 0.0.0.0/0 gss\n",
+    "host all all 0.0.0.0/0 sspi\n",
+    "host all all 0.0.0.0/0 pam\n",
+    "host all all 0.0.0.0/0 bsd\n",
+    "host all all 0.0.0.0/0 ldap\n",
+    "host all all 0.0.0.0/0 radius\n",
+    "host all all 0.0.0.0/0 oauth\n",
+    "host all all 0.0.0.0/0 bogusmethod\n",
+    // --- option key/value coverage ---
+    "host all all 0.0.0.0/0 md5 map=m clientcert=verify-ca\n",
+    "host all all 0.0.0.0/0 cert clientname=DN\n",
+    "host all all 0.0.0.0/0 scram-sha-256 badopt=x\n",
+    "host all all 0.0.0.0/0 md5 optionwithnoequalssign\n",
+    // --- quoting / tokenizer adversarial ---
+    "local \"all\" \"all\" trust\n",
+    "local \"a\"\"b\" all trust\n",           // doubled-quote literal
+    "local \"unterminated all trust\n",        // unbalanced quote
+    "local all,+group,\"q\" all trust\n",      // comma lists + member + quote
+    "local \"\" \"\" trust\n",                 // empty quoted tokens
+    "host \"db,with,commas\" all 0.0.0.0/0 trust\n",
+    "local all all trust # trailing comment\n",
+    "# whole line comment\n",
+    "\n\n   \n\t\n",                            // blank / whitespace lines
+    "local all all \\\n trust\n",              // backslash continuation
+    "local all all trust\\",                    // trailing backslash at EOF
+    // --- regex auth tokens (ident + hba role/db) ---
+    "local all /^ali.*$ trust\n",
+    "host \"/^db[0-9]+$\" all 0.0.0.0/0 trust\n",
+    "local all /[ trust\n",                     // invalid regex
+    // --- pg_ident.conf shapes ---
+    "map1 /^(.*)@example\\.com$ \\1\n",
+    "map1 systemuser pguser\n",
+    "map1 /^(.*)$ \\1extra\n",
+    "map1 sys\n",                               // missing entry at end of line
+    "map1 a b c d\n",                           // multiple values
+    // --- CIDR / netmask edge cases ---
+    "host all all 0.0.0.0/33 trust\n",          // out-of-range prefix
+    "host all all 1.2.3.4/-1 trust\n",
+    "host all all not_an_ip/24 trust\n",
+    "host all all ::/0 trust\n",
+    "host all all fe80::/10 trust\n",
+    // --- structural noise ---
+    "onlyonefield\n",
+    "local\n",
+    "local all\n",
+    "local all all\n",
+    "   local    all    all    trust   \n",
+];
+
+#[test]
+fn authfuzz_corpus_no_panic() {
+    setup();
+    let _g = GUC_LOCK.lock().unwrap();
+    for seed in AF_SEEDS {
+        af_drive(seed.as_bytes());
+    }
+    // NUL-embedded variants of every seed (bug-104-class quote/NUL surface).
+    for seed in AF_SEEDS {
+        let b = seed.as_bytes();
+        for cut in [0usize, 1, b.len() / 2, b.len().saturating_sub(1)] {
+            let mut v = b.to_vec();
+            v.insert(cut.min(v.len()), 0u8);
+            af_drive(&v);
+        }
+    }
+    // Overlong tokens around the MAX_TOKEN=256 boundary.
+    for n in [1usize, 255, 256, 257, 1024, 8192] {
+        af_drive(format!("local {} all trust\n", "a".repeat(n)).as_bytes());
+        af_drive(format!("local all all \"{}\"\n", "x".repeat(n)).as_bytes());
+    }
+}
+
+/// splitmix64: deterministic, dependency-free PRNG for reproducible mutation.
+struct Sm64(u64);
+impl Sm64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+}
+
+#[test]
+fn authfuzz_mutation_no_panic() {
+    setup();
+    let _g = GUC_LOCK.lock().unwrap();
+    // Bounded by default for `cargo test`; PGRUST_AUTHFUZZ_ITERS scales the
+    // local soak (the true 5-20M-exec C-side ASan campaign is a CI cluster job).
+    let iters: u64 = std::env::var("PGRUST_AUTHFUZZ_ITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50_000);
+    let mut rng = Sm64(0xA1B2_C3D4_E5F6_0917);
+    // Interesting bytes the structural grammar keys on.
+    const INTERESTING: &[u8] = b" \t\r\n\",#@/+=\\.:0123456789abcdefhilmostu\x00\xff";
+    for _ in 0..iters {
+        let seed = AF_SEEDS[(rng.next() as usize) % AF_SEEDS.len()].as_bytes();
+        let mut buf = seed.to_vec();
+        let nmut = 1 + (rng.next() % 8) as usize;
+        for _ in 0..nmut {
+            if buf.is_empty() {
+                buf.push(b'a');
+            }
+            match rng.next() % 5 {
+                0 => {
+                    // flip a byte to an interesting value
+                    let i = (rng.next() as usize) % buf.len();
+                    buf[i] = INTERESTING[(rng.next() as usize) % INTERESTING.len()];
+                }
+                1 => {
+                    // insert an interesting byte
+                    let i = (rng.next() as usize) % (buf.len() + 1);
+                    buf.insert(i, INTERESTING[(rng.next() as usize) % INTERESTING.len()]);
+                }
+                2 => {
+                    // delete a byte
+                    let i = (rng.next() as usize) % buf.len();
+                    buf.remove(i);
+                }
+                3 => {
+                    // duplicate a span (token amplification)
+                    let i = (rng.next() as usize) % buf.len();
+                    let n = 1 + (rng.next() as usize) % 32;
+                    let span: Vec<u8> = buf[i..].iter().take(n).copied().collect();
+                    buf.splice(i..i, span);
+                }
+                _ => {
+                    // truncate
+                    let i = (rng.next() as usize) % buf.len();
+                    buf.truncate(i);
+                }
+            }
+            if buf.len() > 64 * 1024 {
+                buf.truncate(32 * 1024);
+            }
+        }
+        af_drive(&buf);
+    }
+}
