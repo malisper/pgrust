@@ -256,6 +256,87 @@ fn too_many_walsenders_is_fatal_53300() {
     ProcStructLock.unlock();
 }
 
+/// D-2 [DIFFERENTIAL-vs-C] (P1): a regular backend over the connection limit
+/// is refused with SQLSTATE 53300 (`ERRCODE_TOO_MANY_CONNECTIONS`) and C's
+/// exact message "sorry, too many clients already" — the same observable
+/// contract stock C PostgreSQL returns for `CAC_TOOMANY` (C is the oracle;
+/// see docs/testing/findings-lifecycle.md). Then a freed slot heals capacity:
+/// a fresh InitProcess succeeds. This is the negative→positive pair of D-2.
+#[test]
+fn too_many_regular_backends_is_53300_and_capacity_heals() {
+    setup();
+    let _guard = freelist_guard();
+    thread_globals(120);
+    let mut claimed = vec![];
+    loop {
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                thread_globals(120);
+                match InitProcess(BackendType::Backend) {
+                    Ok(()) => {
+                        claimed.push(MyProc().unwrap());
+                        // Keep the slot claimed past thread exit: no ProcKill.
+                    }
+                    Err(err) => {
+                        assert_eq!(
+                            err.sqlstate(),
+                            ERRCODE_TOO_MANY_CONNECTIONS,
+                            "over-limit backend must be refused with SQLSTATE 53300"
+                        );
+                        assert!(
+                            err.message().contains("sorry, too many clients already"),
+                            "message must match C's CAC_TOOMANY text, got: {}",
+                            err.message()
+                        );
+                        claimed.push(INVALID_PROC_NUMBER);
+                    }
+                }
+            });
+        });
+        if claimed.last() == Some(&INVALID_PROC_NUMBER) {
+            break;
+        }
+    }
+    // MAX_CONNECTIONS successes, then the (MAX_CONNECTIONS+1)th is refused.
+    assert_eq!(
+        claimed.len() as i32,
+        MAX_CONNECTIONS + 1,
+        "exactly MAX_CONNECTIONS backends succeed before the 53300 refusal"
+    );
+
+    // Capacity heals: return one slot, then a fresh InitProcess succeeds.
+    let hdr = ProcGlobal();
+    let freed = claimed
+        .iter()
+        .copied()
+        .find(|&p| p != INVALID_PROC_NUMBER)
+        .unwrap();
+    spin_acquire(&ProcStructLock);
+    plist_push_tail(hdr, &hdr.freeProcs, freed, links_of);
+    GetPGProcByNumber(freed).pid.store(0, SeqCst);
+    ProcStructLock.unlock();
+    claimed.retain(|&p| p != freed);
+
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            thread_globals(121);
+            InitProcess(BackendType::Backend)
+                .expect("D-2: a freed slot must let a new connection succeed (capacity healed)");
+            claimed.push(MyProc().unwrap());
+        });
+    });
+
+    // Return all claimed regular slots to the freelist for other tests.
+    spin_acquire(&ProcStructLock);
+    for &procno in &claimed {
+        if procno != INVALID_PROC_NUMBER {
+            plist_push_tail(hdr, &hdr.freeProcs, procno, links_of);
+            GetPGProcByNumber(procno).pid.store(0, SeqCst);
+        }
+    }
+    ProcStructLock.unlock();
+}
+
 #[test]
 fn aux_lifecycle() {
     setup();

@@ -228,3 +228,77 @@ fn startup_failure_reaches_the_client_and_closes_the_socket() {
 fn startup_failure_with_no_client_socket_is_inert() {
     report_startup_failure_to_client(types_core::PGINVALID_SOCKET, "no client here");
 }
+
+// --- Lifecycle test design: I-1 firewall status-map seam + I-2 P0 guards ---
+
+/// I-1 [INVARIANT-only] (P0): a backend PANIC resolves through the
+/// `catch_unwind` seam into a postmaster-visible crash status rather than
+/// escaping out of band, and it does NOT take down the process — the spawned
+/// backend thread crashes while this test thread lives on. Exercises the B1
+/// crash primitives against the REAL production status map
+/// (`panic_payload_to_exit_status`, the sole seam `run_child_task` uses).
+#[test]
+fn i1_backend_crash_resolves_through_firewall_seam() {
+    // (a) raw backend panic -> SIGABRT, the generic crash class the reaper
+    //     treats as a crash (drives D-1 terminate-all + reinit).
+    let status = std::thread::spawn(|| {
+        let payload = std::panic::catch_unwind(|| {
+            crash_primitive::pgrust_test_backend_panic()
+        })
+        .expect_err("the panic primitive must unwind, not return");
+        panic_payload_to_exit_status(payload.as_ref())
+    })
+    .join()
+    .expect("the crash must stay contained in its own thread (firewall), not abort the process");
+    assert_eq!(
+        status,
+        procsignal::signums::SIGABRT,
+        "a raw backend panic must map to the SIGABRT crash class"
+    );
+
+    // (b) the SIGSEGV kill variant -> WTERMSIG(SIGSEGV): the hard-signal
+    //     (crash_signals) class, still contained to the one thread.
+    let status = std::thread::spawn(|| {
+        let payload = std::panic::catch_unwind(|| {
+            crash_primitive::pgrust_test_backend_kill_sigsegv()
+        })
+        .expect_err("the SIGSEGV primitive must unwind, not return");
+        panic_payload_to_exit_status(payload.as_ref())
+    })
+    .join()
+    .expect("the SIGSEGV crash must stay contained in its own thread");
+    assert_eq!(
+        status, libc::SIGSEGV,
+        "the SIGSEGV crash primitive must map to WTERMSIG(SIGSEGV)"
+    );
+
+    // (c) negative controls — a clean exit and a FATAL exit(1) are NOT
+    //     crashes: the reaper's status0/status1 arm reclaims the slot and
+    //     keeps the server running (this is what makes D-5 distinct from D-1).
+    assert_eq!(
+        panic_payload_to_exit_status(&ipc::ProcExitThread { code: 0 }),
+        0,
+        "a clean proc_exit(0) is WIFEXITED status 0, not a crash"
+    );
+    assert_eq!(
+        panic_payload_to_exit_status(&ipc::ProcExitThread { code: 1 }),
+        1 << 8,
+        "a FATAL exit(1) is WIFEXITED status 1 (slot reclaimed, no crash cycle)"
+    );
+}
+
+/// I-2 [INVARIANT-only] (P0) hazard #1: `panic = "abort"` silently converts
+/// the `catch_unwind` firewall into a whole-process `abort()` on the first
+/// backend panic — every session dies at once, with none of C's crash
+/// restart. The firewall only exists if the build unwinds.
+#[test]
+fn i2_build_is_panic_unwind_not_abort() {
+    assert!(
+        cfg!(panic = "unwind"),
+        "the backend crash firewall requires panic=unwind"
+    );
+    assert!(
+        !cfg!(panic = "abort"),
+        "panic=abort breaks the I-1 backend crash firewall (I-2 P0 hazard #1)"
+    );
+}

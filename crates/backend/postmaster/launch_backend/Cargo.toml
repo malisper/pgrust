@@ -13,6 +13,12 @@ path = "src/lib.rs"
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }
 
+[features]
+# B1 lifecycle crash primitive (src/crash_primitive.rs). Opt-in ONLY: never
+# enabled by a release build, so the crash entry points are compiled out of a
+# shipped server. Enabled by the lifecycle differential/invariant tests.
+test-crash-primitive = []
+
 [dependencies]
 guc = { path = "../../utils/misc/guc" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }

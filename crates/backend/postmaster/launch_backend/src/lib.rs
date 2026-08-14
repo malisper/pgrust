@@ -15,6 +15,14 @@ use types_startup::{ClientSocket, StartupData};
 #[cfg(test)]
 mod tests;
 
+// B1 (lifecycle test design §7): the gated, test-only single-backend crash
+// primitive. Compiled ONLY under `cfg(test)` or the opt-in
+// `test-crash-primitive` feature, so a shipped release server never carries
+// the symbol (I-2 hazard-adjacent: a crash entry point must not exist in
+// production).
+#[cfg(any(test, feature = "test-crash-primitive"))]
+pub mod crash_primitive;
+
 // CPU affinity for pool threads (cpuaff increment A; default OFF). Hosted
 // here because this crate owns every pool spawn site the policy binds.
 pub mod cpuaff;
@@ -423,6 +431,29 @@ pub fn report_startup_failure_to_client(sock: i32, msg: &str) {
     }
 }
 
+/// The firewall's status-map seam (lifecycle test design §0, I-1): the single
+/// point where an arbitrary caught child-thread panic payload becomes the
+/// C-shaped wait status the postmaster reaper consumes. This is what makes a
+/// threaded backend panic *observably* behave like a C process death:
+///
+/// - [`ipc::ProcExitThread`] `{ code }`  -> `code << 8`  (C `WIFEXITED`, exit code)
+/// - [`ipc::KilledBySignal`] `{ signo }` -> `signo`      (C `WTERMSIG`, signal death)
+/// - any other panic payload             -> `SIGABRT`    (the generic crash class)
+///
+/// The reaper (`postmaster::process_pm_child_exit`) then treats a non-0/1
+/// status as a crash and runs the terminate-all + `ResetShmemAfterCrash`
+/// cycle, while status 0/1 is a clean/FATAL exit that only reclaims the slot.
+/// Extracted from `run_child_task` (its sole production caller) so the I-1
+/// invariant test can assert the mapping over the REAL production code rather
+/// than a copy.
+pub fn panic_payload_to_exit_status(payload: &(dyn std::any::Any + Send)) -> i32 {
+    payload
+        .downcast_ref::<ipc::ProcExitThread>()
+        .map(|p| p.code << 8)
+        .or_else(|| payload.downcast_ref::<ipc::KilledBySignal>().map(|k| k.signo))
+        .unwrap_or(procsignal::signums::SIGABRT)
+}
+
 // The per-task half of the child thread body (InitPostmasterChild through the
 // exit announce): the spawn closure runs it after the thread prelude; a wpool
 // standby runs it on claim with the prelude already paid.
@@ -547,11 +578,7 @@ fn run_child_task(
     }
     // C wait status: ProcExitThread == WIFEXITED; KilledBySignal ==
     // WTERMSIG(signo); other payloads == WTERMSIG(SIGABRT).
-    let exitstatus = payload
-        .downcast_ref::<ipc::ProcExitThread>()
-        .map(|p| p.code << 8)
-        .or_else(|| payload.downcast_ref::<ipc::KilledBySignal>().map(|k| k.signo))
-        .unwrap_or(procsignal::signums::SIGABRT);
+    let exitstatus = panic_payload_to_exit_status(payload.as_ref());
     // Park in flight (wretain): the reaper must treat this announce as a
     // task end, not a thread end. Marked before the announce so the reaper
     // can never observe the announce without the marker.
