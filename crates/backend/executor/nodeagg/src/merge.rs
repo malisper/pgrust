@@ -1984,6 +1984,56 @@ unsafe fn synth_state_vals_pg(
     Ok(())
 }
 
+/// C `project_aggregates`: ExecQual(HAVING) then ExecProject. `None` = rejected.
+fn merge_project_aggregates<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    if node.proj.has_subplan()
+        || !node.proj.param_exec_deps().is_empty()
+        || node.qual.as_deref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty())
+    {
+        let ecxt = node.ps_ExprContext;
+        let result = node.ps_ResultTupleSlot;
+        let instr_idx = node.instr_idx;
+        let AggStateData { perhash, qual, proj, .. } = node;
+        let ph = perhash.as_mut().unwrap();
+        if !::executils::exec_qual_with_subplans_outer(
+            qual.as_deref_mut(),
+            &mut ph.first_slot,
+            estate,
+            ecxt,
+        )? {
+            estate.instr_count_filtered1(instr_idx);
+            return Ok(None);
+        }
+        ::executils::exec_project_with_subplans_outer(
+            proj,
+            &mut ph.first_slot,
+            estate,
+            ecxt,
+            result,
+        )?;
+        return Ok(Some(result));
+    }
+    {
+        let AggStateData { perhash, qual, .. } = node;
+        let ph = perhash.as_mut().unwrap();
+        let mut slots =
+            EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
+        if !::execexpr::exec_qual(qual.as_deref_mut(), &mut slots)? {
+            estate.instr_count_filtered1(node.instr_idx);
+            return Ok(None);
+        }
+    }
+    let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
+    let ph = node.perhash.as_mut().unwrap();
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
+    ::execexpr::exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
+    Ok(Some(node.ps_ResultTupleSlot))
+}
+
 // agg_retrieve_hash_table's merged twin: one qual-passing merged group per
 // call, buckets merged on demand in top-8-hash-bit order, groups within a
 // bucket in first-seen (source-major) order.
@@ -2035,20 +2085,9 @@ pub(crate) fn agg_retrieve_merged<'mcx>(
         };
         finalize_aggregates(node, estate, pergroup)?;
 
-        {
-            let AggStateData { perhash, qual, .. } = node;
-            let ph = perhash.as_mut().unwrap();
-            let mut slots =
-                EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
-            if !::execexpr::exec_qual(qual.as_deref_mut(), &mut slots)? {
-                continue;
-            }
+        if let Some(slot) = merge_project_aggregates(node, estate, mcx)? {
+            return Ok(Some(slot));
         }
-        let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
-        let ph = node.perhash.as_mut().unwrap();
-        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
-        ::execexpr::exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
-        return Ok(Some(node.ps_ResultTupleSlot));
     }
 }
 
@@ -2159,20 +2198,9 @@ fn agg_retrieve_merged_raw<'mcx>(
         }
         finalize_aggregates(node, estate, pergroup)?;
 
-        {
-            let AggStateData { perhash, qual, .. } = node;
-            let ph = perhash.as_mut().unwrap();
-            let mut slots =
-                EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
-            if !::execexpr::exec_qual(qual.as_deref_mut(), &mut slots)? {
-                continue;
-            }
+        if let Some(slot) = merge_project_aggregates(node, estate, mcx)? {
+            return Ok(Some(slot));
         }
-        let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
-        let ph = node.perhash.as_mut().unwrap();
-        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
-        ::execexpr::exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
-        return Ok(Some(node.ps_ResultTupleSlot));
     }
 }
 
