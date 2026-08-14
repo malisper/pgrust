@@ -240,14 +240,26 @@ pub fn exec_rescan_cte_scan<'mcx>(
     Ok(())
 }
 
-/// cteParam in chg == C's leader-cteplanstate-chgParam test; redundant
-/// clears across followers are fine per C.
+/// C `leader->cteplanstate->chgParam != NULL` = producer `allParam ∩ chg`.
+/// `cteParam` is linkage only (subselect.c); not a change signal.
 pub fn exec_rescan_cte_scan_chg<'mcx>(
     node: &mut CteScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
 ) -> PgResult<()> {
-    if !chg.is_member(node.cte_param) {
+    let producer_changed = {
+        let idx = (node.cte_plan_id - 1) as usize;
+        let producer = estate
+            .es_plannedstmt
+            .expect("ExecReScanCteScan: es_plannedstmt set")
+            .subplans
+            .nth(idx)
+            .expect("ExecReScanCteScan: CTE subplan present")
+            .as_plan()
+            .expect("ExecReScanCteScan: CTE subplan is a plan");
+        chg.overlap(&producer.allParam)
+    };
+    if !producer_changed {
         return exec_rescan_cte_scan(node, estate);
     }
     execscan::exec_scan_rescan(&mut node.ss, estate);
