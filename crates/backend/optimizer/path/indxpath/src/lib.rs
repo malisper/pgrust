@@ -839,9 +839,6 @@ fn match_clause_to_indexcol<'mcx>(
             }
             Ok(None)
         }
-        NodeTag::T_RelabelType => {
-            panic!("match_clause_to_indexcol (indxpath.c): RelabelType clause; M2 lane")
-        }
         NodeTag::T_NullTest if index.amsearchnulls => {
             let nt = clause.as_null_test().unwrap();
             if !nt.argisrow
