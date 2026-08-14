@@ -1209,10 +1209,14 @@ fn transformRangeTableFunc<'mcx>(
                         e,
                         ParseExprKind::EXPR_KIND_FROM_FUNCTION,
                     )?;
-                    let e = coerce_to_specific_type_typmod(
+                    let input_type = parse_expr::expr_type(e);
+                    let location = parse_expr::expr_location(e);
+                    let e = coerce::coerce_to_specific_type_typmod(
                         mcx,
                         pstate,
                         e,
+                        input_type,
+                        location,
                         typid,
                         typmod,
                         construct_name,
@@ -1297,53 +1301,6 @@ fn transformRangeTableFunc<'mcx>(
         .map(|nsitem| &*nsitem)
 }
 
-// C coerce_to_specific_type_typmod (parse_coerce.c) — assignment cast with a
-// specific typmod; only XMLTABLE DEFAULT expressions reach it.
-fn coerce_to_specific_type_typmod<'mcx>(
-    mcx: Mcx<'mcx>,
-    pstate: &ParseState<'_, 'mcx>,
-    node: Node<'mcx>,
-    target_type: types_core::Oid,
-    target_typmod: i32,
-    construct_name: &str,
-) -> PgResult<Node<'mcx>> {
-    let input_type = parse_expr::expr_type(node);
-    let location = parse_expr::expr_location(node);
-    let node = if input_type != target_type || target_typmod != -1 {
-        match coerce::coerce_to_target_type(
-            mcx,
-            pstate,
-            node,
-            input_type,
-            target_type,
-            target_typmod,
-            coerce::COERCION_ASSIGNMENT,
-            types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
-            -1,
-        )? {
-            Some(n) => n,
-            None => {
-                return Err(tablefunc_type_mismatch(
-                    pstate,
-                    construct_name,
-                    target_type,
-                    input_type,
-                    location,
-                ))
-            }
-        }
-    } else {
-        node
-    };
-    if coerce::expression_returns_set(node) {
-        return Err(tablefunc_syntax_error(
-            pstate,
-            format!("argument of {construct_name} must not return a set"),
-            location,
-        ));
-    }
-    Ok(node)
-}
 
 #[track_caller]
 #[cold]
@@ -1387,37 +1344,6 @@ fn column_setof_error(
                 "parse_clause.c",
                 0,
                 "transformRangeTableFunc",
-            )),
-    )
-}
-
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn tablefunc_type_mismatch(
-    pstate: &ParseState<'_, '_>,
-    construct_name: &str,
-    target_type: types_core::Oid,
-    input_type: types_core::Oid,
-    location: ParseLoc,
-) -> Box<PgError> {
-    let encoding = mbutils::GetDatabaseEncoding();
-    let targetname = format_type::format_type_be(target_type)
-        .unwrap_or_else(|_| "???".to_string());
-    let inputname =
-        format_type::format_type_be(input_type).unwrap_or_else(|_| "???".to_string());
-    Box::new(
-        elog::ereport(ERROR)
-            .errcode(types_error::ERRCODE_CANNOT_COERCE)
-            .errmsg(format!(
-                "argument of {construct_name} must be type {targetname}, not type {inputname}"
-            ))
-            .errposition(parser_errposition(pstate, location, encoding))
-            .into_error()
-            .with_error_location(ErrorLocation::new(
-                "parse_coerce.c",
-                0,
-                "coerce_to_specific_type_typmod",
             )),
     )
 }

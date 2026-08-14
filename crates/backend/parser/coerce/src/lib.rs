@@ -2091,15 +2091,19 @@ pub fn coerce_to_boolean<'mcx>(
     Ok(node)
 }
 
-/// C `coerce_to_specific_type` (typmod -1); same precomputed exprType/
+/// C `coerce_to_specific_type_typmod`; same precomputed exprType/
 /// exprLocation divergence as [`coerce_to_boolean`].
-pub fn coerce_to_specific_type<'mcx>(
+///
+/// Typmod is applied only when the input type differs — C does not
+/// length-coerce a same-type expression.
+pub fn coerce_to_specific_type_typmod<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
     node: Node<'mcx>,
     input_type_id: Oid,
     node_location: ParseLoc,
     target_type_id: Oid,
+    target_typmod: i32,
     construct_name: &str,
 ) -> PgResult<Node<'mcx>> {
     let node = if input_type_id != target_type_id {
@@ -2109,7 +2113,7 @@ pub fn coerce_to_specific_type<'mcx>(
             node,
             input_type_id,
             target_type_id,
-            -1,
+            target_typmod,
             COERCION_ASSIGNMENT,
             CoercionForm::COERCE_IMPLICIT_CAST,
             -1,
@@ -2133,6 +2137,28 @@ pub fn coerce_to_specific_type<'mcx>(
         return Err(returns_set(pstate, construct_name, node_location));
     }
     Ok(node)
+}
+
+/// C `coerce_to_specific_type` (typmod -1).
+pub fn coerce_to_specific_type<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    node: Node<'mcx>,
+    input_type_id: Oid,
+    node_location: ParseLoc,
+    target_type_id: Oid,
+    construct_name: &str,
+) -> PgResult<Node<'mcx>> {
+    coerce_to_specific_type_typmod(
+        mcx,
+        pstate,
+        node,
+        input_type_id,
+        node_location,
+        target_type_id,
+        -1,
+        construct_name,
+    )
 }
 
 // Closed-set slice of nodeFuncs.c expression_returns_set over the tags this
