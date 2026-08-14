@@ -2711,22 +2711,17 @@ impl<'a> Estate<'a> {
                             ),
                         ));
                     }
-                    // C exec_move_row(rec, NULL, NULL): an empty record of
-                    // the rec's own type. For a composite-domain rec C makes
-                    // the empty record via expanded_record_set_tuple(NULL),
-                    // which domain-checks the NULL (pl_exec.c:6923-6937).
+                    // C exec_move_row(rec, NULL, NULL) (pl_exec.c:6922-6945):
+                    // domain → empty expanded record + domain_check; else
+                    // erh = NULL. RECORD field access then 55000 via
+                    // instantiate_empty_record_variable; a named composite
+                    // instantiates empty on first field touch.
                     let rectypeid = self.rec_meta(target).rectypeid;
-                    if rectypeid != RECORDOID {
-                        if Self::rec_typeid_is_domain(rectypeid)? {
-                            adt_domains::domain_check(Datum::null(), true, rectypeid)?;
-                        }
+                    if Self::rec_typeid_is_domain(rectypeid)? {
+                        adt_domains::domain_check(Datum::null(), true, rectypeid)?;
                         self.instantiate_empty_rec(target)?;
-                    } else if let DatumVal::Rec(Some(rv)) = &mut self.datums[target as usize] {
-                        for i in 0..rv.values.len() {
-                            rv.values[i] = Datum::null();
-                            rv.nulls[i] = true;
-                        }
-                        rv.empty = true;
+                    } else {
+                        self.datums[target as usize] = DatumVal::Rec(None);
                     }
                     return Ok(());
                 }
