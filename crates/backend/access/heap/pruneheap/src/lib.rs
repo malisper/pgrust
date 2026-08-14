@@ -577,17 +577,21 @@ fn heap_prune_satisfies_vacuum(
     Ok(res)
 }
 
-fn htsv_get_valid_status(status: i8) -> HTSV_Result {
+fn htsv_get_valid_status(status: i8) -> PgResult<HTSV_Result> {
     debug_assert!(
         status >= HTSV_Result::HEAPTUPLE_DEAD as i8
             && status <= HTSV_Result::HEAPTUPLE_DELETE_IN_PROGRESS as i8
     );
     match status {
-        0 => HTSV_Result::HEAPTUPLE_DEAD,
-        1 => HTSV_Result::HEAPTUPLE_LIVE,
-        2 => HTSV_Result::HEAPTUPLE_RECENTLY_DEAD,
-        3 => HTSV_Result::HEAPTUPLE_INSERT_IN_PROGRESS,
-        _ => HTSV_Result::HEAPTUPLE_DELETE_IN_PROGRESS,
+        0 => Ok(HTSV_Result::HEAPTUPLE_DEAD),
+        1 => Ok(HTSV_Result::HEAPTUPLE_LIVE),
+        2 => Ok(HTSV_Result::HEAPTUPLE_RECENTLY_DEAD),
+        3 => Ok(HTSV_Result::HEAPTUPLE_INSERT_IN_PROGRESS),
+        4 => Ok(HTSV_Result::HEAPTUPLE_DELETE_IN_PROGRESS),
+        _ => Err(Box::new(::types_error::PgError::new(
+            ::types_error::ERROR,
+            "unexpected HeapTupleSatisfiesVacuum result",
+        ))),
     }
 }
 
@@ -654,7 +658,7 @@ fn heap_prune_chain(
         chainitems[nchain] = offnum;
         nchain += 1;
 
-        match htsv_get_valid_status(prstate.htsv[offnum as usize]) {
+        match htsv_get_valid_status(prstate.htsv[offnum as usize])? {
             HTSV_Result::HEAPTUPLE_DEAD => {
                 ndeadchain = nchain;
                 HeapTupleHeaderAdvanceConflictHorizon(htup, &mut prstate.latest_xid_removed)?;
@@ -801,7 +805,7 @@ fn heap_prune_record_unchanged_lp_normal(
     // SAFETY: LP_NORMAL item.
     let htup = unsafe { header_at(page, itemid) };
 
-    match htsv_get_valid_status(prstate.htsv[offnum as usize]) {
+    match htsv_get_valid_status(prstate.htsv[offnum as usize])? {
         HTSV_Result::HEAPTUPLE_LIVE => {
             prstate.live_tuples += 1;
             if prstate.all_visible {
@@ -825,8 +829,7 @@ fn heap_prune_record_unchanged_lp_normal(
         HTSV_Result::HEAPTUPLE_RECENTLY_DEAD => {
             prstate.recently_dead_tuples += 1;
             prstate.all_visible = false;
-            let xid = HeapTupleHeaderGetUpdateXid(htup)
-                .expect("multixact update xid resolvable during prune");
+            let xid = HeapTupleHeaderGetUpdateXid(htup)?;
             heap_prune_record_prunable(prstate, xid);
         }
         HTSV_Result::HEAPTUPLE_INSERT_IN_PROGRESS => {
@@ -836,12 +839,17 @@ fn heap_prune_record_unchanged_lp_normal(
         HTSV_Result::HEAPTUPLE_DELETE_IN_PROGRESS => {
             prstate.live_tuples += 1;
             prstate.all_visible = false;
-            let xid = HeapTupleHeaderGetUpdateXid(htup)
-                .expect("multixact update xid resolvable during prune");
+            let xid = HeapTupleHeaderGetUpdateXid(htup)?;
             heap_prune_record_prunable(prstate, xid);
         }
         HTSV_Result::HEAPTUPLE_DEAD => {
-            panic!("unexpected HeapTupleSatisfiesVacuum result");
+            return Err(Box::new(::types_error::PgError::new(
+                ::types_error::ERROR,
+                format!(
+                    "unexpected HeapTupleSatisfiesVacuum result {}",
+                    prstate.htsv[offnum as usize]
+                ),
+            )));
         }
     }
 

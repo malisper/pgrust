@@ -112,3 +112,69 @@ fn guard_chain_early_exits() {
     IN_RECOVERY.store(false, Ordering::SeqCst);
     pruneheap_seams::heap_page_prune_opt::call(&rel, 1).unwrap();
 }
+
+fn empty_prstate<'a>() -> super::PruneState<'a> {
+    super::PruneState {
+        vistest: types_core::GlobalVisStateHandle::new(0),
+        mark_unused_now: false,
+        freeze: false,
+        cutoffs: None,
+        pagefrz: super::HeapPageFreeze {
+            freeze_required: false,
+            FreezePageRelfrozenXid: super::InvalidTransactionId,
+            NoFreezePageRelfrozenXid: super::InvalidTransactionId,
+            FreezePageRelminMxid: 0,
+            NoFreezePageRelminMxid: 0,
+        },
+        nfrozen: 0,
+        frozen: [super::HeapTupleFreeze::default(); super::MaxHeapTuplesPerPage],
+        new_prune_xid: super::InvalidTransactionId,
+        latest_xid_removed: super::InvalidTransactionId,
+        nredirected: 0,
+        ndead: 0,
+        nunused: 0,
+        redirected: [0; super::MaxHeapTuplesPerPage * 2],
+        nowdead: [0; super::MaxHeapTuplesPerPage],
+        nowunused: [0; super::MaxHeapTuplesPerPage],
+        nroot_items: 0,
+        root_items: [0; super::MaxHeapTuplesPerPage],
+        nheaponly_items: 0,
+        heaponly_items: [0; super::MaxHeapTuplesPerPage],
+        processed: [false; super::MaxHeapTuplesPerPage + 1],
+        htsv: [-1; super::MaxHeapTuplesPerPage + 1],
+        ndeleted: 0,
+        live_tuples: 0,
+        recently_dead_tuples: 0,
+        hastup: false,
+        lpdead_items: 0,
+        all_visible: false,
+        all_frozen: false,
+        visibility_cutoff_xid: super::InvalidTransactionId,
+    }
+}
+
+#[test]
+fn unexpected_dead_htsv_is_ereport_not_panic() {
+    #[repr(align(8))]
+    struct AlignedPage([u8; super::BLCKSZ]);
+    let mut raw = AlignedPage([0; super::BLCKSZ]);
+    let page_nn = core::ptr::NonNull::new(raw.0.as_mut_ptr()).unwrap();
+    let mut pm = unsafe { super::PageMut::from_raw(page_nn) };
+    pm.init(0);
+    let item = [0u8; ::types_tuple::SizeofHeapTupleHeader];
+    pm.add_item(&item, 0, ::types_storage::bufpage::PAI_IS_HEAP)
+        .expect("one heap item");
+    let page = unsafe { super::PageRef::from_raw(page_nn) };
+
+    let mut prstate = empty_prstate();
+    prstate.htsv[super::FirstOffsetNumber as usize] = super::HTSV_Result::HEAPTUPLE_DEAD as i8;
+    let err = super::heap_prune_record_unchanged_lp_normal(
+        page,
+        &mut prstate,
+        super::FirstOffsetNumber,
+    )
+    .expect_err("C elog(ERROR) on DEAD in unchanged");
+    assert_eq!(err.level, types_error::ERROR);
+    assert_eq!(err.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message, "unexpected HeapTupleSatisfiesVacuum result 0");
+}
