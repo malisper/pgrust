@@ -2406,3 +2406,458 @@ fn equal_cte_cycle_clause_matches_c_field_rules() {
         mk_cte_cycle_clause(mcx, |c| c.cycle_mark_neop = 91)
     ));
 }
+
+fn mk_a_array_expr<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::A_ArrayExpr<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::A_ArrayExpr::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_a_array_expr_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let one = || NodeList::make1(mcx, mk_var_at(mcx, 1, 1, 0)).unwrap();
+    assert!(crate::equal(mk_a_array_expr(mcx, |_| {}), mk_a_array_expr(mcx, |_| {})));
+    assert!(crate::equal(
+        mk_a_array_expr(mcx, |a| {
+            a.location = 3;
+            a.list_start = 1;
+            a.list_end = 2;
+        }),
+        mk_a_array_expr(mcx, |a| {
+            a.location = 99;
+            a.list_start = 8;
+            a.list_end = 9;
+        })
+    ));
+    assert!(!crate::equal(
+        mk_a_array_expr(mcx, |_| {}),
+        mk_a_array_expr(mcx, |a| a.elements = one())
+    ));
+}
+
+fn mk_window_def<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::WindowDef<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::WindowDef::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_window_def_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let one = || NodeList::make1(mcx, mk_var_at(mcx, 1, 1, 0)).unwrap();
+    assert!(crate::equal(mk_window_def(mcx, |_| {}), mk_window_def(mcx, |_| {})));
+    assert!(crate::equal(
+        mk_window_def(mcx, |w| w.location = 1),
+        mk_window_def(mcx, |w| w.location = 9)
+    ));
+    assert!(!crate::equal(
+        mk_window_def(mcx, |_| {}),
+        mk_window_def(mcx, |w| w.name = Some("w"))
+    ));
+    assert!(!crate::equal(
+        mk_window_def(mcx, |_| {}),
+        mk_window_def(mcx, |w| w.refname = Some("r"))
+    ));
+    assert!(!crate::equal(
+        mk_window_def(mcx, |_| {}),
+        mk_window_def(mcx, |w| w.partitionClause = one())
+    ));
+    assert!(!crate::equal(
+        mk_window_def(mcx, |_| {}),
+        mk_window_def(mcx, |w| w.orderClause = one())
+    ));
+    assert!(!crate::equal(
+        mk_window_def(mcx, |_| {}),
+        mk_window_def(mcx, |w| w.frameOptions = 5)
+    ));
+    assert!(!crate::equal(
+        mk_window_def(mcx, |_| {}),
+        mk_window_def(mcx, |w| w.startOffset = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+    assert!(!crate::equal(
+        mk_window_def(mcx, |_| {}),
+        mk_window_def(mcx, |w| w.endOffset = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+}
+
+fn mk_a_indices<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::A_Indices<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::A_Indices::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_a_indices_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    assert!(crate::equal(mk_a_indices(mcx, |_| {}), mk_a_indices(mcx, |_| {})));
+    assert!(!crate::equal(mk_a_indices(mcx, |_| {}), mk_a_indices(mcx, |a| a.is_slice = true)));
+    assert!(!crate::equal(
+        mk_a_indices(mcx, |_| {}),
+        mk_a_indices(mcx, |a| a.lidx = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+    assert!(!crate::equal(
+        mk_a_indices(mcx, |_| {}),
+        mk_a_indices(mcx, |a| a.uidx = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+}
+
+fn mk_locking_clause<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::LockingClause<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::LockingClause::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_locking_clause_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    use crate::nodes_enums::{LockClauseStrength, LockWaitPolicy};
+    assert!(crate::equal(mk_locking_clause(mcx, |_| {}), mk_locking_clause(mcx, |_| {})));
+    assert!(!crate::equal(
+        mk_locking_clause(mcx, |_| {}),
+        mk_locking_clause(mcx, |l| l.lockedRels = NodeList::make1(mcx, mk_var_at(mcx, 1, 1, 0)).unwrap())
+    ));
+    assert!(!crate::equal(
+        mk_locking_clause(mcx, |_| {}),
+        mk_locking_clause(mcx, |l| l.strength = LockClauseStrength::LCS_FORUPDATE)
+    ));
+    assert!(!crate::equal(
+        mk_locking_clause(mcx, |_| {}),
+        mk_locking_clause(mcx, |l| l.waitPolicy = LockWaitPolicy::LockWaitSkip)
+    ));
+}
+
+fn mk_into_clause<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::IntoClause<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::IntoClause::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_into_clause_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    assert!(crate::equal(mk_into_clause(mcx, |_| {}), mk_into_clause(mcx, |_| {})));
+    assert!(!crate::equal(
+        mk_into_clause(mcx, |_| {}),
+        mk_into_clause(mcx, |i| i.rel = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+    assert!(!crate::equal(
+        mk_into_clause(mcx, |_| {}),
+        mk_into_clause(mcx, |i| i.accessMethod = Some("heap"))
+    ));
+    assert!(!crate::equal(
+        mk_into_clause(mcx, |_| {}),
+        mk_into_clause(mcx, |i| i.onCommit = crate::rawnodes::OnCommitAction::ONCOMMIT_DROP)
+    ));
+    assert!(!crate::equal(
+        mk_into_clause(mcx, |_| {}),
+        mk_into_clause(mcx, |i| i.tableSpaceName = Some("pg_default"))
+    ));
+    assert!(!crate::equal(mk_into_clause(mcx, |_| {}), mk_into_clause(mcx, |i| i.skipData = true)));
+}
+
+fn mk_on_conflict_clause<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::OnConflictClause<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::OnConflictClause::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_on_conflict_clause_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    use crate::primnodes::OnConflictAction;
+    assert!(crate::equal(
+        mk_on_conflict_clause(mcx, |_| {}),
+        mk_on_conflict_clause(mcx, |_| {})
+    ));
+    assert!(crate::equal(
+        mk_on_conflict_clause(mcx, |c| c.location = 1),
+        mk_on_conflict_clause(mcx, |c| c.location = 9)
+    ));
+    assert!(!crate::equal(
+        mk_on_conflict_clause(mcx, |_| {}),
+        mk_on_conflict_clause(mcx, |c| c.action = OnConflictAction::ONCONFLICT_UPDATE)
+    ));
+    assert!(!crate::equal(
+        mk_on_conflict_clause(mcx, |_| {}),
+        mk_on_conflict_clause(mcx, |c| c.whereClause = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+}
+
+fn mk_returning_option<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::ReturningOption<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::ReturningOption::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_returning_option_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    use crate::rawnodes::ReturningOptionKind;
+    assert!(crate::equal(
+        mk_returning_option(mcx, |_| {}),
+        mk_returning_option(mcx, |_| {})
+    ));
+    assert!(crate::equal(
+        mk_returning_option(mcx, |o| o.location = 1),
+        mk_returning_option(mcx, |o| o.location = 9)
+    ));
+    assert!(!crate::equal(
+        mk_returning_option(mcx, |_| {}),
+        mk_returning_option(mcx, |o| o.option = ReturningOptionKind::RETURNING_OPTION_NEW)
+    ));
+    assert!(!crate::equal(
+        mk_returning_option(mcx, |_| {}),
+        mk_returning_option(mcx, |o| o.value = Some("old"))
+    ));
+}
+
+fn mk_multi_assign_ref<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::MultiAssignRef<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::MultiAssignRef::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_multi_assign_ref_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    assert!(crate::equal(mk_multi_assign_ref(mcx, |_| {}), mk_multi_assign_ref(mcx, |_| {})));
+    assert!(!crate::equal(
+        mk_multi_assign_ref(mcx, |_| {}),
+        mk_multi_assign_ref(mcx, |m| m.source = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+    assert!(!crate::equal(
+        mk_multi_assign_ref(mcx, |_| {}),
+        mk_multi_assign_ref(mcx, |m| m.colno = 2)
+    ));
+    assert!(!crate::equal(
+        mk_multi_assign_ref(mcx, |_| {}),
+        mk_multi_assign_ref(mcx, |m| m.ncolumns = 3)
+    ));
+}
+
+fn mk_column_def<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::ColumnDef<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::ColumnDef::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_column_def_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    assert!(crate::equal(mk_column_def(mcx, |_| {}), mk_column_def(mcx, |_| {})));
+    assert!(crate::equal(
+        mk_column_def(mcx, |c| c.location = 1),
+        mk_column_def(mcx, |c| c.location = 9)
+    ));
+    assert!(!crate::equal(
+        mk_column_def(mcx, |_| {}),
+        mk_column_def(mcx, |c| c.colname = Some("x"))
+    ));
+    assert!(!crate::equal(mk_column_def(mcx, |_| {}), mk_column_def(mcx, |c| c.inhcount = 1)));
+    assert!(!crate::equal(mk_column_def(mcx, |_| {}), mk_column_def(mcx, |c| c.is_not_null = true)));
+    assert!(!crate::equal(mk_column_def(mcx, |_| {}), mk_column_def(mcx, |c| c.collOid = 100)));
+}
+
+fn mk_merge_stmt<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::MergeStmt<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::MergeStmt::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_merge_stmt_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    assert!(crate::equal(mk_merge_stmt(mcx, |_| {}), mk_merge_stmt(mcx, |_| {})));
+    assert!(!crate::equal(
+        mk_merge_stmt(mcx, |_| {}),
+        mk_merge_stmt(mcx, |m| m.relation = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+    assert!(!crate::equal(
+        mk_merge_stmt(mcx, |_| {}),
+        mk_merge_stmt(mcx, |m| m.joinCondition = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+}
+
+fn mk_create_table_as_stmt<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::CreateTableAsStmt<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::CreateTableAsStmt::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_create_table_as_stmt_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    use crate::parsenodes::ObjectType;
+    assert!(crate::equal(
+        mk_create_table_as_stmt(mcx, |_| {}),
+        mk_create_table_as_stmt(mcx, |_| {})
+    ));
+    assert!(!crate::equal(
+        mk_create_table_as_stmt(mcx, |_| {}),
+        mk_create_table_as_stmt(mcx, |s| s.query = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+    assert!(!crate::equal(
+        mk_create_table_as_stmt(mcx, |_| {}),
+        mk_create_table_as_stmt(mcx, |s| s.objtype = ObjectType::OBJECT_MATVIEW)
+    ));
+    assert!(!crate::equal(
+        mk_create_table_as_stmt(mcx, |_| {}),
+        mk_create_table_as_stmt(mcx, |s| s.is_select_into = true)
+    ));
+    assert!(!crate::equal(
+        mk_create_table_as_stmt(mcx, |_| {}),
+        mk_create_table_as_stmt(mcx, |s| s.if_not_exists = true)
+    ));
+}
+
+fn mk_json_parse_expr<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::JsonParseExpr<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::JsonParseExpr::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_json_parse_expr_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    assert!(crate::equal(mk_json_parse_expr(mcx, |_| {}), mk_json_parse_expr(mcx, |_| {})));
+    assert!(crate::equal(
+        mk_json_parse_expr(mcx, |j| j.location = 1),
+        mk_json_parse_expr(mcx, |j| j.location = 9)
+    ));
+    assert!(!crate::equal(
+        mk_json_parse_expr(mcx, |_| {}),
+        mk_json_parse_expr(mcx, |j| j.expr = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+    assert!(!crate::equal(
+        mk_json_parse_expr(mcx, |_| {}),
+        mk_json_parse_expr(mcx, |j| j.unique_keys = true)
+    ));
+}
+
+fn mk_index_elem<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::IndexElem<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::IndexElem::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_index_elem_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    use crate::rawnodes::SortByDir;
+    assert!(crate::equal(mk_index_elem(mcx, |_| {}), mk_index_elem(mcx, |_| {})));
+    assert!(!crate::equal(
+        mk_index_elem(mcx, |_| {}),
+        mk_index_elem(mcx, |e| e.name = Some("k"))
+    ));
+    assert!(!crate::equal(
+        mk_index_elem(mcx, |_| {}),
+        mk_index_elem(mcx, |e| e.ordering = SortByDir::SORTBY_DESC)
+    ));
+}
+
+fn mk_constraint<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::Constraint<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::Constraint::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_constraint_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    use crate::rawnodes::ConstrType;
+    assert!(crate::equal(mk_constraint(mcx, |_| {}), mk_constraint(mcx, |_| {})));
+    assert!(crate::equal(
+        mk_constraint(mcx, |c| c.location = 1),
+        mk_constraint(mcx, |c| c.location = 9)
+    ));
+    assert!(!crate::equal(
+        mk_constraint(mcx, |_| {}),
+        mk_constraint(mcx, |c| c.contype = ConstrType::CONSTR_CHECK)
+    ));
+    assert!(!crate::equal(
+        mk_constraint(mcx, |_| {}),
+        mk_constraint(mcx, |c| c.conname = Some("c"))
+    ));
+    assert!(!crate::equal(mk_constraint(mcx, |_| {}), mk_constraint(mcx, |c| c.deferrable = true)));
+}
+
+fn mk_range_subselect<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::RangeSubselect<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::RangeSubselect::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_range_subselect_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    assert!(crate::equal(mk_range_subselect(mcx, |_| {}), mk_range_subselect(mcx, |_| {})));
+    assert!(!crate::equal(
+        mk_range_subselect(mcx, |_| {}),
+        mk_range_subselect(mcx, |r| r.lateral = true)
+    ));
+    assert!(!crate::equal(
+        mk_range_subselect(mcx, |_| {}),
+        mk_range_subselect(mcx, |r| r.subquery = Some(mk_var_at(mcx, 1, 1, 0)))
+    ));
+}

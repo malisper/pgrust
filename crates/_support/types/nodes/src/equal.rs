@@ -25,10 +25,15 @@ use crate::primnodes::{
     MergeSupportFunc, WindowFuncRunCondition, XmlExpr,
 };
 use crate::rawnodes::{
-    A_Const, A_Expr, A_Star, CollateClause, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
-    InsertStmt, ParamRef, RangeTableFunc, RangeTableFuncCol, RawStmt, ResTarget, SelectStmt,
-    SortBy, TypeCast, TypeName, UpdateStmt,
-    ValUnion, XmlSerialize,
+    A_ArrayExpr, A_Const, A_Expr, A_Indices, A_Indirection, A_Star, CollateClause, ColumnDef,
+    ColumnRef, Constraint, CreateTableAsStmt, DeleteStmt, DistinctClause, FuncCall, IndexElem,
+    InferClause,
+    InsertStmt, IntoClause, JsonAggConstructor, JsonArgument, JsonArrayAgg, JsonArrayConstructor,
+    JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg, JsonObjectConstructor,
+    JsonOutput, JsonParseExpr, JsonScalarExpr, JsonSerializeExpr, LockingClause, MergeStmt,
+    MergeWhenClause, MultiAssignRef, OnConflictClause, ParamRef, RangeFunction, RangeSubselect,
+    RangeTableFunc, RangeTableFuncCol, RawStmt, ResTarget, ReturningClause, ReturningOption,
+    SelectStmt, SortBy, TypeCast, TypeName, UpdateStmt, ValUnion, WindowDef, XmlSerialize,
 };
 use crate::tags::NodeTag;
 
@@ -178,6 +183,47 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_JsonTablePathSpec => cmp!(as_json_table_path_spec),
         NodeTag::T_JsonTable => cmp!(as_json_table),
         NodeTag::T_JsonTableColumn => cmp!(as_json_table_column),
+        NodeTag::T_A_ArrayExpr => cmp!(as_a_array_expr),
+        NodeTag::T_A_Indices => cmp!(as_a_indices),
+        NodeTag::T_A_Indirection => cmp!(as_a_indirection),
+        NodeTag::T_WindowDef => cmp!(as_window_def),
+        NodeTag::T_LockingClause => cmp!(as_locking_clause),
+        NodeTag::T_IntoClause => cmp!(as_into_clause),
+        NodeTag::T_RangeSubselect => cmp!(as_range_subselect),
+        NodeTag::T_RangeFunction => cmp!(as_range_function),
+        NodeTag::T_OnConflictClause => cmp!(as_on_conflict_clause),
+        NodeTag::T_InferClause => cmp!(as_infer_clause),
+        NodeTag::T_IndexElem => cmp!(as_index_elem),
+        NodeTag::T_ReturningClause => cmp!(as_returning_clause),
+        NodeTag::T_ReturningOption => a
+            .as_variant::<ReturningOption>()
+            .unwrap()
+            .node_equal(b.as_variant::<ReturningOption>().unwrap()),
+        NodeTag::T_MultiAssignRef => cmp!(as_multi_assign_ref),
+        NodeTag::T_ColumnDef => cmp!(as_column_def),
+        NodeTag::T_Constraint => a
+            .as_variant::<Constraint>()
+            .unwrap()
+            .node_equal(b.as_variant::<Constraint>().unwrap()),
+        NodeTag::T_MergeStmt => cmp!(as_merge_stmt),
+        NodeTag::T_MergeWhenClause => cmp!(as_merge_when_clause),
+        NodeTag::T_CreateTableAsStmt => a
+            .as_variant::<CreateTableAsStmt>()
+            .unwrap()
+            .node_equal(b.as_variant::<CreateTableAsStmt>().unwrap()),
+        NodeTag::T_JsonOutput => cmp!(as_json_output),
+        NodeTag::T_JsonArgument => cmp!(as_json_argument),
+        NodeTag::T_JsonFuncExpr => cmp!(as_json_func_expr),
+        NodeTag::T_JsonKeyValue => cmp!(as_json_key_value),
+        NodeTag::T_JsonParseExpr => cmp!(as_json_parse_expr),
+        NodeTag::T_JsonScalarExpr => cmp!(as_json_scalar_expr),
+        NodeTag::T_JsonSerializeExpr => cmp!(as_json_serialize_expr),
+        NodeTag::T_JsonObjectConstructor => cmp!(as_json_object_constructor),
+        NodeTag::T_JsonArrayConstructor => cmp!(as_json_array_constructor),
+        NodeTag::T_JsonArrayQueryConstructor => cmp!(as_json_array_query_constructor),
+        NodeTag::T_JsonAggConstructor => cmp!(as_json_agg_constructor),
+        NodeTag::T_JsonObjectAgg => cmp!(as_json_object_agg),
+        NodeTag::T_JsonArrayAgg => cmp!(as_json_array_agg),
         other => panic!(
             "equal() (equalfuncs.c): node type {other:?} not in the carried vocabulary — \
              unit backend-nodes-equalfuncs"
@@ -1516,5 +1562,324 @@ impl NodeEqual for crate::rawnodes::JsonTableColumn<'_> {
             && self.columns.node_equal(&b.columns)
             && equal_opt(self.on_empty, b.on_empty)
             && equal_opt(self.on_error, b.on_error)
+    }
+}
+
+impl NodeEqual for A_ArrayExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.elements.node_equal(&b.elements)
+    }
+}
+
+impl NodeEqual for A_Indices<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.is_slice == b.is_slice
+            && equal_opt(self.lidx, b.lidx)
+            && equal_opt(self.uidx, b.uidx)
+    }
+}
+
+impl NodeEqual for A_Indirection<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.arg, b.arg) && self.indirection.node_equal(&b.indirection)
+    }
+}
+
+impl NodeEqual for WindowDef<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.name == b.name
+            && self.refname == b.refname
+            && self.partitionClause.node_equal(&b.partitionClause)
+            && self.orderClause.node_equal(&b.orderClause)
+            && self.frameOptions == b.frameOptions
+            && equal_opt(self.startOffset, b.startOffset)
+            && equal_opt(self.endOffset, b.endOffset)
+    }
+}
+
+impl NodeEqual for LockingClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.lockedRels.node_equal(&b.lockedRels)
+            && self.strength == b.strength
+            && self.waitPolicy == b.waitPolicy
+    }
+}
+
+impl NodeEqual for IntoClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.rel, b.rel)
+            && self.colNames.node_equal(&b.colNames)
+            && self.accessMethod == b.accessMethod
+            && self.options.node_equal(&b.options)
+            && self.onCommit == b.onCommit
+            && self.tableSpaceName == b.tableSpaceName
+            && equal_opt(self.viewQuery, b.viewQuery)
+            && self.skipData == b.skipData
+    }
+}
+
+impl NodeEqual for RangeSubselect<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.lateral == b.lateral
+            && equal_opt(self.subquery, b.subquery)
+            && eq_ref(self.alias, b.alias)
+    }
+}
+
+impl NodeEqual for RangeFunction<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.lateral == b.lateral
+            && self.ordinality == b.ordinality
+            && self.is_rowsfrom == b.is_rowsfrom
+            && self.functions.node_equal(&b.functions)
+            && eq_ref(self.alias, b.alias)
+            && self.coldeflist.node_equal(&b.coldeflist)
+    }
+}
+
+impl NodeEqual for OnConflictClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.action == b.action
+            && equal_opt(self.infer, b.infer)
+            && self.targetList.node_equal(&b.targetList)
+            && equal_opt(self.whereClause, b.whereClause)
+    }
+}
+
+impl NodeEqual for InferClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.indexElems.node_equal(&b.indexElems)
+            && equal_opt(self.whereClause, b.whereClause)
+            && self.conname == b.conname
+    }
+}
+
+impl NodeEqual for IndexElem<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.name == b.name
+            && equal_opt(self.expr, b.expr)
+            && self.indexcolname == b.indexcolname
+            && self.collation.node_equal(&b.collation)
+            && self.opclass.node_equal(&b.opclass)
+            && self.opclassopts.node_equal(&b.opclassopts)
+            && self.ordering == b.ordering
+            && self.nulls_ordering == b.nulls_ordering
+    }
+}
+
+impl NodeEqual for ReturningClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.options.node_equal(&b.options) && self.exprs.node_equal(&b.exprs)
+    }
+}
+
+impl NodeEqual for ReturningOption<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.option == b.option && self.value == b.value
+    }
+}
+
+impl NodeEqual for MultiAssignRef<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.source, b.source) && self.colno == b.colno && self.ncolumns == b.ncolumns
+    }
+}
+
+impl NodeEqual for ColumnDef<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.colname == b.colname
+            && equal_opt(self.typeName, b.typeName)
+            && self.compression == b.compression
+            && self.inhcount == b.inhcount
+            && self.is_local == b.is_local
+            && self.is_not_null == b.is_not_null
+            && self.is_from_type == b.is_from_type
+            && self.storage == b.storage
+            && self.storage_name == b.storage_name
+            && equal_opt(self.raw_default, b.raw_default)
+            && equal_opt(self.cooked_default, b.cooked_default)
+            && self.identity == b.identity
+            && eq_ref(self.identitySequence, b.identitySequence)
+            && self.generated == b.generated
+            && equal_opt(self.collClause, b.collClause)
+            && self.collOid == b.collOid
+            && self.constraints.node_equal(&b.constraints)
+            && self.fdwoptions.node_equal(&b.fdwoptions)
+    }
+}
+
+impl NodeEqual for Constraint<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.contype == b.contype
+            && self.conname == b.conname
+            && self.deferrable == b.deferrable
+            && self.initdeferred == b.initdeferred
+            && self.is_enforced == b.is_enforced
+            && self.skip_validation == b.skip_validation
+            && self.initially_valid == b.initially_valid
+            && self.is_no_inherit == b.is_no_inherit
+            && equal_opt(self.raw_expr, b.raw_expr)
+            && self.cooked_expr == b.cooked_expr
+            && self.generated_when == b.generated_when
+            && self.generated_kind == b.generated_kind
+            && self.nulls_not_distinct == b.nulls_not_distinct
+            && self.keys.node_equal(&b.keys)
+            && self.without_overlaps == b.without_overlaps
+            && self.including.node_equal(&b.including)
+            && self.exclusions.node_equal(&b.exclusions)
+            && self.options.node_equal(&b.options)
+            && self.indexname == b.indexname
+            && self.indexspace == b.indexspace
+            && self.reset_default_tblspc == b.reset_default_tblspc
+            && self.access_method == b.access_method
+            && equal_opt(self.where_clause, b.where_clause)
+            && eq_ref(self.pktable, b.pktable)
+            && self.fk_attrs.node_equal(&b.fk_attrs)
+            && self.pk_attrs.node_equal(&b.pk_attrs)
+            && self.fk_with_period == b.fk_with_period
+            && self.pk_with_period == b.pk_with_period
+            && self.fk_matchtype == b.fk_matchtype
+            && self.fk_upd_action == b.fk_upd_action
+            && self.fk_del_action == b.fk_del_action
+            && self.fk_del_set_cols.node_equal(&b.fk_del_set_cols)
+            && self.old_conpfeqop.node_equal(&b.old_conpfeqop)
+            && self.old_pktable_oid == b.old_pktable_oid
+    }
+}
+
+impl NodeEqual for MergeStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.relation, b.relation)
+            && equal_opt(self.sourceRelation, b.sourceRelation)
+            && equal_opt(self.joinCondition, b.joinCondition)
+            && self.mergeWhenClauses.node_equal(&b.mergeWhenClauses)
+            && equal_opt(self.returningClause, b.returningClause)
+            && equal_opt(self.withClause, b.withClause)
+    }
+}
+
+impl NodeEqual for MergeWhenClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.matchKind == b.matchKind
+            && self.commandType == b.commandType
+            && self.r#override == b.r#override
+            && equal_opt(self.condition, b.condition)
+            && self.targetList.node_equal(&b.targetList)
+            && self.values.node_equal(&b.values)
+    }
+}
+
+impl NodeEqual for CreateTableAsStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.query, b.query)
+            && equal_opt(self.into, b.into)
+            && self.objtype == b.objtype
+            && self.is_select_into == b.is_select_into
+            && self.if_not_exists == b.if_not_exists
+    }
+}
+
+impl NodeEqual for JsonOutput<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.typeName, b.typeName) && eq_ref(self.returning, b.returning)
+    }
+}
+
+impl NodeEqual for JsonArgument<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.val, b.val) && self.name == b.name
+    }
+}
+
+impl NodeEqual for JsonFuncExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.op == b.op
+            && self.column_name == b.column_name
+            && equal_opt(self.context_item, b.context_item)
+            && equal_opt(self.pathspec, b.pathspec)
+            && self.passing.node_equal(&b.passing)
+            && equal_opt(self.output, b.output)
+            && equal_opt(self.on_empty, b.on_empty)
+            && equal_opt(self.on_error, b.on_error)
+            && self.wrapper == b.wrapper
+            && self.quotes == b.quotes
+    }
+}
+
+impl NodeEqual for JsonKeyValue<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.key, b.key) && equal_opt(self.value, b.value)
+    }
+}
+
+impl NodeEqual for JsonParseExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.expr, b.expr)
+            && equal_opt(self.output, b.output)
+            && self.unique_keys == b.unique_keys
+    }
+}
+
+impl NodeEqual for JsonScalarExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.expr, b.expr) && equal_opt(self.output, b.output)
+    }
+}
+
+impl NodeEqual for JsonSerializeExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.expr, b.expr) && equal_opt(self.output, b.output)
+    }
+}
+
+impl NodeEqual for JsonObjectConstructor<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.exprs.node_equal(&b.exprs)
+            && equal_opt(self.output, b.output)
+            && self.absent_on_null == b.absent_on_null
+            && self.unique == b.unique
+    }
+}
+
+impl NodeEqual for JsonArrayConstructor<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.exprs.node_equal(&b.exprs)
+            && equal_opt(self.output, b.output)
+            && self.absent_on_null == b.absent_on_null
+    }
+}
+
+impl NodeEqual for JsonArrayQueryConstructor<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.query, b.query)
+            && equal_opt(self.output, b.output)
+            && eq_ref(self.format, b.format)
+            && self.absent_on_null == b.absent_on_null
+    }
+}
+
+impl NodeEqual for JsonAggConstructor<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.output, b.output)
+            && equal_opt(self.agg_filter, b.agg_filter)
+            && self.agg_order.node_equal(&b.agg_order)
+            && equal_opt(self.over, b.over)
+    }
+}
+
+impl NodeEqual for JsonObjectAgg<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.constructor, b.constructor)
+            && equal_opt(self.arg, b.arg)
+            && self.absent_on_null == b.absent_on_null
+            && self.unique == b.unique
+    }
+}
+
+impl NodeEqual for JsonArrayAgg<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.constructor, b.constructor)
+            && equal_opt(self.arg, b.arg)
+            && self.absent_on_null == b.absent_on_null
     }
 }
