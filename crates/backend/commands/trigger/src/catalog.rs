@@ -9,8 +9,8 @@ use pg_depend::{DependencyType, ObjectAddress};
 use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN, RELATION_RELATION_ID};
 use types_error::{
-    PgError, PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_DUPLICATE_OBJECT,
-    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_DUPLICATE_COLUMN,
+    ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_FUNCTION,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
@@ -977,20 +977,29 @@ fn check_when_var(
 
 // LookupFuncName(funcname, 0, NULL, false) (parse_func.c).
 fn lookup_trigger_func<'mcx>(mcx: Mcx<'mcx>, funcname: &NodeList<'mcx>) -> PgResult<Oid> {
-    let mut buf = [""; 4];
-    let mut n = 0;
+    let mut parts: Vec<&str> = Vec::new();
     for part in funcname.iter() {
-        buf[n] = part.as_string().expect("funcname String").sval;
-        n += 1;
+        parts.push(part.as_string().expect("funcname String").sval);
     }
-    let clist = catalog_namespace::FuncnameGetCandidates(mcx, &buf[..n], 0, &[], false, false)?;
-    match clist.len() {
-        0 => Err(err(
-            format!("function {}() does not exist", name_list_to_string(funcname)),
+    let clist = catalog_namespace::FuncnameGetCandidates(mcx, &parts, 0, &[], false, false)?;
+    let oids: Vec<Oid> = clist.iter().map(|c| c.oid).collect();
+    select_zero_arg_func(&oids, &name_list_to_string(funcname))
+}
+
+fn select_zero_arg_func(oids: &[Oid], display: &str) -> PgResult<Oid> {
+    match oids {
+        [] => Err(err(
+            format!("function {display}() does not exist"),
             ERRCODE_UNDEFINED_FUNCTION,
         )),
-        1 => Ok(clist[0].oid),
-        _ => panic!("multiple zero-argument candidates for {}", name_list_to_string(funcname)),
+        [oid] if *oid != InvalidOid => Ok(*oid),
+        _ => Err(Box::new(
+            PgError::new(ERROR, format!("function name \"{display}\" is not unique"))
+                .with_sqlstate(ERRCODE_AMBIGUOUS_FUNCTION)
+                .with_hint(
+                    "Specify the argument list to select the function unambiguously.".to_string(),
+                ),
+        )),
     }
 }
 
@@ -1226,4 +1235,50 @@ pub(crate) fn name_arg<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx,
     mcx::vec_append_bytes(&mut buf, name.as_bytes())?;
     mcx::vec_append_bytes(&mut buf, &[0u8; 64][..n - name.len()])?;
     Ok(buf)
+}
+
+#[cfg(test)]
+mod lookup_func_tests {
+    use super::*;
+    use types_error::ERRCODE_SYNTAX_ERROR;
+    use types_nodes::Node;
+
+    fn name_list<'mcx>(mcx: Mcx<'mcx>, parts: &[&'mcx str]) -> NodeList<'mcx> {
+        let mut list = NodeList::nil();
+        for p in parts {
+            list.lappend(mcx, Node::mk_string(mcx, p).unwrap()).unwrap();
+        }
+        list
+    }
+
+    #[test]
+    fn five_part_funcname_is_syntax_error() {
+        let root = mcx::session_root("trig-dots");
+        let mcx = root.mcx();
+        let names = name_list(mcx, &["a", "b", "c", "d", "e"]);
+        let e = lookup_trigger_func(mcx, &names).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "improper qualified name (too many dotted names): a.b.c.d.e"
+        );
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+    }
+
+    #[test]
+    fn two_zero_arg_candidates_is_ambiguous_function() {
+        let e = select_zero_arg_func(&[1, 2], "foo").unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_AMBIGUOUS_FUNCTION);
+        assert_eq!(e.message(), "function name \"foo\" is not unique");
+        assert_eq!(
+            e.hint(),
+            Some("Specify the argument list to select the function unambiguously.")
+        );
+    }
+
+    #[test]
+    fn invalid_oid_duplicate_marker_is_ambiguous() {
+        let e = select_zero_arg_func(&[InvalidOid], "foo").unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_AMBIGUOUS_FUNCTION);
+        assert_eq!(e.message(), "function name \"foo\" is not unique");
+    }
 }
