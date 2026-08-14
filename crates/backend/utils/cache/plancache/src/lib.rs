@@ -1374,9 +1374,10 @@ where
     })
 }
 
-// query_tree_walker's expression leg: the callback sees every expression node
-// in the query's expression-bearing fields (rtable/CTE subqueries are the
-// callers' own loops).
+// C ScanQueryForLocks's query_tree_walker(..., QTW_IGNORE_RC_SUBQUERIES):
+// every expression-bearing Query field, including onConflict / merge /
+// withCheckOptions / setOperations / window offsets / rtable exprs.
+// rtable/CTE subqueries stay the callers' own loops.
 fn walk_query_expr_nodes<F>(query: &Query<'static>, f: &mut F) -> PgResult<()>
 where
     F: FnMut(types_nodes::Node<'static>) -> PgResult<()>,
@@ -1393,59 +1394,8 @@ where
             nodes_core::expression_tree_walker(node, self)
         }
     }
-    fn walk_jt<F>(node: types_nodes::Node<'static>, w: &mut W<'_, F>) -> PgResult<()>
-    where
-        F: FnMut(types_nodes::Node<'static>) -> PgResult<()>,
-    {
-        use nodes_core::NodeWalker as _;
-        match node.node_tag() {
-            types_nodes::NodeTag::T_RangeTblRef => {}
-            types_nodes::NodeTag::T_FromExpr => {
-                let fe = node.as_from_expr().expect("FromExpr");
-                for child in &fe.fromlist {
-                    walk_jt(child, w)?;
-                }
-                if let Some(q) = fe.quals {
-                    w.visit(q)?;
-                }
-            }
-            types_nodes::NodeTag::T_JoinExpr => {
-                let j = node.as_join_expr().expect("JoinExpr");
-                walk_jt(j.larg, w)?;
-                walk_jt(j.rarg, w)?;
-                if let Some(q) = j.quals {
-                    w.visit(q)?;
-                }
-            }
-            other => panic!("walk_query_expr_nodes (plancache.c): {other:?} jointree arm"),
-        }
-        Ok(())
-    }
-    use nodes_core::NodeWalker as _;
     let mut w = W { f };
-    for te in &query.targetList {
-        w.visit(te)?;
-    }
-    for te in &query.returningList {
-        w.visit(te)?;
-    }
-    if let Some(jt) = query.jointree {
-        for item in &jt.fromlist {
-            walk_jt(item, &mut w)?;
-        }
-        if let Some(q) = jt.quals {
-            w.visit(q)?;
-        }
-    }
-    if let Some(h) = query.havingQual {
-        w.visit(h)?;
-    }
-    if let Some(n) = query.limitOffset {
-        w.visit(n)?;
-    }
-    if let Some(n) = query.limitCount {
-        w.visit(n)?;
-    }
+    nodes_core::query_tree_walker(query, &mut w, nodes_core::QTW_IGNORE_RC_SUBQUERIES)?;
     Ok(())
 }
 

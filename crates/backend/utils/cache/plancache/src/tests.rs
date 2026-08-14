@@ -6,7 +6,7 @@ use mcx::MemoryContext;
 use types_core::{Oid, INT4OID};
 use types_nodes::node_tree::Node;
 use types_nodes::plannodes::{Plan, Result as ResultPlan};
-use types_nodes::primnodes::{Const, TargetEntry};
+use types_nodes::primnodes::{Const, OnConflictExpr, SubLink, SubLinkType, TargetEntry};
 use types_nodes::rawnodes::SelectStmt;
 use types_snapshot::{SnapshotData, SnapshotType};
 use types_storage::lock::LOCKACQUIRE_OK;
@@ -14,6 +14,7 @@ use types_storage::lock::LOCKACQUIRE_OK;
 use super::*;
 
 const TEST_RELID: Oid = 50001;
+const ONCONFLICT_RELID: Oid = 50002;
 // A funcid the generic plan depends on (setrefs would key its PlanInvalItem on
 // PROCOID); the hash value the object-inval message carries.
 const TEST_FUNC_HASH: u32 = 0x00AB_CDEF;
@@ -240,6 +241,66 @@ fn generic_plan_built_once_and_warm_hit_reuses_it() {
 
     ReleaseCachedPlan(p1);
     ReleaseCachedPlan(p2);
+    DropCachedPlan(h);
+}
+
+fn query_with_onconflict_sublink_rel<'m>(mcx: mcx::Mcx<'m>) -> Query<'m> {
+    let mut inner = Node::build::<Query>(mcx).unwrap();
+    inner.commandType = CmdType::CMD_SELECT;
+    inner.canSetTag = true;
+    let inner_rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid: ONCONFLICT_RELID,
+            rellockmode: 1,
+            ..RangeTblEntry::default()
+        },
+    )
+    .unwrap();
+    inner.rtable.lappend(mcx, inner_rte).unwrap();
+    let sl = Node::mk(
+        mcx,
+        SubLink {
+            subLinkType: SubLinkType::EXISTS_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: types_nodes::list::NodeList::nil(),
+            subselect: inner.seal(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let oc = Node::mk(
+        mcx,
+        OnConflictExpr { onConflictWhere: Some(sl), ..OnConflictExpr::default() },
+    )
+    .unwrap();
+    let mut q = select_query(mcx, true);
+    q.hasSubLinks = true;
+    q.onConflict = Some(oc);
+    q
+}
+
+#[test]
+fn onconflict_where_sublink_rel_is_a_source_dependency() {
+    install();
+    push_snapshot();
+    let scratch = test_mcx();
+    let raw = select_raw(scratch);
+    let h = CreateCachedPlan(Some(&raw), "INSERT ... ON CONFLICT", CommandTag::SELECT).unwrap();
+    let qmcx = SourceQueryMcx(h);
+    let mut qlist = PgVec::new_in(qmcx);
+    qlist.push(query_with_onconflict_sublink_rel(qmcx));
+    CompleteCachedPlan(h, qlist, &[], types_portal::CURSOR_OPT_PARALLEL_OK, true).unwrap();
+    SaveCachedPlan(h).unwrap();
+    assert!(CachedPlanIsValid(h));
+
+    PlanCacheRelCallback(Datum::from_oid(InvalidOid), ONCONFLICT_RELID);
+    assert!(
+        !CachedPlanIsValid(h),
+        "C extract_query_dependencies walks onConflict; a rel only in ON CONFLICT WHERE must invalidate the source"
+    );
     DropCachedPlan(h);
 }
 
