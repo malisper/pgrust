@@ -457,7 +457,15 @@ fn process_startup_packet(mcx: Mcx<'_>, mut ssl_done: bool, mut gss_done: bool) 
             return Ok(STATUS_ERROR);
         }
 
-        let len = i32::from_be_bytes(len_bytes) - 4;
+        // backend_startup.c:532-542 subtracts BEFORE the range check (unlike
+        // pqcomm.c:1221-1231, which checks first). C's int32 arithmetic wraps,
+        // so a length word in [INT32_MIN, INT32_MIN+3] wraps to a large
+        // positive value and is rejected by the bound below. A plain Rust `-`
+        // panics on that input under overflow-checks instead, aborting the
+        // process — and in the threaded model that crash-restarts the whole
+        // cluster from one unauthenticated packet (PROTODIFF-1). wrapping_sub
+        // reproduces the C arithmetic exactly; the reject is unchanged.
+        let len = i32::from_be_bytes(len_bytes).wrapping_sub(4);
         if len < SIZEOF_PROTOCOL_VERSION || len > MAX_STARTUP_PACKET_LENGTH {
             ereport(COMMERROR)
                 .errcode(ERRCODE_PROTOCOL_VIOLATION)

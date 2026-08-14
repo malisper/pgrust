@@ -172,6 +172,33 @@ fn oversized_length_is_error() {
     assert_eq!(run_startup_packet().unwrap(), STATUS_ERROR);
 }
 
+/// PROTODIFF-1. backend_startup.c:532-542 subtracts 4 from the length word
+/// BEFORE the range check, and C's int32 arithmetic wraps: a length word in
+/// [INT32_MIN, INT32_MIN+3] wraps to a large positive value and is rejected
+/// by the bound. A plain Rust `-` panics on those four inputs under
+/// overflow-checks, aborting the process — which in the threaded model
+/// crash-restarts the whole cluster from one unauthenticated 12-byte packet.
+/// Every one of these must be a clean STATUS_ERROR, never a panic.
+#[test]
+fn startup_length_word_underflow_rejects_without_panicking() {
+    for len in [
+        i32::MIN,
+        i32::MIN + 1,
+        i32::MIN + 3,
+        i32::MIN + 4, // the first value that does not underflow
+        -1,
+        3,
+    ] {
+        setup();
+        feed(len.to_be_bytes().to_vec());
+        assert_eq!(
+            run_startup_packet().unwrap(),
+            STATUS_ERROR,
+            "length word {len} must reject cleanly"
+        );
+    }
+}
+
 #[test]
 #[should_panic(expected = "proc_exit(1)")]
 fn missing_user_is_fatal() {
