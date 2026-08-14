@@ -1,5 +1,5 @@
 use ::executils::EStateData;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::NodeTag;
 
@@ -825,9 +825,7 @@ fn accumulate_outer_chg<'mcx>(
     Ok(())
 }
 
-/// `ExecMarkPos` (execAmi.c): remember `node`'s current scan position. Only the
-/// mark-capable ported nodes have arms; the planner routes an unmarkable merge
-/// inner through a Sort/Material, so anything else is a loud panic.
+/// `ExecMarkPos` (execAmi.c): remember `node`'s current scan position.
 // ExecIndexMarkPos/RestrPos EPQ arm: with a test tuple or aux rowmark for
 // the scan's rel the index is never touched, so mark/restore are no-ops
 // (relsubs_done must already be set — no caller marks before the first fetch).
@@ -871,7 +869,7 @@ pub fn exec_mark_pos<'mcx>(
         }
         PlanStateNode::Sort(s) => ::nodesort::exec_sort_mark_pos(&mut s.state),
         PlanStateNode::Material(m) => ::nodematerial::exec_material_mark_pos(&mut m.state),
-        _ => panic!("ExecMarkPos (execAmi.c): node type does not support mark/restore"),
+        _ => Ok(()),
     }
 }
 
@@ -896,8 +894,62 @@ pub fn exec_restr_pos<'mcx>(
         }
         PlanStateNode::Sort(s) => ::nodesort::exec_sort_restr_pos(&mut s.state),
         PlanStateNode::Material(m) => ::nodematerial::exec_material_restr_pos(&mut m.state),
-        _ => panic!("ExecRestrPos (execAmi.c): node type does not support mark/restore"),
+        _ => Err(unrecognized_node_type(node)),
     }
+}
+
+fn planstate_tag(node: &PlanStateNode<'_>) -> NodeTag {
+    match node {
+        PlanStateNode::Result(_) => NodeTag::T_ResultState,
+        PlanStateNode::ProjectSet(_) => NodeTag::T_ProjectSetState,
+        PlanStateNode::SeqScan(_) => NodeTag::T_SeqScanState,
+        PlanStateNode::SampleScan(_) => NodeTag::T_SampleScanState,
+        PlanStateNode::FunctionScan(_) => NodeTag::T_FunctionScanState,
+        PlanStateNode::ValuesScan(_) => NodeTag::T_ValuesScanState,
+        PlanStateNode::TableFuncScan(_) => NodeTag::T_TableFuncScanState,
+        PlanStateNode::CteScan(_) => NodeTag::T_CteScanState,
+        PlanStateNode::IndexScan(_) => NodeTag::T_IndexScanState,
+        PlanStateNode::TidScan(_) => NodeTag::T_TidScanState,
+        PlanStateNode::TidRangeScan(_) => NodeTag::T_TidRangeScanState,
+        PlanStateNode::IndexOnlyScan(_) => NodeTag::T_IndexOnlyScanState,
+        PlanStateNode::Agg(_) => NodeTag::T_AggState,
+        PlanStateNode::Sort(_) => NodeTag::T_SortState,
+        PlanStateNode::IncrementalSort(_) => NodeTag::T_IncrementalSortState,
+        PlanStateNode::Material(_) => NodeTag::T_MaterialState,
+        PlanStateNode::Unique(_) => NodeTag::T_UniqueState,
+        PlanStateNode::Group(_) => NodeTag::T_GroupState,
+        PlanStateNode::Limit(_) => NodeTag::T_LimitState,
+        PlanStateNode::LockRows(_) => NodeTag::T_LockRowsState,
+        PlanStateNode::BitmapHeapScan(_) => NodeTag::T_BitmapHeapScanState,
+        PlanStateNode::BitmapIndexScan(_) => NodeTag::T_BitmapIndexScanState,
+        PlanStateNode::BitmapAnd(_) => NodeTag::T_BitmapAndState,
+        PlanStateNode::BitmapOr(_) => NodeTag::T_BitmapOrState,
+        PlanStateNode::ModifyTable(_) => NodeTag::T_ModifyTableState,
+        PlanStateNode::NestLoop(_) => NodeTag::T_NestLoopState,
+        PlanStateNode::HashJoin(_) => NodeTag::T_HashJoinState,
+        PlanStateNode::MergeJoin(_) => NodeTag::T_MergeJoinState,
+        PlanStateNode::WindowAgg(_) => NodeTag::T_WindowAggState,
+        PlanStateNode::Append(_) => NodeTag::T_AppendState,
+        PlanStateNode::MergeAppend(_) => NodeTag::T_MergeAppendState,
+        PlanStateNode::SubqueryScan(_) => NodeTag::T_SubqueryScanState,
+        PlanStateNode::SetOp(_) => NodeTag::T_SetOpState,
+        PlanStateNode::Memoize(_) => NodeTag::T_MemoizeState,
+        PlanStateNode::RecursiveUnion(_) => NodeTag::T_RecursiveUnionState,
+        PlanStateNode::WorkTableScan(_) => NodeTag::T_WorkTableScanState,
+        PlanStateNode::NamedTuplestoreScan(_) => NodeTag::T_NamedTuplestoreScanState,
+        PlanStateNode::Gather(_) => NodeTag::T_GatherState,
+        PlanStateNode::GatherMerge(_) => NodeTag::T_GatherMergeState,
+        PlanStateNode::ForeignScan(_) => NodeTag::T_ForeignScanState,
+        PlanStateNode::Instrumented(w) => planstate_tag(&w.inner),
+    }
+}
+
+#[cold]
+fn unrecognized_node_type(node: &PlanStateNode<'_>) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "unrecognized node type: {}",
+        planstate_tag(node) as u16
+    )))
 }
 
 /// `ExecReScanResult` (nodeResult.c).

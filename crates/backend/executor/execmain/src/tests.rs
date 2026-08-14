@@ -348,6 +348,32 @@ fn mk_select1_pstmt<'mcx>(
     pstmt.seal_ref()
 }
 
+fn mk_limit_select1_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::plannodes::Limit;
+    use ::types_nodes::primnodes::OUTER_VAR;
+
+    let tle =
+        Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false).unwrap();
+    let mut result = Node::build::<ResultPlan>(mcx).unwrap();
+    result.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+    let inner = result.seal();
+
+    let v = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let mut limit = Node::build::<Limit>(mcx).unwrap();
+    limit.plan.targetlist = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, v, 1, Some("?column?"), false).unwrap(),
+    )
+    .unwrap();
+    limit.plan.lefttree = Some(inner);
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(limit.seal());
+    pstmt.seal_ref()
+}
+
 fn leaked_mcx() -> ::mcx::Mcx<'static> {
     let m: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("execmain-test")));
     m.mcx()
@@ -580,6 +606,24 @@ fn result_node_projects_const_datum() {
         exec_re_scan(&mut ps, &mut data.estate).unwrap();
         let again = exec_proc_node(&mut ps, &mut data.estate).unwrap();
         assert!(again.is_some());
+    });
+}
+
+#[test]
+fn unsupported_mark_pos_is_noop_restr_errors() {
+    install_seams();
+    let mcx = leaked_mcx();
+    let pstmt = mk_limit_select1_pstmt(mcx);
+    with_exec_data(pstmt, |data, pstmt| {
+        let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+            .unwrap()
+            .unwrap();
+        crate::execami::exec_mark_pos(&mut ps, &mut data.estate).unwrap();
+        let err = crate::execami::exec_restr_pos(&mut ps, &mut data.estate).unwrap_err();
+        assert!(
+            err.to_string().contains("unrecognized node type: 437"),
+            "{err}"
+        );
     });
 }
 
