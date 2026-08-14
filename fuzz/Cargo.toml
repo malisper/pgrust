@@ -714,3 +714,44 @@ path = "fuzz_targets/pglz_diff.rs"
 test = false
 doc = false
 bench = false
+
+# PARSER-INVENTORY lane: wire the ready-but-unexposed hand-rolled-parser
+# differential modules (comparator + adversarial bank + planted-bug detection
+# control already shipped in core/src/; C oracles pg_varbit_io.c /
+# pg_copyframe_io.c already active in build.rs). These were compiled and
+# cargo-tested but never had a libFuzzer [[bin]], so they got no coverage-guided
+# mutation. See docs/fuzzing/parser-inventory.md.
+
+# varbit_io_diff: bit_in / varbit_in — hand-rolled B/X-prefix text parser.
+[[bin]]
+name = "varbit_io_diff"
+path = "fuzz_targets/varbit_io_diff.rs"
+test = false
+doc = false
+bench = false
+
+# copyrow_diff: COPY line/row splitter (CopyReadLine/CopyReadLineText) —
+# attacker-stream state machine (CSV quote/escape, EOL latch, \. marker).
+[[bin]]
+name = "copyrow_diff"
+path = "fuzz_targets/copyrow_diff.rs"
+test = false
+doc = false
+bench = false
+
+# copyframe_text_diff: COPY text field de-escape + delimiter split.
+[[bin]]
+name = "copyframe_text_diff"
+path = "fuzz_targets/copyframe_text_diff.rs"
+test = false
+doc = false
+bench = false
+
+# copyframe_binary_diff: COPY binary per-field length framing (-1 NULL vs
+# illegal negatives / oversize length words).
+[[bin]]
+name = "copyframe_binary_diff"
+path = "fuzz_targets/copyframe_binary_diff.rs"
+test = false
+doc = false
+bench = false

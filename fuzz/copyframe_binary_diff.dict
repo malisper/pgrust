@@ -1,0 +1,17 @@
+# copyframe_binary_diff dictionary (PARSER-INVENTORY lane). Tokens for the COPY
+# binary per-field length framing (i32 big-endian length words): the -1 NULL
+# sentinel, zero-length, small lengths, and the illegal-negative / oversize
+# length words that must be rejected identically. Input layout is
+# [selector][stream]; these tokens seed the stream tail.
+# -1 NULL sentinel (i32 BE)
+"\xff\xff\xff\xff"
+# zero-length field
+"\x00\x00\x00\x00"
+# length 1 / 4
+"\x00\x00\x00\x01"
+"\x00\x00\x00\x04"
+# illegal negative (not -1)
+"\xff\xff\xff\xfe"
+"\x80\x00\x00\x00"
+# oversize length word
+"\x7f\xff\xff\xff"

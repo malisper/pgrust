@@ -266,6 +266,11 @@ const DELIMS: &[u8] = &[b'\t', b',', b'|', b';', b' ', b':'];
 
 /// COPY text field split differential.
 pub fn copyframe_text_diff(data: &[u8]) {
+    // Hold the oracle lock on the libFuzzer entry frame — c_text reaches the
+    // holder-checked vendored-C oracle (csrc/pg_copyframe_io.c). Required by
+    // the runtime holder check and scripts/lint-oracle-serial.py; reentrant,
+    // so run_copyframe_campaign taking it too is a no-op.
+    let _serial = crate::c_oracle_serial();
     if data.is_empty() {
         return;
     }
@@ -282,6 +287,11 @@ pub fn copyframe_text_diff(data: &[u8]) {
 
 /// COPY binary per-field framing differential (the Q8-F1 length-word surface).
 pub fn copyframe_binary_diff(data: &[u8]) {
+    // Hold the oracle lock on the libFuzzer entry frame — c_binary reaches the
+    // holder-checked vendored-C oracle (csrc/pg_copyframe_io.c). Required by
+    // the runtime holder check and scripts/lint-oracle-serial.py; reentrant,
+    // so run_copyframe_campaign taking it too is a no-op.
+    let _serial = crate::c_oracle_serial();
     if data.is_empty() {
         return;
     }

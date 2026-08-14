@@ -1,0 +1,25 @@
+# varbit_io_diff dictionary (PARSER-INVENTORY lane). Tokens for the
+# bit_in/varbit_in text language: the B/X prefix set + binary/hex digit runs +
+# the odd-nibble / bad-digit / prefix-only adversarial shapes. Input layout is
+# [selector][atttypmod:4 LE][text]; these tokens seed the text tail. CmpLog +
+# dictionary is day-one for parser-shaped targets (fuzzuproof-crate skill).
+# prefixes
+"b"
+"B"
+"x"
+"X"
+# binary digit runs
+"0"
+"1"
+"1010"
+"b1010"
+"B0011"
+# hex form + odd-nibble edges
+"x1f"
+"Xabcdef"
+"x0"
+"x123"
+# bad-digit / adversarial
+"b2"
+"xg"
+"z1010"

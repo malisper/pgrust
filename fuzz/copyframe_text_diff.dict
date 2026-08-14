@@ -1,0 +1,16 @@
+# copyframe_text_diff dictionary (PARSER-INVENTORY lane). Tokens for the COPY
+# text field de-escape + delimiter split: the \N NULL marker, backslash escape
+# forms (\t \n \r \\ octal \0 hex \x), and delimiter/quote bytes. Input layout
+# is [selector][line]; these tokens seed the line tail.
+"\\N"
+"\\t"
+"\\n"
+"\\r"
+"\\\\"
+"\\0"
+"\\x41"
+"\\061"
+"a\tb"
+"a,b"
+"\t"
+","

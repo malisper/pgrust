@@ -183,6 +183,13 @@ const QUOTES: &[u8] = &[b'"', b'\''];
 
 /// COPY line/row framing differential.
 pub fn copyrow_diff(data: &[u8]) {
+    // Hold the process-wide oracle lock on the libFuzzer entry frame: the C
+    // helpers below reach the holder-checked vendored-C oracle
+    // (csrc/pg_copyframe_io.c). Without this the runtime holder check aborts
+    // (the trgmrx arm-9 vacuous-crash class); it also satisfies
+    // scripts/lint-oracle-serial.py for this fuzz_target! entry. Reentrant
+    // (thread-local depth), so run_copyrow_campaign taking it too is a no-op.
+    let _serial = crate::c_oracle_serial();
     if data.is_empty() {
         return;
     }

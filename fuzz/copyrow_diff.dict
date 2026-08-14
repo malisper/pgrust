@@ -1,0 +1,18 @@
+# copyrow_diff dictionary (PARSER-INVENTORY lane). Tokens for the COPY
+# line/row splitter state machine: EOL styles (LF/CR/CRLF), the \. end-of-copy
+# marker (alone and mid-line), CSV quote/escape, and the non-CSV backslash
+# escapes that make \\. data not a marker. Input layout is [selector][stream];
+# these tokens seed the stream tail.
+"\n"
+"\r"
+"\r\n"
+"\\."
+"\\.\n"
+"\n\\.\n"
+"\""
+"\"\""
+"a\tb\n"
+"a,b\n"
+"\\\\.\n"
+"\\\n"
+"x\\.y\n"
