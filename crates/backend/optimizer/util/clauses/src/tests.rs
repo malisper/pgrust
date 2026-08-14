@@ -16,6 +16,7 @@ use crate::fold::{all_arguments_const, eval_const_expressions};
 use crate::walker::{expression_tree_mutator, expression_tree_walker, NodeWalker};
 
 const F_INT4PL: u32 = 177;
+const F_BTINT4CMP: u32 = 351;
 const F_BOOLEQ: u32 = 60;
 const F_INT4EQ: u32 = 65;
 const F_FAKE_VOLATILE: u32 = 9990;
@@ -55,6 +56,11 @@ fn install_fixtures() {
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok(match funcid {
                 F_INT4PL => Some(shape(b'i', b's', true, 23)),
+                F_BTINT4CMP => {
+                    let mut sh = shape(b'i', b's', true, 23);
+                    sh.proleakproof = true;
+                    Some(sh)
+                }
                 F_BOOLEQ => Some(shape(b'i', b's', true, 16)),
                 F_INT4EQ => Some(shape(b'i', b's', true, 16)),
                 F_NEXTVAL => Some(shape(b'v', b'u', true, 20)),
@@ -115,6 +121,9 @@ fn install_fixtures() {
             })
         });
         var_seams::contain_var_clause::set(fixture_contain_var_clause);
+        typcache_seams::type_cache_cmp_proc::set(|typid| {
+            Ok(if typid == 23 { F_BTINT4CMP } else { 0 })
+        });
         miscinit_seams::get_user_id::set(|| 10);
         aclchk_seams::object_aclcheck::set(|_, _, _, _| Ok(0));
         clauses_seams::inline_sql_function::set(|mcx, funcid, _, _, _, args| {
@@ -375,6 +384,13 @@ fn pseudo_constant_and_leaked_vars() {
     assert!(contain_leaked_vars(leaky).unwrap());
     let no_vars = op_expr(mcx, 551, F_INT4PL, 23, &[c, c]);
     assert!(!contain_leaked_vars(no_vars).unwrap());
+
+    // GREATEST/LEAST: leakproof iff the type's btree cmp_proc is.
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let greatest = minmax(mcx, false, &[var, int4_const(mcx, Some(0))]);
+    assert!(!contain_leaked_vars(greatest).unwrap());
+    let consts_only = minmax(mcx, true, &[int4_const(mcx, Some(1)), int4_const(mcx, Some(2))]);
+    assert!(!contain_leaked_vars(consts_only).unwrap());
 }
 
 #[test]

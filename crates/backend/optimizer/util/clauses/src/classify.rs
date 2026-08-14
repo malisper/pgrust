@@ -1,5 +1,5 @@
 use lsyscache::{func_parallel, func_strict, func_volatile, get_func_leakproof};
-use types_core::Oid;
+use types_core::{Oid, OidIsValid};
 use types_error::PgResult;
 use types_nodes::primnodes::{Param, ParamKind, ScalarArrayOpExpr};
 use types_nodes::{Bitmapset, Node, NodeTag};
@@ -533,7 +533,14 @@ impl<'mcx> NodeWalker<'mcx> for ContainLeakedVars {
                     }
                 }
             }
-            t @ NodeTag::T_MinMaxExpr => deferred("contain_leaked_vars_walker", t),
+            NodeTag::T_MinMaxExpr => {
+                let mm = node.as_min_max_expr().unwrap();
+                let cmp = typcache_seams::type_cache_cmp_proc::call(mm.minmaxtype)?;
+                let leakproof = OidIsValid(cmp) && get_func_leakproof(cmp)?;
+                if !leakproof && var_seams::contain_var_clause::call(node) {
+                    return Ok(true);
+                }
+            }
             NodeTag::T_CurrentOfExpr => return Ok(false),
             // Unrecognized node: assume it might be leaky (C default arm).
             _ => return Ok(true),
