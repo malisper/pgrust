@@ -88,7 +88,7 @@ fn elided_expression_stores_one_row() {
         true,
     )
     .unwrap();
-    let elided = crate::exec_init_expr(mcx, Some(konst), estate.param_bind()).unwrap().unwrap();
+    let elided = ::execexpr::exec_init_expr(mcx, Some(konst), estate.param_bind()).unwrap().unwrap();
     let mut setexpr = SetExprState {
         flinfo: None,
         args: PgVec::new_in(mcx),
@@ -167,4 +167,58 @@ fn materialize_mode_from_non_srf_violates_protocol() {
     assert!(err
         .message()
         .contains("table-function protocol for materialize mode was not followed"));
+}
+
+fn empty_vpc_srf(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    if let Some(rsinfo) = fcinfo.rsinfo_mut() {
+        rsinfo.isDone = ExprDoneCond::ExprEndResult;
+    }
+    Ok(Datum::null())
+}
+
+#[test]
+fn eight_arg_table_srf_does_not_panic() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut estate = EStateData::new_in(mcx);
+    let ecxt = estate.exec_assign_expr_context();
+    let desc = int4_desc(mcx, 1);
+
+    let mut args = PgVec::new_in(mcx);
+    for i in 0..8 {
+        let konst = ::types_nodes::node_tree::Node::mk_const(
+            mcx,
+            23,
+            -1,
+            0,
+            4,
+            Datum::from_i32(i),
+            false,
+            true,
+        )
+        .unwrap();
+        args.push(
+            ::execexpr::exec_init_expr(mcx, Some(konst), estate.param_bind())
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let mut setexpr = SetExprState {
+        flinfo: Some(FmgrInfo::new(empty_vpc_srf, 4243, 8, false, true)),
+        args,
+        collation: 0,
+        returns_set: true,
+        returns_tuple: false,
+        elided_func_state: None,
+    };
+
+    let mut arg_mcx = MemoryContext::new("t-args");
+    let mut store =
+        exec_make_table_function_result(&mut setexpr, &desc, false, &mut estate, ecxt, &mut arg_mcx)
+            .unwrap();
+    assert_eq!(store.tuple_count(), 0);
+    store.end();
 }

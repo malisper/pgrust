@@ -8,7 +8,7 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 use ::datum::NullableDatum;
-use ::execexpr::{exec_eval_expr, exec_init_expr, EvalSlots, ExprState};
+use ::execexpr::{exec_eval_expr, exec_init_expr_subplans, EvalSlots, ExprState};
 use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Allocator, Mcx, MemoryContext, PgBox, PgVec};
@@ -351,9 +351,12 @@ fn exec_init_table_function_result<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<SetExprState<'mcx>> {
     let fexpr = rtfunc.funcexpr.expect("RangeTblFunction has funcexpr");
+    let pb = estate.param_bind();
     let Some(func) = fexpr.as_func_expr() else {
-        let elided = exec_init_expr(mcx, Some(fexpr), estate.param_bind())?
-            .expect("non-NULL elided table function expression");
+        let elided = ::executils::with_subplan_compile_env(estate, |env| {
+            exec_init_expr_subplans(mcx, Some(fexpr), pb, env)
+        })?
+        .expect("non-NULL elided table function expression");
         return Ok(SetExprState {
             flinfo: None,
             args: PgVec::new_in(mcx),
@@ -364,12 +367,15 @@ fn exec_init_table_function_result<'mcx>(
         });
     };
     let mut args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
-    for arg in &func.args {
-        args.push(
-            exec_init_expr(mcx, Some(arg), estate.param_bind())?
-                .expect("non-NULL arg expression"),
-        );
-    }
+    ::executils::with_subplan_compile_env(estate, |env| -> PgResult<()> {
+        for arg in &func.args {
+            args.push(
+                exec_init_expr_subplans(mcx, Some(arg), pb, env)?
+                    .expect("non-NULL arg expression"),
+            );
+        }
+        Ok(())
+    })?;
     // init_sexpr's ACL_EXECUTE check (execQual.c): contrib functions REVOKE
     // PUBLIC (pg_buffercache 1.3+, pg_stat_statements), so the old
     // "built-ins are PUBLIC-execute" shortcut no longer holds on this path.
@@ -498,25 +504,7 @@ fn exec_make_table_function_result<'mcx>(
     if setexpr.elided_func_state.is_some() {
         return run_elided(setexpr, expected_desc, random_access, estate, ecxt);
     }
-    match setexpr.args.len() {
-        0 => run_value_per_call::<0>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
-        1 => run_value_per_call::<1>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
-        2 => run_value_per_call::<2>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
-        3 => run_value_per_call::<3>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
-        4 => run_value_per_call::<4>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
-        // pg_create_logical_replication_slot(name, plugin, temporary,
-        // twophase, failover) — pg_createsubscriber's slot creation.
-        5 => run_value_per_call::<5>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
-        // contrib tablefunc connectby: 6- and 7-argument forms.
-        6 => run_value_per_call::<6>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
-        7 => run_value_per_call::<7>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
-        // pg_restore_attribute_stats over pg_stats rows is a 36-arg
-        // variadic-"any" SRF call (stats_import).
-        36 => {
-            run_value_per_call::<36>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx)
-        }
-        n => panic!("ExecMakeTableFunctionResult: {n}-argument SRF — widen the fcinfo dispatch"),
-    }
+    run_value_per_call(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx)
 }
 
 // C's elidedFuncState leg of ExecMakeTableFunctionResult: generic ExecEvalExpr
@@ -558,7 +546,7 @@ fn run_elided<'mcx>(
     Ok(store)
 }
 
-fn run_value_per_call<'mcx, const N: usize>(
+fn run_value_per_call<'mcx>(
     setexpr: &mut SetExprState<'mcx>,
     expected_desc: &TupleDescData<'mcx>,
     random_access: bool,
@@ -577,7 +565,10 @@ fn run_value_per_call<'mcx, const N: usize>(
     // outlives this call frame; rsinfo dies with the frame.
     rsinfo.expectedDesc =
         Some(core::ptr::NonNull::from(expected_desc).cast::<core::ffi::c_void>());
-    let mut fcinfo = LocalFcinfo::<N>::new(setexpr.collation);
+    let nargs = setexpr.args.len();
+    debug_assert!(nargs <= types_core::FUNC_MAX_ARGS);
+    let mut fcinfo = LocalFcinfo::<{ types_core::FUNC_MAX_ARGS }>::new(setexpr.collation);
+    fcinfo.nargs = nargs as i16;
     // fcinfo.resultinfo and the result mcx are armed inside the loop, before
     // each invoke (miri F6/F9: per-invoke provenance re-arm).
 
@@ -585,7 +576,7 @@ fn run_value_per_call<'mcx, const N: usize>(
     // datums must survive the loop's per-tuple resets below (execSRF.c:119).
     arg_mcx.reset();
     let mut all_null_skip = false;
-    for i in 0..N {
+    for i in 0..nargs {
         // SAFETY: arg_mcx is owned by the scan state and outlives this loop;
         // it is only reset at the next scan start.
         unsafe { setexpr.args[i].arm_result_mcx_raw(arg_mcx.mcx()) };
