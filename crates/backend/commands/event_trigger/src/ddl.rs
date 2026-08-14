@@ -7,7 +7,7 @@ use mcx::{Mcx, PgVec};
 use pg_depend::{DependencyType, ObjectAddress};
 use types_core::{CommandTag, Oid, OidIsValid, NAMEDATALEN, TEXTOID};
 use types_error::{
-    PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
+    PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
@@ -174,16 +174,25 @@ fn LookupFuncName0(mcx: Mcx<'_>, funcname: &types_nodes::list::NodeList<'_>) -> 
         parts.push(n.as_string().expect("funcname holds Strings").sval);
     }
     let candidates = catalog_namespace::FuncnameGetCandidates(mcx, &parts, 0, &[], false, false)?;
-    for c in candidates.iter() {
-        if c.args.is_empty() && OidIsValid(c.oid) {
-            return Ok(c.oid);
-        }
+    let oids: Vec<Oid> = candidates.iter().map(|c| c.oid).collect();
+    select_zero_arg_func(&oids, &name_list_to_string_raw(&parts))
+}
+
+fn select_zero_arg_func(oids: &[Oid], display: &str) -> PgResult<Oid> {
+    match oids {
+        [] => Err(elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!("function {display}() does not exist"))
+            .into_error()
+            .into()),
+        [oid] if OidIsValid(*oid) => Ok(*oid),
+        _ => Err(elog::ereport(ERROR)
+            .errcode(ERRCODE_AMBIGUOUS_FUNCTION)
+            .errmsg(format!("function name \"{display}\" is not unique"))
+            .errhint("Specify the argument list to select the function unambiguously.")
+            .into_error()
+            .into()),
     }
-    Err(elog::ereport(ERROR)
-        .errcode(ERRCODE_UNDEFINED_FUNCTION)
-        .errmsg(format!("function {}() does not exist", name_list_to_string_raw(&parts)))
-        .into_error()
-        .into())
 }
 
 fn name_list_to_string(funcname: &types_nodes::list::NodeList<'_>) -> String {
@@ -616,4 +625,27 @@ pub fn get_event_trigger_oid(trigname: &str, missing_ok: bool) -> PgResult<Oid> 
             .into());
     }
     Ok(oid)
+}
+
+#[cfg(test)]
+mod lookup_func_tests {
+    use super::*;
+    use types_core::InvalidOid;
+
+    #[test]
+    fn two_zero_arg_candidates_is_ambiguous_function() {
+        let e = select_zero_arg_func(&[1, 2], "foo").unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_AMBIGUOUS_FUNCTION);
+        assert_eq!(e.message(), "function name \"foo\" is not unique");
+        assert_eq!(
+            e.hint(),
+            Some("Specify the argument list to select the function unambiguously.")
+        );
+    }
+
+    #[test]
+    fn invalid_oid_duplicate_marker_is_ambiguous() {
+        let e = select_zero_arg_func(&[InvalidOid], "foo").unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_AMBIGUOUS_FUNCTION);
+    }
 }
