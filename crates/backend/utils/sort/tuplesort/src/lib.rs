@@ -1966,6 +1966,9 @@ impl Tuplesort {
                 }
                 st.current = st.memtuples.len();
                 st.eof_reached = true;
+                if st.bounded && st.current >= st.bound as usize {
+                    return Err(too_many_bounded());
+                }
                 Ok(false)
             }
             TupSortStatus::SortedOnTape | TupSortStatus::FinalMerge => {

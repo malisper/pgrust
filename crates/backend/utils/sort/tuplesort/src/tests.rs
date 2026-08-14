@@ -213,6 +213,24 @@ fn bounded_top_n_heapsort_used_and_correct() {
     }
 }
 
+#[test]
+fn skiptuples_past_bound_is_error() {
+    let mut ts =
+        Tuplesort::begin_datum_with_key(int32_key(1, false, false), 1024, TUPLESORT_ALLOWBOUNDED);
+    ts.set_bound(3);
+    for i in 0..10 {
+        ts.putdatum(Datum::from_i32(i), false).unwrap();
+    }
+    ts.performsort().unwrap();
+    assert!(ts.used_bound());
+    let err = ts.skiptuples(4, true).unwrap_err();
+    assert!(
+        err.message().contains("retrieved too many tuples in a bounded sort"),
+        "message: {}",
+        err.message()
+    );
+}
+
 // Lane top-k cutoff boundary accessor: None until the bounded heap fills
 // (TSS_BOUNDED), then always the WORST surviving top-k member (the k-th
 // boundary), monotonically tightening — and every value strictly worse than
