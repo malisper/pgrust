@@ -2362,18 +2362,9 @@ fn merge_join_qual_passes<'mcx>(
     plan_slot: ExecSlotId,
 ) -> PgResult<bool> {
     let old_id = mt.rel().ri_oldTupleSlot.expect("ExecInitMergeTupleSlots ran");
-    pre_eval_param_deps(
+    let jc_subplans = needs_subplan_driver(
         mt.rel().merge.as_ref().expect("merge state").join_condition.as_deref(),
-        estate,
-    )?;
-    let jc_subplans = mt
-        .rel()
-        .merge
-        .as_ref()
-        .expect("merge state")
-        .join_condition
-        .as_deref()
-        .is_some_and(|q| q.has_subplan());
+    );
     let node_ecxt = mt.node_ecxt;
     let ModifyTableState { rels, cur, .. } = &mut *mt;
     let merge = rels[*cur].merge.as_mut().expect("merge state");
@@ -2433,22 +2424,13 @@ fn merge_when_qual_matched<'mcx>(
     old_id: ExecSlotId,
 ) -> PgResult<(CmdType, bool)> {
     let node_ecxt = mt.node_ecxt;
-    {
-        let merge = mt.rel().merge.as_ref().expect("merge state");
-        let action = if by_source {
-            &merge.not_matched_by_source_actions[ai]
-        } else {
-            &merge.matched_actions[ai]
-        };
-        pre_eval_param_deps(action.when_qual.as_deref(), estate)?;
-    }
     let merge = mt.rel_mut().merge.as_mut().expect("merge state");
     let action = if by_source {
         &mut merge.not_matched_by_source_actions[ai]
     } else {
         &mut merge.matched_actions[ai]
     };
-    if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
+    if needs_subplan_driver(action.when_qual.as_deref()) {
         let ec = node_ecxt.expect("node ecxt created with MERGE");
         estate.reset_expr_context(ec);
         {
@@ -2492,13 +2474,9 @@ fn merge_when_qual_not_matched<'mcx>(
     plan_slot: ExecSlotId,
 ) -> PgResult<(CmdType, bool)> {
     let node_ecxt = mt.node_ecxt;
-    {
-        let merge = mt.rel().merge.as_ref().expect("merge state");
-        pre_eval_param_deps(merge.not_matched_actions[ai].when_qual.as_deref(), estate)?;
-    }
     let merge = mt.rel_mut().merge.as_mut().expect("merge state");
     let action = &mut merge.not_matched_actions[ai];
-    if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
+    if needs_subplan_driver(action.when_qual.as_deref()) {
         let ec = node_ecxt.expect("node ecxt created with MERGE");
         estate.reset_expr_context(ec);
         {
@@ -2540,13 +2518,9 @@ fn merge_project_not_matched<'mcx>(
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     let node_ecxt = mt.node_ecxt;
-    {
-        let merge = mt.rel().merge.as_ref().expect("merge state");
-        pre_eval_param_deps(merge.not_matched_actions[ai].proj.as_deref(), estate)?;
-    }
     let merge = mt.rel_mut().merge.as_mut().expect("merge state");
     let action = &mut merge.not_matched_actions[ai];
-    if action.proj.as_deref().is_some_and(|p| p.has_subplan()) {
+    if needs_subplan_driver(action.proj.as_deref()) {
         let ec = node_ecxt.expect("node ecxt created with MERGE");
         estate.reset_expr_context(ec);
         {
@@ -2968,8 +2942,7 @@ fn merge_project_update<'mcx>(
     };
     let setvals_id = action.setvals_slot.expect("UPDATE action state");
 
-    pre_eval_param_deps(action.proj.as_deref(), estate)?;
-    if action.proj.as_deref().is_some_and(|p| p.has_subplan()) {
+    if needs_subplan_driver(action.proj.as_deref()) {
         let ec = node_ecxt.expect("node ecxt created with MERGE");
         estate.reset_expr_context(ec);
         {
@@ -3528,7 +3501,7 @@ fn exec_init_insert_projection<'mcx>(
             )
         })?;
         // C: "need an expression context to do the projection".
-        if proj.has_subplan() && mt.node_ecxt.is_none() {
+        if needs_subplan_driver(Some(&proj)) && mt.node_ecxt.is_none() {
             mt.node_ecxt = Some(estate.create_expr_context());
         }
         mt.rel_mut().project_new = Some(proj);
@@ -3680,7 +3653,7 @@ fn exec_get_insert_new_tuple_projected<'mcx>(
         .project_new
         .as_deref_mut()
         .expect("caller checked project_new");
-    if proj.has_subplan() {
+    if needs_subplan_driver(Some(&*proj)) {
         let ec = ecxt.expect("node ecxt created with the SubPlan-bearing projection");
         estate.reset_expr_context(ec);
         {
@@ -5472,42 +5445,10 @@ fn get_tuple_for_trigger<'mcx>(
     }
 }
 
-// RESIDUAL eager arm: MERGE action quals/projections, WCO quals, and the
-// ON CONFLICT set/where expressions evaluate inside EStateData destructures
-// with no suspension driver in reach, so their pending initplan params are
-// still force-run up front rather than lazily at first PARAM_EXEC fetch (C
-// ExecEvalParamExec). C itself pre-hoists around DML EPQ already
-// (ExecSetParamPlanMulti, execMain.c:2972/3076); divergence needs an
-// erroring initplan inside an untaken short-circuit arm of one of these
-// DML-only expressions. RETURNING projections are NOT hoisted — they ride
-// the suspension loop and stay C-lazy.
-fn pre_eval_param_deps(
-    state: Option<&ExprState<'_>>,
-    estate: &mut EStateData<'_>,
-) -> PgResult<()> {
-    if let Some(st) = state {
-        let deps = st.param_exec_deps();
-        if !deps.is_empty() {
-            executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-    }
-    Ok(())
-}
-
-// RLS WCO quals can reference initplan params (policy with an uncorrelated
-// sublink); resolve them while `estate` is still whole — the eval sites sit
-// inside EStateData destructures (execscan note).
-fn pre_eval_wco_param_deps(
-    wcos: &mcx::PgVec<'_, WcoExpr<'_>>,
-    kind: WCOKind,
-    estate: &mut EStateData<'_>,
-) -> PgResult<()> {
-    for w in wcos.iter() {
-        if w.kind == kind {
-            pre_eval_param_deps(Some(&*w.state), estate)?;
-        }
-    }
-    Ok(())
+// Pending InitPlan PARAM_EXEC fetches ride the suspension driver (C
+// ExecEvalParamExec). CASE/COALESCE jumps skip untaken arms.
+fn needs_subplan_driver(st: Option<&ExprState<'_>>) -> bool {
+    st.is_some_and(|s| s.has_subplan() || !s.param_exec_deps().is_empty())
 }
 
 // ExecProcessReturning (nodeModifyTable.c): scan slot = the returned tuple,
@@ -7032,20 +6973,20 @@ fn exec_on_conflict_update<'mcx>(
                 (oc.where_clause.as_deref(), oc.set_proj.as_deref())
             }
         };
-        pre_eval_param_deps(where_clause, estate)?;
-        pre_eval_param_deps(set_proj, estate)?;
-        // Conflict-check WCO policy quals carry SubPlans too (C evaluates
-        // them through the same econtext); they force the driver arm.
+        // Conflict-check WCO policy quals carry SubPlans/InitPlans too (C
+        // evaluates them through the same econtext); they force the driver.
         let wcos = match leaf {
             Some(idx) => mt.leaf_wco[idx].as_ref(),
             None => Some(&mt.rels[mt.cur].wco_exprs),
         };
         let wco_subplan = wcos.is_some_and(|ws| {
-            ws.iter()
-                .any(|w| w.kind == WCOKind::WCO_RLS_CONFLICT_CHECK && w.state.has_subplan())
+            ws.iter().any(|w| {
+                w.kind == WCOKind::WCO_RLS_CONFLICT_CHECK
+                    && needs_subplan_driver(Some(&*w.state))
+            })
         });
-        where_clause.is_some_and(|q| q.has_subplan())
-            || set_proj.is_some_and(|p| p.has_subplan())
+        needs_subplan_driver(where_clause)
+            || needs_subplan_driver(set_proj)
             || wco_subplan
     };
     if use_subplans {
@@ -7122,15 +7063,6 @@ fn exec_on_conflict_update<'mcx>(
             Some(idx) => leaf_on_conflict[idx].as_mut(),
             None => None,
         };
-        {
-            let wcos = match leaf {
-                Some(idx) => leaf_wco[idx].as_ref(),
-                None => Some(&r.wco_exprs),
-            };
-            if let Some(wcos) = wcos {
-                pre_eval_wco_param_deps(wcos, WCOKind::WCO_RLS_CONFLICT_CHECK, estate)?;
-            }
-        }
         let EStateData { es_tupleTable, .. } = &mut *estate;
         let (e, x, v) = (
             existing_id.0 as usize,
@@ -7793,9 +7725,9 @@ fn copy_by_ref_datum<'mcx>(mcx: mcx::Mcx<'mcx>, d: Datum, attlen: i16) -> PgResu
 }
 
 // ExecWithCheckOptions (execMain.c): NULL or false qual = violation for
-// every kind (ExecQual semantics). Only for WCOs proven subplan-free (the
-// on-conflict driver-arm gate); initplan params must be pre-evaluated by the
-// caller. Subplan-bearing WCOs go through `exec_with_check_options`.
+// every kind (ExecQual semantics). Only for WCOs proven subplan- and
+// initplan-free (the on-conflict driver-arm gate). Pending PARAM_EXEC rides
+// `exec_with_check_options`.
 fn exec_with_check_options_basic<'mcx>(
     wcos: &mut mcx::PgVec<'mcx, WcoExpr<'mcx>>,
     kind: WCOKind,
@@ -7826,8 +7758,7 @@ fn exec_with_check_options<'mcx>(
         if w.kind != kind {
             continue;
         }
-        pre_eval_param_deps(Some(&*w.state), estate)?;
-        let ok = if w.state.has_subplan() {
+        let ok = if needs_subplan_driver(Some(&*w.state)) {
             let ec = ecxt.expect("node ecxt created with WCO");
             estate.reset_expr_context(ec);
             {
@@ -7871,8 +7802,7 @@ fn exec_view_check_options<'mcx>(
         if w.kind != WCOKind::WCO_VIEW_CHECK {
             continue;
         }
-        pre_eval_param_deps(Some(&*w.state), estate)?;
-        let ok = if w.state.has_subplan() {
+        let ok = if needs_subplan_driver(Some(&*w.state)) {
             let ec = ecxt.expect("node ecxt created with WCO");
             estate.reset_expr_context(ec);
             {
