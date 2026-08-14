@@ -980,27 +980,39 @@ pub fn copy_attribute_out_text_embedded(
 #[inline(never)]
 fn cannot_copy_from_relkind(rel: &Relation<'_>) -> Box<PgError> {
     let name = rel.name();
-    let (msg, hint): (String, Option<&str>) = match rel.rd_rel.relkind {
+    let (msg, hint, sqlstate) = match rel.rd_rel.relkind {
         b'v' => (
             format!("cannot copy from view \"{name}\""),
             Some("Try the COPY (SELECT ...) TO variant."),
+            ERRCODE_WRONG_OBJECT_TYPE,
         ),
         b'm' => (
             format!("cannot copy from unpopulated materialized view \"{name}\""),
             Some("Use the REFRESH MATERIALIZED VIEW command."),
+            ERRCODE_FEATURE_NOT_SUPPORTED,
         ),
         b'f' => (
             format!("cannot copy from foreign table \"{name}\""),
             Some("Try the COPY (SELECT ...) TO variant."),
+            ERRCODE_WRONG_OBJECT_TYPE,
         ),
-        b'S' => (format!("cannot copy from sequence \"{name}\""), None),
+        b'S' => (
+            format!("cannot copy from sequence \"{name}\""),
+            None,
+            ERRCODE_WRONG_OBJECT_TYPE,
+        ),
         b'p' => (
             format!("cannot copy from partitioned table \"{name}\""),
             Some("Try the COPY (SELECT ...) TO variant."),
+            ERRCODE_WRONG_OBJECT_TYPE,
         ),
-        _ => (format!("cannot copy from non-table relation \"{name}\""), None),
+        _ => (
+            format!("cannot copy from non-table relation \"{name}\""),
+            None,
+            ERRCODE_WRONG_OBJECT_TYPE,
+        ),
     };
-    let mut e = PgError::error(msg).with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE);
+    let mut e = PgError::error(msg).with_sqlstate(sqlstate);
     if let Some(h) = hint {
         e = e.with_hint(h);
     }
