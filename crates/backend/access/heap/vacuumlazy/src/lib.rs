@@ -1105,21 +1105,13 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
                 }
                 if *eager_scan_remaining_successes == 0 {
                     if *eager_scan_max_fails_per_region > 0 {
-                        elog::ereport(if *verbose {
-                            ::types_error::INFO
-                        } else {
-                            ::types_error::DEBUG2
-                        })
-                        .errmsg(format!(
-                            "disabling eager scanning after freezing {} eagerly scanned blocks of relation \"{}.{}.{}\"",
+                        eager_scan_disable_ereport(
+                            *verbose,
                             orig_eager_scan_success_limit,
-                            dbname, relnamespace, relname
-                        ))
-                        .finish(::types_error::ErrorLocation::new(
-                            "src/backend/access/heap/vacuumlazy.c",
-                            1431,
-                            "lazy_scan_heap",
-                        ))?;
+                            dbname,
+                            relnamespace,
+                            relname,
+                        )?;
                     }
                     *eager_scan_remaining_fails = 0;
                     *next_eager_scan_region_start = InvalidBlockNumber;
@@ -2322,6 +2314,29 @@ pub fn init_seams() {
         }
         heap_vacuum_rel(mcx, rel, params, bstrategy)
     });
+}
+
+pub(crate) fn eager_scan_disable_ereport(
+    verbose: bool,
+    orig_limit: BlockNumber,
+    dbname: &str,
+    relnamespace: &str,
+    relname: &str,
+) -> PgResult<()> {
+    elog::ereport(if verbose {
+        ::types_error::INFO
+    } else {
+        ::types_error::DEBUG2
+    })
+    .errmsg(format!(
+        "disabling eager scanning after freezing {} eagerly scanned blocks of relation \"{}.{}.{}\"",
+        orig_limit, dbname, relnamespace, relname
+    ))
+    .finish(::types_error::ErrorLocation::new(
+        "src/backend/access/heap/vacuumlazy.c",
+        1431,
+        "lazy_scan_heap",
+    ))
 }
 
 // ereport(vacrel->verbose ? INFO : DEBUG2, ...) sites in vacuumlazy.c.

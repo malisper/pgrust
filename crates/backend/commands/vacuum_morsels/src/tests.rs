@@ -80,7 +80,6 @@ fn reference_scan(p: &SkipMapParams, vmap: &[u8]) -> (Vec<ScanBlock>, bool) {
             }
             if remaining_fails > 0 {
                 was_eager_scanned = true;
-                remaining_fails -= 1;
                 break (b, av);
             }
             skipsallvis = true;
@@ -212,7 +211,7 @@ fn skipmap_source_contract() {
 }
 
 #[test]
-fn skipmap_eager_admits_av_not_af() {
+fn skipmap_eager_does_not_consume_fail_budget() {
     let mut p = params(40, 0, false, true);
     p.next_eager_scan_region_start = 0;
     p.eager_scan_remaining_fails = 2;
@@ -225,8 +224,51 @@ fn skipmap_eager_admits_av_not_af() {
         .filter(|e| e.was_eager_scanned)
         .map(|e| e.block)
         .collect();
-    assert_eq!(eager, vec![0, 1], "pessimistic fail budget admits two av-not-af pages");
-    assert!(src.skipsallvis(), "remaining av-not-af run is skipped");
+    assert_eq!(
+        src.eager_scan_remaining_fails, 2,
+        "C decrements remaining_fails after prune failure, not at admission"
+    );
+    assert!(
+        eager.len() > 2,
+        "open fail budget must not be spent while building the skip map"
+    );
+    assert!(!src.skipsallvis(), "open fail budget admits the av-not-af run");
+    check_equivalence(&p, &vm);
+}
+
+#[test]
+fn eager_account_decrements_fails_after_prune_miss() {
+    let caps = EagerScanShared::new(10, 3, 3, 0, 100);
+    assert_eq!(caps.fails_at(0), 3);
+    assert!(caps.account(0, false).is_none());
+    assert_eq!(caps.fails_at(0), 2);
+    assert!(caps.account(0, true).is_none());
+    assert_eq!(caps.remaining_successes(), 9);
+    assert_eq!(caps.fails_at(0), 2);
+}
+
+#[test]
+fn eager_account_disable_on_success_cap() {
+    let caps = EagerScanShared::new(1, 5, 5, 0, 100);
+    assert_eq!(caps.account(0, true), Some(1));
+    assert_eq!(caps.max_fails_per_region(), 0);
+    assert_eq!(caps.fails_at(0), 0);
+    assert!(caps.account(0, true).is_none());
+}
+
+#[test]
+fn skipmap_eager_region_hard_boundaries() {
+    use runtime::MorselSource;
+    let mut p = params(20, 0, false, true);
+    p.next_eager_scan_region_start = 10;
+    p.eager_scan_remaining_fails = 1;
+    p.eager_scan_max_fails_per_region = 1;
+    let vm = vec![0u8; 20];
+    let src = VacuumBlockSource::build(&p, |b| vm[b as usize]);
+    assert_eq!(src.total_granules(), 20);
+    assert_eq!(src.next_boundary_after(0), 10);
+    assert_eq!(src.next_boundary_after(9), 10);
+    assert_eq!(src.next_boundary_after(10), 20);
 }
 
 /// Independent reference for the inc-2 partial-commit surface: the same

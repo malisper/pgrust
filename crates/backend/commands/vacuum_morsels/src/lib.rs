@@ -16,10 +16,11 @@
 
 #![allow(non_snake_case)] // C-parity field names (NewRelfrozenXid class)
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use types_core::primitive::TransactionId;
 use types_core::xact::{MultiXactIdPrecedes, TransactionIdIsNormal, TransactionIdPrecedes};
+use types_core::InvalidBlockNumber;
 
 /// C vacuumlazy.c:209 — runs of skippable pages shorter than this are
 /// scanned anyway (kernel readahead beats the seek + rescan-risk math).
@@ -87,10 +88,13 @@ pub struct VacuumBlockSource {
     /// would over-suppress relfrozenxid advancement (safe but breaks the
     /// on/off parity oracle).
     skip_runs: Vec<(u64, bool)>,
-    /// Eager-walk state after the last classified block (pessimistic:
-    /// remaining_fails decrements at admission, not after prune).
+    /// Walk leftover after region resets; admission does not debit fails.
     pub eager_scan_remaining_fails: u32,
     pub next_eager_scan_region_start: u32,
+    /// Initial `SkipMapParams::next_eager_scan_region_start` (Invalid when
+    /// eager is disabled). Hard-boundary math uses this, not the walked
+    /// cursor.
+    eager_region_start: u32,
 }
 
 impl VacuumBlockSource {
@@ -173,7 +177,6 @@ impl VacuumBlockSource {
                 false
             } else if remaining_fails > 0 {
                 was_eager_scanned = true;
-                remaining_fails -= 1;
                 false
             } else {
                 true
@@ -206,6 +209,7 @@ impl VacuumBlockSource {
             skip_runs,
             eager_scan_remaining_fails: remaining_fails,
             next_eager_scan_region_start: next_region,
+            eager_region_start: p.next_eager_scan_region_start,
         }
     }
 
@@ -244,11 +248,157 @@ impl runtime::MorselSource for VacuumBlockSource {
         self.entries.len() as u64
     }
 
-    // Default next_boundary_after: no interior hard boundaries in phase 1
-    // (§3.4 adds eager-scan region boundaries when that port lands).
+    fn next_boundary_after(&self, start: u64) -> u64 {
+        let total = self.entries.len() as u64;
+        if start >= total || self.eager_region_start == InvalidBlockNumber {
+            return total;
+        }
+        let start_block = self.entries[start as usize].block;
+        let next_region = if start_block < self.eager_region_start {
+            self.eager_region_start
+        } else {
+            let off = start_block - self.eager_region_start;
+            self.eager_region_start
+                + ((off / EAGER_SCAN_REGION_SIZE) + 1) * EAGER_SCAN_REGION_SIZE
+        };
+        for i in (start + 1)..total {
+            if self.entries[i as usize].block >= next_region {
+                return i;
+            }
+        }
+        total
+    }
 
     fn startup_c0(&self) -> u64 {
         16 // m1-heap-source's reasoning transfers (doc §3.1)
+    }
+}
+
+/// Shared eager-scan caps for morsel workers (doc §3.4). Fail budget is
+/// per-region; success cap is global. Both decrement after prune, never at
+/// skip-map admission.
+pub struct EagerScanShared {
+    remaining_successes: AtomicU32,
+    max_fails_per_region: AtomicU32,
+    first_region_start: u32,
+    region_fails: Vec<AtomicU32>,
+    orig_success_limit: u32,
+}
+
+fn eager_region_id(first_start: u32, block: u32) -> usize {
+    if first_start == InvalidBlockNumber || block < first_start {
+        0
+    } else {
+        1 + ((block - first_start) / EAGER_SCAN_REGION_SIZE) as usize
+    }
+}
+
+impl EagerScanShared {
+    pub fn new(
+        remaining_successes: u32,
+        first_region_fails: u32,
+        max_fails_per_region: u32,
+        first_region_start: u32,
+        rel_pages: u32,
+    ) -> Self {
+        let nregions = if first_region_start == InvalidBlockNumber {
+            1
+        } else {
+            1 + (rel_pages.saturating_sub(first_region_start) / EAGER_SCAN_REGION_SIZE) as usize + 1
+        };
+        let region_fails = (0..nregions)
+            .map(|i| {
+                AtomicU32::new(if i == 0 {
+                    first_region_fails
+                } else {
+                    max_fails_per_region
+                })
+            })
+            .collect();
+        EagerScanShared {
+            remaining_successes: AtomicU32::new(remaining_successes),
+            max_fails_per_region: AtomicU32::new(max_fails_per_region),
+            first_region_start,
+            region_fails,
+            orig_success_limit: remaining_successes,
+        }
+    }
+
+    pub fn remaining_successes(&self) -> u32 {
+        self.remaining_successes.load(Ordering::Relaxed)
+    }
+
+    pub fn max_fails_per_region(&self) -> u32 {
+        self.max_fails_per_region.load(Ordering::Relaxed)
+    }
+
+    pub fn fails_at(&self, block: u32) -> u32 {
+        self.region_fails
+            .get(eager_region_id(self.first_region_start, block))
+            .map(|a| a.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// `Some(orig_success_limit)` means the success cap just closed and the
+    /// caller must emit the disable ereport.
+    pub fn account(&self, block: u32, vm_page_frozen: bool) -> Option<u32> {
+        if vm_page_frozen {
+            let prev = self
+                .remaining_successes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    Some(n.saturating_sub(1))
+                })
+                .unwrap_or(0);
+            if prev.saturating_sub(1) == 0 {
+                let max = self.max_fails_per_region.swap(0, Ordering::Relaxed);
+                for a in &self.region_fails {
+                    a.store(0, Ordering::Relaxed);
+                }
+                if max > 0 {
+                    return Some(self.orig_success_limit);
+                }
+            }
+            None
+        } else if let Some(a) = self
+            .region_fails
+            .get(eager_region_id(self.first_region_start, block))
+        {
+            let _ = a.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n > 0).then_some(n - 1)
+            });
+            None
+        } else {
+            None
+        }
+    }
+
+    /// Leader fold-back after a morsel round: `(successes, fails, max_fails,
+    /// next_region_start)` at `at_block`.
+    pub fn snapshot(&self, at_block: u32) -> (u32, u32, u32, u32) {
+        let max = self.max_fails_per_region.load(Ordering::Relaxed);
+        if max == 0 {
+            return (
+                self.remaining_successes.load(Ordering::Relaxed),
+                0,
+                0,
+                InvalidBlockNumber,
+            );
+        }
+        let next = if self.first_region_start == InvalidBlockNumber {
+            InvalidBlockNumber
+        } else if at_block < self.first_region_start {
+            self.first_region_start
+        } else {
+            self.first_region_start
+                + ((at_block - self.first_region_start) / EAGER_SCAN_REGION_SIZE + 1)
+                    * EAGER_SCAN_REGION_SIZE
+        };
+        (
+            self.remaining_successes.load(Ordering::Relaxed),
+            self.fails_at(at_block),
+            max,
+            next,
+        )
     }
 }
 

@@ -63,8 +63,8 @@ use ::types_storage::bufpage::PageRef;
 use ::types_storage::ReadBufferMode;
 use ::vacuum_morsels::{
     merge_dead_runs, resume_granule, verify_prefix_coverage, ClaimRecord, CoverageError,
-    DeadRun, QuiesceState, ScanCounters, SkipMapParams, VacScanLocal, VacuumBlockSource,
-    VM_ALL_FROZEN, VM_ALL_VISIBLE,
+    DeadRun, EagerScanShared, QuiesceState, ScanCounters, SkipMapParams, VacScanLocal,
+    VacuumBlockSource, VM_ALL_FROZEN, VM_ALL_VISIBLE,
 };
 use ::visibilitymap::{
     visibilitymap_get_status, visibilitymap_pin, VmBuffer, VISIBILITYMAP_ALL_FROZEN,
@@ -76,9 +76,9 @@ use ::backend_progress::pgstat_progress_update_param;
 use ::bufmgr_seams::{BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 
 use super::{
-    apply_failsafe, dead_items_add, lazy_check_wraparound_failsafe, lazy_scan_new_or_empty,
-    lazy_scan_noprune, lazy_scan_prune, lazy_vacuum, LVRelState, ScanEnv, ScanFolds,
-    FAILSAFE_EVERY_PAGES,
+    apply_failsafe, dead_items_add, eager_scan_disable_ereport, lazy_check_wraparound_failsafe,
+    lazy_scan_new_or_empty, lazy_scan_noprune, lazy_scan_prune, lazy_vacuum, LVRelState, ScanEnv,
+    ScanFolds, FAILSAFE_EVERY_PAGES,
 };
 
 use init_small::globals as g;
@@ -261,11 +261,7 @@ fn build_source(vacrel: &mut LVRelState<'_, '_>, resume_block: BlockNumber) -> P
     vmbuf.release();
     match err {
         Some(e) => Err(e),
-        None => {
-            vacrel.eager_scan_remaining_fails = source.eager_scan_remaining_fails;
-            vacrel.next_eager_scan_region_start = source.next_eager_scan_region_start;
-            Ok(source)
-        }
+        None => Ok(source),
     }
 }
 
@@ -455,6 +451,11 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         let complete = resume_g >= total;
         resume_block =
             if complete { vacrel.rel_pages } else { source.block_of(resume_g).block };
+        let (succ, fails, max_fails, next_region) = shared.eager.snapshot(resume_block);
+        vacrel.eager_scan_remaining_successes = succ;
+        vacrel.eager_scan_remaining_fails = fails;
+        vacrel.eager_scan_max_fails_per_region = max_fails;
+        vacrel.next_eager_scan_region_start = next_region;
 
         let (dead_runs, deferred) = round_drain_plan(&locals, resume_block);
 
@@ -792,6 +793,11 @@ pub(crate) struct VacScanShared {
     error: Mutex<Option<Box<PgError>>>,
     failed: AtomicBool,
     locals: Vec<Mutex<Option<VacScanLocal>>>,
+    eager: EagerScanShared,
+    eager_verbose: bool,
+    eager_dbname: String,
+    eager_relnamespace: String,
+    eager_relname: String,
 }
 
 impl VacScanShared {
@@ -827,6 +833,17 @@ impl VacScanShared {
             error: Mutex::new(None),
             failed: AtomicBool::new(false),
             locals: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
+            eager: EagerScanShared::new(
+                vacrel.eager_scan_remaining_successes,
+                vacrel.eager_scan_remaining_fails,
+                vacrel.eager_scan_max_fails_per_region,
+                vacrel.next_eager_scan_region_start,
+                vacrel.rel_pages,
+            ),
+            eager_verbose: vacrel.verbose,
+            eager_dbname: vacrel.dbname.clone(),
+            eager_relnamespace: vacrel.relnamespace.clone(),
+            eager_relname: vacrel.relname.clone(),
         }
     }
 
@@ -936,7 +953,13 @@ impl VacScanShared {
         wcx.folds.counters = ScanCounters::seed(self.cutoffs.OldestXmin, self.cutoffs.OldestMxact);
         for gidx in range.clone() {
             let sb = self.source.block_of(gidx);
-            self.scan_block_worker(wcx, local, sb.block, sb.all_visible_according_to_vm)?;
+            self.scan_block_worker(
+                wcx,
+                local,
+                sb.block,
+                sb.all_visible_according_to_vm,
+                sb.was_eager_scanned,
+            )?;
         }
         local.counters.fold(&wcx.folds.counters);
         local.claims.push(ClaimRecord { start: range.start, end: range.end, scanned: true });
@@ -956,6 +979,7 @@ impl VacScanShared {
         local: &mut VacScanLocal,
         blkno: BlockNumber,
         all_visible_according_to_vm: bool,
+        was_eager_scanned: bool,
     ) -> PgResult<()> {
         // Cost delay per block, C's parallel discipline (doc §7); failsafe
         // stops delays immediately (§5.5) but interrupts stay checked.
@@ -1058,7 +1082,17 @@ impl VacScanShared {
                     &mut has_lpdead_items,
                     &mut vm_page_frozen,
                 )?;
-                let _ = vm_page_frozen;
+                if was_eager_scanned {
+                    if let Some(limit) = self.eager.account(blkno, vm_page_frozen) {
+                        eager_scan_disable_ereport(
+                            self.eager_verbose,
+                            limit,
+                            &self.eager_dbname,
+                            &self.eager_relnamespace,
+                            &self.eager_relname,
+                        )?;
+                    }
+                }
             }
 
             if env.nindexes == 0 || !self.do_index_vacuuming || !has_lpdead_items {
