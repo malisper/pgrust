@@ -9,8 +9,8 @@ use types_core::catalog::{C_COLLATION_OID, DATABASE_RELATION_ID};
 use types_core::fmgr::F_NAMEEQ;
 use types_core::{AttrNumber, InvalidOid, Oid};
 use types_error::{
-    PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_OBJECT_IN_USE, ERRCODE_UNDEFINED_DATABASE,
-    ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
+    PgResult, ERRCODE_OBJECT_IN_USE, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    NOTICE,
 };
 use types_rel::Relation;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
@@ -258,12 +258,12 @@ fn dropdb_guts(
         return Ok(false);
     }
 
-    if !adt_acl::has_privs_of_role(miscinit::GetUserId(), db.datdba)? {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
-            .errmsg(format!("must be owner of database {dbname}"))
-            .into_error()
-            .into());
+    if !aclchk::object_ownercheck(DATABASE_RELATION_ID, db_id, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            types_nodes::parsenodes::ObjectType::OBJECT_DATABASE,
+            dbname,
+        )?;
     }
 
     if db.datistemplate {

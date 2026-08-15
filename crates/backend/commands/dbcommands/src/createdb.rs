@@ -662,7 +662,7 @@ fn createdb_guts<'mcx>(
     }
 
     if !src.datistemplate
-        && !adt_acl::has_privs_of_role(miscinit::GetUserId(), src.datdba)?
+        && !aclchk::object_ownercheck(DATABASE_RELATION_ID, src_dboid, miscinit::GetUserId())?
     {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
