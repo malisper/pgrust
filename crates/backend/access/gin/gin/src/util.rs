@@ -121,6 +121,30 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
             }
         }
     };
+    let consistent = lsyscache::get_opfamily_proc(
+        opfamily,
+        opcintype,
+        opcintype,
+        GIN_CONSISTENT_PROC as i16,
+    )?;
+    let triconsistent = lsyscache::get_opfamily_proc(
+        opfamily,
+        opcintype,
+        opcintype,
+        GIN_TRICONSISTENT_PROC as i16,
+    )?;
+    if consistent == InvalidOid && triconsistent == InvalidOid {
+        let cx = ::mcx::MemoryContext::new("gin consistent probe");
+        let relname = lsyscache::get_rel_name(cx.mcx(), rel.rd_id)?
+            .map_or_else(String::new, |n| n.as_str().to_string());
+        return Err(Box::new(
+            ::types_error::PgError::error(format!(
+                "missing GIN support function ({GIN_CONSISTENT_PROC} or {GIN_TRICONSISTENT_PROC}) for attribute {} of index \"{relname}\"",
+                i + 1
+            ))
+            .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR),
+        ));
+    }
     // array_ops has no GIN_COMPARE_PROC; C falls back to the index key
     // type's default btree comparator via typcache. The index tupdesc attr
     // is the element type (opckeytype anyelement, ConstructTupleDescriptor).
