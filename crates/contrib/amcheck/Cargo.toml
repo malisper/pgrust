@@ -49,6 +49,7 @@ relation = { path = "../../backend/access/common/relation" }
 detoast = { path = "../../backend/access/common/detoast" }
 toastdesc = { path = "../../backend/access/common/toastdesc" }
 snapmgr = { path = "../../backend/utils/time/snapmgr" }
+cache_syscache = { path = "../../backend/utils/cache/cache_syscache" }
 visibilitymap = { path = "../../backend/access/heap/visibilitymap" }
 heapam = { path = "../../backend/access/heap/heapam" }
 heaptoast = { path = "../../backend/access/heap/heaptoast" }

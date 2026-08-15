@@ -10,13 +10,16 @@ use ::detoast::detoast_attr;
 use ::execindexing::{table_index_build_scan, BuildIndexInfo, IndexInfo};
 use ::mcx::{vec_from_elem_in, Mcx, MemoryContext};
 use ::snapmgr::{GetTransactionSnapshot, RegisterSnapshot, Snapshot, UnregisterSnapshot};
+use ::cache_syscache::{
+    ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, INDEXRELID,
+};
 use ::types_core::{
-    AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, Oid, OffsetNumber, XLogRecPtr,
-    BLCKSZ, BTREE_AM_OID, INDEX_MAX_KEYS,
+    AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, Oid, OffsetNumber, TransactionIdPrecedes,
+    XLogRecPtr, BLCKSZ, BTREE_AM_OID, INDEX_MAX_KEYS,
 };
 use ::types_error::{
     PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INDEX_CORRUPTED,
+    ERRCODE_INDEX_CORRUPTED, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use ::types_rel::Relation;
 use ::types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
@@ -60,6 +63,7 @@ use ::bufmgr::{
 
 const INVALID_BTREE_LEVEL: u32 = InvalidBlockNumber;
 const INTERVAL_BTREE_FAM_OID: Oid = 1982;
+const Anum_pg_index_indcheckxmin: i32 = 12;
 const OPAQUE_MAXALIGN: usize = 16;
 // C divergence: C's TOAST_INDEX_TARGET is MaxHeapTupleSize/16; here 8160/4 to match nbtree::itup's index_form_tuple.
 const TOAST_INDEX_TARGET: usize = 8160 / 4;
@@ -316,7 +320,30 @@ fn bt_check_every_level<'mcx>(
 
         let snap = GetTransactionSnapshot()?;
         state.snapshot = RegisterSnapshot(Some(&snap))?;
-        // C divergence: the IsolationUsesXactSnapshot / indcheckxmin serialization guard is not enforced; behaviour-preserving for READ COMMITTED.
+        if ::xact::IsolationUsesXactSnapshot() {
+            if let Some(reg) = state.snapshot.as_ref() {
+                if let Some(tup) = SearchSysCache1(
+                    INDEXRELID,
+                    SysCacheKey::Value(Datum::from_oid(state.rel.rd_id)),
+                )? {
+                    let (d, isnull) =
+                        SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indcheckxmin)?;
+                    let indcheckxmin = !isnull && d.as_bool();
+                    let index_xmin = tup.tuple().t_data().xmin();
+                    let snap_xmin = reg.xmin;
+                    ReleaseSysCache(tup);
+                    if indcheckxmin && !TransactionIdPrecedes(index_xmin, snap_xmin) {
+                        return Err(Box::new(
+                            PgError::error(format!(
+                                "index \"{}\" cannot be verified using transaction snapshot",
+                                state.rel.name()
+                            ))
+                            .with_sqlstate(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     if state.checkunique {
