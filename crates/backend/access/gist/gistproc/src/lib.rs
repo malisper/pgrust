@@ -6,7 +6,9 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use ::adt_float::float8_cmp_internal;
+use ::adt_float::{
+    float8_cmp_internal, float8_eq, float8_ge, float8_gt, float8_le, float8_lt,
+};
 use ::adt_geo::{adjust_box, box_contain_box, box_ov, point_eq_point, rt_box_union, FPeq, FPge, FPgt, FPle, FPlt, PolyRef};
 use ::datum::Datum;
 use ::types_core::geo::{Point, BOX, CIRCLE};
@@ -241,10 +243,10 @@ fn fc_gist_box_same(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     // Same NaN-comparator class as adjust_box (proofs/gist-geo).
     let r = match (b1, b2) {
         (Some(b1), Some(b2)) => {
-            ::adt_float::float8_eq(b1.low.x, b2.low.x)
-                && ::adt_float::float8_eq(b1.low.y, b2.low.y)
-                && ::adt_float::float8_eq(b1.high.x, b2.high.x)
-                && ::adt_float::float8_eq(b1.high.y, b2.high.y)
+            float8_eq(b1.low.x, b2.low.x)
+                && float8_eq(b1.low.y, b2.low.y)
+                && float8_eq(b1.high.x, b2.high.x)
+                && float8_eq(b1.high.y, b2.high.y)
         }
         (None, None) => true,
         _ => false,
@@ -439,8 +441,8 @@ fn fc_gist_box_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
         let mut right_lower = intervals_lower[i1].lower;
         let mut left_upper = intervals_upper[i2].lower;
         loop {
-            while i1 < nentries && right_lower == intervals_lower[i1].lower {
-                if left_upper < intervals_lower[i1].upper {
+            while i1 < nentries && float8_eq(right_lower, intervals_lower[i1].lower) {
+                if float8_lt(left_upper, intervals_lower[i1].upper) {
                     left_upper = intervals_lower[i1].upper;
                 }
                 i1 += 1;
@@ -450,7 +452,7 @@ fn fc_gist_box_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
             }
             right_lower = intervals_lower[i1].lower;
 
-            while i2 < nentries && intervals_upper[i2].upper <= left_upper {
+            while i2 < nentries && float8_le(intervals_upper[i2].upper, left_upper) {
                 i2 += 1;
             }
 
@@ -463,8 +465,8 @@ fn fc_gist_box_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
         let mut right_lower = intervals_lower[i1 as usize].upper;
         let mut left_upper = intervals_upper[i2 as usize].upper;
         loop {
-            while i2 >= 0 && left_upper == intervals_upper[i2 as usize].upper {
-                if right_lower > intervals_upper[i2 as usize].lower {
+            while i2 >= 0 && float8_eq(left_upper, intervals_upper[i2 as usize].upper) {
+                if float8_gt(right_lower, intervals_upper[i2 as usize].lower) {
                     right_lower = intervals_upper[i2 as usize].lower;
                 }
                 i2 -= 1;
@@ -474,7 +476,7 @@ fn fc_gist_box_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
             }
             left_upper = intervals_upper[i2 as usize].upper;
 
-            while i1 >= 0 && intervals_lower[i1 as usize].lower >= right_lower {
+            while i1 >= 0 && float8_ge(intervals_lower[i1 as usize].lower, right_lower) {
                 i1 -= 1;
             }
 
@@ -530,14 +532,14 @@ fn fc_gist_box_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
             (b.low.y, b.high.y)
         };
 
-        if upper <= context.left_upper {
-            if lower >= context.right_lower {
+        if float8_le(upper, context.left_upper) {
+            if float8_ge(lower, context.right_lower) {
                 common_entries.push(CommonEntry { index: i, delta: 0.0 });
             } else {
                 place_left!(b, i);
             }
         } else {
-            debug_assert!(lower >= context.right_lower);
+            debug_assert!(float8_ge(lower, context.right_lower));
             place_right!(b, i);
         }
     }
@@ -967,5 +969,28 @@ mod nan_same_regression {
         assert!(::adt_float::float8_eq(nan, nan), "C semantics: NaN == NaN");
         assert!(!::adt_float::float8_eq(nan, 1.0));
         assert!(!(nan == nan), "raw == is the behavior we removed");
+    }
+
+    /// C gistproc.c:614-622 groups interval bounds with float8_eq.
+    /// Raw `==` never advances past NaN, so picksplit hangs on a NaN box.
+    #[test]
+    fn picksplit_nan_interval_sweep_terminates() {
+        let lowers = [f64::NAN, f64::NAN, 1.0];
+        let n = lowers.len();
+        let mut i1 = 0;
+        let mut right_lower = lowers[i1];
+        let mut steps = 0u32;
+        loop {
+            while i1 < n && ::adt_float::float8_eq(right_lower, lowers[i1]) {
+                i1 += 1;
+            }
+            if i1 >= n {
+                break;
+            }
+            right_lower = lowers[i1];
+            steps += 1;
+            assert!(steps < 8, "sweep must terminate on NaN bounds");
+        }
+        assert_eq!(i1, n);
     }
 }
