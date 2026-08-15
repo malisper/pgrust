@@ -58,6 +58,21 @@ fn calculate_all_forks_size(key: ::types_storage::RelFileLocatorBackend) -> PgRe
     Ok(size)
 }
 
+// After try_relation_open: missing rel + bad fork is NULL, not this error.
+pub(crate) fn forkname_to_number(forkname: &str) -> PgResult<types_core::ForkNumber> {
+    match forkname {
+        "main" => Ok(types_core::ForkNumber::MAIN_FORKNUM),
+        "fsm" => Ok(types_core::ForkNumber::FSM_FORKNUM),
+        "vm" => Ok(types_core::ForkNumber::VISIBILITYMAP_FORKNUM),
+        "init" => Ok(types_core::ForkNumber::INIT_FORKNUM),
+        _ => Err(Box::new(
+            ::types_error::PgError::error("invalid fork name")
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .with_hint("Valid fork names are \"main\", \"fsm\", \"vm\", and \"init\"."),
+        )),
+    }
+}
+
 pub fn fc_pg_relation_size(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -66,25 +81,13 @@ pub fn fc_pg_relation_size(
     // SAFETY: catalog arg 1 is a non-null text varlena (strict fn).
     let forkname_b = unsafe { fcinfo.arg_varlena_packed(1)? };
     let forkname = String::from_utf8_lossy(forkname_b.data()).into_owned();
-    let forknum = match forkname.as_str() {
-        "main" => types_core::ForkNumber::MAIN_FORKNUM,
-        "fsm" => types_core::ForkNumber::FSM_FORKNUM,
-        "vm" => types_core::ForkNumber::VISIBILITYMAP_FORKNUM,
-        "init" => types_core::ForkNumber::INIT_FORKNUM,
-        other => {
-            return Err(Box::new(
-                ::types_error::PgError::error(format!("invalid fork name: \"{other}\""))
-                    .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
-                    .with_hint("Valid fork names are \"main\", \"fsm\", \"vm\", and \"init\"."),
-            ))
-        }
-    };
     let mcx = fcinfo.result_mcx();
     let Some(rel) =
         relation_seams::try_relation_open::call(mcx, rel_oid, types_rel::AccessShareLock)?
     else {
         return Ok(fcinfo.return_null());
     };
+    let forknum = forkname_to_number(&forkname)?;
     let size = calculate_relation_size(rel_key(&rel), forknum)?;
     rel.close(types_rel::AccessShareLock)?;
     Ok(Datum::from_i64(size))

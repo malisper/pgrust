@@ -36,3 +36,11 @@ fn errors() {
     assert!(e.to_string().contains("invalid size"), "{e}");
     assert!(pg_size_bytes("1 EB").is_err());
 }
+
+#[test]
+fn missing_rel_bad_fork_is_null_pin() {
+    let e = builtins::forkname_to_number("nope").unwrap_err();
+    assert_eq!(e.message(), "invalid fork name");
+    assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+    assert!(!e.message().contains("nope"), "{}", e.message());
+}
