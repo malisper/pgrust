@@ -96,18 +96,20 @@ pub fn CreateSchemaCommand<'mcx>(
         ));
     }
 
-    if stmt.if_not_exists
-        && catalog_namespace::get_namespace_oid(schema_name, true)? != InvalidOid
-    {
-        // C: checkMembershipInCurrentExtension guards extension scripts
-        // reusing pre-existing schemas; extension-script state is loud at the
-        // extension lane, so the pre-existing-object hole cannot be reached
-        // silently here.
-        elog_seams::ereport::call(
-            PgError::new(NOTICE, format!("schema \"{schema_name}\" already exists, skipping"))
-                .with_sqlstate(types_error::ERRCODE_DUPLICATE_SCHEMA),
-        )?;
-        return Ok(InvalidOid);
+    if stmt.if_not_exists {
+        let namespace_id = catalog_namespace::get_namespace_oid(schema_name, true)?;
+        if namespace_id != InvalidOid {
+            let address = pg_depend::ObjectAddress::set(
+                types_core::catalog::NAMESPACE_RELATION_ID,
+                namespace_id,
+            );
+            pg_depend::checkMembershipInCurrentExtension(mcx, &address)?;
+            elog_seams::ereport::call(
+                PgError::new(NOTICE, format!("schema \"{schema_name}\" already exists, skipping"))
+                    .with_sqlstate(types_error::ERRCODE_DUPLICATE_SCHEMA),
+            )?;
+            return Ok(InvalidOid);
+        }
     }
 
     // Create the objects as the target role; error paths rely on transaction
@@ -160,6 +162,9 @@ pub fn CreateSchemaCommand<'mcx>(
     }
     Ok(namespace_id)
 }
+
+#[cfg(test)]
+mod tests;
 
 fn getattr(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> (Datum, bool) {
     let mut isnull = false;

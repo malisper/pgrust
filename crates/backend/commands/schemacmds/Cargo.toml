@@ -21,6 +21,7 @@ aclchk = { path = "../../catalog/aclchk" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 catalog = { path = "../../catalog/catalog" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
 pg_namespace = { path = "../../catalog/pg_namespace" }
 dbcommands = { path = "../dbcommands" }
 elog_seams = { path = "../../utils/error/elog_seams" }
@@ -37,3 +38,7 @@ genam = { path = "../../access/index/genam" }
 heaptuple = { path = "../../access/common/heaptuple" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 pg_shdepend = { path = "../../catalog/pg_shdepend" }
+
+[dev-dependencies]
+relation_seams = { path = "../../access/common/relation_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
