@@ -361,12 +361,24 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
             .as_string()
             .expect("not-null constraint keys")
             .sval;
-        let attnum = (0..rel.rd_att.natts as usize)
-            .find(|&i| rel.rd_att.attr(i).attname.name_str() == colname.as_bytes())
-            .map(|i| (i + 1) as AttrNumber)
-            .unwrap_or_else(|| {
-                panic!("AddRelationNotNullConstraints (heap.c): column {colname:?} not found")
-            });
+        let Some((attnum, _)) =
+            crate::alter::attname_lookup(mcx, rel.rd_id, colname, false)?
+        else {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "column \"{colname}\" of relation \"{relname}\" does not exist"
+                ))
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+            ));
+        };
+        if attnum < 0 {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "cannot add not-null constraint on system column \"{colname}\""
+                ))
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
         // A column can only have one not-null constraint: merge later
         // duplicates into this one, checking NO INHERIT and name conflicts.
         let mut given_name = cdef.conname;
