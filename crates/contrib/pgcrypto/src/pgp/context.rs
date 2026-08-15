@@ -188,14 +188,14 @@ impl PgpContext {
             "sess-key" => self.use_sess_key = atoi(val),
             "s2k-mode" => {
                 let m = atoi(val);
-                if m != 0 && m != 1 && m != 3 {
-                    return Err("Unsupported S2K mode".to_string());
+                if m != PGP_S2K_SIMPLE && m != PGP_S2K_SALTED && m != PGP_S2K_ISALTED {
+                    return Err("Illegal argument to function".to_string());
                 }
                 self.s2k_mode = m;
             }
             "s2k-count" => {
                 let c = atoi(val);
-                if !(1024..=65011712).contains(&c) {
+                if self.s2k_mode != PGP_S2K_ISALTED || !(1024..=65011712).contains(&c) {
                     return Err("Illegal argument to function".to_string());
                 }
                 self.s2k_count = c;
@@ -206,8 +206,24 @@ impl PgpContext {
             "s2k-cipher-algo" => {
                 self.s2k_cipher_algo = cipher_code(val).ok_or(UNSUPPORTED_CIPHER.to_string())?;
             }
-            "compress-algo" => self.compress_algo = atoi(val),
-            "compress-level" => self.compress_level = atoi(val),
+            "compress-algo" => {
+                let a = atoi(val);
+                if a != PGP_COMPR_NONE
+                    && a != PGP_COMPR_ZIP
+                    && a != PGP_COMPR_ZLIB
+                    && a != PGP_COMPR_BZIP2
+                {
+                    return Err("Illegal argument to function".to_string());
+                }
+                self.compress_algo = a;
+            }
+            "compress-level" => {
+                let l = atoi(val);
+                if !(0..=9).contains(&l) {
+                    return Err("Illegal argument to function".to_string());
+                }
+                self.compress_level = l;
+            }
             "convert-crlf" => self.convert_crlf = atoi(val),
             "unicode-mode" => self.unicode_mode = atoi(val),
             "debug" => self.debug = atoi(val),
@@ -308,5 +324,32 @@ mod parse_args_tests {
         let mut c = PgpContext::default();
         c.parse_args(b"DEBUG=1").unwrap();
         assert_eq!(c.debug, 1);
+    }
+
+    #[test]
+    fn setter_rejects_match_c_pxe_argument_error() {
+        const ARG: &str = "Illegal argument to function";
+        let mut c = PgpContext::default();
+        assert_eq!(c.parse_args(b"s2k-mode=0, s2k-count=1024").unwrap_err(), ARG);
+        let mut c = PgpContext::default();
+        assert_eq!(c.parse_args(b"s2k-mode=1, s2k-count=1024").unwrap_err(), ARG);
+        let mut c = PgpContext::default();
+        c.parse_args(b"s2k-count=1024").unwrap();
+        assert_eq!(c.s2k_count, 1024);
+        let mut c = PgpContext::default();
+        c.parse_args(b"s2k-count=1024, s2k-mode=0").unwrap();
+        assert_eq!((c.s2k_count, c.s2k_mode), (1024, 0));
+        let mut c = PgpContext::default();
+        assert_eq!(c.parse_args(b"s2k-mode=2").unwrap_err(), ARG);
+        let mut c = PgpContext::default();
+        assert_eq!(c.parse_args(b"compress-algo=5").unwrap_err(), ARG);
+        let mut c = PgpContext::default();
+        c.parse_args(b"compress-algo=2").unwrap();
+        assert_eq!(c.compress_algo, 2);
+        let mut c = PgpContext::default();
+        assert_eq!(c.parse_args(b"compress-level=10").unwrap_err(), ARG);
+        let mut c = PgpContext::default();
+        c.parse_args(b"compress-level=9").unwrap();
+        assert_eq!(c.compress_level, 9);
     }
 }
