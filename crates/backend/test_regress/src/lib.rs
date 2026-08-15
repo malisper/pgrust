@@ -10,8 +10,8 @@ use ::fmgr::{
     PGFunction,
 };
 use ::types_error::{
-    PgError, PgResult, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_UNDEFINED_FUNCTION,
-    ERRCODE_UNDEFINED_OBJECT, WARNING,
+    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION, WARNING,
 };
 use ::types_nodes::supportnodes;
 
@@ -512,8 +512,28 @@ fn fc_regress_setenv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     if !superuser::superuser()? {
         return Err(err("must be superuser to change environment variables".to_string()));
     }
-    std::env::set_var(&envvar, &envval);
-    Ok(Datum::null())
+    let envvar_c = std::ffi::CString::new(envvar).map_err(|_| {
+        err("could not set environment variable: Invalid argument".to_string())
+    })?;
+    let envval_c = std::ffi::CString::new(envval).map_err(|_| {
+        err("could not set environment variable: Invalid argument".to_string())
+    })?;
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = (envvar_c, envval_c);
+        return Err(err(
+            "could not set environment variable: Function not implemented".to_string(),
+        ));
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        // SAFETY: CStrings are NUL-terminated; setenv copies them.
+        if unsafe { libc::setenv(envvar_c.as_ptr(), envval_c.as_ptr(), 1) } != 0 {
+            let errno = std::io::Error::last_os_error();
+            return Err(err(format!("could not set environment variable: {errno}")));
+        }
+        Ok(Datum::null())
+    }
 }
 
 /* ============================ wait_pid(int4) ============================= */
@@ -837,10 +857,10 @@ unsafe fn arg_name_str(fcinfo: &Fcinfo, i: usize) -> String {
 
 #[track_caller]
 #[cold]
-fn invalid_encoding_name_error(name: &str) -> Box<PgError> {
+fn invalid_encoding_name_error(which: &str, name: &str) -> Box<PgError> {
     Box::new(
-        PgError::error(format!("invalid encoding name \"{name}\""))
-            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+        PgError::error(format!("invalid {which} encoding name \"{name}\""))
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
     )
 }
 
@@ -893,11 +913,11 @@ fn fc_test_enc_conversion(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 
     let src_encoding = mbutils::pg_char_to_encoding(&src_name);
     if src_encoding < 0 {
-        return Err(invalid_encoding_name_error(&src_name));
+        return Err(invalid_encoding_name_error("source", &src_name));
     }
     let dest_encoding = mbutils::pg_char_to_encoding(&dest_name);
     if dest_encoding < 0 {
-        return Err(invalid_encoding_name_error(&dest_name));
+        return Err(invalid_encoding_name_error("destination", &dest_name));
     }
 
     // SAFETY: mcx stays live for this call only; composite_result_2 re-derives
@@ -936,6 +956,17 @@ fn fc_test_enc_conversion(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     let proc = namespace_seams::find_default_conversion_proc::call(src_encoding, dest_encoding)?;
     if proc == types_core::InvalidOid {
         return Err(no_default_conversion_error(src_encoding, dest_encoding));
+    }
+
+    if src_bytes.len() >= ::mcx::MAX_ALLOC_SIZE / mbutils::MAX_CONVERSION_GROWTH {
+        return Err(Box::new(
+            PgError::error("out of memory")
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                .with_detail(format!(
+                    "String of {} bytes is too long for encoding conversion.",
+                    src_bytes.len() as i32
+                )),
+        ));
     }
 
     let cap = src_bytes.len() * mbutils::MAX_CONVERSION_GROWTH + 1;
@@ -1278,5 +1309,19 @@ mod tests {
         assert!(test_atomic_uint32().is_ok());
         assert!(test_atomic_uint64().is_ok());
         assert!(test_spinlock().is_ok());
+    }
+
+    #[test]
+    fn test_enc_conversion_invalid_name_is_22023() {
+        use ::types_error::ERRCODE_INVALID_PARAMETER_VALUE;
+        let src = invalid_encoding_name_error("source", "no_such_enc");
+        assert_eq!(src.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+        assert_eq!(src.message(), "invalid source encoding name \"no_such_enc\"");
+        let dest = invalid_encoding_name_error("destination", "no_such_enc");
+        assert_eq!(dest.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+        assert_eq!(
+            dest.message(),
+            "invalid destination encoding name \"no_such_enc\""
+        );
     }
 }
