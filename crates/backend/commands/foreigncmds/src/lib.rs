@@ -359,8 +359,8 @@ pub fn AlterForeignDataWrapper<'mcx>(
             let referenced = ObjectAddress::set(PROCEDURE_RELATION_ID, func.fdwhandler);
             pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
         }
-        if func.fdwvalidator != InvalidOid {
-            let referenced = ObjectAddress::set(PROCEDURE_RELATION_ID, func.fdwvalidator);
+        if fdwvalidator != InvalidOid {
+            let referenced = ObjectAddress::set(PROCEDURE_RELATION_ID, fdwvalidator);
             pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
         }
     }
