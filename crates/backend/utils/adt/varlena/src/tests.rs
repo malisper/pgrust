@@ -388,6 +388,83 @@ fn fc_wrappers_dispatch() {
     assert_eq!(cstr.to_bytes(), b"aa");
 }
 
+fn pglz_compressed_bytea(payload: &[u8]) -> Vec<u8> {
+    use core::mem::MaybeUninit;
+    let mut dest = vec![MaybeUninit::<u8>::uninit(); pglz::pglz_max_output(payload.len())];
+    let n = pglz::pglz_compress_into(payload, &mut dest, &pglz::PGLZ_STRATEGY_ALWAYS).unwrap();
+    let total = 8 + n;
+    let mut image = Vec::with_capacity(total);
+    image.extend_from_slice(&(((total as u32) << 2) | 0x02).to_ne_bytes());
+    image.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+    image.extend(dest[..n].iter().map(|b| unsafe { b.assume_init() }));
+    image
+}
+
+fn plain_bytea(payload: &[u8]) -> Vec<u8> {
+    let mut image = Vec::with_capacity(4 + payload.len());
+    image.extend_from_slice(&datum::varlena::set_varsize_4b(4 + payload.len()));
+    image.extend_from_slice(payload);
+    image
+}
+
+fn varlena_payload(p: *const u8) -> Vec<u8> {
+    // SAFETY: live 4B-header result from arg_varlena_packed / the fc wrapper.
+    unsafe {
+        let n = types_tuple::varatt::varsize_any(p);
+        core::slice::from_raw_parts(p.add(4), n - 4).to_vec()
+    }
+}
+
+/// C `bytea_larger`/`bytea_smaller` return the PG_GETARG_BYTEA_PP pointer
+/// (packed/detoasted), never the raw compressed arg. Returning `fcinfo.arg`
+/// leaked toast images into MIN/MAX transvalues — the text wrappers already
+/// returned packed pointers (q22coexist); bytea did not.
+#[test]
+fn fc_bytea_minmax_returns_packed_not_raw_toast() {
+    use datum::Datum;
+    use types_fmgr::LocalFcinfo;
+
+    install_detoast_seams();
+    let big: Vec<u8> = (0..200).map(|_| b'z').collect();
+    let compressed = pglz_compressed_bytea(&big);
+    let small = plain_bytea(b"a");
+
+    let ctx = MemoryContext::new("t");
+    let mut fcinfo = LocalFcinfo::<2>::new(0);
+    // SAFETY: ctx outlives the call and the payload reads below.
+    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+    fcinfo.set_arg(0, Datum::from_usize(compressed.as_ptr() as usize));
+    fcinfo.set_arg(1, Datum::from_usize(small.as_ptr() as usize));
+
+    let larger = crate::builtins::fc_bytea_larger(None, &mut fcinfo).unwrap();
+    assert_ne!(
+        larger.as_usize(),
+        compressed.as_ptr() as usize,
+        "bytea_larger must return the packed pointer, not the raw compressed arg"
+    );
+    assert_eq!(varlena_payload(larger.as_usize() as *const u8), big);
+
+    let smaller = crate::builtins::fc_bytea_smaller(None, &mut fcinfo).unwrap();
+    assert_eq!(smaller.as_usize(), small.as_ptr() as usize);
+    assert_eq!(varlena_payload(smaller.as_usize() as *const u8), b"a");
+
+    let tiny: Vec<u8> = (0..200).map(|_| b'a').collect();
+    let compressed_tiny = pglz_compressed_bytea(&tiny);
+    let large = plain_bytea(b"z");
+    fcinfo.set_arg(0, Datum::from_usize(compressed_tiny.as_ptr() as usize));
+    fcinfo.set_arg(1, Datum::from_usize(large.as_ptr() as usize));
+    let smaller_toast = crate::builtins::fc_bytea_smaller(None, &mut fcinfo).unwrap();
+    assert_ne!(
+        smaller_toast.as_usize(),
+        compressed_tiny.as_ptr() as usize,
+        "bytea_smaller must return the packed pointer, not the raw compressed arg"
+    );
+    assert_eq!(
+        varlena_payload(smaller_toast.as_usize() as *const u8),
+        tiny.as_slice()
+    );
+}
+
 #[test]
 fn builtin_table_matches_declared_arity() {
     let non_strict = [3535u32, 3536, 3543, 3544, 6299, 394, 376, 6160, 6161];

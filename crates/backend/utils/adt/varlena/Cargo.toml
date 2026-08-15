@@ -41,3 +41,4 @@ funcapi_srf = { path = "../../fmgr/funcapi_srf" }
 [dev-dependencies]
 syscache_seams = { path = "../../cache/syscache_seams" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+pglz = { path = "../../../../common/pglz" }

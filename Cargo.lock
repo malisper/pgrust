@@ -20041,6 +20041,7 @@ dependencies = [
  "parser_small1",
  "pg_bitutils",
  "pg_locale_seams",
+ "pglz",
  "postgres_seams",
  "pqformat",
  "regex",

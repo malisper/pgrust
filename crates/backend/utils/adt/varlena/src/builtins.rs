@@ -196,24 +196,29 @@ pub fn fc_text_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     ))
 }
 
+// Same packed-pointer contract as text_larger (C PG_GETARG_BYTEA_PP + PG_RETURN_BYTEA_P).
 pub fn fc_bytea_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null bytea varlenas (strict fn).
     let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
-    Ok(if crate::bytea::byteacmp(a.data(), b.data()) > 0 {
-        fcinfo.arg(0)
-    } else {
-        fcinfo.arg(1)
-    })
+    Ok(Datum::from_usize(
+        if crate::bytea::byteacmp(a.data(), b.data()) > 0 {
+            a.as_ptr()
+        } else {
+            b.as_ptr()
+        } as usize,
+    ))
 }
 
 pub fn fc_bytea_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null bytea varlenas (strict fn).
     let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
-    Ok(if crate::bytea::byteacmp(a.data(), b.data()) < 0 {
-        fcinfo.arg(0)
-    } else {
-        fcinfo.arg(1)
-    })
+    Ok(Datum::from_usize(
+        if crate::bytea::byteacmp(a.data(), b.data()) < 0 {
+            a.as_ptr()
+        } else {
+            b.as_ptr()
+        } as usize,
+    ))
 }
 
 // Result varlena lives in the resolved FmgrInfo's scratch (see OutBuf);
