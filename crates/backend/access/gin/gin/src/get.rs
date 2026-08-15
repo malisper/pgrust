@@ -8,7 +8,7 @@ use ::gin_vocab::*;
 use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::tidbitmap::TIDBitmap;
 use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, InvalidBuffer, OffsetNumber};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_rel::Relation;
 use ::types_relscan::{IndexScanDescData, IndexScanOpaque};
 use ::types_tuple::itemptr::{
@@ -190,10 +190,10 @@ fn collect_match_bitmap(
 
             loop {
                 if !move_right_if_needed(rel, stack, snapshot)? {
-                    panic!(
+                    return Err(Box::new(PgError::error(format!(
                         "failed to re-find tuple within index \"{}\"",
                         rel.name()
-                    );
+                    ))));
                 }
                 let buffer = stack.top().buffer;
                 let off = stack.top().off;
@@ -1192,7 +1192,9 @@ fn collect_matches_for_heap_row(
         }
         let item = pos.item;
         if !scan_get_candidate(rel, pos)? || !ItemPointerEquals(&pos.item, &item) {
-            panic!("could not find additional pending pages for same heap tuple");
+            return Err(Box::new(PgError::error(
+                "could not find additional pending pages for same heap tuple",
+            )));
         }
     }
 
