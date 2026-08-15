@@ -9,7 +9,7 @@ use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::nbtree::itup;
 use ::types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, InvalidBuffer, BLCKSZ};
 
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_nbtree::IndexBulkDeleteResult;
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{PageMut, PageRef, PageTemp};
@@ -506,7 +506,10 @@ fn ginVacuumEntryPage<'s>(
                 let bytes =
                     core::slice::from_raw_parts(newtup.as_ptr(), itup::index_tuple_size(newtup.as_ptr()));
                 if pm.add_item(bytes, i, 0) != Some(i) {
-                    panic!("failed to add item to index page in \"{}\"", rel.name());
+                    return Err(Box::new(PgError::error(format!(
+                        "failed to add item to index page in \"{}\"",
+                        rel.name()
+                    ))));
                 }
             }
         }
