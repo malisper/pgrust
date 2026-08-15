@@ -1,12 +1,16 @@
 //! `tablefunc.c` crosstab (positional) + crosstab_hash (categories query).
 
 use datum::Datum;
-use funcapi::{InitMaterializedSRF, MaterializedSRF, MAT_SRF_USE_EXPECTED_DESC};
+use funcapi::{
+    get_call_result_type, InitMaterializedSRF, MaterializedSRF, TypeFuncClass,
+    MAT_SRF_USE_EXPECTED_DESC,
+};
 use mcx::Mcx;
 use rustc_hash::FxHashMap;
 use types_error::{
     PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_DATATYPE_MISMATCH,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_NULL_VALUE_NOT_ALLOWED,
 };
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use types_tuple::TupleDescData;
@@ -98,9 +102,29 @@ pub(crate) fn fc_crosstab(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         return Ok(Datum::null());
     }
 
-    // InitMaterializedSRF resolves the composite/record result tupdesc
-    // (get_call_result_type) and begins the tuplestore; do it here so the
-    // "return type must be a row type" leg fires like C's get_call_result_type.
+    // C get_call_result_type switch: RECORD is 0A000, other non-row is 42804.
+    // InitMaterializedSRF elogs XX000 for both.
+    let expected = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc).map(|p| {
+        // SAFETY: executor-armed expectedDesc, live for this call (same as InitMaterializedSRF).
+        unsafe { p.cast::<TupleDescData<'_>>().as_ref() }
+    });
+    match get_call_result_type(mcx, flinfo, expected)?.class {
+        TypeFuncClass::Composite => {}
+        TypeFuncClass::Record => {
+            return Err(err(
+                "function returning record called in context that cannot accept type record",
+                "",
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        _ => {
+            return Err(err(
+                "return type must be a row type",
+                "",
+                ERRCODE_DATATYPE_MISMATCH,
+            ));
+        }
+    }
     let mut srf = InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
     let num_categories = srf.tupdesc.natts as usize - 1;
 
