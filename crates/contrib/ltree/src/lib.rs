@@ -11,7 +11,7 @@ mod op;
 mod repr;
 
 use datum::Datum;
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_fmgr::{
     byref_result, cstring_result, varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
     PGFunction,
@@ -519,11 +519,15 @@ fn get_siglen(f: &Option<&mut FmgrInfo>, default: i32) -> usize {
 }
 
 fn fc_ltree_gist_in(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Err(PgError::error("cannot accept a value of type ltree_gist").into())
+    Err(PgError::error("cannot accept a value of type ltree_gist")
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into())
 }
 
 fn fc_ltree_gist_out(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Err(PgError::error("cannot display a value of type ltree_gist").into())
+    Err(PgError::error("cannot display a value of type ltree_gist")
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into())
 }
 
 fn fc_ltree_compress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
