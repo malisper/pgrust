@@ -196,16 +196,19 @@ pub fn cluster_rel<'mcx>(
         if recheck {
             // save_userid: the sec context already switched to the table owner.
             if !cluster_is_permitted_for_relation(mcx, table_oid, guard.saved().0)? {
-                return old_heap.close(NoLock);
+                return old_heap.close(AccessExclusiveLock);
+            }
+            if old_heap.is_other_temp() {
+                return old_heap.close(AccessExclusiveLock);
             }
             if index_oid != InvalidOid {
                 if lsyscache::get_rel_name(mcx, index_oid)?.is_none() {
-                    return old_heap.close(NoLock);
+                    return old_heap.close(AccessExclusiveLock);
                 }
                 if params.options & CLUOPT_RECHECK_ISCLUSTERED != 0
                     && !lsyscache::get_index_isclustered(index_oid)?
                 {
-                    return old_heap.close(NoLock);
+                    return old_heap.close(AccessExclusiveLock);
                 }
             }
         }
