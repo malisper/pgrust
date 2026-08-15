@@ -109,14 +109,16 @@ fn relation_open_by_text_arg<'m>(
     } else {
         wchar::PG_SQL_ASCII
     };
-    let names = varlena::split_identifier_string(mcx, &rawname, b'.', encoding)?
-        .filter(|l| !l.is_empty())
-        .ok_or_else(|| {
-            Box::new(
+    // C textToQualifiedNameList: false/NIL → 42602; quoted-empty `""` is kept.
+    let names = match varlena::split_identifier_string(mcx, &rawname, b'.', encoding)? {
+        Some(names) if !names.is_empty() => names,
+        _ => {
+            return Err(Box::new(
                 PgError::error("invalid name syntax")
                     .with_sqlstate(types_error::ERRCODE_INVALID_NAME),
-            )
-        })?;
+            ));
+        }
+    };
     let (catalogname, schemaname, relname) = match names.as_slice() {
         [r] => (None, None, r.as_str()),
         [s, r] => (None, Some(s.as_str()), r.as_str()),
