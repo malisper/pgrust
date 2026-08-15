@@ -235,6 +235,13 @@ pub fn DefineQueryRewrite<'mcx>(
             .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
         ));
     }
+    if !aclchk::object_ownercheck(RELATION_RELATION_ID, event_relid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            get_relkind_objtype(relkind),
+            event_relation.name(),
+        )?;
+    }
 
     for item in action.iter() {
         let query = item.as_query().expect("rule action is a Query");
@@ -634,8 +641,6 @@ fn relkind_not_supported_detail(relkind: u8) -> &'static str {
 
 const Anum_pg_rewrite_ev_enabled: AttrNumber = 5;
 
-// EnableDisableRule (rewriteDefine.c); ownership check rides the single-user
-// boot identity (DefineQueryRewrite precedent).
 pub fn EnableDisableRule<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -675,6 +680,13 @@ pub fn EnableDisableRule<'mcx>(
             ));
         }
     };
+    if !aclchk::object_ownercheck(RELATION_RELATION_ID, owning_rel, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            get_relkind_objtype(rel.rd_rel.relkind),
+            rel.name(),
+        )?;
+    }
     let td = pg_rewrite.descr();
     let mut isnull = false;
     // SAFETY: pg_rewrite row under its own descriptor; declared columns.
