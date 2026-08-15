@@ -8,8 +8,8 @@ use std::rc::Rc;
 use datum::Datum;
 use format_type::format_type_with_typemod;
 use mcx::Mcx;
-use types_core::{InvalidOid, Oid, BOOLOID, INT4OID, NUMERICOID, UNKNOWNOID};
-use types_error::PgResult;
+use types_core::{InvalidOid, Oid, BOOLOID, FUNC_MAX_ARGS, INT4OID, NUMERICOID, UNKNOWNOID};
+use types_error::{PgError, PgResult, ERRCODE_TOO_MANY_ARGUMENTS};
 use types_nodes::primnodes::{
     Aggref, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CoalesceExpr, CoercionForm, Const,
     FuncExpr, MinMaxExpr, MinMaxOp, NextValueExpr, NullTest, NullTestType, OpExpr, Param,
@@ -23,6 +23,15 @@ use crate::query::{self, DeparseNamespace};
 use crate::{
     gap, generate_function_name, generate_operator_name, generate_relation_name, quote_identifier,
 };
+
+pub(crate) fn check_deparse_nargs(n: usize) -> PgResult<()> {
+    if n > FUNC_MAX_ARGS {
+        return Err(PgError::error("too many arguments")
+            .with_sqlstate(ERRCODE_TOO_MANY_ARGUMENTS)
+            .into());
+    }
+    Ok(())
+}
 
 pub(crate) const PRETTYINDENT_STD: i32 = 8;
 pub(crate) const PRETTYINDENT_JOIN: i32 = 4;
@@ -1551,6 +1560,7 @@ fn get_func_expr<'mcx>(
         return Ok(());
     }
 
+    check_deparse_nargs(expr.args.len())?;
     let mut argtypes = Vec::with_capacity(expr.args.len());
     let mut argnames = Vec::new();
     for arg in expr.args.iter() {
@@ -1870,6 +1880,7 @@ fn get_windowfunc_expr_helper<'mcx>(
     ctx: &mut DeparseContext<'mcx>,
     json: Option<(&'mcx types_nodes::JsonConstructorExpr<'mcx>, &str, bool)>,
 ) -> PgResult<()> {
+    check_deparse_nargs(wfunc.args.len())?;
     if let Some((_, funcname, _)) = json {
         ctx.buf.push_str(funcname);
     } else {

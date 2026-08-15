@@ -6,7 +6,7 @@ use std::rc::Rc;
 use datum::Datum;
 use mcx::{Mcx, MemoryContext};
 use types_core::{AttrNumber, Oid};
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_rel::AccessShareLock;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, NameData, TupleDescData};
@@ -121,6 +121,20 @@ pub fn pg_get_ruledef_worker(
     Ok(Some(make_ruledef(mcx, &rule, pretty_flags)?))
 }
 
+pub(crate) fn rule_event_keyword(rulename: &str, ev_type: u8) -> PgResult<&'static str> {
+    match ev_type {
+        b'1' => Ok("SELECT"),
+        b'2' => Ok("UPDATE"),
+        b'3' => Ok("INSERT"),
+        b'4' => Ok("DELETE"),
+        other => Err(PgError::error(format!(
+            "rule \"{rulename}\" has unsupported event type {other}"
+        ))
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into()),
+    }
+}
+
 fn make_ruledef(mcx: Mcx<'_>, rule: &PgRewriteRow, pretty_flags: i32) -> PgResult<String> {
     let actions_node = readfuncs::stringToNode(mcx, &rule.ev_action)?;
     let actions = actions_node.as_list().expect("ev_action is a List");
@@ -136,19 +150,11 @@ fn make_ruledef(mcx: Mcx<'_>, rule: &PgRewriteRow, pretty_flags: i32) -> PgResul
         " ON "
     });
 
+    let event = rule_event_keyword(&rule.rulename, rule.ev_type)?;
+    ctx.buf.push_str(event);
     let mut view_result_desc: Option<Rc<Vec<String>>> = None;
-    match rule.ev_type {
-        b'1' => {
-            ctx.buf.push_str("SELECT");
-            view_result_desc = Some(Rc::new(view_attnames(rule.ev_class)?));
-        }
-        b'2' => ctx.buf.push_str("UPDATE"),
-        b'3' => ctx.buf.push_str("INSERT"),
-        b'4' => ctx.buf.push_str("DELETE"),
-        other => panic!(
-            "rule \"{}\" has unsupported event type {other}",
-            rule.rulename
-        ),
+    if event == "SELECT" {
+        view_result_desc = Some(Rc::new(view_attnames(rule.ev_class)?));
     }
 
     let relname = if pretty_flags & PRETTYFLAG_SCHEMA != 0 {

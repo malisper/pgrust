@@ -2,8 +2,10 @@ use super::*;
 use datum::Datum;
 use mcx::MemoryContext;
 use std::sync::Once;
-use types_core::{BOOLOID, INT4OID, TEXTOID};
-use types_error::ERRCODE_INVALID_PARAMETER_VALUE;
+use types_core::{BOOLOID, FUNC_MAX_ARGS, INT4OID, TEXTOID};
+use types_error::{
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_TOO_MANY_ARGUMENTS,
+};
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use types_tuple::{PgTypeShape, TYPALIGN_INT, TYPSTORAGE_EXTENDED, TYPSTORAGE_PLAIN};
 
@@ -331,4 +333,22 @@ fn null_node_marker_deparses_to_empty_string() {
         pg_get_expr_worker(ctx.mcx(), "<>", 0, get_pretty_flags(true)).unwrap(),
         Some(String::new())
     );
+}
+
+#[test]
+fn unsupported_rule_event_type_is_ereport_0a000() {
+    for ev in [b'1', b'2', b'3', b'4'] {
+        assert!(super::ruledef::rule_event_keyword("r", ev).is_ok());
+    }
+    let err = super::ruledef::rule_event_keyword("r", b'9').unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(err.message(), "rule \"r\" has unsupported event type 57");
+}
+
+#[test]
+fn deparse_too_many_arguments_is_ereport_54023() {
+    super::deparse::check_deparse_nargs(FUNC_MAX_ARGS).unwrap();
+    let err = super::deparse::check_deparse_nargs(FUNC_MAX_ARGS + 1).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_TOO_MANY_ARGUMENTS);
+    assert_eq!(err.message(), "too many arguments");
 }
