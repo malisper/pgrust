@@ -249,10 +249,14 @@ fc_word_ops! {
 fn fc_set_limit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let nlimit = a.value.as_f32();
-    if !(0.0..=1.0).contains(&nlimit) {
-        return Err(PgError::error("pg_trgm.similarity_threshold must be in range [0, 1]")
-            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
-            .into());
+    // C guc.c: error iff value < min || value > max. NaN comparisons are
+    // false, so set_limit(NaN) succeeds (Range.contains rejects NaN).
+    if nlimit < 0.0 || nlimit > 1.0 {
+        return Err(PgError::error(format!(
+            "{nlimit} is outside the valid range for parameter \"pg_trgm.similarity_threshold\" (0 .. 1)"
+        ))
+        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+        .into());
     }
     guc::SetConfigOption(
         "pg_trgm.similarity_threshold",
