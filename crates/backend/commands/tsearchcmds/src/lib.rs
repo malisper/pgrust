@@ -229,22 +229,11 @@ fn ownercheck(classid: Oid, objid: Oid, objtype: ObjectType, name: &str) -> PgRe
     Ok(())
 }
 
-fn defGetQualifiedName<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem<'mcx>) -> PgVec<'mcx, &'mcx str> {
-    let arg = defel.arg.expect("option requires an argument");
-    if let Some(t) = arg.as_type_name() {
-        name_list_parts(mcx, &t.names)
-    } else if let Some(l) = arg.as_list() {
-        name_list_parts(mcx, l)
-    } else if let Some(s) = arg.as_string() {
-        let mut v = PgVec::new_in(mcx);
-        v.push(s.sval);
-        v
-    } else {
-        panic!(
-            "defGetQualifiedName: argument of {} must be a name",
-            defel.defname.unwrap_or("")
-        )
-    }
+pub(crate) fn defGetQualifiedName<'mcx>(
+    mcx: Mcx<'mcx>,
+    defel: &DefElem<'mcx>,
+) -> PgResult<PgVec<'mcx, &'mcx str>> {
+    Ok(name_list_parts(mcx, commands_define::defGetQualifiedName(mcx, defel)?))
 }
 
 // verify_dictoptions (tsearchcmds.c). DIVERGENCE: C suppresses the check in a
@@ -349,7 +338,7 @@ pub fn DefineTSDictionary<'mcx>(
     for n in stmt.definition.iter() {
         let defel = n.as_def_elem().expect("definition holds DefElems");
         if defel.defname == Some("template") {
-            templId = get_ts_template_oid(&defGetQualifiedName(mcx, defel), false)?;
+            templId = get_ts_template_oid(&defGetQualifiedName(mcx, defel)?, false)?;
         } else {
             dictoptions.push(def_item_from_defelem(mcx, defel)?);
         }
@@ -423,7 +412,7 @@ fn func_wrong_rettype(funcname: &[&str], argtypes: &[Oid], rettype: Oid) -> PgRe
 // get_ts_parser_func (tsearchcmds.c): signature-checked regproc lookup.
 fn get_ts_parser_func<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem<'mcx>, attnum: i32) -> PgResult<Oid> {
     use types_core::catalog::{INTERNALOID, INT4OID, VOIDOID};
-    let funcname = defGetQualifiedName(mcx, defel);
+    let funcname = defGetQualifiedName(mcx, defel)?;
     let mut ret_type = INTERNALOID;
     let mut type_id = [INTERNALOID; 3];
     let nargs: i16 = match attnum {
@@ -553,7 +542,7 @@ fn get_ts_template_func<'mcx>(
     attnum: i32,
 ) -> PgResult<Oid> {
     use types_core::catalog::INTERNALOID;
-    let funcname = defGetQualifiedName(mcx, defel);
+    let funcname = defGetQualifiedName(mcx, defel)?;
     let type_id = [INTERNALOID; 4];
     let nargs: i16 = match attnum {
         Anum_pg_ts_template_tmplinit => 1,
@@ -797,8 +786,8 @@ pub fn DefineTSConfiguration<'mcx>(
     for n in stmt.definition.iter() {
         let defel = n.as_def_elem().expect("definition holds DefElems");
         match defel.defname {
-            Some("parser") => prsOid = get_ts_parser_oid(&defGetQualifiedName(mcx, defel), false)?,
-            Some("copy") => sourceOid = get_ts_config_oid(&defGetQualifiedName(mcx, defel), false)?,
+            Some("parser") => prsOid = get_ts_parser_oid(&defGetQualifiedName(mcx, defel)?, false)?,
+            Some("copy") => sourceOid = get_ts_config_oid(&defGetQualifiedName(mcx, defel)?, false)?,
             other => {
                 return Err(Box::new(
                     PgError::error(format!(

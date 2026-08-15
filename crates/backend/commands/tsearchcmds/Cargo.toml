@@ -22,6 +22,7 @@ catalog = { path = "../../catalog/catalog" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
+commands_define = { path = "../commands_define" }
 pg_depend = { path = "../../catalog/pg_depend" }
 aclchk = { path = "../../catalog/aclchk" }
 miscinit = { path = "../../utils/init/miscinit" }

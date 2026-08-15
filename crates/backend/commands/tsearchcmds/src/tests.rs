@@ -115,3 +115,37 @@ fn ts_ownercheck_superuser_bypass_and_owner_error_shape() {
     .unwrap_err();
     assert_eq!(e.message(), "must be owner of text search configuration english");
 }
+
+// define.c defGetQualifiedName: missing / non-name arg is 42601, not panic.
+// Live: CREATE TEXT SEARCH DICTIONARY d (TEMPLATE) / (TEMPLATE = 1).
+#[test]
+fn defgetqualifiedname_non_name_is_42601() {
+    use types_nodes::parsenodes::DefElem;
+    use types_nodes::{Integer, Node};
+    let ctx = mcx::MemoryContext::new("tsearchcmds-test");
+    let mcx = ctx.mcx();
+
+    let missing = DefElem { defname: Some("template"), arg: None, ..DefElem::default() };
+    let e = crate::defGetQualifiedName(mcx, &missing).unwrap_err();
+    assert_eq!(e.message(), "template requires a parameter");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+
+    let int_arg = Node::mk(mcx, Integer { ival: 1 }).unwrap();
+    let numeric = DefElem {
+        defname: Some("template"),
+        arg: Some(int_arg),
+        ..DefElem::default()
+    };
+    let e = crate::defGetQualifiedName(mcx, &numeric).unwrap_err();
+    assert_eq!(e.message(), "argument of template must be a name");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+
+    let parser = DefElem {
+        defname: Some("parser"),
+        arg: Some(Node::mk(mcx, Integer { ival: 1 }).unwrap()),
+        ..DefElem::default()
+    };
+    let e = crate::defGetQualifiedName(mcx, &parser).unwrap_err();
+    assert_eq!(e.message(), "argument of parser must be a name");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+}

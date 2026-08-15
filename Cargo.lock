@@ -18921,6 +18921,7 @@ dependencies = [
  "catalog_dependency",
  "catalog_indexing",
  "catalog_namespace",
+ "commands_define",
  "datum",
  "elog_seams",
  "fmgr_seams",
