@@ -296,10 +296,12 @@ pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<Ob
                 types_error::ERRCODE_INSUFFICIENT_PRIVILEGE,
             ));
         }
-        assert!(
-            p.newTypeOid == InvalidOid,
-            "cannot assign new OID to existing shell type"
-        );
+        if p.newTypeOid != InvalidOid {
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "cannot assign new OID to existing shell type",
+            )));
+        }
         let mut replaces = [true; Natts_pg_type];
         replaces[0] = false;
         let mut newtup =
@@ -312,6 +314,8 @@ pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<Ob
     } else {
         let typeObjectId = if p.newTypeOid != InvalidOid {
             p.newTypeOid
+        } else if init_small::globals::IsBinaryUpgrade() {
+            take_next_pg_type_oid().ok_or_else(|| oid_not_set("TypeCreate", "pg_type"))?
         } else {
             catalog::GetNewOidWithIndex(mcx, &pg_type_desc, TypeOidIndexId, Anum_pg_type_oid)?
         };
