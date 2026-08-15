@@ -415,6 +415,32 @@ fn create_command_tag_alter_object_types() {
     assert_eq!(CreateCommandTag(node), CMDTAG_ALTER_TRIGGER);
 }
 
+// C utility.c CreateCommandTag(T_AlterObjectDependsStmt) =
+// AlterObjectTypeCommandTag(stmt->objectType). Unfixed pgrust was
+// payload_gap panic on every ALTER ... DEPENDS ON EXTENSION (Q3-F1
+// landed the node + exec; this arm was left as a grammar-era gap).
+#[test]
+fn create_command_tag_alter_object_depends() {
+    use types_nodes::parsenodes::{AlterObjectDependsStmt, ObjectType};
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    for (objtype, tag) in [
+        (ObjectType::OBJECT_FUNCTION, CMDTAG_ALTER_FUNCTION),
+        (ObjectType::OBJECT_PROCEDURE, CMDTAG_ALTER_PROCEDURE),
+        (ObjectType::OBJECT_ROUTINE, CMDTAG_ALTER_ROUTINE),
+        (ObjectType::OBJECT_TRIGGER, CMDTAG_ALTER_TRIGGER),
+        (ObjectType::OBJECT_MATVIEW, CMDTAG_ALTER_MATERIALIZED_VIEW),
+        (ObjectType::OBJECT_INDEX, CMDTAG_ALTER_INDEX),
+    ] {
+        let node = Node::mk(
+            mcx,
+            AlterObjectDependsStmt { objectType: objtype, ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(CreateCommandTag(node), tag);
+    }
+}
+
 #[test]
 fn explain_log_level_and_descriptor() {
     use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_MOD};
