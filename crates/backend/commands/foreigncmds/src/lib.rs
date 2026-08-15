@@ -637,8 +637,11 @@ pub fn CreateForeignServer<'mcx>(
 
     let owner_id = miscinit::GetUserId();
 
-    if get_foreign_server_oid(servername, true)? != InvalidOid {
+    let existing = get_foreign_server_oid(servername, true)?;
+    if existing != InvalidOid {
         if stmt.if_not_exists {
+            let myself = ObjectAddress::set(FOREIGN_SERVER_RELATION_ID, existing);
+            pg_depend::checkMembershipInCurrentExtension(mcx, &myself)?;
             ::elog::ereport(NOTICE)
                 .errcode(ERRCODE_DUPLICATE_OBJECT)
                 .errmsg(format!("server \"{servername}\" already exists, skipping"))
@@ -711,6 +714,7 @@ pub fn CreateForeignServer<'mcx>(
     let referenced = ObjectAddress::set(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw.fdwid);
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
     pg_depend::recordDependencyOnOwner(mcx, FOREIGN_SERVER_RELATION_ID, srv_id, owner_id)?;
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
     rel.close(RowExclusiveLock)?;
     Ok(srv_id)
