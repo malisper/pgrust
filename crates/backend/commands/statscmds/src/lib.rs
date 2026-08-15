@@ -812,14 +812,7 @@ pub fn get_statistics_object_oid(names: &[&str], missing_ok: bool) -> PgResult<O
             stats_oid = statext_name_lookup(stats_name, namespace_id)?;
         }
     } else {
-        let mut path = [InvalidOid; 64];
-        let n = catalog_namespace::fetch_search_path_array(&mut path)?;
-        for &nsp in &path[..n] {
-            stats_oid = statext_name_lookup(stats_name, nsp)?;
-            if stats_oid != InvalidOid {
-                break;
-            }
-        }
+        stats_oid = lookup_statext_in_search_path(stats_name)?;
     }
     if stats_oid == InvalidOid && !missing_ok {
         return Err(Box::new(
@@ -842,4 +835,42 @@ fn statext_name_lookup(name: &str, namespace_id: Oid) -> PgResult<Oid> {
         cache_syscache::SysCacheKey::UNUSED,
         cache_syscache::SysCacheKey::UNUSED,
     )
+}
+
+fn first_statext_on_path(stats_name: &str, path: &[Oid]) -> PgResult<Oid> {
+    for &nsp in path {
+        let oid = statext_name_lookup(stats_name, nsp)?;
+        if oid != InvalidOid {
+            return Ok(oid);
+        }
+    }
+    Ok(InvalidOid)
+}
+
+// fetch_search_path_array may report n larger than the stack slot.
+fn lookup_statext_in_search_path(stats_name: &str) -> PgResult<Oid> {
+    let mut path = [InvalidOid; 64];
+    let n = catalog_namespace::fetch_search_path_array(&mut path)?;
+    if n <= path.len() {
+        return first_statext_on_path(stats_name, &path[..n]);
+    }
+    let mut rest = [InvalidOid; 1024];
+    let n = catalog_namespace::fetch_search_path_array(&mut rest)?;
+    first_statext_on_path(stats_name, search_path_view(&rest, n))
+}
+
+fn search_path_view(buf: &[Oid], reported: usize) -> &[Oid] {
+    &buf[..reported.min(buf.len())]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_path_view_survives_count_past_slot() {
+        let buf = [InvalidOid; 64];
+        let view = search_path_view(&buf, 65);
+        assert_eq!(view.len(), 64);
+    }
 }
