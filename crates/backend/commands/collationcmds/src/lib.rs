@@ -76,7 +76,13 @@ fn from_collation_oid<'mcx>(mcx: Mcx<'mcx>, def: &DefElem<'_>) -> PgResult<types
             let l = NodeList::make1(mcx, arg)?;
             catalog_namespace::get_collation_oid_list(&l, false)
         }
-        t => panic!("defGetQualifiedName (define.c): unhandled arg {t:?}"),
+        _ => Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("argument of {} must be a name", def.defname.unwrap_or("")),
+            )
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        )),
     }
 }
 
@@ -160,7 +166,7 @@ pub fn DefineCollation<'mcx>(
         collcollate = row.collcollate.as_ref().map(|s| s.as_str().to_owned());
         collctype = row.collctype.as_ref().map(|s| s.as_str().to_owned());
         colllocale = row.colllocale.as_ref().map(|s| s.as_str().to_owned());
-        collicurules = None;
+        collicurules = row.collicurules.as_ref().map(|s| s.as_str().to_owned());
         if collprovider == COLLPROVIDER_DEFAULT {
             return Err(Box::new(
                 PgError::new(ERROR, "collation \"default\" cannot be copied".to_string())
@@ -555,4 +561,35 @@ pub fn IsThereCollationInNamespace(mcx: Mcx<'_>, collname: &str, nsp_oid: Oid) -
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_nodes::parsenodes::DefElem;
+    use types_nodes::{Integer, Node};
+
+    #[test]
+    fn from_non_name_arg_is_ereport_42601() {
+        let ctx = mcx::MemoryContext::new("collationcmds-test");
+        let mcx = ctx.mcx();
+        let def = DefElem {
+            defname: Some("from"),
+            arg: Some(Node::mk(mcx, Integer { ival: 1 }).unwrap()),
+            ..DefElem::default()
+        };
+        let e = from_collation_oid(mcx, &def).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        assert_eq!(e.message(), "argument of from must be a name");
+    }
+
+    #[test]
+    fn from_missing_arg_is_ereport_42601() {
+        let ctx = mcx::MemoryContext::new("collationcmds-test");
+        let mcx = ctx.mcx();
+        let def = DefElem { defname: Some("from"), arg: None, ..DefElem::default() };
+        let e = from_collation_oid(mcx, &def).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        assert_eq!(e.message(), "from requires a parameter");
+    }
 }
