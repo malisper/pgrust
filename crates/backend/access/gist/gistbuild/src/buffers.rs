@@ -292,7 +292,9 @@ impl<'mcx> GistBuildBuffers<'mcx> {
     /// WriteTempFileBlock.
     fn write_block(&mut self, blknum: i64, page: &AlignedPage) -> PgResult<()> {
         if self.pfile.seek_block(blknum)? != 0 {
-            panic!("could not seek to block {blknum} in temporary file");
+            return Err(crate::elog_error(format!(
+                "could not seek to block {blknum} in temporary file"
+            )));
         }
         self.pfile.write(&page.0)
     }
@@ -300,7 +302,9 @@ impl<'mcx> GistBuildBuffers<'mcx> {
     /// ReadTempFileBlock.
     fn read_block(&mut self, blknum: i64, page: &mut AlignedPage) -> PgResult<()> {
         if self.pfile.seek_block(blknum)? != 0 {
-            panic!("could not seek to block {blknum} in temporary file");
+            return Err(crate::elog_error(format!(
+                "could not seek to block {blknum} in temporary file"
+            )));
         }
         self.pfile.read_exact(&mut page.0)
     }

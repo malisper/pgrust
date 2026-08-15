@@ -426,13 +426,19 @@ fn gist_buffering_find_correct_parent(
     downlinkoffnum: OffsetNumber,
 ) -> PgResult<(BufferPin, OffsetNumber)> {
     let parent = if level > 0 {
-        *bb.parent_map.get(&childblkno).unwrap_or_else(|| {
-            panic!("could not find parent of block {childblkno} in lookup table")
-        })
+        match bb.parent_map.get(&childblkno) {
+            Some(&p) => p,
+            None => {
+                return Err(crate::elog_error(format!(
+                    "could not find parent of block {childblkno} in lookup table"
+                )));
+            }
+        }
     } else {
-        // A leaf's parent must be supplied by the caller.
         if parentblkno == InvalidBlockNumber {
-            panic!("no parent buffer provided of child {childblkno}");
+            return Err(crate::elog_error(format!(
+                "no parent buffer provided of child {childblkno}"
+            )));
         }
         parentblkno
     };
@@ -463,7 +469,11 @@ fn gist_buffering_find_correct_parent(
     };
     match found {
         Some(off) => Ok((pin, off)),
-        None => panic!("failed to re-find parent for block {childblkno}"),
+        None => {
+            return Err(crate::elog_error(format!(
+                "failed to re-find parent for block {childblkno}"
+            )));
+        }
     }
 }
 

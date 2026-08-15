@@ -8,7 +8,7 @@ pub mod buffers;
 use ::datum::Datum;
 use ::mcx::{Mcx, MemoryContext};
 use ::types_core::{BlockNumber, ForkNumber, BLCKSZ, RELPERSISTENCE_UNLOGGED};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_gist::{GistBuildLSN, F_LEAF, GIST_DEFAULT_FILLFACTOR, GIST_ROOT_BLKNO, GIST_SORTSUPPORT_PROC};
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{PageMut, PageRef};
@@ -29,6 +29,13 @@ pub struct IndexBuildResult {
 const BUFFERING_MODE_SWITCH_CHECK_STEP: u64 = 256;
 const BUFFERING_MODE_TUPLE_SIZE_STATS_TARGET: u64 = 4096;
 
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn elog_error(msg: String) -> Box<PgError> {
+    Box::new(PgError::error(msg))
+}
+
 /// GistBuildMode, minus GIST_SORTED_BUILD (dispatched up front).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GistBuildMode {
@@ -46,7 +53,10 @@ pub fn gistbuild<'mcx>(
     indexInfo: &mut IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     if bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)? != 0 {
-        panic!("index \"{}\" already contains data", index.name());
+        return Err(elog_error(format!(
+            "index \"{}\" already contains data",
+            index.name()
+        )));
     }
 
     let mut build_mode = match index.rd_options.as_ref().and_then(|o| o.gist()) {
@@ -514,4 +524,26 @@ pub fn gistbuildempty(index: &Relation<'_>) -> PgResult<()> {
     bufmgr_seams::lock_buffer::call(pin.buffer(), bufmgr_seams::BUFFER_LOCK_UNLOCK)?;
     pin.release();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::elog_error;
+    use types_error::ERRCODE_INTERNAL_ERROR;
+
+    #[test]
+    fn gistbuild_elogs_are_xx000() {
+        let cases = [
+            "index \"g\" already contains data",
+            "could not find parent of block 3 in lookup table",
+            "no parent buffer provided of child 3",
+            "failed to re-find parent for block 3",
+            "could not seek to block 7 in temporary file",
+        ];
+        for msg in cases {
+            let err = elog_error(msg.into());
+            assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR, "{msg}");
+            assert_eq!(err.message, msg);
+        }
+    }
 }
