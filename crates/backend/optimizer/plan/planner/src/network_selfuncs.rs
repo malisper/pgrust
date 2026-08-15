@@ -3,7 +3,7 @@
 use adt_network::{bitncmp, bitncommon, InetRef};
 use datum::Datum;
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_pathnodes::{NodeId, SpecialJoinInfo};
 
 use crate::run::PlannerRun;
@@ -26,14 +26,16 @@ fn default_sel(operator: Oid) -> f64 {
     if operator == OID_INET_OVERLAP_OP { DEFAULT_OVERLAP_SEL } else { DEFAULT_INCLUSION_SEL }
 }
 
-fn inet_opr_codenum(operator: Oid) -> i32 {
+fn inet_opr_codenum(operator: Oid) -> PgResult<i32> {
     match operator {
-        OID_INET_SUP_OP => -2,
-        OID_INET_SUPEQ_OP => -1,
-        OID_INET_OVERLAP_OP => 0,
-        OID_INET_SUBEQ_OP => 1,
-        OID_INET_SUB_OP => 2,
-        _ => panic!("unrecognized operator {operator} for inet selectivity"),
+        OID_INET_SUP_OP => Ok(-2),
+        OID_INET_SUPEQ_OP => Ok(-1),
+        OID_INET_OVERLAP_OP => Ok(0),
+        OID_INET_SUBEQ_OP => Ok(1),
+        OID_INET_SUB_OP => Ok(2),
+        _ => Err(Box::new(PgError::error(format!(
+            "unrecognized operator {operator} for inet selectivity"
+        )))),
     }
 }
 
@@ -61,7 +63,7 @@ pub fn networksel<'mcx>(
     args: &[NodeId],
     varrelid: i32,
 ) -> PgResult<f64> {
-    let opr_codenum = inet_opr_codenum(operator);
+    let opr_codenum = inet_opr_codenum(operator)?;
     let Some((vardata, other, varonleft)) = get_restriction_variable(run, args, varrelid)?
     else {
         return Ok(default_sel(operator));
@@ -101,7 +103,7 @@ pub fn networkjoinsel<'mcx>(
     args: &[NodeId],
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
 ) -> PgResult<f64> {
-    let opr_codenum = inet_opr_codenum(operator);
+    let opr_codenum = inet_opr_codenum(operator)?;
     let sjinfo = sjinfo.expect("networkjoinsel called with an sjinfo");
     let (vardata1, vardata2, join_is_reversed) = get_join_variables(run, args, sjinfo)?;
 
@@ -488,6 +490,16 @@ mod tests {
         let s = side_stats(&vardata).expect("no panic on torn slot");
         assert_eq!(s.mcv_length, 0);
         assert_eq!(s.sumcommon, 0.0);
+    }
+
+    #[test]
+    fn inet_opr_codenum_unrecognized_is_ereport_xx000() {
+        let err = inet_opr_codenum(1).expect_err("unrecognized opr must ereport");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(
+            err.message(),
+            "unrecognized operator 1 for inet selectivity"
+        );
     }
 
     #[test]
