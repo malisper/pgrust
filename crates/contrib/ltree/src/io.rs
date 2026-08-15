@@ -958,6 +958,14 @@ pub fn parse_ltxtquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
 
     let size = st.num as usize;
     let sumlen = st.sumlen as usize;
+    if size
+        > (::mcx::MAX_ALLOC_SIZE
+            .wrapping_sub(HDRSIZEQT)
+            .wrapping_sub(sumlen))
+            / ITEM_SIZE
+    {
+        return Err(prog_limit("ltxtquery is too large"));
+    }
     let commonlen = computesize(size, sumlen);
     let mut out = vec![0u8; commonlen];
     set_varsize(&mut out, commonlen);
