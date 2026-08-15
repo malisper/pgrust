@@ -2783,39 +2783,9 @@ fn find_stats_tuple<'mcx>(
     Ok(found)
 }
 
-// defGetBoolean (define.c).
+// define.c defGetBoolean: 42601, not XX000. Live ANALYZE (VERBOSE = 2).
 fn def_get_boolean(def: &types_nodes::parsenodes::DefElem<'_>) -> PgResult<bool> {
-    use types_nodes::NodeTag;
-    let Some(arg) = def.arg else {
-        return Ok(true);
-    };
-    if arg.node_tag() == NodeTag::T_Integer {
-        match arg.as_integer().unwrap().ival {
-            0 => return Ok(false),
-            1 => return Ok(true),
-            _ => {}
-        }
-    } else {
-        let sval = match arg.node_tag() {
-            NodeTag::T_Float => arg.as_float().unwrap().fval,
-            NodeTag::T_Boolean => {
-                if arg.as_boolean().unwrap().boolval { "true" } else { "false" }
-            }
-            NodeTag::T_String => arg.as_string().unwrap().sval,
-            t => panic!("defGetBoolean (define.c): {t:?} arg unported (define lane)"),
-        };
-        if sval.eq_ignore_ascii_case("true") || sval.eq_ignore_ascii_case("on") {
-            return Ok(true);
-        }
-        if sval.eq_ignore_ascii_case("false") || sval.eq_ignore_ascii_case("off") {
-            return Ok(false);
-        }
-    }
-    Err(PgError::error(format!(
-        "{} requires a Boolean value",
-        def.defname.unwrap_or("")
-    ))
-    .into())
+    commands_define::defGetBoolean(def)
 }
 
 fn stat_key(attno: i32, func: types_core::primitive::RegProcedure, arg: Datum) -> ScanKeyData {
@@ -2839,6 +2809,34 @@ mod tests {
     use datum::Datum;
     use mcx::{Mcx, MemoryContext, PgVec};
     use types_core::InvalidOid;
+
+    // define.c defGetBoolean via ExecVacuum ANALYZE options. C is 42601.
+    // Unfixed local copy omitted errcode → XX000. Live: ANALYZE (VERBOSE = 2).
+    #[test]
+    fn analyze_verbose_non_bool_is_42601() {
+        use types_nodes::parsenodes::DefElem;
+        use types_nodes::{Integer, Node};
+        let ctx = mcx::MemoryContext::new("analyze-test");
+        let mcx = ctx.mcx();
+        let numeric = DefElem {
+            defname: Some("verbose"),
+            arg: Some(Node::mk(mcx, Integer { ival: 2 }).unwrap()),
+            ..DefElem::default()
+        };
+        let e = super::def_get_boolean(&numeric).unwrap_err();
+        assert_eq!(e.message(), "verbose requires a Boolean value");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+
+        let skip = DefElem {
+            defname: Some("skip_locked"),
+            arg: Some(Node::mk(mcx, Integer { ival: 2 }).unwrap()),
+            ..DefElem::default()
+        };
+        let e = super::def_get_boolean(&skip).unwrap_err();
+        assert_eq!(e.message(), "skip_locked requires a Boolean value");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    }
+
 
     fn plain_image(payload: &[u8]) -> Vec<u8> {
         let total = payload.len() + 4;
