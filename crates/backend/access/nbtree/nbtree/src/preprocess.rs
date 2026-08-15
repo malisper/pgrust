@@ -7,7 +7,7 @@ use ::datum::Datum;
 use ::fmgr_core::{fmgr_info, function_call2_coll, oid_function_call2_coll};
 use ::mcx::{Mcx, PgVec};
 use ::types_core::INDEX_MAX_KEYS;
-use ::types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::types_fmgr::FmgrInfo;
 use ::types_nbtree::{BTArrayKeyInfo, BTCommuteStrategyNumber, BTScanOpaqueData, BTORDER_PROC};
 use ::types_rel::Relation;
@@ -29,11 +29,12 @@ struct XformEntry {
 }
 
 /// _bt_preprocess_keys; `input_keys` (scan->keyData) is mutated in place by
-/// strategy fixup, as in C.
+/// strategy fixup, as in C. `parallel` is `scan->parallel_scan != NULL`.
 pub(crate) fn bt_preprocess_keys(
     rel: &Relation<'_>,
     so: &mut BTScanOpaqueData<'_>,
     input_keys: &mut [ScanKeyData],
+    parallel: bool,
 ) -> PgResult<()> {
     if so.numberOfKeys > 0 {
         return Ok(());
@@ -255,7 +256,7 @@ pub(crate) fn bt_preprocess_keys(
     so.numberOfKeys = so.keyData.len() as i32;
 
     if have_arrays {
-        bt_preprocess_array_keys_final(rel, so, &key_data_map)?;
+        bt_preprocess_array_keys_final(rel, so, &key_data_map, parallel)?;
     }
 
     if redundant_key_kept && so.qual_ok {
@@ -1217,6 +1218,7 @@ fn bt_preprocess_array_keys_final(
     rel: &Relation<'_>,
     so: &mut BTScanOpaqueData<'_>,
     key_data_map: &[i32],
+    parallel: bool,
 ) -> PgResult<()> {
     debug_assert!(so.qual_ok);
 
@@ -1291,7 +1293,22 @@ fn bt_preprocess_array_keys_final(
         }
     }
     debug_assert!(so.arrayKeys.len() == so.numArrayKeys as usize);
+    if parallel && so.numArrayKeys > INDEX_MAX_KEYS {
+        return Err(parallel_array_key_limit(so.numArrayKeys));
+    }
     Ok(())
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn parallel_array_key_limit(n: i32) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "number of array scan keys left by preprocessing ({n}) exceeds the maximum allowed by parallel btree index scans ({INDEX_MAX_KEYS})"
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+    )
 }
 
 // _bt_find_extreme_element.

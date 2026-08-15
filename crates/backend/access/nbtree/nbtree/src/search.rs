@@ -453,7 +453,7 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
 
     debug_assert!(!BTScanPosIsValid(&ctx.so.currPos));
 
-    crate::preprocess::bt_preprocess_keys(rel, ctx.so, ctx.input_keys)?;
+    crate::preprocess::bt_preprocess_keys(rel, ctx.so, ctx.input_keys, ctx.parallel.is_some())?;
 
     if !ctx.so.qual_ok {
         debug_assert!(!ctx.so.needPrimScan);
