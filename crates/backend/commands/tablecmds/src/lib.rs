@@ -46,8 +46,8 @@ pub fn init_seams() {
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN};
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
 
 use commands_tablespace::{GLOBALTABLESPACE_OID, TableSpaceRelationId};
@@ -106,6 +106,21 @@ pub fn RangeVarCallbackMaintainsTable(
 #[allow(dead_code)] // stub reporter for not-yet-ported ALTER TABLE arms
 pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: tablecmds {what}")
+}
+
+fn reject_temp_in_security_restricted(relpersistence: u8) -> PgResult<()> {
+    if relpersistence == types_core::RELPERSISTENCE_TEMP
+        && miscinit::InSecurityRestrictedOperation()
+    {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot create temporary table within security-restricted operation".to_string(),
+            )
+            .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+    Ok(())
 }
 
 // makeObjectName/namestrcpy truncation: silent, multibyte-aware.
@@ -405,17 +420,17 @@ pub fn DefineRelation<'mcx>(
         relpersistence: rv.relpersistence,
         location: rv.location,
     };
-    let (namespace_id, _existing_relid, relpersistence) =
-        catalog_namespace::RangeVarGetAndCheckCreationNamespace(mcx, &creation_rv, types_rel::NoLock, false)?;
-
     if stmt.oncommit != OnCommitAction::ONCOMMIT_NOOP
-        && relpersistence != types_core::RELPERSISTENCE_TEMP
+        && rv.relpersistence != types_core::RELPERSISTENCE_TEMP
     {
         return Err(Box::new(
             PgError::new(ERROR, "ON COMMIT can only be used on temporary tables".to_string())
                 .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
         ));
     }
+    let (namespace_id, _existing_relid, relpersistence) =
+        catalog_namespace::RangeVarGetAndCheckCreationNamespace(mcx, &creation_rv, types_rel::NoLock, false)?;
+    reject_temp_in_security_restricted(relpersistence)?;
 
     let mut tablespace_id = match stmt.tablespacename {
         Some(name) => {
@@ -1179,6 +1194,31 @@ mod build_desc_tests {
         let e = column_def_attdim(&tn, "x").unwrap_err();
         assert_eq!(e.message(), "column \"x\" cannot be declared SETOF");
         assert_eq!(e.sqlstate(), ERRCODE_INVALID_TABLE_DEFINITION);
+    }
+}
+
+#[cfg(test)]
+mod define_relation_error_tests {
+    use super::*;
+
+    #[test]
+    fn temp_table_in_security_restricted_operation_is_42501() {
+        let (uid, ctx) = miscinit::GetUserIdAndSecContext();
+        miscinit::SetUserIdAndSecContext(uid, ctx | types_core::SECURITY_RESTRICTED_OPERATION);
+        let e = reject_temp_in_security_restricted(types_core::RELPERSISTENCE_TEMP).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "cannot create temporary table within security-restricted operation"
+        );
+        assert_eq!(e.sqlstate(), ERRCODE_INSUFFICIENT_PRIVILEGE);
+        miscinit::SetUserIdAndSecContext(uid, ctx);
+
+        let (uid, ctx) = miscinit::GetUserIdAndSecContext();
+        miscinit::SetUserIdAndSecContext(uid, ctx | types_core::SECURITY_RESTRICTED_OPERATION);
+        assert!(reject_temp_in_security_restricted(types_core::RELPERSISTENCE_PERMANENT).is_ok());
+        miscinit::SetUserIdAndSecContext(uid, ctx);
+
+        assert!(reject_temp_in_security_restricted(types_core::RELPERSISTENCE_TEMP).is_ok());
     }
 }
 
