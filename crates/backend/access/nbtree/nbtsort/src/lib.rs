@@ -47,6 +47,7 @@ struct BTPageState<'mcx> {
 }
 
 struct BTWriteState<'a, 'mcx> {
+    heap: &'a Relation<'mcx>,
     index: &'a Relation<'mcx>,
     bulkstate: BulkWriteState,
     inskey: BtScanInsert,
@@ -131,7 +132,7 @@ pub fn btbuild<'mcx>(
         spool2 = None;
     }
 
-    leafbuild(mcx, index, sortstate, spool2, indexInfo.ii_Unique)?;
+    leafbuild(mcx, heap, index, sortstate, spool2, indexInfo.ii_Unique)?;
 
     Ok(IndexBuildResult { heap_tuples: reltuples, index_tuples: indtuples })
 }
@@ -166,6 +167,7 @@ pub fn btbuildempty(index: &Relation<'_>) -> PgResult<()> {
 
 fn leafbuild<'mcx>(
     mcx: Mcx<'mcx>,
+    heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
     mut sortstate: tuplesort::Tuplesort,
     mut spool2: Option<tuplesort::Tuplesort>,
@@ -180,6 +182,7 @@ fn leafbuild<'mcx>(
     inskey.allequalimage = bt_allequalimage(index, true)?;
 
     let mut wstate = BTWriteState {
+        heap,
         index,
         bulkstate: bulkwrite::smgr_bulk_start_rel(index, ForkNumber::MAIN_FORKNUM)?,
         inskey,
@@ -398,7 +401,7 @@ unsafe fn buildadd<'mcx>(
     if itupsz > BTMaxItemSize {
         let state = &mut levels[level_idx];
         let page = page_mut_of(&mut state.buf);
-        nbtree::bt_check_third_page(wstate.index, wstate.index, isleaf, &page.as_ref(), itup)?;
+        nbtree::bt_check_third_page(wstate.index, wstate.heap, isleaf, &page.as_ref(), itup)?;
     }
 
     let pgspc = {
@@ -648,3 +651,6 @@ fn bt_allequalimage_check(rel: &Relation<'_>) -> PgResult<bool> {
 
 const _: () = assert!(BLCKSZ == 8192);
 const _: () = assert!(SizeOfPageHeaderData == 24);
+
+#[cfg(test)]
+mod tests;
