@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use datum::Datum;
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use typcache::TypeCacheEntry;
 use types_fmgr::FmgrInfo;
 
@@ -32,7 +32,7 @@ impl MultiSort {
             typcache::TYPECACHE_LT_OPR | typcache::TYPECACHE_CMP_PROC_FINFO,
         )?;
         if entry.lt_opr() == types_core::InvalidOid {
-            panic!("cache lookup failed for ordering operator for type {typid}");
+            return Err(missing_lt_opr(typid));
         }
         let cmp = entry.cmp_proc_finfo().clone();
         self.dims.push(SortDim { entry, cmp, collation });
@@ -117,3 +117,26 @@ impl<'mcx> ItemStore<'mcx> {
 // is a byte-format parity requirement for the serialized statistics.
 // Canonical shared port: crates/_support/pg_qsort.
 pub use ::pg_qsort::pg_qsort;
+
+fn missing_lt_opr(typid: Oid) -> Box<PgError> {
+    PgError::error(format!(
+        "cache lookup failed for ordering operator for type {typid}"
+    ))
+    .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_error::ERRCODE_INTERNAL_ERROR;
+
+    #[test]
+    fn json_missing_lt_opr_is_ereport_xx000() {
+        let e = missing_lt_opr(types_core::JSONOID);
+        assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+        assert_eq!(
+            e.message(),
+            "cache lookup failed for ordering operator for type 114"
+        );
+    }
+}
