@@ -51,9 +51,12 @@ pub use path::{
     SearchPathMatchesCurrentEnvironment,
 };
 pub use visibility::{
+    CollationIsVisible, CollationIsVisibleExt, ConversionIsVisible, ConversionIsVisibleExt,
     FunctionIsVisible, FunctionIsVisibleExt, OpclassIsVisible, OpclassIsVisibleExt,
     OperatorIsVisible, OperatorIsVisibleExt, OpfamilyIsVisible, OpfamilyIsVisibleExt,
-    RelationIsVisible, RelationIsVisibleExt, TypeIsVisible, TypeIsVisibleExt,
+    RelationIsVisible, RelationIsVisibleExt, TSConfigIsVisible, TSConfigIsVisibleExt,
+    TSDictionaryIsVisible, TSDictionaryIsVisibleExt, TSParserIsVisible, TSParserIsVisibleExt,
+    TSTemplateIsVisible, TSTemplateIsVisibleExt, TypeIsVisible, TypeIsVisibleExt,
 };
 
 pub(crate) fn OidIsValid(oid: Oid) -> bool {

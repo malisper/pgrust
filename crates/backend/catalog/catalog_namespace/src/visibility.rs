@@ -1,4 +1,7 @@
-use cache_syscache::cacheinfo::{CLAOID, OPEROID, OPFAMILYOID, PROCOID, RELOID, STATEXTOID, TYPEOID};
+use cache_syscache::cacheinfo::{
+    CLAOID, COLLOID, CONVOID, OPEROID, OPFAMILYOID, PROCOID, RELOID, STATEXTOID, TSCONFIGOID,
+    TSDICTOID, TSPARSERNAMENSP, TSPARSEROID, TSTEMPLATENAMENSP, TSTEMPLATEOID, TYPEOID,
+};
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttrNotNull, SysCacheKey};
 use datum::Datum;
 use mcx::MemoryContext;
@@ -7,7 +10,8 @@ use types_error::{PgError, PgResult};
 use types_tuple::NameData;
 
 use crate::lookup::{
-    FuncnameGetCandidates, OpclassnameGetOpcid, OpernameGetOprid, OpfamilynameGetOpfid,
+    CollationGetCollid, ConversionGetConid, FuncnameGetCandidates, OpclassnameGetOpcid,
+    OpernameGetOprid, OpfamilynameGetOpfid,
 };
 use crate::path::recomputeNamespacePath;
 use crate::{base_path_len, base_path_nth, OidIsValid};
@@ -282,4 +286,187 @@ pub fn OpfamilyIsVisibleExt(opfid: Oid) -> PgResult<Option<bool>> {
         return Ok(Some(false));
     }
     Ok(Some(OpfamilynameGetOpfid(opfmethod, name_str(&opfname))? == opfid))
+}
+
+const ANUM_PG_COLLATION_COLLNAME: i32 = 2;
+const ANUM_PG_COLLATION_COLLNAMESPACE: i32 = 3;
+const ANUM_PG_CONVERSION_CONNAME: i32 = 2;
+const ANUM_PG_CONVERSION_CONNAMESPACE: i32 = 3;
+const ANUM_PG_TS_PARSER_PRSNAME: i32 = 2;
+const ANUM_PG_TS_PARSER_PRSNAMESPACE: i32 = 3;
+const ANUM_PG_TS_TEMPLATE_TMPLNAME: i32 = 2;
+const ANUM_PG_TS_TEMPLATE_TMPLNAMESPACE: i32 = 3;
+const ANUM_PG_TS_DICT_DICTNAME: i32 = 2;
+const ANUM_PG_TS_DICT_DICTNAMESPACE: i32 = 3;
+const ANUM_PG_TS_CONFIG_CFGNAME: i32 = 2;
+const ANUM_PG_TS_CONFIG_CFGNAMESPACE: i32 = 3;
+
+fn named_visible_in_path(obj_nsp: Oid, name: &str, cache_id: i32) -> PgResult<bool> {
+    for i in 0..base_path_len() {
+        let namespace_id = base_path_nth(i);
+        if namespace_id == crate::my_temp_namespace() {
+            continue;
+        }
+        if namespace_id == obj_nsp {
+            return Ok(true);
+        }
+        if OidIsValid(cache_syscache::GetSysCacheOid(
+            cache_id,
+            1,
+            SysCacheKey::Str(name),
+            SysCacheKey::Value(Datum::from_oid(namespace_id)),
+            SysCacheKey::UNUSED,
+            SysCacheKey::UNUSED,
+        )?) {
+            return Ok(false);
+        }
+    }
+    Ok(false)
+}
+
+pub fn CollationIsVisible(collid: Oid) -> PgResult<bool> {
+    CollationIsVisibleExt(collid)?.ok_or_else(|| lookup_failed("collation", collid))
+}
+
+pub fn CollationIsVisibleExt(collid: Oid) -> PgResult<Option<bool>> {
+    let Some(tuple) = SearchSysCache1(COLLOID, SysCacheKey::Value(Datum::from_oid(collid)))? else {
+        return Ok(None);
+    };
+    let collnamespace =
+        SysCacheGetAttrNotNull(COLLOID, &tuple, ANUM_PG_COLLATION_COLLNAMESPACE)?.as_oid();
+    let collname = name_of(SysCacheGetAttrNotNull(COLLOID, &tuple, ANUM_PG_COLLATION_COLLNAME)?);
+    ReleaseSysCache(tuple);
+
+    recomputeNamespacePath()?;
+
+    if collnamespace != PG_CATALOG_NAMESPACE && !path_contains(collnamespace) {
+        return Ok(Some(false));
+    }
+    Ok(Some(CollationGetCollid(name_str(&collname))? == collid))
+}
+
+pub fn ConversionIsVisible(conid: Oid) -> PgResult<bool> {
+    ConversionIsVisibleExt(conid)?.ok_or_else(|| lookup_failed("conversion", conid))
+}
+
+pub fn ConversionIsVisibleExt(conid: Oid) -> PgResult<Option<bool>> {
+    let Some(tuple) = SearchSysCache1(CONVOID, SysCacheKey::Value(Datum::from_oid(conid)))? else {
+        return Ok(None);
+    };
+    let connamespace =
+        SysCacheGetAttrNotNull(CONVOID, &tuple, ANUM_PG_CONVERSION_CONNAMESPACE)?.as_oid();
+    let conname = name_of(SysCacheGetAttrNotNull(CONVOID, &tuple, ANUM_PG_CONVERSION_CONNAME)?);
+    ReleaseSysCache(tuple);
+
+    recomputeNamespacePath()?;
+
+    if connamespace != PG_CATALOG_NAMESPACE && !path_contains(connamespace) {
+        return Ok(Some(false));
+    }
+    Ok(Some(ConversionGetConid(name_str(&conname))? == conid))
+}
+
+pub fn TSParserIsVisible(prs_id: Oid) -> PgResult<bool> {
+    TSParserIsVisibleExt(prs_id)?.ok_or_else(|| lookup_failed("text search parser", prs_id))
+}
+
+pub fn TSParserIsVisibleExt(prs_id: Oid) -> PgResult<Option<bool>> {
+    let Some(tuple) = SearchSysCache1(TSPARSEROID, SysCacheKey::Value(Datum::from_oid(prs_id)))?
+    else {
+        return Ok(None);
+    };
+    let prsnamespace =
+        SysCacheGetAttrNotNull(TSPARSEROID, &tuple, ANUM_PG_TS_PARSER_PRSNAMESPACE)?.as_oid();
+    let prsname = name_of(SysCacheGetAttrNotNull(TSPARSEROID, &tuple, ANUM_PG_TS_PARSER_PRSNAME)?);
+    ReleaseSysCache(tuple);
+
+    recomputeNamespacePath()?;
+
+    if prsnamespace != PG_CATALOG_NAMESPACE && !path_contains(prsnamespace) {
+        return Ok(Some(false));
+    }
+    Ok(Some(named_visible_in_path(
+        prsnamespace,
+        name_str(&prsname),
+        TSPARSERNAMENSP,
+    )?))
+}
+
+pub fn TSDictionaryIsVisible(dict_id: Oid) -> PgResult<bool> {
+    TSDictionaryIsVisibleExt(dict_id)?.ok_or_else(|| lookup_failed("text search dictionary", dict_id))
+}
+
+pub fn TSDictionaryIsVisibleExt(dict_id: Oid) -> PgResult<Option<bool>> {
+    let Some(tuple) = SearchSysCache1(TSDICTOID, SysCacheKey::Value(Datum::from_oid(dict_id)))?
+    else {
+        return Ok(None);
+    };
+    let dictnamespace =
+        SysCacheGetAttrNotNull(TSDICTOID, &tuple, ANUM_PG_TS_DICT_DICTNAMESPACE)?.as_oid();
+    let dictname = name_of(SysCacheGetAttrNotNull(TSDICTOID, &tuple, ANUM_PG_TS_DICT_DICTNAME)?);
+    ReleaseSysCache(tuple);
+
+    recomputeNamespacePath()?;
+
+    if dictnamespace != PG_CATALOG_NAMESPACE && !path_contains(dictnamespace) {
+        return Ok(Some(false));
+    }
+    Ok(Some(named_visible_in_path(
+        dictnamespace,
+        name_str(&dictname),
+        cache_syscache::cacheinfo::TSDICTNAMENSP,
+    )?))
+}
+
+pub fn TSTemplateIsVisible(tmpl_id: Oid) -> PgResult<bool> {
+    TSTemplateIsVisibleExt(tmpl_id)?.ok_or_else(|| lookup_failed("text search template", tmpl_id))
+}
+
+pub fn TSTemplateIsVisibleExt(tmpl_id: Oid) -> PgResult<Option<bool>> {
+    let Some(tuple) = SearchSysCache1(TSTEMPLATEOID, SysCacheKey::Value(Datum::from_oid(tmpl_id)))?
+    else {
+        return Ok(None);
+    };
+    let tmplnamespace =
+        SysCacheGetAttrNotNull(TSTEMPLATEOID, &tuple, ANUM_PG_TS_TEMPLATE_TMPLNAMESPACE)?.as_oid();
+    let tmplname =
+        name_of(SysCacheGetAttrNotNull(TSTEMPLATEOID, &tuple, ANUM_PG_TS_TEMPLATE_TMPLNAME)?);
+    ReleaseSysCache(tuple);
+
+    recomputeNamespacePath()?;
+
+    if tmplnamespace != PG_CATALOG_NAMESPACE && !path_contains(tmplnamespace) {
+        return Ok(Some(false));
+    }
+    Ok(Some(named_visible_in_path(
+        tmplnamespace,
+        name_str(&tmplname),
+        TSTEMPLATENAMENSP,
+    )?))
+}
+
+pub fn TSConfigIsVisible(cfgid: Oid) -> PgResult<bool> {
+    TSConfigIsVisibleExt(cfgid)?.ok_or_else(|| lookup_failed("text search configuration", cfgid))
+}
+
+pub fn TSConfigIsVisibleExt(cfgid: Oid) -> PgResult<Option<bool>> {
+    let Some(tuple) = SearchSysCache1(TSCONFIGOID, SysCacheKey::Value(Datum::from_oid(cfgid)))?
+    else {
+        return Ok(None);
+    };
+    let cfgnamespace =
+        SysCacheGetAttrNotNull(TSCONFIGOID, &tuple, ANUM_PG_TS_CONFIG_CFGNAMESPACE)?.as_oid();
+    let cfgname = name_of(SysCacheGetAttrNotNull(TSCONFIGOID, &tuple, ANUM_PG_TS_CONFIG_CFGNAME)?);
+    ReleaseSysCache(tuple);
+
+    recomputeNamespacePath()?;
+
+    if cfgnamespace != PG_CATALOG_NAMESPACE && !path_contains(cfgnamespace) {
+        return Ok(Some(false));
+    }
+    Ok(Some(named_visible_in_path(
+        cfgnamespace,
+        name_str(&cfgname),
+        cache_syscache::cacheinfo::TSCONFIGNAMENSP,
+    )?))
 }

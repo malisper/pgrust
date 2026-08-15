@@ -413,6 +413,40 @@ pub fn get_collation_oid_list(
     get_collation_oid(&names[..nnames], missing_ok)
 }
 
+pub fn CollationGetCollid(collname: &str) -> PgResult<Oid> {
+    recomputeNamespacePath()?;
+    let dbencoding = mbutils_seams::get_database_encoding::call();
+    let mtn = my_temp_namespace();
+    for i in 0..base_path_len() {
+        let namespace_id = base_path_nth(i);
+        if namespace_id == mtn {
+            continue;
+        }
+        let colloid = lookup_collation(collname, namespace_id, dbencoding)?;
+        if OidIsValid(colloid) {
+            return Ok(colloid);
+        }
+    }
+    Ok(InvalidOid)
+}
+
+pub fn ConversionGetConid(conname: &str) -> PgResult<Oid> {
+    recomputeNamespacePath()?;
+    let mtn = my_temp_namespace();
+    for i in 0..base_path_len() {
+        let namespace_id = base_path_nth(i);
+        if namespace_id == mtn {
+            continue;
+        }
+        let conoid =
+            syscache_seams::lookup_pg_conversion_oid_by_name_nsp::call(conname, namespace_id)?;
+        if OidIsValid(conoid) {
+            return Ok(conoid);
+        }
+    }
+    Ok(InvalidOid)
+}
+
 pub fn get_collation_oid(collname: &[&str], missing_ok: bool) -> PgResult<Oid> {
     let dbencoding = mbutils_seams::get_database_encoding::call();
     let (schemaname, collation_name) = DeconstructQualifiedName(collname)?;
