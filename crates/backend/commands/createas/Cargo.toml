@@ -20,6 +20,7 @@ rel_vocab = { path = "../../../_support/types/rel_vocab" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 createas_seams = { path = "../createas_seams" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
 matview_seams = { path = "../matview_seams" }
 commands_view = { path = "../view" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }

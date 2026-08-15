@@ -3960,6 +3960,7 @@ dependencies = [
  "mcx",
  "parse_expr",
  "parser_analyze",
+ "pg_depend",
  "postgres",
  "prepare",
  "queryjumble",

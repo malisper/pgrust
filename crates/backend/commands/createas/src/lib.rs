@@ -225,8 +225,10 @@ pub fn CreateTableAsRelExists<'mcx>(
                 .into_error()
                 .into());
         }
-        // checkMembershipInCurrentExtension: creating_extension is always
-        // false (no extension lane), so the C check is a no-op.
+        pg_depend::checkMembershipInCurrentExtension(
+            mcx,
+            &pg_depend::ObjectAddress::set(types_core::RELATION_RELATION_ID, oldrelid),
+        )?;
         elog_seams::ereport::call(
             types_error::PgError::new(
                 NOTICE,
