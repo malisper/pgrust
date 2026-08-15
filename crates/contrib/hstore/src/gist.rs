@@ -6,7 +6,7 @@
 
 use datum::Datum;
 use mcx::Mcx;
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_fmgr::{byref_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use types_gist::{GistEntryVector, GistSplitVec, GISTENTRY};
 use types_tuple::varatt;
@@ -200,11 +200,15 @@ fn image_result(fcinfo: &Fcinfo, img: &[u8]) -> PgResult<Datum> {
 }
 
 pub fn fc_ghstore_in(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Err(PgError::error("cannot accept a value of type ghstore").into())
+    Err(PgError::error("cannot accept a value of type ghstore")
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into())
 }
 
 pub fn fc_ghstore_out(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Err(PgError::error("cannot display a value of type ghstore").into())
+    Err(PgError::error("cannot display a value of type ghstore")
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into())
 }
 
 pub fn fc_ghstore_options(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
