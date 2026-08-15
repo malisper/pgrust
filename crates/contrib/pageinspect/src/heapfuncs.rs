@@ -260,7 +260,8 @@ fn tuple_data_split_internal(
         )
     };
 
-    let mut astate = None;
+    // C initArrayResult before the attr loop so natts=0 still yields {}.
+    let mut astate = arrayfuncs::build::init_array_result(mcx, types_core::BYTEAOID, false)?;
     let mut off = 0usize;
     let hdr_natts = (t_infomask2 & HEAP_NATTS_MASK) as usize;
     for i in 0..nattrs {
@@ -332,13 +333,13 @@ fn tuple_data_split_internal(
             Some(img) => (Datum::from_usize(img.as_ptr() as usize), false),
             None => (Datum::null(), true),
         };
-        astate = Some(arrayfuncs::build::accum_array_result(
+        astate = arrayfuncs::build::accum_array_result(
             mcx,
-            astate,
+            Some(astate),
             dvalue,
             disnull,
             types_core::BYTEAOID,
-        )?);
+        )?;
     }
 
     if tupdata.len() != off {
@@ -350,7 +351,6 @@ fn tuple_data_split_internal(
 
     rel.close(types_rel::AccessShareLock)?;
 
-    let astate = astate.expect("natts >= 1 accumulated");
     let image = arrayfuncs::build::make_array_result(mcx, &astate)?;
     byref_result(mcx, &image)
 }
