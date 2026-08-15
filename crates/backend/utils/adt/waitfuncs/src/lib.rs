@@ -4,7 +4,7 @@ use core::sync::atomic::Ordering::Relaxed;
 
 use ::datum::Datum;
 use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
 pub fn fc_pg_isolation_test_session_is_blocked(
@@ -14,7 +14,6 @@ pub fn fc_pg_isolation_test_session_is_blocked(
     let blocked_pid = fcinfo.arg_i32(0);
     // SAFETY: catalog arg 1 is int4[]; strict fn.
     let interesting = unsafe { fcinfo.arg_varlena_packed(1)? };
-    let interesting_pids = int4_array_values(interesting.data());
 
     let Some(proc) = procarray::BackendPidGetProc(blocked_pid) else {
         return Ok(Datum::from_bool(false));
@@ -25,6 +24,7 @@ pub fn fc_pg_isolation_test_session_is_blocked(
         return Ok(Datum::from_bool(true));
     }
 
+    let interesting_pids = int4_array_values(interesting.data())?;
     let blocking_pids = lockfuncs::blocking_pids(blocked_pid)?;
     if blocking_pids.iter().any(|bp| interesting_pids.contains(bp)) {
         return Ok(Datum::from_bool(true));
@@ -38,25 +38,66 @@ pub fn fc_pg_isolation_test_session_is_blocked(
 }
 
 // Payload past varlena header: ndim, dataoffset, elemtype, dims[], lbound[], data.
-fn int4_array_values(payload: &[u8]) -> Vec<i32> {
+fn int4_array_values(payload: &[u8]) -> PgResult<Vec<i32>> {
     if payload.len() < 12 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let ndim = i32::from_ne_bytes(payload[0..4].try_into().unwrap());
-    if ndim == 0 {
-        return Vec::new();
+    if ndim <= 0 {
+        return Ok(Vec::new());
     }
-    assert_eq!(ndim, 1, "int4[] argument must be 1-D");
-    assert_eq!(
-        i32::from_ne_bytes(payload[4..8].try_into().unwrap()),
-        0,
-        "array must not contain nulls"
-    );
-    let nelems = i32::from_ne_bytes(payload[12..16].try_into().unwrap()) as usize;
-    let data = &payload[20..20 + nelems * 4];
-    data.chunks_exact(4)
+    let nd = ndim as usize;
+    let dims_end = 12 + 4 * nd;
+    if payload.len() < dims_end {
+        return Ok(Vec::new());
+    }
+    let mut nelems: usize = 1;
+    for i in 0..nd {
+        let dim = i32::from_ne_bytes(payload[12 + 4 * i..16 + 4 * i].try_into().unwrap());
+        nelems = nelems.saturating_mul(dim.max(0) as usize);
+    }
+    let dataoffset = i32::from_ne_bytes(payload[4..8].try_into().unwrap());
+    if dataoffset != 0 && bitmap_contains_nulls(payload, nd, nelems) {
+        return Err(Box::new(
+            PgError::error("array must not contain nulls").with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        ));
+    }
+    let data_off = if dataoffset != 0 {
+        (dataoffset as usize).saturating_sub(4)
+    } else {
+        12 + 8 * nd
+    };
+    let need = data_off.saturating_add(nelems.saturating_mul(4));
+    if payload.len() < need {
+        return Ok(Vec::new());
+    }
+    let data = &payload[data_off..data_off + nelems * 4];
+    Ok(data
+        .chunks_exact(4)
         .map(|c| i32::from_ne_bytes(c.try_into().unwrap()))
-        .collect()
+        .collect())
+}
+
+fn bitmap_contains_nulls(payload: &[u8], ndim: usize, nelems: usize) -> bool {
+    let off = 12 + 8 * ndim;
+    let nbytes = nelems.div_ceil(8);
+    if payload.len() < off + nbytes {
+        return true;
+    }
+    let bitmap = &payload[off..off + nbytes];
+    let mut left = nelems;
+    for &byte in bitmap {
+        if left >= 8 {
+            if byte != 0xFF {
+                return true;
+            }
+            left -= 8;
+        } else {
+            let mask = (1u8 << left) - 1;
+            return byte & mask != mask;
+        }
+    }
+    false
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
