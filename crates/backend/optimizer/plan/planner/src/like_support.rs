@@ -5,7 +5,9 @@
 use datum::Datum;
 use mcx::Mcx;
 use types_core::Oid;
-use types_error::{PgError, PgResult};
+use types_error::{
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_COLLATION,
+};
 use types_fmgr::FmgrInfo;
 
 use crate::run::PlannerRun;
@@ -24,7 +26,7 @@ enum PrefixStatus {
 }
 
 // Planner-internal stand-in for the prefix Const node.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct PrefixConst {
     value: Datum,
     typ: Oid,
@@ -274,14 +276,17 @@ fn like_fixed_prefix<'mcx>(
 
     if case_insensitive {
         if typeid == BYTEAOID {
-            return Err(Box::new(PgError::error(
-                "case insensitive matching not supported on type bytea".to_string(),
-            )));
+            return Err(Box::new(
+                PgError::error("case insensitive matching not supported on type bytea".to_string())
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
         }
         if collation == 0 {
-            return Err(Box::new(PgError::error(
-                "could not determine which collation to use for ILIKE".to_string(),
-            )));
+            return Err(Box::new(
+                PgError::error("could not determine which collation to use for ILIKE".to_string())
+                    .with_sqlstate(ERRCODE_INDETERMINATE_COLLATION)
+                    .with_hint("Use the COLLATE clause to set the collation explicitly.".to_string()),
+            ));
         }
         locale = Some(pg_locale::pg_newlocale_from_collation(collation)?);
     }
@@ -331,9 +336,10 @@ fn regex_fixed_prefix<'mcx>(
     collation: Oid,
 ) -> PgResult<(PrefixStatus, Option<PrefixConst>, f64)> {
     if typeid == BYTEAOID {
-        return Err(Box::new(PgError::error(
-            "regular-expression matching not supported on type bytea".to_string(),
-        )));
+        return Err(Box::new(
+            PgError::error("regular-expression matching not supported on type bytea".to_string())
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     let patt = varlena_payload(patt_const);
     match regexp_seams::regexp_fixed_prefix::call(mcx, patt, case_insensitive, collation)? {
@@ -793,4 +799,40 @@ pub fn match_pattern_prefix<'mcx>(
         )?);
     }
     Ok(Some(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn like_ic_bytea_is_0a000() {
+        let cx = mcx::MemoryContext::new_bump("d434-bytea-ic");
+        let d = text_const(cx.mcx(), b"a", BYTEAOID).unwrap().value;
+        let e = like_fixed_prefix(cx.mcx(), d, BYTEAOID, true, 0).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(e.message(), "case insensitive matching not supported on type bytea");
+    }
+
+    #[test]
+    fn like_ic_indeterminate_collation_is_42p22() {
+        let cx = mcx::MemoryContext::new_bump("d434-ilike-coll");
+        let d = text_const(cx.mcx(), b"a", TEXTOID).unwrap().value;
+        let e = like_fixed_prefix(cx.mcx(), d, TEXTOID, true, 0).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_INDETERMINATE_COLLATION);
+        assert_eq!(e.message(), "could not determine which collation to use for ILIKE");
+        assert_eq!(
+            e.hint(),
+            Some("Use the COLLATE clause to set the collation explicitly.")
+        );
+    }
+
+    #[test]
+    fn regex_bytea_is_0a000() {
+        let cx = mcx::MemoryContext::new_bump("d434-bytea-re");
+        let d = text_const(cx.mcx(), b"a", BYTEAOID).unwrap().value;
+        let e = regex_fixed_prefix(cx.mcx(), d, BYTEAOID, false, 0).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(e.message(), "regular-expression matching not supported on type bytea");
+    }
 }
