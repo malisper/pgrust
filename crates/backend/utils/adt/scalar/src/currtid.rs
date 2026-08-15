@@ -4,7 +4,9 @@
 use mcx::Mcx;
 use rel_vocab::RangeVar;
 use types_core::{Oid, RELPERSISTENCE_PERMANENT};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR};
+use types_error::{
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR, ERRCODE_SYNTAX_ERROR,
+};
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::ACL_SELECT;
 use types_rel::{Relation, RELKIND_VIEW};
@@ -196,6 +198,14 @@ fn view_unsupported(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
 }
 
+#[track_caller]
+#[cold]
+fn view_unhandled() -> Box<PgError> {
+    Box::new(
+        PgError::error("currtid cannot handle this view").with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
+
 // currtid_for_view (tid.c:338).
 fn currtid_for_view<'mcx>(
     mcx: Mcx<'mcx>,
@@ -255,7 +265,7 @@ fn currtid_for_view<'mcx>(
         }
         break;
     }
-    Err(view_unsupported("currtid cannot handle this view"))
+    Err(view_unhandled())
 }
 
 // currtid_byrelname (tid.c:418).
@@ -315,5 +325,14 @@ mod tests {
         assert_eq!(get_relkind_objtype(types_rel::RELKIND_SEQUENCE), ObjectType::OBJECT_SEQUENCE as i32);
         assert_eq!(get_relkind_objtype(types_rel::RELKIND_INDEX), ObjectType::OBJECT_INDEX as i32);
         assert_eq!(get_relkind_objtype(b'?'), ObjectType::OBJECT_TABLE as i32);
+    }
+
+    #[test]
+    fn unhandled_view_is_xx000_like_c_elog() {
+        let e = view_unhandled();
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.message(), "currtid cannot handle this view");
+        let e = view_unsupported("currtid cannot handle views with no CTID");
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
     }
 }
