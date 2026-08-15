@@ -322,7 +322,7 @@ pub fn AggregateCreate<'mcx>(
         // agg's result type); otherwise transtype plus direct args only.
         let mut ffnVariadicArgType = a.variadic_arg_type;
         fnArgs[0] = a.agg_trans_type;
-        fnArgs[1..=numArgs as usize].copy_from_slice(aggArgTypes);
+        fnArgs[1..numArgs as usize + 1].copy_from_slice(aggArgTypes);
         let nargs_finalfn;
         if a.finalfn_extra_args {
             nargs_finalfn = numArgs as usize + 1;
@@ -447,7 +447,7 @@ pub fn AggregateCreate<'mcx>(
         if let Some(mfinalfn_name) = a.mfinalfn_name {
             let mut ffnVariadicArgType = a.variadic_arg_type;
             fnArgs[0] = a.agg_mtrans_type;
-            fnArgs[1..=numArgs as usize].copy_from_slice(aggArgTypes);
+            fnArgs[1..numArgs as usize + 1].copy_from_slice(aggArgTypes);
             let nargs_finalfn;
             if a.mfinalfn_extra_args {
                 nargs_finalfn = numArgs as usize + 1;
