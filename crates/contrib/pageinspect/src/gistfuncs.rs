@@ -4,7 +4,7 @@ use crate::*;
 use types_core::{GIST_AM_OID, InvalidOid};
 use types_error::ERRCODE_WRONG_OBJECT_TYPE;
 use types_gist::{GistPageIsDeleted, GIST_PAGE_ID, F_DELETED, F_FOLLOW_RIGHT, F_HAS_GARBAGE, F_LEAF, F_TUPLES_DELETED};
-use types_rel::pg_class::RELKIND_INDEX;
+use types_rel::pg_class::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
 
 const GIST_OPAQUE_SIZE: usize = 16;
 
@@ -160,7 +160,9 @@ pub(crate) fn fc_gist_page_items(
 
     let index_relid = fcinfo.arg(1).as_oid();
     let index_rel = relation::relation_open(mcx, index_relid, types_rel::AccessShareLock)?;
-    if index_rel.rd_rel.relkind != RELKIND_INDEX {
+    if index_rel.rd_rel.relkind != RELKIND_INDEX
+        && index_rel.rd_rel.relkind != RELKIND_PARTITIONED_INDEX
+    {
         // C index_open rejects non-indexes before the AM check.
         return Err(Box::new(
             PgError::error(format!("\"{}\" is not an index", index_rel.name()))
