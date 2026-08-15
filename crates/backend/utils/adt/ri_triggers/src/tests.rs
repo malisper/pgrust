@@ -137,3 +137,53 @@ fn inval_on_unbuilt_cache_is_a_noop() {
     InvalidateConstraintCacheCallBack(Datum::null(), cache_syscache::CONSTROID, 0xAAAA);
     assert!(cached().is_empty());
 }
+
+#[test]
+fn no_pg_constraint_entry_is_ereport_42p17() {
+    let e = no_pg_constraint_entry("ri_trig", "child");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_OBJECT_DEFINITION);
+    assert_eq!(
+        e.message(),
+        "no pg_constraint entry for trigger \"ri_trig\" on table \"child\""
+    );
+    assert_eq!(
+        e.hint(),
+        Some(
+            "Remove this referential integrity trigger and its mates, then do ALTER TABLE ADD CONSTRAINT."
+        )
+    );
+}
+
+#[test]
+fn ri_check_trigger_wrong_timing_is_ereport_39p01() {
+    let e = ri_CheckTrigger("RI_FKey_check_ins", RI_TRIGTYPE_INSERT, 0).unwrap_err();
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED);
+    assert_eq!(
+        e.message(),
+        "function \"RI_FKey_check_ins\" must be fired AFTER ROW"
+    );
+}
+
+#[test]
+fn ri_check_trigger_wrong_event_is_ereport_39p01() {
+    let e = ri_CheckTrigger("RI_FKey_check_ins", RI_TRIGTYPE_INSERT, 0x5).unwrap_err();
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED);
+    assert_eq!(
+        e.message(),
+        "function \"RI_FKey_check_ins\" must be fired for INSERT"
+    );
+}
+
+#[test]
+fn unexpected_ri_query_result_is_ereport_xx000() {
+    let e = unexpected_ri_query_result("pk", "fk_con", "fk");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(
+        e.message(),
+        "referential integrity query on \"pk\" from constraint \"fk_con\" on \"fk\" gave unexpected result"
+    );
+    assert_eq!(
+        e.hint(),
+        Some("This is most likely due to a rule having rewritten the query.")
+    );
+}

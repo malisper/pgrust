@@ -16,10 +16,14 @@ use types_core::{
 };
 use types_tuple::NameData;
 use types_error::{
-    PgError, PgResult, ERRCODE_FOREIGN_KEY_VIOLATION, ERRCODE_RESTRICT_VIOLATION, ERROR,
+    PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_FOREIGN_KEY_VIOLATION,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_RESTRICT_VIOLATION, ERROR,
 };
 use types_rel::{Relation, RowShareLock, RELKIND_PARTITIONED_TABLE};
-use types_trigger::{Trigger, TRIGGER_FIRED_BY_UPDATE};
+use types_trigger::{
+    Trigger, TRIGGER_FIRED_AFTER, TRIGGER_FIRED_BY_DELETE, TRIGGER_FIRED_BY_INSERT,
+    TRIGGER_FIRED_BY_UPDATE, TRIGGER_FIRED_FOR_ROW,
+};
 use types_tuple::HeapTupleData;
 
 const RI_MAX_NUMKEYS: usize = INDEX_MAX_KEYS as usize;
@@ -35,6 +39,7 @@ const RI_PLAN_SETNULL_ONUPDATE: i32 = 8;
 const RI_PLAN_SETDEFAULT_ONDELETE: i32 = 9;
 const RI_PLAN_SETDEFAULT_ONUPDATE: i32 = 10;
 
+const RI_TRIGTYPE_INSERT: i32 = 1;
 const RI_TRIGTYPE_UPDATE: i32 = 2;
 const RI_TRIGTYPE_DELETE: i32 = 3;
 
@@ -191,11 +196,60 @@ pub fn init_seams() {
     ri_triggers_seams::ri_partition_remove_check::set(RI_PartitionRemove_Check);
 }
 
+fn ri_trig_kind(tgfoid: Oid) -> Option<(&'static str, i32)> {
+    Some(match tgfoid {
+        F_RI_FKEY_CHECK_INS => ("RI_FKey_check_ins", RI_TRIGTYPE_INSERT),
+        F_RI_FKEY_CHECK_UPD => ("RI_FKey_check_upd", RI_TRIGTYPE_UPDATE),
+        F_RI_FKEY_CASCADE_DEL => ("RI_FKey_cascade_del", RI_TRIGTYPE_DELETE),
+        F_RI_FKEY_CASCADE_UPD => ("RI_FKey_cascade_upd", RI_TRIGTYPE_UPDATE),
+        F_RI_FKEY_RESTRICT_DEL => ("RI_FKey_restrict_del", RI_TRIGTYPE_DELETE),
+        F_RI_FKEY_RESTRICT_UPD => ("RI_FKey_restrict_upd", RI_TRIGTYPE_UPDATE),
+        F_RI_FKEY_SETNULL_DEL => ("RI_FKey_setnull_del", RI_TRIGTYPE_DELETE),
+        F_RI_FKEY_SETNULL_UPD => ("RI_FKey_setnull_upd", RI_TRIGTYPE_UPDATE),
+        F_RI_FKEY_SETDEFAULT_DEL => ("RI_FKey_setdefault_del", RI_TRIGTYPE_DELETE),
+        F_RI_FKEY_SETDEFAULT_UPD => ("RI_FKey_setdefault_upd", RI_TRIGTYPE_UPDATE),
+        F_RI_FKEY_NOACTION_DEL => ("RI_FKey_noaction_del", RI_TRIGTYPE_DELETE),
+        F_RI_FKEY_NOACTION_UPD => ("RI_FKey_noaction_upd", RI_TRIGTYPE_UPDATE),
+        _ => return None,
+    })
+}
+
+#[cold]
+#[inline(never)]
+fn protocol_err(funcname: &str, msg: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, format!("function \"{funcname}\" {msg}"))
+            .with_sqlstate(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+    )
+}
+
+fn ri_CheckTrigger(funcname: &str, tgkind: i32, tg_event: u32) -> PgResult<()> {
+    if !TRIGGER_FIRED_AFTER(tg_event) || !TRIGGER_FIRED_FOR_ROW(tg_event) {
+        return Err(protocol_err(funcname, "must be fired AFTER ROW"));
+    }
+    match tgkind {
+        RI_TRIGTYPE_INSERT if !TRIGGER_FIRED_BY_INSERT(tg_event) => {
+            Err(protocol_err(funcname, "must be fired for INSERT"))
+        }
+        RI_TRIGTYPE_UPDATE if !TRIGGER_FIRED_BY_UPDATE(tg_event) => {
+            Err(protocol_err(funcname, "must be fired for UPDATE"))
+        }
+        RI_TRIGTYPE_DELETE if !TRIGGER_FIRED_BY_DELETE(tg_event) => {
+            Err(protocol_err(funcname, "must be fired for DELETE"))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn ri_fkey_trigger<'mcx>(
     mcx: Mcx<'mcx>,
     tgfoid: Oid,
     tgdata: &RiTriggerData<'_, 'mcx>,
 ) -> PgResult<()> {
+    let Some((funcname, tgkind)) = ri_trig_kind(tgfoid) else {
+        unported(&format!("RI trigger function {tgfoid}"));
+    };
+    ri_CheckTrigger(funcname, tgkind, tgdata.tg_event)?;
     match tgfoid {
         F_RI_FKEY_CHECK_INS | F_RI_FKEY_CHECK_UPD => RI_FKey_check(mcx, tgdata),
         F_RI_FKEY_NOACTION_DEL | F_RI_FKEY_NOACTION_UPD => ri_restrict(mcx, tgdata, true),
@@ -1138,12 +1192,9 @@ fn ri_FetchConstraintInfo<'mcx>(
     rel_is_pk: bool,
 ) -> PgResult<RiConstraintInfo> {
     let constraint_oid = trigger.tgconstraint;
-    assert!(
-        constraint_oid != InvalidOid,
-        "no pg_constraint entry for trigger \"{}\" on table \"{}\"",
-        trigger.tgname.as_str(),
-        trig_rel.name()
-    );
+    if constraint_oid == InvalidOid {
+        return Err(no_pg_constraint_entry(trigger.tgname.as_str(), trig_rel.name()));
+    }
     let riinfo = ri_LoadConstraintInfo(constraint_oid)?;
     if rel_is_pk {
         assert!(
@@ -1438,13 +1489,11 @@ fn ri_PerformCheck<'mcx>(
     let spi_result = spi_result?;
 
     if spi_result != expect_ok {
-        panic!(
-            "referential integrity query on \"{}\" from constraint \"{}\" on \"{}\" gave \
-             unexpected result",
+        return Err(unexpected_ri_query_result(
             pk_rel.name(),
             conname_str(riinfo),
-            fk_rel.name()
-        );
+            fk_rel.name(),
+        ));
     }
 
     let processed = spi::SPI_processed();
@@ -1504,6 +1553,36 @@ fn errtableconstraint<'mcx>(
 }
 
 #[track_caller]
+#[cold]
+#[inline(never)]
+fn no_pg_constraint_entry(tgname: &str, relname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!("no pg_constraint entry for trigger \"{tgname}\" on table \"{relname}\""),
+        )
+        .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION)
+        .with_hint(
+            "Remove this referential integrity trigger and its mates, then do ALTER TABLE ADD CONSTRAINT.",
+        ),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn unexpected_ri_query_result(pk: &str, conname: &str, fk: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!(
+                "referential integrity query on \"{pk}\" from constraint \"{conname}\" on \"{fk}\" gave unexpected result"
+            ),
+        )
+        .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+        .with_hint("This is most likely due to a rule having rewritten the query."),
+    )
+}
+
 #[cold]
 #[inline(never)]
 fn match_full_mixing_error<'mcx>(
