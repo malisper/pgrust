@@ -11,7 +11,7 @@ use types_error::{
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use types_nodes::parsenodes::{AlterEventTrigStmt, CreateEventTrigStmt};
+use types_nodes::parsenodes::{AlterEventTrigStmt, CreateEventTrigStmt, ObjectType};
 use types_rel::{AccessExclusiveLock, InplaceUpdateTupleLock, RowExclusiveLock};
 
 use crate::{TRIGGER_DISABLED, TRIGGER_FIRES_ON_ORIGIN};
@@ -334,10 +334,7 @@ pub fn AlterEventTrigger<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterEventTrigStmt<'mcx>) 
         core::slice::from_raw_parts(evtevent_ptr, NAMEDATALEN as usize).starts_with(b"login\0")
     };
 
-    // object_ownercheck: only superusers can own event triggers.
-    if !superuser::superuser_arg(miscinit::GetUserId())? {
-        panic!("AlterEventTrigger: object_ownercheck for non-superusers (acl lane)");
-    }
+    require_event_trigger_owner(trigoid, trigname)?;
 
     let natts = descr.natts as usize;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -402,11 +399,7 @@ pub fn AlterEventTriggerOwner<'mcx>(
     .as_oid();
 
     if evtowner != newOwnerId {
-        // object_ownercheck: event-trigger owners are always superusers, and
-        // superusers pass every ownercheck; a non-superuser caller cannot own one.
-        if !superuser::superuser_arg(miscinit::GetUserId())? {
-            panic!("AlterEventTriggerOwner: object_ownercheck for non-superusers (acl lane)");
-        }
+        require_event_trigger_owner(evt_oid, name)?;
         if !superuser::superuser_arg(newOwnerId)? {
             return Err(elog::ereport(ERROR)
                 .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
@@ -514,10 +507,7 @@ fn AlterEventTriggerOwner_internal<'mcx>(
         return Ok(());
     }
 
-    // object_ownercheck: only superusers can own event triggers.
-    if !superuser::superuser_arg(miscinit::GetUserId())? {
-        panic!("AlterEventTriggerOwner_internal: object_ownercheck for non-superusers (acl lane)");
-    }
+    require_event_trigger_owner(trigoid, name)?;
 
     if !superuser::superuser_arg(new_owner_id)? {
         return Err(elog::ereport(ERROR)
@@ -627,6 +617,17 @@ pub fn get_event_trigger_oid(trigname: &str, missing_ok: bool) -> PgResult<Oid> 
     Ok(oid)
 }
 
+fn require_event_trigger_owner(trigoid: Oid, name: &str) -> PgResult<()> {
+    if !aclchk::object_ownercheck(EVENT_TRIGGER_RELATION_ID, trigoid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            ObjectType::OBJECT_EVENT_TRIGGER,
+            name,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod lookup_func_tests {
     use super::*;
@@ -647,5 +648,20 @@ mod lookup_func_tests {
     fn invalid_oid_duplicate_marker_is_ambiguous() {
         let e = select_zero_arg_func(&[InvalidOid], "foo").unwrap_err();
         assert_eq!(e.sqlstate(), ERRCODE_AMBIGUOUS_FUNCTION);
+    }
+
+    #[test]
+    fn alter_event_trigger_non_owner_is_42501() {
+        miscinit::SetUserIdAndSecContext(types_core::BOOTSTRAP_SUPERUSERID, 0);
+        require_event_trigger_owner(1, "t").unwrap();
+
+        let e = aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            ObjectType::OBJECT_EVENT_TRIGGER,
+            "t",
+        )
+        .unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_INSUFFICIENT_PRIVILEGE);
+        assert_eq!(e.message(), "must be owner of event trigger t");
     }
 }

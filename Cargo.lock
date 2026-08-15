@@ -5253,6 +5253,7 @@ dependencies = [
 name = "event_trigger"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
  "arrayfuncs",
  "cache_evtcache",
  "cache_syscache",

@@ -48,3 +48,4 @@ pg_attrdef = { path = "../../catalog/pg_attrdef" }
 elog = { path = "../../utils/error/elog" }
 event_trigger_seams = { path = "../event_trigger_seams" }
 pg_shdepend = { path = "../../catalog/pg_shdepend" }
+aclchk = { path = "../../catalog/aclchk" }
