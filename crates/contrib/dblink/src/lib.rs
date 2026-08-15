@@ -350,6 +350,18 @@ fn fc_dblink_record(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let (sql, mut target, conname, fail) = parse_conn_sql_args(mcx, fcinfo, Some(flinfo))?;
 
+    // C storeQueryResult: PQsendQuery busy (asyncStatus != IDLE) is elog XX000.
+    if with_target_ref(&target, |c| c.transaction_status() == pgclient::TransactionStatus::Active)?
+    {
+        let _ = with_target(&mut target, |c| c.drain());
+        terminate_transient(&mut target);
+        return throw(
+            ereport(ERROR)
+                .errmsg("could not send query: another command is already in progress")
+                .finish(loc("dblink_record")),
+        );
+    }
+
     let fcinfo_ptr: *mut Fcinfo = fcinfo;
     // SAFETY: sink holds fcinfo only across exec_streaming, no aliasing.
     let mut sink = unsafe { materialize::TupleSink::new(mcx, flinfo, fcinfo_ptr) };
