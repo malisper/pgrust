@@ -213,16 +213,25 @@ fn main() {
         }
 
         let rmid = reader.XLogRecGetRmid();
-        let desc = rmgr::GetRmgr(rmid).expect("builtin rmgr");
         let (rec_len, _fpi) = rec_lens(&reader);
         let info = reader.XLogRecGetInfo();
         let lsn = reader.v.ReadRecPtr;
         let prev = reader.XLogRecGetPrev();
 
+        // C GetRmgrDesc: builtin table, else custom### (no ereport). Backend GetRmgr
+        // RmgrNotFound is the redo path, not pg_waldump display.
+        let builtin = if rmgr::RmgrIdIsBuiltin(rmid as i32) {
+            Some(rmgr::GetRmgr(rmid).expect("builtin rmgr"))
+        } else {
+            None
+        };
+        let custom_name = builtin.is_none().then(|| format!("custom{rmid:03}"));
+        let rm_name = builtin.map(|d| d.rm_name).unwrap_or_else(|| custom_name.as_deref().unwrap());
+
         let _ = write!(
             out,
             "rmgr: {:<11} len (rec/tot): {:>6}/{:>6}, tx: {:>10}, lsn: {:X}/{:08X}, prev {:X}/{:08X}, ",
-            desc.rm_name,
+            rm_name,
             rec_len,
             reader.XLogRecGetTotalLen(),
             reader.XLogRecGetXid(),
@@ -232,7 +241,7 @@ fn main() {
             prev as u32,
         );
 
-        match (desc.rm_identify)(info) {
+        match builtin.and_then(|d| (d.rm_identify)(info)) {
             Some(id) => {
                 let _ = write!(out, "desc: {id} ");
             }
@@ -242,8 +251,12 @@ fn main() {
         }
 
         buf.reset();
-        if let Err(e) = (desc.rm_desc)(&mut buf, &reader.v) {
-            eprintln!("waldesc: rm_desc failed at {:X}/{:X}: {e:?}", (lsn >> 32) as u32, lsn as u32);
+        if let Some(desc) = builtin {
+            if let Err(e) = (desc.rm_desc)(&mut buf, &reader.v) {
+                eprintln!("waldesc: rm_desc failed at {:X}/{:X}: {e:?}", (lsn >> 32) as u32, lsn as u32);
+            }
+        } else {
+            let _ = buf.append_str(&format!("rmid: {rmid}"));
         }
         let _ = out.write_all(buf.as_bytes());
 
