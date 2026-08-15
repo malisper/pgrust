@@ -257,6 +257,17 @@ pub fn ProcSleep(localtag: &LOCALLOCKTAG) -> PgResult<ProcWaitStatus> {
     debug_assert_eq!(awaited_lock().map(|(t, _)| t), Some(*localtag));
     debug_assert!(!lwlock::LWLockHeldByMe(partition_lock));
 
+    // Awaited-lock cleanup is armed: a backend in recovery (not Startup)
+    // that holds the pin Startup is waiting for must ERROR 40P01 here,
+    // not sleep. The InHotStandby wait path below is Startup-only.
+    if transam_xlog_seams::recovery_in_progress::is_installed()
+        && transam_xlog_seams::recovery_in_progress::call()
+        && !(xlogutils_seams::in_recovery::is_installed()
+            && xlogutils_seams::in_recovery::call())
+    {
+        standby_seams::check_recovery_conflict_deadlock::call()?;
+    }
+
     // InHotStandby (proc.c) — standbyState >= SNAPSHOT_PENDING, a per-process
     // (here per-thread, xlogutils) state only the STARTUP process ever sets:
     // only its lock waits delegate to standby.c's
