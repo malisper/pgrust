@@ -82,7 +82,9 @@ pub fn patternsel<'mcx>(
     if negate {
         operator = lsyscache::get_negator(operator)?;
         if operator == 0 {
-            return Ok(1.0 - DEFAULT_MATCH_SEL);
+            return Err(Box::new(PgError::error(
+                "patternsel called for operator without a negator".to_string(),
+            )));
         }
     }
     patternsel_common(run, operator, 0, args, varrelid, collation, ptype, negate)
