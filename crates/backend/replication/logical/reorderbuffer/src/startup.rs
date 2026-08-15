@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use types_core::NAMEDATALEN;
 use types_error::PgResult;
 
-use crate::rb_error;
+use crate::rb_file_error;
 
 const PG_REPLSLOT_DIR: &str = "pg_replslot";
 
@@ -31,8 +31,10 @@ pub(crate) fn ReorderBufferCleanupSerializedTXNs(slotname: &str) -> PgResult<()>
         Err(_) => return Ok(()),
         Ok(_) => {}
     }
-    let entries = std::fs::read_dir(&path)
-        .map_err(|e| rb_error(format!("could not open directory \"{}\": {e}", path.display())))?;
+    let entries = match std::fs::read_dir(&path) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
     for entry in entries {
         let Ok(entry) = entry else { continue };
         let name = entry.file_name();
@@ -40,10 +42,13 @@ pub(crate) fn ReorderBufferCleanupSerializedTXNs(slotname: &str) -> PgResult<()>
         if name.starts_with("xid") {
             let spill = path.join(&name);
             std::fs::remove_file(&spill).map_err(|e| {
-                rb_error(format!(
-                    "could not remove file \"{}\" during removal of {PG_REPLSLOT_DIR}/{slotname}/xid*: {e}",
-                    spill.display()
-                ))
+                rb_file_error(
+                    format!(
+                        "could not remove file \"{}\" during removal of {PG_REPLSLOT_DIR}/{slotname}/xid*: %m",
+                        spill.display()
+                    ),
+                    &e,
+                )
             })?;
         }
     }
@@ -54,11 +59,19 @@ pub fn StartupReorderBuffer() -> PgResult<()> {
     let Some(dir) = replslot_dir() else {
         return Ok(());
     };
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|e| rb_error(format!("could not open directory \"{}\": {e}", dir.display())))?;
+    let entries = std::fs::read_dir(&dir).map_err(|e| {
+        rb_file_error(
+            format!("could not open directory \"{}\": %m", dir.display()),
+            &e,
+        )
+    })?;
     for entry in entries {
-        let entry = entry
-            .map_err(|e| rb_error(format!("could not read directory \"{}\": {e}", dir.display())))?;
+        let entry = entry.map_err(|e| {
+            rb_file_error(
+                format!("could not read directory \"{}\": %m", dir.display()),
+                &e,
+            )
+        })?;
         let name = entry.file_name();
         let name = name.to_string_lossy().into_owned();
         if !replication_slot_validate_name(&name) {

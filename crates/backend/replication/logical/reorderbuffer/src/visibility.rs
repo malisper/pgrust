@@ -10,7 +10,7 @@ use types_snapshot::SnapshotData;
 use types_storage::RelFileLocator;
 use types_tuple::{HeapTupleData, ItemPointerData};
 
-use crate::rb_error;
+use crate::{rb_error, rb_file_error};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReorderBufferTupleCidKey {
@@ -89,8 +89,12 @@ fn ApplyLogicalMappingFile(
     use std::io::Read;
 
     let path = dir.join(fname);
-    let mut file = std::fs::File::open(&path)
-        .map_err(|e| rb_error(format!("could not open file \"{}\": {e}", path.display())))?;
+    let mut file = std::fs::File::open(&path).map_err(|e| {
+        rb_file_error(
+            format!("could not open file \"{}\": %m", path.display()),
+            &e,
+        )
+    })?;
     let mut buf = [0u8; LOGICAL_REWRITE_MAPPING_SIZE];
     loop {
         // Read all mappings until the end of the file.
@@ -112,16 +116,19 @@ fn ApplyLogicalMappingFile(
                         }
                         Ok(m) => got += m,
                         Err(e) => {
-                            return Err(rb_error(format!(
-                                "could not read file \"{}\": {e}",
-                                path.display()
-                            )))
+                            return Err(rb_file_error(
+                                format!("could not read file \"{}\": %m", path.display()),
+                                &e,
+                            ))
                         }
                     }
                 }
             }
             Err(e) => {
-                return Err(rb_error(format!("could not read file \"{}\": {e}", path.display())))
+                return Err(rb_file_error(
+                    format!("could not read file \"{}\": %m", path.display()),
+                    &e,
+                ))
             }
         }
 
@@ -157,16 +164,12 @@ fn UpdateLogicalMappings(
         return Ok(());
     };
     let dir = PathBuf::from(datadir).join("pg_logical/mappings");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => {
-            return Err(rb_error(format!(
-                "could not open directory \"{}\": {e}",
-                dir.display()
-            )))
-        }
-    };
+    let entries = std::fs::read_dir(&dir).map_err(|e| {
+        rb_file_error(
+            format!("could not open directory \"{}\": %m", dir.display()),
+            &e,
+        )
+    })?;
 
     let dboid = if catalog::IsSharedRelation(relid) {
         InvalidOid
@@ -177,7 +180,12 @@ fn UpdateLogicalMappings(
     let mut files: Vec<(u64, String)> = Vec::new();
     for entry in entries {
         let entry =
-            entry.map_err(|e| rb_error(format!("could not read directory \"{}\": {e}", dir.display())))?;
+            entry.map_err(|e| {
+                rb_file_error(
+                    format!("could not read directory \"{}\": %m", dir.display()),
+                    &e,
+                )
+            })?;
         let name = entry.file_name();
         let name = name.to_string_lossy().into_owned();
         if !name.starts_with("map-") {
@@ -306,6 +314,18 @@ mod mapping_tests {
         let hash: RefCell<TupleCidHash> =
             RefCell::new(PgFxHashMap::with_hasher_in(Default::default(), crate::rb_mcx()));
         assert!(ApplyLogicalMappingFile(&hash, &dir, fname).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn apply_logical_mapping_file_missing_is_undefined_file() {
+        let dir = std::env::temp_dir().join(format!("rb-maptest-miss-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hash: RefCell<TupleCidHash> =
+            RefCell::new(PgFxHashMap::with_hasher_in(Default::default(), crate::rb_mcx()));
+        let err = ApplyLogicalMappingFile(&hash, &dir, "no-such-map")
+            .expect_err("missing mapping file is C ereport");
+        assert_eq!(err.sqlstate, types_error::ERRCODE_UNDEFINED_FILE);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

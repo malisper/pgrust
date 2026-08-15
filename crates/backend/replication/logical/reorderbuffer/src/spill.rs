@@ -25,7 +25,7 @@ use types_storage::{RelFileLocator, SharedInvalidationMessage};
 use types_tuple::{BlockIdData, ItemPointerData, SizeofHeapTupleHeader};
 
 use crate::{
-    dl_delete, dl_iter, rb_error, ChangeId, ListHead, ReorderBuffer,
+    dl_delete, dl_iter, rb_error, rb_file_error, ChangeId, ListHead, ReorderBuffer,
     ReorderBufferChange, ReorderBufferChangeData, ReorderBufferChangeType,
     ReorderBufferChangeType::*, TxnId, INVALID_ID, RBTXN_IS_ABORTED, RBTXN_IS_SERIALIZED,
     RBTXN_IS_SERIALIZED_CLEAR,
@@ -364,7 +364,10 @@ impl ReorderBuffer {
                         .append(true)
                         .open(&path)
                         .map_err(|e| {
-                            rb_error(format!("could not open file \"{}\": {e}", path.display()))
+                            rb_file_error(
+                                format!("could not open file \"{}\": %m", path.display()),
+                                &e,
+                            )
                         })?,
                 );
             }
@@ -495,7 +498,7 @@ impl ReorderBuffer {
 
         file.write_all(buf).map_err(|e| {
             let xid = self.txn(txn).xid;
-            rb_error(format!("could not write to data file for XID {xid}: {e}"))
+            rb_file_error(format!("could not write to data file for XID {xid}: %m"), &e)
         })?;
 
         // Keep final_lsn current with each change sent to disk so that
@@ -552,10 +555,10 @@ impl ReorderBuffer {
                         continue;
                     }
                     Err(e) => {
-                        return Err(rb_error(format!(
-                            "could not open file \"{}\": {e}",
-                            path.display()
-                        )))
+                        return Err(rb_file_error(
+                            format!("could not open file \"{}\": %m", path.display()),
+                            &e,
+                        ))
                     }
                 }
             }
@@ -741,10 +744,10 @@ impl ReorderBuffer {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    return Err(rb_error(format!(
-                        "could not remove file \"{}\": {e}",
-                        path.display()
-                    )))
+                    return Err(rb_file_error(
+                        format!("could not remove file \"{}\": %m", path.display()),
+                        &e,
+                    ))
                 }
             }
         }
@@ -761,9 +764,10 @@ fn read_full(f: &mut File, buf: &mut [u8]) -> PgResult<usize> {
             Ok(n) => off += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => {
-                return Err(rb_error(format!(
-                    "could not read from reorderbuffer spill file: {e}"
-                )))
+                return Err(rb_file_error(
+                    "could not read from reorderbuffer spill file: %m".into(),
+                    &e,
+                ))
             }
         }
     }

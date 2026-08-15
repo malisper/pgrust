@@ -31,7 +31,7 @@ use types_core::{
     CommandId, InvalidCommandId, InvalidTransactionId, InvalidXLogRecPtr, Oid, RepOriginId,
     TimestampTz, TransactionId, XLogRecPtr,
 };
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, ERROR};
 use types_rel::RelationData;
 use types_storage::{RelFileLocator, SharedInvalidationMessage};
 use types_tuple::{ItemPointerData, SizeofHeapTupleHeader};
@@ -54,6 +54,18 @@ pub(crate) fn unported(what: &str) -> ! {
 #[inline(never)]
 pub(crate) fn rb_error(msg: String) -> Box<PgError> {
     PgError::error(msg).into()
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn rb_file_error(msg: String, err: &std::io::Error) -> Box<PgError> {
+    let errno = err.raw_os_error().unwrap_or(0);
+    elog::ereport(ERROR)
+        .with_saved_errno(errno)
+        .errcode_for_file_access()
+        .errmsg(msg)
+        .into_error()
+        .into()
 }
 
 thread_local! {
