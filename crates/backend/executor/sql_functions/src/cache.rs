@@ -33,6 +33,7 @@ pub(crate) struct SqlFnEntryState<'mcx> {
     pub src: PgString<'mcx>,
     pub sqlbody: Option<PgString<'mcx>>,
     pub argtypes: PgVec<'mcx, Oid>,
+    pub argtyplen: PgVec<'mcx, i16>,
     pub argnames: PgVec<'mcx, PgString<'mcx>>,
     pub input_collation: Oid,
     pub rettype: Oid,
@@ -409,11 +410,17 @@ fn compile_entry(
             let mut at: PgVec<'_, Oid> = PgVec::new_in(mcx);
             at.try_reserve_exact(argtypes.len().max(1)).map_err(|_| mcx.oom(1))?;
             at.extend_from_slice(argtypes);
+            let mut atl: PgVec<'_, i16> = PgVec::new_in(mcx);
+            atl.try_reserve_exact(argtypes.len().max(1)).map_err(|_| mcx.oom(1))?;
+            for &t in argtypes {
+                atl.push(lsyscache::typ::get_typlen(t)?);
+            }
             Ok(SqlFnEntryState {
                 fname: row.proname,
                 src: row.prosrc,
                 sqlbody: row.prosqlbody,
                 argtypes: at,
+                argtyplen: atl,
                 argnames: row.argnames,
                 input_collation,
                 rettype,

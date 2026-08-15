@@ -234,6 +234,21 @@ fn datum_copy_out<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<D
     if p.is_null() {
         return Ok(Datum::null());
     }
+    // SAFETY: by-ref datum is live; expanded header tag is the C
+    // VARATT_IS_EXTERNAL_EXPANDED gate before EOH_flatten_into.
+    if typlen == -1 && unsafe { datum::expandeddatum::datum_is_external_expanded(value) } {
+        unsafe {
+            let eoh = datum::expandeddatum::datum_get_eohp(value);
+            let flat = datum::expandeddatum::eoh_get_flat_size(eoh);
+            let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, flat)?;
+            for _ in 0..flat {
+                out.push(0);
+            }
+            datum::expandeddatum::eoh_flatten_into(eoh, out.as_mut_ptr(), flat);
+            let slice = mcx::vec_borrow_in(mcx, out)?;
+            return Ok(Datum::from_usize(slice.as_ptr() as usize));
+        }
+    }
     // SAFETY: by-ref datum into a live tuplestore image; size per its header.
     let src = unsafe {
         let size = match typlen {
@@ -265,6 +280,12 @@ fn datum_copy_out<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<D
     out.extend_from_slice(src);
     let slice = mcx::vec_borrow_in(mcx, out)?;
     Ok(Datum::from_usize(slice.as_ptr() as usize))
+}
+
+fn sql_fn_param_value(value: Datum, isnull: bool, typlen: i16) -> Datum {
+    // SAFETY: fcinfo arg lives for this call. C postquel_sub_params
+    // MakeExpandedObjectReadOnly so a multi-ref Param cannot mutate later refs.
+    unsafe { datum::expandeddatum::make_expanded_object_read_only(value, isnull, typlen) }
 }
 
 fn check_body_utility_node(u: Node<'_>) -> PgResult<()> {
@@ -555,7 +576,11 @@ pub fn fmgr_sql(
                     s.params_buf.try_reserve_exact(nargs.max(1)).map_err(|_| mcx.oom(nargs))?;
                     for (i, &t) in es.argtypes.iter().enumerate() {
                         s.params_buf.push(ParamExternData {
-                            value: arg_vals[i].value,
+                            value: sql_fn_param_value(
+                                arg_vals[i].value,
+                                arg_vals[i].isnull,
+                                es.argtyplen[i],
+                            ),
                             isnull: arg_vals[i].isnull,
                             pflags: PARAM_FLAG_CONST,
                             ptype: t,
@@ -563,7 +588,11 @@ pub fn fmgr_sql(
                     }
                 } else {
                     for i in 0..nargs {
-                        s.params_buf[i].value = arg_vals[i].value;
+                        s.params_buf[i].value = sql_fn_param_value(
+                            arg_vals[i].value,
+                            arg_vals[i].isnull,
+                            es.argtyplen[i],
+                        );
                         s.params_buf[i].isnull = arg_vals[i].isnull;
                         s.params_buf[i].ptype = es.argtypes[i];
                     }
@@ -1393,7 +1422,9 @@ fn fc_fmgr_sql_validator(
 
 #[cfg(test)]
 mod is_polymorphic_tests {
+    use super::datum_copy_out;
     use super::is_polymorphic;
+    use mcx::MemoryContext;
     use types_core::catalog::{
         ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID,
         ANYCOMPATIBLENONARRAYOID, ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID,
@@ -1433,5 +1464,45 @@ mod is_polymorphic_tests {
             assert!(is_polymorphic(t), "type {t} should be polymorphic");
         }
         assert!(!is_polymorphic(INT4OID), "int4 is a concrete type, not polymorphic");
+    }
+
+    #[test]
+    fn datum_copy_out_flattens_expanded() {
+        use datum::expandeddatum::{
+            datum_is_external_expanded, eoh_init_header, eohp_get_rw_datum, ExpandedObjectHeader,
+            ExpandedObjectMethods,
+        };
+        #[repr(C)]
+        struct Fake {
+            hdr: ExpandedObjectHeader,
+            payload: [u8; 8],
+        }
+        unsafe fn flat_size(_: *mut ExpandedObjectHeader) -> usize {
+            12
+        }
+        unsafe fn flatten(eoh: *mut ExpandedObjectHeader, dst: *mut u8, n: usize) {
+            assert_eq!(n, 12);
+            let obj = eoh as *mut Fake;
+            let word = datum::set_varsize_4b(n);
+            core::ptr::copy_nonoverlapping(word.as_ptr(), dst, 4);
+            core::ptr::copy_nonoverlapping((*obj).payload.as_ptr(), dst.add(4), 8);
+        }
+        static METHODS: ExpandedObjectMethods =
+            ExpandedObjectMethods { get_flat_size: flat_size, flatten_into: flatten };
+        let obj = Box::into_raw(Box::new(Fake {
+            hdr: ExpandedObjectHeader::empty(),
+            payload: *b"abcdefgh",
+        }));
+        let ctx = MemoryContext::new("sqlfn datum_copy_out");
+        unsafe {
+            eoh_init_header(core::ptr::addr_of_mut!((*obj).hdr), &METHODS, core::ptr::null());
+            let rw = eohp_get_rw_datum(core::ptr::addr_of_mut!((*obj).hdr));
+            assert!(datum_is_external_expanded(rw));
+            let flat = datum_copy_out(ctx.mcx(), rw, -1).expect("flatten");
+            assert!(!datum_is_external_expanded(flat));
+            let p = flat.as_usize() as *const u8;
+            assert_eq!(core::slice::from_raw_parts(p.add(4), 8), b"abcdefgh");
+        }
+        drop(unsafe { Box::from_raw(obj) });
     }
 }
