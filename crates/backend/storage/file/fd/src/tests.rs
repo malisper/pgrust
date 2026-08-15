@@ -292,6 +292,23 @@ fn temp_file_limit_enforced_with_sqlstate() {
 }
 
 #[test]
+fn buffile_delete_unknown_is_elog_xx000() {
+    setup();
+    let dir = scratch_dir("bfdel");
+    let _cwd = enter_datadir(&dir);
+    with_fd(|fd| fd.temporary_files_allowed = true);
+
+    let fs = crate::fileset::FileSet::init().unwrap();
+    let err = crate::buffile::BufFileDeleteFileSet(&fs, "missing", false).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    assert!(
+        err.message().contains("could not delete unknown BufFile \"missing\""),
+        "message={}",
+        err.message()
+    );
+}
+
+#[test]
 fn file_truncate_adjusts_temp_accounting() {
     setup();
     let dir = scratch_dir("trunc");

@@ -199,8 +199,7 @@ pub fn BufFileDeleteFileSet(
     }
     if !found && !missing_ok {
         ereport(ERROR)
-            .errcode_for_file_access()
-            .errmsg(format!("could not delete unknown temporary file \"{base}\""))
+            .errmsg(format!("could not delete unknown BufFile \"{name}\""))
             .finish(loc("BufFileDeleteFileSet"))?;
     }
     Ok(())
