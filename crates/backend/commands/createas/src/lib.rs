@@ -269,9 +269,22 @@ fn create_ctas_internal<'mcx>(
 
     let relid = tablecmds::DefineRelation(mcx, &create, relkind, InvalidOid, "")?;
     xact::CommandCounterIncrement()?;
-    // toast reloptions: WITH (...) is loud in DefineRelation, so the list is
-    // nil here and transformRelOptions would yield (Datum) 0.
-    catalog_toasting::NewRelationCreateToastTable(mcx, relid, None)?;
+    let toast_options = reloptions::transformRelOptions(
+        mcx,
+        None,
+        &create.options,
+        Some("toast"),
+        reloptions::HEAP_RELOPT_NAMESPACES,
+        true,
+        false,
+    )?;
+    reloptions::heap_reloptions(
+        mcx,
+        types_rel::RELKIND_TOASTVALUE,
+        toast_options.as_deref(),
+        true,
+    )?;
+    catalog_toasting::NewRelationCreateToastTable(mcx, relid, toast_options.as_deref())?;
     if let Some(query) = view_query.take() {
         commands_view::StoreViewQuery(mcx, relid, query, false)?;
         xact::CommandCounterIncrement()?;

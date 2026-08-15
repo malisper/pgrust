@@ -21,6 +21,7 @@ tableam_vocab = { path = "../../access/table/tableam_vocab" }
 createas_seams = { path = "../createas_seams" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 pg_depend = { path = "../../catalog/pg_depend" }
+reloptions = { path = "../../access/common/reloptions" }
 matview_seams = { path = "../matview_seams" }
 commands_view = { path = "../view" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }
