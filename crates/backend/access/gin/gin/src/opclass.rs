@@ -524,12 +524,12 @@ pub fn consistent(
     recheck: &mut bool,
 ) -> PgResult<bool> {
     match col.opclass {
-        GinOpclass::JsonbOps => Ok(::adt_jsonb::gin::gin_consistent_jsonb(
-            check, strategy, nkeys, recheck, jsp_ops,
-        )),
-        GinOpclass::JsonbPathOps => Ok(::adt_jsonb::gin::gin_consistent_jsonb_path(
-            check, strategy, nkeys, recheck, jsp_ops,
-        )),
+        GinOpclass::JsonbOps => {
+            ::adt_jsonb::gin::gin_consistent_jsonb(check, strategy, nkeys, recheck, jsp_ops)
+        }
+        GinOpclass::JsonbPathOps => {
+            ::adt_jsonb::gin::gin_consistent_jsonb_path(check, strategy, nkeys, recheck, jsp_ops)
+        }
         GinOpclass::TsvectorOps => {
             let image = detoast_image(mcx, query)?;
             let q = ::adt_tsvector_core::query::TsQueryRef { payload: &image[4..] };
@@ -603,12 +603,12 @@ pub fn tri_consistent(
     trgm_graph: Option<&mut TrgmPackedGraph>,
 ) -> PgResult<GinTernaryValue> {
     match col.opclass {
-        GinOpclass::JsonbOps => Ok(::adt_jsonb::gin::gin_triconsistent_jsonb(
-            check, strategy, nkeys, jsp_ops,
-        )),
-        GinOpclass::JsonbPathOps => Ok(::adt_jsonb::gin::gin_triconsistent_jsonb_path(
-            check, strategy, nkeys, jsp_ops,
-        )),
+        GinOpclass::JsonbOps => {
+            ::adt_jsonb::gin::gin_triconsistent_jsonb(check, strategy, nkeys, jsp_ops)
+        }
+        GinOpclass::JsonbPathOps => {
+            ::adt_jsonb::gin::gin_triconsistent_jsonb_path(check, strategy, nkeys, jsp_ops)
+        }
         GinOpclass::TsvectorOps => {
             let image = detoast_image(mcx, query)?;
             let q = ::adt_tsvector_core::query::TsQueryRef { payload: &image[4..] };

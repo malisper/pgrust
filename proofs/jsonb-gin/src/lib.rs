@@ -304,6 +304,7 @@ mod proofs {
                 &mut recheck,
                 &s.ops[..s.len],
             )
+            .unwrap()
         } else {
             adt_jsonb::gin::gin_consistent_jsonb(
                 &check[..],
@@ -312,6 +313,7 @@ mod proofs {
                 &mut recheck,
                 &s.ops[..s.len],
             )
+            .unwrap()
         };
         let mut c_recheck: c_int = 0;
         let mut err: c_int = 0;
@@ -352,8 +354,10 @@ mod proofs {
         let check = any_check_tern();
         let r = if path_variant {
             adt_jsonb::gin::gin_triconsistent_jsonb_path(&check[..], strategy, nk, &s.ops[..s.len])
+                .unwrap()
         } else {
             adt_jsonb::gin::gin_triconsistent_jsonb(&check[..], strategy, nk, &s.ops[..s.len])
+                .unwrap()
         };
         let mut err: c_int = 0;
         let c = unsafe {
@@ -442,13 +446,16 @@ mod proofs {
                     0,
                     &mut recheck,
                     &[],
-                ),
-                adt_jsonb::gin::gin_triconsistent_jsonb_path(&check[..], JSP_EXISTS, 0, &[]),
+                )
+                .unwrap(),
+                adt_jsonb::gin::gin_triconsistent_jsonb_path(&check[..], JSP_EXISTS, 0, &[])
+                    .unwrap(),
             )
         } else {
             (
-                adt_jsonb::gin::gin_consistent_jsonb(&check[..], JSP_EXISTS, 0, &mut recheck, &[]),
-                adt_jsonb::gin::gin_triconsistent_jsonb(&check[..], JSP_EXISTS, 0, &[]),
+                adt_jsonb::gin::gin_consistent_jsonb(&check[..], JSP_EXISTS, 0, &mut recheck, &[])
+                    .unwrap(),
+                adt_jsonb::gin::gin_triconsistent_jsonb(&check[..], JSP_EXISTS, 0, &[]).unwrap(),
             )
         };
         let mut c_recheck: c_int = 0;
@@ -576,8 +583,10 @@ mod proofs {
         let mut recheck = false;
         let r = if path_variant {
             adt_jsonb::gin::gin_consistent_jsonb_path(&check[..], strategy, nk, &mut recheck, &[])
+                .unwrap()
         } else {
             adt_jsonb::gin::gin_consistent_jsonb(&check[..], strategy, nk, &mut recheck, &[])
+                .unwrap()
         };
         let mut c_recheck: c_int = 0;
         let mut err: c_int = 0;
@@ -615,9 +624,9 @@ mod proofs {
         let nk = any_nkeys(0);
         let check = any_check_tern();
         let r = if path_variant {
-            adt_jsonb::gin::gin_triconsistent_jsonb_path(&check[..], strategy, nk, &[])
+            adt_jsonb::gin::gin_triconsistent_jsonb_path(&check[..], strategy, nk, &[]).unwrap()
         } else {
-            adt_jsonb::gin::gin_triconsistent_jsonb(&check[..], strategy, nk, &[])
+            adt_jsonb::gin::gin_triconsistent_jsonb(&check[..], strategy, nk, &[]).unwrap()
         };
         let mut err: c_int = 0;
         let c = unsafe {
@@ -1149,7 +1158,8 @@ mod proofs {
             nk,
             &mut recheck,
             &ops[..],
-        );
+        )
+        .unwrap();
         let mut c_recheck: c_int = 0;
         let mut err: c_int = 0;
         let c = unsafe {

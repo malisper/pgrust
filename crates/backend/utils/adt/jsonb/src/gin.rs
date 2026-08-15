@@ -10,7 +10,11 @@ use adt_numeric::{get_str_from_var, Num};
 use datum::Datum;
 use gin_vocab::{JspGinOp, JSP_GIN_AND, JSP_GIN_ENTRY, JSP_GIN_OR};
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
+
+fn unrecognized_strategy_number(strategy: u16) -> Box<PgError> {
+    Box::new(PgError::error(format!("unrecognized strategy number: {strategy}")))
+}
 
 #[allow(non_upper_case_globals)] // C-parity name
 pub const JsonbContainsStrategyNumber: u16 = 7;
@@ -110,7 +114,10 @@ fn make_scalar_key<'m>(mcx: Mcx<'m>, v: &JsonbItem<'_>, is_key: bool) -> PgResul
         JsonbItem::String(s) => {
             make_text_key(mcx, if is_key { JGINFLAG_KEY } else { JGINFLAG_STR }, s)
         }
-        other => panic!("unrecognized jsonb scalar type: {}", other.type_ord()),
+        other => Err(Box::new(PgError::error(format!(
+            "unrecognized jsonb scalar type: {}",
+            other.type_ord()
+        )))),
     }
 }
 
@@ -437,7 +444,12 @@ impl<'m> JspExtractor<'m> {
                     ItemType::Bool => JsonbItem::Bool(scalar_item.get_bool()),
                     ItemType::Numeric => JsonbItem::Numeric(scalar_item.get_numeric()),
                     ItemType::String => JsonbItem::String(scalar_item.get_string()),
-                    other => panic!("invalid scalar jsonpath item type: {}", other as i32),
+                    other => {
+                        return Err(Box::new(PgError::error(format!(
+                            "invalid scalar jsonpath item type: {}",
+                            other as i32
+                        ))));
+                    }
                 };
                 self.extract_path_expr(path, &path_item, Some(&scalar))
             }
@@ -634,7 +646,7 @@ pub fn gin_extract_jsonb_query<'m>(
             ops = jsp_ops;
             entries
         }
-        other => panic!("unrecognized strategy number: {other}"),
+        other => return Err(unrecognized_strategy_number(other)),
     };
     Ok((entries, search_mode, ops))
 }
@@ -665,7 +677,7 @@ pub fn gin_extract_jsonb_query_path<'m>(
             ops = jsp_ops;
             entries
         }
-        other => panic!("unrecognized strategy number: {other}"),
+        other => return Err(unrecognized_strategy_number(other)),
     };
     Ok((entries, search_mode, ops))
 }
@@ -677,34 +689,34 @@ pub fn gin_consistent_jsonb(
     nkeys: usize,
     recheck: &mut bool,
     jsp_ops: &[JspGinOp],
-) -> bool {
+) -> PgResult<bool> {
     match strategy {
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbContainsStrategyNumber => {
             *recheck = true;
-            check[..nkeys].iter().all(|&c| c != 0)
+            Ok(check[..nkeys].iter().all(|&c| c != 0))
         }
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbExistsStrategyNumber | JsonbExistsAnyStrategyNumber => {
             *recheck = true;
-            true
+            Ok(true)
         }
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbExistsAllStrategyNumber => {
             *recheck = true;
-            check[..nkeys].iter().all(|&c| c != 0)
+            Ok(check[..nkeys].iter().all(|&c| c != 0))
         }
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbJsonpathExistsStrategyNumber | JsonbJsonpathPredicateStrategyNumber => {
             *recheck = true;
             if nkeys > 0 {
                 debug_assert!(!jsp_ops.is_empty());
-                execute_jsp_gin_ops(jsp_ops, check, false) != GIN_FALSE
+                Ok(execute_jsp_gin_ops(jsp_ops, check, false) != GIN_FALSE)
             } else {
-                true
+                Ok(true)
             }
         }
-        other => panic!("unrecognized strategy number: {other}"),
+        other => Err(unrecognized_strategy_number(other)),
     }
 }
 
@@ -714,25 +726,25 @@ pub fn gin_triconsistent_jsonb(
     strategy: u16,
     nkeys: usize,
     jsp_ops: &[JspGinOp],
-) -> i8 {
+) -> PgResult<i8> {
     match strategy {
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbContainsStrategyNumber | JsonbExistsAllStrategyNumber => {
             for &c in &check[..nkeys] {
                 if c == GIN_FALSE {
-                    return GIN_FALSE;
+                    return Ok(GIN_FALSE);
                 }
             }
-            GIN_MAYBE
+            Ok(GIN_MAYBE)
         }
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbExistsStrategyNumber | JsonbExistsAnyStrategyNumber => {
             for &c in &check[..nkeys] {
                 if c == GIN_TRUE || c == GIN_MAYBE {
-                    return GIN_MAYBE;
+                    return Ok(GIN_MAYBE);
                 }
             }
-            GIN_FALSE
+            Ok(GIN_FALSE)
         }
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbJsonpathExistsStrategyNumber | JsonbJsonpathPredicateStrategyNumber => {
@@ -740,15 +752,15 @@ pub fn gin_triconsistent_jsonb(
                 debug_assert!(!jsp_ops.is_empty());
                 let res = execute_jsp_gin_ops(jsp_ops, check, true);
                 if res == GIN_TRUE {
-                    GIN_MAYBE
+                    Ok(GIN_MAYBE)
                 } else {
-                    res
+                    Ok(res)
                 }
             } else {
-                GIN_MAYBE
+                Ok(GIN_MAYBE)
             }
         }
-        other => panic!("unrecognized strategy number: {other}"),
+        other => Err(unrecognized_strategy_number(other)),
     }
 }
 
@@ -759,26 +771,26 @@ pub fn gin_consistent_jsonb_path(
     nkeys: usize,
     recheck: &mut bool,
     jsp_ops: &[JspGinOp],
-) -> bool {
+) -> PgResult<bool> {
     match strategy {
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbContainsStrategyNumber => {
             // Hash entries are lossy in structure and collisions; always
             // recheck, but missing keys are a certain miss.
             *recheck = true;
-            check[..nkeys].iter().all(|&c| c != 0)
+            Ok(check[..nkeys].iter().all(|&c| c != 0))
         }
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbJsonpathExistsStrategyNumber | JsonbJsonpathPredicateStrategyNumber => {
             *recheck = true;
             if nkeys > 0 {
                 debug_assert!(!jsp_ops.is_empty());
-                execute_jsp_gin_ops(jsp_ops, check, false) != GIN_FALSE
+                Ok(execute_jsp_gin_ops(jsp_ops, check, false) != GIN_FALSE)
             } else {
-                true
+                Ok(true)
             }
         }
-        other => panic!("unrecognized strategy number: {other}"),
+        other => Err(unrecognized_strategy_number(other)),
     }
 }
 
@@ -788,16 +800,16 @@ pub fn gin_triconsistent_jsonb_path(
     strategy: u16,
     nkeys: usize,
     jsp_ops: &[JspGinOp],
-) -> i8 {
+) -> PgResult<i8> {
     match strategy {
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbContainsStrategyNumber => {
             for &c in &check[..nkeys] {
                 if c == GIN_FALSE {
-                    return GIN_FALSE;
+                    return Ok(GIN_FALSE);
                 }
             }
-            GIN_MAYBE
+            Ok(GIN_MAYBE)
         }
         #[allow(non_upper_case_globals)] // C-parity name
         JsonbJsonpathExistsStrategyNumber | JsonbJsonpathPredicateStrategyNumber => {
@@ -805,14 +817,14 @@ pub fn gin_triconsistent_jsonb_path(
                 debug_assert!(!jsp_ops.is_empty());
                 let res = execute_jsp_gin_ops(jsp_ops, check, true);
                 if res == GIN_TRUE {
-                    GIN_MAYBE
+                    Ok(GIN_MAYBE)
                 } else {
-                    res
+                    Ok(res)
                 }
             } else {
-                GIN_MAYBE
+                Ok(GIN_MAYBE)
             }
         }
-        other => panic!("unrecognized strategy number: {other}"),
+        other => Err(unrecognized_strategy_number(other)),
     }
 }

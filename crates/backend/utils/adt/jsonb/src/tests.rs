@@ -664,6 +664,34 @@ fn gin_jsonpath_execute_ops() {
     assert_eq!(execute_jsp_gin_ops(&ops, &[0, 1, 1], true), 0);
 }
 
+#[test]
+fn unrecognized_strategy_is_ereport_xx000() {
+    use crate::gin::{
+        gin_consistent_jsonb, gin_consistent_jsonb_path, gin_extract_jsonb_query,
+        gin_extract_jsonb_query_path, gin_triconsistent_jsonb, gin_triconsistent_jsonb_path,
+    };
+    use types_error::ERRCODE_INTERNAL_ERROR;
+
+    setup();
+    let ctx = MemoryContext::new_bump("test");
+    let mcx = ctx.mcx();
+    let mut recheck = false;
+    let err = gin_consistent_jsonb(&[], 99, 0, &mut recheck, &[]).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "unrecognized strategy number: 99");
+    let err = gin_consistent_jsonb_path(&[], 99, 0, &mut recheck, &[]).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    let err = gin_triconsistent_jsonb(&[], 99, 0, &[]).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    let err = gin_triconsistent_jsonb_path(&[], 99, 0, &[]).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    let err = gin_extract_jsonb_query(mcx, &[], 99).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "unrecognized strategy number: 99");
+    let err = gin_extract_jsonb_query_path(mcx, &[], 99).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+}
+
 // json_populate_type (populate.rs) over a fixed catalog fixture:
 // int4/text/json/jsonb/int4[].
 mod populate {
