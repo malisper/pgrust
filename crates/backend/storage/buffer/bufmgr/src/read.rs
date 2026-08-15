@@ -1218,6 +1218,7 @@ pub fn PrefetchBuffer(
 ) -> PgResult<PrefetchOutcome> {
     debug_assert!(blkno != P_NEW);
     if rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP {
+        crate::localbuf::ensure_local_buffers()?;
         return Ok(PrefetchOutcome::Skipped);
     }
     let smgr = crate::rel_locator_backend(rel);

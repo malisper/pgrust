@@ -13,7 +13,8 @@ use types_core::{
     BlockNumber, Buffer, ForkNumber, MaxBlockNumber, BLCKSZ,
 };
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_INSUFFICIENT_RESOURCES, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
+    ErrorLocation, PgResult, ERRCODE_INSUFFICIENT_RESOURCES, ERRCODE_INVALID_TRANSACTION_STATE,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
 use pgstat::io::{
     pgstat_count_io_op, pgstat_count_io_op_time, pgstat_prepare_io_time, IOObject, IOOp,
@@ -53,9 +54,6 @@ fn with<R>(f: impl FnOnce(&mut LocalBufs) -> R) -> R {
         // SAFETY: one backend = one thread; no callee below re-enters this
         // module through the same TLS slot (internal helpers take &mut in).
         let slot = unsafe { &mut *l.get() };
-        if slot.is_none() {
-            init_local_buffers(slot);
-        }
         f(slot.as_mut().expect("local buffers initialized"))
     })
 }
@@ -85,11 +83,14 @@ pub fn n_loc_buffer() -> i32 {
 }
 
 #[cold]
-fn init_local_buffers(slot: &mut Option<LocalBufs>) {
+fn init_local_buffers(slot: &mut Option<LocalBufs>) -> PgResult<()> {
     if parallel_seams::is_parallel_worker::is_installed()
         && parallel_seams::is_parallel_worker::call()
     {
-        panic!("cannot access temporary tables during a parallel operation");
+        ereport(ERROR)
+            .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
+            .errmsg("cannot access temporary tables during a parallel operation")
+            .finish(ErrorLocation::new(file!(), line!() as i32, "InitLocalBuffers"))?;
     }
     let nbufs = num_temp_buffers().max(1) as usize;
     let mut descs = Vec::with_capacity(nbufs);
@@ -109,6 +110,18 @@ fn init_local_buffers(slot: &mut Option<LocalBufs>) {
         num_bufs_in_block: 0,
         total_bufs_allocated: 0,
     });
+    Ok(())
+}
+
+pub(crate) fn ensure_local_buffers() -> PgResult<()> {
+    LOCAL.with(|l| {
+        // SAFETY: one backend = one thread; no callee re-enters this TLS slot.
+        let slot = unsafe { &mut *l.get() };
+        if slot.is_none() {
+            init_local_buffers(slot)?;
+        }
+        Ok(())
+    })
 }
 
 #[inline]
@@ -210,6 +223,7 @@ pub(crate) fn LocalBufferAlloc(
     forknum: ForkNumber,
     blkno: BlockNumber,
 ) -> PgResult<(Buffer, bool)> {
+    ensure_local_buffers()?;
     let new_tag = init_buffer_tag(smgr.locator, forknum, blkno);
     resowner::ResourceOwnerEnlarge(resowner::CurrentResourceOwner())?;
     if let Some(buffer) = with(|lb| {
@@ -493,6 +507,7 @@ pub(crate) fn ExtendBufferedRelLocal(
     extend_upto: BlockNumber,
     buffers: &mut [Buffer],
 ) -> PgResult<(BlockNumber, u32)> {
+    ensure_local_buffers()?;
     LimitAdditionalLocalPins(&mut extend_by);
     debug_assert!(extend_by > 0);
 
