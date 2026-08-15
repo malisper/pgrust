@@ -19,7 +19,8 @@ use types_core::{
 };
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
-    ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
 };
 use types_nbtree::page::{
     BTEQUALIMAGE_PROC, BTINRANGE_PROC, BTORDER_PROC, BTSKIPSUPPORT_PROC, BTSORTSUPPORT_PROC,
@@ -109,14 +110,21 @@ fn no_such_am(amname: &str) -> Box<PgError> {
     )
 }
 
+// C get_am_type_oid (amcmds.c:141): table AM used as index AM is 55000.
+#[track_caller]
+#[cold]
+fn am_not_index(amname: &str) -> Box<PgError> {
+    err(
+        ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+        format!("access method \"{amname}\" is not of type {}", "INDEX"),
+    )
+}
+
 // get_index_am_oid (amcmds.c).
 fn get_index_am_oid(amname: &str) -> PgResult<Oid> {
     match get_am_by_name(amname)? {
         Some((oid, amtype)) if amtype == AMTYPE_INDEX => Ok(oid),
-        Some((_, _)) => Err(err(
-            ERRCODE_UNDEFINED_OBJECT,
-            format!("access method \"{amname}\" is not of type {}", "INDEX"),
-        )),
+        Some((_, _)) => Err(am_not_index(amname)),
         None => Err(no_such_am(amname)),
     }
 }
@@ -1351,4 +1359,16 @@ pub fn IsThereOpFamilyInNamespace(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn define_opfamily_table_am_is_ereport_55000() {
+        let e = am_not_index("heap");
+        assert_eq!(e.sqlstate(), ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+        assert_eq!(e.message(), "access method \"heap\" is not of type INDEX");
+    }
 }
