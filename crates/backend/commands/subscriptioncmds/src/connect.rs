@@ -6,7 +6,10 @@
 #![allow(non_snake_case)]
 
 use mcx::Mcx;
-use types_error::{PgError, PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_UNDEFINED_OBJECT, WARNING};
+use types_error::{
+    PgError, PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_UNDEFINED_OBJECT, WARNING,
+};
 
 use walreceiver::client::{ExecStatus, PgConn, QueryResult};
 
@@ -113,9 +116,30 @@ pub(crate) fn check_publications_origin(
     Ok(())
 }
 
-// fetch_table_list (subscriptioncmds.c), publisher >= 16 arm: schema/table
-// pairs published by the given publications (column lists ignored until the
-// column-list subscriber support lands; C reads gpt.attrs for a later check).
+// C list_member(tablelist, rv): a second (nsp, rel) row means DISTINCT kept
+// two attrs values — different column lists for the same table (0A000).
+fn note_published_table(
+    tablelist: &mut Vec<(String, String)>,
+    nspname: String,
+    relname: String,
+) -> PgResult<()> {
+    if tablelist
+        .iter()
+        .any(|(n, r)| n == &nspname && r == &relname)
+    {
+        return Err(err(
+            format!(
+                "cannot use different column lists for table \"{nspname}.{relname}\" in different \
+                 publications"
+            ),
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+    tablelist.push((nspname, relname));
+    Ok(())
+}
+
+// fetch_table_list (subscriptioncmds.c), publisher >= 16 arm.
 pub(crate) fn fetch_table_list(
     conn: &mut PgConn,
     publications: &[&str],
@@ -129,7 +153,11 @@ pub(crate) fn fetch_table_list(
         publications_str(publications)
     );
     let res = exec_or_fail(conn, &cmd, "receive list of replicated tables from the publisher")?;
-    Ok(res.rows.iter().map(|r| (row_text(r, 0), row_text(r, 1))).collect())
+    let mut tablelist = Vec::with_capacity(res.rows.len());
+    for r in &res.rows {
+        note_published_table(&mut tablelist, row_text(r, 0), row_text(r, 1))?;
+    }
+    Ok(tablelist)
 }
 
 // libpqrcv_create_slot (libpqwalreceiver.c), logical arm with CRS_NOEXPORT_SNAPSHOT.
@@ -378,4 +406,28 @@ pub(crate) fn walrcv_alter_slot(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // fetch_table_list (subscriptioncmds.c:2295): DISTINCT (nsp, rel, attrs)
+    // yields a second row only when column lists differ. Unfixed pgrust
+    // skipped the check and later AddSubscriptionRelState'd XX000.
+    #[test]
+    fn different_column_lists_same_table_is_0a000() {
+        let mut tablelist = Vec::new();
+        note_published_table(&mut tablelist, "public".into(), "t".into()).unwrap();
+        let err = note_published_table(&mut tablelist, "public".into(), "t".into()).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(
+            err.message(),
+            "cannot use different column lists for table \"public.t\" in different publications"
+        );
+
+        note_published_table(&mut tablelist, "public".into(), "u".into()).unwrap();
+        note_published_table(&mut tablelist, "other".into(), "t".into()).unwrap();
+        assert_eq!(tablelist.len(), 3);
+    }
 }
