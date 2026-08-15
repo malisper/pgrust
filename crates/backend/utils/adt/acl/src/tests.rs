@@ -153,6 +153,27 @@ fn decode_rejects_wrong_elemtype_and_nulls() {
 }
 
 #[test]
+fn check_acl_wrong_elemtype_and_ndim_are_22023() {
+    use types_error::ERRCODE_INVALID_PARAMETER_VALUE;
+    let ctx = mcx::MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let img = varlena::acl_image(mcx, &[item(0, 10, ACL_SELECT, 0)]).unwrap();
+    let payload = &img.as_slice()[4..];
+
+    let mut wrong_type = payload.to_vec();
+    wrong_type[8..12].copy_from_slice(&23u32.to_le_bytes());
+    let err = varlena::check_acl_payload(&wrong_type).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+    assert_eq!(err.message(), "ACL array contains wrong data type");
+
+    let mut ndim0 = payload.to_vec();
+    ndim0[0..4].copy_from_slice(&0i32.to_le_bytes());
+    let err = varlena::check_acl_payload(&ndim0).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+    assert_eq!(err.message(), "ACL arrays must be one-dimensional");
+}
+
+#[test]
 fn aclupdate_add_del_and_prune() {
     let ctx = mcx::MemoryContext::new_bump("t");
     let mcx = ctx.mcx();

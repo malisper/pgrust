@@ -1,6 +1,6 @@
 use mcx::{vec_append_bytes, Mcx, PgVec};
 use types_error::{
-    PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DATA_EXCEPTION,
+    PgError, PgResult, ERRCODE_DATA_EXCEPTION, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NULL_VALUE_NOT_ALLOWED,
 };
 
@@ -20,7 +20,7 @@ pub fn check_acl_payload(payload: &[u8]) -> PgResult<usize> {
     if payload.len() < ARR_HDR {
         return Err(acl_shape_error(
             "ACL arrays must be one-dimensional",
-            ERRCODE_DATA_EXCEPTION,
+            ERRCODE_INVALID_PARAMETER_VALUE,
         ));
     }
     let ndim = rd(0);
@@ -29,13 +29,13 @@ pub fn check_acl_payload(payload: &[u8]) -> PgResult<usize> {
     if elemtype != ACLITEMOID {
         return Err(acl_shape_error(
             "ACL array contains wrong data type",
-            ERRCODE_DATATYPE_MISMATCH,
+            ERRCODE_INVALID_PARAMETER_VALUE,
         ));
     }
     if ndim != 1 {
         return Err(acl_shape_error(
             "ACL arrays must be one-dimensional",
-            ERRCODE_DATA_EXCEPTION,
+            ERRCODE_INVALID_PARAMETER_VALUE,
         ));
     }
     if dataoffset != 0 {
