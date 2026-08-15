@@ -61,7 +61,15 @@ fn arena_alloc(arena: &mut PgVec<'static, LexemeInfo>, node: LexemeInfo) -> usiz
     arena.len() - 1
 }
 
-fn new_lexeme(d: &mut DictThesaurus, word: &[u8], idsubst: u32, posinsubst: u16) -> PgResult<()> {
+struct ThesaurusBuild {
+    mcx: Mcx<'static>,
+    wrds: PgVec<'static, TheLexeme>,
+    subst: PgVec<'static, TheSubstitute>,
+    nsubst: i32,
+    arena: PgVec<'static, LexemeInfo>,
+}
+
+fn new_lexeme(d: &mut ThesaurusBuild, word: &[u8], idsubst: u32, posinsubst: u16) -> PgResult<()> {
     let entries = arena_alloc(
         &mut d.arena,
         LexemeInfo { idsubst, posinsubst, tnvariant: 0, nextentry: None, nextvariant: None },
@@ -72,7 +80,7 @@ fn new_lexeme(d: &mut DictThesaurus, word: &[u8], idsubst: u32, posinsubst: u16)
 }
 
 fn add_wrd(
-    d: &mut DictThesaurus,
+    d: &mut ThesaurusBuild,
     word: &[u8],
     idsubst: u32,
     nwrd: u16,
@@ -105,7 +113,7 @@ fn mblen(s: &[u8]) -> usize {
     ::mbutils::pg_mblen(s) as usize
 }
 
-fn thesaurus_read(d: &mut DictThesaurus, filename: &[u8]) -> PgResult<()> {
+fn thesaurus_read(d: &mut ThesaurusBuild, filename: &[u8]) -> PgResult<()> {
     let mcx = d.mcx;
     let path = get_tsearch_config_filename(mcx, filename, "ths")?;
     let Some(lines) = tsearch_readlines(mcx, &path)? else {
@@ -438,15 +446,21 @@ fn compile_the_substitute(d: &mut DictThesaurus) -> PgResult<()> {
 
 pub fn thesaurus_init(init: &DictInitData<'static>) -> PgResult<DictThesaurus> {
     let mcx = init.mcx;
+    let mut build = ThesaurusBuild {
+        mcx,
+        wrds: PgVec::new_in(mcx),
+        subst: PgVec::new_in(mcx),
+        nsubst: 0,
+        arena: PgVec::new_in(mcx),
+    };
     let mut fileloaded = false;
-    let mut filename: Option<&[u8]> = None;
     let mut subdictname: Option<&[u8]> = None;
     for (name, value) in init.dict_options.iter() {
         if name.as_slice() == b"dictfile" {
             if fileloaded {
                 return Err(invalid_param("multiple DictFile parameters".into()));
             }
-            filename = Some(value.as_slice());
+            thesaurus_read(&mut build, value.as_slice())?;
             fileloaded = true;
         } else if name.as_slice() == b"dictionary" {
             if subdictname.is_some() {
@@ -479,12 +493,11 @@ pub fn thesaurus_init(init: &DictInitData<'static>) -> PgResult<DictThesaurus> {
         mcx,
         subdict_oid,
         subdict,
-        wrds: PgVec::new_in(mcx),
-        subst: PgVec::new_in(mcx),
-        nsubst: 0,
-        arena: PgVec::new_in(mcx),
+        wrds: build.wrds,
+        subst: build.subst,
+        nsubst: build.nsubst,
+        arena: build.arena,
     };
-    thesaurus_read(&mut d, filename.expect("checked above"))?;
     compile_the_lexeme(&mut d)?;
     compile_the_substitute(&mut d)?;
     Ok(d)
