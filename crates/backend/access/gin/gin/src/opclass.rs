@@ -6,7 +6,7 @@
 use ::datum::Datum;
 use ::gin_vocab::*;
 use ::mcx::{Mcx, PgVec};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_scan::scankey::StrategyNumber;
 use ::types_tuple::varatt;
 
@@ -27,6 +27,14 @@ const GinOverlapStrategy: StrategyNumber = 1;
 const GinContainsStrategy: StrategyNumber = 2;
 const GinContainedStrategy: StrategyNumber = 3;
 const GinEqualStrategy: StrategyNumber = 4;
+
+#[track_caller]
+#[cold]
+fn unknown_array_strategy(what: &str, strategy: StrategyNumber) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "{what}: unknown strategy number: {strategy}"
+    )))
+}
 
 /// Detoasted varlena payload of a datum (header stripped). External and
 /// compressed images take the detoast path; inline images are borrowed.
@@ -438,7 +446,7 @@ pub(crate) fn extract_query<'m>(
                         GIN_SEARCH_MODE_INCLUDE_EMPTY
                     }
                 }
-                other => panic!("ginqueryarrayextract: unknown strategy number: {other}"),
+                other => return Err(unknown_array_strategy("ginqueryarrayextract", other)),
             };
             Ok(ExtractedQuery {
                 entries,
@@ -558,7 +566,7 @@ pub fn consistent(
                     *recheck = true;
                     (0..nkeys).all(|i| check[i] != GIN_FALSE)
                 }
-                other => panic!("ginarrayconsistent: unknown strategy number: {other}"),
+                other => return Err(unknown_array_strategy("ginarrayconsistent", other)),
             };
             Ok(res)
         }
@@ -656,7 +664,7 @@ pub fn tri_consistent(
                     }
                     res
                 }
-                other => panic!("ginarrayconsistent: unknown strategy number: {other}"),
+                other => return Err(unknown_array_strategy("ginarrayconsistent", other)),
             };
             Ok(res)
         }
