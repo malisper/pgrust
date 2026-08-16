@@ -7,8 +7,8 @@ use createas_seams::IntoRelState;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{
-    PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_INDETERMINATE_COLLATION, ERRCODE_SYNTAX_ERROR,
-    ERROR, NOTICE,
+    PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INDETERMINATE_COLLATION, ERRCODE_SYNTAX_ERROR, ERROR, NOTICE,
 };
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::Query;
@@ -418,8 +418,14 @@ fn intorel_startup<'mcx>(
     };
     let rel = table::table_open(mcx, relid, types_rel::AccessExclusiveLock)?;
 
-    if rel.rd_rel.relrowsecurity {
-        panic!("intorel_startup (createas.c): check_enable_rls unported (rls lane)");
+    if rls::check_enable_rls(relid, types_core::InvalidOid, false)?
+        == rls::CheckEnableRls::RlsEnabled
+    {
+        return Err(elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("policies not yet implemented for this command")
+            .into_error()
+            .into());
     }
 
     if is_matview && !into.skipData {
