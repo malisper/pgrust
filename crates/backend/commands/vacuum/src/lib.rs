@@ -776,22 +776,27 @@ fn vacuum_rel<'mcx>(
         InvalidOid
     };
 
-    if params.options & VACOPT_PROCESS_MAIN != 0 {
-        if params.options & VACOPT_FULL != 0 {
-            // VACUUM FULL is a variant of CLUSTER (cluster.c); cluster_rel
-            // closes the relation but keeps the lock.
-            let cluster_options: u32 =
-                if params.options & VACOPT_VERBOSE != 0 { 0x01 } else { 0 };
-            cluster_seams::cluster_rel::call(mcx, rel, InvalidOid, cluster_options)?;
+    let guard = miscinit::SecContextGuard::security_restricted(rel.rd_rel.relowner);
+    let save_nestlevel = guc::NewGUCNestLevel();
+    let work = (|| -> PgResult<()> {
+        guc::RestrictSearchPath()?;
+        if params.options & VACOPT_PROCESS_MAIN != 0 {
+            if params.options & VACOPT_FULL != 0 {
+                let cluster_options: u32 =
+                    if params.options & VACOPT_VERBOSE != 0 { 0x01 } else { 0 };
+                cluster_seams::cluster_rel::call(mcx, rel, InvalidOid, cluster_options)?;
+            } else {
+                tableam_seams::table_relation_vacuum::call(mcx, &rel, &params, bstrategy.clone())?;
+                rel.close(NoLock)?;
+            }
         } else {
-            // C divergence (recorded): SetUserIdAndSecContext/NewGUCNestLevel/
-            // RestrictSearchPath are skipped (single-user milestone).
-            tableam_seams::table_relation_vacuum::call(mcx, &rel, &params, bstrategy.clone())?;
             rel.close(NoLock)?;
         }
-    } else {
-        rel.close(NoLock)?;
-    }
+        Ok(())
+    })();
+    guc::AtEOXact_GUC(false, save_nestlevel);
+    guard.restore();
+    work?;
     snapmgr::PopActiveSnapshot()?;
     xact::CommitTransactionCommand()?;
 

@@ -187,3 +187,12 @@ fn unexpected_ri_query_result_is_ereport_xx000() {
         Some("This is most likely due to a rule having rewritten the query.")
     );
 }
+
+#[test]
+fn rls_owner_bypass_matches_c() {
+    assert!(!ri_rls_owner_blocks(true, true, false, true, false));
+    assert!(!ri_rls_owner_blocks(false, true, true, true, true));
+    assert!(ri_rls_owner_blocks(false, true, false, false, true));
+    assert!(ri_rls_owner_blocks(false, false, true, true, false));
+    assert!(!ri_rls_owner_blocks(false, false, false, false, false));
+}

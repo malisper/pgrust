@@ -12,7 +12,8 @@ use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgHashMap, PgString, PgVec};
 use ri_triggers_seams::RiTriggerData;
 use types_core::{
-    InvalidOid, Oid, INDEX_MAX_KEYS, SECURITY_LOCAL_USERID_CHANGE, SECURITY_NOFORCE_RLS,
+    InvalidOid, Oid, RELATION_RELATION_ID, INDEX_MAX_KEYS, SECURITY_LOCAL_USERID_CHANGE,
+    SECURITY_NOFORCE_RLS,
 };
 use types_tuple::NameData;
 use types_error::{
@@ -865,9 +866,52 @@ fn ri_Check_Pk_Match<'mcx>(
     Ok(found)
 }
 
+fn ri_initial_check_allowed(pk_rel: &Relation<'_>, fk_rel: &Relation<'_>) -> PgResult<bool> {
+    let userid = miscinit::GetUserId();
+    let select = types_nodes::parsenodes::ACL_SELECT;
+    if aclchk_seams::pg_class_aclcheck_ext::call(pk_rel.rd_id, userid, select)?.0 != ACLCHECK_OK {
+        return Ok(false);
+    }
+    if aclchk_seams::pg_class_aclcheck_ext::call(fk_rel.rd_id, userid, select)?.0 != ACLCHECK_OK {
+        return Ok(false);
+    }
+    if aclchk_seams::has_bypassrls_privilege::call(userid)? {
+        return Ok(true);
+    }
+    let pk_owner = aclchk_seams::object_ownercheck::call(
+        RELATION_RELATION_ID,
+        pk_rel.rd_id,
+        userid,
+    )?;
+    let fk_owner = aclchk_seams::object_ownercheck::call(
+        RELATION_RELATION_ID,
+        fk_rel.rd_id,
+        userid,
+    )?;
+    if ri_rls_owner_blocks(
+        false,
+        pk_rel.rd_rel.relrowsecurity,
+        pk_owner,
+        fk_rel.rd_rel.relrowsecurity,
+        fk_owner,
+    ) {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn ri_rls_owner_blocks(
+    bypassrls: bool,
+    pk_rls: bool,
+    pk_owner: bool,
+    fk_rls: bool,
+    fk_owner: bool,
+) -> bool {
+    !bypassrls && ((pk_rls && !pk_owner) || (fk_rls && !fk_owner))
+}
+
 // RI_Initial_Check (ri_triggers.c): whole-table validation for ALTER TABLE
-// ADD FOREIGN KEY. False = caller falls back to the per-row trigger method
-// (here only for non-superusers; C also falls back on RLS/permission grounds).
+// ADD FOREIGN KEY. False = caller falls back to the per-row trigger method.
 pub fn RI_Initial_Check<'mcx>(
     mcx: Mcx<'mcx>,
     trigger: &Trigger<'mcx>,
@@ -876,8 +920,7 @@ pub fn RI_Initial_Check<'mcx>(
 ) -> PgResult<bool> {
     let riinfo = ri_FetchConstraintInfo(trigger, fk_rel, false)?;
 
-    // ExecCheckPermissions + bypassrls/ownercheck walk: superuser fast path.
-    if !superuser::superuser()? {
+    if !ri_initial_check_allowed(pk_rel, fk_rel)? {
         return Ok(false);
     }
 

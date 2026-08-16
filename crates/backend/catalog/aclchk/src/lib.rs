@@ -1264,6 +1264,7 @@ pub fn init_seams() {
     aclchk_seams::object_aclcheck::set(object_aclcheck);
     aclchk_seams::object_aclcheck_ext::set(object_aclcheck_ext);
     aclchk_seams::object_ownercheck::set(object_ownercheck);
+    aclchk_seams::has_bypassrls_privilege::set(has_bypassrls_privilege);
     aclchk_seams::has_lo_priv_byid::set(lo::has_lo_priv_byid);
     aclchk_seams::pg_parameter_aclcheck_set::set(pg_parameter_aclcheck_set);
     aclchk_seams::pg_parameter_aclcheck::set(pg_parameter_aclcheck);
