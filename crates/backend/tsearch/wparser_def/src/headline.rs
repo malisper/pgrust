@@ -534,6 +534,10 @@ fn opt_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
+fn headline_int_opt(s: &str) -> PgResult<i32> {
+    numutils::pg_strtoint32(s)
+}
+
 // prsd_headline (wparser_def.c) body over deserialize_deflist items.
 pub fn prsd_headline_impl<'mcx>(
     mcx: Mcx<'mcx>,
@@ -548,18 +552,7 @@ pub fn prsd_headline_impl<'mcx>(
     let mut highlightall = false;
 
     let int_val = |item: &DefListItem<'_>| -> PgResult<i32> {
-        let s = core::str::from_utf8(&item.value).unwrap_or("");
-        // C reaches this via pg_strtoint32 (C-locale isspace trim). Residual
-        // recorded gap: pg_strtoint32 also accepts 0x/0o/0b prefixes and '_'
-        // digit separators, which parse::<i32> does not.
-        s.trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
-            .parse::<i32>()
-            .map_err(|_| {
-            Box::new(
-                PgError::error(format!("invalid input syntax for type integer: \"{s}\""))
-                    .with_sqlstate(::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
-            )
-        })
+        headline_int_opt(core::str::from_utf8(&item.value).unwrap_or(""))
     };
 
     for item in options {
@@ -656,4 +649,27 @@ fn bytes_in<'mcx>(mcx: Mcx<'mcx>, b: &[u8]) -> PgResult<::mcx::PgVec<'mcx, u8>> 
     let mut v: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, b.len())?;
     v.extend_from_slice(b);
     Ok(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::headline_int_opt;
+    use ::types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+
+    #[test]
+    fn headline_int_opt_overflow_is_22003() {
+        let e = headline_int_opt("9999999999").unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+    }
+
+    #[test]
+    fn headline_int_opt_hex_matches_c() {
+        assert_eq!(headline_int_opt("0x20").unwrap(), 32);
+    }
+
+    #[test]
+    fn headline_int_opt_bad_syntax_is_22p02() {
+        let e = headline_int_opt("nope").unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
+    }
 }
