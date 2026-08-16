@@ -11,7 +11,7 @@ use ::types_brin::{
     PG_BRIN_MINMAX_MULTI_SUMMARYOID,
 };
 use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION};
 use ::types_scan::scankey::{
     ScanKeyData, BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber,
     BTLessEqualStrategyNumber, BTLessStrategyNumber, BTMaxStrategyNumber, SK_ISNULL,
@@ -345,9 +345,7 @@ fn minmax_multi_get_procinfo(
     let opcintype = bdesc.bd_opcintype[attno as usize - 1];
     let proc = lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, procnum as i16)?;
     if proc == 0 {
-        panic!(
-            "invalid opclass definition: missing support function {procnum} for column {attno}"
-        );
+        return Err(invalid_opclass(procnum, attno));
     }
     let finfo = fmgr_core::fmgr_info(proc)?;
     *cache.borrow_mut() = Some(finfo.clone());
@@ -388,4 +386,17 @@ fn minmax_multi_get_strategy_procinfo(
     let finfo = fmgr_core::fmgr_info(proc)?;
     opaque.strategy_procinfos.borrow_mut()[strategynum as usize - 1] = Some(finfo.clone());
     Ok(finfo)
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn invalid_opclass(procnum: u16, attno: u16) -> Box<PgError> {
+    Box::new(
+        PgError::error("invalid opclass definition")
+            .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION)
+            .with_detail(format!(
+                "The operator class is missing support function {procnum} for column {attno}."
+            )),
+    )
 }
