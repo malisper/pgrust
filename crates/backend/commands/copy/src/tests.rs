@@ -555,6 +555,27 @@ fn reject_limit_boolean_arg_is_catchable() {
     assert_eq!(e.message(), "reject_limit requires a numeric value");
 }
 
+// FORMAT binary + HEADER is FEATURE_NOT_SUPPORTED; DELIMITER/NULL/DEFAULT
+// in binary stay SYNTAX_ERROR.
+#[test]
+fn binary_header_is_feature_not_supported() {
+    let mcx = test_ctx().mcx();
+    let fmt = types_nodes::Node::mk(mcx, types_nodes::String { sval: "binary" }).unwrap();
+    let hdr = types_nodes::Node::mk(mcx, types_nodes::Boolean { boolval: true }).unwrap();
+    let opts = opt_list(
+        mcx,
+        &[
+            defelem(mcx, "format", Some(fmt)),
+            defelem(mcx, "header", Some(hdr)),
+        ],
+    );
+    let Err(e) = crate::ProcessCopyOptions(mcx, false, &opts, None) else {
+        panic!("expected error")
+    };
+    assert_eq!(e.message(), "cannot specify HEADER in BINARY mode");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+}
+
 // ---- client-only-encoding escape walks (CopyAttributeOutText/CSV,
 // encoding_embeds_ascii arm) ----
 

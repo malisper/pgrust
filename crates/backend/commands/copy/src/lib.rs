@@ -902,7 +902,10 @@ pub fn ProcessCopyOptions<'s>(
         ));
     }
     if opts.binary && opts.header_line != CopyHeaderChoice::False {
-        return Err(cannot_in_binary("HEADER"));
+        return Err(Box::new(
+            PgError::error("cannot specify HEADER in BINARY mode")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     if !opts.csv_mode && quote.is_some() {
         return Err(requires_csv("QUOTE"));
