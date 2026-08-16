@@ -10,9 +10,12 @@ use crate::bitmapset::Bitmapset;
 use crate::list::{IntList, NodeList, OidList, XidList};
 use crate::node_tree::{BitString, Boolean, Float, Integer, Node, String};
 use crate::parsenodes::{
-    CommonTableExpr, CTECycleClause, CTESearchClause, DeallocateStmt, DefElem, ExecuteStmt, ExplainStmt, FetchStmt, PrepareStmt,
-    GroupingSet, Query, RTEPermissionInfo, RangeTblEntry, RangeTblFunction, RowMarkClause, SetOperationStmt, TransactionStmt, VariableSetStmt, VariableShowStmt,
-    WindowClause, WithCheckOption, WithClause,
+    AccessPriv, AlterTableCmd, AlterTableStmt, CommonTableExpr, CopyStmt, CTECycleClause,
+    CTESearchClause, DeallocateStmt, DeclareCursorStmt, DefElem, DropStmt, ExecuteStmt, ExplainStmt,
+    FetchStmt, GrantStmt, GroupingSet, NotifyStmt, PrepareStmt, Query, RTEPermissionInfo,
+    RangeTblEntry, RangeTblFunction, RoleSpec, RowMarkClause, SetOperationStmt, TransactionStmt,
+    TruncateStmt, VacuumRelation, VacuumStmt, VariableSetStmt, VariableShowStmt, WindowClause,
+    WithCheckOption, WithClause,
 };
 use crate::list::OptNodeList;
 use crate::primnodes::{
@@ -25,15 +28,16 @@ use crate::primnodes::{
     MergeSupportFunc, WindowFuncRunCondition, XmlExpr,
 };
 use crate::rawnodes::{
-    A_ArrayExpr, A_Const, A_Expr, A_Indices, A_Indirection, A_Star, CollateClause, ColumnDef,
-    ColumnRef, Constraint, CreateTableAsStmt, DeleteStmt, DistinctClause, FuncCall, IndexElem,
-    InferClause,
-    InsertStmt, IntoClause, JsonAggConstructor, JsonArgument, JsonArrayAgg, JsonArrayConstructor,
-    JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg, JsonObjectConstructor,
-    JsonOutput, JsonParseExpr, JsonScalarExpr, JsonSerializeExpr, LockingClause, MergeStmt,
-    MergeWhenClause, MultiAssignRef, OnConflictClause, ParamRef, RangeFunction, RangeSubselect,
-    RangeTableFunc, RangeTableFuncCol, RawStmt, ResTarget, ReturningClause, ReturningOption,
-    SelectStmt, SortBy, TypeCast, TypeName, UpdateStmt, ValUnion, WindowDef, XmlSerialize,
+    A_ArrayExpr, A_Const, A_Expr, A_Indices, A_Indirection, A_Star, CallStmt, CollateClause,
+    ColumnDef, ColumnRef, Constraint, CreateStmt, CreateTableAsStmt, DeleteStmt, DistinctClause,
+    FuncCall, IndexElem, IndexStmt, InferClause, InsertStmt, IntoClause, JsonAggConstructor,
+    JsonArgument, JsonArrayAgg, JsonArrayConstructor, JsonArrayQueryConstructor, JsonFuncExpr,
+    JsonKeyValue, JsonObjectAgg, JsonObjectConstructor, JsonOutput, JsonParseExpr, JsonScalarExpr,
+    JsonSerializeExpr, LockingClause, MergeStmt, MergeWhenClause, MultiAssignRef, OnConflictClause,
+    ParamRef, PartitionBoundSpec, PartitionElem, PartitionRangeDatum, PartitionSpec, RangeFunction,
+    RangeSubselect, RangeTableFunc, RangeTableFuncCol, RawStmt, ResTarget, ReturningClause,
+    ReturningOption, RuleStmt, SelectStmt, SortBy, TableLikeClause, TypeCast, TypeName, UpdateStmt,
+    ValUnion, ViewStmt, WindowDef, XmlSerialize,
 };
 use crate::tags::NodeTag;
 
@@ -211,6 +215,61 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
             .as_variant::<CreateTableAsStmt>()
             .unwrap()
             .node_equal(b.as_variant::<CreateTableAsStmt>().unwrap()),
+        NodeTag::T_CreateStmt => a
+            .as_variant::<CreateStmt>()
+            .unwrap()
+            .node_equal(b.as_variant::<CreateStmt>().unwrap()),
+        NodeTag::T_IndexStmt => a
+            .as_variant::<IndexStmt>()
+            .unwrap()
+            .node_equal(b.as_variant::<IndexStmt>().unwrap()),
+        NodeTag::T_CallStmt => cmp!(as_call_stmt),
+        NodeTag::T_AlterTableStmt => a
+            .as_variant::<AlterTableStmt>()
+            .unwrap()
+            .node_equal(b.as_variant::<AlterTableStmt>().unwrap()),
+        NodeTag::T_AlterTableCmd => a
+            .as_variant::<AlterTableCmd>()
+            .unwrap()
+            .node_equal(b.as_variant::<AlterTableCmd>().unwrap()),
+        NodeTag::T_CopyStmt => cmp!(as_copy_stmt),
+        NodeTag::T_DropStmt => cmp!(as_drop_stmt),
+        NodeTag::T_GrantStmt => cmp!(as_grant_stmt),
+        NodeTag::T_TruncateStmt => cmp!(as_truncate_stmt),
+        NodeTag::T_VacuumStmt => cmp!(as_vacuum_stmt),
+        NodeTag::T_VacuumRelation => cmp!(as_vacuum_relation),
+        NodeTag::T_RuleStmt => a
+            .as_variant::<RuleStmt>()
+            .unwrap()
+            .node_equal(b.as_variant::<RuleStmt>().unwrap()),
+        NodeTag::T_DeclareCursorStmt => cmp!(as_declare_cursor_stmt),
+        NodeTag::T_ViewStmt => a
+            .as_variant::<ViewStmt>()
+            .unwrap()
+            .node_equal(b.as_variant::<ViewStmt>().unwrap()),
+        NodeTag::T_NotifyStmt => cmp!(as_notify_stmt),
+        NodeTag::T_AccessPriv => cmp!(as_access_priv),
+        NodeTag::T_RoleSpec => cmp!(as_role_spec),
+        NodeTag::T_TableLikeClause => a
+            .as_variant::<TableLikeClause>()
+            .unwrap()
+            .node_equal(b.as_variant::<TableLikeClause>().unwrap()),
+        NodeTag::T_PartitionSpec => a
+            .as_variant::<PartitionSpec>()
+            .unwrap()
+            .node_equal(b.as_variant::<PartitionSpec>().unwrap()),
+        NodeTag::T_PartitionBoundSpec => a
+            .as_variant::<PartitionBoundSpec>()
+            .unwrap()
+            .node_equal(b.as_variant::<PartitionBoundSpec>().unwrap()),
+        NodeTag::T_PartitionElem => a
+            .as_variant::<PartitionElem>()
+            .unwrap()
+            .node_equal(b.as_variant::<PartitionElem>().unwrap()),
+        NodeTag::T_PartitionRangeDatum => a
+            .as_variant::<PartitionRangeDatum>()
+            .unwrap()
+            .node_equal(b.as_variant::<PartitionRangeDatum>().unwrap()),
         NodeTag::T_JsonOutput => cmp!(as_json_output),
         NodeTag::T_JsonArgument => cmp!(as_json_argument),
         NodeTag::T_JsonFuncExpr => cmp!(as_json_func_expr),
@@ -1776,6 +1835,235 @@ impl NodeEqual for CreateTableAsStmt<'_> {
             && self.objtype == b.objtype
             && self.is_select_into == b.is_select_into
             && self.if_not_exists == b.if_not_exists
+    }
+}
+
+impl NodeEqual for CreateStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        eq_ref(self.relation, b.relation)
+            && self.tableElts.node_equal(&b.tableElts)
+            && self.inhRelations.node_equal(&b.inhRelations)
+            && equal_opt(self.partbound, b.partbound)
+            && equal_opt(self.partspec, b.partspec)
+            && equal_opt(self.ofTypename, b.ofTypename)
+            && self.constraints.node_equal(&b.constraints)
+            && self.nnconstraints.node_equal(&b.nnconstraints)
+            && self.options.node_equal(&b.options)
+            && self.oncommit == b.oncommit
+            && self.tablespacename == b.tablespacename
+            && self.accessMethod == b.accessMethod
+            && self.if_not_exists == b.if_not_exists
+    }
+}
+
+impl NodeEqual for IndexStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.idxname == b.idxname
+            && eq_ref(self.relation, b.relation)
+            && self.accessMethod == b.accessMethod
+            && self.tableSpace == b.tableSpace
+            && self.indexParams.node_equal(&b.indexParams)
+            && self.indexIncludingParams.node_equal(&b.indexIncludingParams)
+            && self.options.node_equal(&b.options)
+            && equal_opt(self.whereClause, b.whereClause)
+            && self.excludeOpNames.node_equal(&b.excludeOpNames)
+            && self.idxcomment == b.idxcomment
+            && self.indexOid == b.indexOid
+            && self.oldNumber == b.oldNumber
+            && self.oldCreateSubid == b.oldCreateSubid
+            && self.oldFirstRelfilelocatorSubid == b.oldFirstRelfilelocatorSubid
+            && self.unique == b.unique
+            && self.nulls_not_distinct == b.nulls_not_distinct
+            && self.primary == b.primary
+            && self.isconstraint == b.isconstraint
+            && self.iswithoutoverlaps == b.iswithoutoverlaps
+            && self.deferrable == b.deferrable
+            && self.initdeferred == b.initdeferred
+            && self.transformed == b.transformed
+            && self.concurrent == b.concurrent
+            && self.if_not_exists == b.if_not_exists
+            && self.reset_default_tblspc == b.reset_default_tblspc
+    }
+}
+
+impl NodeEqual for CallStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        eq_ref(self.funccall, b.funccall)
+            && eq_ref(self.funcexpr, b.funcexpr)
+            && self.outargs.node_equal(&b.outargs)
+    }
+}
+
+impl NodeEqual for AlterTableStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        eq_ref(self.relation, b.relation)
+            && self.cmds.node_equal(&b.cmds)
+            && self.objtype == b.objtype
+            && self.missing_ok == b.missing_ok
+    }
+}
+
+impl NodeEqual for AlterTableCmd<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.subtype == b.subtype
+            && self.name == b.name
+            && self.num == b.num
+            && equal_opt(self.newowner, b.newowner)
+            && equal_opt(self.def, b.def)
+            && self.behavior == b.behavior
+            && self.missing_ok == b.missing_ok
+            && self.recurse == b.recurse
+    }
+}
+
+impl NodeEqual for CopyStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.relation, b.relation)
+            && equal_opt(self.query, b.query)
+            && self.attlist.node_equal(&b.attlist)
+            && self.is_from == b.is_from
+            && self.is_program == b.is_program
+            && self.filename == b.filename
+            && self.options.node_equal(&b.options)
+            && equal_opt(self.whereClause, b.whereClause)
+    }
+}
+
+impl NodeEqual for DropStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.objects.node_equal(&b.objects)
+            && self.removeType == b.removeType
+            && self.behavior == b.behavior
+            && self.missing_ok == b.missing_ok
+            && self.concurrent == b.concurrent
+    }
+}
+
+impl NodeEqual for GrantStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.is_grant == b.is_grant
+            && self.targtype == b.targtype
+            && self.objtype == b.objtype
+            && self.objects.node_equal(&b.objects)
+            && self.privileges.node_equal(&b.privileges)
+            && self.grantees.node_equal(&b.grantees)
+            && self.grant_option == b.grant_option
+            && eq_ref(self.grantor, b.grantor)
+            && self.behavior == b.behavior
+    }
+}
+
+impl NodeEqual for TruncateStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.relations.node_equal(&b.relations)
+            && self.restart_seqs == b.restart_seqs
+            && self.behavior == b.behavior
+    }
+}
+
+impl NodeEqual for VacuumStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.options.node_equal(&b.options)
+            && self.rels.node_equal(&b.rels)
+            && self.is_vacuumcmd == b.is_vacuumcmd
+    }
+}
+
+impl NodeEqual for VacuumRelation<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.relation, b.relation)
+            && self.oid == b.oid
+            && self.va_cols.node_equal(&b.va_cols)
+    }
+}
+
+impl NodeEqual for RuleStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        eq_ref(self.relation, b.relation)
+            && self.rulename == b.rulename
+            && equal_opt(self.whereClause, b.whereClause)
+            && self.event == b.event
+            && self.instead == b.instead
+            && self.actions.node_equal(&b.actions)
+            && self.replace == b.replace
+    }
+}
+
+impl NodeEqual for DeclareCursorStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.portalname == b.portalname
+            && self.options == b.options
+            && equal_opt(self.query, b.query)
+    }
+}
+
+impl NodeEqual for ViewStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        eq_ref(self.view, b.view)
+            && self.aliases.node_equal(&b.aliases)
+            && equal_opt(self.query, b.query)
+            && self.replace == b.replace
+            && self.options.node_equal(&b.options)
+            && self.withCheckOption == b.withCheckOption
+    }
+}
+
+impl NodeEqual for NotifyStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.conditionname == b.conditionname && self.payload == b.payload
+    }
+}
+
+impl NodeEqual for AccessPriv<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.priv_name == b.priv_name && self.cols.node_equal(&b.cols)
+    }
+}
+
+impl NodeEqual for RoleSpec<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.roletype == b.roletype && self.rolename == b.rolename
+    }
+}
+
+impl NodeEqual for TableLikeClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        eq_ref(self.relation, b.relation)
+            && self.options == b.options
+            && self.relationOid == b.relationOid
+    }
+}
+
+impl NodeEqual for PartitionSpec<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.strategy == b.strategy && self.partParams.node_equal(&b.partParams)
+    }
+}
+
+impl NodeEqual for PartitionBoundSpec<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.strategy == b.strategy
+            && self.is_default == b.is_default
+            && self.modulus == b.modulus
+            && self.remainder == b.remainder
+            && self.listdatums.node_equal(&b.listdatums)
+            && self.lowerdatums.node_equal(&b.lowerdatums)
+            && self.upperdatums.node_equal(&b.upperdatums)
+    }
+}
+
+impl NodeEqual for PartitionElem<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.name == b.name
+            && equal_opt(self.expr, b.expr)
+            && self.collation.node_equal(&b.collation)
+            && self.opclass.node_equal(&b.opclass)
+    }
+}
+
+impl NodeEqual for PartitionRangeDatum<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.kind == b.kind && equal_opt(self.value, b.value)
     }
 }
 

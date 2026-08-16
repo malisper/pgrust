@@ -1154,7 +1154,7 @@ fn examine_attribute<'mcx>(
     };
 
     // Closed-set typanalyze dispatch (rule 4): std, array 3816, range 3916,
-    // multirange 4242, tsvector 3688; anything else is an unported analyze lane.
+    // multirange 4242, tsvector 3688; other Oids are OidFunctionCall1.
     let ok = match typanalyze {
         #[allow(non_upper_case_globals)] // C-parity name
         InvalidOid => std_typanalyze(&mut stats)?,
@@ -1168,9 +1168,7 @@ fn examine_attribute<'mcx>(
             stats.compute = ComputeStats::Range { is_multirange: true };
             range_typanalyze::setup(&mut stats)?
         }
-        other => {
-            panic!("examine_attribute (analyze.c): custom typanalyze {other}; typanalyze lane")
-        }
+        other => call_custom_typanalyze(mcx, other, &mut stats)?,
     };
     if !ok {
         return Ok(None);
@@ -1242,9 +1240,7 @@ fn examine_expression<'mcx>(
             stats.compute = ComputeStats::Range { is_multirange: true };
             range_typanalyze::setup(&mut stats)?
         }
-        other => {
-            panic!("examine_expression (extended_stats.c): custom typanalyze {other}")
-        }
+        other => call_custom_typanalyze(mcx, other, &mut stats)?,
     };
     if !ok || stats.minrows <= 0 {
         return Ok(None);
@@ -1414,6 +1410,20 @@ fn expr_stats_row<'b>(
         }
     }
     Ok(Some(row))
+}
+
+fn call_custom_typanalyze<'mcx>(
+    mcx: Mcx<'mcx>,
+    typanalyze: Oid,
+    stats: &mut VacAttrStats<'mcx>,
+) -> PgResult<bool> {
+    let mut flinfo = fmgr_seams::fmgr_info::call(typanalyze)?;
+    let mut fcinfo = types_fmgr::LocalFcinfo::<1>::new(InvalidOid);
+    // SAFETY: mcx outlives this stack frame's single fmgr call.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    fcinfo.set_arg(0, Datum::from_usize(stats as *mut VacAttrStats<'mcx> as usize));
+    let d = flinfo.invoke(&mut fcinfo)?;
+    Ok(!fcinfo.isnull && d.as_bool())
 }
 
 fn std_typanalyze(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {

@@ -2861,3 +2861,65 @@ fn equal_range_subselect_matches_c_field_rules() {
         mk_range_subselect(mcx, |r| r.subquery = Some(mk_var_at(mcx, 1, 1, 0)))
     ));
 }
+
+fn mk_create_stmt<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::CreateStmt<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::CreateStmt::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+fn mk_index_stmt<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::rawnodes::IndexStmt<'m>),
+) -> Node<'m> {
+    let mut n = crate::rawnodes::IndexStmt::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+fn mk_notify_stmt<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::parsenodes::NotifyStmt<'m>),
+) -> Node<'m> {
+    let mut n = crate::parsenodes::NotifyStmt::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+fn mk_drop_stmt<'m>(
+    mcx: mcx::Mcx<'m>,
+    f: impl FnOnce(&mut crate::parsenodes::DropStmt<'m>),
+) -> Node<'m> {
+    let mut n = crate::parsenodes::DropStmt::default();
+    f(&mut n);
+    Node::mk(mcx, n).unwrap()
+}
+
+#[test]
+fn equal_utility_ddl_stmts_match_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    assert!(crate::equal(mk_create_stmt(mcx, |_| {}), mk_create_stmt(mcx, |_| {})));
+    assert!(!crate::equal(
+        mk_create_stmt(mcx, |_| {}),
+        mk_create_stmt(mcx, |s| s.if_not_exists = true)
+    ));
+    assert!(crate::equal(mk_index_stmt(mcx, |_| {}), mk_index_stmt(mcx, |_| {})));
+    assert!(!crate::equal(
+        mk_index_stmt(mcx, |_| {}),
+        mk_index_stmt(mcx, |s| s.unique = true)
+    ));
+    assert!(crate::equal(mk_notify_stmt(mcx, |_| {}), mk_notify_stmt(mcx, |_| {})));
+    assert!(!crate::equal(
+        mk_notify_stmt(mcx, |_| {}),
+        mk_notify_stmt(mcx, |s| s.conditionname = Some("ch"))
+    ));
+    assert!(crate::equal(mk_drop_stmt(mcx, |_| {}), mk_drop_stmt(mcx, |_| {})));
+    assert!(!crate::equal(
+        mk_drop_stmt(mcx, |_| {}),
+        mk_drop_stmt(mcx, |s| s.missing_ok = true)
+    ));
+}
