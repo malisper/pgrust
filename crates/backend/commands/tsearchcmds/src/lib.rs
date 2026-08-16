@@ -148,26 +148,48 @@ fn get_ts_object_oid(cache_id: i32, noun: &str, names: &[&str], missing_ok: bool
             )?;
         }
     } else {
-        let mut path = [InvalidOid; 64];
-        let n = catalog_namespace::fetch_search_path_array(&mut path)?;
-        for &nsp in &path[..n] {
-            found = cache_syscache::GetSysCacheOid(
-                cache_id,
-                1,
-                SysCacheKey::Str(objname),
-                SysCacheKey::Value(Datum::from_oid(nsp)),
-                SysCacheKey::UNUSED,
-                SysCacheKey::UNUSED,
-            )?;
-            if found != InvalidOid {
-                break;
-            }
-        }
+        found = lookup_ts_object_in_search_path(cache_id, objname)?;
     }
     if found == InvalidOid && !missing_ok {
         return Err(undefined_ts_object(noun, &names.join(".")));
     }
     Ok(found)
+}
+
+fn ts_name_lookup(cache_id: i32, objname: &str, namespace_id: Oid) -> PgResult<Oid> {
+    cache_syscache::GetSysCacheOid(
+        cache_id,
+        1,
+        SysCacheKey::Str(objname),
+        SysCacheKey::Value(Datum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+fn first_ts_object_on_path(cache_id: i32, objname: &str, path: &[Oid]) -> PgResult<Oid> {
+    for &nsp in path {
+        let oid = ts_name_lookup(cache_id, objname, nsp)?;
+        if oid != InvalidOid {
+            return Ok(oid);
+        }
+    }
+    Ok(InvalidOid)
+}
+
+fn lookup_ts_object_in_search_path(cache_id: i32, objname: &str) -> PgResult<Oid> {
+    let mut path = [InvalidOid; 64];
+    let n = catalog_namespace::fetch_search_path_array(&mut path)?;
+    if n <= path.len() {
+        return first_ts_object_on_path(cache_id, objname, &path[..n]);
+    }
+    let mut rest = [InvalidOid; 1024];
+    let n = catalog_namespace::fetch_search_path_array(&mut rest)?;
+    first_ts_object_on_path(cache_id, objname, search_path_view(&rest, n))
+}
+
+fn search_path_view(buf: &[Oid], reported: usize) -> &[Oid] {
+    &buf[..reported.min(buf.len())]
 }
 
 pub fn get_ts_dict_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {

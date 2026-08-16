@@ -149,3 +149,10 @@ fn defgetqualifiedname_non_name_is_42601() {
     assert_eq!(e.message(), "argument of parser must be a name");
     assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
 }
+
+#[test]
+fn search_path_view_survives_count_past_slot() {
+    let buf = [types_core::InvalidOid; 64];
+    let view = crate::search_path_view(&buf, 65);
+    assert_eq!(view.len(), 64);
+}
