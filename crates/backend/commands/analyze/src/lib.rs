@@ -2038,6 +2038,18 @@ pub(crate) fn varlena_stored_size(d: Datum) -> usize {
     unsafe { types_tuple::varatt::varsize_any(d.as_usize() as *const u8) }
 }
 
+fn cstring_stored_size(d: Datum) -> f64 {
+    let p = d.as_usize() as *const u8;
+    let mut n = 0usize;
+    // SAFETY: cstring datum is a NUL-terminated byte string (typlen == -2).
+    unsafe {
+        while *p.add(n) != 0 {
+            n += 1;
+        }
+    }
+    (n + 1) as f64
+}
+
 fn varlena_image<'a>(d: Datum) -> &'a [u8] {
     let p = d.as_usize() as *const u8;
     // SAFETY: non-null varlena datum readable through its header.
@@ -2083,7 +2095,7 @@ fn compute_trivial_stats(
         if is_varlena {
             total_width += varlena_stored_size(value) as f64;
         } else if is_varwidth {
-            panic!("compute_trivial_stats (analyze.c): cstring-width type lane");
+            total_width += cstring_stored_size(value);
         }
     }
     if nonnull_cnt > 0 {
@@ -2193,7 +2205,7 @@ fn compute_distinct_stats<'mcx>(
                 value = detoast_sample_value(col_mcx, raw)?;
             }
         } else if is_varwidth {
-            panic!("compute_distinct_stats (analyze.c): cstring-width type lane");
+            total_width += cstring_stored_size(value);
         }
         distinct_track_update(&mut track, track_max, value, &mut datum_eq);
     }
@@ -2367,7 +2379,7 @@ fn compute_scalar_stats<'mcx>(
                 value = detoast_sample_value(col_mcx, raw)?;
             }
         } else if is_varwidth {
-            panic!("compute_scalar_stats (analyze.c): cstring-width type lane");
+            total_width += cstring_stored_size(value);
         }
         let tupno = values.len() as i32;
         values.push((value, tupno));
