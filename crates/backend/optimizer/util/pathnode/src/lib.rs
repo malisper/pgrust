@@ -594,9 +594,31 @@ pub fn reparameterize_path<'mcx>(
     Ok(None)
 }
 
+// CHECK_FOR_INTERRUPTS (pathnode.c:471-475): "no part of the planner goes
+// very long without calling add_path()" — the planner's cancel point; without
+// it large join problems and GEQO plan uninterruptibly.  add_path keeps C's
+// infallible shape, so a pending cancel unwinds as a structured PgError
+// (panic_any, recovered by pg_error_from_panic — the promoted_array_type
+// precedent from nodes_core).
+#[cold]
+#[inline(never)]
+fn process_interrupts() {
+    if let Err(e) = postgres_seams::check_for_interrupts::call() {
+        std::panic::panic_any(e);
+    }
+}
+
+#[inline(always)]
+fn check_for_interrupts() {
+    if init_small::globals::InterruptPending() {
+        process_interrupts();
+    }
+}
+
 // add_path (pathnode.c).
 pub fn add_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId, new_id: PathId) -> PathId {
     use types_pathnodes::relids::{relids_subset_compare, SubsetCmp};
+    check_for_interrupts();
     let mut accept_new = true;
     let mut insert_at = 0usize;
 
@@ -1198,6 +1220,9 @@ pub fn create_seqscan_path<'mcx>(
 // never parameterized, row counts all agree, and startup cost is irrelevant
 // (parallel plans always run to completion).
 pub fn add_partial_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId, new_id: PathId) {
+    // "Check for query cancel." (pathnode.c:805) — same cancel point as
+    // add_path for the partial-path arm.
+    check_for_interrupts();
     let mut accept_new = true;
     let mut insert_at = 0usize;
 

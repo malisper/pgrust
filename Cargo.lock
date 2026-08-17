@@ -11661,6 +11661,7 @@ dependencies = [
  "mcx",
  "nodehash",
  "planner_seams",
+ "postgres_seams",
  "types_error",
  "types_nodes",
  "types_pathnodes",

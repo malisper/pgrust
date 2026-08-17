@@ -18,4 +18,5 @@ planner_seams = { path = "../../plan/planner_seams" }
 clauses = { path = "../clauses" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 init_small = { path = "../../../utils/init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 nodehash = { path = "../../../executor/nodehash" }
