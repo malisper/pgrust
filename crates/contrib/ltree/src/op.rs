@@ -365,6 +365,21 @@ fn check_level(curq: &LqlView, t_name: &[u8]) -> bool {
     !success
 }
 
+// C CHECK_FOR_INTERRUPTS (heapam's gated-helper shape), unboxed to match
+// check_cond's Result<_, PgError> error type.
+#[inline(never)]
+fn process_interrupts() -> Result<(), PgError> {
+    postgres_seams::check_for_interrupts::call().map_err(|e| *e)
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> Result<(), PgError> {
+    if init_small::globals::InterruptPending() {
+        return process_interrupts();
+    }
+    Ok(())
+}
+
 fn check_cond(
     levels: &[LqlView],
     qi: usize,
@@ -375,11 +390,13 @@ fn check_cond(
 ) -> Result<bool, PgError> {
     // C lquery_op.c checkCond(): "Since this function recurses, it could be
     // driven to stack overflow" -> check_stack_depth(), plus
-    // CHECK_FOR_INTERRUPTS() for "pathological patterns could take awhile".
+    // CHECK_FOR_INTERRUPTS() for "pathological patterns could take awhile"
+    // (lquery_op.c:204-209).
     // The guard must be BYTE-based like C's: a frame-count cap cannot bound
     // stack bytes and at real frame sizes a 100_000-frame cap is unreachable
     // behind any backend stack, i.e. dead code.
     stack_depth::check_stack_depth()?;
+    check_for_interrupts()?;
     let mut qi = qi;
     let mut qlen = qlen;
     let mut ti = ti;

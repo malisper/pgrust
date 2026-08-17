@@ -29,6 +29,8 @@ stack_depth = { path = "../../backend/utils/misc/stack_depth" }
 hashfn = { path = "../../common/hashfn" }
 pqformat = { path = "../../backend/libpq/pqformat" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+init_small = { path = "../../backend/utils/init/init_small" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 
 [dev-dependencies]
 stringinfo = { path = "../../_support/types/stringinfo" }
