@@ -584,6 +584,13 @@ pub fn DefineIndex<'mcx>(
         ));
     }
 
+    if rel.is_other_temp() {
+        return Err(err(
+            "cannot create indexes on temporary tables of other sessions".into(),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+
     if check_not_in_use {
         catalog_heap::CheckTableNotInUse(&rel, "CREATE INDEX")?;
     }
