@@ -747,11 +747,15 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             let eff = new.unwrap_or(node);
             if all_arguments_const(eff)? {
                 let mm = eff.as_min_max_expr().unwrap();
+                // C ece_evaluate_expr passes exprTypmod(node): GREATEST/LEAST
+                // args agreeing on typmod keep it on the folded Const, so the
+                // executed RowDescription matches C (fmod 655366, not -1, for
+                // greatest('1.23'::numeric(10,2), '1.24'::numeric(10,2))).
                 return clauses_seams::evaluate_expr::call(
                     cx.mcx,
                     eff,
                     mm.minmaxtype,
-                    -1,
+                    nodes_core::node_funcs::expr_typmod(eff),
                     mm.minmaxcollid,
                 )
                 .map(Some);

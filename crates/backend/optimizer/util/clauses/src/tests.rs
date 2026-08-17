@@ -816,6 +816,86 @@ fn eval_const_minmax_all_const_defers_to_evaluate_expr_seam() {
     let _ = eval_const_expressions(mcx, e);
 }
 
+#[test]
+fn eval_const_minmax_folds_with_agreed_typmod() {
+    // C ece_evaluate_expr hands evaluate_expr exprTypmod(node): all-const
+    // GREATEST over numeric(10,2) folds with typmod 655366, not -1
+    // (wire-metadata workflow finding minmax-constfold-typmod).
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<(u32, i32)>> = Mutex::new(Vec::new());
+    // record the (type, typmod) the fold hands over, then panic with the
+    // uninstalled-seam message so the sibling `defers_to_..._seam`
+    // should-panic tests keep passing (seam slots are process-global).
+    clauses_seams::evaluate_expr::set(|_mcx, _expr, ty, tm, _coll| {
+        SEEN.lock().unwrap().push((ty, tm));
+        panic!("seam not installed: clauses_seams::evaluate_expr (recording test stub)");
+    });
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    const NUMERICOID: u32 = 1700;
+    let num_const = |tm: i32| {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::Const {
+                consttype: NUMERICOID,
+                consttypmod: tm,
+                constcollid: 0,
+                constlen: -1,
+                constvalue: datum::Datum::from_i32(0),
+                constisnull: true,
+                constbyval: false,
+                location: -1,
+            },
+        )
+        .unwrap()
+    };
+    // numeric(10,2) both args -> agreed typmod 655366 reaches the seam
+    let agree = minmax(mcx, false, &[num_const(655366), num_const(655366)]);
+    let agree = {
+        let mm = agree.as_min_max_expr().unwrap();
+        // the shared helper hardcodes int4; rebuild with numeric result type
+        use types_nodes::primnodes::{MinMaxExpr, MinMaxOp};
+        Node::mk(
+            mcx,
+            MinMaxExpr {
+                minmaxtype: NUMERICOID,
+                minmaxcollid: 0,
+                inputcollid: 0,
+                op: MinMaxOp::IS_GREATEST,
+                args: mm.args.clone_in(mcx).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = eval_const_expressions(mcx, agree);
+    }));
+    assert!(SEEN.lock().unwrap().contains(&(NUMERICOID, 655366)));
+    // disagreeing typmods -> C exprTypmod says -1
+    let disagree = minmax(mcx, false, &[num_const(655366), num_const(786440)]);
+    let disagree = {
+        let mm = disagree.as_min_max_expr().unwrap();
+        use types_nodes::primnodes::{MinMaxExpr, MinMaxOp};
+        Node::mk(
+            mcx,
+            MinMaxExpr {
+                minmaxtype: NUMERICOID,
+                minmaxcollid: 0,
+                inputcollid: 0,
+                op: MinMaxOp::IS_GREATEST,
+                args: mm.args.clone_in(mcx).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = eval_const_expressions(mcx, disagree);
+    }));
+    assert!(SEEN.lock().unwrap().contains(&(NUMERICOID, -1)));
+}
+
 fn saop<'mcx>(
     mcx: Mcx<'mcx>,
     opno: u32,
