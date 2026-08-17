@@ -16411,6 +16411,7 @@ dependencies = [
  "pg_depend",
  "rel_vocab",
  "relation",
+ "resowner_seams",
  "sequence_seams",
  "sequence_xlog",
  "smgr",

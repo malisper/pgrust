@@ -207,12 +207,23 @@ fn sequence_open<'mcx>(mcx: Mcx<'mcx>, relid: Oid, lockmode: i32) -> PgResult<Re
     Ok(r)
 }
 
-// C holds the lock under TopTransactionResourceOwner; locks here are
-// transaction-scoped already, so only the once-per-lxid memo is ported.
+// C sequence.c:1084-1107: the lock is acquired with CurrentResourceOwner
+// swapped to TopTransactionResourceOwner, so a subtransaction abort does NOT
+// release it (resowner lock release is per-owner) — which is what makes the
+// once-per-top-lxid memo sound. Without the swap, ROLLBACK TO SAVEPOINT
+// released a lock the memo still claimed (I2-1: nextval after a rolled-back
+// savepoint opened the sequence unlocked).
 fn lock_and_open_sequence<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Relation<'mcx>> {
     let thislxid = my_lxid();
     if with_elm(relid, |e| e.lxid) != thislxid {
-        lmgr::LockRelationOid(relid, RowExclusiveLock)?;
+        let save_owner = resowner_seams::current_resource_owner::call();
+        resowner_seams::set_current_resource_owner::call(
+            resowner_seams::top_transaction_resource_owner::call(),
+        );
+        let res = lmgr::LockRelationOid(relid, RowExclusiveLock);
+        resowner_seams::set_current_resource_owner::call(save_owner);
+        res?;
+        // Flag that we have a lock in the current xact
         with_elm(relid, |e| e.lxid = thislxid);
     }
     sequence_open(mcx, relid, NoLock)
