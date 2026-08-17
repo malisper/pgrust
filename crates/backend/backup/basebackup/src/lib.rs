@@ -27,7 +27,7 @@ use types_core::{Oid, TimeLineID, XLogRecPtr};
 use types_error::{
     ErrorLocation, PgResult,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-    ERRCODE_SYNTAX_ERROR, ERROR, WARNING,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERROR, WARNING,
 };
 
 use manifest::checksum::{
@@ -158,12 +158,17 @@ fn read_link(path: &str) -> PgResult<String> {
     // As in C's sendDir: a target that fills the whole buffer may have been
     // truncated -- error out rather than emit a truncated link target.
     if n as usize >= buf.len() {
-        ereport(ERROR)
-            .errmsg(format!("symbolic link \"{path}\" target is too long"))
-            .finish(loc("read_link"))?;
-        unreachable!()
+        return readlink_target_too_long(path);
     }
     Ok(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+fn readlink_target_too_long(path: &str) -> PgResult<String> {
+    ereport(ERROR)
+        .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .errmsg(format!("symbolic link \"{path}\" target is too long"))
+        .finish(loc("read_link"))?;
+    unreachable!()
 }
 
 fn read_dir_names(path: &str) -> PgResult<Vec<String>> {
@@ -1855,23 +1860,35 @@ fn _tarWriteHeader(
     );
     match rc {
         TarError::Ok => {}
-        TarError::NameTooLong => {
-            return ereport(ERROR)
-                .errmsg(format!("file name too long for tar format: \"{filename}\""))
-                .finish(loc("_tarWriteHeader")).map(|()| 0);
-        }
-        TarError::SymlinkTooLong => {
-            return ereport(ERROR)
-                .errmsg(format!(
-                    "symbolic link target too long for tar format: file name \"{}\", target \"{}\"",
-                    filename, linktarget.unwrap_or("")
-                ))
-                .finish(loc("_tarWriteHeader")).map(|()| 0);
+        TarError::NameTooLong | TarError::SymlinkTooLong => {
+            return tar_header_limit_error(rc, filename, linktarget).map(|()| 0);
         }
     }
     sink.buffer_slice_mut(TAR_BLOCK_SIZE).copy_from_slice(&header);
     bbsink_archive_contents(sink, state, TAR_BLOCK_SIZE)?;
     Ok(TAR_BLOCK_SIZE as i64)
+}
+
+fn tar_header_limit_error(
+    rc: TarError,
+    filename: &str,
+    linktarget: Option<&str>,
+) -> PgResult<()> {
+    match rc {
+        TarError::NameTooLong => ereport(ERROR)
+            .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .errmsg(format!("file name too long for tar format: \"{filename}\""))
+            .finish(loc("_tarWriteHeader")),
+        TarError::SymlinkTooLong => ereport(ERROR)
+            .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .errmsg(format!(
+                "symbolic link target too long for tar format: file name \"{}\", target \"{}\"",
+                filename,
+                linktarget.unwrap_or("")
+            ))
+            .finish(loc("_tarWriteHeader")),
+        TarError::Ok => Ok(()),
+    }
 }
 
 fn _tarWritePadding(sink: &mut Bbsink<'_>, state: &mut BbsinkState, len: usize) -> PgResult<()> {
@@ -2143,5 +2160,43 @@ mod incremental_gate_tests {
         let parsed = parse_basebackup_options(&incr_opt());
         guc_tables::vars::summarize_wal.write(false);
         assert!(parsed.unwrap().incremental);
+    }
+}
+
+#[cfg(test)]
+mod tar_limit_sqlstate_tests {
+    use super::*;
+
+    #[test]
+    fn tar_name_too_long_is_54000() {
+        let name = "a".repeat(100);
+        let (rc, _) = tar_create_header(&name, None, 0, 0o644, 0, 0, 0);
+        let err = tar_header_limit_error(rc, &name, None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(
+            err.message(),
+            format!("file name too long for tar format: \"{name}\"")
+        );
+    }
+
+    #[test]
+    fn tar_symlink_target_too_long_is_54000() {
+        let target = "b".repeat(100);
+        let (rc, _) = tar_create_header("link", Some(&target), 0, 0o644, 0, 0, 0);
+        let err = tar_header_limit_error(rc, "link", Some(&target)).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(
+            err.message(),
+            format!(
+                "symbolic link target too long for tar format: file name \"link\", target \"{target}\""
+            )
+        );
+    }
+
+    #[test]
+    fn readlink_target_too_long_is_54000() {
+        let err = readlink_target_too_long("./pg_tblspc").unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(err.message(), "symbolic link \"./pg_tblspc\" target is too long");
     }
 }
