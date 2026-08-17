@@ -82,6 +82,12 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
         ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction),
         "backward drive below the forward-only run seam (deletion-prep B1)"
     );
+    // nodeMaterial.c:49: CFI per call — covers the tuplestore REPLAY arm
+    // (nestloop-inner rescan replays the full store with no child fetch,
+    // so child-node CFIs never fire on that path).
+    if init_small::globals::InterruptPending() {
+        postgres_seams::check_for_interrupts::call()?;
+    }
     if node.tuplestorestate.is_none() && node.eflags != 0 {
         let mut ts = Tuplestore::begin_heap(true, false, init_small::globals::work_mem());
         ts.set_eflags(node.eflags);

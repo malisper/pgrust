@@ -134,6 +134,9 @@ pub fn BufFileOpenFileSet<'mcx>(
             break;
         }
         files.push(f);
+        // buffile.c:321: cancel point per 1GB segment (TB-scale spill sets
+        // mean thousands of opens); crate idiom per copydir.rs.
+        postgres_seams::check_for_interrupts::call()?;
     }
     if files.is_empty() {
         ereport(ERROR)
@@ -196,6 +199,8 @@ pub fn BufFileDeleteFileSet(
         }
         found = true;
         segment += 1;
+        // buffile.c:383: cancel point per unlinked segment.
+        postgres_seams::check_for_interrupts::call()?;
     }
     if !found && !missing_ok {
         ereport(ERROR)

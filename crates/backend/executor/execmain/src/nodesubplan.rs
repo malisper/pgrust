@@ -1429,6 +1429,10 @@ fn find_partial_match<'mcx>(
     lhs_slot: ExecSlotId,
     main_table: bool,
 ) -> PgResult<bool> {
+    // nodeSubplan.c:71 (ExecSubPlan's CFI): this full-hashtable scan runs
+    // once per outer row; without a cancel point here the only CFI is the
+    // outer scan's per-page one.
+    crate::cfi()?;
     let mcx = estate.es_query_cxt;
     let ncols = h.key_col_idx.len();
     let ht = if main_table {

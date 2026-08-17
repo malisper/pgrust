@@ -56,3 +56,4 @@ dbcommands = { path = "../dbcommands" }
 publicationcmds_seams = { path = "../publicationcmds_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+postgres_seams = { path = "../../tcop/postgres_seams" }

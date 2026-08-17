@@ -43,6 +43,8 @@ lmgr = { path = "../../storage/lmgr/lmgr" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
 execscan = { path = "../execscan" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
+init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 
 [dev-dependencies]
 transam_seams = { path = "../../access/transam/transam_seams" }

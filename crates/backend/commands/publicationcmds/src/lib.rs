@@ -326,6 +326,22 @@ fn conflicting_collist(relname: &str) -> Box<PgError> {
     )
 }
 
+// CHECK_FOR_INTERRUPTS (miscadmin.h), the heapam pattern: cheap pending
+// check inline, the ereport-raising slow path out of line.
+#[cold]
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return process_interrupts();
+    }
+    Ok(())
+}
+
 fn OpenTableList<'mcx>(
     mcx: Mcx<'mcx>,
     tables: &[&'mcx PublicationTable<'mcx>],
@@ -336,6 +352,9 @@ fn OpenTableList<'mcx>(
     let mut relids_with_collist: Vec<Oid> = Vec::new();
 
     for t in tables {
+        // publicationcmds.c:1681: "Allow query cancel in case this takes a
+        // long time"
+        check_for_interrupts()?;
         let prv = t.relation.expect("PublicationTable.relation");
         let recurse = prv.inh;
         let rv = to_rel_vocab_rv(prv);
@@ -371,6 +390,8 @@ fn OpenTableList<'mcx>(
         if recurse && relkind != RELKIND_PARTITIONED_TABLE {
             let children = pg_inherits::find_all_inheritors(mcx, myrelid, ShareUpdateExclusiveLock)?;
             for &childrelid in children.iter() {
+                // publicationcmds.c:1745: same cancel point per partition child
+                check_for_interrupts()?;
                 if relids.contains(&childrelid) {
                     if childrelid != myrelid
                         && (t.whereClause.is_some() || relids_with_rf.contains(&childrelid))
@@ -412,6 +433,9 @@ fn CloseTableList(rels: Vec<PubRelOpen<'_>>) -> PgResult<()> {
 
 fn LockSchemaList(schemalist: &[Oid]) -> PgResult<()> {
     for &schemaid in schemalist {
+        // publicationcmds.c:1840: "Allow query cancel in case this takes a
+        // long time"
+        check_for_interrupts()?;
         lmgr::LockDatabaseObject(NAMESPACE_RELATION_ID, schemaid, 0, AccessShareLock)?;
         if !SearchSysCacheExists(
             NAMESPACEOID,

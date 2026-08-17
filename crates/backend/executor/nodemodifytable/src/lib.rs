@@ -346,6 +346,22 @@ struct WcoExpr<'mcx> {
     state: PgBox<'mcx, ExprState<'mcx>>,
 }
 
+// CHECK_FOR_INTERRUPTS (miscadmin.h), the heapam pattern: cheap pending
+// check inline, the ereport-raising slow path out of line.
+#[cold]
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return process_interrupts();
+    }
+    Ok(())
+}
+
 /// `ExecInitModifyTable` (nodeModifyTable.c); the caller inits the subplan
 /// and, when RETURNING is present, passes the result descriptor built from
 /// the node's targetlist (C's ExecInitResultTupleSlotTL).
@@ -6480,6 +6496,10 @@ fn exec_insert<'mcx>(
         let existing_id = resolve_existing_slot(mt, estate, leaf_idx);
         // vlock:
         loop {
+            // nodeModifyTable.c:1135 (`vlock:`): "Better allow interrupts in
+            // case some bug makes this an infinite loop" — the retry can spin
+            // under sustained speculative conflicts.
+            check_for_interrupts()?;
             let mut conflict_tid = ItemPointerData::default();
             ItemPointerSetInvalid(&mut conflict_tid);
 

@@ -196,6 +196,22 @@ pub fn fc_pg_size_pretty_numeric(
     text_result(fcinfo, &result)
 }
 
+// CHECK_FOR_INTERRUPTS (miscadmin.h), the heapam pattern: cheap pending
+// check inline, the ereport-raising slow path out of line.
+#[cold]
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return process_interrupts();
+    }
+    Ok(())
+}
+
 // db_dir_size (dbsize.c): physical size of directory contents, 0 if absent.
 // Paths are DataDir-relative (the backend chdir's to PGDATA, per C).
 fn db_dir_size(path: &str) -> PgResult<i64> {
@@ -204,6 +220,8 @@ fn db_dir_size(path: &str) -> PgResult<i64> {
     };
     let mut dirsize: i64 = 0;
     for entry in entries {
+        // dbsize.c:86-90: cancel point per directory entry
+        check_for_interrupts()?;
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -252,6 +270,8 @@ fn calculate_database_size(db_oid: Oid) -> PgResult<i64> {
         }
     };
     for entry in tblspc.flatten() {
+        // dbsize.c:149-151: cancel point per tablespace
+        check_for_interrupts()?;
         totalsize += db_dir_size(&format!(
             "pg_tblspc/{}/{}/{db_oid}",
             entry.file_name().to_string_lossy(),
@@ -341,6 +361,8 @@ fn calculate_tablespace_size(mcx: ::mcx::Mcx<'_>, tblspc_oid: Oid) -> PgResult<i
     };
     let mut totalsize = 0i64;
     for entry in entries {
+        // dbsize.c:247-251: cancel point per directory entry
+        check_for_interrupts()?;
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
