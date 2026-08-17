@@ -61,6 +61,13 @@ fn install_seams() {
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         fmgr_core::init_seams();
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
+        syscache_seams::lookup_pg_proc_secdef::set(|_fnoid| {
+            Ok(Some(syscache_seams::PgProcSecdefShape {
+                proowner: 10,
+                prosecdef: false,
+                proconfig: None,
+            }))
+        });
         // IsBinaryCoercible backing: varchar -> text is a binary implicit cast.
         syscache_seams::pg_type_base_shape::set(|typid| {
             Ok(matches!(typid, INT4OID | TEXTOID | VARCHAROID).then_some(

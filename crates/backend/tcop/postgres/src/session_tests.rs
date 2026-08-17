@@ -417,6 +417,15 @@ fn install_catalog_fixture() {
     });
     syscache_seams::pg_type_typtype::set(|_| Ok(Some(b'b' as i8)));
     aclchk_seams::object_aclcheck::set(|_, _, _, _| Ok(0));
+    // ExecInitAgg's component-fn ACL checks look up the aggregate owner;
+    // the owner value is inert here since object_aclcheck is stubbed OK.
+    syscache_seams::lookup_pg_proc_secdef::set(|_| {
+        Ok(Some(syscache_seams::PgProcSecdefShape {
+            proowner: 10, // BOOTSTRAP_SUPERUSERID
+            prosecdef: false,
+            proconfig: None,
+        }))
+    });
     syscache_seams::pg_aggregate_agginitval::set(|mcx, aggfnoid| {
         Ok(match aggfnoid {
             2803 => Some(Some(mcx::PgString::from_str_in("0", mcx)?)),

@@ -860,6 +860,39 @@ fn agg_permission_denied(aggfnoid: Oid) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE))
 }
 
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn fn_permission_denied(fnoid: Oid) -> Box<PgError> {
+    let msg = match syscache_seams::pg_proc_proname::call(fnoid) {
+        Ok(Some(name)) => format!(
+            "permission denied for function {}",
+            core::str::from_utf8(name.name_str()).expect("catalog NameData is valid UTF-8")
+        ),
+        _ => format!("permission denied for function {fnoid}"),
+    };
+    Box::new(PgError::error(msg).with_sqlstate(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE))
+}
+
+fn component_fn_aclcheck(fnoid: Oid, agg_owner: Oid) -> PgResult<()> {
+    let aclresult =
+        aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, fnoid, agg_owner, ACL_EXECUTE)?;
+    if aclresult != ACLCHECK_OK {
+        return Err(fn_permission_denied(fnoid));
+    }
+    Ok(())
+}
+
+fn lookup_agg_owner(aggfnoid: Oid) -> PgResult<Oid> {
+    Ok(syscache_seams::lookup_pg_proc_secdef::call(aggfnoid)?
+        .ok_or_else(|| {
+            Box::new(PgError::error(format!(
+                "cache lookup failed for function {aggfnoid}"
+            )))
+        })?
+        .proowner)
+}
+
 fn collect_aggrefs<'mcx>(
     node: Node<'mcx>,
     out: &mut PgVec<'mcx, (Node<'mcx>, &'mcx Aggref<'mcx>)>,
@@ -1236,6 +1269,17 @@ pub fn exec_init_agg<'mcx>(
                 deserialfn_oid = shape.aggdeserialfn;
             }
         }
+        let agg_owner = lookup_agg_owner(aggref.aggfnoid)?;
+        let finalfn_oid = if skip_final { 0 } else { shape.aggfinalfn };
+        if finalfn_oid != 0 {
+            component_fn_aclcheck(finalfn_oid, agg_owner)?;
+        }
+        if serialfn_oid != 0 {
+            component_fn_aclcheck(serialfn_oid, agg_owner)?;
+        }
+        if deserialfn_oid != 0 {
+            component_fn_aclcheck(deserialfn_oid, agg_owner)?;
+        }
         let serialfn = if serialfn_oid != 0 { Some(fmgr_core::fmgr_info(serialfn_oid)?) } else { None };
 
         let num_direct_args = aggref.aggdirectargs.len();
@@ -1244,19 +1288,8 @@ pub fn exec_init_agg<'mcx>(
         } else {
             num_direct_args as u16 + 1
         };
-        let finalfn = if !skip_final && shape.aggfinalfn != 0 {
-            // Divergence: C aclchecks as the aggregate owner; differs only
-            // under SET ROLE.
-            let aclresult = aclchk_seams::object_aclcheck::call(
-                PROCEDURE_RELATION_ID,
-                shape.aggfinalfn,
-                userid,
-                ACL_EXECUTE,
-            )?;
-            if aclresult != ACLCHECK_OK {
-                return Err(agg_permission_denied(shape.aggfinalfn));
-            }
-            let mut flinfo = fmgr_core::fmgr_info(shape.aggfinalfn)?;
+        let finalfn = if finalfn_oid != 0 {
+            let mut flinfo = fmgr_core::fmgr_info(finalfn_oid)?;
             // build_aggregate_finalfn_expr's [transtype, input types..].
             let mut fnexpr_types: PgVec<'mcx, Oid> =
                 vec_with_capacity_in(mcx, num_final_args as usize)?;
@@ -1329,6 +1362,7 @@ pub fn exec_init_agg<'mcx>(
                 trans_shared[transno] = true;
             }
             None => {
+                component_fn_aclcheck(transfn_oid, agg_owner)?;
                 trans_aggref[transno] = Some((aggref_node, aggref));
                 trans_fnoid[transno] = transfn_oid;
                 trans_deserialfn[transno] = deserialfn_oid;

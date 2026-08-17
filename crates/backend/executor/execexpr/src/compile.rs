@@ -2950,6 +2950,24 @@ fn init_scalar_array_op<'mcx>(
         lsyscache::get_opcode(saop.opno)?
     };
 
+    let userid = miscinit_seams::get_user_id::call();
+    let aclresult =
+        aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, opfuncid, userid, ACL_EXECUTE)?;
+    if aclresult != ACLCHECK_OK {
+        return Err(permission_denied(mcx, opfuncid)?);
+    }
+    if saop.hashfuncid != 0 {
+        let aclresult = aclchk_seams::object_aclcheck::call(
+            PROCEDURE_RELATION_ID,
+            saop.hashfuncid,
+            userid,
+            ACL_EXECUTE,
+        )?;
+        if aclresult != ACLCHECK_OK {
+            return Err(permission_denied(mcx, saop.hashfuncid)?);
+        }
+    }
+
     let element_type = lsyscache::get_element_type(expr_type(arrayarg))?;
     assert!(
         element_type != 0,
