@@ -19,6 +19,19 @@ const RELPERSISTENCE_PERMANENT: u8 = b'p';
 const RELPERSISTENCE_UNLOGGED: u8 = b'u';
 const RELPERSISTENCE_TEMP: u8 = b't';
 
+// CHECK_FOR_INTERRUPTS at the top of each collision-retry iteration
+// (catalog.c:475 GetNewOidWithIndex, catalog.c:600 GetNewRelFileNumber):
+// a near-full OID space spins these loops for a long time (the huge-toast-
+// table case), and C keeps them cancellable per probe.  Gated on
+// InterruptPending so the common single-iteration case costs one global load.
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return postgres_seams::check_for_interrupts::call();
+    }
+    Ok(())
+}
+
 fn oid_eq_key(attno: AttrNumber, oid: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno;
@@ -42,6 +55,7 @@ pub fn GetNewOidWithIndex<'mcx>(
     }
     let snapshot = Rc::new(SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_ANY));
     loop {
+        check_for_interrupts()?;
         let new_oid = varsup::GetNewObjectId()?;
         let key = [oid_eq_key(oidcolumn, new_oid)];
         let mut scan =
@@ -78,6 +92,7 @@ pub fn GetNewRelFileNumber<'mcx>(
     };
 
     loop {
+        check_for_interrupts()?;
         let rel_number: RelFileNumber = match pg_class {
             Some(rel) => {
                 GetNewOidWithIndex(mcx, rel, ClassOidIndexId, Anum_pg_class_oid as AttrNumber)?

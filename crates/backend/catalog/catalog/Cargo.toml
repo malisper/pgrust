@@ -24,6 +24,7 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 genam = { path = "../../access/index/genam" }
 varsup = { path = "../../access/transam/varsup" }
 init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 relpath = { path = "../../../common/relpath" }
 
 [dev-dependencies]

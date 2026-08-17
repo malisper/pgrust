@@ -2802,6 +2802,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "namespace_seams",
+ "postgres_seams",
  "relpath",
  "types_core",
  "types_error",
