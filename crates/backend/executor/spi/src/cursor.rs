@@ -160,6 +160,19 @@ pub fn SPI_cursor_open(
             p.queryEnv = crate::current_query_env();
         }
 
+        if portal.borrow().cursorOptions & CURSOR_OPT_SCROLL != 0
+            && stmt_slice.len() == 1
+            && stmt_slice[0].commandType != types_nodes::nodes_enums::CmdType::CMD_UTILITY
+            && !stmt_slice[0].rowMarks.is_nil()
+        {
+            return Err(ereport(types_error::ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("DECLARE SCROLL CURSOR ... FOR UPDATE/SHARE is not supported")
+                .errdetail("Scrollable cursors must be READ ONLY.")
+                .into_error()
+                .into());
+        }
+
         if read_only {
             for stmt in stmt_slice {
                 if !utility::CommandIsReadOnly(stmt) {
