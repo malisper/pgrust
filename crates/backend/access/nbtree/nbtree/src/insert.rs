@@ -843,7 +843,9 @@ fn unique_violation<'mcx>(
         "duplicate key value violates unique constraint \"{}\"",
         rel.name()
     ))
-    .with_sqlstate(ERRCODE_UNIQUE_VIOLATION);
+    .with_sqlstate(ERRCODE_UNIQUE_VIOLATION)
+    // C nbtinsert.c: the ereport lives in _bt_check_unique (wire R field)
+    .with_funcname("_bt_check_unique");
 
     let tupdesc = rel.descr();
     let natts = tupdesc.natts as usize;

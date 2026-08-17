@@ -237,7 +237,7 @@ fn run_subplan<'mcx>(
             | SubLinkType::ROWCOMPARE_SUBLINK
             | SubLinkType::MULTIEXPR_SUBLINK => {
                 if found {
-                    return Err(too_many_rows());
+                    return Err(too_many_rows("ExecSetParamPlan"));
                 }
                 found = true;
                 values.clear();
@@ -308,12 +308,15 @@ fn run_subplan<'mcx>(
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn too_many_rows() -> Box<PgError> {
+fn too_many_rows(funcname: &'static str) -> Box<PgError> {
+    // funcname = the enclosing C fn's __func__ (nodeSubplan.c repeats this
+    // ereport in ExecScanSubPlan and ExecSetParamPlan); wire R field.
     Box::new(
         PgError::error(
             "more than one row returned by a subquery used as an expression".to_string(),
         )
-        .with_sqlstate(ERRCODE_CARDINALITY_VIOLATION),
+        .with_sqlstate(ERRCODE_CARDINALITY_VIOLATION)
+        .with_funcname(funcname),
     )
 }
 
@@ -883,21 +886,21 @@ fn scan_sub_plan_loop<'mcx>(
             }
             SubLinkType::EXPR_SUBLINK => {
                 if found {
-                    return Err(too_many_rows());
+                    return Err(too_many_rows("ExecScanSubPlan"));
                 }
                 found = true;
                 result = store_expr_result(sstate, estate, slot_id)?;
             }
             SubLinkType::MULTIEXPR_SUBLINK => {
                 if found {
-                    return Err(too_many_rows());
+                    return Err(too_many_rows("ExecScanSubPlan"));
                 }
                 found = true;
                 store_multiexpr_params(sstate, estate, slot_id)?;
             }
             SubLinkType::ROWCOMPARE_SUBLINK => {
                 if found {
-                    return Err(too_many_rows());
+                    return Err(too_many_rows("ExecScanSubPlan"));
                 }
                 found = true;
                 load_param_ids(sstate, estate, slot_id);

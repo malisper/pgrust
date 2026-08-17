@@ -8250,6 +8250,8 @@ fn not_null_violation<'mcx>(
          not-null constraint"
     ))
     .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION)
+    // C execMain.c: the ereport lives in ReportNotNullViolationError (wire R)
+    .with_funcname("ReportNotNullViolationError")
     .with_schema_name(schema_name_of(mcx, rel))
     .with_table_name(table);
     if let Ok(Some(desc)) = root_slot_value_description(mcx, rel, slot, root_rel, modified_cols) {
@@ -8300,6 +8302,8 @@ fn check_violation<'mcx>(
         "new row for relation \"{table}\" violates check constraint \"{ccname}\""
     ))
     .with_sqlstate(ERRCODE_CHECK_VIOLATION)
+    // C execMain.c: the check-constraint ereport lives in ExecConstraints
+    .with_funcname("ExecConstraints")
     .with_schema_name(schema_name_of(mcx, rel))
     .with_table_name(table)
     .with_constraint_name(ccname);

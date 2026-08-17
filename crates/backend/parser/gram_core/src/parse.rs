@@ -455,6 +455,9 @@ impl<'mcx> Parser<'mcx> {
         };
         Box::new(
             err.with_sqlstate(ERRCODE_SYNTAX_ERROR)
+                // C scan.l: parser_yyerror funnels into scanner_yyerror,
+                // whose __func__ is the wire R field
+                .with_funcname("scanner_yyerror")
                 .with_cursor_position(parser_small1::parser_errposition_source(
                     Some(self.scanbuf),
                     yylloc,

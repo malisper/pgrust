@@ -1643,7 +1643,7 @@ fn match_full_mixing_error<'mcx>(
     )
     .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
     .with_detail("MATCH FULL does not allow mixing of null and nonnull key values.");
-    Box::new(errtableconstraint(e, mcx, fk_rel, conname))
+    Box::new(errtableconstraint(e, mcx, fk_rel, conname).with_funcname("RI_FKey_check"))
 }
 
 // aclchk.c ACLCHECK_OK.
@@ -1747,7 +1747,7 @@ fn ri_ReportViolation<'mcx>(
             "Key ({key_names})=({key_values}) is still referenced from table \"{}\".",
             fk_rel.name()
         ));
-        return Box::new(errtableconstraint(e, mcx, fk_rel, conname));
+        return Box::new(errtableconstraint(e, mcx, fk_rel, conname).with_funcname("ri_ReportViolation"));
     }
     if onfk {
         let e = PgError::new(
@@ -1766,7 +1766,7 @@ fn ri_ReportViolation<'mcx>(
         } else {
             format!("Key is not present in table \"{}\".", pk_rel.name())
         });
-        Box::new(errtableconstraint(e, mcx, fk_rel, conname))
+        Box::new(errtableconstraint(e, mcx, fk_rel, conname).with_funcname("ri_ReportViolation"))
     } else if is_restrict {
         let e = PgError::new(
             ERROR,
@@ -1786,7 +1786,7 @@ fn ri_ReportViolation<'mcx>(
         } else {
             format!("Key is referenced from table \"{}\".", fk_rel.name())
         });
-        Box::new(errtableconstraint(e, mcx, fk_rel, conname))
+        Box::new(errtableconstraint(e, mcx, fk_rel, conname).with_funcname("ri_ReportViolation"))
     } else {
         let e = PgError::new(
             ERROR,
@@ -1806,7 +1806,7 @@ fn ri_ReportViolation<'mcx>(
         } else {
             format!("Key is still referenced from table \"{}\".", fk_rel.name())
         });
-        Box::new(errtableconstraint(e, mcx, fk_rel, conname))
+        Box::new(errtableconstraint(e, mcx, fk_rel, conname).with_funcname("ri_ReportViolation"))
     }
 }
 

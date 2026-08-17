@@ -329,6 +329,7 @@ pub fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResul
                         "Custom parameter names must be two or more simple identifiers separated by dots.",
                     )
                     .into_error()
+                    .with_funcname("assignable_custom_variable_name")
                     .into());
             }
             return Ok(false);
@@ -343,6 +344,7 @@ pub fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResul
                     .errmsg(format!("invalid configuration parameter name \"{name}\""))
                     .errdetail(format!("\"{rcprefix}\" is a reserved prefix."))
                     .into_error()
+                    .with_funcname("assignable_custom_variable_name")
                     .into());
             }
             return Ok(false);
@@ -351,7 +353,7 @@ pub fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResul
     }
 
     if !skip_errors {
-        return Err(unrecognized(name).into());
+        return Err(unrecognized(name).with_funcname("assignable_custom_variable_name").into());
     }
     Ok(false)
 }

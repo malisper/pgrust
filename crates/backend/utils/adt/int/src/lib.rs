@@ -81,8 +81,14 @@ fn smallint_out_of_range() -> Box<PgError> {
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn division_by_zero() -> Box<PgError> {
-    Box::new(PgError::error("division by zero").with_sqlstate(ERRCODE_DIVISION_BY_ZERO))
+fn division_by_zero(funcname: &'static str) -> Box<PgError> {
+    // funcname = the enclosing C fn's __func__ (wire R field); C repeats the
+    // ereport per function, so each caller threads its own name (W-1).
+    Box::new(
+        PgError::error("division by zero")
+            .with_sqlstate(ERRCODE_DIVISION_BY_ZERO)
+            .with_funcname(funcname),
+    )
 }
 
 #[track_caller]
@@ -503,7 +509,7 @@ pub fn int4mul(arg1: i32, arg2: i32) -> PgResult<i32> {
 #[inline]
 pub fn int4div(arg1: i32, arg2: i32) -> PgResult<i32> {
     if arg2 == 0 {
-        return Err(division_by_zero());
+        return Err(division_by_zero("int4div"));
     }
     // INT_MIN / -1 traps; division by -1 is negation.
     if arg2 == -1 {
@@ -567,7 +573,7 @@ pub fn int2mul(arg1: i16, arg2: i16) -> PgResult<i16> {
 #[inline]
 pub fn int2div(arg1: i16, arg2: i16) -> PgResult<i16> {
     if arg2 == 0 {
-        return Err(division_by_zero());
+        return Err(division_by_zero("int2div"));
     }
     if arg2 == -1 {
         if arg1 == PG_INT16_MIN {
@@ -608,7 +614,7 @@ pub fn int24mul(arg1: i16, arg2: i32) -> PgResult<i32> {
 #[inline]
 pub fn int24div(arg1: i16, arg2: i32) -> PgResult<i32> {
     if arg2 == 0 {
-        return Err(division_by_zero());
+        return Err(division_by_zero("int24div"));
     }
     Ok(arg1 as i32 / arg2)
 }
@@ -643,7 +649,7 @@ pub fn int42mul(arg1: i32, arg2: i16) -> PgResult<i32> {
 #[inline]
 pub fn int42div(arg1: i32, arg2: i16) -> PgResult<i32> {
     if arg2 == 0 {
-        return Err(division_by_zero());
+        return Err(division_by_zero("int42div"));
     }
     if arg2 == -1 {
         if arg1 == PG_INT32_MIN {
@@ -657,7 +663,7 @@ pub fn int42div(arg1: i32, arg2: i16) -> PgResult<i32> {
 #[inline]
 pub fn int4mod(arg1: i32, arg2: i32) -> PgResult<i32> {
     if arg2 == 0 {
-        return Err(division_by_zero());
+        return Err(division_by_zero("int4mod"));
     }
     // INT_MIN % -1 traps on some machines; the answer is zero.
     if arg2 == -1 {
@@ -669,7 +675,7 @@ pub fn int4mod(arg1: i32, arg2: i32) -> PgResult<i32> {
 #[inline]
 pub fn int2mod(arg1: i16, arg2: i16) -> PgResult<i16> {
     if arg2 == 0 {
-        return Err(division_by_zero());
+        return Err(division_by_zero("int2mod"));
     }
     if arg2 == -1 {
         return Ok(0);
