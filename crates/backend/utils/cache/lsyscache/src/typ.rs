@@ -277,13 +277,22 @@ pub fn get_base_element_type(mut typid: Oid) -> PgResult<Oid> {
     }
 }
 
+// C renders these via format_type_be (lsyscache.c:3070-3132). The old
+// raw-oid fallback ("for type 1033" instead of "for type aclitem") was a
+// wire-visible message divergence; the format_type cycle it cited is gone
+// (misc.rs already calls format_type_be). C's format_type_be never errors,
+// so a lookup failure here degrades to the raw oid rather than recursing
+// into error handling.
+#[cold]
+fn type_name_or_oid(typid: Oid) -> String {
+    format_type::format_type_be(typid).unwrap_or_else(|_| typid.to_string())
+}
+
 #[track_caller]
 #[cold]
 fn shell_type_error(typid: Oid) -> Box<PgError> {
-    // C renders the type name via format_type_be; the format_type crate deps
-    // lsyscache, so this error keeps the raw oid (cycle).
     Box::new(
-        PgError::error(format!("type {typid} is only a shell"))
+        PgError::error(format!("type {} is only a shell", type_name_or_oid(typid)))
             .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
     )
 }
@@ -292,8 +301,11 @@ fn shell_type_error(typid: Oid) -> Box<PgError> {
 #[cold]
 fn no_io_function_error(kind: &str, typid: Oid) -> Box<PgError> {
     Box::new(
-        PgError::error(format!("no {kind} function available for type {typid}"))
-            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION),
+        PgError::error(format!(
+            "no {kind} function available for type {}",
+            type_name_or_oid(typid)
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION),
     )
 }
 

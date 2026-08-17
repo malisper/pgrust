@@ -602,7 +602,13 @@ fn spi_ctx_err(
         return e;
     }
     let line = spi_context_line(query, mode);
-    if e.context.as_deref().is_some_and(|c| c.contains(line.as_str())) {
+    // Dedup only an immediately-repeated line (same-level double handling by
+    // the spi port). C runs its callback once per LEVEL: recursive re-entry
+    // legitimately repeats the same expression line at every depth, with the
+    // function's own context line interposed between repeats — a whole-
+    // context `contains` check collapsed those to one line (wire-metadata
+    // workflow, recursive-context finding).
+    if e.context.as_deref().and_then(|c| c.lines().last()) == Some(line.as_str()) {
         return e;
     }
     match e.context.take() {

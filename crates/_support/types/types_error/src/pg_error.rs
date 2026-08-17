@@ -310,6 +310,11 @@ impl PgError {
         self
     }
 
+    pub fn with_column_name(mut self, column_name: impl Into<String>) -> Self {
+        self.column_name = Some(column_name.into());
+        self
+    }
+
     /// Appends to any existing context, newline-separated (C `errcontext()`).
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
         self.context = append_context(self.context.take(), context.into());

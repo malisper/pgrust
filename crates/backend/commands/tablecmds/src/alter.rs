@@ -1790,6 +1790,16 @@ fn ATRewriteTableOne<'mcx>(
 }
 
 // ATRewriteTable: scan (verify) or rewrite one table.
+// C errtable/errtablecol/errtableconstraint (relerror.c): ATRewriteTable's
+// validation errors carry the table's schema+table (+column/constraint)
+// as ErrorResponse s/t/c/n wire fields. Cold error paths only.
+fn with_errtable(mut e: PgError, mcx: Mcx<'_>, nspoid: Oid, relname: &str) -> PgError {
+    if let Ok(Some(nsp)) = lsyscache::get_namespace_name(mcx, nspoid) {
+        e = e.with_schema_name(nsp.as_str().to_owned());
+    }
+    e.with_table_name(relname.to_string())
+}
+
 fn ATRewriteTable<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,
@@ -2015,7 +2025,7 @@ fn ATRewriteTable<'mcx>(
                     let att = new_tupdesc.attr(attn as usize - 1);
                     let colname =
                         core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
-                    return Err(Box::new(
+                    return Err(Box::new(with_errtable(
                         PgError::new(
                             ERROR,
                             format!(
@@ -2023,8 +2033,13 @@ fn ATRewriteTable<'mcx>(
                                  null values"
                             ),
                         )
-                        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION),
-                    ));
+                        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION)
+                        // C errtablecol(oldrel, attn)
+                        .with_column_name(colname.to_string()),
+                        mcx,
+                        oldrel.namespace(),
+                        &relname,
+                    )));
                 }
             }
             for (attnum, state) in nn_virtual_states.iter_mut() {
@@ -2039,7 +2054,7 @@ fn ATRewriteTable<'mcx>(
                     let att = new_tupdesc.attr(*attnum as usize - 1);
                     let colname =
                         core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
-                    return Err(Box::new(
+                    return Err(Box::new(with_errtable(
                         PgError::new(
                             ERROR,
                             format!(
@@ -2047,8 +2062,13 @@ fn ATRewriteTable<'mcx>(
                                  null values"
                             ),
                         )
-                        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION),
-                    ));
+                        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION)
+                        // C errtablecol(oldrel, attnum)
+                        .with_column_name(colname.to_string()),
+                        mcx,
+                        oldrel.namespace(),
+                        &relname,
+                    )));
                 }
             }
             for (i, state) in con_states.iter_mut() {
@@ -2060,7 +2080,7 @@ fn ATRewriteTable<'mcx>(
                 let r = execexpr::exec_eval_expr(state, &mut slots)?;
                 if !r.isnull && !r.value.as_bool() {
                     let conname = tab.constraints[*i].name;
-                    return Err(Box::new(
+                    return Err(Box::new(with_errtable(
                         PgError::new(
                             ERROR,
                             format!(
@@ -2068,8 +2088,13 @@ fn ATRewriteTable<'mcx>(
                                  is violated by some row"
                             ),
                         )
-                        .with_sqlstate(ERRCODE_CHECK_VIOLATION),
-                    ));
+                        .with_sqlstate(ERRCODE_CHECK_VIOLATION)
+                        // C errtableconstraint(oldrel, con->name) (tablecmds.c:6498)
+                        .with_constraint_name(conname.to_string()),
+                        mcx,
+                        oldrel.namespace(),
+                        &relname,
+                    )));
                 }
             }
 
@@ -2092,9 +2117,13 @@ fn ATRewriteTable<'mcx>(
                              some row"
                         )
                     };
-                    return Err(Box::new(
+                    // C errtable(oldrel) on both partition arms (tablecmds.c:6517,6523)
+                    return Err(Box::new(with_errtable(
                         PgError::new(ERROR, msg).with_sqlstate(ERRCODE_CHECK_VIOLATION),
-                    ));
+                        mcx,
+                        oldrel.namespace(),
+                        &relname,
+                    )));
                 }
             }
 

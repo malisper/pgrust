@@ -19070,6 +19070,7 @@ dependencies = [
  "resowner",
  "resowner_seams",
  "sort_storage",
+ "syscache_seams",
  "tuplesort_seams",
  "types_core",
  "types_error",

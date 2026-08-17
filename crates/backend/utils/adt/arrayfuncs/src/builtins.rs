@@ -27,9 +27,13 @@ fn build_meta(element_type: Oid, which: IOFuncSelector, binary: bool) -> PgResul
             IOFuncSelector::IOFunc_receive => "input",
             _ => "output",
         };
+        // C array_recv/array_send name the element via format_type_be
+        // (arrayfuncs.c); rangetypes/multirangetypes already match.
+        let t = ::format_type::format_type_be(element_type)
+            .unwrap_or_else(|_| alloc::format!("{element_type}"));
         return Err(Box::new(
             PgError::error(alloc::format!(
-                "no binary {what} function available for type {element_type}"
+                "no binary {what} function available for type {t}"
             ))
             .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION),
         ));

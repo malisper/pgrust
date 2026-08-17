@@ -601,11 +601,31 @@ fn unique_violation_error(
         Some(desc) => format!("Key {desc} is duplicated."),
         None => "Duplicate keys exist.".to_string(),
     };
-    Box::new(
-        PgError::error(format!("could not create unique index \"{index_name}\""))
-            .with_sqlstate(ERRCODE_UNIQUE_VIOLATION)
-            .with_detail(detail),
-    )
+    let mut e = PgError::error(format!("could not create unique index \"{index_name}\""))
+        .with_sqlstate(ERRCODE_UNIQUE_VIOLATION)
+        .with_detail(detail)
+        // C errtableconstraint(arg->index.heapRel, RelationGetRelationName
+        // (indexRel)) (tuplesortvariants.c:1692): heap schema/table + the
+        // index name as the constraint, on the wire.
+        .with_constraint_name(index_name.to_string());
+    if let Some(idx) = index_rel.and_then(|r| r.rd_index.as_ref()) {
+        // Cold error path; scratch context for the catalog lookups, gated so
+        // seam-less unit harnesses skip the enrichment (BIVD-gate precedent).
+        if syscache_seams::pg_class_relname::is_installed()
+            && syscache_seams::lookup_pg_class_ls_shape::is_installed()
+        {
+            let cx = ::mcx::MemoryContext::new("unique_violation_error");
+            if let Ok(Some(heap_name)) = lsyscache::get_rel_name(cx.mcx(), idx.indrelid) {
+                e = e.with_table_name(heap_name.as_str().to_owned());
+            }
+            if let Ok(nspoid) = lsyscache::get_rel_namespace(idx.indrelid) {
+                if let Ok(Some(nsp)) = lsyscache::misc::get_namespace_name(cx.mcx(), nspoid) {
+                    e = e.with_schema_name(nsp.as_str().to_owned());
+                }
+            }
+        }
+    }
+    Box::new(e)
 }
 
 macro_rules! ctx {

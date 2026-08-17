@@ -21,6 +21,7 @@ exectuples = { path = "../../../executor/exectuples" }
 sort_storage = { path = "../sort_storage" }
 heaptuple = { path = "../../../access/common/heaptuple" }
 lsyscache = { path = "../../cache/lsyscache" }
+syscache_seams = { path = "../../cache/syscache_seams" }
 types_rel = { path = "../../../../_support/types/rel" }
 nbtree = { path = "../../../access/nbtree/nbtree" }
 varlena = { path = "../../../utils/adt/varlena" }
