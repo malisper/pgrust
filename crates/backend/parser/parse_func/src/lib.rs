@@ -582,6 +582,19 @@ pub fn ParseFuncOrColumn<'mcx>(
                 ));
             }
 
+            // C parse_func.c:810: named arguments are disallowed for
+            // aggregates — the planner cannot reorder NamedArgExprs inside
+            // an Aggref's TargetEntry list, so accepting them risks wrong
+            // argument binding downstream.
+            if !argnames.is_empty() {
+                return Err(feature_not_supported(
+                    pstate,
+                    "aggregates cannot use named arguments".to_string(),
+                    None,
+                    location,
+                ));
+            }
+
             let mut aggref = Node::build::<Aggref>(mcx)?;
             aggref.aggfnoid = funcid;
             aggref.aggtype = rettype;
