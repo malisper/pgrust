@@ -1624,8 +1624,27 @@ impl<'a> Estate<'a> {
         result
     }
 
-    // exec_run_select (portal-less arm): SPI_execute_plan.
+    // C exec_run_select: non-SELECT is 42601. RETURN QUERY is not this helper.
     fn exec_run_select(&mut self, expr: &PlExpr, maxtuples: i64) -> PgResult<i32> {
+        let rc = self.exec_spi_plan(expr, maxtuples)?;
+        if rc != spi::SPI_OK_SELECT {
+            let msg = if rc == spi::SPI_OK_SELINTO {
+                "query is SELECT INTO, but it should be plain SELECT"
+            } else {
+                "query is not a SELECT"
+            };
+            return Err(Box::new(
+                elog::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                    .errmsg(msg)
+                    .errcontext_msg(format!("query: {}", expr.query))
+                    .into_error(),
+            ));
+        }
+        Ok(rc)
+    }
+
+    fn exec_spi_plan(&mut self, expr: &PlExpr, maxtuples: i64) -> PgResult<i32> {
         let (plan, paramnos, argtypes) = EXPR_PLANS.with(|t| {
             let t = t.borrow();
             let e = t.get(&expr.expr_id).expect("plan ensured");
@@ -4326,7 +4345,7 @@ impl<'a> Estate<'a> {
             ctx_query = query.query.clone();
             ctx_mode = query.parse_mode;
             self.ensure_plan(query, CURSOR_OPT_PARALLEL_OK)?;
-            self.exec_run_select(query, 0)?
+            self.exec_spi_plan(query, 0)?
         } else {
             let dynquery = dynquery.expect("RETURN QUERY has a query");
             let (qv, isnull, restype, _m) = self.exec_eval_expr(dynquery)?;
