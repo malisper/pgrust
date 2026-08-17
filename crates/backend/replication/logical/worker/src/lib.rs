@@ -20,8 +20,8 @@ use elog::ereport;
 use mcx::{Mcx, MemoryContext};
 use types_core::{InvalidXLogRecPtr, Oid, TimestampTz, XLogRecPtr};
 use types_error::{
-    ErrorLocation, PgResult, DEBUG2, ERRCODE_CONNECTION_FAILURE,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, LOG, WARNING,
+    ErrorLocation, PgResult, DEBUG2, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_CONNECTION_FAILURE,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, LOG, WARNING,
 };
 
 use walreceiver::client::{CopyData, PgConn};
@@ -648,6 +648,16 @@ fn replorigin_reset(_code: i32, _arg: datum::Datum) -> PgResult<()> {
     Ok(())
 }
 
+// C ProcessInterrupts' IsLogicalWorker() die arm (postgres.c:3321-3324),
+// carried by the SIGTERM disposition in the thread model (bgworker_die
+// precedent).
+fn logicalrep_worker_die() -> PgResult<()> {
+    ereport(FATAL)
+        .errcode(ERRCODE_ADMIN_SHUTDOWN)
+        .errmsg("terminating logical replication worker due to administrator command")
+        .finish(loc("ProcessInterrupts"))
+}
+
 // ApplyWorkerMain (worker.c:4818) + InitializeLogRepWorker + run_apply_worker,
 // non-tablesync subset. main_arg = launcher worker-slot index.
 pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
@@ -655,11 +665,17 @@ pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
     launcher::logicalrep_worker_attach(slot)?;
 
     // SetupApplyOrSyncWorker (worker.c:4784): SIGHUP reloads config; the
-    // apply loop's idle arm consumes ConfigReloadPending. SIGTERM keeps the
-    // bgworker default (bgworker_die; C installs die — same FATAL exit).
+    // apply loop's idle arm consumes ConfigReloadPending. SIGTERM: C installs
+    // die and ProcessInterrupts' IsLogicalWorker arm (postgres.c:3321-3324)
+    // stamps the logical-worker message; here the disposition itself carries
+    // that arm (same FATAL 57P01 exit as the bgworker default it replaces).
     procsignal::pqsignal_thread(
         procsignal::signums::SIGHUP,
         procsignal::ThreadSignalHandler::Simple(interrupt::SignalHandlerForConfigReload),
+    );
+    procsignal::pqsignal_thread(
+        procsignal::signums::SIGTERM,
+        procsignal::ThreadSignalHandler::Fallible(logicalrep_worker_die),
     );
 
     let result = apply_worker_body(slot);

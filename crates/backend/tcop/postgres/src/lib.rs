@@ -427,6 +427,14 @@ pub fn ProcessInterrupts() -> PgResult<()> {
                 .with_error_location(loc(3316, "ProcessInterrupts"))
                 .into());
         }
+        if miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker {
+            return Err(ereport(FATAL)
+                .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
+                .errmsg("terminating autovacuum process due to administrator command")
+                .into_error()
+                .with_error_location(loc(3317, "ProcessInterrupts"))
+                .into());
+        }
         if miscinit::GetMyBackendType() == types_core::BackendType::WalReceiver {
             return Err(ereport(FATAL)
                 .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
@@ -435,7 +443,10 @@ pub fn ProcessInterrupts() -> PgResult<()> {
                 .with_error_location(loc(3339, "ProcessInterrupts"))
                 .into());
         }
-        // C's other worker-process arms are unreachable: those mains panic at launch.
+        // C's IsLogicalWorker/AmBackgroundWorkerProcess arms live in the
+        // workers' own SIGTERM dispositions here (logicalrep_worker_die /
+        // bgworker_die); the remaining C arms (launcher, io worker) are
+        // dispositions too, so only backend-reachable arms stay in this chain.
         return Err(ereport(FATAL)
             .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
             .errmsg("terminating connection due to administrator command")
@@ -525,6 +536,15 @@ pub fn ProcessInterrupts() -> PgResult<()> {
                 .errmsg("canceling statement due to statement timeout")
                 .into_error()
                 .with_error_location(loc(3445, "ProcessInterrupts"))
+                .into());
+        }
+        if miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker {
+            lmgr_proc::LockErrorCleanup()?;
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_QUERY_CANCELED)
+                .errmsg("canceling autovacuum task")
+                .into_error()
+                .with_error_location(loc(3447, "ProcessInterrupts"))
                 .into());
         }
         if !DoingCommandRead() {
