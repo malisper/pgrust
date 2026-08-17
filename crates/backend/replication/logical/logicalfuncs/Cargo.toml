@@ -31,3 +31,5 @@ logical_decode = { path = "../logical_decode" }
 logical_message = { path = "../logical_message" }
 resowner_seams = { path = "../../../utils/resowner/resowner_seams" }
 types_resowner = { path = "../../../../_support/types/types_resowner" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+init_small = { path = "../../../utils/init/init_small" }

@@ -34,6 +34,22 @@ fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
+// CHECK_FOR_INTERRUPTS (miscadmin.h), the heapam pattern: cheap pending
+// check inline, the ereport-raising slow path out of line.
+#[cold]
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return process_interrupts();
+    }
+    Ok(())
+}
+
 struct DecodingOutputState {
     srf: *mut MaterializedSRF<'static>,
     mcx: Mcx<'static>,
@@ -302,6 +318,11 @@ fn decode_loop(
         if upto_nchanges != 0 && upto_nchanges as i64 <= p.returned_rows {
             break;
         }
+
+        // logicalfuncs.c:275: CFI once per decoded record, so a large WAL
+        // backlog stays cancellable (xlogutils' CFI only fires in the
+        // caught-up wait arm, never while records are available).
+        check_for_interrupts()?;
     }
 
     // Logical decoding could have clobbered CurrentResourceOwner during
