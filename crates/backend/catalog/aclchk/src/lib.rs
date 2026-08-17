@@ -800,9 +800,9 @@ pub(crate) fn objtype_from_i32(objtype: i32) -> ObjectType {
     unsafe { core::mem::transmute::<u32, ObjectType>(objtype as u32) }
 }
 
-fn objtype_noun(objtype: ObjectType) -> &'static str {
+fn objtype_noun(objtype: ObjectType) -> PgResult<&'static str> {
     use ObjectType::*;
-    match objtype {
+    Ok(match objtype {
         OBJECT_AGGREGATE => "aggregate",
         OBJECT_COLLATION => "collation",
         OBJECT_COLUMN => "column",
@@ -837,8 +837,15 @@ fn objtype_noun(objtype: ObjectType) -> &'static str {
         OBJECT_TSDICTIONARY => "text search dictionary",
         OBJECT_TYPE => "type",
         OBJECT_VIEW => "view",
-        other => panic!("aclcheck_error: unsupported object type: {}", other as i32),
-    }
+        // C's "these currently aren't used" arms: elog(ERROR, ...) — XX000,
+        // backend survives (aclchk.c aclcheck_error), not a panic.
+        other => {
+            return Err(Box::new(PgError::error(format!(
+                "unsupported object type: {}",
+                other as i32
+            ))))
+        }
+    })
 }
 
 // object_ownercheck (aclchk.c); classes without an arm below are loud.
@@ -1194,7 +1201,7 @@ pub fn aclcheck_error(aclerr: i32, objtype: ObjectType, objectname: &str) -> PgR
         ACLCHECK_NO_PRIV => Err(Box::new(
             PgError::error(format!(
                 "permission denied for {} {objectname}",
-                objtype_noun(objtype)
+                objtype_noun(objtype)?
             ))
             .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
         )),
@@ -1206,7 +1213,7 @@ pub fn aclcheck_error(aclerr: i32, objtype: ObjectType, objectname: &str) -> PgR
                 | ObjectType::OBJECT_RULE
                 | ObjectType::OBJECT_TABCONSTRAINT
                 | ObjectType::OBJECT_TRIGGER => "relation",
-                _ => objtype_noun(objtype),
+                _ => objtype_noun(objtype)?,
             };
             Err(Box::new(
                 PgError::error(format!("must be owner of {noun} {objectname}"))
