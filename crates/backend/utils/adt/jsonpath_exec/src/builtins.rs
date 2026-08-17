@@ -161,16 +161,12 @@ fn query_common(
             )?
         };
         let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(rows));
+        fctx.set_user_fctx(rows);
     }
     let fctx = funcapi::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
     let rows = fctx
-        .user_fctx
-        .as_ref()
-        .expect("SRF rows set at first call")
-        .downcast_ref::<Vec<Vec<u8>>>()
-        .expect("user_fctx is the row set");
+        .user_fctx_ref::<Vec<Vec<u8>>>();
     let mcx = fcinfo.result_mcx();
     match rows.get(idx) {
         Some(img) => {

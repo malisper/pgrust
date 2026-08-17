@@ -56,17 +56,13 @@ pub(crate) fn fc_normal_rand(
         };
         let call = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
         call.max_calls = num_tuples as u64;
-        call.user_fctx = Some(Box::new(fctx));
+        call.set_user_fctx(fctx);
     }
 
     let call = funcapi::per_MultiFuncCall(flinfo);
     if call.call_cntr < call.max_calls {
         let fctx = call
-            .user_fctx
-            .as_mut()
-            .expect("normal_rand: user_fctx set at first call")
-            .downcast_mut::<NormalRandFctx>()
-            .expect("normal_rand: user_fctx is NormalRandFctx");
+            .user_fctx_mut::<NormalRandFctx>();
         let result = if fctx.use_carry {
             fctx.use_carry = false;
             fctx.carry_val

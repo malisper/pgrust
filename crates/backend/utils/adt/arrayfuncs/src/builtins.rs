@@ -193,14 +193,10 @@ pub fn fc_array_unnest(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
             elmalign,
         };
         let fctx = ::funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(state));
+        fctx.set_user_fctx(state);
     }
     let next = ::funcapi_srf::per_MultiFuncCall(flinfo)
-        .user_fctx
-        .as_mut()
-        .expect("array_unnest: user_fctx set at first call")
-        .downcast_mut::<ArrayUnnestFctx>()
-        .expect("array_unnest: user_fctx is ArrayUnnestFctx")
+        .user_fctx_mut::<ArrayUnnestFctx>()
         .next();
     match next {
         Some((d, isnull)) => {

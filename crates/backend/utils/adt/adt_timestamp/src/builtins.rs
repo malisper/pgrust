@@ -989,14 +989,10 @@ fn generate_series_common(
         };
         let state = GenSeriesTimestamp::new(start, finish, step, attimezone, tz_aware)?;
         let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(state));
+        fctx.set_user_fctx(state);
     }
     let next = funcapi::per_MultiFuncCall(flinfo)
-        .user_fctx
-        .as_mut()
-        .expect("generate_series_timestamp: user_fctx set at first call")
-        .downcast_mut::<GenSeriesTimestamp>()
-        .expect("generate_series_timestamp: user_fctx is GenSeriesTimestamp")
+        .user_fctx_mut::<GenSeriesTimestamp>()
         .next()?;
     match next {
         Some(v) => Ok(funcapi::srf_return_next(flinfo, fcinfo, Datum::from_i64(v))),

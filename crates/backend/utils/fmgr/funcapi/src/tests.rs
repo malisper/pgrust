@@ -320,13 +320,13 @@ fn multi_func_call_lifecycle() {
 
     let fctx = init_MultiFuncCall(&mut flinfo, &fcinfo).unwrap();
     fctx.max_calls = 3;
-    fctx.user_fctx = Some(Box::new(7i32));
+    fctx.set_user_fctx(7i32);
 
     let again = per_MultiFuncCall(&mut flinfo);
     again.call_cntr += 1;
     assert_eq!(again.call_cntr, 1);
     assert_eq!(again.max_calls, 3);
-    assert_eq!(*again.user_fctx.as_ref().unwrap().downcast_ref::<i32>().unwrap(), 7);
+    assert_eq!(*again.user_fctx_ref::<i32>(), 7);
 
     let err = init_MultiFuncCall(&mut flinfo, &fcinfo).unwrap_err();
     assert!(err.message().contains("cannot be called more than once"));

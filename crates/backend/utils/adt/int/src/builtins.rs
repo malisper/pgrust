@@ -365,14 +365,10 @@ pub fn fc_generate_series_step_int4(
         let step = if fcinfo.nargs() == 3 { fcinfo.arg(2).as_i32() } else { 1 };
         let state = crate::series::GenerateSeriesInt4::new(start, finish, step)?;
         let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(alloc::boxed::Box::new(state));
+        fctx.set_user_fctx(state);
     }
     let next = ::funcapi::per_MultiFuncCall(flinfo)
-        .user_fctx
-        .as_mut()
-        .expect("generate_series_int4: user_fctx set at first call")
-        .downcast_mut::<crate::series::GenerateSeriesInt4>()
-        .expect("generate_series_int4: user_fctx is GenerateSeriesInt4")
+        .user_fctx_mut::<crate::series::GenerateSeriesInt4>()
         .next();
     match next {
         Some(v) => Ok(::funcapi::srf_return_next(flinfo, fcinfo, Datum::from_i32(v))),

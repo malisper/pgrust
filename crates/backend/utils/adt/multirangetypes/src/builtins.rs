@@ -819,7 +819,7 @@ pub fn fc_multirange_unnest(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     let flinfo = flinfo.expect("multirange_unnest: NULL flinfo");
     if !flinfo.has_fn_extra() {
         // The SRF state owns a copy of the image (C detoasts into the
-        // multi-call context); Vec is the user_fctx Box's own allocation.
+        // multi-call context); Vec is the user_fctx carrier's own allocation.
         let state = {
             let mcx = fcinfo.result_mcx();
             let mr = arg_multirange(fcinfo, 0, mcx)?;
@@ -827,15 +827,11 @@ pub fn fc_multirange_unnest(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
             UnnestState { mr: mr.to_vec(), rng: mi.rng, index: 0 }
         };
         let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(state));
+        fctx.set_user_fctx(state);
     }
     let mcx = fcinfo.result_mcx();
     let state = ::funcapi::per_MultiFuncCall(flinfo)
-        .user_fctx
-        .as_mut()
-        .expect("multirange_unnest: user_fctx set at first call")
-        .downcast_mut::<UnnestState>()
-        .expect("multirange_unnest: user_fctx is UnnestState");
+        .user_fctx_mut::<UnnestState>();
     if state.index < multirange_count(&state.mr) as usize {
         let d = {
             let img = multirange_get_range(mcx, &state.rng, &state.mr, state.index)?;

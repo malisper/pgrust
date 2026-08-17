@@ -1024,16 +1024,12 @@ pub fn fc_pg_get_keywords(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     if !flinfo.has_fn_extra() {
         let rows = collect_keyword_rows(flinfo, fcinfo)?;
         let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(rows));
+        fctx.set_user_fctx(rows);
     }
     let fctx = funcapi::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
     let rows = fctx
-        .user_fctx
-        .as_ref()
-        .expect("pg_get_keywords: rows set at first call")
-        .downcast_ref::<KeywordRows>()
-        .expect("pg_get_keywords: user_fctx is KeywordRows");
+        .user_fctx_ref::<KeywordRows>();
     match rows.tuples.get(idx) {
         Some(img) => {
             let d = byref_result(fcinfo.result_mcx(), img)?;
@@ -1098,16 +1094,12 @@ pub fn fc_pg_get_catalog_foreign_keys(
     if !flinfo.has_fn_extra() {
         let rows = collect_catalog_fk_rows(flinfo, fcinfo)?;
         let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(rows));
+        fctx.set_user_fctx(rows);
     }
     let fctx = funcapi::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
     let rows = fctx
-        .user_fctx
-        .as_ref()
-        .expect("pg_get_catalog_foreign_keys: rows set at first call")
-        .downcast_ref::<CatalogFkRows>()
-        .expect("pg_get_catalog_foreign_keys: user_fctx is CatalogFkRows");
+        .user_fctx_ref::<CatalogFkRows>();
     match rows.tuples.get(idx) {
         Some(img) => {
             let d = byref_result(fcinfo.result_mcx(), img)?;

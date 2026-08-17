@@ -352,16 +352,12 @@ pub fn fc_tsvector_unnest(
     if !flinfo.has_fn_extra() {
         let rows = unnest_collect(fcinfo)?;
         let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(UnnestRows::Tuples(rows)));
+        fctx.set_user_fctx(UnnestRows::Tuples(rows));
     }
     let fctx = ::funcapi::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
     let UnnestRows::Tuples(rows) = fctx
-        .user_fctx
-        .as_ref()
-        .expect("rows set at first call")
-        .downcast_ref::<UnnestRows>()
-        .expect("user_fctx is UnnestRows");
+        .user_fctx_ref::<UnnestRows>();
     match rows.get(idx) {
         Some(img) => {
             let d = byref_result(fcinfo.result_mcx(), img)?;
