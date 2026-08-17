@@ -3425,17 +3425,28 @@ impl<'a> Estate<'a> {
         let mut err_message: Option<String> = None;
         if let Some(msg) = message {
             let mut ds = String::new();
-            let bytes = msg.as_bytes();
             let mut pi = 0usize;
-            let mut i = 0usize;
-            while i < bytes.len() {
-                if bytes[i] == b'%' {
-                    if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
+            // C pl_exec.c:3774-3799 walks the message byte-wise; '%' cannot
+            // occur inside a multibyte sequence, so a char walk is
+            // equivalent — and unlike the old byte-as-char loop it does not
+            // Latin-1-widen multibyte text ("café" became "cafÃ©", which
+            // the client-encoding conversion then faithfully mojibake'd).
+            let mut it = msg.chars().peekable();
+            while let Some(c) = it.next() {
+                if c == '%' {
+                    if it.peek() == Some(&'%') {
+                        it.next();
                         ds.push('%');
-                        i += 2;
                         continue;
                     }
-                    let p = &params[pi];
+                    // C: "should have been checked at compile time"
+                    // (pl_exec.c:3794-3796).
+                    let Some(p) = params.get(pi) else {
+                        return Err(exec_err(
+                            types_error::ERRCODE_INTERNAL_ERROR,
+                            "unexpected RAISE parameter list length".to_string(),
+                        ));
+                    };
                     pi += 1;
                     let (v, isnull, t, _m) = self.exec_eval_expr(p)?;
                     if isnull {
@@ -3444,11 +3455,8 @@ impl<'a> Estate<'a> {
                         ds.push_str(&self.convert_value_to_string(v, t)?);
                     }
                     self.exec_eval_cleanup();
-                    i += 1;
                 } else {
-                    // Preserve raw bytes (message text is server-encoded).
-                    ds.push(bytes[i] as char);
-                    i += 1;
+                    ds.push(c);
                 }
             }
             err_message = Some(ds);
@@ -5071,5 +5079,45 @@ mod cfi_tests {
         let err = estate.exec_stmts(&[]).unwrap_err();
         init_small::globals::SetInterruptPending(false);
         assert_eq!(err.sqlstate, types_error::ERRCODE_QUERY_CANCELED);
+    }
+
+    // RAISE literal text must survive byte-for-byte: the old scan loop pushed
+    // each UTF-8 byte as a char (Latin-1 widening), so "café" reached the
+    // client-encoding conversion as "cafÃ©" and every non-UTF8 client saw
+    // mojibake (driver-sweep finding M-1).
+    #[test]
+    fn raise_message_literal_multibyte_not_widened() {
+        let func = tiny_function();
+        let mut estate = Estate::new(&func, false, true);
+        let stmt = PlStmt::Raise {
+            lineno: 1,
+            elog_level: crate::gram::ELOG_ERROR,
+            condname: None,
+            message: Some("café %% x".into()),
+            params: Vec::new(),
+            options: Vec::new(),
+        };
+        let err = estate.exec_stmt_raise(&stmt).unwrap_err();
+        assert_eq!(err.message, "café % x");
+        assert_eq!(err.sqlstate, types_error::ERRCODE_RAISE_EXCEPTION);
+    }
+
+    // C pl_exec.c:3794-3796: parameter-list underrun is an XX000 elog, not a
+    // panic (the old loop indexed params[] unchecked).
+    #[test]
+    fn raise_message_param_underrun_is_internal_error() {
+        let func = tiny_function();
+        let mut estate = Estate::new(&func, false, true);
+        let stmt = PlStmt::Raise {
+            lineno: 1,
+            elog_level: crate::gram::ELOG_ERROR,
+            condname: None,
+            message: Some("value: %".into()),
+            params: Vec::new(),
+            options: Vec::new(),
+        };
+        let err = estate.exec_stmt_raise(&stmt).unwrap_err();
+        assert_eq!(err.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.message, "unexpected RAISE parameter list length");
     }
 }
