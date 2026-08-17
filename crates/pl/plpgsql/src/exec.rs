@@ -31,6 +31,23 @@ use types_portal::params::ParamExternData;
 use crate::ast::*;
 use crate::errcodes::EXCEPTION_LABEL_MAP;
 
+// CHECK_FOR_INTERRUPTS() (miscadmin.h), the heapam pattern: cold seam call
+// gated on the InterruptPending flag. A raised cancel/die comes back as the
+// Err; exception_matches_conditions keeps OTHERS from catching it (C parity).
+#[cold]
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return process_interrupts();
+    }
+    Ok(())
+}
+
 pub const RC_OK: i32 = 0;
 pub const RC_EXIT: i32 = 1;
 pub const RC_RETURN: i32 = 2;
@@ -1992,15 +2009,26 @@ impl<'a> Estate<'a> {
 
     pub fn exec_toplevel_block(&mut self, block: &'a PlBlock) -> PgResult<i32> {
         self.frame.stmt.set(Some((block.lineno, "statement block")));
+        // pl_exec.c:1644
+        check_for_interrupts()?;
         let rc = self.exec_stmt_block(block)?;
         self.frame.stmt.set(None);
         Ok(rc)
     }
 
     fn exec_stmts(&mut self, stmts: &'a [PlStmt]) -> PgResult<i32> {
+        if stmts.is_empty() {
+            // pl_exec.c:2001-2010: CHECK_FOR_INTERRUPTS() even though there
+            // is no statement — prevents hangup in a tight loop if, for
+            // instance, there is a LOOP construct with an empty body.
+            check_for_interrupts()?;
+            return Ok(RC_OK);
+        }
         let save = self.frame.stmt.get();
         for s in stmts {
             self.frame.stmt.set(Some((stmt_lineno(s), stmt_typename(s))));
+            // pl_exec.c:2023: per statement, before the dispatch switch
+            check_for_interrupts()?;
             let rc = self.exec_stmt(s)?;
             if rc != RC_OK {
                 self.frame.stmt.set(save);
@@ -4974,4 +5002,74 @@ fn set_raise_fields(
     e.datatype_name = datatype;
     e.table_name = table;
     e.schema_name = schema;
+}
+
+#[cfg(test)]
+mod cfi_tests {
+    use super::*;
+
+    fn tiny_function() -> PlFunction {
+        PlFunction {
+            fn_signature: "inline_code_block".into(),
+            fn_oid: types_core::InvalidOid,
+            fn_xmin: 0,
+            fn_tid: (0, 0),
+            fn_input_collation: types_core::InvalidOid,
+            fn_rettype: 2278, // VOIDOID
+            fn_rettyplen: 4,
+            fn_retbyval: true,
+            fn_retistuple: false,
+            fn_retisdomain: false,
+            fn_retset: false,
+            fn_readonly: false,
+            fn_prokind: b'f' as i8,
+            fn_is_trigger: FnTrigger::NotTrigger,
+            fn_nargs: 0,
+            fn_argvarnos: Vec::new(),
+            fn_arg_is_input: Vec::new(),
+            new_varno: -1,
+            old_varno: -1,
+            found_varno: -1,
+            out_param_varno: -1,
+            datums: Vec::new(),
+            ns: Vec::new(),
+            action: PlBlock {
+                lineno: 1,
+                label: None,
+                body: Vec::new(),
+                initvarnos: Vec::new(),
+                exceptions: None,
+            },
+            resolve_option: 0,
+            print_strict_params: false,
+            nstatements: 0,
+            expr_ids: Vec::new(),
+        }
+    }
+
+    // Witness for pl_exec.c:2001-2010's empty-body hangup guard: with the
+    // interrupt flag raised, exec_stmts on an EMPTY statement list (a `LOOP`
+    // with an empty body iterates exactly this) must reach
+    // CHECK_FOR_INTERRUPTS and surface its cancel error — pre-fix, the empty
+    // list fell straight through to RC_OK and the loop was unkillable.
+    #[test]
+    fn empty_stmts_reach_check_for_interrupts() {
+        postgres_seams::check_for_interrupts::set(|| {
+            Err(Box::new(
+                PgError::error("canceling statement due to user request".to_string())
+                    .with_sqlstate(types_error::ERRCODE_QUERY_CANCELED),
+            ))
+        });
+
+        let func = tiny_function();
+        let mut estate = Estate::new(&func, false, true);
+
+        init_small::globals::SetInterruptPending(false);
+        assert_eq!(estate.exec_stmts(&[]).unwrap(), RC_OK, "no interrupt: RC_OK");
+
+        init_small::globals::SetInterruptPending(true);
+        let err = estate.exec_stmts(&[]).unwrap_err();
+        init_small::globals::SetInterruptPending(false);
+        assert_eq!(err.sqlstate, types_error::ERRCODE_QUERY_CANCELED);
+    }
 }

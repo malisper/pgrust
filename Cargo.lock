@@ -13462,6 +13462,7 @@ dependencies = [
  "pgsync",
  "plancache",
  "portalmem",
+ "postgres_seams",
  "rel_vocab",
  "resowner",
  "rewrite_handler_seams",

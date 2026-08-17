@@ -60,6 +60,7 @@ wchar = { path = "../../common/wchar" }
 xact = { path = "../../backend/access/transam/xact" }
 arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
 init_small = { path = "../../backend/utils/init/init_small" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 tupdesc = { path = "../../backend/access/common/tupdesc" }
 tuplestore = { path = "../../backend/utils/sort/tuplestore" }
 typcache = { path = "../../backend/utils/cache/typcache" }
