@@ -12,7 +12,7 @@ compile_error!("only the little-endian blkreftable layout is implemented");
 use crc32c::{fin_crc32c, pg_comp_crc32c, CRC32C_INIT};
 use mcx::{vec_append_bytes, vec_new_in, Mcx, PgFxHashMap, PgVec};
 use types_core::{BlockNumber, ForkNumber, InvalidBlockNumber};
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use types_storage::RelFileLocator;
 
 const BLOCKS_PER_CHUNK: u32 = 1 << 16;
@@ -499,6 +499,7 @@ impl<'mcx, 'f, R: FnMut(&mut [u8]) -> PgResult<usize>> BlockRefTableReader<'mcx,
                 "file \"{}\" has wrong magic number: expected {}, found {}",
                 reader.error_filename, BLOCKREFTABLE_MAGIC, magic
             ))
+            .with_sqlstate(ERRCODE_DATA_CORRUPTED)
             .into());
         }
         Ok(reader)
@@ -541,6 +542,7 @@ impl<'mcx, 'f, R: FnMut(&mut [u8]) -> PgResult<usize>> BlockRefTableReader<'mcx,
             "file \"{}\" ends unexpectedly",
             self.error_filename
         ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED)
         .into()
     }
 
@@ -563,6 +565,7 @@ impl<'mcx, 'f, R: FnMut(&mut [u8]) -> PgResult<usize>> BlockRefTableReader<'mcx,
                     "file \"{}\" has wrong checksum: expected {:08X}, found {:08X}",
                     self.error_filename, expected_crc, actual_crc
                 ))
+                .with_sqlstate(ERRCODE_DATA_CORRUPTED)
                 .into());
             }
             return Ok(None);

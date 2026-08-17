@@ -272,6 +272,7 @@ fn wrong_magic_is_rejected() {
     };
     assert!(err.message().contains("has wrong magic number"));
     assert!(err.message().contains("boom"));
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
 }
 
 #[test]
@@ -290,6 +291,7 @@ fn corrupt_crc_is_rejected() {
     let _ = drain_all(&mut reader);
     let err = reader.next_relation().expect_err("bad crc");
     assert!(err.message().contains("has wrong checksum"));
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
 }
 
 #[test]
@@ -308,6 +310,7 @@ fn truncated_file_ends_unexpectedly() {
         match reader.next_relation() {
             Err(e) => {
                 assert!(e.message().contains("ends unexpectedly"));
+                assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
                 hit_err = true;
                 break;
             }
