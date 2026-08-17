@@ -842,18 +842,45 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
         relpersistence: rv.relpersistence,
         location: rv.location,
     };
-    let relid =
-        namespace_seams::range_var_get_relid::call(mcx, &v, ShareRowExclusiveLock, stmt.missing_ok)?;
+    // C: RangeVarCallbackOwnsRelation runs inside RangeVarGetRelidExtended
+    // (sequence.c:454-458, tablecmds.c:19554-19579) BEFORE the lock is taken
+    // ("it's really best to check permissions before locking anything!" —
+    // namespace.c), and is re-invoked when concurrent DDL moves the name to a
+    // different OID while we waited for the lock. The lookup seam has no
+    // callback hook, so C's retry loop is inlined here: NoLock lookup ->
+    // callback -> lock -> re-resolve; a changed answer unlocks the stale OID
+    // and retries. C's SharedInvalidMessageCounter fast exit is folded into
+    // the unconditional re-resolve — same answer, at worst one extra lookup
+    // on this cold path.
+    let mut relid;
+    let mut old_relid = types_core::InvalidOid;
+    let mut retry = false;
+    loop {
+        relid = namespace_seams::range_var_get_relid::call(mcx, &v, NoLock, stmt.missing_ok)?;
+        // Permission check before locking; no-op on InvalidOid, 42501 for
+        // non-owners (RangeVarCallbackOwnsRelation).
+        range_var_callback_owns_relation(&v, relid)?;
+        if retry {
+            if relid == old_relid {
+                break; // answer unchanged: the right relation is locked
+            }
+            if old_relid != types_core::InvalidOid {
+                lmgr::UnlockRelationOid(old_relid, ShareRowExclusiveLock)?;
+            }
+        }
+        if relid == types_core::InvalidOid {
+            break; // nothing to lock (missing_ok NOTICE below)
+        }
+        lmgr::LockRelationOid(relid, ShareRowExclusiveLock)?;
+        retry = true;
+        old_relid = relid;
+    }
     if relid == types_core::InvalidOid {
         ::elog::ereport(::types_error::NOTICE)
             .errmsg(format!("relation \"{}\" does not exist, skipping", v.relname))
             .finish(::types_error::ErrorLocation::new(file!(), line!() as i32, "AlterSequence"))?;
         return Ok(types_core::InvalidOid);
     }
-    // C: RangeVarCallbackOwnsRelation inside RangeVarGetRelidExtended
-    // (sequence.c:454-458, tablecmds.c:19554-19579); the lookup seam has no
-    // callback hook, so it runs post-lookup under the already-taken lock.
-    range_var_callback_owns_relation(&v, relid)?;
 
     let seqrel = init_sequence(mcx, relid)?;
 
