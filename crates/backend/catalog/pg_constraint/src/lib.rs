@@ -1200,7 +1200,7 @@ pub fn get_relation_constraint_attnos<'mcx>(
         constraint_oid = getattr(&con_rel, tup, Anum_pg_constraint_oid).0.as_oid();
         if let Some(img) = fk_array_image(mcx, tup, desc, Anum_pg_constraint_conkey)? {
             let mut out = [0i16; INDEX_MAX_KEYS];
-            let n = fk_i16_array(&img, "conkey is not a 1-D smallint array", &mut out);
+            let n = fk_i16_array(&img, "conkey is not a 1-D smallint array", &mut out)?;
             for &attnum in &out[..n] {
                 conattnos.push(attnum);
             }
@@ -1243,10 +1243,13 @@ pub fn get_primary_key_attnos<'mcx>(
             break;
         }
         let con_oid = getattr(&con_rel, tup, Anum_pg_constraint_oid).0.as_oid();
+        // C: elog(ERROR, "null conkey for constraint %u") — pg_constraint.c:1498.
         let img = fk_array_image(mcx, tup, con_rel.descr(), Anum_pg_constraint_conkey)?
-            .unwrap_or_else(|| panic!("null conkey for constraint {con_oid}"));
+            .ok_or_else(|| {
+                Box::new(PgError::error(format!("null conkey for constraint {con_oid}")))
+            })?;
         let mut out = [0i16; INDEX_MAX_KEYS];
-        let n = fk_i16_array(&img, "conkey is not a 1-D smallint array", &mut out);
+        let n = fk_i16_array(&img, "conkey is not a 1-D smallint array", &mut out)?;
         let mut pkattnos: PgVec<'mcx, i16> = PgVec::new_in(mcx);
         pkattnos.extend_from_slice(&out[..n]);
         result = Some((pkattnos, con_oid));
@@ -1607,31 +1610,32 @@ fn fk_array_image<'mcx>(
     Ok(Some(full))
 }
 
-fn fk_array_nelems(img: &[u8], elemtype: Oid, errmsg: &str) -> usize {
+// C's malformed-array arms are elog(ERROR, ...) — XX000, the backend
+// survives (pg_constraint.c DeconstructFkConstraintRow) — not panics.
+fn fk_array_nelems(img: &[u8], elemtype: Oid, errmsg: &str) -> PgResult<usize> {
     let rd = |off: usize| i32::from_ne_bytes(img[off..off + 4].try_into().unwrap());
-    assert!(
-        img.len() >= ARR_1D_HDRSZ && rd(4) == 1 && rd(8) == 0 && rd(12) as u32 == elemtype,
-        "{errmsg}"
-    );
-    rd(16) as usize
+    if !(img.len() >= ARR_1D_HDRSZ && rd(4) == 1 && rd(8) == 0 && rd(12) as u32 == elemtype) {
+        return Err(Box::new(PgError::error(errmsg.to_string())));
+    }
+    Ok(rd(16) as usize)
 }
 
-fn fk_i16_array(img: &[u8], errmsg: &str, out: &mut [i16; INDEX_MAX_KEYS]) -> usize {
-    let n = fk_array_nelems(img, INT2OID, errmsg);
+fn fk_i16_array(img: &[u8], errmsg: &str, out: &mut [i16; INDEX_MAX_KEYS]) -> PgResult<usize> {
+    let n = fk_array_nelems(img, INT2OID, errmsg)?;
     for (i, o) in out.iter_mut().enumerate().take(n) {
         let off = ARR_1D_HDRSZ + 2 * i;
         *o = i16::from_ne_bytes(img[off..off + 2].try_into().unwrap());
     }
-    n
+    Ok(n)
 }
 
-fn fk_oid_array(img: &[u8], errmsg: &str, out: &mut [Oid; INDEX_MAX_KEYS]) -> usize {
-    let n = fk_array_nelems(img, types_core::OIDOID, errmsg);
+fn fk_oid_array(img: &[u8], errmsg: &str, out: &mut [Oid; INDEX_MAX_KEYS]) -> PgResult<usize> {
+    let n = fk_array_nelems(img, types_core::OIDOID, errmsg)?;
     for (i, o) in out.iter_mut().enumerate().take(n) {
         let off = ARR_1D_HDRSZ + 4 * i;
         *o = u32::from_ne_bytes(img[off..off + 4].try_into().unwrap());
     }
-    n
+    Ok(n)
 }
 
 pub fn DeconstructFkConstraintRow<'mcx>(
@@ -1650,22 +1654,31 @@ pub fn DeconstructFkConstraintRow<'mcx>(
         fk_del_set_cols: [0; INDEX_MAX_KEYS],
     };
 
+    // C reads the NOT NULL attrs via SysCacheGetAttrNotNull; a null is its
+    // elog(ERROR, "unexpected null value in cached tuple ...") — XX000, the
+    // backend survives — not a panic.
     let req = |attnum: AttrNumber, name: &str| -> PgResult<PgVec<'mcx, u8>> {
-        Ok(fk_array_image(mcx, tup, desc, attnum)?
-            .unwrap_or_else(|| panic!("unexpected null {name} in pg_constraint tuple")))
+        fk_array_image(mcx, tup, desc, attnum)?.ok_or_else(|| {
+            Box::new(PgError::error(format!(
+                "unexpected null value in cached tuple for catalog pg_constraint column {name}"
+            )))
+        })
     };
 
     let conkey = req(Anum_pg_constraint_conkey, "conkey")?;
-    let numkeys = fk_i16_array(&conkey, "conkey is not a 1-D smallint array", &mut out.conkey);
-    assert!(
-        numkeys > 0 && numkeys <= INDEX_MAX_KEYS,
-        "foreign key constraint cannot have {numkeys} columns"
-    );
+    let numkeys = fk_i16_array(&conkey, "conkey is not a 1-D smallint array", &mut out.conkey)?;
+    if !(numkeys > 0 && numkeys <= INDEX_MAX_KEYS) {
+        return Err(Box::new(PgError::error(format!(
+            "foreign key constraint cannot have {numkeys} columns"
+        ))));
+    }
     out.numfks = numkeys;
 
     let confkey = req(Anum_pg_constraint_confkey, "confkey")?;
     let bad_confkey = "confkey is not a 1-D smallint array";
-    assert!(fk_i16_array(&confkey, bad_confkey, &mut out.confkey) == numkeys, "{bad_confkey}");
+    if fk_i16_array(&confkey, bad_confkey, &mut out.confkey)? != numkeys {
+        return Err(Box::new(PgError::error(bad_confkey.to_string())));
+    }
 
     for (attnum, name, slot) in [
         (Anum_pg_constraint_conpfeqop, "conpfeqop", &mut out.pf_eq_oprs),
@@ -1674,7 +1687,9 @@ pub fn DeconstructFkConstraintRow<'mcx>(
     ] {
         let img = req(attnum, name)?;
         let bad = format!("{name} is not a 1-D Oid array");
-        assert!(fk_oid_array(&img, &bad, slot) == numkeys, "{bad}");
+        if fk_oid_array(&img, &bad, slot)? != numkeys {
+            return Err(Box::new(PgError::error(bad)));
+        }
     }
 
     if let Some(img) = fk_array_image(mcx, tup, desc, Anum_pg_constraint_confdelsetcols)? {
@@ -1682,7 +1697,7 @@ pub fn DeconstructFkConstraintRow<'mcx>(
             &img,
             "confdelsetcols is not a 1-D smallint array",
             &mut out.fk_del_set_cols,
-        );
+        )?;
     }
 
     Ok(out)
