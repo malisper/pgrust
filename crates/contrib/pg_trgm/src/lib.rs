@@ -185,7 +185,7 @@ fn word_sim_value(fcinfo: &Fcinfo, swapped: bool, flags: u8) -> PgResult<f32> {
     let (a, b) = text_args(fcinfo)?;
     let (a, b) = if swapped { (b, a) } else { (a, b) };
     let env = make_env();
-    Ok(calc_word_similarity(
+    calc_word_similarity(
         a,
         b,
         flags,
@@ -193,7 +193,7 @@ fn word_sim_value(fcinfo: &Fcinfo, swapped: bool, flags: u8) -> PgResult<f32> {
         &legacy_crc32,
         word_similarity_threshold(),
         strict_word_similarity_threshold(),
-    ))
+    )
 }
 
 fn fc_similarity(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

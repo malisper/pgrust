@@ -17,6 +17,8 @@ datum = { path = "../../_support/types/datum" }
 mcx = { path = "../../_support/mcx" }
 types_core = { path = "../../_support/types/types_core" }
 types_error = { path = "../../_support/types/types_error" }
+init_small = { path = "../../backend/utils/init/init_small" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 types_fmgr = { path = "../../_support/types/fmgr" }
 types_gist = { path = "../../_support/types/gist" }
 types_tuple = { path = "../../_support/types/types_tuple" }

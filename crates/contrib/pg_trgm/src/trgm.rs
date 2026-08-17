@@ -2,7 +2,25 @@
 //! Pure logic over byte buffers; backend services (pg_mblen / ISWORDCHR /
 //! str_tolower) thread in via TrgmEnv so the unit tests can stub them.
 
+use ::types_error::PgResult;
+
 pub type Trgm = [u8; 3];
+
+// C CHECK_FOR_INTERRUPTS (heapam's gated-helper shape): trgm_op.c CFIs each
+// position of iterate_word_similarity's O(len2) walk.  Gated on
+// InterruptPending so the seam stays uncalled in unit tests.
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return process_interrupts();
+    }
+    Ok(())
+}
 
 pub const LPADDING: usize = 2;
 pub const RPADDING: usize = 1;
@@ -387,7 +405,7 @@ fn iterate_word_similarity(
     bounds: Option<&[u8]>,
     word_similarity_threshold: f64,
     strict_word_similarity_threshold: f64,
-) -> f32 {
+) -> PgResult<f32> {
     let strict = flags & WORD_SIMILARITY_STRICT != 0;
     let check_only = flags & WORD_SIMILARITY_CHECK_ONLY != 0;
     let threshold = if strict {
@@ -403,6 +421,10 @@ fn iterate_word_similarity(
     let mut lastpos = vec![-1i32; len];
 
     for i in 0..len2 {
+        // C trgm_op.c:688: CFI per position (word_similarity over long
+        // strings is O(n*m) inner work).
+        check_for_interrupts()?;
+
         let trgindex = trg2indexes[i] as usize;
 
         if lower >= 0 || found[trgindex] {
@@ -479,7 +501,7 @@ fn iterate_word_similarity(
         }
     }
 
-    smlr_max
+    Ok(smlr_max)
 }
 
 pub fn calc_word_similarity(
@@ -490,7 +512,7 @@ pub fn calc_word_similarity(
     legacy_crc32: &dyn Fn(&[u8]) -> u32,
     word_similarity_threshold: f64,
     strict_word_similarity_threshold: f64,
-) -> f32 {
+) -> PgResult<f32> {
     let strict = flags & WORD_SIMILARITY_STRICT != 0;
 
     let (trg1, _) = generate_trgm_only(str1, false, env, legacy_crc32);
@@ -542,6 +564,8 @@ pub fn calc_word_similarity(
         strict_word_similarity_threshold,
     )
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -604,7 +628,7 @@ mod tests {
     fn word_similarity_reference() {
         let env = ascii_env();
         // word_similarity('Sunday', 'Saturday') = 0.2857143 (2/7) in PG
-        let s = calc_word_similarity(b"Sunday", b"Saturday", 0, &env, &crc, 0.6, 0.5);
+        let s = calc_word_similarity(b"Sunday", b"Saturday", 0, &env, &crc, 0.6, 0.5).unwrap();
         assert!((s - 2.0 / 7.0).abs() < 1e-6, "got {s}");
     }
 }
