@@ -8,7 +8,7 @@ use ::adt_geo::{FPgt, FPlt};
 use ::datum::Datum;
 use ::types_core::geo::Point;
 use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use ::types_scan::scankey::{
     RTAboveStrategyNumber, RTBelowStrategyNumber, RTContainedByStrategyNumber,
@@ -23,6 +23,14 @@ use ::types_spgist::state::{
 
 const FLOAT8OID: Oid = 701;
 const VOIDOID: Oid = 2278;
+
+#[track_caller]
+#[cold]
+fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "unrecognized strategy number: {strategy}"
+    )))
+}
 
 // SAFETY: datum points at a live 16-byte point image (opclass protocol).
 #[inline]
@@ -224,7 +232,7 @@ fn fc_spg_kd_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
                     which &= 1 << 2;
                 }
             }
-            other => panic!("unrecognized strategy number: {other}"),
+            other => return Err(unrecognized_strategy(other)),
         }
         if which == 0 {
             break;

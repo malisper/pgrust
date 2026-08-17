@@ -9,7 +9,7 @@ use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::geo::{Point, BOX};
 use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use ::types_scan::scankey::{
     RTAboveStrategyNumber, RTBelowStrategyNumber, RTContainedByStrategyNumber,
@@ -24,6 +24,14 @@ use ::types_spgist::state::{
 
 const POINTOID: Oid = 600;
 const VOIDOID: Oid = 2278;
+
+#[track_caller]
+#[cold]
+fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "unrecognized strategy number: {strategy}"
+    )))
+}
 
 // SAFETY: datum points at a live 16-byte point image (opclass protocol).
 #[inline]
@@ -302,7 +310,7 @@ fn fc_spg_quad_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
                     which &= r;
                 }
             }
-            other => panic!("unrecognized strategy number: {other}"),
+            other => return Err(unrecognized_strategy(other)),
         }
         if which == 0 {
             break;
@@ -370,7 +378,7 @@ fn fc_spg_quad_leaf_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
                 let boxQuery = unsafe { box_at(key.sk_argument) };
                 box_contain_pt(&boxQuery, &datum)
             }
-            other => panic!("unrecognized strategy number: {other}"),
+            other => return Err(unrecognized_strategy(other)),
         };
         if !res {
             break;

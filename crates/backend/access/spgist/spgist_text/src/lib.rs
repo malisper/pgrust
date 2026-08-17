@@ -6,7 +6,7 @@
 use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::{Oid, BLCKSZ};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use ::types_spgist::state::{
     spgChooseIn, spgChooseOut, spgInnerConsistentIn, spgInnerConsistentOut, spgLeafConsistentIn,
@@ -36,6 +36,14 @@ const BTGreaterStrategyNumber: u16 = 5;
 #[inline]
 fn is_collation_aware(strategy: u16) -> bool {
     strategy > SPG_STRATEGY_ADDITION && strategy != RTPrefixStrategyNumber
+}
+
+#[track_caller]
+#[cold]
+fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "unrecognized strategy number: {strategy}"
+    )))
 }
 
 // VARDATA_ANY/VARSIZE_ANY_EXHDR over an untoasted (possibly short) text datum.
@@ -442,7 +450,7 @@ fn fc_spg_text_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
                 BTEqualStrategyNumber => r == 0 && in_text.len() >= this_len,
                 BTGreaterEqualStrategyNumber | BTGreaterStrategyNumber => r >= 0,
                 RTPrefixStrategyNumber => r == 0,
-                other => panic!("unrecognized strategy number: {other}"),
+                other => return Err(unrecognized_strategy(other)),
             };
             if !res {
                 break;
@@ -568,7 +576,7 @@ fn fc_spg_text_leaf_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
             BTEqualStrategyNumber => r == 0,
             BTGreaterEqualStrategyNumber => r >= 0,
             BTGreaterStrategyNumber => r > 0,
-            other => panic!("unrecognized strategy number: {other}"),
+            other => return Err(unrecognized_strategy(other)),
         };
         if !res {
             break;
