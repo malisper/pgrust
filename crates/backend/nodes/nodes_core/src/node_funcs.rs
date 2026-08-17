@@ -3,6 +3,7 @@
 // loud panic (infallible signatures); exprTypmod's default is C's -1;
 // exprLocation carries every C 18.3 arm plus C's default of -1.
 use types_core::{Oid, ParseLoc};
+use types_error::{PgError, ERRCODE_UNDEFINED_OBJECT};
 use types_nodes::{Node, NodeList, NodeTag};
 
 // C's `elog(ERROR, "unrecognized node type: %d", ...)` default arms; loud
@@ -110,16 +111,17 @@ pub fn expr_type(node: Node<'_>) -> Oid {
     }
 }
 
-// DIVERGENCE: C ereports 42704 for an arrayless element type (e.g. ARRAY
-// over a void-returning select); loud panic here since expr_type is
-// infallible by signature.
+// C ereport 42704; expr_type is infallible so this is panic_any(PgError).
 pub fn promoted_array_type(elemtype: Oid) -> Oid {
     let arraytype = lsyscache::get_promoted_array_type(elemtype)
-        .unwrap_or_else(|e| panic!("get_promoted_array_type({elemtype}): {e}"));
-    assert!(
-        arraytype != types_core::InvalidOid,
-        "could not find array type for data type {elemtype}"
-    );
+        .unwrap_or_else(|e| std::panic::panic_any(e));
+    if arraytype == types_core::InvalidOid {
+        let name = format_type::format_type_be(elemtype).unwrap_or_else(|_| format!("{elemtype}"));
+        std::panic::panic_any(Box::new(
+            PgError::error(format!("could not find array type for data type {name}"))
+                .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
     arraytype
 }
 
