@@ -2023,6 +2023,15 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 self.push_back(&t)?;
                 break;
             }
+            // C pl_gram.y:3670: fieldnames[1024]/varnos[1024] array bound —
+            // checked on seeing the comma, before lexing the next variable.
+            if varnos.len() >= 1024 {
+                return Err(self.gram_err_pos(
+                    types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                    "too many INTO variables specified".to_string(),
+                    t.2,
+                ));
+            }
             let vt = self.yylex()?;
             if vt.0 == T_DATUM {
                 let w = vt.1.wdatum.as_ref().expect("T_DATUM");
