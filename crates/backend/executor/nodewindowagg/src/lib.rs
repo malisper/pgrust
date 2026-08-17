@@ -418,6 +418,19 @@ fn wfunc_incompatible_trans_type(fnoid: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn wfunc_strictness_mismatch() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "strictness of aggregate's forward and inverse transition functions must match"
+                .to_string(),
+        )
+        .with_sqlstate(::types_error::ERRCODE_INVALID_FUNCTION_DEFINITION),
+    )
+}
+
 // initialize_peragg (nodeWindowAgg.c:2911-2944): EXECUTE check on one
 // component function, run as the aggregate owner (pg_proc.proowner).
 // InvokeFunctionExecuteHook: no hook surface exists (repo-wide).
@@ -1312,11 +1325,7 @@ fn initialize_peragg_framed<'mcx>(
             let transfn = fmgr_core::fmgr_info(t)?;
             let invtransfn = fmgr_core::fmgr_info(inv)?;
             if transfn.fn_strict != invtransfn.fn_strict {
-                panic!(
-                    "strictness of aggregate's forward and inverse transition functions \
-                     must match (aggregate {})",
-                    wfunc.winfnoid
-                );
+                return Err(wfunc_strictness_mismatch());
             }
             fn_strict = transfn.fn_strict;
             kernel = AggKernel::MovingByVal { transfn, invtransfn };
