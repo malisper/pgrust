@@ -334,6 +334,7 @@ fn resolve_type_name<'mcx>(
     pstate: &parser_small1::ParseState<'_, 'mcx>,
     tn: &TypeName<'_>,
     languageOid: Oid,
+    objtype: ObjectType,
 ) -> PgResult<Oid> {
     let (typoid, typname) = resolve_type_oid(mcx, tn)?;
     if typoid == InvalidOid {
@@ -342,7 +343,7 @@ fn resolve_type_name<'mcx>(
             ERRCODE_UNDEFINED_OBJECT,
         ));
     }
-    shell_type_check(mcx, Some(pstate), tn, typoid, languageOid, false)?;
+    shell_type_check(mcx, Some(pstate), tn, typoid, languageOid, objtype, false)?;
     check_defined_and_acl(typoid)?;
     Ok(typoid)
 }
@@ -477,6 +478,7 @@ fn shell_type_check<'mcx>(
     tn: &TypeName<'_>,
     typoid: Oid,
     languageOid: Oid,
+    objtype: ObjectType,
     is_return: bool,
 ) -> PgResult<()> {
     if syscache_seams::pg_type_isdefined::call(typoid)?.unwrap_or(false) {
@@ -492,6 +494,18 @@ fn shell_type_check<'mcx>(
             PgError::new(
                 ERROR,
                 format!("SQL function cannot {verb} shell type {}", name.as_str()),
+            )
+            .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
+            .with_cursor_position(pos),
+        ));
+    }
+    // C functioncmds.c:248: aggregates cannot be created on shell types
+    // either — hard error, where plain functions only get the NOTICE below.
+    if objtype == ObjectType::OBJECT_AGGREGATE {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("aggregate cannot accept shell type {}", name.as_str()),
             )
             .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
             .with_cursor_position(pos),
@@ -514,7 +528,15 @@ fn compute_return_type<'mcx>(
 ) -> PgResult<(Oid, bool)> {
     let (mut rettype, _typname) = resolve_type_oid(mcx, returnType)?;
     if rettype != InvalidOid {
-        shell_type_check(mcx, None, returnType, rettype, languageOid, true)?;
+        shell_type_check(
+            mcx,
+            None,
+            returnType,
+            rettype,
+            languageOid,
+            ObjectType::OBJECT_FUNCTION,
+            true,
+        )?;
     } else {
         let typnam = commands_define::TypeNameToString(mcx, returnType)?;
         // C: only C-coded functions can be I/O functions; anything else is a
@@ -617,7 +639,7 @@ pub fn interpret_function_parameter_list<'mcx>(
         };
         let tn_node: Node<'mcx> = fp.argType.expect("FunctionParameter.argType");
         let tn = tn_node.as_variant::<TypeName>().expect("argType is a TypeName");
-        let toid = resolve_type_name(mcx, pstate, tn, languageOid)?;
+        let toid = resolve_type_name(mcx, pstate, tn, languageOid, objtype)?;
         if tn.setof {
             let msg = match objtype {
                 ObjectType::OBJECT_AGGREGATE => "aggregates cannot accept set arguments",
