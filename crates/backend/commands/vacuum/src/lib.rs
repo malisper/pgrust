@@ -732,6 +732,16 @@ fn vacuum_rel<'mcx>(
         return Ok(true);
     }
 
+    // Get a session-level lock too (vacuum.c:2182-2191): it protects our
+    // access to the relation across the per-relation transaction commits, so
+    // the TOAST recursion below runs secure in the knowledge that no one is
+    // deleting the parent relation. Cannot block, even if someone else is
+    // waiting for access — the lock manager knows both requests are from the
+    // same process. No unwind guard needed: on error the transaction aborts
+    // and ProcReleaseLocks(!isCommit) releases session locks too, like C.
+    let lockrelid = rel.rd_lockInfo.lockRelId;
+    lmgr::LockRelationIdForSession(&lockrelid, lmode)?;
+
     // Toast applies its own reloptions; do not inherit the parent's scribbles.
     let mut toast_params = *params;
 
@@ -805,6 +815,9 @@ fn vacuum_rel<'mcx>(
         toast_params.toast_parent = relid;
         vacuum_rel(mcx, toast_relid, None, &toast_params, bstrategy)?;
     }
+
+    // Now release the session-level lock on the main table (vacuum.c:2360).
+    lmgr::UnlockRelationIdForSession(&lockrelid, lmode)?;
 
     Ok(true)
 }

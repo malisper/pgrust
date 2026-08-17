@@ -282,6 +282,8 @@ fn install_proc_boot_seams() {
     lock_seams::lock_acquire_extended::set(|_, _, _, _, _, _| {
         Ok(types_storage::lock::LOCKACQUIRE_OK)
     });
+    // vacuum_rel's session-level lock release (C UnlockRelationIdForSession)
+    lock_seams::lock_release::set(|_, _, _| Ok(true));
     timeout_seams::disable_timeouts::set(|_| {});
     aio_seams::pgaio_closing_fd::set(|_| {});
     sync_seams::register_sync_request::set(|_, _, _| Ok(true));
