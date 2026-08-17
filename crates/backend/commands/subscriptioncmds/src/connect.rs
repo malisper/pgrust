@@ -8,7 +8,7 @@
 use mcx::Mcx;
 use types_error::{
     PgError, PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_UNDEFINED_OBJECT, WARNING,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_UNDEFINED_OBJECT, WARNING,
 };
 
 use walreceiver::client::{ExecStatus, PgConn, QueryResult};
@@ -24,13 +24,18 @@ fn row_text(r: &[Option<Vec<u8>>], i: usize) -> String {
         .unwrap_or_default()
 }
 
-fn exec_or_fail(conn: &mut PgConn, cmd: &str, what: &str) -> PgResult<QueryResult> {
+// C stamps these per call site: fetch_table_list/check_publications_origin
+// use ERRCODE_CONNECTION_FAILURE (subscriptioncmds.c:2150,2274) but
+// check_publications raises a bare errmsg — XX000 (subscriptioncmds.c:465).
+fn exec_or_fail(
+    conn: &mut PgConn,
+    cmd: &str,
+    what: &str,
+    sqlstate: types_error::SqlState,
+) -> PgResult<QueryResult> {
     let res = conn.exec(cmd)?;
     if res.status != ExecStatus::TuplesOk && res.status != ExecStatus::CommandOk {
-        return Err(err(
-            format!("could not {what}: {}", res.err.clone()),
-            ERRCODE_CONNECTION_FAILURE,
-        ));
+        return Err(err(format!("could not {what}: {}", res.err.clone()), sqlstate));
     }
     Ok(res)
 }
@@ -50,7 +55,12 @@ pub(crate) fn check_publications(conn: &mut PgConn, publications: &[&str]) -> Pg
         "SELECT t.pubname FROM pg_catalog.pg_publication t WHERE t.pubname IN ({})",
         publications_str(publications)
     );
-    let res = exec_or_fail(conn, &cmd, "receive list of publications from the publisher")?;
+    let res = exec_or_fail(
+        conn,
+        &cmd,
+        "receive list of publications from the publisher",
+        ERRCODE_INTERNAL_ERROR,
+    )?;
 
     let found: Vec<String> = res.rows.iter().map(|r| row_text(r, 0)).collect();
     let missing: Vec<&&str> =
@@ -93,7 +103,12 @@ pub(crate) fn check_publications_origin(
          C.relnamespace) WHERE C.oid = GPT.relid AND P.pubname IN ({})",
         publications_str(publications)
     );
-    let res = exec_or_fail(conn, &cmd, "receive list of replicated tables from the publisher")?;
+    let res = exec_or_fail(
+        conn,
+        &cmd,
+        "receive list of replicated tables from the publisher",
+        ERRCODE_CONNECTION_FAILURE,
+    )?;
     if !res.rows.is_empty() {
         let list =
             res.rows.iter().map(|r| format!("\"{}\"", row_text(r, 0))).collect::<Vec<_>>().join(", ");
@@ -152,7 +167,12 @@ pub(crate) fn fetch_table_list(
          ON gpt.relid = c.oid\n",
         publications_str(publications)
     );
-    let res = exec_or_fail(conn, &cmd, "receive list of replicated tables from the publisher")?;
+    let res = exec_or_fail(
+        conn,
+        &cmd,
+        "receive list of replicated tables from the publisher",
+        ERRCODE_CONNECTION_FAILURE,
+    )?;
     let mut tablelist = Vec::with_capacity(res.rows.len());
     for r in &res.rows {
         note_published_table(&mut tablelist, row_text(r, 0), row_text(r, 1))?;

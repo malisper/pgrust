@@ -273,6 +273,38 @@ pub fn end_streaming(conn: &mut PgConn) -> PgResult<TimeLineID> {
                 .parse()
                 .unwrap_or(0);
             res = conn.get_result()?;
+        } else if r.status == ExecStatus::CopyOut {
+            // C: if CopyDone hadn't been received from the backend yet (copy
+            // aborted mid-stream), PQendcopy drains the copy; a drain failure
+            // is 08006 (libpqwalreceiver.c:693-701).
+            loop {
+                match conn.get_copy_data() {
+                    Ok(CopyData::End) => break,
+                    Ok(CopyData::Msg(_)) => {}
+                    Ok(CopyData::Block) => {
+                        if !conn.consume_input() {
+                            return throw(ereport(ERROR)
+                                .errcode(ERRCODE_CONNECTION_FAILURE)
+                                .errmsg(format!(
+                                    "error while shutting down streaming COPY: {}",
+                                    pchomp(&conn.error_message())
+                                ))
+                                .finish(loc("libpqrcv_endstreaming")));
+                        }
+                    }
+                    Err(e) => {
+                        return throw(ereport(ERROR)
+                            .errcode(ERRCODE_CONNECTION_FAILURE)
+                            .errmsg(format!(
+                                "error while shutting down streaming COPY: {}",
+                                pchomp(&e)
+                            ))
+                            .finish(loc("libpqrcv_endstreaming")));
+                    }
+                }
+            }
+            // CommandComplete should follow
+            res = conn.get_result()?;
         }
     }
     match &res {
