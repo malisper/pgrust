@@ -631,9 +631,27 @@ pub(super) enum RefuseReason {
     /// drive is forward-only over the index). Ticks under the index/IOS
     /// classes at their admission gates; allowlist rows in the same commit.
     DescOrder = 43,
+    // -----------------------------------------------------------------------
+    // Series fold (issue #83, lanev2/series_fold.rs; APPEND-ONLY mint — one
+    // variant, ticked knob-ON only under the FunctionScan and AggBuild
+    // classes). No new class: the drive reuses the frozen rows of the two
+    // shapes it composes.
+    // -----------------------------------------------------------------------
+    /// The offered plain-Agg-over-FunctionScan is outside the series-fold
+    /// vocabulary. Two mechanisms, one row (the mechanism is the lane
+    /// trace's detail, never a second class): the SCAN is not a plain
+    /// `generate_series` feed the generator reproduces (`ROWS FROM` /
+    /// `WITH ORDINALITY` / qual / projection / backward-capable /
+    /// already-materialized / `pgstat`-tracked / another function), ticked
+    /// under `FunctionScan`; or the fold PLAN reads something a
+    /// one-column, never-null synthetic lane cannot serve (a second column,
+    /// a FILTER, a guarded or residual transition, a lane width other than
+    /// the generator's own), ticked under `AggBuild`. Both leave the node
+    /// untouched — the store path runs byte-identically.
+    SeriesShape = 44,
 }
 
-const N_REASONS: usize = 44;
+const N_REASONS: usize = 45;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -682,6 +700,7 @@ impl RefuseReason {
             RefuseReason::CursorCurrentOfTidCapture => "cursor-currentof-tidcapture",
             RefuseReason::SpiPlanRefused => "spi-plan-refused",
             RefuseReason::DescOrder => "desc-order",
+            RefuseReason::SeriesShape => "series-shape",
         }
     }
 
@@ -732,6 +751,7 @@ impl RefuseReason {
             CursorCurrentOfTidCapture,
             SpiPlanRefused,
             DescOrder,
+            SeriesShape,
         ][i]
     }
 }

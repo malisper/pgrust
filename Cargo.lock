@@ -9504,6 +9504,8 @@ name = "nodefunctionscan"
 version = "0.1.0"
 dependencies = [
  "aclchk_seams",
+ "adt_int",
+ "adt_int8",
  "coerce",
  "datum",
  "detoast_seams",
