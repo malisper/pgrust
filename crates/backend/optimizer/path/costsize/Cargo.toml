@@ -28,3 +28,6 @@ nodehash = { path = "../../../executor/nodehash" }
 nodememoize = { path = "../../../executor/nodememoize" }
 vars = { path = "../../util/vars" }
 nodes_core = { path = "../../../nodes/nodes_core" }
+
+[dev-dependencies]
+datum = { path = "../../../../_support/types/datum" }

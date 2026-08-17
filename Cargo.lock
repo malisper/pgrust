@@ -4753,6 +4753,7 @@ name = "costsize"
 version = "0.1.0"
 dependencies = [
  "allpaths",
+ "datum",
  "guc_tables",
  "init_small",
  "lsyscache",

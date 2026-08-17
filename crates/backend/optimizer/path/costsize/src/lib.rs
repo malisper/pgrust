@@ -2347,7 +2347,16 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             (types_core::catalog::BOOLOID, -1)
         }
         NodeTag::T_RowExpr => (node.as_row_expr().unwrap().row_typeid, -1),
-        NodeTag::T_FuncExpr => (node.as_func_expr().unwrap().funcresulttype, -1),
+        // C exprTypmod (nodeFuncs.c:316): a length-coercion cast carries its
+        // typmod (exprIsLengthCoercion). setrefs' upper-plan Vars are built
+        // from this pair (setrefs.c:2718-2720), so a bare -1 here erased cast
+        // typmods from the executed RowDescription whenever an upper node
+        // (LIMIT/SORT/UNIQUE/...) sat above the scan, while Describe-statement
+        // metadata (which uses nodes_core::expr_typmod) stayed correct.
+        NodeTag::T_FuncExpr => (
+            node.as_func_expr().unwrap().funcresulttype,
+            nodes_core::expr_typmod(node),
+        ),
         NodeTag::T_Aggref => (node.as_aggref().unwrap().aggtype, -1),
         NodeTag::T_GroupingFunc => (23, -1),
         NodeTag::T_WindowFunc => (node.as_window_func().unwrap().wintype, -1),
@@ -4428,6 +4437,61 @@ fn calc_joinrel_size_estimate<'mcx>(
 
 #[cfg(test)]
 mod tests {
+    /// expr_type_typmod's FuncExpr arm must report length-coercion typmods
+    /// like C exprTypmod (nodeFuncs.c exprIsLengthCoercion): setrefs builds
+    /// upper-plan Vars from this pair, and a -1 here erased cast typmods
+    /// from the executed RowDescription (fmod 786440 -> -1 under LIMIT).
+    #[test]
+    fn func_expr_length_coercion_typmod_survives() {
+        use types_nodes::primnodes::{Const, FuncExpr, Var};
+        use types_nodes::{CoercionForm, Node, NodeList};
+        let ctx = mcx::MemoryContext::new_bump("costsize-test");
+        let mcx = ctx.mcx();
+        const NUMERICOID: u32 = 1700;
+        let arg = Node::mk(
+            mcx,
+            Var { varno: 1, varattno: 1, vartype: NUMERICOID, vartypmod: 655366, ..Default::default() },
+        )
+        .unwrap();
+        // numeric(12,4): ((12 << 16) | 4) + VARHDRSZ = 786440
+        let typmod_const = Node::mk(
+            mcx,
+            Const {
+                consttype: types_core::catalog::INT4OID,
+                consttypmod: -1,
+                constcollid: 0,
+                constlen: 4,
+                constvalue: datum::Datum::from_i32(786440),
+                constisnull: false,
+                constbyval: true,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let cast = |form| {
+            Node::mk(
+                mcx,
+                FuncExpr {
+                    funcid: 1703,
+                    funcresulttype: NUMERICOID,
+                    funcformat: form,
+                    args: NodeList::from_slice(mcx, &[arg, typmod_const]).unwrap(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            super::expr_type_typmod(cast(CoercionForm::COERCE_EXPLICIT_CAST)),
+            (NUMERICOID, 786440)
+        );
+        // a plain function call still has no typmod
+        assert_eq!(
+            super::expr_type_typmod(cast(CoercionForm::COERCE_EXPLICIT_CALL)),
+            (NUMERICOID, -1)
+        );
+    }
+
     #[test]
     fn mergejoin_unique_outer_has_no_rescans() {
         assert_eq!(
