@@ -40,6 +40,21 @@ unsafe fn page_mut<'a>(buf: Buffer) -> PageMut<'a> {
     PageMut::from_raw(buffer_get_page::call(buf))
 }
 
+// C CHECK_FOR_INTERRUPTS (heapam's gated-helper shape): brin_pageops.c /
+// brin_revmap.c CFI their retry and per-tuple loops.
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return process_interrupts();
+    }
+    Ok(())
+}
+
 pub fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
     rel.is_permanent()
         && (transam_xlog_seams::xlog_standby_info_active::call()
@@ -425,6 +440,9 @@ pub fn brin_evacuate_page(
     let maxoff = page.max_offset_number();
     let mut off = 1;
     while off <= maxoff {
+        // C brin_pageops.c:584: CFI per evacuated tuple.
+        check_for_interrupts()?;
+
         let lp = page.item_id(off);
         if lp.is_used() {
             let (p, sz) = page.item_raw(lp);
@@ -530,6 +548,9 @@ fn brin_getinsertbuffer(
     }
 
     loop {
+        // C brin_pageops.c:722: CFI at the top of the extension retry.
+        check_for_interrupts()?;
+
         let mut extended = false;
         let mut extension_lock_held = false;
         let buf: Buffer;
@@ -749,6 +770,9 @@ pub fn brinGetTupleForHeapBlock(
 
     let mut previptr = ItemPointerData::invalid();
     loop {
+        // C brin_revmap.c:225: CFI per concurrent-update retry.
+        check_for_interrupts()?;
+
         if revmap.rm_currBuf.get() == InvalidBuffer
             || buffer_get_block_number::call(revmap.rm_currBuf.get()) != mapBlk
         {
@@ -939,6 +963,9 @@ fn revmap_extend_and_get_blkno(
 ) -> PgResult<BlockNumber> {
     let targetblk = HEAPBLK_TO_REVMAP_BLK(revmap.rm_pagesPerRange, heapBlk) + 1;
     while targetblk > revmap.rm_lastRevmapPage.get() {
+        // C brin_revmap.c:510: CFI per revmap extension step.
+        check_for_interrupts()?;
+
         revmap_physical_extend(idxrel, revmap)?;
     }
     Ok(targetblk)

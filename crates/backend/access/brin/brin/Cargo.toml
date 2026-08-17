@@ -29,3 +29,5 @@ xact = { path = "../../transam/xact" }
 brin_minmax_multi = { path = "../brin_minmax_multi" }
 brin_bloom = { path = "../brin_bloom" }
 brin_inclusion = { path = "../brin_inclusion" }
+init_small = { path = "../../../utils/init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }

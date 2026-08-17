@@ -28,6 +28,21 @@ use brin_pageops::{
 };
 use brin_tuple::{brin_deform_tuple, brin_form_tuple, brin_new_memtuple};
 
+// C CHECK_FOR_INTERRUPTS (heapam's gated-helper shape): brin.c CFIs every
+// range in bringetbitmap and every brininsert retry.
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return process_interrupts();
+    }
+    Ok(())
+}
+
 // unported: user-reachable feature arms (custom opclasses) raise a clean
 // 0A000 instead of panicking; see each site's marker comment.
 #[cold]
@@ -257,6 +272,9 @@ pub fn brininsert<'mcx>(
     let mut buf: Buffer = InvalidBuffer;
 
     loop {
+        // C brin.c:386: CFI at the top of every insert retry.
+        check_for_interrupts()?;
+
         // First tuple of a new page range: ask for summarization of the
         // previous one (C brininsert's autosummarize block).
         if autosummarize && heapBlk > 0 && heapBlk == origHeapBlk && heaptid.ip_posid == 1 {
@@ -414,6 +432,9 @@ pub fn bringetbitmap(
     // u64 iteration: heapBlk could wrap for tables near 2^32 pages.
     let mut heapBlk: u64 = 0;
     while heapBlk < nblocks as u64 {
+        // C brin.c:748: CFI once per page range in the whole-index walk.
+        check_for_interrupts()?;
+
         per_range.reset();
 
         let gottuple = brinGetTupleForHeapBlock(
