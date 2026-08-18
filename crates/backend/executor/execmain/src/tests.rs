@@ -15146,6 +15146,9 @@ fn with_armed_stack_guard<F: FnOnce() + Send + 'static>(f: F) {
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
             let old = stack_depth_core::set_stack_base();
+            // Production pairing: ceiling clamps the scaled budget inside
+            // this thread's real 64 MiB, keeping failure polite (54001).
+            stack_depth_core::set_thread_stack_ceiling(64 * 1024 * 1024);
             stack_depth_core::assign_max_stack_depth(2048); // shipped default, kB
             f();
             stack_depth_core::restore_stack_base(old);

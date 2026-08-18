@@ -35,6 +35,9 @@ fn compile(pat: &str) -> Result<(), i32> {
         .stack_size(8 << 20)
         .spawn(move || {
             ::stack_depth::set_stack_base();
+            // Production pairing: clamp the scaled budget to this thread's
+            // real 8 MiB so deep patterns error, not SIGSEGV.
+            ::stack_depth::set_thread_stack_ceiling(8 << 20);
             ::stack_depth::assign_max_stack_depth(7680);
             let ctx = MemoryContext::new("t");
             pg_regcomp(ctx.mcx(), &w, REG_ADVANCED, 0)

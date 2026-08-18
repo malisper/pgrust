@@ -948,6 +948,10 @@ mod stack_guard {
                     // short-circuits on base == 0 and every guard is INERT —
                     // the test would be vacuous.
                     ::stack_depth::set_stack_base();
+                    // Production pairing: clamp the scaled budget to this
+                    // thread's real 8 MiB so deep inputs trip 54001, not
+                    // SIGSEGV.
+                    ::stack_depth::set_thread_stack_ceiling(8 << 20);
                     ::stack_depth::assign_max_stack_depth(2048);
                     install_detoast();
                     let ctx = MemoryContext::new("t");

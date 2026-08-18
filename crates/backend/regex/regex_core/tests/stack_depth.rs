@@ -49,6 +49,9 @@ fn deep_regex_nesting_reports_etoobig_and_does_not_abort() {
                 // base == 0 and every guard below is INERT -- the test would be
                 // vacuous.
                 ::stack_depth::set_stack_base();
+                // Production pairing: backend threads record their real
+                // reservation; the ceiling keeps the scaled budget inside it.
+                ::stack_depth::set_thread_stack_ceiling(2 << 20);
                 ::stack_depth::assign_max_stack_depth(1536);
                 let ctx = MemoryContext::new("t");
                 pg_regcomp(ctx.mcx(), &w, REG_ADVANCED, 0).map(|_| ())

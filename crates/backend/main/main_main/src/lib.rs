@@ -274,6 +274,16 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
     // MemoryContextInit: top-level contexts are owner-created here; ErrorContext is PgResult.
 
     stack_depth::set_stack_base();
+    // Backend threads get scaled-provisioned stacks (launch_backend); the
+    // main thread runs on the process stack (RLIMIT_STACK), so clamp the
+    // guard's budget to what actually exists — the guard must raise 54001
+    // before the real stack ends.
+    {
+        let rlim = stack_depth::get_stack_depth_rlimit();
+        if rlim > 0 && rlim < isize::MAX {
+            stack_depth::set_thread_stack_ceiling(rlim as usize);
+        }
+    }
 
     // set_pglocale_pgservice: NLS/gettext unported; PGSYSCONFDIR default suffices.
 

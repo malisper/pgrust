@@ -755,6 +755,7 @@ pub fn postmaster_child_launch(
 
             // C records the stack base once in main(); each thread owns its own.
             let _ = stack_depth::set_stack_base();
+            stack_depth::set_thread_stack_ceiling(child_thread_stack_size());
 
             let guc_result = if guc::layers::base_share_enabled() {
                 guc::store::initialize_guc_options_for_child_base(&guc_base)
@@ -797,20 +798,25 @@ pub fn postmaster_child_launch(
 // C backends run on the process stack (RLIMIT_STACK); a raised-from-rlimit
 // max_stack_depth needs the same real budget here, so child threads reserve
 // the finite rlimit (env RUST_MIN_STACK still wins when larger; std ignores
-// it once stack_size() is explicit). Unlimited/unknown rlimit reserves 16MiB
-// (or the max_stack_depth budget + slop when the GUC was raised above that):
-// reserve is address space only, but 64MiB x max_connections=500 was 32 GB
-// of VSZ for zero benefit under `ulimit -s unlimited`.
+// it once stack_size() is explicit). The reservation must also cover the
+// SCALED guard budget (stack_depth::STACK_DEPTH_SCALE — Rust frames cost a
+// multiple of C's, so the guard enforces GUC-bytes x scale) plus 8MiB slop,
+// or the thread would fault before the guard fires. Reserve is address
+// space only, but it is capped at 512MiB (macOS pthread limit territory;
+// the per-thread ceiling clamp in stack_depth_core keeps the guard sound
+// if the cap ever binds). Unlimited/unknown rlimit reserves at least 16MiB.
 fn child_thread_stack_size() -> usize {
     let rlim = stack_depth::get_stack_depth_rlimit();
-    let unlimited_reserve =
-        (16usize << 20).max(stack_depth::max_stack_depth_bytes().max(0) as usize + (2 << 20));
+    let scaled_need =
+        stack_depth::scaled_max_stack_depth_bytes().max(0) as usize + (8 << 20);
+    let unlimited_reserve = (16usize << 20).max(scaled_need);
     let rlim = if rlim > 0 && rlim < isize::MAX { rlim as usize } else { unlimited_reserve };
     let min_stack = std::env::var("RUST_MIN_STACK")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    rlim.max(min_stack).max(2 << 20)
+    let computed = rlim.max(scaled_need).max(2 << 20).min(512 << 20);
+    computed.max(min_stack)
 }
 
 pub fn init_seams() {
@@ -1100,6 +1106,7 @@ pub mod wpool {
                     waiteventset::WaitEventSetReleaseGuard::new();
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
+                stack_depth::set_thread_stack_ceiling(super::child_thread_stack_size());
                 // cpuaff increment A (default OFF): standbys ride the full
                 // pool-set mask (no dedicated core). Fail-open, loud-once.
                 super::cpuaff::apply_wpool_standby();
@@ -1920,6 +1927,7 @@ pub mod rtpool {
                 let _charge = PopulationCharge;
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
+                stack_depth::set_thread_stack_ceiling(super::child_thread_stack_size());
                 // cpuaff increment A (default OFF): bind this executor to
                 // its core (standby ordinals take the set mask) before any
                 // work runs. Fail-open — a refused set degrades loud-once.

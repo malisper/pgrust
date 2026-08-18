@@ -192,6 +192,9 @@ fn on_guarded_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) 
         .stack_size(1 << 20)
         .spawn(move || {
             let _ = stack_depth::set_stack_base();
+            // Production pairing: the ceiling clamps the scaled budget to
+            // this thread's real 1 MiB so the guard fires before overflow.
+            stack_depth::set_thread_stack_ceiling(1 << 20);
             setup();
             f()
         })

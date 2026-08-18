@@ -175,6 +175,9 @@ fn mk_a_node_deep_affix_raises_54001_not_stack_overflow() {
     ::stack_depth::set_max_stack_depth(MAX_KB);
     ::stack_depth::assign_max_stack_depth(MAX_KB);
     let _ = ::stack_depth::set_stack_base();
+    // Production pairing: clamp the scaled budget to libtest's real 2 MiB
+    // thread stack so the deep recursion trips 54001, not SIGSEGV.
+    ::stack_depth::set_thread_stack_ceiling(2 << 20);
 
     // Old-ispell-format affix file with ONE suffix entry whose replacement
     // string is long: `repl` length == mk_a_node recursion depth.

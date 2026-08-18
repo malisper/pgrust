@@ -23,9 +23,37 @@ pub type pg_stack_base_t = usize;
 
 pub const STACK_DEPTH_SLOP: isize = 512 * 1024;
 
+/// Rust frames on the guarded recursion chains cost a multiple of their C
+/// counterparts, so the same `max_stack_depth` GUC value buys far less
+/// recursion than it does in C: at 2048kB, C 18.3 reaches 932 plpgsql
+/// self-recursion levels vs 34 here (~27x, dev build, macOS aarch64), and
+/// two driver suites (DBD::Pg `foreign_key_info`'s 9-join catalog query,
+/// pgjdbc `testOidUpdatable`) hit "stack depth limit exceeded" at stock
+/// config on queries C handles. The GUC keeps its C-parity value/limits
+/// (SHOW, accepted range, rlimit cap are byte-identical to C); the byte
+/// budget the guard *enforces* is scaled by this per-profile constant so
+/// the same GUC setting buys comparable recursion DEPTH.
+///
+/// debug = 32: covers the measured 27x worst chain with slop.
+/// release = 4: PLACEHOLDER — NOT a measurement. It MUST be calibrated
+/// with `scripts/stack-calibrate.sh` against a release build before any
+/// perf-claim or conformance run leans on release-mode depth behavior
+/// (the 27x/1.9x figures above are dev-profile; release frames are
+/// smaller but not C-sized).
+pub const STACK_DEPTH_SCALE: isize = if cfg!(debug_assertions) { 32 } else { 4 };
+
 thread_local! {
     static MAX_STACK_DEPTH: Cell<i32> = const { Cell::new(100) };
-    static MAX_STACK_DEPTH_BYTES: Cell<isize> = const { Cell::new(100 * 1024) };
+    static MAX_STACK_DEPTH_BYTES: Cell<isize> =
+        const { Cell::new(100 * 1024 * STACK_DEPTH_SCALE) };
+    // The scaled budget before the thread-stack ceiling clamp; kept so the
+    // clamp can be (re)applied whichever of assign/ceiling happens first.
+    static SCALED_STACK_BUDGET: Cell<isize> =
+        const { Cell::new(100 * 1024 * STACK_DEPTH_SCALE) };
+    // Enforceable ceiling derived from this thread's real stack reservation
+    // (0 = unknown: no clamp). The guard must fire before the actual stack
+    // ends, or recursion dies by SIGSEGV instead of SQLSTATE 54001.
+    static THREAD_STACK_CEILING: Cell<isize> = const { Cell::new(0) };
     static STACK_BASE_PTR: Cell<usize> = const { Cell::new(0) };
     // 0 is C's "not yet computed" sentinel (a real rlimit is never 0).
     static STACK_DEPTH_RLIMIT_CACHE: Cell<isize> = const { Cell::new(0) };
@@ -116,8 +144,50 @@ fn stack_depth_exceeded() -> Box<types_error::PgError> {
 // C InitializeGUCOptionsFromEnvironment's stack-rlimit branch (guc.c): the
 // boot default is 100kB; a usable platform limit raises it to
 // min((rlimit - slop)/1024, 2048) kB, as PGC_S_ENV_VAR so conf/argv override.
+//
+// The enforced budget is the GUC's bytes x STACK_DEPTH_SCALE (see the
+// constant's comment), clamped to the thread's real stack when known.
 pub fn assign_max_stack_depth(newval: i32) {
-    MAX_STACK_DEPTH_BYTES.set(newval as isize * 1024);
+    let scaled = (newval as isize)
+        .saturating_mul(1024)
+        .saturating_mul(STACK_DEPTH_SCALE);
+    SCALED_STACK_BUDGET.set(scaled);
+    MAX_STACK_DEPTH_BYTES.set(effective_budget(scaled));
+}
+
+fn effective_budget(scaled: isize) -> isize {
+    let ceiling = THREAD_STACK_CEILING.get();
+    if ceiling > 0 { scaled.min(ceiling) } else { scaled }
+}
+
+/// The scaled budget BEFORE the per-thread ceiling clamp — what thread
+/// provisioning must accommodate (launch_backend sizes backend stacks from
+/// this, plus slop).
+pub fn scaled_max_stack_depth_bytes() -> isize {
+    SCALED_STACK_BUDGET.get()
+}
+
+/// Test/calibration hook: set the ENFORCED byte budget directly, bypassing
+/// STACK_DEPTH_SCALE and the thread-stack ceiling. Guard-witness tests pin
+/// the 54001 mechanism at exact byte budgets (readfuncs/tsquery deep-nesting
+/// witnesses); production code never calls this — the GUC assign hook is the
+/// only production writer.
+pub fn set_enforced_stack_budget_for_tests(bytes: isize) {
+    SCALED_STACK_BUDGET.set(bytes);
+    THREAD_STACK_CEILING.set(0);
+    MAX_STACK_DEPTH_BYTES.set(bytes);
+}
+
+/// Record this thread's real stack reservation so the guard always fires
+/// before the stack actually ends. Call once at thread start, next to
+/// set_stack_base(). Keeps `min(8MiB, size/2)` in reserve below the
+/// reservation for the frames past the last check (elog machinery etc.).
+pub fn set_thread_stack_ceiling(stack_size: usize) {
+    let size = stack_size.min(isize::MAX as usize) as isize;
+    let reserve = (size / 2).min(8 << 20);
+    let ceiling = (size - reserve).max(0);
+    THREAD_STACK_CEILING.set(ceiling);
+    MAX_STACK_DEPTH_BYTES.set(effective_budget(SCALED_STACK_BUDGET.get()));
 }
 
 // Platform stack limit in bytes, -1 if unknown; cached after first call.

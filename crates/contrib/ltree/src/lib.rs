@@ -1054,6 +1054,10 @@ mod tests {
                     if armed {
                         stack_depth::set_stack_base();
                         stack_depth::assign_max_stack_depth(2048);
+                        // Production pairing: clamp the scaled budget to this
+                        // thread's real 8 MiB so deep inputs trip 54001, not
+                        // SIGSEGV (stack-frame-scale witness conversion).
+                        stack_depth::set_thread_stack_ceiling(8 << 20);
                     }
                     if which == "check_cond" {
                         op::ltq_regex(&tree, &query).map(|b| b.to_string())
@@ -1121,6 +1125,10 @@ mod tests {
                 .spawn(move || {
                     stack_depth::set_stack_base();
                     stack_depth::assign_max_stack_depth(2048);
+                    // Production pairing: clamp the scaled budget to this
+                    // thread's real 8 MiB so deep inputs trip 54001, not
+                    // SIGSEGV (stack-frame-scale witness conversion).
+                    stack_depth::set_thread_stack_ceiling(8 << 20);
                     io::parse_ltxtquery(q.as_bytes()).is_ok()
                 })
                 .unwrap()
@@ -1247,6 +1255,10 @@ mod tests {
                     // makes this test non-vacuous.
                     stack_depth::set_stack_base();
                     stack_depth::assign_max_stack_depth(2048);
+                    // Production pairing: clamp the scaled budget to this
+                    // thread's real 8 MiB so deep inputs trip 54001, not
+                    // SIGSEGV (stack-frame-scale witness conversion).
+                    stack_depth::set_thread_stack_ceiling(8 << 20);
                     io::parse_ltxtquery(&s)
                 })
                 .unwrap();

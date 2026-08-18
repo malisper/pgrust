@@ -209,6 +209,9 @@ fn tsquery_deep_recursion_raises_54001_and_does_not_abort() {
                 // Without this, stack_is_too_deep() short-circuits on base == 0
                 // and every guard below is INERT — the test would be vacuous.
                 ::stack_depth::set_stack_base();
+                // Production pairing: clamp the scaled budget to this
+                // thread's real 8 MiB so deep inputs trip 54001, not SIGSEGV.
+                ::stack_depth::set_thread_stack_ceiling(8 << 20);
                 ::stack_depth::assign_max_stack_depth(2048);
                 let ctx = MemoryContext::new("t");
                 let mcx = ctx.mcx();
@@ -462,8 +465,9 @@ fn qtn_sort_stack_error_propagates_as_54001() {
             let mut tree = qt2qtn(mcx, TsQueryRef { payload: &img[4..] }, 0).unwrap();
             qtn_ternary(&mut tree).unwrap();
             // Base at THIS frame; 1kB limit; 32 padded frames (> 16kB) below.
+            // Exact bytes, scale-independent — this pins the guard mechanism.
             ::stack_depth::set_stack_base();
-            ::stack_depth::assign_max_stack_depth(1);
+            ::stack_depth::set_enforced_stack_budget_for_tests(1024);
             let err = descend(32, &mut tree).expect_err("guard must trip");
             ::stack_depth::assign_max_stack_depth(2048);
             assert_eq!(err.sqlstate().0, STATEMENT_TOO_COMPLEX);

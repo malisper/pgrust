@@ -436,8 +436,9 @@ fn deep_nesting_raises_54001_with_the_guard_armed() {
                 "control failed: the witness input must parse at a high limit"
             );
 
-            // guard: a low limit turns the same input into 54001
-            stack_depth_core::assign_max_stack_depth(200);
+            // guard: a low limit turns the same input into 54001 (exact
+            // bytes, scale-independent — this pins the guard mechanism)
+            stack_depth_core::set_enforced_stack_budget_for_tests(200 * 1024);
             let ctx2 = MemoryContext::new("t");
             let err = crate::stringToNodeNullable(ctx2.mcx(), &text)
                 .expect_err("the guard must fire at a 200kB limit");

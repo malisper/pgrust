@@ -12,8 +12,10 @@ fn setup() {
 
 #[test]
 fn defaults_match_c() {
+    // The GUC value is C-parity; the enforced bytes carry the per-profile
+    // frame-cost scale (see STACK_DEPTH_SCALE).
     assert_eq!(max_stack_depth(), 100);
-    assert_eq!(max_stack_depth_bytes(), 100 * 1024);
+    assert_eq!(max_stack_depth_bytes(), 100 * 1024 * STACK_DEPTH_SCALE);
     assert_eq!(STACK_DEPTH_SLOP, 512 * 1024);
 }
 
@@ -31,7 +33,8 @@ fn depth_check_trips_past_limit() {
     assert_eq!(here, 0);
 
     let base = set_stack_base();
-    restore_stack_base(base + 200 * 1024);
+    let past_limit = (max_stack_depth_bytes() + 100 * 1024) as usize;
+    restore_stack_base(base + past_limit);
     assert!(stack_is_too_deep());
     let err = check_stack_depth().unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_STATEMENT_TOO_COMPLEX);
@@ -44,7 +47,7 @@ fn depth_check_trips_past_limit() {
         )
     );
 
-    restore_stack_base(base.saturating_sub(200 * 1024));
+    restore_stack_base(base.saturating_sub(past_limit));
     assert!(stack_is_too_deep());
 
     restore_stack_base(base);
@@ -75,8 +78,39 @@ fn boot_source_matches_c() {
 #[test]
 fn assign_updates_bytes_only() {
     assign_max_stack_depth(2048);
-    assert_eq!(max_stack_depth_bytes(), 2048 * 1024);
+    assert_eq!(max_stack_depth_bytes(), 2048 * 1024 * STACK_DEPTH_SCALE);
     assert_eq!(max_stack_depth(), 100);
+    assign_max_stack_depth(100);
+}
+
+#[test]
+fn thread_stack_ceiling_clamps_budget() {
+    assign_max_stack_depth(2048);
+    let scaled = 2048 * 1024 * STACK_DEPTH_SCALE;
+    assert_eq!(max_stack_depth_bytes(), scaled);
+    assert_eq!(scaled_max_stack_depth_bytes(), scaled);
+
+    // A small real stack clamps the ENFORCED budget (guard fires before the
+    // stack ends); the scaled figure used for provisioning is unclamped.
+    set_thread_stack_ceiling(16 << 20);
+    let ceiling = (16 << 20) - (8 << 20);
+    assert_eq!(max_stack_depth_bytes(), scaled.min(ceiling));
+    assert_eq!(scaled_max_stack_depth_bytes(), scaled);
+
+    // Re-assign under a live ceiling keeps the clamp.
+    assign_max_stack_depth(4096);
+    assert_eq!(
+        max_stack_depth_bytes(),
+        (4096 * 1024 * STACK_DEPTH_SCALE).min(ceiling)
+    );
+
+    // Tiny stacks keep half in reserve rather than clamping to zero.
+    set_thread_stack_ceiling(1 << 20);
+    assert_eq!(max_stack_depth_bytes(), (1 << 20) / 2);
+
+    // 0 = unknown: clamp removed.
+    set_thread_stack_ceiling(0);
+    assert_eq!(max_stack_depth_bytes(), 4096 * 1024 * STACK_DEPTH_SCALE);
     assign_max_stack_depth(100);
 }
 
@@ -120,7 +154,7 @@ fn guc_slots_installed() {
     assert_eq!(max_stack_depth(), 150);
     let assign = guc_tables::hooks::assign_max_stack_depth.get();
     assign(150, None);
-    assert_eq!(max_stack_depth_bytes(), 150 * 1024);
+    assert_eq!(max_stack_depth_bytes(), 150 * 1024 * STACK_DEPTH_SCALE);
 
     guc_tables::vars::max_stack_depth.write(100);
     assign(100, None);
