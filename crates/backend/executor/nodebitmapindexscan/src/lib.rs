@@ -1,4 +1,3 @@
-// Array keys loud-panic in the shared scankey builder; runtime keys are live.
 #![allow(non_snake_case)]
 
 use ::executils::EStateData;
@@ -7,7 +6,10 @@ use ::indexam::{
     IndexScanDescData,
 };
 use ::mcx::{Mcx, PgBox, PgVec};
-use ::nodeindexscan::{exec_index_build_scan_keys, exec_index_eval_runtime_keys, RuntimeKeysState};
+use ::nodeindexscan::{
+    exec_index_advance_array_keys, exec_index_build_scan_keys, exec_index_eval_array_keys,
+    exec_index_eval_runtime_keys, IndexArrayKeyInfo, RuntimeKeysState,
+};
 use ::tidbitmap::TIDBitmap;
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::BitmapIndexScan;
@@ -20,7 +22,11 @@ pub struct BitmapIndexScanState<'mcx> {
     pub biss_ScanDesc: Option<PgBox<'mcx, IndexScanDescData<'mcx>>>,
     pub biss_RelationDesc: Option<Relation<'mcx>>,
     pub biss_ScanKeys: PgVec<'mcx, ScanKeyData>,
+    // C treats array keys as runtime keys: biss_Runtime is Some whenever
+    // either kind exists, and its `ready` covers both (false = an empty or
+    // null array, so no scan at all).
     pub biss_Runtime: Option<PgBox<'mcx, RuntimeKeysState<'mcx>>>,
+    pub biss_ArrayKeys: PgVec<'mcx, IndexArrayKeyInfo<'mcx>>,
 }
 
 pub fn exec_init_bitmap_index_scan<'mcx>(
@@ -51,6 +57,7 @@ pub fn exec_init_bitmap_index_scan_rel<'mcx>(
     // thread-native builds a plain arena bitmap and freezes it at
     // tbm_prepare_shared_iterate, so no arm is needed here.
     let mut runtime_keys = ::mcx::PgVec::new_in(mcx);
+    let mut array_keys = ::mcx::PgVec::new_in(mcx);
     let params = estate.param_bind();
     let biss_ScanKeys = ::executils::with_subplan_compile_env(estate, |env| {
         exec_index_build_scan_keys(
@@ -60,10 +67,11 @@ pub fn exec_init_bitmap_index_scan_rel<'mcx>(
             params,
             false,
             &mut runtime_keys,
+            Some(&mut array_keys),
             env,
         )
     })?;
-    let biss_Runtime = if runtime_keys.is_empty() {
+    let biss_Runtime = if runtime_keys.is_empty() && array_keys.is_empty() {
         None
     } else {
         Some(::mcx::alloc_in(
@@ -80,6 +88,7 @@ pub fn exec_init_bitmap_index_scan_rel<'mcx>(
         biss_RelationDesc: Some(index_rel),
         biss_ScanKeys,
         biss_Runtime,
+        biss_ArrayKeys: array_keys,
     })
 }
 
@@ -112,12 +121,27 @@ pub fn multi_exec_bitmap_index_scan_into<'mcx>(
         node.biss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
     }
 
-    let scandesc = node
-        .biss_ScanDesc
-        .as_deref_mut()
-        .expect("scan desc initialized above");
-    let n_tuples = index_getbitmap(scandesc, tbm)? as f64;
-    check_for_interrupts()?;
+    // C MultiExecBitmapIndexScan: doscan=false means the rescan found a null
+    // or empty array key, so no scan is possible; otherwise loop the scan
+    // over every array-key element combination.
+    let mut doscan = node.biss_Runtime.as_deref().is_none_or(|r| r.ready);
+    let mut n_tuples = 0.0;
+    while doscan {
+        let scandesc = node
+            .biss_ScanDesc
+            .as_deref_mut()
+            .expect("scan desc initialized above");
+        n_tuples += index_getbitmap(scandesc, tbm)? as f64;
+        check_for_interrupts()?;
+        doscan = exec_index_advance_array_keys(&mut node.biss_ArrayKeys, &mut node.biss_ScanKeys);
+        if doscan {
+            let scandesc = node
+                .biss_ScanDesc
+                .as_deref_mut()
+                .expect("scan desc initialized above");
+            index_rescan(scandesc, Some(&node.biss_ScanKeys), None)?;
+        }
+    }
     Ok(n_tuples)
 }
 
@@ -287,21 +311,36 @@ pub fn exec_end_bitmap_index_scan(node: &mut BitmapIndexScanState<'_>) -> PgResu
     }
     node.biss_ScanKeys.clear();
     node.biss_Runtime = None;
+    node.biss_ArrayKeys.clear();
     Ok(())
 }
 
-/// `ExecReScanBitmapIndexScan`; array keys stay loud in the shared builder.
+/// `ExecReScanBitmapIndexScan`: recompute runtime keys, re-expand array keys
+/// (ready = false when an array is null/empty), then rescan if possible.
 pub fn exec_rescan_bitmap_index_scan<'mcx>(
     node: &mut BitmapIndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
     if let Some(rt) = node.biss_Runtime.as_deref_mut() {
         estate.reset_expr_context(rt.ecxt);
         exec_index_eval_runtime_keys(estate, rt.ecxt, &mut rt.keys, &mut node.biss_ScanKeys, &mut [])?;
-        rt.ready = true;
+        rt.ready = if node.biss_ArrayKeys.is_empty() {
+            true
+        } else {
+            exec_index_eval_array_keys(
+                mcx,
+                estate,
+                rt.ecxt,
+                &mut node.biss_ArrayKeys,
+                &mut node.biss_ScanKeys,
+            )?
+        };
     }
-    if let Some(scandesc) = node.biss_ScanDesc.as_deref_mut() {
-        index_rescan(scandesc, Some(&node.biss_ScanKeys), None)?;
+    if node.biss_Runtime.as_deref().is_none_or(|r| r.ready) {
+        if let Some(scandesc) = node.biss_ScanDesc.as_deref_mut() {
+            index_rescan(scandesc, Some(&node.biss_ScanKeys), None)?;
+        }
     }
     Ok(())
 }
@@ -418,5 +457,6 @@ const _: fn(&BitmapIndexScanState<'_>) = |v| {
         biss_RelationDesc: _,
         biss_ScanKeys: _,
         biss_Runtime: _,
+        biss_ArrayKeys: _,
     } = v;
 };

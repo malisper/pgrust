@@ -23,12 +23,15 @@ const PROC_LOWER_ANY: Oid = 871;
 const PROC_SF_CAT: Oid = 40001;
 const PROC_SF_PUB: Oid = 40002;
 const ROLE_M: Oid = 10;
+const NS_TEMP: Oid = 16386;
+const PROC_TEMP_F: Oid = 40100;
 
 thread_local! {
     static NS_BY_NAME: RefCell<HashMap<String, Oid>> = RefCell::new(HashMap::new());
     static RELS: RefCell<HashMap<(String, Oid), Oid>> = RefCell::new(HashMap::new());
     static PROCS: RefCell<Vec<(String, Oid, Oid, Vec<Oid>)>> = const { RefCell::new(Vec::new()) };
     static PATH: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
+    static TEMP_NS: std::cell::Cell<Oid> = const { std::cell::Cell::new(InvalidOid) };
 }
 
 fn ns_name(oid: Oid) -> Option<String> {
@@ -42,6 +45,10 @@ fn install_fakes() {
         miscinit_seams::get_user_id::set(|| ROLE_M);
         namespace_seams::type_is_visible::set(|_| Ok(true));
         namespace_seams::is_temp_namespace::set(|_| false);
+        namespace_seams::my_temp_namespace::set(|| TEMP_NS.with(std::cell::Cell::get));
+        dbcommands_seams::get_database_name::set(|dbid| {
+            Ok((dbid == init_small::globals::MyDatabaseId()).then(|| "testdb".to_string()))
+        });
         syscache_seams::pg_type_typnamespace::set(|_| Ok(Some(11)));
         aclchk_seams::object_aclcheck::set(|_, _, _, _| Ok(0));
         aclchk_seams::aclcheck_error::set(|_, _, name| {
@@ -271,6 +278,7 @@ fn install_fakes() {
         ];
     });
     PATH.with(|p| *p.borrow_mut() = vec![NS_CATALOG, NS_PUBLIC]);
+    TEMP_NS.with(|t| t.set(InvalidOid));
 }
 
 fn with_mcx<R>(f: impl FnOnce(Mcx<'_>) -> R) -> R {
@@ -458,6 +466,61 @@ fn funcname_missing_schema_is_function_not_found() {
             soft.error().unwrap().message(),
             "function \"ng_catalog.now\" does not exist"
         );
+    });
+}
+
+#[test]
+fn pg_temp_alias_resolves_to_temp_namespace() {
+    // C LookupExplicitNamespace: "pg_temp" is the session's temp namespace
+    // (no ACL check); C-server: 'pg_temp.f(int)'::regprocedure -> pg_temp_N.f.
+    with_mcx(|mcx| {
+        TEMP_NS.with(|t| t.set(NS_TEMP));
+        PROCS.with(|p| p.borrow_mut().push(("tf".into(), PROC_TEMP_F, NS_TEMP, vec![23])));
+        assert_eq!(regprocedurein(mcx, "pg_temp.tf(integer)", None).unwrap(), Some(PROC_TEMP_F));
+        assert_eq!(regprocin(mcx, "pg_temp.tf", None).unwrap(), Some(PROC_TEMP_F));
+        // A temp function not on the search path is invisible unqualified.
+        let err = regprocin(mcx, "tf", None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+    });
+}
+
+#[test]
+fn pg_temp_alias_without_temp_namespace_falls_through() {
+    // C-server (fresh session, no temp namespace):
+    //   SELECT 'pg_temp.f(int)'::regprocedure;
+    //   ERROR: 42883: function "pg_temp.f(int)" does not exist
+    //   to_regprocedure('pg_temp.f(int)') -> NULL
+    with_mcx(|mcx| {
+        let err = regprocedurein(mcx, "pg_temp.tf(integer)", None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+        assert_eq!(err.message(), "function \"pg_temp.tf(integer)\" does not exist");
+        let mut soft = SoftErrorContext::new(false);
+        assert_eq!(regprocedurein(mcx, "pg_temp.tf(integer)", Some(&mut soft)).unwrap(), Some(0));
+        assert!(soft.error_occurred());
+    });
+}
+
+#[test]
+fn catalog_qualified_names() {
+    // C DeconstructQualifiedName: the catalog name must be the current
+    // database; C-server:
+    //   SELECT 'otherdb.public.foo(int)'::regprocedure;
+    //   ERROR: 0A000: cross-database references are not implemented: otherdb.public.foo
+    // (hard even for to_regprocedure).
+    with_mcx(|mcx| {
+        assert_eq!(regprocin(mcx, "testdb.pg_catalog.now", None).unwrap(), Some(PROC_NOW));
+        assert_eq!(
+            regprocedurein(mcx, "testdb.pg_catalog.lower(text)", None).unwrap(),
+            Some(PROC_LOWER_TEXT)
+        );
+        let err = regprocin(mcx, "otherdb.public.foo", None).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(
+            err.message(),
+            "cross-database references are not implemented: otherdb.public.foo"
+        );
+        let mut soft = SoftErrorContext::new(false);
+        assert!(regprocedurein(mcx, "otherdb.public.foo(integer)", Some(&mut soft)).is_err());
     });
 }
 

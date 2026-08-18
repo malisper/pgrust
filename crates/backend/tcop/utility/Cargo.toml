@@ -73,6 +73,8 @@ xact = { path = "../../access/transam/xact" }
 cmdtag = { path = "../cmdtag" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
 tcop_dest = { path = "../dest" }
+parser_seams = { path = "../../parser/parser_seams" }
+types_dest = { path = "../../../_support/types/types_dest" }
 utility_seams = { path = "../utility_seams" }
 seam_core = { path = "../../../_support/seam_core" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }

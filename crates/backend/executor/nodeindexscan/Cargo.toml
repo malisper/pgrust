@@ -30,6 +30,7 @@ execexpr = { path = "../execexpr" }
 executils = { path = "../executils" }
 exectuples = { path = "../exectuples" }
 init_small = { path = "../../utils/init/init_small" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 types_slot = { path = "../../../_support/types/types_slot" }
 
 [dev-dependencies]

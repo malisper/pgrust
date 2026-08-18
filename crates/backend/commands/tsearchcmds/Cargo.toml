@@ -37,3 +37,5 @@ ts_locale = { path = "../../tsearch/ts_locale" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 parse_func_seams = { path = "../../parser/parse_func_seams" }
+cmdtag = { path = "../../tcop/cmdtag" }
+event_trigger = { path = "../event_trigger" }

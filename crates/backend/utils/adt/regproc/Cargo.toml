@@ -17,6 +17,8 @@ regproc_seams = { path = "../regproc_seams" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 parse_utilcmd_seams = { path = "../../../parser/parse_utilcmd_seams" }
 miscinit_seams = { path = "../../init/miscinit_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+init_small = { path = "../../init/init_small" }
 lsyscache = { path = "../../cache/lsyscache" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 format_type = { path = "../format_type" }

@@ -635,22 +635,19 @@ fn log_destination_check_accepts_postgres_keywords() {
 }
 
 #[test]
-fn log_destination_check_rejects_unported_writers() {
-    // csvlog/jsonlog are recognized keywords whose writer seams are unported;
-    // accepting them panicked per log line inside error reporting (seam-audit
-    // F2). They are rejected at check time — with a message distinct from the
-    // unrecognized-keyword one — until write_csvlog/write_jsonlog land.
+fn log_destination_check_accepts_structured_writers() {
+    // csvlog/jsonlog writers live in syslogger::errlog (installed into
+    // error_small_seams by syslogger::init_seams), so the GUC accepts the
+    // keywords as C does. The former seam-audit F2 rejection is retired.
+    use types_error::{LOG_DESTINATION_CSVLOG, LOG_DESTINATION_JSONLOG};
+    assert_eq!(check_log_destination("csvlog").unwrap(), LOG_DESTINATION_CSVLOG);
     assert_eq!(
-        check_log_destination("csvlog").unwrap_err().message,
-        "Destination \"csvlog\" is not supported in this build."
+        check_log_destination("stderr, JSONLOG").unwrap(),
+        LOG_DESTINATION_STDERR | LOG_DESTINATION_JSONLOG
     );
     assert_eq!(
-        check_log_destination("stderr, JSONLOG").unwrap_err().message,
-        "Destination \"jsonlog\" is not supported in this build."
-    );
-    assert_eq!(
-        check_log_destination("\"stderr\", csvlog").unwrap_err().message,
-        "Destination \"csvlog\" is not supported in this build."
+        check_log_destination("\"stderr\", csvlog").unwrap(),
+        LOG_DESTINATION_STDERR | LOG_DESTINATION_CSVLOG
     );
 }
 

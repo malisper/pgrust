@@ -1,6 +1,7 @@
 //! detoast.c: retrieve compressed or external varlena attributes, plus the
 //! toast_compression.c decompression dispatch (pglz inline via the pglz
-//! crate; this build has no LZ4, matching C without USE_LZ4). Values are raw
+//! crate; lz4 via lz4_flex block mode, matching C built with USE_LZ4 — the
+//! stock-build default). Values are raw
 //! varlena images (`&[u8]`, header included); results are fresh 4B-header
 //! images charged to the caller's `Mcx`. External on-disk fetch crosses
 //! `toast_internals_seams` (loud until the toast unit lands); indirect arms
@@ -8,7 +9,7 @@
 //! flatten through `datum::expandeddatum`.
 
 use mcx::{Mcx, PgVec};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use types_tuple::varatt::{
     self, VARHDRSZ, VARHDRSZ_EXTERNAL, VARHDRSZ_SHORT, VARTAG_INDIRECT, VARTAG_ONDISK,
 };
@@ -347,9 +348,8 @@ fn corrupt_pglz() -> PgError {
 
 #[cold]
 #[inline(never)]
-fn no_lz4_support() -> PgError {
-    PgError::error("compression method lz4 not supported")
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+fn corrupt_lz4() -> PgError {
+    PgError::error("compressed lz4 data is corrupt").with_sqlstate(ERRCODE_DATA_CORRUPTED)
 }
 
 #[cold]
@@ -364,7 +364,7 @@ pub fn toast_decompress_datum<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgV
     debug_assert!(is_compressed(attr));
     match toast_compress_method(attr) {
         TOAST_PGLZ_COMPRESSION_ID => pglz_decompress_datum(mcx, attr),
-        TOAST_LZ4_COMPRESSION_ID => Err(no_lz4_support().into()),
+        TOAST_LZ4_COMPRESSION_ID => lz4_decompress_datum(mcx, attr),
         cmid => Err(invalid_compression_id(cmid).into()),
     }
 }
@@ -382,7 +382,7 @@ pub fn toast_decompress_datum_slice<'mcx>(
     }
     match toast_compress_method(attr) {
         TOAST_PGLZ_COMPRESSION_ID => pglz_decompress_datum_slice(mcx, attr, slicelength as usize),
-        TOAST_LZ4_COMPRESSION_ID => Err(no_lz4_support().into()),
+        TOAST_LZ4_COMPRESSION_ID => lz4_decompress_datum_slice(mcx, attr, slicelength as usize),
         cmid => Err(invalid_compression_id(cmid).into()),
     }
 }
@@ -416,6 +416,38 @@ fn pglz_decompress_datum_slice<'mcx>(
     unsafe { result.set_len(VARHDRSZ + n) };
     let header = varatt::set_varsize_4b_word((VARHDRSZ + n) as u32).to_ne_bytes();
     result[..VARHDRSZ].copy_from_slice(&header);
+    Ok(result)
+}
+
+/// C `lz4_decompress_datum`: LZ4 block decode (LZ4_decompress_safe semantics
+/// — rawsize may come out shorter than the stored extsize).
+fn lz4_decompress_datum<'mcx>(mcx: Mcx<'mcx>, value: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let rawsize = toast_compress_extsize(value) as usize;
+    let mut result = mcx::vec_with_capacity_in(mcx, VARHDRSZ + rawsize)?;
+    result.resize(VARHDRSZ + rawsize, 0);
+    let src = &value[VARHDRSZ_COMPRESSED..varsize_4b(value)];
+    let n = lz4_flex::block::decompress_into(src, &mut result[VARHDRSZ..])
+        .map_err(|_| corrupt_lz4())?;
+    result.truncate(VARHDRSZ + n);
+    let header = varatt::set_varsize_4b_word((VARHDRSZ + n) as u32).to_ne_bytes();
+    result[..VARHDRSZ].copy_from_slice(&header);
+    Ok(result)
+}
+
+/// C `lz4_decompress_datum_slice` uses LZ4_decompress_safe_partial; lz4_flex
+/// has no partial decode, so decompress fully and truncate — identical output
+/// for well-formed data.
+fn lz4_decompress_datum_slice<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &[u8],
+    slicelength: usize,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut result = lz4_decompress_datum(mcx, value)?;
+    if result.len() > VARHDRSZ + slicelength {
+        result.truncate(VARHDRSZ + slicelength);
+        let header = varatt::set_varsize_4b_word(result.len() as u32).to_ne_bytes();
+        result[..VARHDRSZ].copy_from_slice(&header);
+    }
     Ok(result)
 }
 

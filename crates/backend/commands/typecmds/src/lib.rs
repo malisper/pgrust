@@ -1634,5 +1634,7 @@ pub fn DefineCompositeType<'mcx>(
         InvalidOid,
         query_string,
     )?;
-    Ok(ObjectAddress::set(types_core::RELATION_RELATION_ID, relid))
+    // C returns DefineRelation's typaddress — the pg_type entry, not the
+    // relation (typecmds.c:2599); the composite type's reltype is that oid.
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, lsyscache::get_rel_type_id(relid)?))
 }

@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 foreigncmds_seams = { path = "../../../commands/foreigncmds_seams" }
+pg_class_seams = { path = "../../../catalog/pg_class_seams" }
 execmain = { path = "../../../executor/execmain" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 parse_agg = { path = "../../../parser/parse_agg" }

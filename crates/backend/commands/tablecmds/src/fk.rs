@@ -38,17 +38,25 @@ const F_RI_FKEY_NOACTION_UPD: Oid = 1655;
 const BTREE_AM_OID: Oid = 403;
 
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: tablecmds FK {what}")
-}
-
 #[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
+}
+
+// Non-FK contypes are routed elsewhere by the alter.rs wrapper; clean 0A000
+// (same class as alter.rs) if a new caller ever slips one through.
+#[cold]
+fn require_foreign_contype(contype: types_nodes::rawnodes::ConstrType) -> PgResult<()> {
+    if contype != types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN {
+        return Err(err(
+            "ALTER TABLE ... ADD CONSTRAINT for this constraint type is not supported yet"
+                .to_string(),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+    Ok(())
 }
 
 // NewConstraint CONSTR_FOREIGN fields (tablecmds.c), for the Phase-3 pass.
@@ -70,11 +78,7 @@ pub(crate) fn ATExecAddConstraint<'mcx>(
     old_desc: &types_tuple::TupleDescData<'mcx>,
     lockmode: types_rel::LOCKMODE,
 ) -> PgResult<()> {
-    use types_nodes::rawnodes::ConstrType;
-    match constraint.contype {
-        ConstrType::CONSTR_FOREIGN => {}
-        other => unported(&format!("ATExecAddConstraint {other:?} (CHECK/NOT NULL ALTER lane)")),
-    }
+    require_foreign_contype(constraint.contype)?;
 
     let relname = rel.name();
     let conname_storage;
@@ -3229,4 +3233,24 @@ fn alter_constr_update_constraint_entry<'mcx>(
     let n_final = n;
     pg_constraint::update_constraint_fields(mcx, conoid, &fields[..n_final])?;
     inval::invalidate::CacheInvalidateRelcacheByRelid(conrelid)
+}
+
+// Panic-hygiene pin (2026-08-18): the ATExecAddConstraint non-FK tail is a
+// clean 0A000 (same class as the alter.rs wrapper), never a panic.
+#[cfg(test)]
+mod panic_hygiene_tests {
+    use types_nodes::rawnodes::ConstrType;
+
+    #[test]
+    fn non_fk_contype_errors_instead_of_panicking() {
+        assert!(super::require_foreign_contype(ConstrType::CONSTR_FOREIGN).is_ok());
+        for contype in [ConstrType::CONSTR_CHECK, ConstrType::CONSTR_PRIMARY] {
+            let e = super::require_foreign_contype(contype).unwrap_err();
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+            assert_eq!(
+                e.message(),
+                "ALTER TABLE ... ADD CONSTRAINT for this constraint type is not supported yet"
+            );
+        }
+    }
 }

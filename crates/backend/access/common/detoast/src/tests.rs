@@ -122,13 +122,52 @@ fn decompress_slice_overlong_request_takes_full_path() {
     assert_eq!(varsize_4b(&out), 128 + VARHDRSZ);
 }
 
+fn lz4_image(input: &[u8]) -> Vec<u8> {
+    let compressed = lz4_flex::block::compress(input);
+    let total = VARHDRSZ_COMPRESSED + compressed.len();
+    let mut image = Vec::with_capacity(total);
+    image.extend_from_slice(&(((total as u32) << 2) | 0x02).to_ne_bytes());
+    image.extend_from_slice(
+        &((input.len() as u32) | (TOAST_LZ4_COMPRESSION_ID << 30)).to_ne_bytes(),
+    );
+    image.extend_from_slice(&compressed);
+    image
+}
+
 #[test]
-fn lz4_and_invalid_method_ids_error() {
+fn lz4_decompress_roundtrip_full_and_slice() {
+    let ctx = MemoryContext::new("t");
+    let input = sample(4000);
+    let image = lz4_image(&input);
+    let out = toast_decompress_datum(ctx.mcx(), &image).unwrap();
+    assert_eq!(&out[VARHDRSZ..], &input[..]);
+    assert_eq!(varsize_4b(&out), input.len() + VARHDRSZ);
+    let out = toast_decompress_datum_slice(ctx.mcx(), &image, 128).unwrap();
+    assert_eq!(&out[VARHDRSZ..], &input[..128]);
+    assert_eq!(varsize_4b(&out), 128 + VARHDRSZ);
+    // Overlong slice request takes the full-decompression path.
+    let out = toast_decompress_datum_slice(ctx.mcx(), &image, 100_000).unwrap();
+    assert_eq!(&out[VARHDRSZ..], &input[..]);
+}
+
+#[test]
+fn corrupt_lz4_stream_errors_with_data_corrupted() {
+    let ctx = MemoryContext::new("t");
+    let input = sample(4000);
+    let mut image = lz4_image(&input);
+    let n = image.len();
+    image.truncate(n - 5);
+    let hdr = (((image.len() as u32) << 2) | 0x02).to_ne_bytes();
+    image[..VARHDRSZ].copy_from_slice(&hdr);
+    let err = toast_decompress_datum(ctx.mcx(), &image).unwrap_err();
+    assert_eq!(err.message(), "compressed lz4 data is corrupt");
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+}
+
+#[test]
+fn invalid_method_id_errors() {
     let ctx = MemoryContext::new("t");
     let input = sample(200);
-    let lz4 = compress_image(&input, TOAST_LZ4_COMPRESSION_ID);
-    let err = toast_decompress_datum(ctx.mcx(), &lz4).unwrap_err();
-    assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
     let bad = compress_image(&input, 2);
     let err = toast_decompress_datum(ctx.mcx(), &bad).unwrap_err();
     assert!(err.message().contains("invalid compression method id 2"));

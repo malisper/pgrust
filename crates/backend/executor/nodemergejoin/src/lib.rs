@@ -1,6 +1,7 @@
-// nodeMergejoin.c INNER/LEFT/RIGHT/SEMI/ANTI/FULL MJ_* state machine
-// (clauseless FULL included); the MergeJoinInner trait carries
-// ExecMarkPos/ExecRestrPos. RIGHT_SEMI/RIGHT_ANTI and parallel merge are loud.
+// nodeMergejoin.c INNER/LEFT/RIGHT/SEMI/ANTI/RIGHT_ANTI/FULL MJ_* state
+// machine (clauseless FULL included); the MergeJoinInner trait carries
+// ExecMarkPos/ExecRestrPos. RIGHT_SEMI has no merge-join arm in C either
+// (joinpath.c refuses it); parallel merge is loud.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -120,25 +121,22 @@ pub fn exec_init_merge_join<'mcx>(
     inner_is_material: bool,
 ) -> PgResult<MergeJoinState<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
-    if !matches!(
-        node.join.jointype,
-        JoinType::JOIN_INNER
-            | JoinType::JOIN_LEFT
-            | JoinType::JOIN_RIGHT
-            | JoinType::JOIN_FULL
-            | JoinType::JOIN_SEMI
-            | JoinType::JOIN_ANTI
-            | JoinType::JOIN_RIGHT_ANTI
-    ) {
-        // unported: ExecInitMergeJoin (nodeMergejoin.c) RIGHT_SEMI lane.
-        return Err(Box::new(
-            PgError::error(format!(
-                "merge join with join type {:?} is not yet implemented",
-                node.join.jointype
-            ))
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
-    }
+    // C has no RIGHT_SEMI merge-join arm (joinpath.c never builds one); it
+    // lands in the switch's elog default with the rest of the enum.
+    assert!(
+        matches!(
+            node.join.jointype,
+            JoinType::JOIN_INNER
+                | JoinType::JOIN_LEFT
+                | JoinType::JOIN_RIGHT
+                | JoinType::JOIN_FULL
+                | JoinType::JOIN_SEMI
+                | JoinType::JOIN_ANTI
+                | JoinType::JOIN_RIGHT_ANTI
+        ),
+        "ExecInitMergeJoin (nodeMergejoin.c): unrecognized join type {:?}",
+        node.join.jointype
+    );
     assert!(
         !node.skip_mark_restore || node.join.joinqual.is_nil(),
         "ExecInitMergeJoin (nodeMergejoin.c): skip_mark_restore with joinqual"

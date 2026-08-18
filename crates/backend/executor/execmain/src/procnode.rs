@@ -1334,9 +1334,19 @@ pub fn exec_init_node<'mcx>(
                     // C ExecInitAppend: as_first_partial_plan is the lowest surviving
                     // (post-pruning, compacted-space) subplan index that is partial.
                     let mut first_partial = nvalid as i32;
+                    let mut asyncplans = ::types_nodes::bitmapset::Bitmapset::empty();
+                    let mut nasyncplans = 0i32;
                     let mut i = valid.next_member(-1);
                     while i >= 0 {
                         let subplan = ap_plan.appendplans.nth(i as usize);
+                        // Record async subplans; under EvalPlanQual they are
+                        // treated as sync ones (C ExecInitAppend).
+                        if subplan.as_plan().expect("plan node").async_capable
+                            && !estate.es_epq_active
+                        {
+                            asyncplans.add_member(mcx, substates.len() as i32)?;
+                            nasyncplans += 1;
+                        }
                         if i >= ap_plan.first_partial_plan
                             && (substates.len() as i32) < first_partial
                         {
@@ -1355,6 +1365,8 @@ pub fn exec_init_node<'mcx>(
                         substates.len(),
                         first_partial,
                         prune_state,
+                        asyncplans,
+                        nasyncplans,
                     )?;
                     PlanStateNode::Append(::mcx::alloc_in(
                         mcx,
@@ -3079,7 +3091,58 @@ fn append_arm<'mcx>(
     let AppendNode {
         state, substates, ..
     } = &mut **a;
-    ::nodeappend::exec_append(state, estate, |e, i| exec_proc_node(&mut substates[i], e))
+    ::nodeappend::exec_append(state, estate, &mut AppendChildrenDriver { substates })
+}
+
+// The host half of nodeappend's AppendAsyncDriver: sync pulls recurse through
+// exec_proc_node; async dispatch goes through execasync (execAsync.c).
+struct AppendChildrenDriver<'a, 'mcx> {
+    substates: &'a mut ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
+}
+
+impl<'a, 'mcx> ::nodeappend::AppendAsyncDriver<'mcx> for AppendChildrenDriver<'a, 'mcx> {
+    fn fetch_subplan(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        i: usize,
+    ) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(&mut self.substates[i], estate)
+    }
+    fn async_request(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        areq: &mut ::executils::AsyncRequest,
+    ) -> PgResult<()> {
+        crate::execasync::exec_async_request(
+            &mut self.substates[areq.request_index as usize],
+            estate,
+            areq,
+        )
+    }
+    fn async_configure_wait(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        areq: &mut ::executils::AsyncRequest,
+        wait: &::executils::AsyncWaitCtx,
+    ) -> PgResult<()> {
+        crate::execasync::exec_async_configure_wait(
+            &mut self.substates[areq.request_index as usize],
+            estate,
+            areq,
+            wait,
+        )
+    }
+    fn async_notify(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        areq: &mut ::executils::AsyncRequest,
+    ) -> PgResult<()> {
+        crate::execasync::exec_async_notify(
+            &mut self.substates[areq.request_index as usize],
+            estate,
+            areq,
+        )
+    }
 }
 
 #[inline(never)]
@@ -4061,7 +4124,7 @@ fn exec_end_node_inner<'mcx>(
         PlanStateNode::ModifyTable(mps) => {
             let mps = &mut **mps;
             crate::epq::eval_plan_qual_end(&mut mps.epq, &mut mps.mt.epq_subs, estate)?;
-            ::nodemodifytable::exec_end_modify_table(&mut mps.mt);
+            ::nodemodifytable::exec_end_modify_table(&mut mps.mt)?;
             exec_end_node(&mut mps.subplan, estate)
         }
         PlanStateNode::Append(a) => {

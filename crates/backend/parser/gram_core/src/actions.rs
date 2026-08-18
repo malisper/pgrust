@@ -811,11 +811,17 @@ impl<'mcx> Parser<'mcx> {
                 n.rel = view.v(2).node();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // OptTempTableName (GLOBAL-deprecated arms stay unported).
-            1745 | 1746 | 1747 | 1748 | 1751 | 1752 | 1753 => {
+            // OptTempTableName (GLOBAL arms emit C's deprecation WARNING, then TEMP).
+            1745..=1753 => {
+                if rule == 1749 || rule == 1750 {
+                    self.errposition_warning(
+                        "GLOBAL is deprecated in temporary table creation",
+                        view.l(1),
+                    )?;
+                }
                 let (slot, persistence) = match rule {
                     1745 | 1746 => (3, RELPERSISTENCE_TEMP),
-                    1747 | 1748 => (4, RELPERSISTENCE_TEMP),
+                    1747..=1750 => (4, RELPERSISTENCE_TEMP),
                     1751 => (3, RELPERSISTENCE_UNLOGGED),
                     1752 => (2, RELPERSISTENCE_PERMANENT),
                     _ => (1, RELPERSISTENCE_PERMANENT),
@@ -888,8 +894,15 @@ impl<'mcx> Parser<'mcx> {
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // OptTemp (GLOBAL-deprecated variants stay unported).
             461..=464 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_TEMP as i32),
+            // OptTemp: GLOBAL TEMPORARY | GLOBAL TEMP — deprecation WARNING, then TEMP.
+            465 | 466 => {
+                self.errposition_warning(
+                    "GLOBAL is deprecated in temporary table creation",
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Ival(RELPERSISTENCE_TEMP as i32);
+            }
             467 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_UNLOGGED as i32),
             468 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_PERMANENT as i32),
             // ViewStmt: CREATE [OR REPLACE] OptTemp VIEW ...
@@ -3550,6 +3563,17 @@ impl<'mcx> Parser<'mcx> {
                 *yyval =
                     YYSTYPE::Node(Some(system_type_name(mcx, name, typmods, view.l(1))?));
             }
+            // ConstBit: BitWithoutLength — "BIT" defaults to unspecified length
+            // (drop BitWithoutLength's bit(1) default, as ConstCharacter does).
+            1978 => {
+                let t = view.v(1).node().expect("BitWithoutLength");
+                // SAFETY: as rule 8.
+                unsafe {
+                    t.with_mut::<TypeName, _>(|tn| tn.typmods = NodeList::nil())
+                        .expect("TypeName");
+                }
+                *yyval = YYSTYPE::Node(Some(t));
+            }
             1984 => {
                 let t = view.v(1).node().expect("CharacterWithLength");
                 // SAFETY: as rule 8.
@@ -3682,9 +3706,10 @@ impl<'mcx> Parser<'mcx> {
                 )?));
             }
             // a_expr IS [NOT] DISTINCT FROM a_expr
-            2068 | 2069 => {
+            // b_expr IS [NOT] DISTINCT FROM b_expr
+            2068 | 2069 | 2108 | 2109 => {
                 use types_nodes::rawnodes::A_Expr_Kind;
-                let (kind, r_i) = if rule == 2068 {
+                let (kind, r_i) = if rule == 2068 || rule == 2108 {
                     (A_Expr_Kind::AEXPR_DISTINCT, 5)
                 } else {
                     (A_Expr_Kind::AEXPR_NOT_DISTINCT, 6)
@@ -4403,6 +4428,51 @@ impl<'mcx> Parser<'mcx> {
                 }
                 list.lcons(mcx, Node::mk_string(mcx, name)?)?;
                 *yyval = YYSTYPE::List(list);
+            }
+            // CreateAssertionStmt — C-parity error (not implemented in C either).
+            847 => {
+                return Err(self.errposition_error_code(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "CREATE ASSERTION is not yet implemented".into(),
+                    view.l(1),
+                ))
+            }
+            // a_expr: UNIQUE opt_unique_null_treatment select_with_parens —
+            // C-parity error (not implemented in C either).
+            2080 => {
+                return Err(self.errposition_error_code(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "UNIQUE predicate is not yet implemented".into(),
+                    view.l(1),
+                ))
+            }
+            // AexprConst: func_name '(' func_arg_list opt_sort_clause ')' Sconst
+            // — generic type 'literal' with a type modifier. func_arg_list /
+            // opt_sort_clause only exist to dodge reduce/reduce conflicts;
+            // named args and ORDER BY are rejected here as in C.
+            2445 => {
+                for arg in view.v(3).list().iter() {
+                    if let Some(na) = arg.as_variant::<types_nodes::NamedArgExpr>() {
+                        return Err(self.errposition_error(
+                            "type modifier cannot have parameter name".into(),
+                            na.location,
+                        ));
+                    }
+                }
+                if !view.v(4).list().is_nil() {
+                    return Err(self.errposition_error(
+                        "type modifier cannot have ORDER BY".into(),
+                        view.l(4),
+                    ));
+                }
+                let t =
+                    make_type_name(mcx, view.v(1).list(), view.v(3).list(), view.l(1))?;
+                *yyval = YYSTYPE::Node(Some(make_string_const_cast(
+                    mcx,
+                    view.v(6).str_val(),
+                    view.l(6),
+                    t,
+                )?));
             }
             // AexprConst typed literals: func_name Sconst / ConstTypename Sconst.
             2444 => {
@@ -5229,6 +5299,14 @@ impl<'mcx> Parser<'mcx> {
                     None => n.kind = VariableSetKind::VAR_SET_DEFAULT,
                 }
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // set_rest_more: CATALOG_P Sconst — C-parity error (C rejects too).
+            214 => {
+                return Err(self.errposition_error_code(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "current database cannot be changed".into(),
+                    view.l(2),
+                ))
             }
             // set_rest_more: SCHEMA Sconst -> SET search_path.
             215 => {

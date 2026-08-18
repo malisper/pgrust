@@ -548,7 +548,10 @@ const MAX_STATISTICS_TARGET: i64 = 10000;
 // AlterStatistics (statscmds.c:638). DIVERGENCE: the old tuple comes from a
 // systable scan on the oid index instead of SearchSysCache1(STATEXTOID); the
 // update is identical.
-pub fn AlterStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterStatsStmt<'_>) -> PgResult<()> {
+pub fn AlterStatistics<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &AlterStatsStmt<'_>,
+) -> PgResult<pg_depend::ObjectAddress> {
     let mut newtarget: i64 = 0;
     let mut newtarget_default = true;
     if let Some(t) = stmt.stxstattarget {
@@ -593,7 +596,7 @@ pub fn AlterStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterStatsStmt<'_>) -> PgRes
             None => format!("statistics object \"{statname}\" does not exist, skipping"),
         };
         ereport(NOTICE).errmsg(msg).finish(loc("AlterStatistics"))?;
-        return Ok(());
+        return Ok(pg_depend::ObjectAddress::set(InvalidOid, InvalidOid));
     }
 
     let rel = table::table_open(mcx, StatisticExtRelationId, RowExclusiveLock)?;
@@ -637,7 +640,7 @@ pub fn AlterStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterStatsStmt<'_>) -> PgRes
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
 
     rel.close(RowExclusiveLock)?;
-    Ok(())
+    Ok(pg_depend::ObjectAddress::set(StatisticExtRelationId, stxoid))
 }
 
 fn ChooseExtendedStatisticName(

@@ -367,3 +367,31 @@ fn domain_checks_gate_all_mutation_paths() {
     )
     .is_err());
 }
+
+#[test]
+fn field_select_leg_reads_fields_and_checks_bounds() {
+    let parent = MemoryContext::new("t");
+    let mcx = parent.mcx();
+    let p = registered_record(&parent);
+    let erh = unsafe { &mut *p };
+    expanded_record_set_fields(
+        erh,
+        &[Datum::from_i32(7), text_datum(mcx, "hi")],
+        &[false, false],
+        false,
+    )
+    .unwrap();
+    let d = unsafe { datum::expandeddatum::eohp_get_rw_datum(p as *const _) };
+
+    let (v, isnull) = field_select(d, 1, INT4OID).unwrap();
+    assert!(!isnull);
+    assert_eq!(v.as_i32(), 7);
+    let (v, isnull) = field_select(d, 2, TEXTOID).unwrap();
+    assert!(!isnull);
+    assert_eq!(unsafe { text_bytes(v) }, b"hi");
+
+    let err = field_select(d, 3, INT4OID).unwrap_err();
+    assert!(format!("{err:?}").contains("exceeds number of columns"));
+    let err = field_select(d, 0, INT4OID).unwrap_err();
+    assert!(format!("{err:?}").contains("unsupported reference to system column"));
+}

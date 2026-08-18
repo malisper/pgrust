@@ -373,6 +373,41 @@ pub fn GetFdwRoutineByRelId<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<FdwKin
     GetFdwRoutineByServerId(mcx, serverid)
 }
 
+/// FdwRoutine->IsForeignRelUpdatable, per FdwKind. Installed = the provider
+/// also has the ExecForeign{Insert,Update,Delete} half (CheckValidResultRel
+/// keys its 0A000 arm off the absence).
+pub type FdwUpdatableFn = for<'mcx> fn(Mcx<'mcx>, Oid) -> PgResult<i32>;
+
+// AtomicPtr registry per the seams-init determinism lint (nodeforeignscan's
+// FDW_EXEC_ROUTINES shape); installers hand a &'static fn slot.
+static FDW_UPDATABLE: [core::sync::atomic::AtomicPtr<FdwUpdatableFn>; types_nodes::NUM_FDW_KINDS] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) };
+        types_nodes::NUM_FDW_KINDS];
+
+pub fn install_fdw_updatable(kind: FdwKind, f: &'static FdwUpdatableFn) {
+    let prev = FDW_UPDATABLE[kind.index()].swap(
+        f as *const FdwUpdatableFn as *mut FdwUpdatableFn,
+        core::sync::atomic::Ordering::Release,
+    );
+    if !prev.is_null() {
+        panic!("install_fdw_updatable: already installed for {kind:?}");
+    }
+}
+
+pub fn fdw_is_foreign_rel_updatable<'mcx>(
+    mcx: Mcx<'mcx>,
+    kind: FdwKind,
+    relid: Oid,
+) -> PgResult<Option<i32>> {
+    let p = FDW_UPDATABLE[kind.index()].load(core::sync::atomic::Ordering::Acquire);
+    if p.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: only ever set from install_fdw_updatable with a &'static fn slot.
+    let f = unsafe { *p };
+    Ok(Some(f(mcx, relid)?))
+}
+
 /// MappingUserName (foreign.h).
 pub fn MappingUserName<'mcx>(mcx: Mcx<'mcx>, userid: Oid) -> PgResult<&'mcx str> {
     if userid == InvalidOid {

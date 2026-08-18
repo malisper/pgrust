@@ -53,8 +53,22 @@ const CONNECTION_CLEANUP_TIMEOUT_MS: i64 = 30_000;
 // Delay before a cancel request is re-issued (connection.c:104).
 const RETRY_CANCEL_TIMEOUT_MS: i64 = 1_000;
 
+// C PgFdwConnState.pendingAreq, by value: the in-flight async FETCH's cursor
+// plus its requestor Append's plan_node_id (C reaches the AsyncRequest by
+// pointer; we cannot reach another node's state, so ownership is by id).
+#[derive(Clone, Copy)]
+pub(crate) struct PendingFetch {
+    pub(crate) cursor_number: u32,
+    pub(crate) requestor_plan_id: i32,
+}
+
 pub(crate) struct ConnCacheEntry {
     pub(crate) conn: Option<PgConn>,
+    pub(crate) pending_fetch: Option<PendingFetch>,
+    // Batches drained off the wire on behalf of another scan that needed the
+    // connection (C's process_pending_request completes the other node's
+    // request in place; we park the rows for the owner to adopt).
+    pub(crate) parked: Vec<(u32, QueryResult)>,
     // 0 = no xact open, 1 = main xact, 2 = one level of subxact, ...
     pub(crate) xact_depth: i32,
     pub(crate) have_prep_stmt: bool,
@@ -74,6 +88,8 @@ impl ConnCacheEntry {
     fn new() -> ConnCacheEntry {
         ConnCacheEntry {
             conn: None,
+            pending_fetch: None,
+            parked: Vec::new(),
             xact_depth: 0,
             have_prep_stmt: false,
             have_error: false,
@@ -214,10 +230,12 @@ pub(crate) fn with_entry<R>(
     })
 }
 
-// pgfdw_exec_query (sync arm): PQsendQuery + collect-last. The closure runs
-// no catalog code; conversion happens outside the borrow.
+// pgfdw_exec_query (sync arm): PQsendQuery + collect-last, after settling any
+// in-flight async fetch (C's process_pending_request prologue). The closure
+// runs no catalog code; conversion happens outside the borrow.
 pub(crate) fn exec_query(key: Oid, sql: &str) -> PgResult<QueryResult> {
-    with_entry(key, |e| {
+    with_entry(key, |e| -> PgResult<QueryResult> {
+        park_pending_entry(e)?;
         let conn = e.conn.as_mut().expect("live connection");
         conn.exec(sql)
     })?
@@ -229,10 +247,94 @@ pub(crate) fn exec_query_params(
     sql: &str,
     params: &[Option<&str>],
 ) -> PgResult<QueryResult> {
-    with_entry(key, |e| {
+    with_entry(key, |e| -> PgResult<QueryResult> {
+        park_pending_entry(e)?;
         let conn = e.conn.as_mut().expect("live connection");
         conn.exec_params(sql, &[], params)
     })?
+}
+
+// ---------- async fetch plumbing (connection.c pendingAreq discipline) ----
+
+// pgfdw_get_result's collect-last pump; conn-level failures are attributed to
+// `query` (the caller's original remote SELECT, as C).
+fn drain_last_result(conn: &mut PgConn, query: Option<&str>) -> PgResult<QueryResult> {
+    let mut last: Option<QueryResult> = None;
+    loop {
+        match conn.get_result()? {
+            None => break,
+            Some(r) => last = Some(r),
+        }
+    }
+    last.ok_or_else(|| remote_error(&QueryResult::conn_error(conn.error_message()), query))
+}
+
+// process_pending_request's connection half: drain the in-flight FETCH and
+// park its rows for the owning scan to adopt.
+pub(crate) fn park_pending_entry(e: &mut ConnCacheEntry) -> PgResult<()> {
+    let Some(p) = e.pending_fetch else { return Ok(()) };
+    let conn = e.conn.as_mut().expect("live connection");
+    let res = drain_last_result(conn, None)?;
+    e.pending_fetch = None;
+    e.parked.push((p.cursor_number, res));
+    Ok(())
+}
+
+pub(crate) fn pending_fetch(key: Oid) -> PgResult<Option<PendingFetch>> {
+    with_entry(key, |e| e.pending_fetch)
+}
+
+pub(crate) fn socket(key: Oid) -> PgResult<types_core::pgsocket> {
+    with_entry(key, |e| e.conn.as_ref().expect("live connection").socket())
+}
+
+// fetch_more_data_begin's wire half: send the FETCH without waiting.
+pub(crate) fn begin_async_fetch(
+    key: Oid,
+    sql: &str,
+    cursor_number: u32,
+    requestor_plan_id: i32,
+    query: &str,
+) -> PgResult<()> {
+    with_entry(key, |e| -> PgResult<()> {
+        debug_assert!(e.pending_fetch.is_none());
+        let conn = e.conn.as_mut().expect("live connection");
+        if !conn.send_query(sql) {
+            // On error, report the original query, not the FETCH.
+            return Err(remote_error(
+                &QueryResult::conn_error(conn.error_message()),
+                Some(query),
+            ));
+        }
+        e.pending_fetch = Some(PendingFetch { cursor_number, requestor_plan_id });
+        Ok(())
+    })?
+}
+
+// fetch_more_data's async arm, wire half: block for the whole FETCH result.
+pub(crate) fn finish_pending_fetch(key: Oid, query: &str) -> PgResult<QueryResult> {
+    with_entry(key, |e| -> PgResult<QueryResult> {
+        debug_assert!(e.pending_fetch.is_some());
+        let conn = e.conn.as_mut().expect("live connection");
+        let res = drain_last_result(conn, Some(query));
+        e.pending_fetch = None;
+        res
+    })?
+}
+
+pub(crate) fn park_pending_fetch(key: Oid) -> PgResult<()> {
+    with_entry(key, park_pending_entry)?
+}
+
+pub(crate) fn take_parked(key: Oid, cursor_number: u32) -> PgResult<Option<QueryResult>> {
+    with_entry(key, |e| {
+        let i = e.parked.iter().position(|(c, _)| *c == cursor_number)?;
+        Some(e.parked.swap_remove(i).1)
+    })
+}
+
+pub(crate) fn drop_parked(key: Oid, cursor_number: u32) -> PgResult<()> {
+    with_entry(key, |e| e.parked.retain(|(c, _)| *c != cursor_number))
 }
 
 #[allow(dead_code)] // phase 3: MOVE BACKWARD gate for pre-15 remotes
@@ -301,6 +403,12 @@ pub(crate) fn get_connection<'mcx>(
             put_entry(key, entry);
             return Err(e);
         }
+    }
+
+    // Process a pending asynchronous request if any (connection.c:287).
+    if let Err(e) = park_pending_entry(&mut entry) {
+        put_entry(key, entry);
+        return Err(e);
     }
 
     // begin_remote_xact with C's retry-once arm: only when the error is
@@ -795,6 +903,11 @@ fn pgfdw_inval_callback(_arg: Datum, cacheid: i32, hashvalue: u32) {
 fn pgfdw_reset_xact_state(entry: &mut ConnCacheEntry, toplevel: bool) {
     if toplevel {
         entry.xact_depth = 0;
+        // An async fetch begun but never finished (error path) leaves the
+        // per-connection state set; reset it here (connection.c:1783). Parked
+        // batches die with the transaction's cursors.
+        entry.pending_fetch = None;
+        entry.parked.clear();
         let unhealthy = match entry.conn.as_ref() {
             None => false,
             Some(conn) => {

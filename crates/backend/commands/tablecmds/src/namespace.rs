@@ -30,7 +30,7 @@ fn object_present(objs_moved: &PgVec<'_, ObjectAddress>, obj: &ObjectAddress) ->
 pub fn AlterTableNamespace<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &AlterObjectSchemaStmt<'_>,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let relid = AlterTableLookupRangeVar(
         mcx,
         stmt.relation.expect("AlterObjectSchemaStmt.relation"),
@@ -48,7 +48,7 @@ pub fn AlterTableNamespace<'mcx>(
             ),
             None,
         )?;
-        return Ok(());
+        return Ok(ObjectAddress::set(InvalidOid, InvalidOid));
     }
 
     let rel = relation_seams::relation_open::call(mcx, relid, NoLock)?;
@@ -89,7 +89,8 @@ pub fn AlterTableNamespace<'mcx>(
     let mut objs_moved: PgVec<'mcx, ObjectAddress> = PgVec::new_in(mcx);
     AlterTableNamespaceInternal(mcx, &rel, old_nsp_oid, nsp_oid, &mut objs_moved)?;
 
-    rel.close(NoLock)
+    rel.close(NoLock)?;
+    Ok(ObjectAddress::set(types_core::RELATION_RELATION_ID, relid))
 }
 
 pub fn AlterTableNamespaceInternal<'mcx>(

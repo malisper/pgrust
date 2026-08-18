@@ -290,6 +290,32 @@ fn install() {
                 amoprighttype: INT4OID,
             }))
         });
+        syscache_seams::lookup_pg_amop_by_strategy::set(|opfamily, lefttype, righttype, strategy| {
+            assert_eq!(
+                (opfamily, lefttype, righttype),
+                (INT4_BTREE_OPFAMILY, INT4OID, INT4OID)
+            );
+            Ok(match strategy {
+                3 => OP_INT4EQ,
+                5 => OP_INT4GT,
+                _ => 0,
+            })
+        });
+        syscache_seams::lookup_pg_operator_shape::set(|opno| {
+            Ok((opno == OP_INT4EQ).then_some(syscache_seams::PgOperatorShape {
+                oprnamespace: 11,
+                oprleft: INT4OID,
+                oprright: INT4OID,
+                oprresult: 16,
+                oprcom: OP_INT4EQ,
+                oprnegate: 0,
+                oprcode: F_INT4EQ,
+                oprrest: 0,
+                oprjoin: 0,
+                oprcanmerge: true,
+                oprcanhash: true,
+            }))
+        });
         syscache_seams::lookup_pg_amproc::set(|opfamily, lefttype, righttype, procnum| {
             assert_eq!(
                 (opfamily, lefttype, righttype, procnum),
@@ -626,6 +652,26 @@ fn forced_page_splits_stay_navigable_through_executor() {
     assert_eq!(all.len(), n as usize);
     assert!(all.windows(2).all(|w| w[0] < w[1]));
     assert_eq!(scan_values(mcx, OP_INT4EQ, F_INT4EQ, 777), vec![777]);
+    quiesced();
+}
+
+#[test]
+fn speculative_open_fills_unique_equality_info() {
+    let _g = serial();
+    install();
+    UNIQUE_IDX.with(|c| c.set(true));
+    reset_fixture();
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let heap = Relation::open(heap_relation_data(mcx), None);
+    let idxstate = crate::ExecOpenIndices(mcx, &heap, true).unwrap();
+    assert_eq!(idxstate.num_indices(), 1);
+    let ii = &idxstate.infos[0];
+    assert_eq!(ii.ii_UniqueStrats[0], 3);
+    assert_eq!(ii.ii_UniqueOps[0], OP_INT4EQ);
+    assert_eq!(ii.ii_UniqueProcs[0], F_INT4EQ);
+    crate::ExecCloseIndices(idxstate).unwrap();
     quiesced();
 }
 

@@ -15,3 +15,12 @@ types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_scan = { path = "../../../_support/types/types_scan" }
 types_slot = { path = "../../../_support/types/types_slot" }
+types_core = { path = "../../../_support/types/types_core" }
+types_storage = { path = "../../../_support/types/types_storage" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }
+latch = { path = "../../storage/ipc/latch" }
+
+[dev-dependencies]
+libc = "0.2"
+fd = { path = "../../storage/file/fd" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }

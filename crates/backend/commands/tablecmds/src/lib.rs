@@ -101,13 +101,6 @@ pub fn RangeVarCallbackMaintainsTable(
     Ok(())
 }
 
-#[cold]
-#[inline(never)]
-#[allow(dead_code)] // stub reporter for not-yet-ported ALTER TABLE arms
-pub(crate) fn unported(what: &str) -> ! {
-    panic!("unported: tablecmds {what}")
-}
-
 fn reject_temp_in_security_restricted(relpersistence: u8) -> PgResult<()> {
     if relpersistence == types_core::RELPERSISTENCE_TEMP
         && miscinit::InSecurityRestrictedOperation()
@@ -201,9 +194,9 @@ fn GetColumnDefCollationPos(
     Ok(result)
 }
 
-// GetAttributeCompression (tablecmds.c) -> CompressionNameToMethod (compressamapi.c).
-// This build has no lz4 (USE_LZ4 undefined), so "lz4" takes C's
-// not-supported/DETAIL error rather than the generic invalid-name error.
+// GetAttributeCompression (tablecmds.c) -> CompressionNameToMethod
+// (toast_compression.c). lz4 is supported (matching C built with USE_LZ4,
+// the stock-build default).
 pub(crate) fn GetAttributeCompression(
     atttypid: Oid,
     compression: Option<&str>,
@@ -232,11 +225,7 @@ pub(crate) fn GetAttributeCompression(
     if compression == "pglz" {
         Ok(b'p' as i8)
     } else if compression == "lz4" {
-        Err(Box::new(
-            PgError::new(ERROR, "compression method lz4 not supported")
-                .with_detail("This functionality requires the server to be built with lz4 support.")
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ))
+        Ok(b'l' as i8)
     } else {
         Err(Box::new(
             PgError::new(ERROR, format!("invalid compression method \"{compression}\""))

@@ -609,6 +609,31 @@ pub struct EcxtId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecSlotId(pub u32);
 
+/// `AsyncRequest` (execnodes.h). C's requestor/requestee PlanState pointers
+/// collapse to ids: the requestor Append is named by its plan_node_id (the
+/// key postgres_fdw's per-connection pending fetch carries), the requestee is
+/// the Append's `substates[request_index]`.
+#[derive(Debug, Clone, Copy)]
+pub struct AsyncRequest {
+    pub requestor_plan_id: i32,
+    pub request_index: i32,
+    pub callback_pending: bool,
+    pub request_complete: bool,
+    /// None = no tuple (EOF when `request_complete`).
+    pub result: Option<ExecSlotId>,
+}
+
+/// The requestor-Append state C's ForeignAsyncConfigureWait reads through
+/// `areq->requestor`: the live WaitEventSet and whether as_needrequest is
+/// empty (postgres_fdw's cross-Append pending-fetch arbitration reads both).
+#[derive(Clone, Copy)]
+pub struct AsyncWaitCtx {
+    pub set: ::types_storage::waiteventset::WaitEventSetHandle,
+    pub needrequest_empty: bool,
+}
+
+mcx::forget_safe_nodrop!(AsyncRequest);
+
 /// Operator→operator page-batch seam for the lane executor (lane-executor-v2
 /// design §Architecture 1). A source stages a batch, then serves individual
 /// rows into an outer slot with its scan/build qual applied; the batched lane

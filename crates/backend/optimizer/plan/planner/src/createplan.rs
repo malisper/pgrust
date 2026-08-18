@@ -2204,6 +2204,47 @@ fn create_modifytable_plan<'mcx>(
         }
         plan.mergeJoinConditions = mjc;
     }
+
+    // make_modifytable's FDW loop: PlanForeignModify per foreign result rel,
+    // accumulated positionally into fdwPrivLists (NIL entries for non-FDW
+    // rels). Direct modify (PlanDirectModify) is unported: non-direct DML.
+    {
+        let mut fdw_priv_lists = types_nodes::list::NodeList::nil();
+        for (i, &rti) in result_relations.iter().enumerate() {
+            let rte = run.rte(rti as usize);
+            let kind = if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_RELATION
+                && rte.relkind == types_rel::RELKIND_FOREIGN_TABLE
+            {
+                Some(foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, rte.relid)?)
+            } else {
+                None
+            };
+            // MERGE on a foreign partition (the named target was already
+            // rejected in parse analysis).
+            if operation == CmdType::CMD_MERGE && kind.is_some() {
+                let name = lsyscache::get_rel_name(mcx, rte.relid)?
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default();
+                return Err(Box::new(
+                    types_error::PgError::error(format!(
+                        "cannot execute MERGE on relation \"{name}\""
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_detail(pg_class_seams::errdetail_relkind_not_supported::call(
+                        rte.relkind,
+                    )?),
+                ));
+            }
+            let fdw_private = match kind
+                .and_then(|k| crate::fdwplan::fdw_plan_routine(k).plan_foreign_modify)
+            {
+                Some(f) => f(run, &plan, rti as u32, i)?,
+                None => types_nodes::list::NodeList::nil(),
+            };
+            fdw_priv_lists.lappend(mcx, Node::mk_list(mcx, fdw_private)?)?;
+        }
+        plan.fdwPrivLists = fdw_priv_lists;
+    }
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
 }
@@ -4556,7 +4597,80 @@ fn create_mergejoin_plan<'mcx>(
     Ok(join_plan.seal())
 }
 
-// create_append_plan (createplan.c), serial arm; async legs have no lane.
+// mark_async_capable_plan (createplan.c).
+fn mark_async_capable_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Node<'mcx>,
+    path_id: PathId,
+) -> bool {
+    enum Arm<'m> {
+        // C recurses with the SubqueryScanPath's subpath; it lives in the
+        // rel's subroot here (create_subqueryscan_plan precedent).
+        Subquery { rel_id: RelId, sub_pid: PathId, subplan: Node<'m> },
+        Foreign,
+        Projection { sub_pid: PathId },
+        No,
+    }
+    let arm = match run.root.path(path_id) {
+        // A gating Result atop the generated plan can't run asynchronously
+        // (nor can a Result materializing a projection).
+        _ if plan.node_tag() == NodeTag::T_Result => Arm::No,
+        PathNode::SubqueryScanPath(sp) => Arm::Subquery {
+            rel_id: sp.path.parent,
+            sub_pid: sp.subroot_subpath.expect("SubqueryScanPath has a subpath"),
+            subplan: plan
+                .as_subquery_scan()
+                .expect("SubqueryScanPath built a SubqueryScan")
+                .subplan
+                .expect("SubqueryScan has a subplan"),
+        },
+        PathNode::ForeignPath(_) => Arm::Foreign,
+        PathNode::ProjectionPath(pp) => Arm::Projection {
+            sub_pid: pp.subpath.expect("ProjectionPath has a subpath"),
+        },
+        _ => Arm::No,
+    };
+    match arm {
+        Arm::Subquery { rel_id, sub_pid, subplan } => {
+            // Async-capable only when the deletable SubqueryScan sits atop an
+            // async-capable subplan.
+            if !crate::setrefs::trivial_subqueryscan(plan) {
+                return false;
+            }
+            let idx =
+                run.root.rel(rel_id).subroot_idx.expect("subquery rel has a subroot");
+            run.swap_with_rel_subroot(idx);
+            let ok = mark_async_capable_plan(run, subplan, sub_pid);
+            run.swap_with_rel_subroot(idx);
+            if !ok {
+                return false;
+            }
+        }
+        Arm::Foreign => {
+            let kind = run
+                .root
+                .rel(run.root.path(path_id).base().parent)
+                .fdwroutine
+                .expect("foreign path parent has fdwroutine");
+            match crate::fdwplan::fdw_plan_routine(kind).is_foreign_path_async_capable {
+                Some(f) if f(run, path_id) => {}
+                _ => return false,
+            }
+        }
+        Arm::Projection { sub_pid } => {
+            // create_projection_plan pulled the subplan up (no Result here):
+            // check the capability using the subpath.
+            return mark_async_capable_plan(run, plan, sub_pid);
+        }
+        Arm::No => return false,
+    }
+    // SAFETY: exclusive plan-tree ownership — `plan` is the just-built
+    // subplan create_append_plan holds by value (setrefs with_mut precedent).
+    unsafe { plan.with_plan_mut(|p| p.async_capable = true) };
+    true
+}
+
+// create_append_plan (createplan.c), serial + async arms.
 fn create_append_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
@@ -4601,6 +4715,12 @@ fn create_append_plan<'mcx>(
         Some(cols)
     };
 
+    let consider_async = crate::gucs::enable_async_append()
+        && pathkeys.is_empty()
+        && !run.root.path(path_id).base().parallel_safe
+        && subpaths.len() > 1;
+    let mut nasyncplans = 0i32;
+
     let mut appendplans = NodeList::nil();
     for &sp in subpaths.iter() {
         let mut subplan = create_plan_recurse(run, sp, CP_EXACT_TLIST)?;
@@ -4608,6 +4728,10 @@ fn create_append_plan<'mcx>(
             subplan = prepare_ordered_append_child(
                 run, subplan, sp, &pathkeys, cols, limit_tuples, "Append",
             )?;
+        }
+        if consider_async && mark_async_capable_plan(run, subplan, sp) {
+            debug_assert!(subplan.as_plan().expect("plan node").async_capable);
+            nasyncplans += 1;
         }
         appendplans.lappend(mcx, subplan)?;
     }
@@ -4659,7 +4783,7 @@ fn create_append_plan<'mcx>(
     plan.plan.targetlist = node_tlist;
     plan.apprelids = apprelids;
     plan.appendplans = appendplans;
-    plan.nasyncplans = 0;
+    plan.nasyncplans = nasyncplans;
     plan.first_partial_plan = first_partial;
     plan.part_prune_index = part_prune_index;
     copy_generic_path_info(run, &mut plan.plan, path_id);

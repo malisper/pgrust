@@ -122,12 +122,6 @@ pub const PublicationRelRelationId: Oid = 6106;
 pub const PublicationNamespaceRelationId: Oid = 6237;
 pub const SubscriptionRelationId: Oid = 6100;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: objectaddress.c {what}")
-}
-
 #[track_caller]
 #[cold]
 fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
@@ -515,7 +509,12 @@ fn get_object_address_unqualified<'mcx>(
             types_core::FOREIGN_SERVER_RELATION_ID,
             get_foreign_server_oid(name, missing_ok)?,
         )),
-        other => unported(&format!("get_object_address_unqualified {other:?}")),
+        // C's default arm: elog(ERROR, "unrecognized object type: %d");
+        // callers only pass the unqualified-name object types.
+        other => Err(err(
+            ::types_error::ERRCODE_INTERNAL_ERROR,
+            format!("unrecognized object type: {}", other as i32),
+        )),
     }
 }
 
@@ -771,7 +770,12 @@ fn get_object_address_opcf<'mcx>(
             OPERATOR_FAMILY_RELATION_ID,
             opclasscmds_seams::get_opfamily_oid::call(amoid, &name, missing_ok)?,
         )),
-        other => unported(&format!("get_object_address_opcf {other:?}")),
+        // C's default arm: elog(ERROR, "unrecognized object type: %d");
+        // callers only pass OBJECT_OPCLASS/OBJECT_OPFAMILY.
+        other => Err(err(
+            ::types_error::ERRCODE_INTERNAL_ERROR,
+            format!("unrecognized object type: {}", other as i32),
+        )),
     }
 }
 
@@ -1400,8 +1404,15 @@ pub fn get_object_address<'mcx>(
                 )?,
                 None,
             ),
+            // Compiler-verified unreachable (the match is ObjectType-
+            // exhaustive); C's default arm is the same elog.
             #[allow(unreachable_patterns)]
-            other => unported(&format!("get_object_address {other:?}")),
+            other => {
+                return Err(err(
+                    ::types_error::ERRCODE_INTERNAL_ERROR,
+                    format!("unrecognized object type: {}", other as i32),
+                ))
+            }
         };
 
         if !OidIsValid(address.objectId) {
@@ -1782,5 +1793,23 @@ mod tests {
             LookupTypeNameOid(&pct_typename(mcx, &["a", "b", "c", "d", "e"]), false).unwrap_err();
         assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
         assert_eq!(e.message, "improper %TYPE reference (too many dotted names): a.b.c.d.e");
+    }
+
+    // Panic-hygiene pins (2026-08-18): the get_object_address dispatch tails
+    // raise C's elog ("unrecognized object type: %d", XX000) instead of
+    // panicking when handed an object type outside the callers' contract.
+    #[test]
+    fn object_address_dispatch_tails_error_instead_of_panicking() {
+        use types_nodes::parsenodes::ObjectType;
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let name = Node::mk_string(mcx, "x").unwrap();
+        let e = get_object_address_unqualified(mcx, ObjectType::OBJECT_TABLE, name, false)
+            .unwrap_err();
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(
+            e.message,
+            format!("unrecognized object type: {}", ObjectType::OBJECT_TABLE as i32)
+        );
     }
 }

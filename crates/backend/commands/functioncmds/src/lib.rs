@@ -1,6 +1,6 @@
 // functioncmds.c CREATE FUNCTION/PROCEDURE lane. Loud: inline SQL bodies
 // (BEGIN ATOMIC / RETURN), parameter defaults, TABLE parameter mode,
-// TRANSFORM/SUPPORT options, languages beyond sql+internal+C+plpgsql,
+// SUPPORT option, languages beyond sql+internal+C+plpgsql,
 // %TYPE / typmod TypeNames, DROP FUNCTION, DO.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -66,6 +66,24 @@ fn conflicting_options() -> Box<PgError> {
     err("conflicting or redundant options".to_string(), ERRCODE_SYNTAX_ERROR)
 }
 
+// errorConflictingDefElem (defrem.h): the same message carrying the offending
+// DefElem's parse position.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn conflicting_options_at(source_text: &str, location: types_core::ParseLoc) -> Box<PgError> {
+    let pos = parser_small1::parser_errposition_source(
+        Some(source_text.as_bytes()),
+        location,
+        mbutils::GetDatabaseEncoding(),
+    );
+    Box::new(
+        PgError::new(ERROR, "conflicting or redundant options".to_string())
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR)
+            .with_cursor_position(pos),
+    )
+}
+
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -85,6 +103,8 @@ fn invalid_procedure_attribute(source_text: &str, location: types_core::ParseLoc
 struct FunctionAttrs<'mcx> {
     as_clause: Option<&'mcx DefElem<'mcx>>,
     language: Option<&'mcx str>,
+    // TRANSFORM option: the raw List of TypeName nodes (C's *transform).
+    transform: Option<Node<'mcx>>,
     windowfunc: bool,
     volatility: i8,
     strict: bool,
@@ -215,6 +235,7 @@ fn compute_function_attributes<'mcx>(
 ) -> PgResult<FunctionAttrs<'mcx>> {
     let mut as_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut language_item: Option<&'mcx DefElem<'mcx>> = None;
+    let mut transform_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut volatility_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut strict_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut security_item: Option<&'mcx DefElem<'mcx>> = None;
@@ -248,13 +269,7 @@ fn compute_function_attributes<'mcx>(
         let slot: &mut Option<&'mcx DefElem<'mcx>> = match name {
             "as" => &mut as_item,
             "language" => &mut language_item,
-            // unported: TRANSFORM option (pg_transform lane)
-            "transform" => {
-                return Err(err(
-                    "CREATE FUNCTION ... TRANSFORM is not supported yet".to_string(),
-                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-                ))
-            }
+            "transform" => &mut transform_item,
             "window" => &mut windowfunc_item,
             "volatility" => &mut volatility_item,
             "strict" => &mut strict_item,
@@ -267,7 +282,7 @@ fn compute_function_attributes<'mcx>(
             other => panic!("option \"{other}\" not recognized"),
         };
         if slot.is_some() {
-            return Err(conflicting_options());
+            return Err(conflicting_options_at(source_text, defel.location));
         }
         *slot = Some(defel);
     }
@@ -308,6 +323,7 @@ fn compute_function_attributes<'mcx>(
     Ok(FunctionAttrs {
         as_clause: as_item,
         language: language_item.map(defel_str),
+        transform: transform_item.and_then(|d| d.arg),
         windowfunc: windowfunc_item.map(defel_bool).unwrap_or(false),
         volatility: volatility_item.map_or(PROVOLATILE_VOLATILE, interpret_func_volatility),
         strict: strict_item.map(defel_bool).unwrap_or(false),
@@ -1111,6 +1127,26 @@ pub fn CreateFunction<'mcx>(
         ));
     }
 
+    // functioncmds.c:1152-1168: resolve each TRANSFORM FOR TYPE entry to its
+    // base element type and look up the matching pg_transform row (loud 42704
+    // from get_transform_oid when none exists).
+    let mut trftypes_list: Vec<Oid> = Vec::new();
+    let mut trfoids_list: Vec<Oid> = Vec::new();
+    if let Some(transform) = attrs.transform {
+        let types = transform.as_list().expect("TRANSFORM option holds a List");
+        for item in types.iter() {
+            let tn = item.as_variant::<TypeName>().expect("TRANSFORM FOR TYPE holds TypeNames");
+            let mut typeid = parse_utilcmd::typenameTypeId(mcx, None, tn)?;
+            let elt = lsyscache::get_base_element_type(typeid)?;
+            if elt != InvalidOid {
+                typeid = elt;
+            }
+            let transformid = cast_transform::get_transform_oid(mcx, typeid, languageOid, false)?;
+            trftypes_list.push(typeid);
+            trfoids_list.push(transformid);
+        }
+    }
+
     let objtype = if stmt.is_procedure {
         ObjectType::OBJECT_PROCEDURE
     } else {
@@ -1196,7 +1232,7 @@ pub fn CreateFunction<'mcx>(
             types_nodes::Node::mk_list(mcx, params.parameter_defaults.clone_in(mcx)?)?,
         )?)
     };
-    pg_proc::ProcedureCreate(
+    pg_proc::ProcedureCreateWithTransforms(
         mcx,
         &ProcedureCreateArgs {
             procedureName: funcname,
@@ -1241,6 +1277,9 @@ pub fn CreateFunction<'mcx>(
             parameterDefaults: argdefaults_str.as_deref(),
             numDefaults: params.parameter_defaults.len() as i16,
         },
+        // functioncmds.c:1221-1237: NULL protrftypes when no transforms.
+        if trftypes_list.is_empty() { None } else { Some(&trftypes_list) },
+        &trfoids_list,
     )
 }
 

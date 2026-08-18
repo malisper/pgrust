@@ -220,6 +220,27 @@ impl<'mcx> Parser<'mcx> {
         )
     }
 
+    // C's ereport(WARNING, ... parser_errposition(...)) from a grammar
+    // action: emitted through elog so it reaches the client, with the
+    // cursor position computed the same way as the error paths above.
+    #[cold]
+    #[track_caller]
+    pub(crate) fn errposition_warning(&self, message: &str, location: i32) -> PgResult<()> {
+        let site = core::panic::Location::caller();
+        elog::ereport(types_error::WARNING)
+            .errmsg(message)
+            .errposition(parser_small1::parser_errposition_source(
+                Some(self.scanbuf),
+                location,
+                self.settings.encoding,
+            ))
+            .finish(types_error::ErrorLocation::new(
+                site.file(),
+                site.line() as i32,
+                "errposition_warning",
+            ))
+    }
+
     #[cold]
     pub(crate) fn errposition_error_code(
         &self,

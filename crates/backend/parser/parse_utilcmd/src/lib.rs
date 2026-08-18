@@ -22,10 +22,25 @@ use types_nodes::{
     AlterSeqStmt, CoercionForm, FuncCall, Node, NodeList, NodeTag, RangeVar, TypeCast, ValUnion,
 };
 
+// C transformTableConstraint's elog arms (XX000) for contypes the grammar
+// cannot attach to a table constraint.
 #[cold]
 #[inline(never)]
-pub(crate) fn unported(what: &str) -> ! {
-    panic!("unported: parse_utilcmd {what}")
+fn table_constraint_dispatch_error(contype: ConstrType) -> Box<PgError> {
+    let msg = match contype {
+        ConstrType::CONSTR_NULL
+        | ConstrType::CONSTR_DEFAULT
+        | ConstrType::CONSTR_ATTR_DEFERRABLE
+        | ConstrType::CONSTR_ATTR_NOT_DEFERRABLE
+        | ConstrType::CONSTR_ATTR_DEFERRED
+        | ConstrType::CONSTR_ATTR_IMMEDIATE
+        | ConstrType::CONSTR_ATTR_ENFORCED
+        | ConstrType::CONSTR_ATTR_NOT_ENFORCED => {
+            format!("invalid context for constraint type {}", contype as i32)
+        }
+        _ => format!("unrecognized constraint type: {}", contype as i32),
+    };
+    Box::new(PgError::new(ERROR, msg))
 }
 
 #[track_caller]
@@ -48,7 +63,7 @@ fn type_is_only_a_shell(name: &str) -> Box<PgError> {
     )
 }
 
-// Clean 0A000 for unported-feature lanes (user-reachable stubs must raise,
+// SQL-reachable unported lane: clean 0A000 per doctrine (statement fails,
 // not panic); errposition attaches when the surrounding code has a pstate.
 #[track_caller]
 #[cold]
@@ -1116,7 +1131,9 @@ fn transformColumnDefinition<'mcx>(
         };
     }
     if col!().raw_default.is_some() || col!().cooked_default.is_some() {
-        unported("pre-split column defaults");
+        // unported lane: ColumnDefs arriving with defaults already split out
+        // of the constraint list (C accepts these silently).
+        return Err(unported_feature_at(None, -1, "pre-split column defaults"));
     }
 
     // SERIAL pseudo-types (transformColumnDefinition's is_serial arm).
@@ -1530,7 +1547,15 @@ fn transformColumnDefinition<'mcx>(
             | ConstrType::CONSTR_ATTR_NOT_ENFORCED => {
                 // transformConstraintAttrs took care of these
             }
-            _ => unported("unexpected column constraint type"),
+            // Only CONSTR_EXCLUSION remains; C's arm is
+            // elog(ERROR, "column exclusion constraints are not supported")
+            // (grammar does not allow EXCLUDE as a column constraint).
+            ConstrType::CONSTR_EXCLUSION => {
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    "column exclusion constraints are not supported".to_string(),
+                )))
+            }
         }
         if saw_default && saw_identity {
             return Err(column_syntax_error(
@@ -1946,7 +1971,7 @@ pub fn transformCreateStmt<'mcx>(
                         }
                         fkconstraints.lappend(mcx, elt)?
                     }
-                    other => unported(&format!("transformTableConstraint {other:?} arm")),
+                    other => return Err(table_constraint_dispatch_error(other)),
                 }
             }
             other => panic!("unrecognized node type in tableElts: {other:?}"),
@@ -2689,8 +2714,14 @@ fn transform_existing_index_constraint<'mcx>(
         let attnum = index_form.indkey[i];
         if attnum <= 0 {
             // Expression columns were rejected above; system columns can't be
-            // indexed here (index creation on them is an earlier error).
-            unported("transformIndexConstraint: USING INDEX over a system column");
+            // indexed (index creation on them errors), so no accepted SQL
+            // reaches this. C looks up SystemAttributeDefinition and proceeds;
+            // that lane is unported — clean 0A000 instead of a panic.
+            return Err(unported_feature_at(
+                None,
+                -1,
+                "USING INDEX with an index over a system column",
+            ));
         }
         let attform = rel.rd_att.attr(attnum as usize - 1);
         let attname = {
@@ -3396,14 +3427,6 @@ pub fn transformAlterTableCmd<'mcx>(
                     .expect("AlterTableCmd");
             }
         }
-        AlterTableType::AT_DropColumn
-        | AlterTableType::AT_ColumnDefault
-        | AlterTableType::AT_DropIdentity
-        | AlterTableType::AT_DropNotNull
-        | AlterTableType::AT_SetNotNull
-        | AlterTableType::AT_DropConstraint
-        | AlterTableType::AT_SetStatistics
-        | AlterTableType::AT_SetStorage => {}
         AlterTableType::AT_AlterColumnType => {
             // The USING transform stays raw here; tablecmds'
             // ATPrepAlterColumnType cooks it (C cooks in this arm).
@@ -3465,8 +3488,10 @@ pub fn transformAlterTableCmd<'mcx>(
             }
         }
         AlterTableType::AT_AddConstraint => {
-            // transformTableConstraint: CHECK/FOREIGN pass through untouched;
-            // index-backed contypes are unported lanes.
+            // transformTableConstraint's reachable contypes pass through
+            // untouched here; the tablecmds caller schedules the real work.
+            // Anything else is C's elog "invalid context for constraint
+            // type" (grammar can't produce it in ADD CONSTRAINT).
             let defnode = cmd.def.expect("AT_AddConstraint Constraint");
             let c = defnode
                 .as_variant::<types_nodes::rawnodes::Constraint>()
@@ -3476,19 +3501,20 @@ pub fn transformAlterTableCmd<'mcx>(
                 | types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN
                 | types_nodes::rawnodes::ConstrType::CONSTR_PRIMARY
                 | types_nodes::rawnodes::ConstrType::CONSTR_UNIQUE
+                | types_nodes::rawnodes::ConstrType::CONSTR_EXCLUSION
                 | types_nodes::rawnodes::ConstrType::CONSTR_NOTNULL => {}
-                other => unported(&format!("transformTableConstraint {other:?} arm")),
+                // C's elog for contypes the grammar can't produce in ADD
+                // CONSTRAINT position (NULL/DEFAULT/ATTR_*): clean XX000,
+                // message byte-exact to parse_utilcmd.c.
+                other => return Err(table_constraint_dispatch_error(other)),
             }
         }
-        // unported: subcommands whose transformAlterTableStmt analysis isn't
-        // wired yet; clean 0A000 (the panic was user-reachable).
-        other => {
-            return Err(unported_feature_at(
-                None,
-                -1,
-                &format!("this ALTER TABLE subcommand ({other:?})"),
-            ))
-        }
+        // C's default arm (parse_utilcmd.c:3788-3796): subcommands that need
+        // no parse transformation pass through unchanged. Attach/Detach
+        // partition's transformPartitionCmd runs inline at the tablecmds
+        // call sites (attach.rs transformPartitionBound; the partitioned-
+        // index bound rejection in alter.rs), so no arm is needed here.
+        _ => {}
     }
     cxt.ckconstraints = ckconstraints;
     cxt.nnconstraints = nnconstraints;
@@ -4033,5 +4059,83 @@ mod tests {
             &pg_depend::ObjectAddress::set(types_core::catalog::RELATION_RELATION_ID, 12345),
         )
         .unwrap();
+    }
+
+    // Panic-hygiene pins (2026-08-18): unported/grammar-unreachable lanes in
+    // transformColumnDefinition raise clean SQLSTATE errors, never panics.
+    fn transform_column<'mcx>(
+        mcx: Mcx<'mcx>,
+        column_node: Node<'mcx>,
+    ) -> PgResult<()> {
+        let relation =
+            RangeVar { relname: Some("t"), location: -1, ..RangeVar::default() };
+        let mut cxt = CreateStmtCxt::new("CREATE TABLE");
+        let mut ck = NodeList::nil();
+        let mut nn = NodeList::nil();
+        let mut ix = NodeList::nil();
+        let mut fk = NodeList::nil();
+        transformColumnDefinition(
+            mcx, column_node, &relation, None, None, &mut cxt, &mut ck, &mut nn, &mut ix,
+            &mut fk, false, false, false, false,
+        )
+    }
+
+    #[test]
+    fn presplit_column_defaults_error_instead_of_panicking() {
+        let mcx = ctx().mcx();
+        let mut cd = Node::build::<ColumnDef>(mcx).unwrap();
+        cd.colname = Some("c");
+        cd.raw_default = Some(Node::mk_string(mcx, "x").unwrap());
+        let e = transform_column(mcx, cd.seal()).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(e.message(), "pre-split column defaults is not supported yet");
+    }
+
+    #[test]
+    fn column_exclusion_constraint_errors_instead_of_panicking() {
+        // C transformColumnDefinition's CONSTR_EXCLUSION arm: elog ERROR
+        // "column exclusion constraints are not supported" (XX000).
+        let mcx = ctx().mcx();
+        let mut cd = Node::build::<ColumnDef>(mcx).unwrap();
+        cd.colname = Some("c");
+        let mut con = Node::build::<Constraint>(mcx).unwrap();
+        con.contype = ConstrType::CONSTR_EXCLUSION;
+        con.location = -1;
+        cd.constraints = NodeList::make1(mcx, con.seal()).unwrap();
+        let e = transform_column(mcx, cd.seal()).unwrap_err();
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.message(), "column exclusion constraints are not supported");
+    }
+
+    #[test]
+    fn table_constraint_dispatch_tail_matches_c_elogs() {
+        // C transformTableConstraint's two elog arms, byte-exact (XX000).
+        let e = table_constraint_dispatch_error(ConstrType::CONSTR_DEFAULT);
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.message(), "invalid context for constraint type 2");
+        let e = table_constraint_dispatch_error(ConstrType::CONSTR_ATTR_DEFERRABLE);
+        assert_eq!(e.message(), "invalid context for constraint type 10");
+        let e = table_constraint_dispatch_error(ConstrType::CONSTR_IDENTITY);
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.message(), "unrecognized constraint type: 3");
+    }
+
+    #[test]
+    fn unported_lanes_raise_0a000() {
+        // The unported_feature_at class used by the converted panic sites
+        // (pre-split defaults, USING INDEX system column, ALTER TABLE ADD
+        // EXCLUDE): 0A000, "{what} is not supported yet".
+        let e = unported_feature_at(
+            None,
+            -1,
+            "ALTER TABLE ... ADD CONSTRAINT for this constraint type",
+        );
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(
+            e.message(),
+            "ALTER TABLE ... ADD CONSTRAINT for this constraint type is not supported yet"
+        );
+        let e = unported_feature_at(None, -1, "USING INDEX with an index over a system column");
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
     }
 }

@@ -963,7 +963,15 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      #![cfg(pgrust_sim)] in a tests/ target — ABSENT from product
     //      codegen; counted only because the census counter is textual.
     //      Not a session_sources row.
-    assert_eq!(count_tree(crates), 565, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 566, re-pinned at the csvlog/jsonlog writers landing (gap-lanes wave):
+    //   +1 postmaster/syslogger/src/errlog.rs — CSV_LOG_LINE_NUMBER /
+    //      JSON_LOG_LINE_NUMBER: per-backend log line counters, the
+    //      thread-model analog of C's per-process statics in csvlog.c/
+    //      jsonlog.c (reset-on-fork becomes fresh-per-thread). Log
+    //      bookkeeping, not session identity; a migrated session restarting
+    //      at line 1 matches C's behavior after backend re-fork. Safe to
+    //      lose; not a session_sources row.
+    assert_eq!(count_tree(crates), 566, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

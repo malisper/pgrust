@@ -315,6 +315,7 @@ pgvector = { path = "../../contrib/pgvector" }
 pgvector_hnsw = { path = "../../contrib/pgvector_hnsw" }
 bloom = { path = "../../contrib/bloom" }
 hstore = { path = "../../contrib/hstore" }
+adt_expandedrecord = { path = "../../backend/utils/adt/expandedrecord" }
 pg_trgm = { path = "../../contrib/pg_trgm" }
 btree_gist = { path = "../../contrib/btree_gist" }
 btree_gin = { path = "../../contrib/btree_gin" }

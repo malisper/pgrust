@@ -9,6 +9,8 @@
 pub mod connection;
 pub mod deparse;
 pub mod exec;
+pub mod import;
+pub mod modify;
 pub mod option;
 pub mod plan;
 pub mod relinfo;
@@ -29,4 +31,8 @@ pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
 
 pub fn init_seams() {
     plan::install();
+    foreigncmds::install_fdw_import_routine(
+        types_nodes::FdwKind::PostgresFdw,
+        import::postgresImportForeignSchema,
+    );
 }

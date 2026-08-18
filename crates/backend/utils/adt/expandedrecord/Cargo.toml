@@ -21,6 +21,7 @@ typcache = { path = "../../cache/typcache" }
 adt_scalar = { path = "../scalar" }
 adt_domains = { path = "../domains" }
 format_type = { path = "../format_type" }
+expandedrecord_seams = { path = "../expandedrecord_seams" }
 
 [dev-dependencies]
 typcache_seams = { path = "../../cache/typcache_seams" }

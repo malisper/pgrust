@@ -15,6 +15,7 @@ types_scan = { path = "../../../../_support/types/types_scan" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 pglz = { path = "../../../../common/pglz" }
+lz4_flex = "0.11"
 init_small = { path = "../../../utils/init/init_small" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 heaptuple = { path = "../../common/heaptuple" }

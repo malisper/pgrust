@@ -233,6 +233,14 @@ fn run_right_join(
     .unwrap()
 }
 
+// C has no RIGHT_SEMI merge-join arm (joinpath.c refuses to build one);
+// ExecInitMergeJoin's switch default elogs "unrecognized join type".
+#[test]
+#[should_panic(expected = "unrecognized join type")]
+fn right_semi_is_unrecognized_like_c() {
+    let _ = run_join(JoinType::JOIN_RIGHT_SEMI, vec![Some(1)], vec![Some(1)]);
+}
+
 // C gold (18.3): `select * from o right join i on a=b` with o empty,
 // i=(1),(2) fills every inner row. Before the INITIALIZE_OUTER
 // ENDOFJOIN->ENDOUTER arm set MatchedInner, this panicked "inner slot set"

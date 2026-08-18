@@ -31,6 +31,7 @@ struct PgFdwScanState {
     conn_key: Oid,
     cursor_number: u32,
     cursor_exists: bool,
+    async_capable: bool,
     query: &'static str,
     fetch_size: i32,
     retrieved_attrs: Vec<i32>,
@@ -40,7 +41,7 @@ struct PgFdwScanState {
     param_exprs: Vec<PgBox<'static, ExprState<'static>>>,
     // current batch (C batch_cxt): datum payloads live in batch_mcx.
     batch_mcx: mcx::MemoryContext,
-    tuples: Vec<(Vec<Datum>, Vec<bool>)>,
+    tuples: Vec<(Vec<Datum>, Vec<bool>, types_tuple::ItemPointerData)>,
     next_tuple: usize,
     fetch_ct_2: i32,
     eof_reached: bool,
@@ -48,8 +49,8 @@ struct PgFdwScanState {
 
 // C AttInMetadata over the foreign table's descriptor (dblink's port shape),
 // plus typlen/typbyval so retained datums can be copied out of the fmgr
-// per-call scratch (see retain_datum).
-struct AttInMeta {
+// per-call scratch (see retain_datum), plus tidin for the retrieved-ctid arm.
+pub(crate) struct AttInMeta {
     natts: usize,
     relname: String,
     attnames: Vec<String>,
@@ -58,10 +59,12 @@ struct AttInMeta {
     typmods: Vec<i32>,
     typlens: Vec<i16>,
     typbyvals: Vec<bool>,
+    tid_in: FmgrInfo,
+    tid_ioparam: Oid,
 }
 
 impl AttInMeta {
-    fn build(relname: &str, tupdesc: &TupleDescData<'_>) -> PgResult<AttInMeta> {
+    pub(crate) fn build(relname: &str, tupdesc: &TupleDescData<'_>) -> PgResult<AttInMeta> {
         let natts = tupdesc.natts as usize;
         let mut attnames = Vec::with_capacity(natts);
         let mut in_funcs = Vec::with_capacity(natts);
@@ -90,6 +93,8 @@ impl AttInMeta {
             typlens.push(typlen);
             typbyvals.push(typbyval);
         }
+        let (tid_infunc, tid_ioparam) =
+            lsyscache::getTypeInputInfo(types_core::catalog::TIDOID)?;
         Ok(AttInMeta {
             natts,
             relname: relname.to_string(),
@@ -99,6 +104,8 @@ impl AttInMeta {
             typmods,
             typlens,
             typbyvals,
+            tid_in: fmgr_seams::fmgr_info::call(tid_infunc)?,
+            tid_ioparam,
         })
     }
 }
@@ -169,7 +176,13 @@ pub(crate) fn begin_foreign_scan<'mcx>(
         .expect("fdw_private[2] is fetch_size")
         .ival;
 
-    if retrieved_attrs.iter().any(|&a| a <= 0) {
+    // ctid (SelfItemPointerAttributeNumber) is retrieved into the slot's
+    // tts_tid (the UPDATE/DELETE row identity); other system columns need
+    // heap-tuple scan slots and stay unported.
+    if retrieved_attrs
+        .iter()
+        .any(|&a| a <= 0 && a != types_tuple::htup::SelfItemPointerAttributeNumber)
+    {
         return Err(system_columns_unported());
     }
 
@@ -202,6 +215,8 @@ pub(crate) fn begin_foreign_scan<'mcx>(
         conn_key,
         cursor_number,
         cursor_exists: false,
+        // C copies ps.async_capable, which ExecInitNode clears under EPQ.
+        async_capable: fsplan.scan.plan.async_capable && !estate.es_epq_active,
         query,
         fetch_size,
         retrieved_attrs,
@@ -286,20 +301,18 @@ fn create_cursor<'mcx>(
     Ok(())
 }
 
-// fetch_more_data: "FETCH %d FROM c%u", convert the batch.
-fn fetch_more_data(state: &mut PgFdwScanState) -> PgResult<()> {
+// fetch_more_data's conversion half: install one FETCH result as the batch.
+fn absorb_batch(state: &mut PgFdwScanState, res: &pgclient::QueryResult) -> PgResult<()> {
     state.tuples.clear();
     state.batch_mcx.reset();
-
-    let sql = format!("FETCH {} FROM c{}", state.fetch_size, state.cursor_number);
-    let res = connection::exec_query(state.conn_key, &sql)?;
     if res.status != ExecStatus::TuplesOk {
-        return Err(connection::remote_error(&res, Some(state.query)));
+        // On error, report the original query, not the FETCH.
+        return Err(connection::remote_error(res, Some(state.query)));
     }
     let numrows = res.rows.len();
     state.tuples.reserve(numrows);
     for row in &res.rows {
-        let tup = make_tuple_from_result_row(state, row.len(), row)?;
+        let tup = make_tuple_from_result_row(state, row)?;
         state.tuples.push(tup);
     }
     state.next_tuple = 0;
@@ -310,22 +323,52 @@ fn fetch_more_data(state: &mut PgFdwScanState) -> PgResult<()> {
     Ok(())
 }
 
+// fetch_more_data: async arm completes the in-flight FETCH begun by
+// fetch_more_data_begin; sync arm sends "FETCH %d FROM c%u" and waits.
+fn fetch_more_data(state: &mut PgFdwScanState) -> PgResult<()> {
+    if state.async_capable {
+        debug_assert!(connection::pending_fetch(state.conn_key)?
+            .is_some_and(|p| p.cursor_number == state.cursor_number));
+        let res = connection::finish_pending_fetch(state.conn_key, state.query)?;
+        return absorb_batch(state, &res);
+    }
+    let sql = format!("FETCH {} FROM c{}", state.fetch_size, state.cursor_number);
+    let res = connection::exec_query(state.conn_key, &sql)?;
+    absorb_batch(state, &res)
+}
+
+// Adopt a batch another scan drained and parked on our behalf (the requestor
+// half of C's process_pending_request runs at our next ConfigureWait/Notify).
+fn adopt_parked(state: &mut PgFdwScanState) -> PgResult<bool> {
+    match connection::take_parked(state.conn_key, state.cursor_number)? {
+        Some(res) => {
+            absorb_batch(state, &res)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 // make_tuple_from_result_row: text -> datum through the input functions
-// (called for NULLs too — domains), with C's conversion errcontext.
-fn make_tuple_from_result_row(
-    state: &mut PgFdwScanState,
-    nfields: usize,
+// (called for NULLs too — domains), with C's conversion errcontext. Shared by
+// the scan batches and the modify RETURNING path (store_returning_result).
+// The third result is the retrieved ctid (invalid when not fetched) — C
+// stores it into the built tuple's t_self.
+pub(crate) fn convert_result_row(
+    attin: &mut AttInMeta,
+    retrieved_attrs: &[i32],
     row: &[Option<Vec<u8>>],
-) -> PgResult<(Vec<Datum>, Vec<bool>)> {
-    let natts = state.attin.natts;
+    batch: mcx::Mcx<'_>,
+) -> PgResult<(Vec<Datum>, Vec<bool>, types_tuple::ItemPointerData)> {
+    let natts = attin.natts;
+    let nfields = row.len();
     let mut values = vec![Datum::null(); natts];
     let mut nulls = vec![true; natts];
-    let batch = state.batch_mcx.mcx();
+    let mut ctid = types_tuple::ItemPointerData::default();
+    types_tuple::itemptr::ItemPointerSetInvalid(&mut ctid);
 
     let mut j = 0usize;
-    for &i in &state.retrieved_attrs {
-        debug_assert!(i >= 1 && i as usize <= natts, "begin gated system columns");
-        let idx = (i - 1) as usize;
+    for &i in retrieved_attrs {
         let cell = row.get(j).cloned().flatten();
         let cstr = match &cell {
             None => None,
@@ -333,7 +376,26 @@ fn make_tuple_from_result_row(
                 Box::new(PgError::error("remote value contains embedded NUL byte"))
             })?),
         };
-        let attin = &mut state.attin;
+        if i == types_tuple::htup::SelfItemPointerAttributeNumber {
+            // ctid arm: tidin over the non-NULL text (C skips NULLs).
+            if cell.is_some() {
+                let d = types_fmgr::input_function_call(
+                    &mut attin.tid_in,
+                    cstr.as_deref(),
+                    attin.tid_ioparam,
+                    -1,
+                    batch,
+                )
+                .map_err(|e| conversion_error(e, attin, i))?;
+                // SAFETY: tidin returns a pointer datum to an ItemPointerData;
+                // copied by value before the fmgr scratch is reused.
+                ctid = unsafe { *(d.as_usize() as *const types_tuple::ItemPointerData) };
+            }
+            j += 1;
+            continue;
+        }
+        debug_assert!(i >= 1 && i as usize <= natts, "begin gated system columns");
+        let idx = (i - 1) as usize;
         let r = types_fmgr::input_function_call(
             &mut attin.in_funcs[idx],
             cstr.as_deref(),
@@ -359,7 +421,7 @@ fn make_tuple_from_result_row(
                     )?;
                 }
             }
-            Err(e) => return Err(conversion_error(e, &state.attin, i)),
+            Err(e) => return Err(conversion_error(e, attin, i)),
         }
         j += 1;
     }
@@ -369,12 +431,20 @@ fn make_tuple_from_result_row(
             "remote query result does not match the foreign table",
         )));
     }
-    Ok((values, nulls))
+    Ok((values, nulls, ctid))
+}
+
+fn make_tuple_from_result_row(
+    state: &mut PgFdwScanState,
+    row: &[Option<Vec<u8>>],
+) -> PgResult<(Vec<Datum>, Vec<bool>, types_tuple::ItemPointerData)> {
+    let PgFdwScanState { attin, retrieved_attrs, batch_mcx, .. } = state;
+    convert_result_row(attin, retrieved_attrs, row, batch_mcx.mcx())
 }
 
 // Deep-copy a byref datum image into the batch context (datumCopy shape;
 // evaluate_expr's byref-image precedent).
-fn retain_datum(batch: mcx::Mcx<'_>, d: Datum, typlen: i16, typbyval: bool) -> PgResult<Datum> {
+pub(crate) fn retain_datum(batch: mcx::Mcx<'_>, d: Datum, typlen: i16, typbyval: bool) -> PgResult<Datum> {
     if typbyval {
         return Ok(d);
     }
@@ -401,7 +471,7 @@ fn retain_datum(batch: mcx::Mcx<'_>, d: Datum, typlen: i16, typbyval: bool) -> P
 // conversion_error_callback: C's errcontext line for a failed conversion.
 #[track_caller]
 #[cold]
-fn conversion_error(e: Box<PgError>, attin: &AttInMeta, attno: i32) -> Box<PgError> {
+pub(crate) fn conversion_error(e: Box<PgError>, attin: &AttInMeta, attno: i32) -> Box<PgError> {
     let line = if attno >= 1 && attno as usize <= attin.natts {
         format!(
             "column \"{}\" of foreign table \"{}\"",
@@ -433,6 +503,12 @@ pub(crate) fn iterate_foreign_scan<'mcx>(
     let state = fsstate(node).expect("fdw_state set by BeginForeignScan");
 
     if state.next_tuple >= state.tuples.len() {
+        // In async mode, just clear the tuple slot: the next batch arrives
+        // through the ForeignAsyncNotify path, never a blocking fetch here.
+        if state.async_capable {
+            exectuples::exec_clear_tuple(estate.slot_mut(scan_slot), qmcx);
+            return Ok(false);
+        }
         if !state.eof_reached {
             fetch_more_data(state)?;
         }
@@ -442,7 +518,8 @@ pub(crate) fn iterate_foreign_scan<'mcx>(
         }
     }
 
-    let (values, nulls) = &state.tuples[state.next_tuple];
+    let (values, nulls, ctid) = &state.tuples[state.next_tuple];
+    let ctid = *ctid;
     state.next_tuple += 1;
     let slot = estate.slot_mut(scan_slot);
     exectuples::exec_clear_tuple(slot, qmcx);
@@ -452,6 +529,9 @@ pub(crate) fn iterate_foreign_scan<'mcx>(
         base.tts_values.extend_from_slice(values);
         base.tts_isnull.clear();
         base.tts_isnull.extend_from_slice(nulls);
+        // C's t_self: the retrieved ctid feeds the junk Var(-1) fetch
+        // (slot_getsysattr reads tts_tid).
+        base.tts_tid = ctid;
     }
     exectuples::exec_store_virtual_tuple(slot);
     Ok(true)
@@ -471,6 +551,18 @@ pub(crate) fn rescan_foreign_scan<'mcx>(
     };
     if !state.cursor_exists {
         return Ok(());
+    }
+    // Complete an in-flight (or parked) async fetch before restarting the
+    // scan (postgresReScanForeignScan's async arm; parked = the batch another
+    // scan drained for us, see adopt_parked).
+    if state.async_capable {
+        if connection::pending_fetch(state.conn_key)?
+            .is_some_and(|p| p.cursor_number == state.cursor_number)
+        {
+            fetch_more_data(state)?;
+        } else {
+            adopt_parked(state)?;
+        }
     }
     if state.param_exprs.is_empty() && state.fetch_ct_2 <= 1 {
         // Just rewind the local batch (the cursor has not moved past it).
@@ -499,6 +591,16 @@ pub(crate) fn end_foreign_scan<'mcx>(
     let Some(state) = fsstate(node) else {
         return Ok(()); // EXPLAIN
     };
+    // Drain an in-flight async fetch and discard any parked batch: the
+    // cursor is going away.
+    if state.async_capable {
+        if connection::pending_fetch(state.conn_key)?
+            .is_some_and(|p| p.cursor_number == state.cursor_number)
+        {
+            let _ = connection::finish_pending_fetch(state.conn_key, state.query)?;
+        }
+        connection::drop_parked(state.conn_key, state.cursor_number)?;
+    }
     if state.cursor_exists {
         let sql = format!("CLOSE c{}", state.cursor_number);
         let res = connection::exec_query(state.conn_key, &sql)?;
@@ -510,4 +612,191 @@ pub(crate) fn end_foreign_scan<'mcx>(
     connection::release_connection(state.conn_key);
     node.fdw_state = None;
     Ok(())
+}
+
+// ---- asynchronous execution (postgres_fdw.c async half) ----
+
+// postgresForeignAsyncRequest.
+pub(crate) fn foreign_async_request<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    areq: &mut executils::AsyncRequest,
+) -> PgResult<()> {
+    produce_tuple_asynchronously(node, estate, areq, true)
+}
+
+// postgresForeignAsyncConfigureWait.
+pub(crate) fn foreign_async_configure_wait<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    areq: &mut executils::AsyncRequest,
+    wait: &executils::AsyncWaitCtx,
+) -> PgResult<()> {
+    debug_assert!(areq.callback_pending);
+    let tuples_ready = {
+        let state = fsstate(node).expect("fdw_state set by BeginForeignScan");
+        adopt_parked(state)? || state.next_tuple < state.tuples.len()
+    };
+    if tuples_ready {
+        // Another scan already drained our fetch: complete the request.
+        complete_pending_request(node, estate, areq)?;
+        if areq.request_complete {
+            return Ok(());
+        }
+        debug_assert!(areq.callback_pending);
+    }
+    let (conn_key, cursor_number) = {
+        let state = fsstate(node).expect("fdw_state set by BeginForeignScan");
+        debug_assert!(state.next_tuple >= state.tuples.len());
+        (state.conn_key, state.cursor_number)
+    };
+    debug_assert!(waiteventset::GetNumRegisteredWaitEvents(wait.set) >= 1);
+    match connection::pending_fetch(conn_key)? {
+        None => fetch_more_data_begin(node, estate, areq)?,
+        Some(p) if p.requestor_plan_id != areq.requestor_plan_id => {
+            // In-flight request from another Append, which may not need more
+            // tuples: prefer skipping this request over processing it. But
+            // never leave the set with only the postmaster-death event.
+            if !wait.needrequest_empty {
+                return Ok(());
+            }
+            if waiteventset::GetNumRegisteredWaitEvents(wait.set) > 1 {
+                return Ok(());
+            }
+            connection::park_pending_fetch(conn_key)?;
+            fetch_more_data_begin(node, estate, areq)?;
+        }
+        Some(p) if p.cursor_number != cursor_number => {
+            // Same Append, different child: only that child's event gets
+            // configured.
+            return Ok(());
+        }
+        Some(_) => {} // our own fetch is in flight
+    }
+    waiteventset::AddWaitEventToSet(
+        wait.set,
+        types_storage::waiteventset::WL_SOCKET_READABLE,
+        connection::socket(conn_key)?,
+        None,
+        Some(areq.request_index),
+    )?;
+    Ok(())
+}
+
+// postgresForeignAsyncNotify.
+pub(crate) fn foreign_async_notify<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    areq: &mut executils::AsyncRequest,
+) -> PgResult<()> {
+    // The core code would have reset callback_pending.
+    debug_assert!(!areq.callback_pending);
+    let tuples_ready = {
+        let state = fsstate(node).expect("fdw_state set by BeginForeignScan");
+        adopt_parked(state)? || state.next_tuple < state.tuples.len()
+    };
+    if !tuples_ready {
+        let state = fsstate(node).expect("fdw_state set by BeginForeignScan");
+        debug_assert!(connection::pending_fetch(state.conn_key)?
+            .is_some_and(|p| p.cursor_number == state.cursor_number));
+        fetch_more_data(state)?;
+    }
+    produce_tuple_asynchronously(node, estate, areq, true)
+}
+
+// produce_tuple_asynchronously.
+fn produce_tuple_asynchronously<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    areq: &mut executils::AsyncRequest,
+    fetch: bool,
+) -> PgResult<()> {
+    let (conn_key, cursor_number, have_tuple, eof) = {
+        let state = fsstate(node).expect("fdw_state set by BeginForeignScan");
+        (
+            state.conn_key,
+            state.cursor_number,
+            state.next_tuple < state.tuples.len(),
+            state.eof_reached,
+        )
+    };
+    // Not to be called while our own request is in flight.
+    debug_assert!(!connection::pending_fetch(conn_key)?
+        .is_some_and(|p| p.cursor_number == cursor_number));
+    if !have_tuple {
+        return produce_out_of_tuples(node, estate, areq, fetch, eof, conn_key);
+    }
+    // Get a tuple from the ForeignScan node (C ExecProcNodeReal).
+    match nodeforeignscan::exec_foreign_scan(node, estate)? {
+        Some(slot) => {
+            areq.request_complete = true;
+            areq.result = Some(slot);
+            Ok(())
+        }
+        None => {
+            let eof = fsstate(node).expect("fdw_state").eof_reached;
+            produce_out_of_tuples(node, estate, areq, fetch, eof, conn_key)
+        }
+    }
+}
+
+fn produce_out_of_tuples<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    areq: &mut executils::AsyncRequest,
+    fetch: bool,
+    eof: bool,
+    conn_key: Oid,
+) -> PgResult<()> {
+    if !eof {
+        // ExecAsyncRequestPending.
+        areq.callback_pending = true;
+        areq.request_complete = false;
+        areq.result = None;
+        // Begin another fetch if requested and no request is pending.
+        if fetch && connection::pending_fetch(conn_key)?.is_none() {
+            fetch_more_data_begin(node, estate, areq)?;
+        }
+    } else {
+        // ExecAsyncRequestDone(NULL): nothing more to do.
+        areq.request_complete = true;
+        areq.result = None;
+    }
+    Ok(())
+}
+
+// complete_pending_request: unset callback_pending ourselves and produce
+// without starting a new fetch. (C also calls ExecAsyncResponse here; the
+// requestor half runs in nodeappend right after ConfigureWait returns.)
+fn complete_pending_request<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    areq: &mut executils::AsyncRequest,
+) -> PgResult<()> {
+    debug_assert!(areq.callback_pending);
+    areq.callback_pending = false;
+    produce_tuple_asynchronously(node, estate, areq, false)
+}
+
+// fetch_more_data_begin: create the cursor synchronously if needed, then
+// send the FETCH without waiting for the response.
+fn fetch_more_data_begin<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    areq: &mut executils::AsyncRequest,
+) -> PgResult<()> {
+    let conn_key = fsstate(node).expect("fdw_state").conn_key;
+    debug_assert!(connection::pending_fetch(conn_key)?.is_none());
+    if !fsstate(node).expect("fdw_state").cursor_exists {
+        create_cursor(node, estate)?;
+    }
+    let state = fsstate(node).expect("fdw_state");
+    let sql = format!("FETCH {} FROM c{}", state.fetch_size, state.cursor_number);
+    connection::begin_async_fetch(
+        state.conn_key,
+        &sql,
+        state.cursor_number,
+        areq.requestor_plan_id,
+        state.query,
+    )
 }

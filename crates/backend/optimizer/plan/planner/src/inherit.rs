@@ -404,7 +404,7 @@ fn expand_single_inheritance_child<'mcx>(
                 0,
             )?;
             add_row_identity_var(run, rrvar, child_rti, "tableoid")?;
-            add_row_identity_columns(run, child_rti, child_relkind)?;
+            add_row_identity_columns(run, child_rti, childrel)?;
         }
     }
     Ok(child_rti)
@@ -1224,16 +1224,17 @@ pub fn add_row_identity_var<'mcx>(
     processed_tlist_append(run, tle)
 }
 
-// add_row_identity_columns (appendinfo.c). The FDW leg is C's default
-// wholerow arm: no in-tree FDW installs AddForeignUpdateTargets.
+// add_row_identity_columns (appendinfo.c).
 pub fn add_row_identity_columns<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rtindex: u32,
-    relkind: u8,
+    rel: &types_rel::Relation<'mcx>,
 ) -> PgResult<()> {
     let mcx = run.mcx;
+    let relkind = rel.rd_rel.relkind;
+    let command_type = run.parse().commandType;
     debug_assert!(matches!(
-        run.parse().commandType,
+        command_type,
         CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
     ));
     if relkind == types_rel::RELKIND_RELATION
@@ -1250,8 +1251,29 @@ pub fn add_row_identity_columns<'mcx>(
         )?;
         add_row_identity_var(run, var, rtindex, "ctid")?;
     } else if relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        let var = mk_var(mcx, rtindex, 0, types_core::catalog::RECORDOID, -1, 0)?;
-        add_row_identity_var(run, var, rtindex, "wholerow")?;
+        let kind = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, rel.rd_id)?;
+        if let Some(f) = crate::fdwplan::fdw_plan_routine(kind).add_foreign_update_targets {
+            let mut pending: mcx::PgVec<'mcx, (Node<'mcx>, &'static str)> =
+                mcx::PgVec::new_in(mcx);
+            f(mcx, rtindex, &mut |expr, name| {
+                pending.push((expr, name));
+                Ok(())
+            })?;
+            for (expr, name) in pending.iter() {
+                add_row_identity_var(run, *expr, rtindex, name)?;
+            }
+        }
+        // Wholerow: UPDATE always; otherwise only when delete row triggers
+        // need the OLD row (appendinfo.c:960-972).
+        let need_wholerow = command_type == CmdType::CMD_UPDATE || {
+            rel.rd_hastriggers
+                && relcache_seams::relation_get_trigger_desc::call(rel.rd_id)?
+                    .is_some_and(|t| t.trig_delete_after_row || t.trig_delete_before_row)
+        };
+        if need_wholerow {
+            let var = mk_var(mcx, rtindex, 0, types_core::catalog::RECORDOID, -1, 0)?;
+            add_row_identity_var(run, var, rtindex, "wholerow")?;
+        }
     }
     Ok(())
 }
@@ -1282,9 +1304,8 @@ pub fn distribute_row_identity_vars<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResul
         // Every leaf was excluded: fall back to the top rel's own identity
         // columns so the (never-executed) plan still carries junk columns.
         let rel = table::table_open(mcx, target_rte.relid, types_rel::NoLock)?;
-        let relkind = rel.rd_rel.relkind;
+        add_row_identity_columns(run, result_relation as u32, &rel)?;
         rel.close(types_rel::NoLock)?;
-        add_row_identity_columns(run, result_relation as u32, relkind)?;
         crate::initsplan::build_base_rel_tlists(run)?;
         return Ok(());
     }

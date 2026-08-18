@@ -1924,11 +1924,14 @@ pub fn relation_is_updatable<'mcx>(
     }
 
     if rel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
-        // C derives events from GetFdwRoutineForRelation; no FDW handler is
-        // invocable yet, so the live surface is the no-handler error
-        // (plancat.rs precedent) and an installed handler stays loud.
-        foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, rel.rd_id)?;
-        unreachable!("get_fdw_routine_by_rel_id returned");
+        // C: let the FDW's IsForeignRelUpdatable decide; a provider without
+        // modify executor functions (no mask installed) supports no events.
+        let kind = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, rel.rd_id)?;
+        if let Some(mask) =
+            foreigncmds_seams::fdw_is_foreign_rel_updatable::call(mcx, kind, rel.rd_id)?
+        {
+            events |= mask & ALL_EVENTS;
+        }
     }
 
     if rel.rd_rel.relkind == RELKIND_VIEW {

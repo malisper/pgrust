@@ -17,6 +17,8 @@ types_nbtree = { path = "../../../_support/types/types_nbtree" }
 exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
 indexam = { path = "../../access/index/indexam" }
+amapi = { path = "../../access/index/amapi" }
+types_pathnodes = { path = "../../../_support/types/pathnodes" }
 types_relscan = { path = "../../access/index/relscan" }
 genam_seams = { path = "../../access/index/genam_seams" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
@@ -45,6 +47,7 @@ execexpr = { path = "../execexpr" }
 tuplesort = { path = "../../utils/sort/tuplesort" }
 init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
+elog = { path = "../../utils/error/elog" }
 
 adt_rangetypes = { path = "../../utils/adt/rangetypes" }
 adt_multirangetypes = { path = "../../utils/adt/multirangetypes" }

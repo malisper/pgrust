@@ -33,6 +33,64 @@ use types_snapshot::{SnapshotData, SNAPSHOT_ANY};
 use types_tuple::itemptr::ItemPointerSetInvalid;
 use types_tuple::{ItemPointerData, TupleDescData};
 
+// The FDW-modify half of C's FdwRoutine (fdwapi.h), installed per FdwKind by
+// the provider's init_seams (nodeforeignscan's FdwExecRoutine pattern). Not
+// installed = the provider has no ExecForeign{Insert,Update,Delete}
+// (CheckValidResultRel's 0A000 arm). Batch insert / direct modify unmodeled.
+pub struct FdwModifyRoutine {
+    /// BeginForeignModify: decode fdwPrivLists[list_index], open the remote
+    /// connection, return ri_FdwState (None under EXPLAIN_ONLY).
+    pub begin: for<'mcx> fn(
+        &'mcx ModifyTable<'mcx>,
+        u32,   // rti
+        usize, // list_index into fdwPrivLists
+        &mut EStateData<'mcx>,
+        i32, // eflags
+    ) -> PgResult<Option<Box<dyn core::any::Any>>>,
+    /// ExecForeignInsert/Update/Delete: true = a remote row was affected
+    /// ("do nothing" = false). `slot` is the new-tuple slot (INSERT/UPDATE)
+    /// or the RETURNING slot (DELETE); RETURNING data is stored into it.
+    pub exec_insert: for<'mcx> fn(
+        &mut dyn core::any::Any,
+        &mut EStateData<'mcx>,
+        ExecSlotId, // slot
+        ExecSlotId, // plan slot
+    ) -> PgResult<bool>,
+    pub exec_update: for<'mcx> fn(
+        &mut dyn core::any::Any,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        ExecSlotId,
+    ) -> PgResult<bool>,
+    pub exec_delete: for<'mcx> fn(
+        &mut dyn core::any::Any,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        ExecSlotId,
+    ) -> PgResult<bool>,
+    /// EndForeignModify: deallocate the prepared statement, release the
+    /// connection.
+    pub end: fn(Box<dyn core::any::Any>) -> PgResult<()>,
+}
+
+static FDW_MODIFY_ROUTINES: [core::sync::atomic::AtomicPtr<FdwModifyRoutine>;
+    types_nodes::NUM_FDW_KINDS] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) };
+        types_nodes::NUM_FDW_KINDS];
+
+pub fn install_fdw_modify_routine(kind: types_nodes::FdwKind, routine: &'static FdwModifyRoutine) {
+    FDW_MODIFY_ROUTINES[kind.index()].store(
+        routine as *const FdwModifyRoutine as *mut FdwModifyRoutine,
+        core::sync::atomic::Ordering::Release,
+    );
+}
+
+fn fdw_modify_routine(kind: types_nodes::FdwKind) -> Option<&'static FdwModifyRoutine> {
+    let p = FDW_MODIFY_ROUTINES[kind.index()].load(core::sync::atomic::Ordering::Acquire);
+    // SAFETY: install stores a &'static FdwModifyRoutine; never unset.
+    unsafe { p.as_ref() }
+}
+
 // ExecBuildUpdateProjection's step stream, resolved once per statement onto a
 // flat per-target-column source map (rule 4: known-set dispatch, no ExprState).
 #[derive(Clone, Copy)]
@@ -98,6 +156,10 @@ pub struct ResultRelExec<'mcx> {
     virtual_nn_exprs: Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>,
     // ri_MergeActions + per-rel merge slots (ExecInitMerge).
     merge: Option<MergeState<'mcx>>,
+    // C ri_FdwRoutine (provider id; the fn table is FDW_MODIFY_ROUTINES).
+    ri_FdwRoutine: Option<types_nodes::FdwKind>,
+    // C ri_FdwState; dropped in exec_end_modify_table.
+    ri_FdwState: Option<Box<dyn core::any::Any>>,
 }
 
 pub struct ModifyTableState<'mcx> {
@@ -387,17 +449,6 @@ pub fn exec_init_modify_table<'mcx>(
             node.operation
         );
     }
-    if !node.fdwPrivLists.is_nil() {
-        // Invariant tripwire: fdwPrivLists has no producer — PlanForeignModify
-        // is unwired (see the phase-4 note at postgres_fdw/src/deparse.rs:1546-1552),
-        // and foreign-table DML is refused cleanly first at lib.rs:1175-1191
-        // (0A000, matching C's null-hook error).
-        panic!(
-            "ExecInitModifyTable: fdwPrivLists is non-nil but has no producer, \
-             PlanForeignModify is unwired (postgres_fdw/src/deparse.rs:1546-1552) and \
-             foreign-table DML is refused with 0A000 at nodemodifytable/src/lib.rs:1175-1191"
-        );
-    }
     // C's arowmarks loop: resolve each non-parent PlanRowMark's junk attnos
     // against the subplan targetlist (ExecFindRowMark + ExecBuildAuxRowMark);
     // the EPQ recheck re-fetches these source rows instead of rescanning.
@@ -489,6 +540,17 @@ pub fn exec_init_modify_table<'mcx>(
             Some(i),
             (node.rootRelation > 0).then_some(node.rootRelation as u32),
         )?);
+    }
+
+    // ExecInitModifyTable's per-result-rel BeginForeignModify loop
+    // (nodeModifyTable.c:4846-4862); ri_FdwState stays None under
+    // EXEC_FLAG_EXPLAIN_ONLY (the provider checks eflags, as C).
+    for (idx, &(rti, i)) in kept.iter().enumerate() {
+        if let Some(kind) = rels[idx].ri_FdwRoutine {
+            let routine =
+                fdw_modify_routine(kind).expect("check_valid_result_rel admitted this FDW");
+            rels[idx].ri_FdwState = (routine.begin)(node, rti, i, estate, eflags)?;
+        }
     }
 
     // ExecSetupTransitionCaptureState (skipped in explain-only mode); the
@@ -812,6 +874,16 @@ fn init_result_rel<'mcx>(
 ) -> PgResult<ResultRelExec<'mcx>> {
     estate.exec_init_result_relation(rti)?;
     let mcx = estate.es_query_cxt;
+    let fdw_kind = {
+        let rel = estate.es_relations[(rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+            Some(foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, rel.rd_id)?)
+        } else {
+            None
+        }
+    };
     let (trigdesc, relkind, rd_id) = {
         let rel = estate.es_relations[(rti - 1) as usize]
             .as_ref()
@@ -822,7 +894,31 @@ fn init_result_rel<'mcx>(
             None
         };
         if list_index.is_some() {
-            check_valid_result_rel(mcx, rel, node, td.as_deref())?;
+            check_valid_result_rel(mcx, rel, node, td.as_deref(), fdw_kind)?;
+        }
+        // C runs row triggers on foreign tables through the wholerow/slot
+        // machinery; that lane is unported — refuse cleanly, never mis-fire.
+        if fdw_kind.is_some() {
+            if let Some(td) = td.as_deref() {
+                let has_row_trigger = td.trig_insert_before_row
+                    || td.trig_insert_after_row
+                    || td.trig_insert_instead_row
+                    || td.trig_update_before_row
+                    || td.trig_update_after_row
+                    || td.trig_update_instead_row
+                    || td.trig_delete_before_row
+                    || td.trig_delete_after_row
+                    || td.trig_delete_instead_row;
+                if has_row_trigger {
+                    return Err(Box::new(
+                        PgError::error(format!(
+                            "row-level triggers on foreign table \"{}\" are not yet supported",
+                            rel.name()
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+            }
         }
         (td, rel.rd_rel.relkind, rel.rd_id)
     };
@@ -847,6 +943,14 @@ fn init_result_rel<'mcx>(
         if relkind == types_rel::RELKIND_VIEW {
             rowid_attno = exec_find_junk_attribute_in_tlist(&subplan.targetlist, "wholerow");
             assert!(rowid_attno > 0, "could not find junk wholerow column");
+        } else if relkind == types_rel::RELKIND_FOREIGN_TABLE {
+            // C: wholerow is required for UPDATE (unchanged columns) and with
+            // row triggers; the FDW fetches its own junk attrs (ctid) itself.
+            rowid_attno = exec_find_junk_attribute_in_tlist(&subplan.targetlist, "wholerow");
+            assert!(
+                rowid_attno > 0 || node.operation != CmdType::CMD_UPDATE,
+                "could not find junk wholerow column"
+            );
         } else {
             rowid_attno = exec_find_junk_attribute_in_tlist(&subplan.targetlist, "ctid");
             assert!(
@@ -1132,6 +1236,8 @@ fn init_result_rel<'mcx>(
         generated_exprs: None,
         virtual_nn_exprs: None,
         merge,
+        ri_FdwRoutine: fdw_kind,
+        ri_FdwState: None,
     })
 }
 
@@ -1153,6 +1259,7 @@ fn check_valid_result_rel<'mcx>(
     rel: &Relation<'mcx>,
     node: &'mcx ModifyTable<'mcx>,
     trigdesc: Option<&types_trigger::TriggerDesc<'static>>,
+    fdw_kind: Option<types_nodes::FdwKind>,
 ) -> PgResult<()> {
     let operation = node.operation;
     if rel.rd_rel.relkind == types_rel::RELKIND_VIEW {
@@ -1218,21 +1325,39 @@ fn check_valid_result_rel<'mcx>(
         return Ok(());
     }
     if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        // C asks the FDW's routine for the operation's callback; no in-tree
-        // FDW models any of them, so the per-operation error is invariant.
-        let verb = match operation {
-            CmdType::CMD_INSERT => "insert into",
-            CmdType::CMD_UPDATE => "update",
-            CmdType::CMD_DELETE => "delete from",
+        // C: okay only if the FDW supports the operation. MERGE on a foreign
+        // target is rejected in parse analysis / createplan, so the
+        // per-operation arms are exhaustive here (C's default: elog).
+        let (verb, not_allowed) = match operation {
+            CmdType::CMD_INSERT => ("insert into", "does not allow inserts"),
+            CmdType::CMD_UPDATE => ("update", "does not allow updates"),
+            CmdType::CMD_DELETE => ("delete from", "does not allow deletes"),
             _ => panic!("CheckValidResultRel (execMain.c): {operation:?} on a foreign table"),
         };
-        return Err(Box::new(
-            PgError::error(format!(
-                "cannot {verb} foreign table \"{}\"",
-                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
-            ))
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
+        let kind = fdw_kind.expect("caller resolved the FdwKind for a foreign result rel");
+        if fdw_modify_routine(kind).is_none() {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "cannot {verb} foreign table \"{}\"",
+                    String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+                ))
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        if let Some(mask) =
+            foreigncmds_seams::fdw_is_foreign_rel_updatable::call(mcx, kind, rel.rd_id)?
+        {
+            if mask & (1 << operation as i32) == 0 {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "foreign table \"{}\" {not_allowed}",
+                        String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                ));
+            }
+        }
+        return Ok(());
     }
     if rel.rd_rel.relkind != RELKIND_RELATION
         && rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE
@@ -1575,6 +1700,88 @@ pub fn mt_accept_row<'mcx>(
                             clear_slot(estate, oid);
                         }
                         return Ok(Some(out));
+                    }
+                }
+            }
+            // ExecUpdate's ri_FdwRoutine arm (nodeModifyTable.c:2491-2517):
+            // the OLD row arrives as the wholerow junk attr; the FDW keys the
+            // remote UPDATE off its own junk attrs in the plan slot.
+            CmdType::CMD_UPDATE if mt.rel().ri_FdwRoutine.is_some() => {
+                let old_tup = fetch_wholerow_tuple(mt, estate, plan_slot)?;
+                if !mt.rel().ri_projectNewInfoValid {
+                    exec_init_update_projection(mt, estate)?;
+                }
+                let old_slot = mt.rel().ri_oldTupleSlot.expect("ExecInitUpdateProjection ran");
+                {
+                    let mcx = estate.es_query_cxt;
+                    exectuples::exec_force_store_heap_tuple(
+                        old_tup,
+                        &mut estate.es_tupleTable[old_slot.0 as usize],
+                        mcx,
+                    )?;
+                }
+                let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
+                fdw_prepare_new_slot(mt, estate, slot)?;
+                if exec_foreign_modify_row(mt, estate, CmdType::CMD_UPDATE, slot, plan_slot)? {
+                    if mt.canSetTag {
+                        estate.es_processed += 1;
+                    }
+                    // ExecUpdateEpilogue's WCO_VIEW_CHECK leg.
+                    if !mt.rel().wco_exprs.is_empty() {
+                        let mcx = estate.es_query_cxt;
+                        let ecxt = mt.node_ecxt;
+                        let r = &mut mt.rels[mt.cur];
+                        let rti = r.rti;
+                        exec_view_check_options(
+                            mcx,
+                            estate,
+                            ecxt,
+                            &mut r.wco_exprs,
+                            slot,
+                            WcoRel::Rti { rti, root_rti: None },
+                        )?;
+                    }
+                    if mt.rel().project_returning.is_some() {
+                        return Ok(Some(exec_process_returning(
+                            mt,
+                            estate,
+                            CmdType::CMD_UPDATE,
+                            Some(old_slot),
+                            Some(slot),
+                            plan_slot,
+                        )?));
+                    }
+                }
+            }
+            // ExecDelete's ri_FdwRoutine arm (nodeModifyTable.c:1612-1637).
+            CmdType::CMD_DELETE if mt.rel().ri_FdwRoutine.is_some() => {
+                let ret_slot = ensure_returning_slot(mt, estate);
+                clear_slot(estate, ret_slot);
+                if exec_foreign_modify_row(mt, estate, CmdType::CMD_DELETE, ret_slot, plan_slot)?
+                {
+                    let rd_id = mt.rel().rd_id;
+                    {
+                        let mcx = estate.es_query_cxt;
+                        let slot = &mut estate.es_tupleTable[ret_slot.0 as usize];
+                        // C: an FDW without RETURNING data leaves the slot
+                        // empty — substitute an all-NULL row.
+                        if slot.base().is_empty() {
+                            exectuples::exec_store_all_null_tuple(slot, mcx);
+                        }
+                        slot.base_mut().tts_tableOid = rd_id;
+                    }
+                    if mt.canSetTag {
+                        estate.es_processed += 1;
+                    }
+                    if mt.rel().project_returning.is_some() {
+                        return Ok(Some(exec_process_returning(
+                            mt,
+                            estate,
+                            CmdType::CMD_DELETE,
+                            Some(ret_slot),
+                            None,
+                            plan_slot,
+                        )?));
                     }
                 }
             }
@@ -3401,7 +3608,15 @@ fn merge_self_modified(
 }
 
 /// `ExecEndModifyTable` node-local half; the caller ends the subplan.
-pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
+pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) -> PgResult<()> {
+    // EndForeignModify first: it talks to the remote (DEALLOCATE) and its
+    // errors must surface before the local teardown forgets state.
+    for r in mt.rels.iter_mut() {
+        if let Some(state) = r.ri_FdwState.take() {
+            let kind = r.ri_FdwRoutine.expect("state implies a routine");
+            (fdw_modify_routine(kind).expect("installed").end)(state)?;
+        }
+    }
     for r in mt.rels.iter_mut().chain(mt.root.iter_mut()) {
         if let Some(indexes) = r.indexes.take() {
             execindexing::ExecCloseIndices(indexes).expect("ExecCloseIndices");
@@ -3451,6 +3666,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.leaf_trig_when.clear();
     mt.router = None;
     mt.index_eval_cx = None;
+    Ok(())
 }
 
 // ExecInitInsertProjection (nodeModifyTable.c): extract the non-junk columns
@@ -4940,11 +5156,11 @@ fn invalid_on_update_specification() -> Box<PgError> {
 
 // ExecDelete's RETURNING arm: re-fetch the deleted tuple under SnapshotAny
 // into a lazily-built table-format slot (C ExecGetReturningSlot).
-fn exec_delete_fetch_old<'mcx>(
+// ExecGetReturningSlot (execUtils.c): the per-result-rel RETURNING work slot.
+fn ensure_returning_slot<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    tupleid: &ItemPointerData,
-) -> PgResult<ExecSlotId> {
+) -> ExecSlotId {
     if mt.rel().ri_ReturningSlot.is_none() {
         let mcx = estate.es_query_cxt;
         let (kind, desc) = {
@@ -4958,7 +5174,67 @@ fn exec_delete_fetch_old<'mcx>(
         estate.es_tupleTable.push(slot);
         mt.rel_mut().ri_ReturningSlot = Some(id);
     }
-    let slot_id = mt.rel().ri_ReturningSlot.expect("just initialized");
+    mt.rel().ri_ReturningSlot.expect("just initialized")
+}
+
+// The ri_FdwRoutine dispatch shared by the foreign INSERT/UPDATE/DELETE arms.
+// True = a remote row was affected; the slot's tableoid is re-stamped for AR
+// triggers / RETURNING, as C.
+fn exec_foreign_modify_row<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    op: CmdType,
+    slot_id: ExecSlotId,
+    plan_slot: ExecSlotId,
+) -> PgResult<bool> {
+    let kind = mt.rel().ri_FdwRoutine.expect("foreign result rel");
+    let routine = fdw_modify_routine(kind).expect("admitted at init");
+    let rd_id = mt.rel().rd_id;
+    let f = match op {
+        CmdType::CMD_INSERT => routine.exec_insert,
+        CmdType::CMD_UPDATE => routine.exec_update,
+        CmdType::CMD_DELETE => routine.exec_delete,
+        other => unreachable!("exec_foreign_modify_row: {other:?}"),
+    };
+    let state = mt
+        .rel_mut()
+        .ri_FdwState
+        .as_deref_mut()
+        .expect("BeginForeignModify ran");
+    let modified = f(state, estate, slot_id, plan_slot)?;
+    if modified {
+        estate.es_tupleTable[slot_id.0 as usize].base_mut().tts_tableOid = rd_id;
+    }
+    Ok(modified)
+}
+
+// ExecUpdatePrepareSlot / ExecInsert's FDW leg: stamp tableoid and compute
+// stored generated columns on the new tuple before handing it to the FDW.
+fn fdw_prepare_new_slot<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+) -> PgResult<()> {
+    let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = &mut *estate;
+    let ModifyTableState { rels, cur, .. } = &mut *mt;
+    let r = &mut rels[*cur];
+    let rel = es_relations[(r.rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    let slot = &mut es_tupleTable[slot_id.0 as usize];
+    slot.base_mut().tts_tableOid = rel.rd_id;
+    if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
+        exec_compute_stored_generated(*es_query_cxt, &mut r.generated_exprs, rel, slot)?;
+    }
+    Ok(())
+}
+
+fn exec_delete_fetch_old<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tupleid: &ItemPointerData,
+) -> PgResult<ExecSlotId> {
+    let slot_id = ensure_returning_slot(mt, estate);
     let found = {
         let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = estate;
         let rel = es_relations[(mt.rel().rti - 1) as usize]
@@ -6106,6 +6382,34 @@ fn exec_insert<'mcx>(
         )? {
             return Ok(None);
         }
+    }
+
+    // ExecInsert's ri_FdwRoutine arm (nodeModifyTable.c:922-1105, single-row
+    // leg; batching unmodeled — C's default batch_size is 1): constraints and
+    // indexes are the remote's job; the tail (es_processed, WCO_VIEW_CHECK,
+    // RETURNING via the caller) mirrors the common exit.
+    if mt.rel().ri_FdwRoutine.is_some() {
+        fdw_prepare_new_slot(mt, estate, slot_id)?;
+        if !exec_foreign_modify_row(mt, estate, CmdType::CMD_INSERT, slot_id, slot_id)? {
+            return Ok(None);
+        }
+        if !mt.rel().wco_exprs.is_empty() {
+            let ecxt = mt.node_ecxt;
+            let r = &mut mt.rels[mt.cur];
+            let rti = r.rti;
+            exec_view_check_options(
+                mcx,
+                estate,
+                ecxt,
+                &mut r.wco_exprs,
+                slot_id,
+                WcoRel::Rti { rti, root_rti: None },
+            )?;
+        }
+        if mt.canSetTag {
+            estate.es_processed += 1;
+        }
+        return Ok(Some(slot_id));
     }
 
     // ExecFindPartition first checks the routing root's own partition
@@ -8344,10 +8648,10 @@ mcx::forget_safe_struct!(
     WcoExpr<'_> { kind, relname, polname; state },
     ResultRelExec<'_> { rti, rd_id, relkind, ri_newTupleSlot, ri_oldTupleSlot,
         ri_ReturningSlot, ri_AllNullSlot, ri_projectNewInfoValid, ri_RowIdAttNo,
-        update_cols, update_colnos;
+        update_cols, update_colnos, ri_FdwRoutine;
         indexes, project_new, project_returning, check_exprs, partition_check, trigdesc,
         trig_fmgr, trig_old_slot, trig_when, all_updated_cols, child_to_root,
-        generated_exprs, virtual_nn_exprs, wco_exprs, merge },
+        generated_exprs, virtual_nn_exprs, wco_exprs, merge, ri_FdwState },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
@@ -8813,7 +9117,7 @@ mod check_valid_result_rel_tests {
         )
         .unwrap();
         let rel = relation_of_kind(mcx, name, relkind);
-        check_valid_result_rel(mcx, &rel, node, None)
+        check_valid_result_rel(mcx, &rel, node, None, None)
     }
 
     // INSERT INTO <sequence>: C gives a clean error, not an abort.
@@ -8840,5 +9144,35 @@ mod check_valid_result_rel_tests {
         let e = check(cx.mcx(), "idx1", types_rel::RELKIND_INDEX).unwrap_err();
         assert_eq!(e.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
         assert_eq!(e.message(), "cannot change relation \"idx1\"");
+    }
+
+    // A provider without an FdwModifyRoutine (file_fdw): C's
+    // null-ExecForeignInsert 0A000 arm.
+    #[test]
+    fn foreign_result_rel_without_modify_routine_is_clean_error() {
+        let cx = ::mcx::MemoryContext::new("cvrr test");
+        let mcx = cx.mcx();
+        for (op, msg) in [
+            (CmdType::CMD_INSERT, "cannot insert into foreign table \"ft1\""),
+            (CmdType::CMD_UPDATE, "cannot update foreign table \"ft1\""),
+            (CmdType::CMD_DELETE, "cannot delete from foreign table \"ft1\""),
+        ] {
+            let node: &ModifyTable<'_> = ::mcx::alloc_leak_in(
+                mcx,
+                ModifyTable { operation: op, ..Default::default() },
+            )
+            .unwrap();
+            let rel = relation_of_kind(mcx, "ft1", types_rel::RELKIND_FOREIGN_TABLE);
+            let e = check_valid_result_rel(
+                mcx,
+                &rel,
+                node,
+                None,
+                Some(types_nodes::FdwKind::FileFdw),
+            )
+            .unwrap_err();
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+            assert_eq!(e.message(), msg);
+        }
     }
 }

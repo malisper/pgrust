@@ -295,6 +295,7 @@ dependencies = [
  "catalog_heap",
  "datum",
  "detoast",
+ "expandedrecord_seams",
  "format_type",
  "heaptoast",
  "heaptuple",
@@ -854,7 +855,9 @@ version = "0.1.0"
 dependencies = [
  "aclchk_seams",
  "datum",
+ "dbcommands_seams",
  "format_type",
+ "init_small",
  "inval_seams",
  "lmgr_seams",
  "lsyscache",
@@ -5081,6 +5084,7 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "detoast_seams",
+ "lz4_flex",
  "mcx",
  "pglz",
  "toast_internals_seams",
@@ -5359,6 +5363,7 @@ dependencies = [
  "detoast_seams",
  "elog",
  "exectuples",
+ "expandedrecord_seams",
  "fd",
  "fmgr_core",
  "format_type",
@@ -5435,6 +5440,7 @@ dependencies = [
  "aclchk_seams",
  "adt_multirangetypes",
  "adt_rangetypes",
+ "amapi",
  "bufmgr_seams",
  "catalog",
  "catalog_seams",
@@ -5442,6 +5448,7 @@ dependencies = [
  "copyfuncs",
  "datum",
  "detoast_seams",
+ "elog",
  "execexpr",
  "exectuples",
  "executils",
@@ -5487,6 +5494,7 @@ dependencies = [
  "types_fmgr",
  "types_nbtree",
  "types_nodes",
+ "types_pathnodes",
  "types_rel",
  "types_relscan",
  "types_scan",
@@ -5869,7 +5877,18 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_slot",
+ "types_storage",
  "types_tuple",
+]
+
+[[package]]
+name = "expandedrecord_seams"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -6990,6 +7009,7 @@ dependencies = [
 name = "gram_core"
 version = "0.1.0"
 dependencies = [
+ "elog",
  "mcx",
  "parser_seams",
  "parser_small1",
@@ -7572,6 +7592,7 @@ dependencies = [
  "heaptuple",
  "indexam",
  "init_small",
+ "lz4_flex",
  "mcx",
  "miscinit_seams",
  "multixact_seams",
@@ -9650,14 +9671,21 @@ version = "0.1.0"
 dependencies = [
  "execpartition",
  "executils",
+ "fd",
  "init_small",
+ "latch",
+ "libc",
  "mcx",
  "partprune",
  "postgres_seams",
+ "types_core",
  "types_error",
  "types_nodes",
  "types_scan",
  "types_slot",
+ "types_storage",
+ "waitevent_seams",
+ "waiteventset",
 ]
 
 [[package]]
@@ -9925,6 +9953,7 @@ version = "0.1.0"
 dependencies = [
  "aclchk_seams",
  "adt_scalar",
+ "arrayfuncs",
  "bufmgr_seams",
  "datum",
  "detoast",
@@ -10126,6 +10155,7 @@ dependencies = [
  "executils",
  "fd",
  "fmgr_core",
+ "foreigncmds_seams",
  "format_type",
  "freespace_seams",
  "gram_core",
@@ -13378,6 +13408,7 @@ dependencies = [
  "partdesc",
  "partprune",
  "pathnode",
+ "pg_class_seams",
  "pg_depend",
  "pg_inherits",
  "pg_locale",
@@ -13890,10 +13921,12 @@ dependencies = [
  "mcx",
  "miscinit",
  "nodeforeignscan",
+ "nodemodifytable",
  "nodes_core",
  "pg_depend",
  "pgclient",
  "planner",
+ "relcache_seams",
  "rustc-hash",
  "superuser",
  "syscache_seams",
@@ -13908,10 +13941,12 @@ dependencies = [
  "types_pathnodes",
  "types_rel",
  "types_slot",
+ "types_storage",
  "types_tuple",
  "varlena",
  "vars",
  "waitevent",
+ "waiteventset",
  "xact",
 ]
 
@@ -16002,6 +16037,7 @@ dependencies = [
  "aclchk",
  "adt_acl",
  "adt_bool",
+ "adt_expandedrecord",
  "adt_float",
  "adt_formatting",
  "adt_geo",
@@ -17978,6 +18014,7 @@ name = "syslogger"
 version = "0.0.0"
 dependencies = [
  "elog",
+ "error_small_seams",
  "fd",
  "guc_file",
  "guc_tables",
@@ -18949,9 +18986,11 @@ dependencies = [
  "catalog_dependency",
  "catalog_indexing",
  "catalog_namespace",
+ "cmdtag",
  "commands_define",
  "datum",
  "elog_seams",
+ "event_trigger",
  "fmgr_seams",
  "format_type",
  "genam",
@@ -19816,6 +19855,7 @@ dependencies = [
  "parallel_seams",
  "parse_clause",
  "parse_utilcmd",
+ "parser_seams",
  "parser_small1",
  "pg_depend",
  "pg_inherits",

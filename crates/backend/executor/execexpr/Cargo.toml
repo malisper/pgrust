@@ -38,6 +38,7 @@ typcache = { path = "../../utils/cache/typcache" }
 heaptuple = { path = "../../access/common/heaptuple" }
 arrayutils = { path = "../../utils/adt/arrayutils" }
 detoast_seams = { path = "../../access/common/detoast_seams" }
+expandedrecord_seams = { path = "../../utils/adt/expandedrecord_seams" }
 format_type = { path = "../../utils/adt/format_type" }
 exectuples = { path = "../exectuples" }
 lanereg = { path = "../lanereg" }

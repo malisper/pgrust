@@ -711,6 +711,48 @@ pub fn expanded_record_get_tuple<'a, 'mcx>(
     Ok(None)
 }
 
+// ExecEvalFieldSelect's expanded-record leg (execExprInterp.c) is hosted here
+// behind the seam: execexpr cannot depend on this crate (cycle via
+// adt_domains).
+fn field_select(value: Datum, fieldnum: i32, resulttype: Oid) -> PgResult<(Datum, bool)> {
+    // SAFETY: the seam contract guarantees a live external-expanded datum.
+    let erh = unsafe {
+        &mut *(datum::expandeddatum::datum_get_eohp(value) as *mut ExpandedRecordHeader)
+    };
+    assert_eq!(erh.er_magic, ER_MAGIC);
+    let td = expanded_record_get_tupdesc(erh)?;
+    let natts = td.natts;
+    if fieldnum <= 0 {
+        return Err(PgError::error(format!(
+            "unsupported reference to system column {fieldnum} in FieldSelect"
+        ))
+        .into());
+    }
+    if fieldnum > natts {
+        return Err(PgError::error(format!(
+            "attribute number {fieldnum} exceeds number of columns {natts}"
+        ))
+        .into());
+    }
+    let attr = td.attr((fieldnum - 1) as usize);
+    if attr.attisdropped {
+        return Ok((Datum::null(), true));
+    }
+    if resulttype != attr.atttypid {
+        let have = format_type::format_type_be(attr.atttypid)?;
+        let want = format_type::format_type_be(resulttype)?;
+        return Err(PgError::error(format!("attribute {fieldnum} has wrong type"))
+            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+            .with_detail(format!("Table has type {have}, but query expects {want}."))
+            .into());
+    }
+    expanded_record_get_field(erh, fieldnum)
+}
+
+pub fn init_seams() {
+    expandedrecord_seams::expanded_record_field_select::set(field_select);
+}
+
 /// # Safety
 /// `d` is a live composite or expanded-record datum. A read/write input is
 /// returned as-is (C's caution about corrupting it applies).

@@ -31,6 +31,7 @@ pub(crate) fn once_val<T: Copy>(cell: &'static std::sync::OnceLock<T>, init: fn(
 
 mod epq;
 mod execami;
+mod execasync;
 mod execcurrent;
 mod execmain;
 mod execparallel;

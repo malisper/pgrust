@@ -15636,8 +15636,8 @@ pub fn try_own_agg_over_gather<'mcx>(
 //     table) — non-serial subplan order; the lane refuses anything not
 //     provably ordering-identical serially (`lane_choose_local`). Ticked per
 //     offered call (the mode is worker/DSM-init-assigned).
-//   * async-capable subplans — unported (`exec_init_append` panics), so no
-//     gate is needed; recorded here for the C-diff reader.
+//   * async-capable subplans — the lane's SyncOnlyDriver cannot serve the
+//     execasync dispatch (`lane_no_async` gate; also never fusible scans).
 //   * dynamic EPQ / non-forward pulls (§4 model-incompatible; per call).
 //   * any child that is not a lane-fusible Phase-1 scan
 //     (`scan_child_fusible`, verbatim — the child's specific refusal reason
@@ -15771,15 +15771,25 @@ pub fn try_own_append<'mcx>(
         stats::tick_refused(ShapeClass::Append, RefuseReason::ParallelGate);
         return Ok(None);
     }
+    // Async-capable children need the execasync dispatch the lane's
+    // SyncOnlyDriver cannot serve (they are also never lane-fusible scans —
+    // this gate is the belt to that suspender).
+    if !::nodeappend::lane_no_async(&a.state) {
+        return Ok(None);
+    }
     if !append_lane_fusible_memo(a, estate)? {
         return Ok(None);
     }
     let crate::procnode::AppendNode {
         state, substates, ..
     } = a;
-    Ok(Some(::nodeappend::exec_append(state, estate, |e, i| {
-        lane_scan_pull_dispatch(&mut substates[i], e)
-    })?))
+    Ok(Some(::nodeappend::exec_append(
+        state,
+        estate,
+        &mut ::nodeappend::SyncOnlyDriver(|e: &mut EStateData<'mcx>, i: usize| {
+            lane_scan_pull_dispatch(&mut substates[i], e)
+        }),
+    )?))
 }
 
 // ===========================================================================

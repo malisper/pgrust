@@ -914,7 +914,7 @@ pub fn AlterTypeOwner<'mcx>(
     names: &NodeList<'mcx>,
     new_owner_id: Oid,
     objecttype: ObjectType,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let typename = typename_from_list(mcx, names)?;
     let (type_oid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
     let row = fetch_type_row(mcx, type_oid)?;
@@ -975,7 +975,7 @@ pub fn AlterTypeOwner<'mcx>(
         }
         AlterTypeOwner_oid(mcx, type_oid, new_owner_id, true)?;
     }
-    Ok(())
+    Ok(ObjectAddress::set(types_core::TYPE_RELATION_ID, type_oid))
 }
 
 pub fn AlterTypeOwner_oid<'mcx>(
@@ -1076,7 +1076,7 @@ pub fn AlterTypeNamespace<'mcx>(
     names: &NodeList<'mcx>,
     newschema: &str,
     objecttype: ObjectType,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let typename = typename_from_list(mcx, names)?;
     let (type_oid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
     if objecttype == ObjectType::OBJECT_DOMAIN && lsyscache::get_typtype(type_oid)? != TYPTYPE_DOMAIN
@@ -1086,7 +1086,7 @@ pub fn AlterTypeNamespace<'mcx>(
     let nsp_oid = catalog_namespace::LookupCreationNamespace(mcx, newschema)?;
     let mut objs_moved: PgVec<'mcx, ObjectAddress> = PgVec::new_in(mcx);
     AlterTypeNamespace_oid(mcx, type_oid, nsp_oid, false, &mut objs_moved)?;
-    Ok(())
+    Ok(ObjectAddress::set(types_core::TYPE_RELATION_ID, type_oid))
 }
 
 pub fn AlterTypeNamespace_oid<'mcx>(

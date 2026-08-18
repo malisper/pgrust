@@ -401,6 +401,7 @@ pub fn init_seams() {
     namespace_seams::opername_get_candidate_oids::set(opername_get_candidate_oids);
     namespace_seams::type_is_visible::set(lookup::TypeIsVisible);
     namespace_seams::lookup_explicit_namespace::set(lookup::LookupExplicitNamespace);
+    namespace_seams::my_temp_namespace::set(my_temp_namespace);
 
     guc_tables::vars::namespace_search_path.install(guc_tables::GucVarAccessors {
         get: namespace_search_path_get,

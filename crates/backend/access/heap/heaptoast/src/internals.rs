@@ -10,8 +10,8 @@ use ::types_tuple::varatt::{
     set_varsize_4b_c_word, varatt_is_1b, varsize_1b, varsize_4b, VARHDRSZ, VARHDRSZ_SHORT,
 };
 use toastdesc::{
-    compression_method_is_valid, VarattExternal, TOAST_LZ4_COMPRESSION, TOAST_PGLZ_COMPRESSION,
-    TOAST_PGLZ_COMPRESSION_ID, TOAST_POINTER_SIZE,
+    compression_method_is_valid, VarattExternal, TOAST_LZ4_COMPRESSION, TOAST_LZ4_COMPRESSION_ID,
+    TOAST_PGLZ_COMPRESSION, TOAST_PGLZ_COMPRESSION_ID, TOAST_POINTER_SIZE,
 };
 
 use crate::{check_for_interrupts, TOAST_MAX_CHUNK_SIZE};
@@ -25,11 +25,8 @@ pub(crate) const F_INT4GE: Oid = 150;
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn no_lz4_support() -> Box<PgError> {
-    Box::new(
-        PgError::error("compression method lz4 not supported")
-            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-    )
+fn lz4_compression_failed() -> Box<PgError> {
+    Box::new(PgError::error("lz4 compression failed"))
 }
 
 #[track_caller]
@@ -63,9 +60,9 @@ pub fn toast_compress_datum<'mcx>(
         ::guc_tables::vars::default_toast_compression.read() as u8
     };
 
-    let tmp = match cmethod {
-        TOAST_PGLZ_COMPRESSION => pglz_compress_datum(mcx, data)?,
-        TOAST_LZ4_COMPRESSION => return Err(no_lz4_support()),
+    let (tmp, cmid) = match cmethod {
+        TOAST_PGLZ_COMPRESSION => (pglz_compress_datum(mcx, data)?, TOAST_PGLZ_COMPRESSION_ID),
+        TOAST_LZ4_COMPRESSION => (lz4_compress_datum(mcx, data)?, TOAST_LZ4_COMPRESSION_ID),
         _ => return Err(invalid_compression_method(cmethod as i8)),
     };
 
@@ -75,11 +72,7 @@ pub fn toast_compress_datum<'mcx>(
 
     // C insists on > 2 bytes of savings (header + padding worst case).
     if tmp.len() < valsize - 2 {
-        toastdesc::toast_compress_set_size_and_compress_method(
-            &mut tmp,
-            valsize as i32,
-            TOAST_PGLZ_COMPRESSION_ID,
-        )?;
+        toastdesc::toast_compress_set_size_and_compress_method(&mut tmp, valsize as i32, cmid)?;
         Ok(Some(tmp))
     } else {
         Ok(None)
@@ -107,6 +100,23 @@ fn pglz_compress_datum<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<Option<PgV
     };
     // SAFETY: header appended + len compressed bytes initialized.
     unsafe { tmp.set_len(VARHDRSZ_COMPRESSED + len) };
+    let word = set_varsize_4b_c_word((len + VARHDRSZ_COMPRESSED) as u32).to_ne_bytes();
+    tmp[..VARHDRSZ].copy_from_slice(&word);
+    Ok(Some(tmp))
+}
+
+// toast_compression.c lz4_compress_datum: LZ4 block format (lz4_flex block
+// mode = LZ4_compress_default); C treats `len > valsize` as incompressible.
+fn lz4_compress_datum<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let max_size = lz4_flex::block::get_maximum_output_size(data.len());
+    let mut tmp = ::mcx::vec_with_capacity_in(mcx, VARHDRSZ_COMPRESSED + max_size)?;
+    tmp.resize(VARHDRSZ_COMPRESSED + max_size, 0);
+    let len = lz4_flex::block::compress_into(data, &mut tmp[VARHDRSZ_COMPRESSED..])
+        .map_err(|_| lz4_compression_failed())?;
+    if len > data.len() {
+        return Ok(None);
+    }
+    tmp.truncate(VARHDRSZ_COMPRESSED + len);
     let word = set_varsize_4b_c_word((len + VARHDRSZ_COMPRESSED) as u32).to_ne_bytes();
     tmp[..VARHDRSZ].copy_from_slice(&word);
     Ok(Some(tmp))

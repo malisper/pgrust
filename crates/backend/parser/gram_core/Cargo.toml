@@ -8,6 +8,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+elog = { path = "../../utils/error/elog" }
 mcx = { path = "../../../_support/mcx" }
 parser_seams = { path = "../parser_seams" }
 parser_small1 = { path = "../parser_small1" }

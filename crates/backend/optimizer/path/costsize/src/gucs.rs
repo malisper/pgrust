@@ -35,6 +35,7 @@ session_guc_cluster!(CostsizeGucs, COSTSIZE_GUCS:
     (enable_gathermerge_cell, bool, enable_gathermerge, set_enable_gathermerge, true),
     (enable_parallel_hash_cell, bool, enable_parallel_hash, set_enable_parallel_hash, true),
     (enable_parallel_append_cell, bool, enable_parallel_append, set_enable_parallel_append, true),
+    (enable_async_append_cell, bool, enable_async_append, set_enable_async_append, true),
     (parallel_leader_participation_backing_cell, bool, parallel_leader_participation_backing, set_parallel_leader_participation_backing, true),
 );
 
@@ -344,6 +345,8 @@ pub fn install() {
         .install(GucVarAccessors { get: enable_parallel_hash, set: set_enable_parallel_hash });
     guc_tables::vars::enable_parallel_append
         .install(GucVarAccessors { get: enable_parallel_append, set: set_enable_parallel_append });
+    guc_tables::vars::enable_async_append
+        .install(GucVarAccessors { get: enable_async_append, set: set_enable_async_append });
     guc_tables::vars::parallel_leader_participation.install_if_absent(GucVarAccessors {
         get: parallel_leader_participation_backing,
         set: set_parallel_leader_participation_backing,

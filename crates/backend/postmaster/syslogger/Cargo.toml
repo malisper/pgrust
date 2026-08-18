@@ -16,6 +16,7 @@ types_guc = { path = "../../../_support/types/types_guc" }
 types_startup = { path = "../../../_support/types/types_startup" }
 types_storage = { path = "../../../_support/types/types_storage" }
 elog = { path = "../../utils/error/elog" }
+error_small_seams = { path = "../../utils/error/error_small_seams" }
 fd = { path = "../../storage/file/fd" }
 guc_file = { path = "../../utils/misc/guc_file" }
 guc_tables = { path = "../../utils/misc/guc_tables" }

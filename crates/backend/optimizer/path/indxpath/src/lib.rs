@@ -858,10 +858,9 @@ fn match_clause_to_indexcol<'mcx>(
             }
             Ok(None)
         }
-        NodeTag::T_ScalarArrayOpExpr if index.amsearcharray => {
-            match_saopclause_to_indexcol(run, rinfo, indexcol, index)
-        }
-        NodeTag::T_ScalarArrayOpExpr => Ok(None),
+        // C matches SAOP regardless of amsearcharray; build_index_paths'
+        // skip_nonnative_saop demotes non-native matches to bitmap-only.
+        NodeTag::T_ScalarArrayOpExpr => match_saopclause_to_indexcol(run, rinfo, indexcol, index),
         NodeTag::T_BoolExpr if clauses::is_orclause(clause) => {
             match_orclause_to_indexcol(run, rinfo, indexcol, index)
         }
@@ -1748,7 +1747,16 @@ fn get_index_paths<'mcx>(
     clauses: &IndexClauseSet<'mcx>,
     bitindexpaths: &mut PgVec<'mcx, PathId>,
 ) -> PgResult<()> {
-    let indexpaths = build_index_paths(run, rel, index, clauses, index.predOK.get(), false)?;
+    let mut skip_nonnative_saop = false;
+    let indexpaths = build_index_paths(
+        run,
+        rel,
+        index,
+        clauses,
+        index.predOK.get(),
+        false,
+        Some(&mut skip_nonnative_saop),
+    )?;
     for &ipath in indexpaths.iter() {
         if index.amhasgettuple {
             add_path(run, rel, ipath);
@@ -1766,6 +1774,12 @@ fn get_index_paths<'mcx>(
                 bitindexpaths.push(ipath);
             }
         }
+    }
+    // SAOP clauses the AM can't handle natively: retry as bitmap-only paths
+    // relying on executor-managed array keys (C get_index_paths tail).
+    if skip_nonnative_saop {
+        let indexpaths = build_index_paths(run, rel, index, clauses, false, true, None)?;
+        bitindexpaths.extend(indexpaths.iter().copied());
     }
     Ok(())
 }
@@ -1818,7 +1832,9 @@ fn build_index_paths<'mcx>(
     clauses: &IndexClauseSet<'mcx>,
     useful_predicate: bool,
     bitmap: bool,
+    mut skip_nonnative_saop: Option<&mut bool>,
 ) -> PgResult<PgVec<'mcx, PathId>> {
+    debug_assert!(skip_nonnative_saop.is_some() || bitmap);
     let mcx = run.mcx;
     let mut result: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
 
@@ -1827,6 +1843,17 @@ fn build_index_paths<'mcx>(
     for indexcol in 0..index.nkeycolumns as usize {
         for ic in clauses.indexclauses[indexcol].iter() {
             let rid = ic.rinfo.expect("IndexClause rinfo");
+            if let Some(flag) = skip_nonnative_saop.as_deref_mut() {
+                if !index.amsearcharray
+                    && run.root.expr_node(run.root.rinfo(rid).clause).node_tag()
+                        == NodeTag::T_ScalarArrayOpExpr
+                {
+                    // The AM lacks native SAOP support; caller retries as a
+                    // bitmap path with executor-managed array keys.
+                    *flag = true;
+                    continue;
+                }
+            }
             outer_relids = types_pathnodes::relids::relids_union(
                 mcx,
                 &outer_relids,
@@ -2401,7 +2428,7 @@ fn build_paths_for_or<'mcx>(
         for &r in other_clauses {
             match_clause_to_index(run, r, index, &mut clauseset)?;
         }
-        let paths = build_index_paths(run, rel, index, &clauseset, useful_predicate, true)?;
+        let paths = build_index_paths(run, rel, index, &clauseset, useful_predicate, true, None)?;
         result.extend(paths.iter().copied());
     }
     Ok(result)

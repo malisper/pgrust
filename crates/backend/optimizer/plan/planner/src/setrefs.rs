@@ -5272,8 +5272,9 @@ fn set_subqueryscan_references<'mcx>(
 const SUBQUERY_SCAN_TRIVIAL: u32 = 1;
 const SUBQUERY_SCAN_NONTRIVIAL: u32 = 2;
 
-// trivial_subqueryscan (setrefs.c), scanstatus memo included.
-fn trivial_subqueryscan(plan: Node<'_>) -> bool {
+// trivial_subqueryscan (setrefs.c), scanstatus memo included; also read by
+// createplan's mark_async_capable_plan, as C.
+pub(crate) fn trivial_subqueryscan(plan: Node<'_>) -> bool {
     let s = plan.as_subquery_scan().expect("SubqueryScan node");
     match s.scanstatus {
         SUBQUERY_SCAN_TRIVIAL => return true,

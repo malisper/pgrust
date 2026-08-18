@@ -358,8 +358,9 @@ fn file_copy_method_options_match_platform_clone_support() {
 
 #[test]
 fn lz4_build_config_is_reflected_in_option_sets() {
+    // TOAST lz4 is implemented (lz4_flex); WAL lz4/zstd compression is not.
     let opts = find("default_toast_compression").options().unwrap().entries();
-    assert!(!opts.iter().any(|o| o.name == "lz4"));
+    assert!(opts.iter().any(|o| o.name == "lz4" && o.val == consts::TOAST_LZ4_COMPRESSION));
     let wal = find("wal_compression").options().unwrap().entries();
     assert!(!wal.iter().any(|o| o.name == "lz4" || o.name == "zstd"));
     let GucSetting::Enum(style) = find("IntervalStyle") else {

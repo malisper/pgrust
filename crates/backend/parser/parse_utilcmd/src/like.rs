@@ -2,7 +2,7 @@
 // generateClonedIndexStmt + generateClonedExtStatsStmt. LOUD: compression
 // copy, non-default opclass/collation.
 use mcx::{Mcx, PgVec};
-use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN, RELATION_RELATION_ID};
+use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
@@ -19,8 +19,6 @@ use types_nodes::rawnodes::{
 };
 use types_nodes::{Node, NodeList};
 use types_rel::{AccessShareLock, NoLock, Relation};
-
-use crate::unported;
 
 const RELKIND_RELATION: u8 = b'r';
 const RELKIND_VIEW: u8 = b'v';
@@ -208,11 +206,10 @@ pub(crate) fn transformTableLikeClause<'mcx>(
         if attribute.attisdropped {
             continue;
         }
+        // C copies NameStr(attribute->attname) verbatim: pg_attribute names
+        // are already NAMEDATALEN-truncated at creation, so no length check.
         let attname =
             str_in(mcx, core::str::from_utf8(attribute.attname.name_str()).expect("attname"))?;
-        if attname.len() >= NAMEDATALEN as usize {
-            unported("overlength column name truncation");
-        }
         let tn = TypeName {
             typeOid: attribute.atttypid,
             typemod: attribute.atttypmod,

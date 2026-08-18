@@ -62,6 +62,18 @@ pub struct RuntimeKeysState<'mcx> {
     pub ecxt: EcxtId,
 }
 
+/// C IndexArrayKeyInfo: a SAOP qual on a non-amsearcharray AM; the executor
+/// expands the array and drives one index scan per element combination
+/// (bitmap scans only — the planner's skip_nonnative_saop keeps these off
+/// plain scans).
+pub struct IndexArrayKeyInfo<'mcx> {
+    pub scan_key: usize,
+    pub array_expr: PgBox<'mcx, ExprState<'mcx>>,
+    pub next_elem: usize,
+    pub elem_values: PgVec<'mcx, Datum>,
+    pub elem_nulls: PgVec<'mcx, bool>,
+}
+
 // nodeIndexscan.c ReorderTuple: heap copy + datumCopy'd distances, allocated
 // in the query context, live until popped.
 pub struct ReorderTuple<'mcx> {
@@ -576,11 +588,11 @@ pub fn exec_init_index_scan_rel<'mcx>(
                 ::execexpr::exec_init_qual_subplans(mcx, &node.indexqualorig, params, env)?;
             let mut runtime_keys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>> = PgVec::new_in(mcx);
             let scan_keys = exec_index_build_scan_keys(
-                mcx, &index_rel, &node.indexqual, params, false, &mut runtime_keys, env,
+                mcx, &index_rel, &node.indexqual, params, false, &mut runtime_keys, None, env,
             )?;
             // ORDER BY exprs become scankeys the same way (SK_ORDER_BY).
             let orderby_keys = exec_index_build_scan_keys(
-                mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys, env,
+                mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys, None, env,
             )?;
             // orderbyorig re-evaluation (xs_recheckorderby) can carry the
             // same SubPlans the runtime keys do — compile under the env.
@@ -702,24 +714,13 @@ fn order_dir(dir: i32) -> ScanDirection {
     }
 }
 
-// unported: ExecIndexBuildScanKeys legs the planner can still reach raise a
-// clean ERRCODE_FEATURE_NOT_SUPPORTED error (plan-init time, safe unwind).
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn scankey_case_unported(what: &str) -> Box<PgError> {
-    Box::new(
-        PgError::error(format!("index scan over {what} is not yet implemented"))
-            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-    )
-}
-
 /// `ExecIndexBuildScanKeys`, cases 1 (indexkey op Const), 2 (runtime key),
-/// 3 (RowCompare, Const or runtime members), 4 (amsearcharray
-/// ScalarArrayOp, Const or runtime array), and 5 (NullTest).
-/// Non-amsearcharray ScalarArrayOp raises a clean feature error pending the
-/// IndexArrayKeyInfo lane (the planner CAN emit those via
-/// skip_nonnative_saop). `isorderby` is the ORDER BY (amcanorderbyop) leg:
+/// 3 (RowCompare, Const or runtime members), 4 (ScalarArrayOp — native
+/// SK_SEARCHARRAY when the AM has amsearcharray, else an executor-managed
+/// entry in `array_keys`), and 5 (NullTest). `array_keys` is None for scans
+/// that can't iterate array keys (plain/ordered scans; C passes NULL) —
+/// a non-native SAOP then panics like C's elog.
+/// `isorderby` is the ORDER BY (amcanorderbyop) leg:
 /// ordering-op strategy lookup + SK_ORDER_BY, cases 1 and 2 only.
 /// `runtime_keys` is shared across the indexqual and indexorderby calls
 /// (C's resized array). SK_ROW_HEADER keys and RowCompare runtime keys
@@ -732,6 +733,7 @@ pub fn exec_index_build_scan_keys<'mcx>(
     params: ParamBind<'mcx>,
     isorderby: bool,
     runtime_keys: &mut PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
+    mut array_keys: Option<&mut PgVec<'mcx, IndexArrayKeyInfo<'mcx>>>,
     sub: Option<::execexpr::SubplanCompileEnv>,
 ) -> PgResult<PgVec<'mcx, ScanKeyData>> {
     let indnkeyatts = index.indnkeyatts();
@@ -856,11 +858,8 @@ pub fn exec_index_build_scan_keys<'mcx>(
                 let saop = clause.as_scalar_array_op_expr().unwrap();
                 debug_assert!(!isorderby);
                 debug_assert!(saop.useOr);
-                if !::indexam::IndexAmKind::from_relam(index.rd_rel.relam).amsearcharray() {
-                    return Err(scankey_case_unported(
-                        "a scalar-array qual on a non-amsearcharray access method",
-                    ));
-                }
+                let amsearcharray =
+                    ::indexam::IndexAmKind::from_relam(index.rd_rel.relam).amsearcharray();
                 let mut leftop = saop.args.nth(0);
                 if leftop.node_tag() == NodeTag::T_RelabelType {
                     leftop = leftop.as_relabel_type().unwrap().arg;
@@ -881,24 +880,48 @@ pub fn exec_index_build_scan_keys<'mcx>(
                 if rightop.node_tag() == NodeTag::T_RelabelType {
                     rightop = rightop.as_relabel_type().unwrap().arg;
                 }
-                let (flags, scanvalue) = match rightop.as_const() {
-                    Some(con) => (
-                        SK_SEARCHARRAY | if con.constisnull { SK_ISNULL } else { 0 },
-                        con.constvalue,
-                    ),
-                    None => {
-                        runtime_keys.push(IndexRuntimeKeyInfo {
-                            scan_key: scan_keys.len(),
-                            orderby: false,
-                            row_member: None,
-                            key_expr: ::execexpr::exec_init_expr_subplans(mcx, Some(rightop), params, sub)?
-                                .expect("runtime key expr compiles"),
-                            // The expr yields an array of op_righttype, not
-                            // op_righttype itself; every array type is toastable.
-                            key_toastable: true,
-                        });
-                        (SK_SEARCHARRAY, ::datum::Datum::from_usize(0))
+                let (flags, scanvalue) = if amsearcharray {
+                    // Index AM handles the whole array like a simple operator.
+                    match rightop.as_const() {
+                        Some(con) => (
+                            SK_SEARCHARRAY | if con.constisnull { SK_ISNULL } else { 0 },
+                            con.constvalue,
+                        ),
+                        None => {
+                            runtime_keys.push(IndexRuntimeKeyInfo {
+                                scan_key: scan_keys.len(),
+                                orderby: false,
+                                row_member: None,
+                                key_expr: ::execexpr::exec_init_expr_subplans(mcx, Some(rightop), params, sub)?
+                                    .expect("runtime key expr compiles"),
+                                // The expr yields an array of op_righttype, not
+                                // op_righttype itself; every array type is toastable.
+                                key_toastable: true,
+                            });
+                            (SK_SEARCHARRAY, ::datum::Datum::from_usize(0))
+                        }
                     }
+                } else if let Some(aks) = array_keys.as_deref_mut() {
+                    // Executor expands the array: one rescan per element
+                    // (ExecIndexEvalArrayKeys / ExecIndexAdvanceArrayKeys).
+                    aks.push(IndexArrayKeyInfo {
+                        scan_key: scan_keys.len(),
+                        array_expr: ::execexpr::exec_init_expr_subplans(
+                            mcx,
+                            Some(rightop),
+                            params,
+                            sub,
+                        )?
+                        .expect("array key expr compiles"),
+                        next_elem: 0,
+                        elem_values: PgVec::new_in(mcx),
+                        elem_nulls: PgVec::new_in(mcx),
+                    });
+                    (0, ::datum::Datum::from_usize(0))
+                } else {
+                    // C elog: skip_nonnative_saop keeps non-native SAOPs off
+                    // the plain/ordered scan paths that pass NULL here.
+                    panic!("ScalarArrayOpExpr index qual found where not allowed");
                 };
 
                 let mut key = ScanKeyData::empty();
@@ -1207,12 +1230,95 @@ fn detoast_datum<'m>(mcx: Mcx<'m>, v: ::datum::Datum) -> PgResult<::datum::Datum
     }
 }
 
-pub fn exec_index_eval_array_keys() -> ! {
-    panic!("nodeindexscan: ExecIndexEvalArrayKeys unreachable (planner emits saop index quals only on amsearcharray AMs)")
+/// `ExecIndexEvalArrayKeys`: evaluate the array expressions and point the
+/// scankeys at the arrays' first elements. false = a null or empty array, so
+/// no match is possible. The detoasted array image lives in the runtime
+/// econtext's per-tuple context like C (reset at the next rescan, which
+/// re-evaluates every key); the element vectors live in the query context
+/// and are rebuilt per rescan (C divergence: per-rescan arena growth instead
+/// of per-tuple reset, bounded by rescan count).
+pub fn exec_index_eval_array_keys<'mcx>(
+    mcx: Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    array_keys: &mut [IndexArrayKeyInfo<'mcx>],
+    scan_keys: &mut [ScanKeyData],
+) -> PgResult<bool> {
+    for ak in array_keys.iter_mut() {
+        // SAFETY: the per-tuple context object outlives the plan (reset-only).
+        unsafe {
+            ak.array_expr
+                .arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx())
+        };
+        let nd = if ak.array_expr.has_subplan() || !ak.array_expr.param_exec_deps().is_empty() {
+            ::executils::exec_eval_expr_with_subplans(&mut ak.array_expr, estate, ecxt)?
+        } else {
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: None,
+                outer: None,
+            };
+            exec_eval_expr(&mut ak.array_expr, &mut slots)?
+        };
+        if nd.isnull {
+            return Ok(false);
+        }
+        let flat = detoast_datum(estate.ecxt(ecxt).per_tuple_mcx(), nd.value)?;
+        let p = flat.as_usize() as *const u8;
+        // SAFETY: detoast_datum yields a 4B-uncompressed varlena; the image
+        // is readable through its header-declared size.
+        let image =
+            unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
+        let elemtype = arrayfuncs::arr_elemtype(image);
+        let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
+        let (elem_values, elem_nulls) =
+            arrayfuncs::deconstruct_array(mcx, image, elmlen as i32, elmbyval, elmalign as u8, true)?;
+        if elem_values.is_empty() {
+            return Ok(false);
+        }
+        let key = &mut scan_keys[ak.scan_key];
+        key.sk_argument = elem_values[0];
+        if elem_nulls[0] {
+            key.sk_flags |= SK_ISNULL;
+        } else {
+            key.sk_flags &= !SK_ISNULL;
+        }
+        ak.elem_values = elem_values;
+        ak.elem_nulls = elem_nulls;
+        ak.next_elem = 1;
+    }
+    Ok(true)
 }
 
-pub fn exec_index_advance_array_keys() -> ! {
-    panic!("nodeindexscan: ExecIndexAdvanceArrayKeys unreachable (planner emits saop index quals only on amsearcharray AMs)")
+/// `ExecIndexAdvanceArrayKeys`: step to the next combination of array
+/// elements; false = exhausted. The rightmost key advances fastest (C:
+/// hypothesized better index locality).
+pub fn exec_index_advance_array_keys(
+    array_keys: &mut [IndexArrayKeyInfo<'_>],
+    scan_keys: &mut [ScanKeyData],
+) -> bool {
+    let mut found = false;
+    for ak in array_keys.iter_mut().rev() {
+        let mut next_elem = ak.next_elem;
+        if next_elem >= ak.elem_values.len() {
+            next_elem = 0;
+            found = false; // need to advance the next array key
+        } else {
+            found = true;
+        }
+        let key = &mut scan_keys[ak.scan_key];
+        key.sk_argument = ak.elem_values[next_elem];
+        if ak.elem_nulls[next_elem] {
+            key.sk_flags |= SK_ISNULL;
+        } else {
+            key.sk_flags &= !SK_ISNULL;
+        }
+        ak.next_elem = next_elem + 1;
+        if found {
+            break;
+        }
+    }
+    found
 }
 
 /// `ExecIndexScanEstimate`: no DSM thread-native; the instrument-only arm is

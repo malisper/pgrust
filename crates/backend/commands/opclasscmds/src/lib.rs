@@ -616,6 +616,16 @@ pub fn AlterOpFamily<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterOpFamilyStmt<'mcx>) -> Pg
     } else {
         AlterOpFamilyAdd(mcx, stmt, &am, opfamilyoid)?;
     }
+    // C: EventTriggerCollectAlterOpFam (SCT_AlterOpFamily), fired at the tail
+    // of both AlterOpFamilyAdd and AlterOpFamilyDrop. It also retains the
+    // operator/procedure member lists — extension-deparse-only surface; the
+    // SRF rows (classid/objid/command_tag/object_type/identity) are identical
+    // via Simple, whose address is always valid here.
+    event_trigger::EventTriggerCollectSimpleCommand(
+        ObjectAddress::set(OPERATOR_FAMILY_RELATION_ID, opfamilyoid),
+        ObjectAddress::set(types_core::InvalidOid, types_core::InvalidOid),
+        cmdtag::GetCommandTagEnum(b"ALTER OPERATOR FAMILY"),
+    );
     Ok(opfamilyoid)
 }
 

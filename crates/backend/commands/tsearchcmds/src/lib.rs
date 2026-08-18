@@ -1200,6 +1200,16 @@ pub fn AlterTSConfiguration<'mcx>(
     } else if !stmt.tokentype.is_nil() {
         DropConfigurationMapping(mcx, stmt, cfgId, prsId, &relMap)?;
     }
+    // C: EventTriggerCollectAlterTSConfig (SCT_AlterTSConfig), fired at the
+    // tail of Make/DropConfigurationMapping — hoisted to their single call
+    // site. C also retains the dictionary oid list (extension-deparse-only);
+    // the SRF rows are identical via Simple, whose address is always valid
+    // here. ProcessUtilitySlow sets commandCollected for this tag.
+    event_trigger::EventTriggerCollectSimpleCommand(
+        ObjectAddress::set(TSConfigRelationId, cfgId),
+        ObjectAddress::set(InvalidOid, InvalidOid),
+        cmdtag::GetCommandTagEnum(b"ALTER TEXT SEARCH CONFIGURATION"),
+    );
 
     make_configuration_dependencies(mcx, cfgId, cfgnamespace, cfgowner, prsId, true, Some(&relMap))?;
     relMap.close(RowExclusiveLock)?;

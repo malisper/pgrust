@@ -28,6 +28,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // FdwRoutine->IsForeignRelUpdatable dispatch (fdwapi.h): Some(mask of
+    // 1<<CMD_*) when the provider supports foreign modify, None when it has
+    // no modify executor functions (CheckValidResultRel's 0A000 arm).
+    pub fn fdw_is_foreign_rel_updatable(
+        mcx: Mcx<'_>,
+        kind: types_nodes::FdwKind,
+        relid: Oid,
+    ) -> PgResult<Option<i32>>
+);
+
+seam_core::seam!(
     // get_foreign_data_wrapper_oid (foreign.c) — has_foreign_data_wrapper_privilege
     // name resolution (a direct adt_acl -> foreigncmds dep would cycle).
     pub fn get_foreign_data_wrapper_oid(fdwname: &str, missing_ok: bool) -> PgResult<Oid>

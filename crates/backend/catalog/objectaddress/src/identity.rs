@@ -129,7 +129,12 @@ pub fn getObjectTypeDescription<'mcx>(
                     format!("unsupported object class: {other}"),
                 ));
             }
-            panic!("unported: objectaddress.c getObjectTypeDescription class {other}")
+            // Classes C handles but this port has not implemented yet:
+            // clean 0A000 (pg_identify_object reaches this from SQL).
+            return Err(crate::err(
+                ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("object type descriptions for object class {other} are not supported yet"),
+            ));
         }
     };
     Ok(Some(s))
@@ -1056,7 +1061,12 @@ pub fn getObjectIdentityParts<'mcx>(
                     format!("unsupported object class: {other}"),
                 ));
             }
-            panic!("unported: objectaddress.c getObjectIdentityParts class {other}")
+            // Classes C handles but this port has not implemented yet:
+            // clean 0A000 (pg_identify_object reaches this from SQL).
+            Err(crate::err(
+                ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("object identities for object class {other} are not supported yet"),
+            ))
         }
     }
 }

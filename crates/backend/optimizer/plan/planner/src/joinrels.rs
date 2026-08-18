@@ -601,7 +601,10 @@ pub(crate) fn populate_joinrel_with_paths<'mcx>(
                 crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_ANTI, sjinfo, restrictlist)?;
                 crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_RIGHT_ANTI, sjinfo, restrictlist)?;
             }
-            other => panic!("populate_joinrel_with_paths (joinrels.c): jointype {other}"),
+            // C's default arm: SpecialJoinInfos carry only LEFT/FULL/SEMI/
+            // ANTI (deconstruct_jointree) plus the fabricated INNER; all
+            // arms above cover them, same as C.
+            other => panic!("unrecognized join type: {other}"),
         }
     }
     try_partitionwise_join(run, rel1, rel2, joinrel, sjinfo, restrictlist)

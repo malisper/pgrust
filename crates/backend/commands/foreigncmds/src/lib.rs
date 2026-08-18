@@ -251,7 +251,7 @@ pub fn AlterForeignDataWrapper<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &AlterFdwStmt<'mcx>,
     source_text: &str,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let fdwname = stmt.fdwname.expect("AlterFdwStmt.fdwname");
     let rel = table::table_open(mcx, FOREIGN_DATA_WRAPPER_RELATION_ID, RowExclusiveLock)?;
 
@@ -365,7 +365,8 @@ pub fn AlterForeignDataWrapper<'mcx>(
         }
     }
 
-    rel.close(RowExclusiveLock)
+    rel.close(RowExclusiveLock)?;
+    Ok(ObjectAddress::set(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id))
 }
 
 // AlterForeignDataWrapperOwner + _oid + _internal (foreigncmds.c).
@@ -723,7 +724,7 @@ pub fn CreateForeignServer<'mcx>(
 pub fn AlterForeignServer<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &AlterForeignServerStmt<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let servername = stmt.servername.expect("AlterForeignServerStmt.servername");
     let rel = table::table_open(mcx, FOREIGN_SERVER_RELATION_ID, RowExclusiveLock)?;
 
@@ -748,6 +749,7 @@ pub fn AlterForeignServer<'mcx>(
         let d = unsafe { types_tuple::heap_getattr(&tp, attnum, rel.descr(), &mut isnull) };
         (d, isnull)
     };
+    let srv_id = getattr(Anum_pg_foreign_server_oid).0.as_oid();
     let srv_owner = getattr(Anum_pg_foreign_server_srvowner).0.as_oid();
     let srv_fdw = getattr(Anum_pg_foreign_server_srvfdw).0.as_oid();
 
@@ -800,7 +802,8 @@ pub fn AlterForeignServer<'mcx>(
     let otid = tp.t_self;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
 
-    rel.close(RowExclusiveLock)
+    rel.close(RowExclusiveLock)?;
+    Ok(ObjectAddress::set(FOREIGN_SERVER_RELATION_ID, srv_id))
 }
 
 /// user_mapping_ddl_aclcheck (foreigncmds.c).
@@ -923,7 +926,10 @@ pub fn CreateUserMapping<'mcx>(
     Ok(myself)
 }
 
-pub fn AlterUserMapping<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterUserMappingStmt<'mcx>) -> PgResult<()> {
+pub fn AlterUserMapping<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &AlterUserMappingStmt<'mcx>,
+) -> PgResult<ObjectAddress> {
     let servername = stmt.servername.expect("AlterUserMappingStmt.servername");
     let rel = table::table_open(mcx, USER_MAPPING_RELATION_ID, RowExclusiveLock)?;
 
@@ -978,7 +984,8 @@ pub fn AlterUserMapping<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterUserMappingStmt<'mcx>)
     ReleaseSysCache(tp);
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
 
-    rel.close(RowExclusiveLock)
+    rel.close(RowExclusiveLock)?;
+    Ok(ObjectAddress::set(USER_MAPPING_RELATION_ID, um_id))
 }
 
 pub fn RemoveUserMapping<'mcx>(mcx: Mcx<'mcx>, stmt: &DropUserMappingStmt<'mcx>) -> PgResult<()> {
@@ -1103,10 +1110,59 @@ pub fn CreateForeignTable<'mcx>(
     ftrel.close(RowExclusiveLock)
 }
 
+/// `FdwRoutine.ImportForeignSchema` (fdwapi.h): the DDL half of the routine,
+/// per-provider and installed at init_seams time, keyed by [`FdwKind`] — the
+/// same split-routine shape as the planner/executor halves (types_nodes::fdw).
+/// A provider with no entry is C's `fdw_routine->ImportForeignSchema == NULL`.
+pub type ImportForeignSchemaFn = for<'mcx> fn(
+    Mcx<'mcx>,
+    &ImportForeignSchemaStmt<'mcx>,
+    Oid,
+) -> PgResult<mcx::PgVec<'mcx, &'mcx str>>;
+
+static IMPORT_ROUTINES: [core::sync::atomic::AtomicUsize; types_nodes::NUM_FDW_KINDS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; types_nodes::NUM_FDW_KINDS];
+
+pub fn install_fdw_import_routine(kind: types_nodes::FdwKind, f: ImportForeignSchemaFn) {
+    IMPORT_ROUTINES[kind.index()]
+        .store(f as usize, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn fdw_import_routine(kind: types_nodes::FdwKind) -> Option<ImportForeignSchemaFn> {
+    let p = IMPORT_ROUTINES[kind.index()].load(core::sync::atomic::Ordering::Relaxed);
+    if p == 0 {
+        return None;
+    }
+    // SAFETY: the slot only ever holds an ImportForeignSchemaFn stored by
+    // install_fdw_import_routine.
+    Some(unsafe { core::mem::transmute::<usize, ImportForeignSchemaFn>(p) })
+}
+
+/// IsImportableForeignTable (foreign.c): the LIMIT TO / EXCEPT filter, applied
+/// by the caller to each statement the FDW returned.
+pub fn IsImportableForeignTable(tablename: &str, stmt: &ImportForeignSchemaStmt<'_>) -> bool {
+    use types_nodes::rawnodes::ImportForeignSchemaType::*;
+    let listed = || {
+        stmt.table_list.iter().any(|n| {
+            n.as_variant::<types_nodes::primnodes::RangeVar>()
+                .is_some_and(|rv| rv.relname == Some(tablename))
+        })
+    };
+    match stmt.list_type {
+        FDW_IMPORT_SCHEMA_ALL => true,
+        FDW_IMPORT_SCHEMA_LIMIT_TO => listed(),
+        FDW_IMPORT_SCHEMA_EXCEPT => !listed(),
+    }
+}
+
+/// ImportForeignSchema's front half (foreigncmds.c:1495): permission checks
+/// plus the FDW's command generation. DIVERGENCE: C parses and executes the
+/// returned commands here; the parse+ProcessUtility loop is the caller's
+/// (utility.c is above this crate), so the commands are returned instead.
 pub fn ImportForeignSchema<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &ImportForeignSchemaStmt<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<mcx::PgVec<'mcx, &'mcx str>> {
     let servername = stmt.server_name.expect("ImportForeignSchemaStmt.server_name");
     let server = GetForeignServerByName(mcx, servername, false)?.expect("missing_ok=false");
     if aclchk::object_aclcheck(
@@ -1126,7 +1182,6 @@ pub fn ImportForeignSchema<'mcx>(
         mcx,
         stmt.local_schema.expect("ImportForeignSchemaStmt.local_schema"),
     )?;
-    // The no-handler error is the live surface; a handler-bearing FDW is loud.
     let fdw = GetForeignDataWrapper(mcx, server.fdwid)?;
     if fdw.fdwhandler == InvalidOid {
         return Err(::elog::ereport(ERROR)
@@ -1135,13 +1190,18 @@ pub fn ImportForeignSchema<'mcx>(
             .into_error()
             .into());
     }
-    // unported: ImportForeignSchema handler invocation
-    // (GetFdwRoutine; dfmgr/LANGUAGE C)
-    Err(::elog::ereport(ERROR)
-        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-        .errmsg("IMPORT FOREIGN SCHEMA is not supported yet".to_string())
-        .into_error()
-        .into())
+    let kind = foreign::GetFdwRoutine(fdw.fdwhandler)?;
+    let Some(import) = fdw_import_routine(kind) else {
+        return Err(::elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FDW_NO_SCHEMAS)
+            .errmsg(format!(
+                "foreign-data wrapper \"{}\" does not support IMPORT FOREIGN SCHEMA",
+                fdw.fdwname
+            ))
+            .into_error()
+            .into());
+    };
+    import(mcx, stmt, server.serverid)
 }
 
 pub fn init_seams() {
@@ -1151,6 +1211,7 @@ pub fn init_seams() {
     foreigncmds_seams::get_fdw_routine_by_rel_id::set(GetFdwRoutineByRelId);
     foreigncmds_seams::get_fdw_routine_by_server_id::set(GetFdwRoutineByServerId);
     foreigncmds_seams::get_foreign_server_id_by_rel_id::set(GetForeignServerIdByRelId);
+    foreigncmds_seams::fdw_is_foreign_rel_updatable::set(foreign::fdw_is_foreign_rel_updatable);
     foreigncmds_seams::get_foreign_data_wrapper_oid::set(get_foreign_data_wrapper_oid);
     foreigncmds_seams::get_foreign_server_oid::set(get_foreign_server_oid);
     foreigncmds_seams::pg_options_to_table::set(options::pg_options_to_table);

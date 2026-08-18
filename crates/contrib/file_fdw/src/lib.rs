@@ -957,6 +957,9 @@ static PLAN_ROUTINE: FdwPlanRoutine = FdwPlanRoutine {
     get_foreign_rel_size: file_get_foreign_rel_size,
     get_foreign_paths: file_get_foreign_paths,
     get_foreign_plan: file_get_foreign_plan,
+    add_foreign_update_targets: None,
+    plan_foreign_modify: None,
+    is_foreign_path_async_capable: None,
 };
 
 static EXEC_ROUTINE: FdwExecRoutine = FdwExecRoutine {
@@ -965,6 +968,9 @@ static EXEC_ROUTINE: FdwExecRoutine = FdwExecRoutine {
     rescan: file_rescan_foreign_scan,
     end: file_end_foreign_scan,
     explain: Some(file_explain_foreign_scan),
+    async_request: None,
+    async_configure_wait: None,
+    async_notify: None,
 };
 
 static ANALYZE_ROUTINE: FdwAnalyzeRoutine =

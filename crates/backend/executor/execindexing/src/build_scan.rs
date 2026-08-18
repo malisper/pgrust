@@ -1,8 +1,7 @@
 // heapam_index_build_range_scan (heapam_handler.c), serial lane; boundary
 // hoisted above heapam_handler (execindexing already sits above the AM stack
 // — a heapam_handler home would cycle).
-// Loud: concurrent builds, parallel scans, foreign in-progress xacts
-// (XactLockTableWait lane; "anyvisible" mode indexes those without waiting).
+// Loud: concurrent builds, parallel scans.
 use ::datum::Datum;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::{BlockNumber, INDEX_MAX_KEYS, InvalidBlockNumber};
@@ -15,7 +14,7 @@ use ::types_tuple::itemptr::{InvalidOffsetNumber, ItemPointerData};
 use ::types_tuple::HeapTupleData;
 use tableam_vocab::{SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TYPE_SEQSCAN};
 
-use crate::{index_predicate_passes, unported, FormIndexDatum, IndexInfo};
+use crate::{index_predicate_passes, FormIndexDatum, IndexInfo};
 
 pub fn table_index_build_scan<'mcx, F>(
     mcx: Mcx<'mcx>,
@@ -184,83 +183,106 @@ where
             tuple_is_alive = true;
             reltuples += 1.0;
         } else {
-            let pin = scan.rs_cbuf.as_ref().expect("pinned page for returned tuple");
-            let guard = pin.lock_share()?;
-            let htsv = heapam_visibility::HeapTupleSatisfiesVacuum(&mut tuple, oldest_xmin, buffer)?;
-            drop(guard);
-            match htsv {
-                HEAPTUPLE_DEAD => {
-                    index_it = false;
-                    tuple_is_alive = false;
-                }
-                HEAPTUPLE_LIVE => {
-                    index_it = true;
-                    tuple_is_alive = true;
-                    reltuples += 1.0;
-                }
-                HEAPTUPLE_RECENTLY_DEAD => {
-                    if tuple.t_data().is_hot_updated() {
-                        index_it = false;
-                        index_info.ii_BrokenHotChain = true;
-                    } else {
-                        index_it = true;
-                    }
-                    tuple_is_alive = false;
-                }
-                HEAPTUPLE_INSERT_IN_PROGRESS if anyvisible => {
-                    index_it = true;
-                    tuple_is_alive = true;
-                    reltuples += 1.0;
-                }
-                HEAPTUPLE_INSERT_IN_PROGRESS => {
-                    let xwait = tuple.t_data().xmin();
-                    if !xact::TransactionIdIsCurrentTransactionId(xwait) {
-                        if !is_system_catalog {
-                            // unported: XactLockTableWait lane
-                            // (heapam_index_build_range_scan).
-                            return Err(unported(
-                                "index build over a concurrent in-progress insert",
-                            ));
-                        }
-                        if checking_uniqueness {
-                            // unported: XactLockTableWait recheck lane.
-                            return Err(unported(
-                                "unique-index build over a concurrent in-progress insert",
-                            ));
-                        }
-                    } else {
+            // C's `recheck:` loop: an XactLockTableWait drops the buffer lock,
+            // waits out the in-progress xact, and re-runs SatisfiesVacuum.
+            (index_it, tuple_is_alive) = loop {
+                let pin = scan.rs_cbuf.as_ref().expect("pinned page for returned tuple");
+                let guard = pin.lock_share()?;
+                let htsv =
+                    heapam_visibility::HeapTupleSatisfiesVacuum(&mut tuple, oldest_xmin, buffer)?;
+                match htsv {
+                    HEAPTUPLE_DEAD => break (false, false),
+                    HEAPTUPLE_LIVE => {
                         reltuples += 1.0;
+                        break (true, true);
                     }
-                    index_it = true;
-                    tuple_is_alive = true;
-                }
-                HEAPTUPLE_DELETE_IN_PROGRESS if anyvisible => {
-                    index_it = true;
-                    tuple_is_alive = false;
-                    reltuples += 1.0;
-                }
-                HEAPTUPLE_DELETE_IN_PROGRESS => {
-                    let xwait = heapam::HeapTupleHeaderGetUpdateXid(tuple.t_data())?;
-                    if !xact::TransactionIdIsCurrentTransactionId(xwait) {
-                        if !is_system_catalog || checking_uniqueness || tuple.t_data().is_hot_updated()
-                        {
-                            // unported: XactLockTableWait lane
-                            // (heapam_index_build_range_scan).
-                            return Err(unported(
-                                "index build over a concurrent in-progress delete",
-                            ));
+                    HEAPTUPLE_RECENTLY_DEAD => {
+                        if tuple.t_data().is_hot_updated() {
+                            index_info.ii_BrokenHotChain = true;
+                            break (false, false);
                         }
-                        index_it = true;
-                        reltuples += 1.0;
-                    } else if tuple.t_data().is_hot_updated() {
-                        index_it = false;
-                        index_info.ii_BrokenHotChain = true;
-                    } else {
-                        index_it = true;
+                        break (true, false);
                     }
-                    tuple_is_alive = false;
+                    HEAPTUPLE_INSERT_IN_PROGRESS if anyvisible => {
+                        reltuples += 1.0;
+                        break (true, true);
+                    }
+                    HEAPTUPLE_INSERT_IN_PROGRESS => {
+                        let xwait = tuple.t_data().xmin();
+                        if !xact::TransactionIdIsCurrentTransactionId(xwait) {
+                            if !is_system_catalog {
+                                elog::ereport_msg(
+                                    types_error::WARNING,
+                                    format!(
+                                        "concurrent insert in progress within table \"{}\"",
+                                        heap_relation.name()
+                                    ),
+                                    None,
+                                )?;
+                            }
+                            // Indexing an uncommitted insert could raise a
+                            // bogus uniqueness failure: wait it out, recheck.
+                            if checking_uniqueness {
+                                drop(guard);
+                                lmgr::XactLockTableWait(
+                                    xwait,
+                                    Some(heap_relation),
+                                    Some(&tuple.t_self),
+                                    ::types_storage::lock::XLTW_Oper::InsertIndexUnique,
+                                )?;
+                                postgres_seams::check_for_interrupts::call()?;
+                                continue;
+                            }
+                        } else {
+                            reltuples += 1.0;
+                        }
+                        break (true, true);
+                    }
+                    HEAPTUPLE_DELETE_IN_PROGRESS if anyvisible => {
+                        reltuples += 1.0;
+                        break (true, false);
+                    }
+                    HEAPTUPLE_DELETE_IN_PROGRESS => {
+                        let xwait = heapam::HeapTupleHeaderGetUpdateXid(tuple.t_data())?;
+                        if !xact::TransactionIdIsCurrentTransactionId(xwait) {
+                            if !is_system_catalog {
+                                elog::ereport_msg(
+                                    types_error::WARNING,
+                                    format!(
+                                        "concurrent delete in progress within table \"{}\"",
+                                        heap_relation.name()
+                                    ),
+                                    None,
+                                )?;
+                            }
+                            // Uniqueness: assuming dead could miss a
+                            // violation. HOT: only the deleter's fate says
+                            // whether this or the chain tip gets indexed.
+                            // Either way, wait it out and recheck.
+                            if checking_uniqueness || tuple.t_data().is_hot_updated() {
+                                drop(guard);
+                                lmgr::XactLockTableWait(
+                                    xwait,
+                                    Some(heap_relation),
+                                    Some(&tuple.t_self),
+                                    ::types_storage::lock::XLTW_Oper::InsertIndexUnique,
+                                )?;
+                                postgres_seams::check_for_interrupts::call()?;
+                                continue;
+                            }
+                            // Index it but exclude from uniqueness, same as
+                            // RECENTLY_DEAD; count as live to match ANALYZE.
+                            reltuples += 1.0;
+                            break (true, false);
+                        } else if tuple.t_data().is_hot_updated() {
+                            index_info.ii_BrokenHotChain = true;
+                            break (false, false);
+                        } else {
+                            break (true, false);
+                        }
+                    }
                 }
-            }
+            };
         }
 
         if !index_it {

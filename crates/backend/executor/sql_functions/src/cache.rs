@@ -666,7 +666,7 @@ fn sqlfn_source_owner(h: plancache::CachedPlanSourceHandle) -> PgResult<Rc<SqlFn
     match SQLFN_SOURCE_OWNER.with_borrow(|m| m.get(&h.0).and_then(Weak::upgrade)) {
         Some(e) => Ok(e),
         None => Err(efn(
-            ERRCODE_FEATURE_NOT_SUPPORTED,
+            types_error::ERRCODE_INTERNAL_ERROR,
             "SQL function cached plan re-analysis: owning cache entry is gone".to_string(),
         )),
     }
@@ -853,6 +853,22 @@ mod tests {
         .expect("read_input_argnames");
         let got: Vec<&str> = out.iter().map(|s| s.as_str()).collect();
         assert_eq!(got, ["fmt", "rest"]);
+    }
+}
+
+#[cfg(test)]
+mod source_owner_tests {
+    use super::*;
+
+    // C's analog dereferences a stashed pointer; a miss is elog(ERROR) => XX000.
+    #[test]
+    fn unregistered_source_is_internal_error() {
+        let r = sqlfn_source_owner(plancache::CachedPlanSourceHandle(u64::MAX));
+        let err = match r {
+            Err(e) => e,
+            Ok(_) => panic!("expected miss"),
+        };
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 }
 

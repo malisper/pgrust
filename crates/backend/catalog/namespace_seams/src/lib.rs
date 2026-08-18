@@ -138,3 +138,9 @@ seam_core::seam!(
     // LookupExplicitNamespace (namespace.c); InvalidOid when missing_ok.
     pub fn lookup_explicit_namespace(nspname: &str, missing_ok: bool) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    // myTempNamespace global read (namespace.c): infallible, no catalog
+    // access — InvalidOid when the session has no temp namespace yet.
+    pub fn my_temp_namespace() -> Oid
+);

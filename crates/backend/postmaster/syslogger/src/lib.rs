@@ -37,6 +37,8 @@ const SIGHUP: i32 = 1;
 #[cfg(target_family = "wasm")]
 const SIGUSR1: i32 = 10;
 
+pub mod errlog;
+
 #[cfg(test)]
 mod tests;
 
@@ -977,4 +979,6 @@ pub fn init_seams() {
     syslogger_seams::remove_logrotate_signal_files::set(RemoveLogrotateSignalFiles);
     syslogger_seams::write_syslogger_file::set(write_syslogger_file);
     syslogger_seams::sys_logger_main::set(SysLoggerMain);
+    error_small_seams::write_csvlog::set(errlog::write_csvlog);
+    error_small_seams::write_jsonlog::set(errlog::write_jsonlog);
 }

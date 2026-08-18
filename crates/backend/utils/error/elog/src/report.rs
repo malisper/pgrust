@@ -142,7 +142,9 @@ pub fn check_log_of_query(edata: &PgError) -> bool {
     current_query_string().is_some()
 }
 
-fn current_query_string() -> Option<String> {
+// C's debug_query_string as the log writers see it (NULL once suppressed);
+// pub for the csvlog/jsonlog writers hosted in the syslogger crate.
+pub fn current_query_string() -> Option<String> {
     if stack::statement_suppressed() {
         return None;
     }

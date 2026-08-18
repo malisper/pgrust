@@ -335,17 +335,18 @@ pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<In
     })
 }
 
-/// BuildSpeculativeIndexInfo (catalog/index.c), btree arm: equality operator
+/// BuildSpeculativeIndexInfo (catalog/index.c): equality operator
 /// strategy/operator/proc per key column for the ON CONFLICT arbiter probe.
 pub fn BuildSpeculativeIndexInfo(index: &Relation<'_>, ii: &mut IndexInfo) -> PgResult<()> {
     debug_assert!(ii.ii_Unique);
-    if index.rd_rel.relam != ::types_core::catalog::BTREE_AM_OID {
-        return Err(unported("ON CONFLICT arbiter over a non-btree unique index"));
-    }
     let indnkeyatts = ii.ii_NumIndexKeyAttrs as usize;
     for i in 0..indnkeyatts {
-        // IndexAmTranslateCompareType(COMPARE_EQ, BTREE) = BTEqualStrategyNumber.
-        let strat = ::types_scan::scankey::BTEqualStrategyNumber;
+        let strat = amapi::IndexAmTranslateCompareType(
+            ::types_pathnodes::COMPARE_EQ,
+            index.rd_rel.relam,
+            index.rd_opfamily[i],
+            false,
+        )?;
         let opno = lsyscache::amop::get_opfamily_member(
             index.rd_opfamily[i],
             index.rd_opcintype[i],
@@ -468,8 +469,13 @@ pub fn FormIndexDatum<'mcx>(
     for i in 0..indexInfo.ii_NumIndexAttrs as usize {
         let keycol = indexInfo.ii_IndexAttrNumbers[i];
         if keycol < 0 {
-            // unported: slot_getsysattr lane.
-            return Err(unported("system-attribute index columns"));
+            // Unreachable invariant: C's FormIndexDatum reads system
+            // attributes here (slot_getsysattr), but DefineIndex refuses
+            // system columns in both key columns and expressions/predicates
+            // (indexcmds.c ComputeIndexAttrs, "index creation on system
+            // columns is not supported"), and no catalog-built index uses
+            // them since oid indexes were removed.
+            panic!("FormIndexDatum: system-attribute index column {keycol}");
         }
         if keycol != 0 {
             let mut null = false;

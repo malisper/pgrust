@@ -427,7 +427,27 @@ static PLAN_ROUTINE: FdwPlanRoutine = FdwPlanRoutine {
     get_foreign_rel_size: postgres_get_foreign_rel_size,
     get_foreign_paths: postgres_get_foreign_paths,
     get_foreign_plan: postgres_get_foreign_plan,
+    add_foreign_update_targets: Some(crate::modify::add_foreign_update_targets),
+    plan_foreign_modify: Some(crate::modify::plan_foreign_modify),
+    is_foreign_path_async_capable: Some(postgres_is_foreign_path_async_capable),
 };
+
+static MODIFY_ROUTINE: nodemodifytable::FdwModifyRoutine = nodemodifytable::FdwModifyRoutine {
+    begin: crate::modify::begin_foreign_modify,
+    exec_insert: crate::modify::exec_foreign_insert,
+    exec_update: crate::modify::exec_foreign_update,
+    exec_delete: crate::modify::exec_foreign_delete,
+    end: crate::modify::end_foreign_modify,
+};
+
+// postgresIsForeignPathAsyncCapable.
+fn postgres_is_foreign_path_async_capable<'mcx>(
+    run: &PlannerRun<'mcx>,
+    path_id: PathId,
+) -> bool {
+    let rel = run.root.rel(run.root.path(path_id).base().parent);
+    fpinfo(rel).borrow().async_capable
+}
 
 static EXEC_ROUTINE: FdwExecRoutine = FdwExecRoutine {
     begin: crate::exec::begin_foreign_scan,
@@ -435,6 +455,9 @@ static EXEC_ROUTINE: FdwExecRoutine = FdwExecRoutine {
     rescan: crate::exec::rescan_foreign_scan,
     end: crate::exec::end_foreign_scan,
     explain: Some(explain_foreign_scan),
+    async_request: Some(crate::exec::foreign_async_request),
+    async_configure_wait: Some(crate::exec::foreign_async_configure_wait),
+    async_notify: Some(crate::exec::foreign_async_notify),
 };
 
 pub fn install() {
@@ -445,4 +468,8 @@ pub fn install() {
     });
     planner::fdwplan::install_fdw_plan_routine(FdwKind::PostgresFdw, &PLAN_ROUTINE);
     nodeforeignscan::install_fdw_exec_routine(FdwKind::PostgresFdw, &EXEC_ROUTINE);
+    nodemodifytable::install_fdw_modify_routine(FdwKind::PostgresFdw, &MODIFY_ROUTINE);
+    static UPDATABLE_FN: foreigncmds::foreign::FdwUpdatableFn =
+        crate::modify::is_foreign_rel_updatable;
+    foreigncmds::foreign::install_fdw_updatable(FdwKind::PostgresFdw, &UPDATABLE_FN);
 }

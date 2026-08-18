@@ -508,12 +508,15 @@ pub static shared_memory_options: &[config_enum_entry] = &[
     config_enum_entry { name: "mmap", val: SHMEM_TYPE_MMAP, hidden: false },
 ];
 
-// Reference build (../pgrust/postgres-18.3 pg_config.h): USE_LZ4, USE_ZSTD
-// undefined — entries/boot values follow the C #else branches. USE_SSL /
-// USE_OPENSSL are DEFINED here (be_secure_openssl): ssl_library, ssl_ciphers,
-// ssl_groups carry the OpenSSL boot values.
+// USE_LZ4 for TOAST is implemented in Rust (lz4_flex), so
+// default_toast_compression carries C's #ifdef USE_LZ4 entry. USE_ZSTD stays
+// undefined, and wal_compression's lz4/zstd arms are NOT implemented — those
+// options follow the C #else branches. USE_SSL / USE_OPENSSL are DEFINED here
+// (be_secure_openssl): ssl_library, ssl_ciphers, ssl_groups carry the OpenSSL
+// boot values.
 pub static default_toast_compression_options: &[config_enum_entry] = &[
     config_enum_entry { name: "pglz", val: TOAST_PGLZ_COMPRESSION, hidden: false },
+    config_enum_entry { name: "lz4", val: TOAST_LZ4_COMPRESSION, hidden: false },
 ];
 
 pub static wal_compression_options: &[config_enum_entry] = &[

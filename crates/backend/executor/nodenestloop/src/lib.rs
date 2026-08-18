@@ -10,7 +10,7 @@ use ::execexpr::{
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::PgBox;
-use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_error::PgResult;
 use ::types_nodes::plannodes::NestLoop;
 use ::types_nodes::JoinType;
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
@@ -74,18 +74,16 @@ pub fn exec_init_nest_loop<'mcx>(
     inner_desc: &Rc<TupleDescData<'static>>,
 ) -> PgResult<NestLoopState<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
+    // Unreachable invariant: nestloop supports only INNER/LEFT/SEMI/ANTI.
+    // The planner never builds a nestloop for RIGHT/RIGHT_SEMI/RIGHT_ANTI/
+    // FULL (match_unsorted_outer's nestjoinOK switch, joinpath.c:1840-1866;
+    // every try_nestloop_path/consider_parallel_nestloop call is gated on
+    // it), matching C ExecInitNestLoop's default elog.
     if !matches!(
         node.join.jointype,
         JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_SEMI | JoinType::JOIN_ANTI
     ) {
-        // unported: ExecInitNestLoop (nodeNestloop.c) RIGHT/FULL lane.
-        return Err(Box::new(
-            PgError::error(format!(
-                "nested loop with join type {:?} is not yet implemented",
-                node.join.jointype
-            ))
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
+        panic!("unrecognized join type: {:?}", node.join.jointype);
     }
     let nl_fill_outer =
         matches!(node.join.jointype, JoinType::JOIN_LEFT | JoinType::JOIN_ANTI);

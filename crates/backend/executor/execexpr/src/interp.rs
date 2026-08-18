@@ -3120,15 +3120,13 @@ fn eval_field_select(
     let p = value.as_usize() as *const u8;
     // SAFETY: non-null composite datum per the FieldSelect contract.
     if unsafe { ::types_tuple::varatt::varatt_is_external_expanded(p) } {
-        // unported: ExecEvalFieldSelect's expanded-record fastpath
-        // (expanded_record_get_field without flattening). The primitives
-        // exist in adt_expandedrecord, but that crate depends back on
-        // execexpr (via adt_domains), so the wiring needs a seam.
-        return Err(PgError::error(
-            "field selection from an expanded record is not yet implemented",
-        )
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
-        .into());
+        // Expanded-record fastpath: no flattening; seam because
+        // adt_expandedrecord depends back on execexpr via adt_domains.
+        return ::expandedrecord_seams::expanded_record_field_select::call(
+            value,
+            fieldnum as i32,
+            resulttype,
+        );
     }
     // SAFETY: a live varlena-headed composite image.
     let total = unsafe { ::types_tuple::varatt::varsize_any(p) };

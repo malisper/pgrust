@@ -24,6 +24,9 @@ use types_tuple::NameData;
 
 pub use pg_depend::{DependencyType, ObjectAddress};
 
+// pg_transform.h: TransformRelationId (protrftypes dependency targets).
+const TransformRelationId: Oid = 3576;
+
 pub const ProcedureOidIndexId: Oid = 2690;
 pub const ProcedureNameArgsNspIndexId: Oid = 2691;
 
@@ -250,6 +253,20 @@ pub fn ProcedureCreate<'mcx>(
     mcx: Mcx<'mcx>,
     a: &ProcedureCreateArgs<'_>,
 ) -> PgResult<ObjectAddress> {
+    ProcedureCreateWithTransforms(mcx, a, None, &[])
+}
+
+// pg_proc.c ProcedureCreate's trftypes/trfoids parameters (the TRANSFORM
+// option of CREATE FUNCTION): trftypes stores pg_proc.protrftypes (None
+// stores NULL), trfoids is the list of pg_transform OIDs the routine must
+// depend on. Split out so the many transform-less callers keep the short
+// ProcedureCreate signature.
+pub fn ProcedureCreateWithTransforms<'mcx>(
+    mcx: Mcx<'mcx>,
+    a: &ProcedureCreateArgs<'_>,
+    trftypes: Option<&[Oid]>,
+    trfoids: &[Oid],
+) -> PgResult<ObjectAddress> {
     let parameterCount = a.parameterTypes.len();
     if parameterCount > FUNC_MAX_ARGS {
         return Err(err(
@@ -452,7 +469,26 @@ pub fn ProcedureCreate<'mcx>(
             Datum::from_usize(t.as_bytes().as_ptr() as usize),
         None => nulls[Anum_pg_proc_proargdefaults - 1] = true,
     }
-    nulls[Anum_pg_proc_protrftypes - 1] = true;
+    // pg_proc.c:362-366: protrftypes as an oid[] (not an oidvector), NULL
+    // when the function declares no transforms.
+    let trftypes_image = match trftypes {
+        Some(oids) => {
+            let mut elems: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, oids.len())?;
+            for &o in oids {
+                elems.push(Datum::from_oid(o));
+            }
+            Some(datum::array_build::construct_array_image(mcx, &elems, OIDOID, 4, true, b'i')?)
+        }
+        None => None,
+    };
+    match &trftypes_image {
+        Some(img) => set(
+            &mut values,
+            Anum_pg_proc_protrftypes,
+            Datum::from_usize(img.as_ptr() as usize),
+        ),
+        None => nulls[Anum_pg_proc_protrftypes - 1] = true,
+    }
     set(
         &mut values,
         Anum_pg_proc_prosrc,
@@ -837,12 +873,16 @@ pub fn ProcedureCreate<'mcx>(
     let dep_param_types = a.allParameterTypes.unwrap_or(a.parameterTypes);
     let myself = ObjectAddress::set(PROCEDURE_RELATION_ID, retval);
     let mut referenced: mcx::PgVec<'mcx, ObjectAddress> =
-        mcx::vec_with_capacity_in(mcx, 4 + dep_param_types.len())?;
+        mcx::vec_with_capacity_in(mcx, 4 + dep_param_types.len() + trfoids.len())?;
     referenced.push(ObjectAddress::set(NAMESPACE_RELATION_ID, a.procNamespace));
     referenced.push(ObjectAddress::set(LANGUAGE_RELATION_ID, a.languageObjectId));
     referenced.push(ObjectAddress::set(TYPE_RELATION_ID, a.returnType));
     for &argtype in dep_param_types {
         referenced.push(ObjectAddress::set(TYPE_RELATION_ID, argtype));
+    }
+    // dependency on transforms, if any (pg_proc.c:647-652)
+    for &transformid in trfoids {
+        referenced.push(ObjectAddress::set(TransformRelationId, transformid));
     }
     // dependency on support function, if any
     if OidIsValid(a.prosupport) {

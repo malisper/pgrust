@@ -41,6 +41,18 @@ pub type RegName<'mcx> = PgVec<'mcx, u8>;
 
 #[cold]
 #[inline(never)]
+
+// myTempNamespace read through the seam; an uninstalled seam (unit tests,
+// contexts with no session) reads as InvalidOid exactly like C's global
+// before any temp namespace is assigned.
+fn my_temp_namespace_or_invalid() -> Oid {
+    if namespace_seams::my_temp_namespace::is_installed() {
+        namespace_seams::my_temp_namespace::call()
+    } else {
+        InvalidOid
+    }
+}
+
 fn invalid_name_syntax() -> PgError {
     PgError::error("invalid name syntax").with_sqlstate(ERRCODE_INVALID_NAME)
 }
@@ -225,21 +237,27 @@ fn make_range_var<'a>(names: &'a [String]) -> PgResult<rel_vocab::RangeVar<'a>> 
     })
 }
 
-/// C DeconstructQualifiedName, function-name callers only (the catalogname
-/// arm needs get_database_name — loud until a consumer shows up).
+/// C DeconstructQualifiedName (namespace.c): hard errors even under soft
+/// callers (C reports through plain ereport, no escontext).
 fn deconstruct_qualified_name<'a>(names: &[&'a str]) -> PgResult<(Option<&'a str>, &'a str)> {
     match names {
         [objname] => Ok((None, objname)),
         [schemaname, objname] => Ok((Some(schemaname), objname)),
-        // unported: DeconstructQualifiedName (namespace.c) catalog-qualified
-        // arm (needs the get_database_name cross-database check).
-        [_, _, _] => Err(Box::new(
-            PgError::error(format!(
-                "catalog-qualified names are not yet implemented: {}",
-                names.join(".")
-            ))
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        )),
+        [catalogname, schemaname, objname] => {
+            // C: "We check the catalog name and then ignore it."
+            let dbname =
+                dbcommands_seams::get_database_name::call(init_small::globals::MyDatabaseId())?;
+            if dbname.as_deref() != Some(*catalogname) {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "cross-database references are not implemented: {}",
+                        names.join(".")
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            Ok((Some(schemaname), objname))
+        }
         _ => Err(Box::new(
             PgError::error(format!(
                 "improper qualified name (too many dotted names): {}",
@@ -252,15 +270,16 @@ fn deconstruct_qualified_name<'a>(names: &[&'a str]) -> PgResult<(Option<&'a str
 
 /// C LookupExplicitNamespace: lookup + ACL_USAGE check; missing_ok=true
 /// returns InvalidOid for a missing schema (ACL failures stay hard).
-/// The pg_temp alias arm needs myTempNamespace — loud.
 fn lookup_explicit_namespace(nspname: &str, missing_ok: bool) -> PgResult<Oid> {
+    // pg_temp alias (namespace.c): the session's temp namespace, skipping the
+    // ACL check (it is ours by construction). Lookups of existing objects
+    // never create the temp namespace, so when there is none we fall through
+    // to a normal lookup of a schema literally named "pg_temp".
     if nspname == "pg_temp" {
-        // unported: LookupExplicitNamespace (namespace.c) pg_temp alias arm
-        // (needs myTempNamespace).
-        return Err(Box::new(
-            PgError::error("the pg_temp schema alias is not yet implemented here")
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
+        let temp_namespace = my_temp_namespace_or_invalid();
+        if OidIsValid(temp_namespace) {
+            return Ok(temp_namespace);
+        }
     }
     let namespace_id = syscache_seams::lookup_pg_namespace_oid_by_name::call(nspname)?;
     if !OidIsValid(namespace_id) {
@@ -324,10 +343,17 @@ fn funcname_candidates<'mcx>(
                 }
                 0
             }
-            (None, Some(p)) => match p.iter().position(|&n| n == cand.pronamespace) {
-                Some(pos) => pos,
-                None => continue,
-            },
+            // C FuncnameGetCandidates: an unqualified name never resolves into
+            // the temp namespace (namespace.c:1256).
+            (None, Some(p)) => {
+                if cand.pronamespace == my_temp_namespace_or_invalid() {
+                    continue;
+                }
+                match p.iter().position(|&n| n == cand.pronamespace) {
+                    Some(pos) => pos,
+                    None => continue,
+                }
+            }
             (None, None) => unreachable!(),
         };
         match kept.iter_mut().find(|prev| {
@@ -879,8 +905,14 @@ pub fn format_procedure(mcx: Mcx<'_>, procedure_oid: Oid) -> PgResult<String> {
     let pos = |nsp: Oid| path.iter().position(|&p| p == nsp);
     let mut visible = false;
     let mut best: Option<(usize, Oid)> = None;
+    let mtn = my_temp_namespace_or_invalid();
     for cand in raw.iter() {
         if cand.proargtypes.as_slice() != argtypes.as_slice() {
+            continue;
+        }
+        // FuncnameGetCandidates skips the temp namespace for unqualified
+        // names, so a temp-schema proc is never visible (namespace.c:1256).
+        if cand.pronamespace == mtn {
             continue;
         }
         if let Some(p) = pos(cand.pronamespace) {
@@ -934,7 +966,12 @@ pub fn format_operator(mcx: Mcx<'_>, operator_oid: Oid) -> PgResult<String> {
     let path = namespace_seams::fetch_search_path::call(mcx, true)?;
     let mut visible = false;
     let mut my_nsp = InvalidOid;
+    let mtn = my_temp_namespace_or_invalid();
     'outer: for &nsp in path.iter() {
+        // OpernameGetOprid skips the temp namespace (namespace.c:1832).
+        if nsp == mtn {
+            continue;
+        }
         for &(oid, oprnamespace) in cands.iter() {
             if oid == operator_oid {
                 my_nsp = oprnamespace;

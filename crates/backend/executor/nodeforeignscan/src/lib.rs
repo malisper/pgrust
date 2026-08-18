@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use ::execexpr::{exec_qual, EvalSlots, ExprState};
 use ::execscan::{exec_scan, exec_scan_extended, ScanNode, ScanState};
-use ::executils::{EStateData, ExecSlotId};
+use ::executils::{AsyncRequest, AsyncWaitCtx, EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox};
 use ::types_core::{InvalidOid, Oid};
 use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
@@ -47,6 +47,67 @@ pub struct FdwExecRoutine {
             &mut dyn FnMut(&str, FdwExplainProp<'_>) -> PgResult<()>,
         ) -> PgResult<()>,
     >,
+    /// ForeignAsyncRequest / ForeignAsyncConfigureWait / ForeignAsyncNotify
+    /// (fdwapi.h); None = provider is never async-capable.
+    pub async_request: Option<
+        for<'mcx> fn(
+            &mut ForeignScanState<'mcx>,
+            &mut EStateData<'mcx>,
+            &mut AsyncRequest,
+        ) -> PgResult<()>,
+    >,
+    pub async_configure_wait: Option<
+        for<'mcx> fn(
+            &mut ForeignScanState<'mcx>,
+            &mut EStateData<'mcx>,
+            &mut AsyncRequest,
+            &AsyncWaitCtx,
+        ) -> PgResult<()>,
+    >,
+    pub async_notify: Option<
+        for<'mcx> fn(
+            &mut ForeignScanState<'mcx>,
+            &mut EStateData<'mcx>,
+            &mut AsyncRequest,
+        ) -> PgResult<()>,
+    >,
+}
+
+/// `ExecAsyncForeignScanRequest` (nodeForeignscan.c).
+pub fn exec_async_foreign_scan_request<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    areq: &mut AsyncRequest,
+) -> PgResult<()> {
+    let f = fdw_exec_routine(node.fdwroutine)
+        .async_request
+        .expect("async-capable FDW provides ForeignAsyncRequest");
+    f(node, estate, areq)
+}
+
+/// `ExecAsyncForeignScanConfigureWait` (nodeForeignscan.c).
+pub fn exec_async_foreign_scan_configure_wait<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    areq: &mut AsyncRequest,
+    wait: &AsyncWaitCtx,
+) -> PgResult<()> {
+    let f = fdw_exec_routine(node.fdwroutine)
+        .async_configure_wait
+        .expect("async-capable FDW provides ForeignAsyncConfigureWait");
+    f(node, estate, areq, wait)
+}
+
+/// `ExecAsyncForeignScanNotify` (nodeForeignscan.c).
+pub fn exec_async_foreign_scan_notify<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    areq: &mut AsyncRequest,
+) -> PgResult<()> {
+    let f = fdw_exec_routine(node.fdwroutine)
+        .async_notify
+        .expect("async-capable FDW provides ForeignAsyncNotify");
+    f(node, estate, areq)
 }
 
 static FDW_EXEC_ROUTINES: [AtomicPtr<FdwExecRoutine>; NUM_FDW_KINDS] =

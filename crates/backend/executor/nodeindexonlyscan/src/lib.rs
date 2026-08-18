@@ -494,11 +494,11 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
                 ::execexpr::exec_init_qual_subplans(mcx, &node.recheckqual, params, env)?;
             let mut runtime_keys = PgVec::new_in(mcx);
             let scan_keys = exec_index_build_scan_keys(
-                mcx, &index_rel, &node.indexqual, params, false, &mut runtime_keys, env,
+                mcx, &index_rel, &node.indexqual, params, false, &mut runtime_keys, None, env,
             )?;
             // ORDER BY exprs become scankeys the same way (SK_ORDER_BY).
             let orderby_keys = exec_index_build_scan_keys(
-                mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys, env,
+                mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys, None, env,
             )?;
             Ok((qual, recheckqual, scan_keys, orderby_keys, runtime_keys))
         })?;

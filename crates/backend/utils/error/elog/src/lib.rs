@@ -24,7 +24,8 @@ pub use policy::{
     should_output_to_server,
 };
 pub use report::{
-    append_with_tabs, check_log_of_query, err_sendstring, error_severity, format_elog_string,
+    append_with_tabs, check_log_of_query, current_query_string, err_sendstring, error_severity,
+    format_elog_string,
     get_backend_type_for_log, get_formatted_log_time, get_formatted_start_time, log_line_prefix,
     log_status_format, pre_format_elog_string, reset_formatted_start_time,
     send_message_to_frontend, send_message_to_server_log, set_backtrace, unpack_sql_state,

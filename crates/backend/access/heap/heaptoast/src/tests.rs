@@ -683,14 +683,20 @@ fn compress_datum_invalid_cmethod_consults_default_guc() {
         toastdesc::TOAST_PGLZ_COMPRESSION_ID
     );
 
-    // The read is live: an lz4 default is consulted and hits the clean
-    // tree-wide lz4 rejection (the GUC itself never accepts lz4 today).
+    // The read is live: an lz4 default is consulted and produces an
+    // lz4-stamped image that round-trips through detoast.
     DEFAULT_TOAST_COMPRESSION.store(
         ::guc_tables::consts::TOAST_LZ4_COMPRESSION,
         Ordering::Relaxed,
     );
-    let err = toast_compress_datum(mcx, &comp, 0).unwrap_err();
-    assert_eq!(err.message(), "compression method lz4 not supported");
+    let out = toast_compress_datum(mcx, &comp, 0).unwrap().unwrap();
+    assert_eq!(
+        toastdesc::toast_compress_method(&out).unwrap(),
+        toastdesc::TOAST_LZ4_COMPRESSION_ID
+    );
+    assert_eq!(toastdesc::toast_compress_extsize(&out).unwrap(), 1000);
+    let back = detoast::toast_decompress_datum(mcx, &out).unwrap();
+    assert_eq!(&back[VARHDRSZ..], &[b'a'; 1000][..]);
 
     // An explicitly valid cmethod never consults the GUC.
     let out = toast_compress_datum(mcx, &comp, toastdesc::TOAST_PGLZ_COMPRESSION as i8)

@@ -3317,7 +3317,9 @@ fn init_subscripting_ref<'mcx>(
             Some("hstore_subscript_handler") => {
                 return init_hstore_subscripting_ref(node, state, mcx, out, agg, params, sub)
             }
-            // unported: non-core SubscriptingRef handler (ExecInitSubscriptingRef).
+            // Descoped, not unported: arbitrary third-party SubscriptingRef
+            // handlers are C functions in dlopen'd modules, excluded by the
+            // no-dlopen carve; only in-tree handlers are dispatchable.
             _ => {
                 return Err(feature_unported(&format!(
                     "subscripting via handler function {typsubscript}"
@@ -3666,9 +3668,12 @@ fn init_hstore_subscripting_ref<'mcx>(
     if is_assignment {
         let assgn = sbsref.refassgnexpr.unwrap();
         if assgn_needs_old(assgn) {
-            // unported: no sbs_fetch_old (EEOP_SBSREF_OLD, hstore_subs.c).
-            return Err(feature_unported(
-                "hstore subscripted assignment referencing the old element",
+            // hstore has no sbs_fetch_old (hstore_subs.c leaves it NULL); C's
+            // ExecInitSubscriptingRef ereports exactly this.
+            let tn = ::format_type::format_type_be(sbsref.refcontainertype)?;
+            return Err(Box::new(
+                PgError::error(format!("type {tn} does not support subscripted assignment"))
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
             ));
         }
         let replace_slot =
@@ -7275,4 +7280,45 @@ fn collect_suffix_calls(state: &ExprState<'_>, steps: &[Step]) -> LaneSuffix {
         }
     }
     LaneSuffix::Calls(oids)
+}
+
+#[cfg(test)]
+mod assgn_needs_old_tests {
+    use super::*;
+    use ::types_nodes::primnodes::{CaseTestExpr, FieldStore, RelabelType};
+
+    fn casetest(mcx: Mcx<'_>) -> Node<'_> {
+        Node::mk(mcx, CaseTestExpr { typeId: 25, typeMod: -1, collation: 0 }).unwrap()
+    }
+
+    #[test]
+    fn recognizes_old_element_readers() {
+        let cx = ::mcx::MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let fs = Node::mk(
+            mcx,
+            FieldStore {
+                arg: casetest(mcx),
+                newvals: ::types_nodes::NodeList::nil(),
+                fieldnums: Default::default(),
+                resulttype: 25,
+            },
+        )
+        .unwrap();
+        assert!(assgn_needs_old(fs));
+        let rl = Node::mk(
+            mcx,
+            RelabelType {
+                arg: fs,
+                resulttype: 25,
+                resulttypmod: -1,
+                resultcollid: 0,
+                relabelformat: ::types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                location: -1,
+            },
+        )
+        .unwrap();
+        assert!(assgn_needs_old(rl));
+        assert!(!assgn_needs_old(casetest(mcx)));
+    }
 }

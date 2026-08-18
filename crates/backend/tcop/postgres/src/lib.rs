@@ -309,14 +309,14 @@ fn ProcessRecoveryConflictInterrupt(reason: ProcSignalReason) -> PgResult<()> {
         // Fall through to error handling.
     }
 
-    if matches!(
+    if !matches!(
         reason,
-        PROCSIG_RECOVERY_CONFLICT_LOCK
-            | PROCSIG_RECOVERY_CONFLICT_TABLESPACE
-            | PROCSIG_RECOVERY_CONFLICT_SNAPSHOT
+        PROCSIG_RECOVERY_CONFLICT_DATABASE | PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT
     ) && !xact::IsTransactionOrTransactionBlock()
     {
-        // No longer in a transaction: ignore.
+        // No longer in a transaction: ignore. C's BUFFERPIN/STARTUP_DEADLOCK
+        // cases fall through into this check too (they reach here only while
+        // holding a recovery-delaying pin).
         return Ok(());
     }
 

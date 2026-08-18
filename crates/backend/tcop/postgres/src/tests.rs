@@ -130,6 +130,67 @@ fn recovery_conflict_arm_is_handled() {
 }
 
 #[test]
+fn recovery_conflict_snapshot_outside_transaction_is_noop() {
+    use types_storage::storage::ProcSignalReason;
+    install_test_seams();
+    // Not in a transaction: C ignores LOCK/TABLESPACE/SNAPSHOT conflicts.
+    HandleRecoveryConflictInterrupt(ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_SNAPSHOT as u32);
+    assert!(init_small::globals::InterruptPending());
+    check_for_interrupts().expect("snapshot conflict outside a transaction is a no-op");
+    assert!(!init_small::globals::InterruptPending());
+    assert_eq!(RECOVERY_CONFLICT_PENDING_REASONS.with(std::cell::Cell::get), 0);
+}
+
+#[test]
+fn recovery_conflict_database_is_fatal_57p04() {
+    use types_storage::storage::ProcSignalReason;
+    install_test_seams();
+    HandleRecoveryConflictInterrupt(ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_DATABASE as u32);
+    let err = check_for_interrupts().unwrap_err();
+    assert_eq!(err.level(), types_error::FATAL);
+    assert_eq!(err.sqlstate, types_error::ERRCODE_DATABASE_DROPPED);
+    assert_eq!(err.message, "terminating connection due to conflict with recovery");
+    assert_eq!(
+        err.detail.as_deref(),
+        Some("User was connected to a database that must be dropped.")
+    );
+    assert_eq!(
+        err.hint.as_deref(),
+        Some(
+            "In a moment you should be able to reconnect to the database and repeat your command."
+        )
+    );
+    assert_eq!(RECOVERY_CONFLICT_PENDING_REASONS.with(std::cell::Cell::get), 0);
+}
+
+#[test]
+fn recovery_conflict_logicalslot_is_error_40001_and_respects_holdoff() {
+    use types_storage::storage::ProcSignalReason;
+    install_test_seams();
+    let reason = ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT as u32;
+
+    // Mid-message read (QueryCancelHoldoffCount > 0): re-arm and defer.
+    init_small::globals::HoldCancelInterrupts();
+    HandleRecoveryConflictInterrupt(reason);
+    check_for_interrupts().expect("conflict must defer under cancel holdoff");
+    assert!(init_small::globals::InterruptPending()); /* re-armed */
+    assert_ne!(RECOVERY_CONFLICT_PENDING_REASONS.with(std::cell::Cell::get) & (1 << reason), 0);
+    init_small::globals::ResumeCancelInterrupts();
+
+    // Holdoff released: the deferred conflict now cancels the statement.
+    let err = check_for_interrupts().unwrap_err();
+    assert_eq!(err.level(), types_error::ERROR);
+    assert_eq!(err.sqlstate, types_error::ERRCODE_T_R_SERIALIZATION_FAILURE);
+    assert_eq!(err.message, "canceling statement due to conflict with recovery");
+    assert_eq!(
+        err.detail.as_deref(),
+        Some("User was using a logical replication slot that must be invalidated.")
+    );
+    assert_eq!(RECOVERY_CONFLICT_PENDING_REASONS.with(std::cell::Cell::get), 0);
+    assert!(!init_small::globals::InterruptPending());
+}
+
+#[test]
 fn idle_and_transaction_timeout_arms() {
     install_test_seams();
 

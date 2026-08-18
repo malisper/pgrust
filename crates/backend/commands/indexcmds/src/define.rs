@@ -37,12 +37,6 @@ const INDOPTION_DESC: i16 = 1 << 0;
 const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
 const ATTRIBUTE_GENERATED_VIRTUAL: i8 = b'v' as i8;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: indexcmds {what}")
-}
-
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -294,7 +288,12 @@ struct IndexAmInfo {
 // spgutils.c:51, brin.c:257).
 fn resolve_index_am(name: Option<&str>) -> PgResult<IndexAmInfo> {
     let Some(mut name) = name else {
-        unported("DefineIndex: access method None (AMNAME lookup)");
+        // C never sees a NULL accessMethod (gram.y and parse_utilcmd fill in
+        // DEFAULT_INDEX_TYPE); a None here is an unported producer lane.
+        return Err(err(
+            "index definitions without an access method are not supported yet".to_string(),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
     };
     let mut probe = index_am_probe(name)?;
     if probe.is_none() && name == "rtree" {
@@ -2126,6 +2125,21 @@ mod tests {
         ] {
             assert_eq!(super::index_am_flags(kind).2, canmulticol, "{kind:?}");
         }
+    }
+
+    // Panic-hygiene pin (2026-08-18): an IndexStmt with no access method
+    // (never produced by the grammar, which defaults to btree) raises a
+    // clean 0A000 instead of panicking.
+    #[test]
+    fn resolve_index_am_none_errors_instead_of_panicking() {
+        let Err(e) = super::resolve_index_am(None) else {
+            panic!("resolve_index_am(None) must error");
+        };
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(
+            e.message(),
+            "index definitions without an access method are not supported yet"
+        );
     }
 }
 

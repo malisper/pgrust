@@ -1,7 +1,7 @@
 // getObjectDescription / getObjectIdentity arms for the live object classes;
-// all other classes are named panics.
+// all other classes raise clean errors.
 use crate::{
-    unported, AttrDefaultRelationId, CastRelationId, ConstraintRelationId, ObjectAddress,
+    AttrDefaultRelationId, CastRelationId, ConstraintRelationId, ObjectAddress,
     PolicyRelationId,
     ProcedureRelationId, PublicationNamespaceRelationId, PublicationRelRelationId,
     PublicationRelationId, RewriteRelationId, SubscriptionRelationId, TriggerRelationId,
@@ -836,7 +836,12 @@ pub fn getObjectDescription(
                     format!("unsupported object class: {other}"),
                 ));
             }
-            unported(&format!("getObjectDescription object class {other}"))
+            // Classes C describes but this port has not implemented yet:
+            // clean 0A000 (pg_describe_object/DROP reach this from SQL).
+            Err(crate::err(
+                ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("object descriptions for object class {other} are not supported yet"),
+            ))
         }
     }
 }

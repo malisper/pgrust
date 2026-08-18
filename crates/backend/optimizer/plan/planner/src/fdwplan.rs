@@ -31,10 +31,33 @@ pub type GetForeignPlan = for<'mcx> fn(
     Option<Node<'mcx>>,
 ) -> PgResult<Node<'mcx>>;
 
+/// AddForeignUpdateTargets: the provider registers row-identity junk columns
+/// through `register(expr, rowid_name)` — the caller adapts it to its tlist
+/// (preprocess_targetlist) or add_row_identity_var (inheritance expansion).
+pub type AddForeignUpdateTargets = for<'mcx> fn(
+    mcx::Mcx<'mcx>,
+    u32, // rtindex
+    &mut dyn FnMut(Node<'mcx>, &'static str) -> PgResult<()>,
+) -> PgResult<()>;
+
+/// PlanForeignModify: returns the per-result-rel fdw_private list appended to
+/// ModifyTable.fdwPrivLists (createplan.c make_modifytable's FDW loop).
+pub type PlanForeignModify = for<'mcx> fn(
+    &mut PlannerRun<'mcx>,
+    &types_nodes::plannodes::ModifyTable<'mcx>,
+    u32,   // resultRelation rti
+    usize, // subplan_index
+) -> PgResult<NodeList<'mcx>>;
+
 pub struct FdwPlanRoutine {
     pub get_foreign_rel_size: for<'mcx> fn(&mut PlannerRun<'mcx>, RelId, Oid) -> PgResult<()>,
     pub get_foreign_paths: for<'mcx> fn(&mut PlannerRun<'mcx>, RelId, Oid) -> PgResult<()>,
     pub get_foreign_plan: GetForeignPlan,
+    pub add_foreign_update_targets: Option<AddForeignUpdateTargets>,
+    pub plan_foreign_modify: Option<PlanForeignModify>,
+    /// IsForeignPathAsyncCapable; None = never async (C's NULL slot).
+    pub is_foreign_path_async_capable:
+        Option<for<'mcx> fn(&PlannerRun<'mcx>, PathId) -> bool>,
 }
 
 static ROUTINES: [OnceLock<&'static FdwPlanRoutine>; NUM_FDW_KINDS] =

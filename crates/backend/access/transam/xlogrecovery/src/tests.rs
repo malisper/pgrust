@@ -208,3 +208,106 @@ fn consistency_check_flag_bit_pinned() {
     // xlogrecord.h: #define XLR_CHECK_CONSISTENCY 0x02
     assert_eq!(XLR_CHECK_CONSISTENCY, 0x02);
 }
+
+// The mask+compare lane of verify_backup_page_consistency, exercised without
+// WAL machinery: pd_lsn parsing, mask-forgives-hint-divergence, and
+// mask-preserves-real-divergence (the FATAL trigger condition).
+mod mask_compare_lane {
+    use super::super::{page_lsn, BLCKSZ};
+    use types_core::RmgrIds;
+    use types_storage::bufpage::{PageMut, PAI_IS_HEAP};
+    use types_tuple::htup::{HeapTupleHeaderData, SizeofHeapTupleHeader};
+    use types_tuple::{HEAP_XMAX_COMMITTED, HEAP_XMIN_COMMITTED};
+
+    #[repr(align(8))]
+    struct P([u8; BLCKSZ]);
+
+    fn pm(p: &mut P) -> PageMut<'_> {
+        let ptr = core::ptr::NonNull::new(p.0.as_mut_ptr()).unwrap();
+        // SAFETY: owned MAXALIGNed BLCKSZ image, exclusively borrowed.
+        unsafe { PageMut::from_raw(ptr) }
+    }
+
+    // PageGetLSN over the two PageXLogRecPtr u32 halves.
+    #[test]
+    fn page_lsn_matches_page_set_lsn() {
+        let mut p = P([0u8; BLCKSZ]);
+        let mut page = pm(&mut p);
+        page.init(0);
+        page.set_lsn(0x1122_3344_5566_7788);
+        assert_eq!(page_lsn(&p.0), 0x1122_3344_5566_7788);
+        assert_eq!(page_lsn(&[0u8; BLCKSZ]), 0);
+    }
+
+    fn heap_page_with_tuple(lsn: u64, infomask: u16, payload: u8) -> P {
+        let mut p = P([0u8; BLCKSZ]);
+        let mut page = pm(&mut p);
+        page.init(0);
+        let mut body = [payload; SizeofHeapTupleHeader + 8];
+        // Zero the header portion so only t_infomask below differs.
+        body[..SizeofHeapTupleHeader].fill(0);
+        page.add_item(&body, 0, PAI_IS_HEAP).unwrap();
+        page.set_lsn(lsn);
+        let off = page.as_ref().item_id(1).lp_off() as usize;
+        // SAFETY: the item just added stores a HeapTupleHeaderData at `off`.
+        let htup = unsafe { &mut *(page.as_mut_ptr().add(off) as *mut HeapTupleHeaderData) };
+        htup.t_infomask = infomask;
+        p
+    }
+
+    // Replay side and primary FPI differing only in maskable state (pd_lsn,
+    // hint bits) must compare equal after rm_mask — no false FATAL.
+    #[test]
+    fn heap_mask_forgives_lsn_and_hint_bit_divergence() {
+        let mask = rmgr::GetRmgr(RmgrIds::RM_HEAP_ID as u8)
+            .unwrap()
+            .rm_mask
+            .expect("heap rmgr has rm_mask");
+        let mut replay = heap_page_with_tuple(0x0AAA_0000, HEAP_XMIN_COMMITTED, 0x5A);
+        let mut primary =
+            heap_page_with_tuple(0x0BBB_0000, HEAP_XMIN_COMMITTED | HEAP_XMAX_COMMITTED, 0x5A);
+        assert_ne!(replay.0[..], primary.0[..]);
+        mask(&mut replay.0, 7).unwrap();
+        mask(&mut primary.0, 7).unwrap();
+        assert_eq!(replay.0[..], primary.0[..]);
+    }
+
+    // A genuine data divergence (different tuple payload) must survive the
+    // mask — this inequality is exactly what raises the C-text FATAL.
+    #[test]
+    fn heap_mask_preserves_real_data_divergence() {
+        let mask = rmgr::GetRmgr(RmgrIds::RM_HEAP_ID as u8)
+            .unwrap()
+            .rm_mask
+            .expect("heap rmgr has rm_mask");
+        let mut replay = heap_page_with_tuple(0x0AAA_0000, 0, 0x5A);
+        let mut primary = heap_page_with_tuple(0x0AAA_0000, 0, 0xA5);
+        mask(&mut replay.0, 7).unwrap();
+        mask(&mut primary.0, 7).unwrap();
+        assert_ne!(replay.0[..], primary.0[..]);
+    }
+
+    // Every rmgr with rm_mask in C 18.3 rmgrlist.h has one here, and only
+    // those — an unported mask would silently weaken the consistency check.
+    #[test]
+    fn mask_coverage_matches_c_rmgrlist() {
+        use RmgrIds::*;
+        let masked = [
+            RM_HEAP2_ID,
+            RM_HEAP_ID,
+            RM_BTREE_ID,
+            RM_HASH_ID,
+            RM_GIN_ID,
+            RM_GIST_ID,
+            RM_SEQ_ID,
+            RM_SPGIST_ID,
+            RM_BRIN_ID,
+            RM_GENERIC_ID,
+        ];
+        for id in 0..=RM_LOGICALMSG_ID as u8 {
+            let has = rmgr::GetRmgr(id).unwrap().rm_mask.is_some();
+            let expect = masked.iter().any(|&m| m as u8 == id);
+            assert_eq!(has, expect, "rmid {id} mask presence");
+        }
+    }
+}

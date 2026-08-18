@@ -10,5 +10,7 @@ mcx = { path = "../../../../_support/mcx" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 pglz = { path = "../../../../common/pglz" }
+# lz4 TOAST codec, block mode; same crate already in-tree for basebackup.
+lz4_flex = "0.11"
 detoast_seams = { path = "../detoast_seams" }
 toast_internals_seams = { path = "../toast_internals_seams" }

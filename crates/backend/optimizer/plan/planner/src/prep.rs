@@ -850,7 +850,7 @@ fn add_merge_junk_vars<'mcx>(
 
 fn add_row_identity_columns<'mcx>(
     mcx: Mcx<'mcx>,
-    _run: &PlannerRun<'mcx>,
+    run: &PlannerRun<'mcx>,
     tlist: &NodeList<'mcx>,
     result_relation: i32,
     rel: &types_rel::Relation<'mcx>,
@@ -858,14 +858,39 @@ fn add_row_identity_columns<'mcx>(
     // Non-target auto rowmarks (preprocess_rowmarks) coexist with the row
     // identity; C's add_row_identity_columns has no rowMarks interaction.
     if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        // C's default wholerow arm (no in-tree FDW installs
-        // AddForeignUpdateTargets); execution errors at CheckValidResultRel.
-        let var =
-            Node::mk_var(mcx, result_relation, 0, types_core::catalog::RECORDOID, -1, 0, 0)?;
         let mut new_tlist = tlist.clone_in(mcx)?;
-        let tle =
-            Node::mk_target_entry(mcx, var, new_tlist.len() as i16 + 1, Some("wholerow"), true)?;
-        new_tlist.lappend(mcx, tle)?;
+        let kind = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, rel.rd_id)?;
+        if let Some(f) = crate::fdwplan::fdw_plan_routine(kind).add_foreign_update_targets {
+            f(mcx, result_relation as u32, &mut |expr, name| {
+                let tle = Node::mk_target_entry(
+                    mcx,
+                    expr,
+                    new_tlist.len() as i16 + 1,
+                    Some(name),
+                    true,
+                )?;
+                new_tlist.lappend(mcx, tle)
+            })?;
+        }
+        // Wholerow: UPDATE always (unchanged columns for the NEW tuple);
+        // otherwise only when delete row triggers need the OLD row.
+        let need_wholerow = run.parse().commandType == CmdType::CMD_UPDATE || {
+            rel.rd_hastriggers
+                && relcache_seams::relation_get_trigger_desc::call(rel.rd_id)?
+                    .is_some_and(|t| t.trig_delete_after_row || t.trig_delete_before_row)
+        };
+        if need_wholerow {
+            let var =
+                Node::mk_var(mcx, result_relation, 0, types_core::catalog::RECORDOID, -1, 0, 0)?;
+            let tle = Node::mk_target_entry(
+                mcx,
+                var,
+                new_tlist.len() as i16 + 1,
+                Some("wholerow"),
+                true,
+            )?;
+            new_tlist.lappend(mcx, tle)?;
+        }
         return Ok(new_tlist);
     }
     if rel.rd_rel.relkind != types_rel::RELKIND_RELATION
