@@ -1162,6 +1162,22 @@ fn set_time_zone() {
     assert_eq!(n.kind, VAR_SET_DEFAULT);
 }
 
+// set_rest_more: NAMES opt_encoding -> SET client_encoding (gram.y:1741).
+#[test]
+fn set_names() {
+    use types_nodes::parsenodes::VariableSetKind::*;
+    let n = set_of(only_stmt(&parse("SET NAMES 'UTF8';")));
+    assert_eq!((n.kind, n.name), (VAR_SET_VALUE, Some("client_encoding")));
+    let c = n.args.nth(0).as_a_const().unwrap();
+    assert!(matches!(c.val, Some(ValUnion::String(s)) if s.sval == "UTF8"));
+
+    // opt_encoding DEFAULT / empty both fold to SET DEFAULT.
+    let n = set_of(only_stmt(&parse("SET NAMES DEFAULT;")));
+    assert_eq!((n.kind, n.name), (VAR_SET_DEFAULT, Some("client_encoding")));
+    let n = set_of(only_stmt(&parse("SET NAMES;")));
+    assert_eq!((n.kind, n.name), (VAR_SET_DEFAULT, Some("client_encoding")));
+}
+
 fn xact_modes<'a>(n: &types_nodes::parsenodes::TransactionStmt<'a>) -> Vec<(&'a str, i32)> {
     n.options
         .iter()
@@ -2765,15 +2781,6 @@ fn udeescape_hard_failures_carry_an_error_cursor() {
 // The full reachable-rule enumeration: notes/audits/unported-grammar-actions.md.
 #[test]
 fn unported_grammar_action_errors_instead_of_panicking() {
-    // set_rest_more: SET NAMES opt_encoding (gram.y:1741).
-    let e = parse_err("SET NAMES 'UTF8'");
-    assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
-    assert!(
-        e.message().contains("not yet implemented (grammar rule"),
-        "unexpected message: {}",
-        e.message()
-    );
-
     // AlterObjectDependsStmt (gram.y:9986-10053) is ported: all six object
     // forms plus the NO DEPENDS variant parse.
     parse("ALTER FUNCTION f(int) DEPENDS ON EXTENSION e");

@@ -5244,6 +5244,26 @@ impl<'mcx> Parser<'mcx> {
                 n.location = view.l(2);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // set_rest_more: NAMES opt_encoding -> SET client_encoding
+            // (no/DEFAULT encoding = SET DEFAULT).
+            216 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_VALUE;
+                n.name = Some("client_encoding");
+                n.location = view.l(2);
+                match opt_str(view.v(2)) {
+                    Some(s) => {
+                        let c = Node::mk_a_const(
+                            mcx,
+                            Some(ValUnion::String(types_nodes::String { sval: s })),
+                            view.l(2),
+                        )?;
+                        n.args = NodeList::make1(mcx, c)?;
+                    }
+                    None => n.kind = VariableSetKind::VAR_SET_DEFAULT,
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             217 => {
                 let mut n = Node::build::<VariableSetStmt>(mcx)?;
                 n.kind = VariableSetKind::VAR_SET_VALUE;
