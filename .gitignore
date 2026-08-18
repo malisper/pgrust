@@ -12,6 +12,7 @@ mutants.out/
 mutants.out.old/
 /cpg-cov/
 /cpg-ref/
+/cpg-src/
 /cpg-icu/
 /cpg-icu-build.out
 # crashdiff (W1) work root: B-side scratch checkout, per-seed run evidence
