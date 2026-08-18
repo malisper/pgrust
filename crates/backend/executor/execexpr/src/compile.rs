@@ -760,7 +760,7 @@ fn build_agg_trans_masked<'mcx>(
         let init_strict = flinfo.fn_strict && spec.init_value_is_null;
         let fn_strict = flinfo.fn_strict;
         if let Some(ord) = spec.ordered {
-            build_agg_trans_ordered(&mut state, mcx, spec, ord, fn_strict, params)?;
+            build_agg_trans_ordered(&mut state, mcx, spec, ord, fn_strict, params, sub)?;
             continue;
         }
         let frame = FuncFrame::new_in(mcx, flinfo, nargs as u16, spec.inputcollid)?;
@@ -1052,6 +1052,7 @@ fn build_agg_trans_ordered<'mcx>(
     ord: crate::compile::AggOrderedSpec,
     fn_strict: bool,
     params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<()> {
     debug_assert!(ord.num_trans_inputs as usize <= spec.args.len());
     // C evaluates the FILTER before the aggregated arguments; a false filter
@@ -1059,7 +1060,12 @@ fn build_agg_trans_ordered<'mcx>(
     let mut filter_jump: Option<usize> = None;
     if let Some(f) = spec.aggfilter {
         let rout = state.result_out();
-        init_expr_rec(f, state, mcx, rout, None, params, None)?;
+        // Thread the subplan driver: a DISTINCT/ORDER BY aggregate's FILTER
+        // may contain a SubPlan (e.g. `FILTER (WHERE x IN (SELECT ...))`).
+        // C's ExecBuildAggTrans compiles the filter in the parent node's expr
+        // context, so its SubPlans resolve; passing None here left the
+        // SubPlan without a driver (init_subplan_expr's None arm).
+        init_expr_rec(f, state, mcx, rout, None, params, sub)?;
         filter_jump = Some(state.steps.len());
         push_step(
             state,
