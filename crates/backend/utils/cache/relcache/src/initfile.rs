@@ -3,7 +3,10 @@ use std::rc::Rc;
 
 use mcx::{Mcx, MemoryContext, PgString, PgVec};
 use types_core::{InvalidSubTransactionId, Oid, RECORDOID};
-use types_error::{PgError, PgResult, DEBUG1, ERRCODE_INTERNAL_ERROR, WARNING};
+use types_error::{
+    PgError, PgResult, DEBUG1, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR,
+    ERRCODE_UNDEFINED_OBJECT, FATAL, PANIC, WARNING,
+};
 use types_rel::{FormData_pg_class, FormData_pg_index, RelationData, RELKIND_INDEX};
 use types_rel::{
     AutoVacOpts, BTOptions, BrinOptions, GinOptions, GistOptions, HashOptions, RdOptions,
@@ -218,8 +221,18 @@ fn finish_relcache_entries() -> PgResult<()> {
 #[inline(never)]
 fn cache_lookup_failed(relid: Oid) -> Box<PgError> {
     Box::new(
-        PgError::error(format!("cache lookup failed for relation {relid}"))
-            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        PgError::new(FATAL, format!("cache lookup failed for relation {relid}"))
+            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+    )
+}
+
+fn critical_index_missing(indexoid: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            PANIC,
+            format!("could not open critical system index {indexoid}"),
+        )
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
     )
 }
 
@@ -229,10 +242,7 @@ fn load_critical_index(indexoid: Oid, heapoid: Oid) -> PgResult<()> {
     lmgr::LockRelationOid(indexoid, AccessShareLock)?;
     let ird = build::RelationBuildDesc(indexoid, true)?;
     if ird.is_none() {
-        return Err(Box::new(
-            PgError::error(format!("could not open critical system index {indexoid}"))
-                .with_sqlstate(ERRCODE_INTERNAL_ERROR),
-        ));
+        return Err(critical_index_missing(indexoid));
     }
     // C: rd_isnailed = true, rd_refcnt = 1 (the nail is the flag here).
     with_state(|st| {
@@ -1398,4 +1408,23 @@ fn remove_in_dir(tblspc: &Path) {
         fd::FreeDir(dir)?;
         Ok(())
     })();
+}
+
+#[cfg(test)]
+mod hunt_sqlstate {
+    use super::*;
+
+    #[test]
+    fn phase3_cache_lookup_failed_is_fatal_42704() {
+        let e = cache_lookup_failed(1259);
+        assert_eq!(e.sqlstate(), ERRCODE_UNDEFINED_OBJECT);
+        assert_eq!(e.level(), FATAL);
+    }
+
+    #[test]
+    fn load_critical_index_miss_is_panic_xx001() {
+        let e = critical_index_missing(2658);
+        assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        assert_eq!(e.level(), PANIC);
+    }
 }
