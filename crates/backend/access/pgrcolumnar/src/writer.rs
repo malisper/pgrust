@@ -3693,6 +3693,51 @@ mod dict_frames_tests {
         assert_eq!(decode_all(&control, n), rows);
     }
 
+    // #340: an out-of-range dictionary code in the chunk payload (bit rot,
+    // a foreign/copied part) is rejected at decode_granule_codes with a
+    // DATA_CORRUPTED PgError instead of flowing into the executor's
+    // unchecked *dict.add(code) and dereferencing a wild pointer. A valid
+    // part on the same shape decodes cleanly.
+    #[test]
+    fn corrupt_dict_code_is_rejected_not_deref() {
+        let n = 400;
+        let ndv = 5; // width 1 (<=256 distinct); first code byte holds a code
+        let rows = dict_rows(n, ndv);
+        let mut body =
+            encode(&rows, &CodecCtx::new(CodecChoice::Lz4, ZSTD_LEVEL_DEFAULT, false));
+        let ndict = {
+            let cv = ChunkView::at(&body, 0, n as u32);
+            assert!(matches!(cv.hdr.encoding, Encoding::Dict | Encoding::Lz4Dict), "premise: dict");
+            assert_eq!(cv.hdr.width, 1, "premise: 1-byte codes");
+            let (mut codes, mut dict, mut arena, mut lazy) =
+                (Vec::new(), Vec::new(), Vec::new(), None);
+            assert!(cv.decode_granule_codes(0, &mut codes, &mut dict, &mut arena, &mut lazy));
+            dict.len()
+        };
+        assert!(ndict as u32 <= ndv as u32);
+
+        // Corrupt the first code byte to a value >= ndict.
+        let poff = ChunkView::at(&body, 0, n as u32).test_payload_off();
+        body[poff] = 0xFF;
+
+        let cv = ChunkView::at(&body, 0, n as u32);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (mut codes, mut dict, mut arena, mut lazy) =
+                (Vec::new(), Vec::new(), Vec::new(), None);
+            let _ = cv.decode_granule_codes(0, &mut codes, &mut dict, &mut arena, &mut lazy);
+        }));
+        let payload = caught.expect_err("corrupt code must be rejected, not decoded");
+        let err = payload
+            .downcast::<Box<::types_error::PgError>>()
+            .expect("rejection carries a PgError payload");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+        assert!(
+            err.message().contains("dictionary code") && err.message().contains("out of range"),
+            "message names the corruption: {}",
+            err.message()
+        );
+    }
+
     // Default arm (CodecCtx::new, env unset): the framed bit never appears
     // — frozen-bank byte behavior.
     #[test]

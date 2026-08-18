@@ -33,6 +33,18 @@ fn arena_frame(arena: &mut Vec<u64>, raw_len: usize) -> &mut [u8] {
     }
 }
 
+#[cold]
+#[inline(never)]
+fn corrupt_code(code: u32, ndict: u32, enc: crate::format::Encoding, g: usize) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "pgrcolumnar: corrupt part file: dictionary code {code} out of range \
+             (dictionary has {ndict} entries; encoding {enc:?}, granule {g})"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_DATA_CORRUPTED),
+    )
+}
+
 pub fn read_header(hdr: &[u8]) -> PgResult<(u64, u64, u32)> {
     let version = get_u32(hdr, 8);
     if get_u64(hdr, 0) != CB_MAGIC || !(CB_VERSION_V1..=CB_VERSION).contains(&version) {
@@ -1312,6 +1324,11 @@ impl<'a> ChunkView<'a> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_payload_off(&self) -> usize {
+        self.payload_off
+    }
+
     fn payload(&self) -> &'a [u8] {
         &self.part[self.payload_off..self.payload_off + self.hdr.payload_len as usize]
     }
@@ -1515,6 +1532,22 @@ impl<'a> ChunkView<'a> {
         // SAFETY: the zipped loops above wrote exactly the first `n` slots of
         // the spare capacity reserved above.
         unsafe { codes.set_len(n) };
+        // #340: the executor dict lane consumes these codes through unchecked
+        // pointer adds (SoaDictTable::datum -> *dict.add(code)); the filler
+        // contract `code < ndict` (ndict == dict.len() downstream; both
+        // builders push exactly ndv entries before returning) must hold
+        // against the on-file bytes. A corrupt/foreign code otherwise reads a
+        // machine word outside the dictionary allocation and, dereferenced as
+        // a text pointer, SIGSEGVs the whole process (backends are threads).
+        // Validate once, branch-free max; on violation panic_any(PgError) —
+        // the message loop recovers it as ERRCODE_DATA_CORRUPTED (node_funcs
+        // precedent for an ereport from an infallible call chain), aborting
+        // the transaction instead of crashing the server.
+        let ndict = dict.len() as u32;
+        let maxc = codes.iter().copied().fold(0u32, u32::max);
+        if maxc >= ndict {
+            std::panic::panic_any(corrupt_code(maxc, ndict, self.hdr.encoding, g));
+        }
         true
     }
 
