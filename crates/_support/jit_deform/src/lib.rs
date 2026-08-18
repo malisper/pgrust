@@ -224,7 +224,16 @@ mod imp {
 
     pub(crate) fn alloc_code(words: &[u32]) -> Option<CodeAlloc> {
         let len = words.len() * 4;
-        debug_assert!(len <= CHUNK_BYTES);
+        // A kernel larger than one chunk can never fit the bump arena. This
+        // MUST be a real branch, not a debug_assert: in release the assert
+        // compiles out and the copy_nonoverlapping below writes `len` bytes
+        // into a CHUNK_BYTES mapping -> out-of-bounds write (the
+        // io_combine_limit debug-assert-masking class). Fail open to the
+        // interpreter, exactly like the arena-full path (install_code's
+        // contract: None => caller falls back to its interpreter).
+        if len > CHUNK_BYTES {
+            return None;
+        }
         ARENA.with(|arena| {
             let mut arena = arena.borrow_mut();
             let chunk = match arena.iter().find(|c| c.used.get() + len <= CHUNK_BYTES) {

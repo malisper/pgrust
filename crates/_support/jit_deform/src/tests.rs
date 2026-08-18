@@ -260,3 +260,32 @@ fn arena_reuses_chunks() {
     assert!(held.len() >= 100, "arena unusably small: {}", held.len());
     assert!(held.len() < 100_000, "arena cap did not fail open");
 }
+
+// W5-A regression: a compiled expression program larger than one arena chunk
+// (>64KiB) must fail open to None, NEVER write out of bounds. Pre-fix a
+// debug_assert masked this; release built the OOB copy_nonoverlapping. Asserts
+// observed behavior (return value), not the debug_assert, per the
+// debug-assert-masking law — so it is meaningful in a release build too.
+#[test]
+fn oversized_code_block_fails_open_not_oob() {
+    // CHUNK_BYTES = 64KiB = 16384 u32 words.
+    let one_chunk_words = (64 * 1024) / 4;
+
+    // Exactly one chunk still installs (len <= CHUNK_BYTES boundary).
+    let full = vec![0u32; one_chunk_words];
+    assert!(
+        super::install_code(&full).is_some(),
+        "a kernel of exactly CHUNK_BYTES must still install"
+    );
+
+    // One word over a chunk: must refuse cleanly, not panic, not corrupt.
+    let over = vec![0u32; one_chunk_words + 1];
+    assert!(
+        super::install_code(&over).is_none(),
+        "an over-CHUNK_BYTES kernel must fail open to the interpreter"
+    );
+
+    // Far over (256KiB): still just refuses.
+    let way_over = vec![0u32; one_chunk_words * 4];
+    assert!(super::install_code(&way_over).is_none());
+}
