@@ -4289,12 +4289,16 @@ fn cb_zone_from_parts(
     konst: ::datum::Datum,
 ) -> Option<(u16, ::tableam::ZoneCmp, i64)> {
     use ::tableam::ZoneCmp as Z;
-    let (cmp, cw) = cb_zone_cmp(fn_oid)?;
-    let val = match cw {
-        2 => konst.as_i16() as i64,
-        4 => konst.as_i32() as i64,
-        _ => konst.as_i64(),
-    };
+    let (cmp, _cw) = cb_zone_cmp(fn_oid)?;
+    // M4-S4 (the lx4seam commuted-width CRITICAL's twin, fixed in the
+    // same act): read the const at FULL word width — signed datum words
+    // are sign-extended by construction, so `as_i64` is width-correct
+    // for every const; the table width is arg1's (the const side of the
+    // UNCOMMUTED pattern only), so a narrow read took the WRONG
+    // operand's width on commuted cross-type conjuncts and pruned
+    // granules against a truncated constant (`WHERE 100000 = int2col`
+    // pruned on -31072 — wrongly ERASING matching granules).
+    let val = konst.as_i64();
     let cmp = if commuted {
         match cmp {
             Z::Lt => Z::Gt,
