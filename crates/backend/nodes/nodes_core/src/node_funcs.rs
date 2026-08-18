@@ -180,10 +180,16 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().reftypmod,
+        // If all the elements agree on type/typmod, return that typmod,
+        // else -1 (C nodeFuncs.c exprTypmod T_ArrayExpr).
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().unwrap();
+            let commontype = if a.multidims { a.array_typeid } else { a.element_typeid };
+            uniform_args_typmod(&a.elements, commontype)
+        }
         NodeTag::T_MergeSupportFunc
         | NodeTag::T_OpExpr
         | NodeTag::T_ScalarArrayOpExpr
-        | NodeTag::T_ArrayExpr
         | NodeTag::T_Aggref
         | NodeTag::T_GroupingFunc
         | NodeTag::T_WindowFunc

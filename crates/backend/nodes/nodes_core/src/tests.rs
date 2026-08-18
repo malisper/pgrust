@@ -784,3 +784,52 @@ fn expr_accessors_inference_elem_and_typmod_default() {
     // InferenceElem has no exprTypmod arm in C: default -1.
     assert_eq!(node_funcs::expr_typmod(ie), -1);
 }
+
+#[test]
+fn array_expr_typmod_agrees_or_minus_one() {
+    // C nodeFuncs.c exprTypmod T_ArrayExpr: all elements agreeing on
+    // type+typmod yield that typmod (timetz(0)[] keeps 0), else -1.
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    const TIMETZOID: types_core::Oid = 1266;
+    fn timetz(mcx: Mcx<'_>, typmod: i32) -> Node<'_> {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::Const {
+                consttype: TIMETZOID,
+                consttypmod: typmod,
+                constcollid: 0,
+                constlen: 12,
+                constvalue: datum::Datum::from_i32(0),
+                constisnull: true,
+                constbyval: false,
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+    fn arr<'m>(mcx: Mcx<'m>, elems: &[Node<'m>]) -> Node<'m> {
+        Node::mk(
+            mcx,
+            types_nodes::ArrayExpr {
+                array_typeid: 1270, // _timetz
+                element_typeid: TIMETZOID,
+                elements: NodeList::from_slice(mcx, elems).unwrap(),
+                list_start: -1,
+                list_end: -1,
+                location: -1,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+    let e0a = timetz(mcx, 0);
+    let e0b = timetz(mcx, 0);
+    let e3 = timetz(mcx, 3);
+    assert_eq!(node_funcs::expr_typmod(arr(mcx, &[e0a, e0b])), 0);
+    assert_eq!(node_funcs::expr_typmod(arr(mcx, &[e0a, e3])), -1);
+    assert_eq!(node_funcs::expr_typmod(arr(mcx, &[])), -1);
+    // element type disagreeing with the common type is -1
+    let p = extern_param(mcx, 1);
+    assert_eq!(node_funcs::expr_typmod(arr(mcx, &[p])), -1);
+}

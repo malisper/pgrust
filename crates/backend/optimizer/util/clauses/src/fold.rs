@@ -401,11 +401,13 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 },
             )?;
             if all_const {
+                // C ece_evaluate_expr passes exprTypmod(node): elements
+                // agreeing on typmod keep it on the folded array Const.
                 return clauses_seams::evaluate_expr::call(
                     cx.mcx,
                     new_node,
                     a.array_typeid,
-                    -1,
+                    nodes_core::node_funcs::expr_typmod(new_node),
                     a.array_collid,
                 )
                 .map(Some);
