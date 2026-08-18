@@ -16,7 +16,7 @@ use elog::{elog, ereport};
 use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo, BLCKSZ};
 use types_storage::{BufferIsValid, InvalidBuffer, ReadBufferMode};
 use types_error::{
-    ErrorLevel, ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERROR, FATAL, LOG, PANIC,
+    ErrorLevel, ErrorLocation, PgResult, DEBUG1, DEBUG2, ERROR, FATAL, LOG, PANIC,
     WARNING,
 };
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
@@ -166,6 +166,14 @@ pub fn XLogRequestWalReceiverReply() {
     DO_REQUEST_WALRCV_REPLY.set(true);
 }
 
+// C XLogPageRead attaches an errcode to each failed page read (#1415):
+// ERRCODE_DATA_CORRUPTED for a short read, file-access for an I/O error.
+enum ReadFailCode {
+    None,
+    Corrupted,
+    FileAccess(i32),
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum XLogSource {
     Any,
@@ -294,13 +302,25 @@ impl PageSource {
         emode
     }
 
-    fn report(&mut self, emode: ErrorLevel, rec_ptr: XLogRecPtr, msg: String) -> PgResult<()> {
+    fn report(
+        &mut self,
+        emode: ErrorLevel,
+        rec_ptr: XLogRecPtr,
+        msg: String,
+        code: ReadFailCode,
+    ) -> PgResult<()> {
         let emode = self.emode_for_corrupt_record(emode, rec_ptr);
-        if emode == PANIC || emode == FATAL {
-            return Err(Box::new(PgError::new(emode, msg)));
-        }
-        let _ = elog(emode, msg);
-        Ok(())
+        // ereport(emode, (errcode(..), errmsg(..))): logs at LOG/lower, returns
+        // Err at ERROR/FATAL/PANIC — matching C's XLogPageRead ereport, whose
+        // errcode (ERRCODE_DATA_CORRUPTED for a short read, file-access for an
+        // I/O error) previously went unattached here (#1415).
+        let b = ereport(emode);
+        let b = match code {
+            ReadFailCode::None => b,
+            ReadFailCode::Corrupted => b.errcode(::types_error::ERRCODE_DATA_CORRUPTED),
+            ReadFailCode::FileAccess(errnum) => b.with_saved_errno(errnum).errcode_for_file_access(),
+        };
+        b.errmsg_internal(msg).finish(loc("XLogPageRead"))
     }
 
     fn xlog_file_read(
@@ -823,20 +843,30 @@ impl XLogReaderRoutine for PageSource {
                 let fname =
                     transam_xlog::XLogFileName(self.cur_file_tli, self.read_seg_no, wal_segsz);
                 let emode = self.emode;
-                let msg = if r < 0 {
-                    format!(
-                        "could not read from WAL segment {fname}, LSN {}, offset {}: {errno}",
-                        lsn_fmt(target_page_ptr),
-                        self.read_off
+                let (msg, code) = if r < 0 {
+                    (
+                        format!(
+                            "could not read from WAL segment {fname}, LSN {}, offset {}: {errno}",
+                            lsn_fmt(target_page_ptr),
+                            self.read_off
+                        ),
+                        ReadFailCode::FileAccess(errno.raw_os_error().unwrap_or(0)),
                     )
                 } else {
-                    format!(
-                        "could not read from WAL segment {fname}, LSN {}, offset {}: read {r} of {XLOG_BLCKSZ}",
-                        lsn_fmt(target_page_ptr),
-                        self.read_off
+                    // A short read (0 < r < XLOG_BLCKSZ) is DATA_CORRUPTED in C,
+                    // not end-of-WAL: preallocated segments always have the full
+                    // page present, so a partial read is an I/O anomaly. End of
+                    // WAL is detected by page-header validation on a full read.
+                    (
+                        format!(
+                            "could not read from WAL segment {fname}, LSN {}, offset {}: read {r} of {XLOG_BLCKSZ}",
+                            lsn_fmt(target_page_ptr),
+                            self.read_off
+                        ),
+                        ReadFailCode::Corrupted,
                     )
                 };
-                self.report(emode, target_page_ptr + req_len as u64, msg)?;
+                self.report(emode, target_page_ptr + req_len as u64, msg, code)?;
             } else {
                 v.seg.ws_tli = self.cur_file_tli;
                 // In standby mode, sanity-check a segment-start page header
@@ -861,6 +891,7 @@ impl XLogReaderRoutine for PageSource {
                             lsn_fmt(target_page_ptr),
                             target_page_off
                         ),
+                        ReadFailCode::None,
                     )?;
                 } else {
                 let read_len = if self.read_source == XLogSource::Stream
@@ -929,7 +960,7 @@ fn read_record(
                 if let Some(msg) = rec.reader.errormsg() {
                     let msg = msg.to_string();
                     let end = rec.reader.v.EndRecPtr;
-                    rec.src.report(emode, end, msg)?;
+                    rec.src.report(emode, end, msg, ReadFailCode::None)?;
                 }
             }
             Some(_) => {
@@ -948,6 +979,7 @@ fn read_record(
                             "unexpected timeline ID {latest_page_tli} in WAL segment {fname}, LSN {}, offset {offset}",
                             lsn_fmt(latest_page_ptr)
                         ),
+                        ReadFailCode::None,
                     )?;
                     have_record = false;
                 }
