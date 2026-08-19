@@ -4,7 +4,7 @@
 //
 // LOUD (not ported): DEFERRABLE safe snapshots (GetSafeSnapshot), snapshot
 // import (SetSerializableTransactionSnapshot), parallel-query sharing, 2PC
-// lock transfer, SLRU summarization (SummarizeOldestCommittedSxact/SerialAdd).
+// lock transfer.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -46,7 +46,10 @@ use types_storage::LWTRANCHE_PER_XACT_PREDICATE_LIST;
 
 use crate::ilist::*;
 use crate::internals::*;
-use crate::serial::{SerialGetMinConflictCommitSeqNo, SerialInit, SerialSetActiveSerXmin};
+use crate::serial::{
+    SerialAdd, SerialGetMinConflictCommitSeqNo, SerialInit, SerialSetActiveSerXmin,
+    SerialShmemSize,
+};
 
 thread_local! {
     static MY_SERIALIZABLE_XACT: Cell<*mut SERIALIZABLEXACT> = const { Cell::new(ptr::null_mut()) };
@@ -578,8 +581,7 @@ pub fn PredicateLockShmemSize(max_prepared_xacts: i32) -> Size {
     size += RWConflictPoolHeaderDataSize();
     size += max_table_size as usize * RWConflictDataSize();
     size += size_of::<dlist_head>();
-    // C adds SerialControlData + the pg_serial SLRU; that store is a loud
-    // panic here (serial.rs), so its bytes are not requested.
+    size += SerialShmemSize();
     size
 }
 
@@ -676,6 +678,49 @@ pub fn AttachSerializableXact(handle: usize) -> PgResult<()> {
     Ok(())
 }
 
+// Free up shared memory structures by pushing the oldest sxact (the one at
+// the front of the FinishedSerializableTransactions list) into summary form
+// in the pg_serial SLRU. Each call frees exactly one SERIALIZABLEXACT and
+// may also free one or more SERIALIZABLEXID / PREDICATELOCK /
+// PREDICATELOCKTARGET / RWConflictData structures.
+unsafe fn SummarizeOldestCommittedSxact() -> PgResult<()> {
+    let procno = my_procno();
+    LWLockAcquire(SerializableFinishedListLock(), LW_EXCLUSIVE, procno)?;
+
+    // Only called when no sxact slot is available, so some must belong to
+    // old, already-finished transactions. Race: while we held no locks, a
+    // transaction may have ended and cleaned up all the finished entries
+    // already; nothing to do then — the caller finds the freed slot when it
+    // retries (predicate.c).
+    let finished = shared().finished;
+    if dlist_is_empty(finished) {
+        LWLockRelease(SerializableFinishedListLock())?;
+        return Ok(());
+    }
+
+    // The first sxact on the finished list is the earliest commit.
+    let sxact = dlist_container!(SERIALIZABLEXACT, finishedLink, (*finished).head.next);
+    dlist_delete_thoroughly(&raw mut (*sxact).finishedLink);
+
+    // Add to SLRU summary information.
+    if TransactionIdIsValid((*sxact).topXid) && !SxactIsReadOnly(sxact) {
+        SerialAdd(
+            (*sxact).topXid,
+            if SxactHasConflictOut(sxact) {
+                (*sxact).SeqNo.earliestOutConflictCommit
+            } else {
+                InvalidSerCommitSeqNo
+            },
+        )?;
+    }
+
+    // Summarize and release the detail.
+    ReleaseOneSerializableXact(sxact, false, true)?;
+
+    LWLockRelease(SerializableFinishedListLock())?;
+    Ok(())
+}
+
 // PG_WAIT_IPC | SafeSnapshot's index in wait_event_names.txt's IPC section.
 const WAIT_EVENT_SAFE_SNAPSHOT: u32 = 0x0800_0000 | 51;
 
@@ -744,15 +789,13 @@ fn GetSerializableTransactionSnapshotInt<'m>(
         let procno = my_procno();
 
         LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
-        let sxact = CreatePredXact();
-        if sxact.is_null() {
-            // C summarizes the oldest committed sxact into the pg_serial SLRU
-            // and retries; that store is not ported.
+        // If null, push out a committed sxact to the SLRU summary & retry.
+        let mut sxact = CreatePredXact();
+        while sxact.is_null() {
             LWLockRelease(SerializableXactHashLock())?;
-            panic!(
-                "predicate.c SummarizeOldestCommittedSxact: SERIALIZABLEXACT slots exhausted \
-                 and the pg_serial summarization path is not ported"
-            );
+            SummarizeOldestCommittedSxact()?;
+            LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
+            sxact = CreatePredXact();
         }
 
         procarray::GetSnapshotData(snapshot, mcx)?;
@@ -2794,14 +2837,14 @@ pub(crate) fn test_acquire_sxact(xmin: TransactionId) -> PgResult<()> {
         assert!(MySerializableXact() == InvalidSerializableXact);
         let procno = my_procno();
         LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
-        // Mirrors GetSerializableTransactionSnapshotInt's slot acquisition.
-        let sxact = CreatePredXact();
-        if sxact.is_null() {
+        // Mirrors GetSerializableTransactionSnapshotInt's slot acquisition:
+        // if null, push out a committed sxact to the SLRU summary & retry.
+        let mut sxact = CreatePredXact();
+        while sxact.is_null() {
             LWLockRelease(SerializableXactHashLock())?;
-            panic!(
-                "predicate.c SummarizeOldestCommittedSxact: SERIALIZABLEXACT slots exhausted \
-                 and the pg_serial summarization path is not ported"
-            );
+            SummarizeOldestCommittedSxact()?;
+            LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
+            sxact = CreatePredXact();
         }
         let px = shared().pred_xact;
 
