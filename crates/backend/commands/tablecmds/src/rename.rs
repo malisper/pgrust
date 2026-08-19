@@ -301,6 +301,7 @@ fn renameatt_internal<'mcx>(
         attnum,
         &[(Anum_pg_attribute_attname, Datum::from_usize(namebuf.as_ptr() as usize))],
     )?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, relid, attnum as i32)?;
     rel.close(NoLock)
 }
 
@@ -528,6 +529,7 @@ pub fn RenameRelationInternal<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &relrelation, &otid, &mut newtup)?;
     lmgr::UnlockTuple(&relrelation, &otid, InplaceUpdateTupleLock)?;
+    objectaccess::InvokeObjectPostAlterHookArg(RELATION_RELATION_ID, myrelid, 0, InvalidOid, false)?;
     relrelation.close(RowExclusiveLock)?;
 
     if targetrelation.rd_rel.reltype != InvalidOid {

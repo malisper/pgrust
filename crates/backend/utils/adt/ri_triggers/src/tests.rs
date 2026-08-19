@@ -196,3 +196,8 @@ fn rls_owner_bypass_matches_c() {
     assert!(ri_rls_owner_blocks(false, false, true, true, false));
     assert!(!ri_rls_owner_blocks(false, false, false, false, false));
 }
+
+#[test]
+fn ri_builtin_rows_match_canonical() {
+    fmgr_core::assert_rows_match_canonical(crate::RI_TRIGGERS_BUILTINS);
+}

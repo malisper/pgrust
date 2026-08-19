@@ -526,9 +526,14 @@ fn dispatch_switch<'mcx>(
 
         // load_file over dfmgr's builtin registry: no dlopen exists, so an
         // unregistered filename is C's file-access error. C's !superuser()
-        // path restriction is skipped (no filesystem paths to restrict).
+        // name restriction (utility.c: load_file(name, !superuser());
+        // dfmgr.c check_restricted_library_name) still applies and outranks
+        // the file-access error.
         T_LoadStmt => {
             let stmt = parsetree.as_load_stmt().expect("LoadStmt");
+            if !superuser::superuser()? {
+                miscinit::check_restricted_library_name(stmt.filename)?;
+            }
             dfmgr::load_file(stmt.filename)?;
         }
         T_CallStmt => {

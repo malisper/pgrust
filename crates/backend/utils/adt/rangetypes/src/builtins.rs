@@ -742,6 +742,8 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, strict: bool, func: PGFunc
 
 // pg_proc.dat rows for rangetypes.c, OID-ascending.
 pub const RANGETYPES_BUILTINS: &[FmgrBuiltin] = &[
+    // rangetypes_typanalyze.c hook: ANALYZE dispatches natively; parity row.
+    b(3916, "range_typanalyze", 1, true, ::types_fmgr::fc_internal_dispatch_only),
     b(3417, "hash_range_extended", 2, true, fc_hash_range_extended),
     b(3834, "range_in", 3, true, fc_range_in),
     b(3835, "range_out", 1, true, fc_range_out),

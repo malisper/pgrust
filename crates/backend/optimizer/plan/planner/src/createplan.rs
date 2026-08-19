@@ -1102,11 +1102,15 @@ fn create_foreignscan_plan<'mcx>(
     )?;
     debug_assert_eq!(plan.node_tag(), NodeTag::T_ForeignScan);
 
-    if run.root.rel(rel_id).reloptkind == types_pathnodes::RELOPT_UPPER_REL {
-        panic!("create_foreignscan_plan (createplan.c): upper-rel ForeignPath unported");
-    }
+    // An upper rel has no relids; it covers every relation in the underlying
+    // scan/join, so use all_query_rels.
+    let src_relids = if run.root.rel(rel_id).reloptkind == types_pathnodes::RELOPT_UPPER_REL {
+        &run.root.all_query_rels
+    } else {
+        &run.root.rel(rel_id).relids
+    };
     let mut fs_relids = types_nodes::bitmapset::Bitmapset::empty();
-    for m in types_pathnodes::relids::relids_members(&run.root.rel(rel_id).relids) {
+    for m in types_pathnodes::relids::relids_members(src_relids) {
         fs_relids.add_member(mcx, m)?;
     }
     let mut fs_base_relids = fs_relids.clone_in(mcx)?;
@@ -2235,11 +2239,43 @@ fn create_modifytable_plan<'mcx>(
                     )?),
                 ));
             }
-            let fdw_private = match kind
-                .and_then(|k| crate::fdwplan::fdw_plan_routine(k).plan_foreign_modify)
+            // PlanDirectModify: direct remote UPDATE/DELETE, unless a local
+            // per-row structure (row triggers, stored generated columns,
+            // WCO, RETURNING OLD/NEW, transition tables) blocks it.
+            let mut direct_modify = false;
+            if let Some(f) =
+                kind.and_then(|k| crate::fdwplan::fdw_plan_routine(k).plan_direct_modify)
             {
-                Some(f) => f(run, &plan, rti as u32, i)?,
-                None => types_nodes::list::NodeList::nil(),
+                if plan.withCheckOptionLists.is_nil()
+                    && !crate::plancat::has_row_triggers(run, rti as usize, operation)?
+                    && !crate::plancat::has_stored_generated_columns(run, rti as usize)?
+                {
+                    let returning_old_or_new = match run.parse().returningList.is_nil() {
+                        true => false,
+                        false => vars::contain_vars_returning_old_or_new(Node::mk_list(
+                            mcx,
+                            run.parse().returningList.clone_in(mcx)?,
+                        )?)?,
+                    };
+                    if !returning_old_or_new
+                        && !crate::plancat::has_transition_tables(
+                            run,
+                            nominal as usize,
+                            operation,
+                        )?
+                    {
+                        direct_modify = f(run, &mut plan, rti as u32, i)?;
+                    }
+                }
+            }
+            if direct_modify {
+                plan.fdwDirectModifyPlans.add_member(mcx, i as i32)?;
+            }
+            let fdw_private = match (direct_modify, kind
+                .and_then(|k| crate::fdwplan::fdw_plan_routine(k).plan_foreign_modify))
+            {
+                (false, Some(f)) => f(run, &plan, rti as u32, i)?,
+                _ => types_nodes::list::NodeList::nil(),
             };
             fdw_priv_lists.lappend(mcx, Node::mk_list(mcx, fdw_private)?)?;
         }

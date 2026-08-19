@@ -72,3 +72,6 @@ heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 postmaster_seams = { path = "../../postmaster/postmaster_seams" }
 standby = { path = "../../storage/ipc/standby" }
+
+[dev-dependencies]
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }

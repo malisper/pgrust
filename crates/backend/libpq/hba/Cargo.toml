@@ -18,6 +18,8 @@ hba_seams = { path = "../hba_seams" }
 ifaddr = { path = "../ifaddr" }
 ip = { path = "../../../common/ip" }
 libc = "0.2"
+pg_path = { path = "../../../port/pg_path" }
+pg_string = { path = "../../../common/string" }
 pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }
 types_core = { path = "../../../_support/types/types_core" }
 regex = { path = "../../../_support/types/regex" }

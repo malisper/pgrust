@@ -1413,6 +1413,20 @@ fn create_ordinary_grouping_paths<'mcx>(
         extra,
     )?;
 
+    // GetForeignUpperPaths (UPPERREL_GROUP_AGG): the FDW responsible for all
+    // baserels may add a pushed-down grouping path.
+    if let Some(kind) = run.root.rel(grouped_rel).fdwroutine {
+        if let Some(f) = crate::fdwplan::fdw_plan_routine(kind).get_foreign_upper_paths {
+            f(
+                run,
+                types_pathnodes::UPPERREL_GROUP_AGG,
+                input_rel,
+                grouped_rel,
+                extra.having_qual,
+            )?;
+        }
+    }
+
     if run.root.rel(grouped_rel).pathlist.is_empty() {
         return Err(could_not_implement("GROUP BY"));
     }

@@ -274,5 +274,7 @@ pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(1403, "current_schemas", 1, fc_current_schemas),
     b(2422, "namerecv", 1, fc_namerecv),
     b(2423, "namesend", 1, fc_namesend),
+    // sortsupport: native comparator resolution; fmgr-lookup parity row.
+    b(3135, "btnamesortsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(6311, "system_user", 0, fc_system_user),
 ];

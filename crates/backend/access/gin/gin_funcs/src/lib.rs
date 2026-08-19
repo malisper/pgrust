@@ -101,14 +101,35 @@ pub fn fc_gin_clean_pending_list(
     Ok(Datum::from_i64(pages_deleted))
 }
 
-pub static GIN_FUNCS_BUILTINS: &[FmgrBuiltin] = &[FmgrBuiltin {
-    foid: 3789,
-    name: "gin_clean_pending_list",
-    nargs: 1,
-    strict: true,
-    retset: false,
-    func: fc_gin_clean_pending_list as PGFunction,
-}];
+// ginhandler (ginutil.c) + the ginarrayproc.c opclass support procs: GIN
+// index build/scan resolves these natively; rows exist for fmgr-lookup parity.
+const fn gin_internal(foid: ::types_core::Oid, name: &'static str, nargs: i16) -> FmgrBuiltin {
+    FmgrBuiltin {
+        foid,
+        name,
+        nargs,
+        strict: true,
+        retset: false,
+        func: ::types_fmgr::fc_internal_dispatch_only,
+    }
+}
+
+pub static GIN_FUNCS_BUILTINS: &[FmgrBuiltin] = &[
+    FmgrBuiltin {
+        foid: 3789,
+        name: "gin_clean_pending_list",
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: fc_gin_clean_pending_list as PGFunction,
+    },
+    gin_internal(333, "ginhandler", 1),
+    gin_internal(2743, "ginarrayextract", 3),
+    gin_internal(2744, "ginarrayconsistent", 8),
+    gin_internal(2774, "ginqueryarrayextract", 7),
+    gin_internal(3076, "ginarrayextract_2args", 2),
+    gin_internal(3920, "ginarraytriconsistent", 7),
+];
 
 pub fn init_seams() {
     ::fmgr_core::register_late_builtins(GIN_FUNCS_BUILTINS);
@@ -120,7 +141,15 @@ mod tests {
 
     #[test]
     fn builtins_match_pg_proc_dat() {
-        let expect = [(3789u32, "gin_clean_pending_list", 1i16)];
+        let expect = [
+            (3789u32, "gin_clean_pending_list", 1i16),
+            (333, "ginhandler", 1),
+            (2743, "ginarrayextract", 3),
+            (2744, "ginarrayconsistent", 8),
+            (2774, "ginqueryarrayextract", 7),
+            (3076, "ginarrayextract_2args", 2),
+            (3920, "ginarraytriconsistent", 7),
+        ];
         assert_eq!(GIN_FUNCS_BUILTINS.len(), expect.len());
         for (b, (foid, name, nargs)) in GIN_FUNCS_BUILTINS.iter().zip(expect) {
             assert_eq!(b.foid, foid);

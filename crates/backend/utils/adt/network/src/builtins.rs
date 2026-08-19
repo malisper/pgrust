@@ -471,4 +471,6 @@ pub const NETWORK_BUILTINS: &[FmgrBuiltin] = &[
     b(3563, "network_smaller", 2, fc_network_smaller),
     b(4063, "inet_merge", 2, fc_inet_merge),
     b(4071, "inet_same_family", 2, fc_inet_same_family),
+    // sortsupport: native comparator resolution; fmgr-lookup parity row.
+    b(5033, "network_sortsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
 ];

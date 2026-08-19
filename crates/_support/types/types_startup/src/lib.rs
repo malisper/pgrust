@@ -43,9 +43,16 @@ pub struct AuthToken {
     pub regex: bool,
 }
 
-// HbaLine (libpq/hba.h) scoped to the supported build: no ldap/radius/pam/
-// krb/oauth option fields — their methods are rejected or deferred loud at
-// parse time, so the fields are unrepresentable rather than silently unused.
+// ldap.h search scopes (OpenLDAP values, used by HbaLine.ldapscope).
+pub const LDAP_SCOPE_BASE: i32 = 0;
+pub const LDAP_SCOPE_ONELEVEL: i32 = 1;
+pub const LDAP_SCOPE_SUBTREE: i32 = 2;
+pub const LDAP_SCOPE_SUBORDINATE: i32 = 3;
+
+// HbaLine (libpq/hba.h) scoped to the supported build: ldap, radius, oauth,
+// pam, and gss carry their C option fields; sspi/bsd methods are rejected
+// loud at parse time, so their fields stay unrepresentable rather than
+// silently unused.
 #[derive(Clone, Debug)]
 pub struct HbaLine {
     pub sourcefile: String,
@@ -60,8 +67,38 @@ pub struct HbaLine {
     pub hostname: Option<String>,
     pub auth_method: UserAuth,
     pub usermap: Option<String>,
+    pub ldapserver: Option<String>,
+    pub ldapport: i32,
+    pub ldapscheme: Option<String>,
+    pub ldaptls: bool,
+    pub ldapscope: i32,
+    pub ldapbasedn: Option<String>,
+    pub ldapbinddn: Option<String>,
+    pub ldapbindpasswd: Option<String>,
+    pub ldapsearchattribute: Option<String>,
+    pub ldapsearchfilter: Option<String>,
+    pub ldapprefix: Option<String>,
+    pub ldapsuffix: Option<String>,
+    // radius* lists are C's List-of-strings; the *_s raw strings back
+    // pg_hba_file_rules display.
+    pub radiusservers: Vec<String>,
+    pub radiusservers_s: Option<String>,
+    pub radiussecrets: Vec<String>,
+    pub radiussecrets_s: Option<String>,
+    pub radiusidentifiers: Vec<String>,
+    pub radiusidentifiers_s: Option<String>,
+    pub radiusports: Vec<String>,
+    pub radiusports_s: Option<String>,
+    pub pamservice: Option<String>,
+    pub pam_use_hostname: bool,
+    pub include_realm: bool,
+    pub krb_realm: Option<String>,
     pub clientcert: ClientCertMode,
     pub clientcertname: ClientCertName,
+    pub oauth_issuer: Option<String>,
+    pub oauth_scope: Option<String>,
+    pub oauth_validator: Option<String>,
+    pub oauth_skip_usermap: bool,
 }
 
 impl HbaLine {
@@ -79,8 +116,36 @@ impl HbaLine {
             hostname: None,
             auth_method: types_core::init::uaReject,
             usermap: None,
+            ldapserver: None,
+            ldapport: 0,
+            ldapscheme: None,
+            ldaptls: false,
+            ldapscope: LDAP_SCOPE_BASE,
+            ldapbasedn: None,
+            ldapbinddn: None,
+            ldapbindpasswd: None,
+            ldapsearchattribute: None,
+            ldapsearchfilter: None,
+            ldapprefix: None,
+            ldapsuffix: None,
+            radiusservers: Vec::new(),
+            radiusservers_s: None,
+            radiussecrets: Vec::new(),
+            radiussecrets_s: None,
+            radiusidentifiers: Vec::new(),
+            radiusidentifiers_s: None,
+            radiusports: Vec::new(),
+            radiusports_s: None,
+            pamservice: None,
+            pam_use_hostname: false,
+            include_realm: false,
+            krb_realm: None,
             clientcert: clientCertOff,
             clientcertname: clientCertCN,
+            oauth_issuer: None,
+            oauth_scope: None,
+            oauth_validator: None,
+            oauth_skip_usermap: false,
         }
     }
 }

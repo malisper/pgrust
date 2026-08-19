@@ -1,0 +1,35 @@
+[package]
+name = "pqmq"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pqmq"
+path = "src/lib.rs"
+
+[dependencies]
+elog = { path = "../../utils/error/elog" }
+init_small = { path = "../../utils/init/init_small" }
+pqcomm = { path = "../pqcomm" }
+pqformat = { path = "../pqformat" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+shm_mq = { path = "../../storage/ipc/shm_mq" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+types_core = { path = "../../../_support/types/types_core" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+[dev-dependencies]
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+latch = { path = "../../storage/ipc/latch" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+mcx = { path = "../../../_support/mcx" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+shmem_seams = { path = "../../storage/ipc/shmem_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }

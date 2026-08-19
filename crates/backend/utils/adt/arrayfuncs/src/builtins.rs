@@ -979,6 +979,12 @@ const fn nb(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmgr
 
 // pg_proc.dat rows for the generic array functions.
 pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
+    // array_typanalyze.c hook + arraysubs.c subscript handlers (no crate of
+    // their own): native dispatch; fmgr-lookup parity rows.
+    b(3816, "array_typanalyze", 1, ::types_fmgr::fc_internal_dispatch_only),
+    b(6179, "array_subscript_handler", 1, ::types_fmgr::fc_internal_dispatch_only),
+    b(6180, "raw_array_subscript_handler", 1, ::types_fmgr::fc_internal_dispatch_only),
+    b(6380, "array_subscript_handler_support", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(382, "btarraycmp", 2, fc_btarraycmp),
     b(390, "array_ne", 2, fc_array_ne),
     b(391, "array_lt", 2, fc_array_lt),

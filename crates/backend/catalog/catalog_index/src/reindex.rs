@@ -32,10 +32,37 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
     rel: &Relation<'mcx>,
     persistence: u8,
 ) -> PgResult<()> {
-    let newrelfilenumber =
-        catalog::GetNewRelFileNumber(mcx, rel.rd_rel.reltablespace, None, persistence)?;
+    let newrelfilenumber = if !init_small::globals::IsBinaryUpgrade() {
+        catalog::GetNewRelFileNumber(mcx, rel.rd_rel.reltablespace, None, persistence)?
+    } else if rel.rd_rel.relkind == types_rel::RELKIND_INDEX {
+        crate::take_next_index_pg_class_relfilenumber().ok_or_else(|| {
+            crate::binary_upgrade_err(
+                "index relfilenumber value not set when in binary upgrade mode",
+            )
+        })?
+    } else if rel.rd_rel.relkind == types_rel::RELKIND_RELATION {
+        catalog_heap::take_next_heap_pg_class_relfilenumber().ok_or_else(|| {
+            crate::binary_upgrade_err(
+                "heap relfilenumber value not set when in binary upgrade mode",
+            )
+        })?
+    } else {
+        return Err(crate::binary_upgrade_err(
+            "unexpected request for new relfilenumber in binary upgrade mode",
+        ));
+    };
 
-    catalog_storage::RelationDropStorage(rel)?;
+    if init_small::globals::IsBinaryUpgrade() {
+        // Binary upgrade frees old storage immediately: the incoming
+        // relfilenumber may equal the one being vacated (pg_largeobject).
+        let srel = types_storage::RelFileLocatorBackend {
+            locator: rel.rd_locator.get(),
+            backend: rel.rd_backend,
+        };
+        smgr::smgrdounlinkall(&[srel], false)?;
+    } else {
+        catalog_storage::RelationDropStorage(rel)?;
+    }
 
     let mut newrlocator = rel.rd_locator.get();
     newrlocator.relNumber = newrelfilenumber;

@@ -169,7 +169,15 @@ pub fn DefineDomain<'mcx>(
 ) -> PgResult<ObjectAddress> {
     let mut names: [&str; 4] = [""; 4];
     let nnames = stmt.domainname.len();
-    assert!((1..=3).contains(&nnames), "improper qualified name");
+    if !(1..=3).contains(&nnames) {
+        return Err(catalog_namespace::improper_qualified_name_joined(
+            stmt.domainname
+                .iter()
+                .map(|n| n.as_string().expect("domainname names").sval)
+                .collect::<Vec<_>>()
+                .join("."),
+        ));
+    }
     for (i, n) in stmt.domainname.iter().enumerate() {
         names[i] = n.as_string().expect("domainname names").sval;
     }
@@ -562,7 +570,15 @@ fn creation_namespace<'mcx, 'a>(
 ) -> PgResult<(Oid, &'a str)> {
     let mut names: [&str; 4] = [""; 4];
     let nnames = qualified.len();
-    assert!((1..=3).contains(&nnames), "improper qualified name");
+    if !(1..=3).contains(&nnames) {
+        return Err(catalog_namespace::improper_qualified_name_joined(
+            qualified
+                .iter()
+                .map(|n| n.as_string().expect("qualified name").sval)
+                .collect::<Vec<_>>()
+                .join("."),
+        ));
+    }
     for (i, n) in qualified.iter().enumerate() {
         names[i] = n.as_string().expect("qualified name").sval;
     }
@@ -804,7 +820,15 @@ pub fn DefineType<'mcx>(
 
     let mut buf = [""; 4];
     let nnames = names.len();
-    assert!((1..=3).contains(&nnames), "improper qualified name");
+    if !(1..=3).contains(&nnames) {
+        return Err(catalog_namespace::improper_qualified_name_joined(
+            names
+                .iter()
+                .map(|n| n.as_string().expect("qualified name").sval)
+                .collect::<Vec<_>>()
+                .join("."),
+        ));
+    }
     for (i, n) in names.iter().enumerate() {
         buf[i] = n.as_string().expect("qualified name").sval;
     }
@@ -1317,6 +1341,8 @@ pub fn AlterEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterEnumStmt<'mcx>) -> PgResult<O
         }
     }
 
+    objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, enum_type_oid, 0)?;
+
     Ok(ObjectAddress::set(TYPE_RELATION_ID, enum_type_oid))
 }
 
@@ -1544,6 +1570,27 @@ mod tests {
         .unwrap();
         let tn = TypeName { names, ..Default::default() };
         assert_eq!(type_name_to_string(mcx, &tn).unwrap().as_str(), "pg_catalog.int4");
+    }
+
+    // F1 (gramwalk 2026-08-18): >3 dotted names raise C's catchable 42601
+    // with the full joined name list (namespace.c DeconstructQualifiedName),
+    // not an assert.
+    #[test]
+    fn define_domain_four_dotted_name_is_42601() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let nodes: Vec<Node<'_>> =
+            ["a", "b", "c", "d"].iter().map(|p| Node::mk_string(mcx, p).unwrap()).collect();
+        let stmt = CreateDomainStmt {
+            domainname: NodeList::from_slice(mcx, &nodes).unwrap(),
+            typeName: None,
+            collClause: None,
+            constraints: NodeList::default(),
+        };
+        let mut pstate = make_parsestate(mcx, None);
+        let e = DefineDomain(mcx, &mut pstate, &stmt).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        assert_eq!(e.message(), "improper qualified name (too many dotted names): a.b.c.d");
     }
 
     #[test]

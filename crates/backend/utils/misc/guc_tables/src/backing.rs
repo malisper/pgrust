@@ -427,6 +427,14 @@ int_var!(
     0
 );
 bool_var!(B_EnableSSL, EnableSSL, set_EnableSSL, false);
+// C: char *oauth_validator_libraries_string (auth-oauth.c). PGC_SIGHUP;
+// resolved against the builtin validator registry, never dlopened (§2 carve).
+string_var!(
+    CELL_oauth_validator_libraries,
+    oauth_validator_libraries,
+    set_oauth_validator_libraries,
+    Some("")
+);
 bool_var!(
     B_restart_after_crash,
     restart_after_crash,

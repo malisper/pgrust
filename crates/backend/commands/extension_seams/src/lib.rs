@@ -26,5 +26,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn pg_extension_config_dump<'f, 'c>(
+        flinfo: Option<&'f mut FmgrInfo>,
+        fcinfo: &'c mut FunctionCallInfoBaseData,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
+    pub fn pg_get_loaded_modules<'f, 'c>(
+        flinfo: Option<&'f mut FmgrInfo>,
+        fcinfo: &'c mut FunctionCallInfoBaseData,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
     pub fn get_extension_name(ext_oid: types_core::Oid) -> PgResult<Option<String>>
 );

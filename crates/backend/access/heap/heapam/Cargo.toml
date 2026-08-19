@@ -51,9 +51,10 @@ visibilitymap = { path = "../visibilitymap" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 lock_seams = { path = "../../../storage/lmgr/lock_seams" }
 xact = { path = "../../transam/xact" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
 
 [dev-dependencies]
-miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
 xlogutils_seams = { path = "../../transam/xlogutils_seams" }
 heapam_visibility = { path = "../heapam_visibility" }

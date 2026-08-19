@@ -301,12 +301,26 @@ pub fn create_modifytable_path<'mcx>(
         parallel_aware: false,
         parallel_safe: false,
         parallel_workers: 0,
-        rows: 0.0,
+        // RETURNING emits the subpath's rows; width follows via the reltarget
+        // update below (C's "totally wrong but consistent" width rule).
+        rows: if returning_lists.is_empty() { 0.0 } else { sub.rows },
         disabled_nodes: sub.disabled_nodes,
         startup_cost: sub.startup_cost,
         total_cost: sub.total_cost,
         pathkeys: PgVec::new_in(run.mcx),
     };
+    if !returning_lists.is_empty() {
+        let sub_width = run
+            .root
+            .path(subpath_id)
+            .base()
+            .pathtarget_id
+            .map(|t| run.root.pathtarget(t).width)
+            .unwrap_or(0);
+        if let Some(t) = path.pathtarget_id {
+            run.root.pathtarget_mut(t).width = sub_width;
+        }
+    }
     PathNode::ModifyTablePath(types_pathnodes::ModifyTablePath {
         path,
         subpath: Some(subpath_id),
@@ -1432,6 +1446,89 @@ pub fn create_foreignscan_path<'mcx>(
         path.pathtarget_id = Some(t);
     }
     path.param_info = param_info;
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    path.parallel_workers = 0;
+    path.rows = rows;
+    path.disabled_nodes = disabled_nodes;
+    path.startup_cost = startup_cost;
+    path.total_cost = total_cost;
+    path.pathkeys = pathkeys;
+    Ok(run.root.alloc_path(PathNode::ForeignPath(types_pathnodes::ForeignPath {
+        path,
+        fdw_outerpath,
+        fdw_restrictinfo,
+        fdw_private,
+    })))
+}
+
+// create_foreign_join_path (pathnode.c): ForeignPath for a pushed-down join.
+// Joins with required parameterization are not generated (C Assert).
+#[allow(clippy::too_many_arguments)]
+pub fn create_foreign_join_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    target: Option<PtId>,
+    rows: f64,
+    disabled_nodes: i32,
+    startup_cost: f64,
+    total_cost: f64,
+    pathkeys: PgVec<'mcx, PathKey>,
+    required_outer: &Relids<'mcx>,
+    fdw_outerpath: Option<PathId>,
+    fdw_restrictinfo: PgVec<'mcx, RinfoId>,
+    fdw_private: PgVec<'mcx, types_pathnodes::NodeId>,
+) -> PgResult<PathId> {
+    debug_assert!(matches!(
+        run.root.rel(rel_id).reloptkind,
+        types_pathnodes::RELOPT_JOINREL | types_pathnodes::RELOPT_OTHER_JOINREL
+    ));
+    debug_assert!(types_pathnodes::relids::relids_is_empty(required_outer));
+    let mut path = base_path(run, NodeTag::T_ForeignPath, NodeTag::T_ForeignScan, rel_id);
+    if let Some(t) = target {
+        path.pathtarget_id = Some(t);
+    }
+    path.param_info = None;
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    path.parallel_workers = 0;
+    path.rows = rows;
+    path.disabled_nodes = disabled_nodes;
+    path.startup_cost = startup_cost;
+    path.total_cost = total_cost;
+    path.pathkeys = pathkeys;
+    Ok(run.root.alloc_path(PathNode::ForeignPath(types_pathnodes::ForeignPath {
+        path,
+        fdw_outerpath,
+        fdw_restrictinfo,
+        fdw_private,
+    })))
+}
+
+// create_foreign_upper_path (pathnode.c): ForeignPath for a pushed-down
+// upper (grouping/ordering/final) relation; never parameterized.
+#[allow(clippy::too_many_arguments)]
+pub fn create_foreign_upper_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    target: Option<PtId>,
+    rows: f64,
+    disabled_nodes: i32,
+    startup_cost: f64,
+    total_cost: f64,
+    pathkeys: PgVec<'mcx, PathKey>,
+    fdw_outerpath: Option<PathId>,
+    fdw_restrictinfo: PgVec<'mcx, RinfoId>,
+    fdw_private: PgVec<'mcx, types_pathnodes::NodeId>,
+) -> PgResult<PathId> {
+    debug_assert!(types_pathnodes::relids::relids_is_empty(
+        &run.root.rel(rel_id).lateral_relids
+    ));
+    let mut path = base_path(run, NodeTag::T_ForeignPath, NodeTag::T_ForeignScan, rel_id);
+    if let Some(t) = target {
+        path.pathtarget_id = Some(t);
+    }
+    path.param_info = None;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     path.parallel_workers = 0;

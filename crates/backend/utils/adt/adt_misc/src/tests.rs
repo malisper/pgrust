@@ -261,3 +261,12 @@ fn default_version_first_digit_run_is_the_pg_major() {
         .collect();
     assert_eq!(first_run, "18");
 }
+
+#[test]
+fn pg_nextoid_row_matches_canonical() {
+    let row = crate::builtins::MISC_BUILTINS
+        .iter()
+        .find(|b| b.foid == 275)
+        .expect("pg_nextoid registered");
+    fmgr_core::assert_rows_match_canonical(core::slice::from_ref(row));
+}

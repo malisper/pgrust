@@ -56,20 +56,101 @@ fn numeric_host(sa: &ip::SockAddr) -> String {
     node
 }
 
-// get_hba_options (hbafuncs.c:52). GSS/SSPI/PAM/BSD/LDAP/RADIUS/OAuth are
-// rejected at parse time in this build (hba::parse_hba_line), so HbaLine
-// carries no fields for them and those option branches are unreachable.
+// get_hba_options (hbafuncs.c:52). GSS, PAM, LDAP, RADIUS, and OAuth
+// options are live; SSPI/BSD are rejected at parse time in this build
+// (hba::parse_hba_line), so HbaLine carries no fields for them and those
+// option branches are unreachable.
 // Config-file SRF: per-call frequency, not per-row — bare Vec/String is the
 // same cost class hba::HbaLine already uses for its own fields.
 fn hba_options_strings(hba: &HbaLine) -> Vec<String> {
     let mut opts: Vec<String> = Vec::new();
 
+    if hba.auth_method == types_core::init::uaGSS {
+        if hba.include_realm {
+            opts.push("include_realm=true".to_string());
+        }
+        if let Some(krb_realm) = &hba.krb_realm {
+            opts.push(format!("krb_realm={krb_realm}"));
+        }
+    }
     if let Some(usermap) = &hba.usermap {
         opts.push(format!("map={usermap}"));
     }
     if hba.clientcert != clientCertOff {
         let mode = if hba.clientcert == clientCertCA { "verify-ca" } else { "verify-full" };
         opts.push(format!("clientcert={mode}"));
+    }
+    if let Some(pamservice) = &hba.pamservice {
+        opts.push(format!("pamservice={pamservice}"));
+    }
+
+    if hba.auth_method == types_core::init::uaLDAP {
+        if let Some(v) = &hba.ldapserver {
+            opts.push(format!("ldapserver={v}"));
+        }
+        if hba.ldapport != 0 {
+            opts.push(format!("ldapport={}", hba.ldapport));
+        }
+        if let Some(v) = &hba.ldapscheme {
+            opts.push(format!("ldapscheme={v}"));
+        }
+        if hba.ldaptls {
+            opts.push("ldaptls=true".to_string());
+        }
+        if let Some(v) = &hba.ldapprefix {
+            opts.push(format!("ldapprefix={v}"));
+        }
+        if let Some(v) = &hba.ldapsuffix {
+            opts.push(format!("ldapsuffix={v}"));
+        }
+        if let Some(v) = &hba.ldapbasedn {
+            opts.push(format!("ldapbasedn={v}"));
+        }
+        if let Some(v) = &hba.ldapbinddn {
+            opts.push(format!("ldapbinddn={v}"));
+        }
+        if let Some(v) = &hba.ldapbindpasswd {
+            opts.push(format!("ldapbindpasswd={v}"));
+        }
+        if let Some(v) = &hba.ldapsearchattribute {
+            opts.push(format!("ldapsearchattribute={v}"));
+        }
+        if let Some(v) = &hba.ldapsearchfilter {
+            opts.push(format!("ldapsearchfilter={v}"));
+        }
+        if hba.ldapscope != 0 {
+            opts.push(format!("ldapscope={}", hba.ldapscope));
+        }
+    }
+
+    if hba.auth_method == types_core::init::uaRADIUS {
+        if let Some(v) = &hba.radiusservers_s {
+            opts.push(format!("radiusservers={v}"));
+        }
+        if let Some(v) = &hba.radiussecrets_s {
+            opts.push(format!("radiussecrets={v}"));
+        }
+        if let Some(v) = &hba.radiusidentifiers_s {
+            opts.push(format!("radiusidentifiers={v}"));
+        }
+        if let Some(v) = &hba.radiusports_s {
+            opts.push(format!("radiusports={v}"));
+        }
+    }
+
+    if hba.auth_method == types_core::init::uaOAuth {
+        if let Some(issuer) = &hba.oauth_issuer {
+            opts.push(format!("issuer={issuer}"));
+        }
+        if let Some(scope) = &hba.oauth_scope {
+            opts.push(format!("scope={scope}"));
+        }
+        if let Some(validator) = &hba.oauth_validator {
+            opts.push(format!("validator={validator}"));
+        }
+        if hba.oauth_skip_usermap {
+            opts.push("delegate_ident_mapping=true".to_string());
+        }
     }
 
     opts

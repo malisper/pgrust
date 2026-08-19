@@ -27,6 +27,28 @@ pub enum RuledPattern {
     /// implementation state, not planner conformance. Plan structure
     /// still compares strictly (a structural diff is a real finding).
     ExplainCounter,
+    /// EXPLAIN output equal after additionally masking wall-clock timing
+    /// text ("actual time=" digits; the counter mask already covers
+    /// Planning/Execution Time and Memory/Buffers). Opt-in only: the
+    /// classifier emits the candidate solely when the statement's lane
+    /// set DiffInput::mask_explain_timing (gramwalk grammar-derived
+    /// EXPLAIN ANALYZE, --mask-explain-timing replays). H1.
+    ExplainTiming,
+    /// xml build-config divergence (F9 / LD1-N1): the pinned C oracle is
+    /// a no-libxml build whose every XML path short-circuits with 0A000
+    /// "unsupported XML feature"; pgrust deliberately dlopens libxml2
+    /// (adt_xml "never a stub") and executes XML natively. The classifier
+    /// emits the candidate only when the A side raised exactly that
+    /// message and the B side did not panic (XX000 still escalates) —
+    /// the oracle offers no behavioural signal on these statements.
+    XmlConfig,
+    /// SHOW ALL / pg_settings GUC-inventory row-count divergence (F4):
+    /// pgrust deliberately ships extra `pgrust.*` GUCs and retuned
+    /// defaults (docs/design/env-to-guc.md, jit-parallel-defaults.md
+    /// DIVERGENCE NOTICEs; util module docs skip SHOW ALL for the same
+    /// reason). Row-count / count(*) shape only — a wrong GUC *value*
+    /// never produces this candidate and stays a finding.
+    GucInventory,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +87,34 @@ pub fn default_table() -> Vec<RuledEntry> {
             pattern: RuledPattern::ExplainCounter,
         },
         RuledEntry {
+            id: "explain-timing",
+            ruling: "EXPLAIN ANALYZE wall-clock timing text (actual time=) is \
+                     never comparable between engines; masked only for opt-in \
+                     lanes (gramwalk grammar-derived EXPLAIN ANALYZE cannot \
+                     carry TIMING OFF); plan structure and actual rows still \
+                     compare strictly",
+            pattern: RuledPattern::ExplainTiming,
+        },
+        RuledEntry {
+            id: "xml-config",
+            ruling: "xml build-config ruling (LD1-N1, banked): the pinned C \
+                     oracle is built without libxml while pgrust dlopens \
+                     libxml2 by design; statements the oracle rejects 0A000 \
+                     'unsupported XML feature' carry no oracle signal — a \
+                     pgrust panic (XX000) on the same statement still \
+                     escalates",
+            pattern: RuledPattern::XmlConfig,
+        },
+        RuledEntry {
+            id: "guc-inventory",
+            ruling: "GUC-inventory ruling: pgrust deliberately diverges on the \
+                     pg_settings / SHOW ALL inventory (extra pgrust.* GUCs, \
+                     retuned defaults) — docs/design/env-to-guc.md and \
+                     docs/design/jit-parallel-defaults.md DIVERGENCE NOTICEs; \
+                     row-count shape only, GUC values still compare strictly",
+            pattern: RuledPattern::GucInventory,
+        },
+        RuledEntry {
             id: "tie-ordering",
             ruling: "docs/conformance/tie-ordering.md: tie order under underdetermined ORDER BY",
             pattern: RuledPattern::TieOrder,
@@ -86,6 +136,16 @@ fn matches(entry: &RuledEntry, candidate: &str, sql: &str) -> bool {
         RuledPattern::ExplainCounter => {
             candidate == "explain-counter" && crate::diff::is_explain_stmt(sql)
         }
+        RuledPattern::ExplainTiming => {
+            candidate == "explain-timing" && crate::diff::is_explain_stmt(sql)
+        }
+        RuledPattern::GucInventory => {
+            candidate == "guc-inventory" && crate::diff::is_guc_inventory_stmt(sql)
+        }
+        // The candidate is emitted only on the A-side NO_XML_SUPPORT
+        // message signature; there is no reliable SQL-text refinement
+        // (xml reaches casts, xmlserialize, table functions, ...).
+        RuledPattern::XmlConfig => candidate == "xml-config",
     }
 }
 
@@ -162,6 +222,34 @@ mod tests {
         assert!(out.detail.contains("implementation state"));
         // A non-EXPLAIN statement carrying the candidate escalates.
         let out = apply_ruled(&default_table(), "SELECT 1;", candidate("explain-counter"));
+        assert_eq!(out.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn guc_inventory_resolves_only_on_inventory_statements() {
+        let out = apply_ruled(&default_table(), "show all ;", candidate("guc-inventory"));
+        assert_eq!(out.class, DiffClass::Ruled("guc-inventory".to_string()));
+        assert!(out.detail.contains("env-to-guc"));
+        let out = apply_ruled(
+            &default_table(),
+            "select count(*) from pg_settings ;",
+            candidate("guc-inventory"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("guc-inventory".to_string()));
+        // Any other statement carrying the candidate escalates.
+        let out = apply_ruled(&default_table(), "SHOW work_mem;", candidate("guc-inventory"));
+        assert_eq!(out.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn explain_timing_resolves_only_on_explain_statements() {
+        let out = apply_ruled(
+            &default_table(),
+            "explain analyze select 1 ;",
+            candidate("explain-timing"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("explain-timing".to_string()));
+        let out = apply_ruled(&default_table(), "SELECT 1;", candidate("explain-timing"));
         assert_eq!(out.class, DiffClass::RowsetDiff);
     }
 

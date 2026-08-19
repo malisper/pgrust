@@ -209,6 +209,7 @@ pub fn AlterRelationNamespaceInternal<'mcx>(
     }
     if !already_done {
         objs_moved.push(thisobj);
+        objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel_oid, 0)?;
     }
     Ok(())
 }

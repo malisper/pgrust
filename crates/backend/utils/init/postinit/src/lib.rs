@@ -12,8 +12,9 @@ use types_core::init::BackendType;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_core::xact::XACT_READ_COMMITTED;
 use types_error::{
-    ErrorLocation, PgError, PgResult, DEBUG3, ERRCODE_INSUFFICIENT_PRIVILEGE,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ErrorLocation, PgError, PgResult, DEBUG3, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_TOO_MANY_CONNECTIONS, ERRCODE_UNDEFINED_DATABASE, ERRCODE_UNDEFINED_OBJECT, ERROR,
     FATAL, LOG, WARNING,
 };
@@ -144,6 +145,43 @@ fn build_auth_logmsg() -> String {
     })
 }
 
+// UTF-8-only server encodings (ratified carve,
+// docs/design/carve-ratifications.md §11, 2026-08-18): pgrust serves only
+// UTF8 and SQL_ASCII databases. A non-UTF8 database can still exist in the
+// cluster (C's initdb — the initdb-via-C carve — or a C-created datadir can
+// carry one); refuse it per-connection with a clean FATAL so the rest of
+// the cluster stays usable, instead of failing per-feature once connected.
+fn unsupported_database_encoding_error(name: &str, encoding: i32) -> Option<PgError> {
+    if encoding == wchar::PG_UTF8 || encoding == wchar::PG_SQL_ASCII {
+        return None;
+    }
+    Some(
+        PgError::new(
+            FATAL,
+            format!(
+                "database \"{name}\" has server encoding \"{}\", which is not supported by \
+                 pgrust; only \"UTF8\" and \"SQL_ASCII\" server encodings are accepted \
+                 (UTF-8-only carve, docs/design/carve-ratifications.md)",
+                mbutils::pg_encoding_to_char(encoding)
+            ),
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint(
+            "Restore non-UTF8 dumps into a UTF8 database; client_encoding conversion is \
+             supported.",
+        ),
+    )
+}
+
+fn check_database_encoding_supported(name: &str, encoding: i32) -> PgResult<()> {
+    match unsupported_database_encoding_error(name, encoding) {
+        None => Ok(()),
+        Some(e) => {
+            elog::ThrowErrorData(e.with_error_location(loc(413, "CheckMyDatabase")))
+        }
+    }
+}
+
 fn CheckMyDatabase(
     mcx: Mcx<'_>,
     name: &str,
@@ -208,6 +246,8 @@ fn CheckMyDatabase(
                 .finish(loc(396, "CheckMyDatabase"));
         }
     }
+
+    check_database_encoding_supported(name, dbform.encoding)?;
 
     mbutils_seams::set_database_encoding::call(dbform.encoding)?;
     guc::SetConfigOption(

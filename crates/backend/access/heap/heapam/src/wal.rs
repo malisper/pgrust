@@ -2,7 +2,10 @@
 // addendum). Block references are resolved from state the caller already
 // holds (rd_locator + the tuple TID), where C's XLogRegisterBuffer re-derives
 // them via BufferGetTag.
-use ::types_core::{BlockNumber, Buffer, ForkNumber, XLogRecPtr, BLCKSZ};
+use ::types_core::{BlockNumber, Buffer, ForkNumber, BLCKSZ};
+#[cfg(not(test))]
+use ::types_core::XLogRecPtr;
+#[cfg(not(test))]
 use ::types_error::PgResult;
 use ::types_storage::RelFileLocator;
 

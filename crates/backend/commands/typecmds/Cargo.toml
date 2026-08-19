@@ -22,6 +22,7 @@ parse_expr = { path = "../../parser/parse_expr" }
 parse_collate = { path = "../../parser/parse_collate" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
+objectaccess = { path = "../../catalog/objectaccess" }
 pg_depend = { path = "../../catalog/pg_depend" }
 coerce = { path = "../../parser/coerce" }
 vars = { path = "../../optimizer/util/vars" }

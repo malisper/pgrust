@@ -1,16 +1,46 @@
 //! auth.c: ClientAuthentication and the per-method handlers. Live end-to-end:
 //! trust, reject / implicit-reject (SQLSTATE 28000 exact), peer, ident
-//! (RFC 1413 ident_inet), cert (CheckCertAuth, hostssl-only), and the
-//! password family — password / md5 / scram-sha-256 via CheckPWChallengeAuth +
-//! CheckSASLAuth. Loud: radius / oauth. gss / sspi / pam / bsd / ldap never
-//! reach dispatch — hba rejects those methods in this build.
+//! (RFC 1413 ident_inet), cert (CheckCertAuth, hostssl-only), the password
+//! family — password / md5 / scram-sha-256 via CheckPWChallengeAuth +
+//! CheckSASLAuth — plus ldap (in-tree LDAPv3 client, simple bind and
+//! search+bind; no TLS/SRV), radius (RFC 2865 over UDP), oauth
+//! (OAUTHBEARER via CheckSASLAuth + auth_oauth), pam (CheckPAMAuth over
+//! dlopened libpam), and gss (pg_GSS_recvauth over the system GSSAPI
+//! library; authentication only, no gssencmode). sspi / bsd never reach
+//! dispatch — hba rejects those methods in this build.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
+#[cfg(not(target_family = "wasm"))]
+mod ldap;
+#[cfg(not(target_family = "wasm"))]
+mod ldapber;
+#[cfg(not(target_family = "wasm"))]
+mod radius;
+mod gss;
+mod gss_ffi;
+mod pam;
+mod pam_ffi;
 #[cfg(test)]
 mod tests;
+
+#[cfg(not(target_family = "wasm"))]
+use ldap::CheckLDAPAuth;
+#[cfg(not(target_family = "wasm"))]
+use radius::CheckRADIUSAuth;
+
+// wasm32: WASI has no TCP/UDP sockets; like ident_inet, the network auth
+// methods fail as the C "can't reach the server" arms do.
+#[cfg(target_family = "wasm")]
+fn CheckLDAPAuth(_port: &mut Port) -> PgResult<i32> {
+    Ok(STATUS_ERROR)
+}
+#[cfg(target_family = "wasm")]
+fn CheckRADIUSAuth(_port: &mut Port) -> PgResult<i32> {
+    Ok(STATUS_ERROR)
+}
 
 use elog::{elog, ereport};
 use hba::pg_isblank;
@@ -35,15 +65,17 @@ pub const AUTH_REQ_OK: AuthRequest = 0;
 pub const AUTH_REQ_PASSWORD: AuthRequest = 3;
 pub const AUTH_REQ_MD5: AuthRequest = 5;
 pub const AUTH_REQ_GSS: AuthRequest = 7;
+pub const AUTH_REQ_GSS_CONT: AuthRequest = 8;
 pub const AUTH_REQ_SSPI: AuthRequest = 9;
 pub use auth_sasl::{AUTH_REQ_SASL, AUTH_REQ_SASL_CONT, AUTH_REQ_SASL_FIN};
 
 pub const PqMsg_AuthenticationRequest: u8 = b'R';
 pub const PqMsg_PasswordMessage: u8 = b'p';
+pub const PqMsg_GSSResponse: u8 = b'p';
 
 pub const PG_MAX_AUTH_TOKEN_LENGTH: i32 = 65535;
 
-fn loc(line: i32, func: &'static str) -> ErrorLocation {
+pub(crate) fn loc(line: i32, func: &'static str) -> ErrorLocation {
     ErrorLocation::new("src/backend/libpq/auth.c", line, func)
 }
 
@@ -211,10 +243,32 @@ pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
         m if m == uaIdent => ident_inet(port)?,
         m if m == uaMD5 || m == uaSCRAM => CheckPWChallengeAuth(port, &mut logdetail)?,
         m if m == uaPassword => CheckPasswordAuth(port, &mut logdetail)?,
-        m if m == uaRADIUS => deferred_arm("radius", "CheckRADIUSAuth"),
-        m if m == uaOAuth => deferred_arm("oauth", "CheckSASLAuth(oauth)"),
+        m if m == uaLDAP => CheckLDAPAuth(port)?,
+        m if m == uaRADIUS => CheckRADIUSAuth(port)?,
+        m if m == uaOAuth => {
+            // C passes logdetail = NULL here (auth.c:628): OAuth failure
+            // detail goes to the server log from validate(), not auth_failed.
+            let mut oauth_logdetail: Option<String> = None;
+            auth_sasl::CheckSASLAuth(
+                &auth_oauth::OAuthMech { set_authn_id },
+                port,
+                None,
+                &mut oauth_logdetail,
+                sendAuthRequest,
+            )?
+        }
         m if m == uaCert || m == uaTrust => STATUS_OK,
-        // gss/sspi/pam/bsd/ldap: hba rejects these methods in this build.
+        m if m == uaPAM => {
+            pam::CheckPAMAuth(port, port.user_name.clone().unwrap_or_default().as_str(), "")?
+        }
+        m if m == uaGSS => {
+            // GSS encryption is never established in this build, so C's
+            // port->gss->enc shortcut (pg_GSS_checkauth directly) is
+            // unreachable: always ask for the AP-REQ exchange.
+            sendAuthRequest(port, AUTH_REQ_GSS, &[])?;
+            gss::pg_GSS_recvauth(port)?
+        }
+        // sspi/bsd: hba rejects these methods in this build.
         m => unreachable!("ClientAuthentication: unreachable auth method {m}"),
     };
 
@@ -934,7 +988,7 @@ pub(crate) fn port_auth_method(port: &Port) -> UserAuth {
     port.hba.as_ref().expect("port->hba is NULL").auth_method
 }
 
-fn gai_strerror(errcode: i32) -> String {
+pub(crate) fn gai_strerror(errcode: i32) -> String {
     // SAFETY: gai_strerror returns a static NUL-terminated C string.
     unsafe {
         let p = ip::sys::gai_strerror(errcode);
@@ -945,8 +999,37 @@ fn gai_strerror(errcode: i32) -> String {
     }
 }
 
+// C: char *pg_krb_server_keyfile / bool pg_krb_caseins_users /
+// bool pg_gss_accept_delegation live in auth.c. PGC_SIGHUP scope: the
+// postmaster reload thread writes, backends read — process globals (the
+// thread rendering of fork-inherited state, as hba's parsed lines).
+static KRB_SERVER_KEYFILE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+static KRB_CASEINS_USERS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static GSS_ACCEPT_DELEGATION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub fn init_seams() {
     auth_seams::client_authentication::set(client_authentication_entry);
+    use std::sync::atomic::Ordering;
+    guc_tables::vars::pg_krb_server_keyfile.install(guc_tables::GucVarAccessors {
+        get: || {
+            KRB_SERVER_KEYFILE
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .or(Some(String::new()))
+        },
+        set: |v| *KRB_SERVER_KEYFILE.write().unwrap_or_else(|e| e.into_inner()) = v,
+    });
+    guc_tables::vars::pg_krb_caseins_users.install(guc_tables::GucVarAccessors {
+        get: || KRB_CASEINS_USERS.load(Ordering::Relaxed),
+        set: |v| KRB_CASEINS_USERS.store(v, Ordering::Relaxed),
+    });
+    guc_tables::vars::pg_gss_accept_delegation.install(guc_tables::GucVarAccessors {
+        get: || GSS_ACCEPT_DELEGATION.load(Ordering::Relaxed),
+        set: |v| GSS_ACCEPT_DELEGATION.store(v, Ordering::Relaxed),
+    });
 }
 
 fn client_authentication_entry() -> PgResult<()> {

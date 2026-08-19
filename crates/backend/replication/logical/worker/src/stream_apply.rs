@@ -1,14 +1,16 @@
-// Serial streamed-transaction apply (worker.c, TRANS_LEADER_SERIALIZE arm):
-// in-progress transactions arrive as STREAM START/STOP chunks whose data
-// messages are spooled — stripped of their per-change (sub)txn xid — into a
-// per-(subscription, xid) fileset file, plus a companion subxact file mapping
-// each subxact to the offset of its first change (for STREAM ABORT of a
-// subtransaction). STREAM COMMIT replays the spool through apply_dispatch.
-// The parallel-apply arms (applyparallelworker.c) are NOT ported: a
-// subscription with streaming=parallel is refused loudly at stream-options
-// time (lib.rs).
+// Streamed-transaction apply (worker.c stream handlers, all TransApplyAction
+// arms): in-progress transactions arrive as STREAM START/STOP chunks. The
+// leader either serializes the chunk's data messages — stripped of their
+// per-change (sub)txn xid — into a per-(subscription, xid) fileset file
+// (TRANS_LEADER_SERIALIZE, replayed at STREAM COMMIT), or forwards them to a
+// parallel apply worker (TRANS_LEADER_SEND_TO_PARALLEL), falling back to
+// spooling the remainder WITH xids for the parallel worker to replay
+// (TRANS_LEADER_PARTIAL_SERIALIZE) when the queue backs up. A parallel apply
+// worker itself runs the TRANS_PARALLEL_APPLY arms. See parallel.rs
+// (applyparallelworker.c) for the worker pool and the locking protocol.
 
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 use elog::ereport;
 use fd::{
@@ -16,11 +18,20 @@ use fd::{
     BufFileOpenFileSetMaybe, FileSet,
 };
 use mcx::Mcx;
-use types_core::{InvalidTransactionId, Oid, TransactionId, XLogRecPtr};
-use types_error::{PgResult, ERRCODE_PROTOCOL_VIOLATION, ERROR};
+use types_core::{InvalidTransactionId, InvalidXLogRecPtr, Oid, TransactionId, XLogRecPtr};
+use types_error::{PgResult, DEBUG1, ERRCODE_PROTOCOL_VIOLATION, ERROR};
+use types_rel::AccessExclusiveLock;
 use walreceiver::client::PgConn;
 
 use crate::apply::{apply_dispatch, begin_replication_step, end_replication_step};
+use crate::parallel::{
+    self, pa_allocate_worker, pa_decr_and_wait_stream_block, pa_find_worker,
+    pa_incr_pending_stream_count, pa_lock_stream, pa_lock_transaction, pa_send_data,
+    pa_set_fileset_state, pa_set_last_commit_end, pa_set_stream_apply_worker,
+    pa_set_xact_state, pa_start_subtrans, pa_stream_abort, pa_switch_to_partial_serialize,
+    pa_unlock_stream, pa_unlock_transaction, pa_xact_finish, ParallelTransState,
+    PartialFileSetState, Winfo, PARALLEL_STREAM_NCHANGES,
+};
 use crate::{loc, my_sub, IN_REMOTE_TRANSACTION, REMOTE_FINAL_LSN};
 
 // SubXactInfo (worker.c:341): offset of the subxact's first change in the
@@ -37,9 +48,9 @@ thread_local! {
     static IN_STREAMED_TRANSACTION: Cell<bool> = const { Cell::new(false) };
     static STREAM_XID: Cell<TransactionId> = const { Cell::new(InvalidTransactionId) };
     // C MyLogicalRepWorker->stream_fileset: created on the first streamed
-    // transaction, lives for the worker (= this thread). Serial apply only,
-    // so nothing shares it.
-    static STREAM_FILESET: RefCell<Option<FileSet>> = const { RefCell::new(None) };
+    // transaction, lives for the worker (= this thread). Arc so the leader
+    // can hand it to a parallel apply worker at FS_SERIALIZE_DONE.
+    static STREAM_FILESET: RefCell<Option<Arc<FileSet>>> = const { RefCell::new(None) };
     // C stream_fd: the open spool file between STREAM START and STREAM STOP,
     // and during spooled replay.
     static STREAM_FD: RefCell<Option<BufFile<'static>>> = const { RefCell::new(None) };
@@ -54,6 +65,30 @@ pub(crate) fn in_streamed_transaction() -> bool {
 
 fn subid() -> Oid {
     my_sub(|s| s.oid)
+}
+
+// TransApplyAction (worker.c:261).
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum TransApplyAction {
+    LeaderApply,
+    LeaderSerialize,
+    LeaderSendToParallel,
+    LeaderPartialSerialize,
+    ParallelApply,
+}
+
+// get_transaction_apply_action (worker.c:5198).
+fn get_transaction_apply_action(xid: TransactionId) -> (TransApplyAction, Option<Winfo>) {
+    use TransApplyAction::*;
+    if parallel::am_parallel_apply_worker() {
+        return (ParallelApply, None);
+    }
+    match pa_find_worker(xid) {
+        Some(w) if w.borrow().serialize_changes => (LeaderPartialSerialize, Some(w)),
+        Some(w) => (LeaderSendToParallel, Some(w)),
+        None if in_streamed_transaction() => (LeaderSerialize, None),
+        None => (LeaderApply, None),
+    }
 }
 
 // changes_filename (worker.c:4290) / subxact_filename (worker.c:4283).
@@ -79,21 +114,48 @@ fn with_fileset<R>(f: impl FnOnce(&FileSet) -> PgResult<R>) -> PgResult<R> {
     STREAM_FILESET.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
-            *slot = Some(FileSet::init()?);
+            *slot = Some(Arc::new(FileSet::init()?));
         }
         f(slot.as_ref().expect("just initialized"))
     })
 }
 
-// handle_streamed_transaction (worker.c:539), serialize arm: while inside a
-// streamed chunk every data message carries the (sub)txn xid first; remember
-// the subxact and spool the message minus the xid. Returns true when the
-// message was consumed here.
-pub(crate) fn handle_streamed_transaction(action: u8, buf: &[u8]) -> PgResult<bool> {
-    if !in_streamed_transaction() {
-        return Ok(false);
+// The leader's stream fileset, shared with a parallel apply worker at
+// FS_SERIALIZE_DONE (C copies the FileSet by value into the DSM).
+pub(crate) fn stream_fileset_arc() -> Arc<FileSet> {
+    STREAM_FILESET.with(|cell| {
+        Arc::clone(cell.borrow().as_ref().expect("stream fileset initialized"))
+    })
+}
+
+// What apply_dispatch should do with a data message after
+// handle_streamed_transaction looked at it.
+pub(crate) enum StreamedHandling {
+    // Not in streaming mode: parse from the action byte as usual.
+    NotStreamed,
+    // Spooled or forwarded; nothing left to do.
+    Consumed,
+    // The (sub)txn xid prefix was consumed; parse the payload at this offset
+    // (parallel apply worker, and RELATION/TYPE which the leader also applies).
+    ContinueAt(usize),
+}
+
+// handle_streamed_transaction (worker.c:551): while inside a streamed chunk
+// every data message carries the (sub)txn xid first.
+pub(crate) fn handle_streamed_transaction(
+    mcx: Mcx<'static>,
+    action: u8,
+    buf: &[u8],
+) -> PgResult<StreamedHandling> {
+    use TransApplyAction::*;
+
+    let (apply_action, winfo) = get_transaction_apply_action(STREAM_XID.get());
+    if apply_action == LeaderApply {
+        return Ok(StreamedHandling::NotStreamed);
     }
-    debug_assert!(STREAM_XID.get() != InvalidTransactionId);
+    debug_assert!(
+        apply_action == ParallelApply || STREAM_XID.get() != InvalidTransactionId
+    );
 
     if buf.len() < 5 {
         protocol_violation(
@@ -109,15 +171,59 @@ pub(crate) fn handle_streamed_transaction(action: u8, buf: &[u8]) -> PgResult<bo
         )?;
     }
 
-    subxact_info_add(current_xid)?;
-    stream_write_change(action, &buf[5..])?;
-    Ok(true)
+    // RELATION/TYPE updates are also applied in the leader: the publisher
+    // doesn't always resend them after the streamed transaction.
+    let leader_also_applies = matches!(
+        action,
+        logicalproto::LOGICAL_REP_MSG_RELATION | logicalproto::LOGICAL_REP_MSG_TYPE
+    );
+    let forwarded = |()| {
+        if leader_also_applies {
+            StreamedHandling::ContinueAt(5)
+        } else {
+            StreamedHandling::Consumed
+        }
+    };
+
+    match apply_action {
+        LeaderSerialize => {
+            subxact_info_add(current_xid)?;
+            stream_write_change(action, &buf[5..])?;
+            Ok(StreamedHandling::Consumed)
+        }
+        LeaderSendToParallel => {
+            let winfo = winfo.expect("winfo");
+            if pa_send_data(&winfo, buf)? {
+                return Ok(forwarded(()));
+            }
+            // Queue full: switch to serialize mode.
+            pa_switch_to_partial_serialize(mcx, &winfo, false)?;
+            stream_write_change(action, &buf[1..])?;
+            Ok(forwarded(()))
+        }
+        LeaderPartialSerialize => {
+            // Spool the original message (xid included) for the parallel
+            // apply worker's replay.
+            stream_write_change(action, &buf[1..])?;
+            Ok(forwarded(()))
+        }
+        ParallelApply => {
+            PARALLEL_STREAM_NCHANGES.with(|c| c.set(c.get() + 1));
+            pa_start_subtrans(current_xid, STREAM_XID.get())?;
+            Ok(StreamedHandling::ContinueAt(5))
+        }
+        LeaderApply => unreachable!(),
+    }
 }
 
-// stream_start_internal (worker.c:1439): open the spool file (create on the
+// stream_start_internal (worker.c:1445): open the spool file (create on the
 // first segment) inside a transaction that lasts until stream stop, and load
 // the subxact info for continued segments.
-fn stream_start_internal(mcx: Mcx<'static>, xid: TransactionId, first_segment: bool) -> PgResult<()> {
+pub(crate) fn stream_start_internal(
+    mcx: Mcx<'static>,
+    xid: TransactionId,
+    first_segment: bool,
+) -> PgResult<()> {
     begin_replication_step(mcx)?;
     stream_open_file(mcx, subid(), xid, first_segment)?;
     if !first_segment {
@@ -126,19 +232,22 @@ fn stream_start_internal(mcx: Mcx<'static>, xid: TransactionId, first_segment: b
     end_replication_step()
 }
 
-// apply_handle_stream_start (worker.c:1484), serialize arm.
-pub(crate) fn apply_handle_stream_start(
-    mcx: Mcx<'static>,
-    r: &mut logicalproto::Reader<'_>,
-) -> PgResult<()> {
+// apply_handle_stream_start (worker.c:1484). `buf` is the full message
+// (action byte first) so it can be forwarded/spooled verbatim.
+pub(crate) fn apply_handle_stream_start(mcx: Mcx<'static>, buf: &[u8]) -> PgResult<()> {
+    use TransApplyAction::*;
+
     if in_streamed_transaction() {
         protocol_violation("duplicate STREAM START message", "apply_handle_stream_start")?;
     }
-    debug_assert!(STREAM_XID.get() == InvalidTransactionId);
+    debug_assert!(
+        parallel::am_parallel_apply_worker() || STREAM_XID.get() == InvalidTransactionId
+    );
 
     IN_STREAMED_TRANSACTION.set(true);
 
-    let (xid, first_segment) = logicalproto::logicalrep_read_stream_start(r)?;
+    let mut r = logicalproto::Reader::new(&buf[1..]);
+    let (xid, first_segment) = logicalproto::logicalrep_read_stream_start(&mut r)?;
     if xid == InvalidTransactionId {
         protocol_violation(
             "invalid transaction ID in streamed replication transaction",
@@ -147,10 +256,60 @@ pub(crate) fn apply_handle_stream_start(
     }
     STREAM_XID.set(xid);
 
-    stream_start_internal(mcx, xid, first_segment)
+    // Try to allocate a parallel apply worker for the streaming transaction.
+    if first_segment {
+        pa_allocate_worker(mcx, xid)?;
+    }
+
+    let (apply_action, winfo) = get_transaction_apply_action(xid);
+    match apply_action {
+        LeaderSerialize => stream_start_internal(mcx, xid, first_segment)?,
+
+        LeaderSendToParallel => {
+            let winfo = winfo.expect("winfo");
+            if pa_send_data(&winfo, buf)? {
+                // Unlock so the parallel apply worker can receive changes.
+                if !first_segment {
+                    let wxid = winfo.borrow().shared.lock_xid();
+                    pa_unlock_stream(wxid, AccessExclusiveLock)?;
+                }
+                pa_incr_pending_stream_count(&winfo);
+                pa_set_stream_apply_worker(Some(winfo));
+            } else {
+                pa_switch_to_partial_serialize(mcx, &winfo, !first_segment)?;
+                // The switch opened the spool file already.
+                stream_write_change(logicalproto::LOGICAL_REP_MSG_STREAM_START, &buf[1..])?;
+                pa_set_stream_apply_worker(Some(winfo));
+            }
+        }
+
+        LeaderPartialSerialize => {
+            let winfo = winfo.expect("winfo");
+            stream_start_internal(mcx, xid, first_segment)?;
+            stream_write_change(logicalproto::LOGICAL_REP_MSG_STREAM_START, &buf[1..])?;
+            pa_set_stream_apply_worker(Some(winfo));
+        }
+
+        ParallelApply => {
+            if first_segment {
+                // Hold the transaction lock until the end of the transaction.
+                let myxid = parallel::my_parallel_shared_xid();
+                pa_lock_transaction(myxid, AccessExclusiveLock)?;
+                pa_set_xact_state(&parallel::my_shared(), ParallelTransState::Started);
+                // The leader may be waiting for us in pa_wait_for_xact_state.
+                launcher::logicalrep_worker_wakeup(subid(), types_core::InvalidOid);
+            }
+            PARALLEL_STREAM_NCHANGES.with(|c| c.set(0));
+        }
+
+        LeaderApply => {
+            return elog::elog(ERROR, "unexpected apply action: TRANS_LEADER_APPLY".to_string())
+        }
+    }
+    Ok(())
 }
 
-// stream_stop_internal (worker.c:1617): flush subxact info, close the spool
+// stream_stop_internal (worker.c:1620): flush subxact info, close the spool
 // file, and commit the per-stream transaction.
 fn stream_stop_internal(mcx: Mcx<'static>, xid: TransactionId) -> PgResult<()> {
     subxact_info_write(mcx, subid(), xid)?;
@@ -159,23 +318,66 @@ fn stream_stop_internal(mcx: Mcx<'static>, xid: TransactionId) -> PgResult<()> {
     xact::CommitTransactionCommand()
 }
 
-// apply_handle_stream_stop (worker.c:1643), serialize arm.
-pub(crate) fn apply_handle_stream_stop(mcx: Mcx<'static>) -> PgResult<()> {
+// apply_handle_stream_stop (worker.c:1643).
+pub(crate) fn apply_handle_stream_stop(mcx: Mcx<'static>, buf: &[u8]) -> PgResult<()> {
+    use TransApplyAction::*;
+
     if !in_streamed_transaction() {
         protocol_violation(
             "STREAM STOP message without STREAM START",
             "apply_handle_stream_stop",
         )?;
     }
+    let xid = STREAM_XID.get();
 
-    stream_stop_internal(mcx, STREAM_XID.get())?;
+    let (apply_action, winfo) = get_transaction_apply_action(xid);
+    match apply_action {
+        LeaderSerialize => stream_stop_internal(mcx, xid)?,
+
+        LeaderSendToParallel => {
+            let winfo = winfo.expect("winfo");
+            // Lock before sending STREAM_STOP so the parallel apply worker
+            // waits on the leader (deadlock detection; see parallel.rs).
+            let wxid = winfo.borrow().shared.lock_xid();
+            pa_lock_stream(wxid, AccessExclusiveLock)?;
+            if pa_send_data(&winfo, buf)? {
+                pa_set_stream_apply_worker(None);
+            } else {
+                pa_switch_to_partial_serialize(mcx, &winfo, true)?;
+                stream_write_change(logicalproto::LOGICAL_REP_MSG_STREAM_STOP, &buf[1..])?;
+                stream_stop_internal(mcx, xid)?;
+                pa_set_stream_apply_worker(None);
+            }
+        }
+
+        LeaderPartialSerialize => {
+            stream_write_change(logicalproto::LOGICAL_REP_MSG_STREAM_STOP, &buf[1..])?;
+            stream_stop_internal(mcx, xid)?;
+            pa_set_stream_apply_worker(None);
+        }
+
+        ParallelApply => {
+            let _ = elog::elog(
+                DEBUG1,
+                format!(
+                    "applied {} changes in the streaming chunk",
+                    PARALLEL_STREAM_NCHANGES.with(Cell::get)
+                ),
+            );
+            pa_decr_and_wait_stream_block()?;
+        }
+
+        LeaderApply => {
+            return elog::elog(ERROR, "unexpected apply action: TRANS_LEADER_APPLY".to_string())
+        }
+    }
 
     IN_STREAMED_TRANSACTION.set(false);
     STREAM_XID.set(InvalidTransactionId);
     Ok(())
 }
 
-// stream_abort_internal (worker.c:1744): toplevel abort deletes the spool;
+// stream_abort_internal (worker.c:1746): toplevel abort deletes the spool;
 // a subxact abort truncates the changes file at the subxact's first-change
 // offset and drops it (and every later subxact) from the subxact info.
 fn stream_abort_internal(
@@ -219,11 +421,10 @@ fn stream_abort_internal(
     xact::CommitTransactionCommand()
 }
 
-// apply_handle_stream_abort (worker.c:1829), serialize arm.
-pub(crate) fn apply_handle_stream_abort(
-    mcx: Mcx<'static>,
-    r: &mut logicalproto::Reader<'_>,
-) -> PgResult<()> {
+// apply_handle_stream_abort (worker.c:1829).
+pub(crate) fn apply_handle_stream_abort(mcx: Mcx<'static>, buf: &[u8]) -> PgResult<()> {
+    use TransApplyAction::*;
+
     if in_streamed_transaction() {
         protocol_violation(
             "STREAM ABORT message without STREAM STOP",
@@ -231,26 +432,147 @@ pub(crate) fn apply_handle_stream_abort(
         )?;
     }
 
-    // Abort info rides only with parallel apply, which this worker never
-    // requests.
-    let abort = logicalproto::logicalrep_read_stream_abort(r, false)?;
-    stream_abort_internal(mcx, abort.xid, abort.subxid)
+    // Abort info rides only when we requested parallel streaming.
+    let read_abort_info = launcher::my_worker_slot()
+        .and_then(launcher::worker_snapshot)
+        .map(|w| w.parallel_apply)
+        .unwrap_or(false);
+    let mut r = logicalproto::Reader::new(&buf[1..]);
+    let abort = logicalproto::logicalrep_read_stream_abort(&mut r, read_abort_info)?;
+    let (xid, subxid) = (abort.xid, abort.subxid);
+    let toplevel_xact = xid == subxid;
+
+    let (apply_action, winfo) = get_transaction_apply_action(xid);
+    match apply_action {
+        LeaderApply => {
+            // Serialized to file in the leader.
+            stream_abort_internal(mcx, xid, subxid)?;
+            let _ = elog::elog(
+                DEBUG1,
+                "finished processing the STREAM ABORT command".to_string(),
+            );
+        }
+
+        LeaderSendToParallel => {
+            let winfo = winfo.expect("winfo");
+            // For a subxact abort, count a pending stream block and retake
+            // the stream lock BEFORE sending, so the parallel apply worker
+            // waits on the leader for the next set of changes afterwards.
+            if !toplevel_xact {
+                pa_unlock_stream(xid, AccessExclusiveLock)?;
+                pa_incr_pending_stream_count(&winfo);
+                pa_lock_stream(xid, AccessExclusiveLock)?;
+            }
+            if pa_send_data(&winfo, buf)? {
+                // Wait for toplevel aborts to finish (xid-wraparound hazards
+                // on the txn hash and the partial-serialize files).
+                if toplevel_xact {
+                    pa_xact_finish(&winfo, InvalidXLogRecPtr)?;
+                }
+            } else {
+                pa_switch_to_partial_serialize(mcx, &winfo, true)?;
+                stream_open_and_write_change(
+                    mcx,
+                    xid,
+                    logicalproto::LOGICAL_REP_MSG_STREAM_ABORT,
+                    &buf[1..],
+                )?;
+                if toplevel_xact {
+                    pa_set_fileset_state(&winfo.borrow().shared, PartialFileSetState::SerializeDone);
+                    pa_xact_finish(&winfo, InvalidXLogRecPtr)?;
+                }
+            }
+        }
+
+        LeaderPartialSerialize => {
+            let winfo = winfo.expect("winfo");
+            // The parallel apply worker might have applied some changes, so
+            // spool the STREAM_ABORT so it can roll back if needed.
+            stream_open_and_write_change(
+                mcx,
+                xid,
+                logicalproto::LOGICAL_REP_MSG_STREAM_ABORT,
+                &buf[1..],
+            )?;
+            if toplevel_xact {
+                pa_set_fileset_state(&winfo.borrow().shared, PartialFileSetState::SerializeDone);
+                pa_xact_finish(&winfo, InvalidXLogRecPtr)?;
+            }
+        }
+
+        ParallelApply => {
+            // Applying spooled messages: close the file before aborting.
+            if toplevel_xact && STREAM_FD.with(|f| f.borrow().is_some()) {
+                stream_close_file();
+            }
+            pa_stream_abort(&abort)?;
+            // Wait for the next set of changes after a subxact rollback.
+            if !toplevel_xact {
+                pa_decr_and_wait_stream_block()?;
+            }
+            let _ = elog::elog(
+                DEBUG1,
+                "finished processing the STREAM ABORT command".to_string(),
+            );
+        }
+
+        LeaderSerialize => {
+            return elog::elog(
+                ERROR,
+                "unexpected apply action: TRANS_LEADER_SERIALIZE".to_string(),
+            )
+        }
+    }
+    Ok(())
 }
 
-// apply_spooled_messages (worker.c:2018): replay every spooled message
-// through apply_dispatch.
-fn apply_spooled_messages(
+// ensure_last_message (worker.c:1985).
+fn ensure_last_message(
     mcx: Mcx<'static>,
-    conn: &mut PgConn,
+    fileset: &FileSet,
+    xid: TransactionId,
+    fileno: i32,
+    offset: i64,
+) -> PgResult<()> {
+    debug_assert!(!xact::IsTransactionState());
+    begin_replication_step(mcx)?;
+    let name = changes_filename(subid(), xid);
+    let mut file = BufFileOpenFileSet(mcx, fileset, &name, true)?;
+    file.seek(0, 0, fd::buffile::SEEK_END)?;
+    let (last_fileno, last_offset) = file.tell();
+    file.close()?;
+    end_replication_step()?;
+    if last_fileno != fileno || last_offset != offset {
+        return elog::elog(
+            ERROR,
+            format!(
+                "unexpected message left in streaming transaction's changes file \"{name}\""
+            ),
+        );
+    }
+    Ok(())
+}
+
+// apply_spooled_messages (worker.c:2017): replay every spooled message
+// through apply_dispatch. The open spool file lives in STREAM_FD so the
+// transaction-finish handlers (parallel apply replay) can close it mid-loop.
+pub(crate) fn apply_spooled_messages(
+    mcx: Mcx<'static>,
+    mut conn: Option<&mut PgConn>,
+    fileset: &FileSet,
     xid: TransactionId,
     lsn: XLogRecPtr,
 ) -> PgResult<()> {
-    crate::maybe_start_skipping_changes(lsn);
+    if !parallel::am_parallel_apply_worker() {
+        crate::maybe_start_skipping_changes(lsn);
+    }
 
     begin_replication_step(mcx)?;
 
     let name = changes_filename(subid(), xid);
-    let mut file = with_fileset(|fs| BufFileOpenFileSet(mcx, fs, &name, true))?;
+    let file = BufFileOpenFileSet(mcx, fileset, &name, true)?;
+    debug_assert!(STREAM_FD.with(|f| f.borrow().is_none()));
+    STREAM_FD.with(|f| *f.borrow_mut() = Some(file));
 
     REMOTE_FINAL_LSN.set(lsn);
     // Make sure the apply_dispatch methods know we're in a remote txn.
@@ -261,42 +583,65 @@ fn apply_spooled_messages(
     // Read the entries one by one and pass them through the same logic as
     // the live apply path.
     let mut buf: Vec<u8> = Vec::new();
+    let mut nchanges = 0u32;
     loop {
         postgres_seams::check_for_interrupts::call()?;
 
-        let mut lenbuf = [0u8; 4];
-        let nbytes = file.read_maybe_eof(&mut lenbuf, true)?;
-        if nbytes == 0 {
-            break; // end of the file
-        }
-        let len = i32::from_ne_bytes(lenbuf);
-        if len <= 0 {
-            ereport(ERROR)
-                .errmsg(format!(
-                    "incorrect length {len} in streaming transaction's changes file \"{name}\""
-                ))
-                .finish(loc("apply_spooled_messages"))?;
-        }
-
-        buf.clear();
-        buf.resize(len as usize, 0);
-        file.read_exact(&mut buf)?;
+        let read = STREAM_FD.with(|f| -> PgResult<Option<(i32, i64)>> {
+            let mut slot = f.borrow_mut();
+            let file = slot.as_mut().expect("stream file open");
+            let mut lenbuf = [0u8; 4];
+            let nbytes = file.read_maybe_eof(&mut lenbuf, true)?;
+            if nbytes == 0 {
+                return Ok(None); // end of the file
+            }
+            let len = i32::from_ne_bytes(lenbuf);
+            if len <= 0 {
+                ereport(ERROR)
+                    .errmsg(format!(
+                        "incorrect length {len} in streaming transaction's changes file \"{name}\""
+                    ))
+                    .finish(loc("apply_spooled_messages"))?;
+            }
+            buf.clear();
+            buf.resize(len as usize, 0);
+            file.read_exact(&mut buf)?;
+            Ok(Some(file.tell()))
+        })?;
+        let Some((fileno, offset)) = read else { break };
 
         // The spooled record is action + payload, the live wire shape.
-        apply_dispatch(mcx, conn, &buf)?;
+        apply_dispatch(mcx, conn.as_deref_mut(), &buf)?;
+        nchanges += 1;
+
+        // The file may have been closed because we processed a transaction
+        // end message (stream_commit in the parallel replay), in which case
+        // that must be the last message.
+        if STREAM_FD.with(|f| f.borrow().is_none()) {
+            ensure_last_message(mcx, fileset, xid, fileno, offset)?;
+            break;
+        }
     }
 
-    file.close()?;
+    if STREAM_FD.with(|f| f.borrow().is_some()) {
+        stream_close_file();
+    }
+
+    let _ = elog::elog(
+        DEBUG1,
+        format!("replayed {nchanges} (all) changes from file \"{name}\""),
+    );
     Ok(())
 }
 
-// apply_handle_stream_commit (worker.c:2148), serialized-transaction arm +
-// the shared commit tail.
+// apply_handle_stream_commit (worker.c:2147).
 pub(crate) fn apply_handle_stream_commit(
     mcx: Mcx<'static>,
-    conn: &mut PgConn,
-    r: &mut logicalproto::Reader<'_>,
+    mut conn: Option<&mut PgConn>,
+    buf: &[u8],
 ) -> PgResult<()> {
+    use TransApplyAction::*;
+
     if in_streamed_transaction() {
         protocol_violation(
             "STREAM COMMIT message without STREAM STOP",
@@ -304,27 +649,96 @@ pub(crate) fn apply_handle_stream_commit(
         )?;
     }
 
-    let (xid, commit_data) = logicalproto::logicalrep_read_stream_commit(r)?;
+    let mut r = logicalproto::Reader::new(&buf[1..]);
+    let (xid, commit_data) = logicalproto::logicalrep_read_stream_commit(&mut r)?;
 
-    // Replay all the spooled operations, then commit like a live COMMIT.
-    apply_spooled_messages(mcx, conn, xid, commit_data.commit_lsn)?;
-    crate::apply::apply_handle_commit_internal(mcx, &commit_data)?;
+    let (apply_action, winfo) = get_transaction_apply_action(xid);
+    match apply_action {
+        LeaderApply => {
+            // Serialized to file: replay all the spooled operations.
+            let fileset = stream_fileset_arc();
+            apply_spooled_messages(
+                mcx,
+                conn.as_deref_mut(),
+                &fileset,
+                xid,
+                commit_data.commit_lsn,
+            )?;
+            crate::apply::apply_handle_commit_internal(mcx, &commit_data)?;
+            stream_cleanup_files(subid(), xid)?;
+            let _ = elog::elog(
+                DEBUG1,
+                "finished processing the STREAM COMMIT command".to_string(),
+            );
+        }
 
-    // Unlink the files with serialized changes and subxact info.
-    stream_cleanup_files(subid(), xid)?;
+        LeaderSendToParallel => {
+            let winfo = winfo.expect("winfo");
+            if pa_send_data(&winfo, buf)? {
+                pa_xact_finish(&winfo, commit_data.end_lsn)?;
+            } else {
+                pa_switch_to_partial_serialize(mcx, &winfo, true)?;
+                stream_open_and_write_change(
+                    mcx,
+                    xid,
+                    logicalproto::LOGICAL_REP_MSG_STREAM_COMMIT,
+                    &buf[1..],
+                )?;
+                pa_set_fileset_state(&winfo.borrow().shared, PartialFileSetState::SerializeDone);
+                pa_xact_finish(&winfo, commit_data.end_lsn)?;
+            }
+        }
 
+        LeaderPartialSerialize => {
+            let winfo = winfo.expect("winfo");
+            stream_open_and_write_change(
+                mcx,
+                xid,
+                logicalproto::LOGICAL_REP_MSG_STREAM_COMMIT,
+                &buf[1..],
+            )?;
+            pa_set_fileset_state(&winfo.borrow().shared, PartialFileSetState::SerializeDone);
+            pa_xact_finish(&winfo, commit_data.end_lsn)?;
+        }
+
+        ParallelApply => {
+            // Applying spooled messages: close the file before committing.
+            if STREAM_FD.with(|f| f.borrow().is_some()) {
+                stream_close_file();
+            }
+            crate::apply::apply_handle_commit_internal(mcx, &commit_data)?;
+            pa_set_last_commit_end(transam_xlog_seams::xact_last_commit_end::call());
+            // Set FINISHED before releasing the lock (pa_wait_for_xact_finish).
+            pa_set_xact_state(&parallel::my_shared(), ParallelTransState::Finished);
+            pa_unlock_transaction(xid, AccessExclusiveLock)?;
+            parallel::pa_reset_subtrans();
+            let _ = elog::elog(
+                DEBUG1,
+                "finished processing the STREAM COMMIT command".to_string(),
+            );
+        }
+
+        LeaderSerialize => {
+            return elog::elog(
+                ERROR,
+                "unexpected apply action: TRANS_LEADER_SERIALIZE".to_string(),
+            )
+        }
+    }
+
+    // Process any tables that are being synchronized in parallel.
     crate::tablesync::process_syncing_tables(mcx, conn, commit_data.end_lsn)?;
     Ok(())
 }
 
-// apply_handle_stream_prepare (worker.c:1280), serialized-transaction
-// (TRANS_LEADER_APPLY) arm: replay the spool, then prepare like a live
-// PREPARE.
+// apply_handle_stream_prepare (worker.c:1280).
 pub(crate) fn apply_handle_stream_prepare(
     mcx: Mcx<'static>,
-    conn: &mut PgConn,
-    r: &mut logicalproto::Reader<'_>,
+    mut conn: Option<&mut PgConn>,
+    buf: &[u8],
 ) -> PgResult<()> {
+    use TransApplyAction::*;
+
     if in_streamed_transaction() {
         protocol_violation(
             "STREAM PREPARE message without STREAM STOP",
@@ -340,31 +754,90 @@ pub(crate) fn apply_handle_stream_prepare(
         )?;
     }
 
-    let prepare_data = logicalproto::logicalrep_read_stream_prepare(r)?;
+    let mut r = logicalproto::Reader::new(&buf[1..]);
+    let prepare_data = logicalproto::logicalrep_read_stream_prepare(&mut r)?;
 
-    // The transaction has been serialized to file, so replay all the spooled
-    // operations; apply_spooled_messages leaves the last change's transaction
-    // open for the prepare.
-    apply_spooled_messages(mcx, conn, prepare_data.xid, prepare_data.prepare_lsn)?;
+    let (apply_action, winfo) = get_transaction_apply_action(prepare_data.xid);
+    match apply_action {
+        LeaderApply => {
+            // Replay the spool; the last change's transaction stays open for
+            // the prepare.
+            let fileset = stream_fileset_arc();
+            apply_spooled_messages(
+                mcx,
+                conn.as_deref_mut(),
+                &fileset,
+                prepare_data.xid,
+                prepare_data.prepare_lsn,
+            )?;
+            crate::apply::apply_handle_prepare_internal(&prepare_data)?;
+            xact::CommitTransactionCommand()?;
 
-    // Mark the transaction as prepared.
-    crate::apply::apply_handle_prepare_internal(&prepare_data)?;
+            // The prepare record is always flushed; an invalid local LSN is ok.
+            crate::store_flush_position(prepare_data.end_lsn, types_core::InvalidXLogRecPtr);
+            IN_REMOTE_TRANSACTION.set(false);
+            stream_cleanup_files(subid(), prepare_data.xid)?;
+            let _ = elog::elog(
+                DEBUG1,
+                "finished processing the STREAM PREPARE command".to_string(),
+            );
+        }
 
-    xact::CommitTransactionCommand()?;
+        LeaderSendToParallel => {
+            let winfo = winfo.expect("winfo");
+            if pa_send_data(&winfo, buf)? {
+                pa_xact_finish(&winfo, prepare_data.end_lsn)?;
+            } else {
+                pa_switch_to_partial_serialize(mcx, &winfo, true)?;
+                stream_open_and_write_change(
+                    mcx,
+                    prepare_data.xid,
+                    logicalproto::LOGICAL_REP_MSG_STREAM_PREPARE,
+                    &buf[1..],
+                )?;
+                pa_set_fileset_state(&winfo.borrow().shared, PartialFileSetState::SerializeDone);
+                pa_xact_finish(&winfo, prepare_data.end_lsn)?;
+            }
+        }
 
-    // It is okay not to set the local_end LSN for the prepare because the
-    // prepare record is always flushed (see apply_handle_prepare).
-    crate::store_flush_position(prepare_data.end_lsn, types_core::InvalidXLogRecPtr);
+        LeaderPartialSerialize => {
+            let winfo = winfo.expect("winfo");
+            stream_open_and_write_change(
+                mcx,
+                prepare_data.xid,
+                logicalproto::LOGICAL_REP_MSG_STREAM_PREPARE,
+                &buf[1..],
+            )?;
+            pa_set_fileset_state(&winfo.borrow().shared, PartialFileSetState::SerializeDone);
+            pa_xact_finish(&winfo, prepare_data.end_lsn)?;
+        }
 
-    IN_REMOTE_TRANSACTION.set(false);
+        ParallelApply => {
+            // Applying spooled messages: close the file before preparing.
+            if STREAM_FD.with(|f| f.borrow().is_some()) {
+                stream_close_file();
+            }
+            begin_replication_step(mcx)?;
+            crate::apply::apply_handle_prepare_internal(&prepare_data)?;
+            end_replication_step()?;
+            xact::CommitTransactionCommand()?;
+            pa_set_last_commit_end(InvalidXLogRecPtr);
+            pa_set_xact_state(&parallel::my_shared(), ParallelTransState::Finished);
+            pa_unlock_transaction(parallel::my_parallel_shared_xid(), AccessExclusiveLock)?;
+            parallel::pa_reset_subtrans();
+            let _ = elog::elog(
+                DEBUG1,
+                "finished processing the STREAM PREPARE command".to_string(),
+            );
+        }
 
-    // Unlink the files with serialized changes and subxact info.
-    stream_cleanup_files(subid(), prepare_data.xid)?;
-
-    let _ = elog::elog(
-        types_error::DEBUG1,
-        "finished processing the STREAM PREPARE command".to_string(),
-    );
+        LeaderSerialize => {
+            return elog::elog(
+                ERROR,
+                "unexpected apply action: TRANS_LEADER_SERIALIZE".to_string(),
+            )
+        }
+    }
 
     // Process any tables that are being synchronized in parallel.
     crate::tablesync::process_syncing_tables(mcx, conn, prepare_data.end_lsn)?;
@@ -379,7 +852,7 @@ pub(crate) fn apply_handle_stream_prepare(
 // ---- spool file helpers -----------------------------------------------------
 
 // stream_cleanup_files (worker.c:4304).
-fn stream_cleanup_files(subid: Oid, xid: TransactionId) -> PgResult<()> {
+pub(crate) fn stream_cleanup_files(subid: Oid, xid: TransactionId) -> PgResult<()> {
     with_fileset(|fs| {
         BufFileDeleteFileSet(fs, &changes_filename(subid, xid), false)?;
         BufFileDeleteFileSet(fs, &subxact_filename(subid, xid), true)
@@ -416,8 +889,9 @@ fn stream_close_file() {
     file.close().expect("closing streamed-changes spool file");
 }
 
-// stream_write_change (worker.c:4391): [len][action][payload], the payload
-// already stripped of the (sub)txn xid.
+// stream_write_change (worker.c:4391): [len][action][payload]. For the serial
+// spool the payload has the (sub)txn xid stripped; for the partial-serialize
+// spool it keeps it (the parallel apply worker needs it for savepoints).
 fn stream_write_change(action: u8, payload: &[u8]) -> PgResult<()> {
     STREAM_FD.with(|f| {
         let mut slot = f.borrow_mut();
@@ -427,6 +901,21 @@ fn stream_write_change(action: u8, payload: &[u8]) -> PgResult<()> {
         file.write(&[action])?;
         file.write(payload)
     })
+}
+
+// stream_open_and_write_change (worker.c:4421).
+fn stream_open_and_write_change(
+    mcx: Mcx<'static>,
+    xid: TransactionId,
+    action: u8,
+    payload: &[u8],
+) -> PgResult<()> {
+    debug_assert!(!in_streamed_transaction());
+    if STREAM_FD.with(|f| f.borrow().is_none()) {
+        stream_start_internal(mcx, xid, false)?;
+    }
+    stream_write_change(action, payload)?;
+    stream_stop_internal(mcx, xid)
 }
 
 // ---- subxact info -----------------------------------------------------------

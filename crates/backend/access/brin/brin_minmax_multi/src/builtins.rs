@@ -358,6 +358,11 @@ fn fc_options(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum>
 }
 
 pub const MINMAX_MULTI_BUILTINS: &[FmgrBuiltin] = &[
+    // opclass support: native BRIN dispatch; fmgr-lookup parity rows.
+    b(4616, "brin_minmax_multi_opcinfo", 1, ::fmgr::fc_internal_dispatch_only),
+    b(4617, "brin_minmax_multi_add_value", 4, ::fmgr::fc_internal_dispatch_only),
+    b(4618, "brin_minmax_multi_consistent", 4, ::fmgr::fc_internal_dispatch_only),
+    b(4619, "brin_minmax_multi_union", 3, ::fmgr::fc_internal_dispatch_only),
     b(4620, "brin_minmax_multi_options", 1, fc_options),
     b(4621, "brin_minmax_multi_distance_int2", 2, fc_dist_int2),
     b(4622, "brin_minmax_multi_distance_int4", 2, fc_dist_int4),

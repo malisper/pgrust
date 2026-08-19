@@ -309,6 +309,13 @@ pub(crate) fn store_catalog_inheritance1<'mcx>(
         &parentobject,
         pg_depend::DependencyType::Auto,
     )?;
+    objectaccess::InvokeObjectPostAlterHookArg(
+        pg_inherits::InheritsRelationId,
+        relation_id,
+        0,
+        parent_oid,
+        false,
+    )?;
     SetRelationHasSubclass(mcx, parent_oid, true)
 }
 

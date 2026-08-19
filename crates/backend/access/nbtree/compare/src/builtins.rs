@@ -64,6 +64,19 @@ const fn b(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {
 }
 
 // pg_proc.dat rows (all proisstrict 2-arg int4-returning), OID-ascending.
+// nbtcompare.c sortsupport/skipsupport rows: sorts and skip scans resolve
+// their comparators natively; rows exist for fmgr-lookup parity.
+const fn support(foid: Oid, name: &'static str) -> FmgrBuiltin {
+    FmgrBuiltin {
+        foid,
+        name,
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: ::types_fmgr::fc_internal_dispatch_only,
+    }
+}
+
 pub const NBT_BUILTINS: &[FmgrBuiltin] = &[
     b(350, "btint2cmp", fc_btint2cmp),
     b(351, "btint4cmp", fc_btint4cmp),
@@ -78,6 +91,10 @@ pub const NBT_BUILTINS: &[FmgrBuiltin] = &[
     b(2191, "btint42cmp", fc_btint42cmp),
     b(2192, "btint28cmp", fc_btint28cmp),
     b(2193, "btint82cmp", fc_btint82cmp),
+    support(3129, "btint2sortsupport"),
+    support(3130, "btint4sortsupport"),
+    support(3131, "btint8sortsupport"),
+    support(3134, "btoidsortsupport"),
     FmgrBuiltin {
         foid: 5051,
         name: "btequalimage",
@@ -86,4 +103,8 @@ pub const NBT_BUILTINS: &[FmgrBuiltin] = &[
         retset: false,
         func: fc_btequalimage,
     },
+    support(6402, "btint2skipsupport"),
+    support(6403, "btint4skipsupport"),
+    support(6404, "btint8skipsupport"),
+    support(6405, "btoidskipsupport"),
 ];

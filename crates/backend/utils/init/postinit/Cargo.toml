@@ -51,6 +51,8 @@ transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 plancache_portal_seams = { path = "../../cache/plancache_portal_seams" }
 namespace_seams = { path = "../../../catalog/namespace_seams" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
+mbutils = { path = "../../mb/mbutils" }
+wchar = { path = "../../../../common/wchar" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 miscinit_seams = { path = "../miscinit_seams" }
 parallel_seams = { path = "../../../access/transam/parallel_seams" }

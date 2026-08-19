@@ -366,7 +366,9 @@ pub(crate) fn resolve_plan(
 
     if any_text && mbutils::GetDatabaseEncoding() != wchar::PG_UTF8 {
         // Parquet strings are UTF-8 by definition; transcoding into other
-        // database encodings is a later increment.
+        // database encodings is a later increment. Still reachable via
+        // SQL_ASCII databases (kept creatable under the UTF-8-only
+        // server-encoding carve, docs/design/carve-ratifications.md §11).
         return Err(Box::new(
             PgError::error(
                 "COPY FROM parquet with text columns requires a UTF8 database encoding",

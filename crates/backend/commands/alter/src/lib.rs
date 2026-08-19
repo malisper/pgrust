@@ -384,6 +384,8 @@ pub fn AlterObjectRename_internal<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, rel, &otid, &mut newtup)?;
 
+    objectaccess::InvokeObjectPostAlterHook(class_id, object_id, 0)?;
+
     if class_id == PublicationRelationId {
         commands_publicationcmds::InvalidatePubRelSyncCache(mcx, object_id, puballtables)?;
     }
@@ -436,6 +438,7 @@ pub fn AlterObjectNamespace_internal<'mcx>(
 
     if old_nsp_oid == nsp_oid {
         genam::systable_endscan(mcx, scan)?;
+        objectaccess::InvokeObjectPostAlterHook(class_id, objid, 0)?;
         return Ok(old_nsp_oid);
     }
 
@@ -487,6 +490,8 @@ pub fn AlterObjectNamespace_internal<'mcx>(
             "could not change schema dependency for object {objid}"
         ))));
     }
+
+    objectaccess::InvokeObjectPostAlterHook(class_id, objid, 0)?;
 
     Ok(old_nsp_oid)
 }
@@ -735,6 +740,8 @@ pub fn AlterObjectOwner_internal<'mcx>(
         genam::systable_endscan(mcx, scan)?;
         lmgr::UnlockTuple(&rel, &otid, InplaceUpdateTupleLock)?;
     }
+
+    objectaccess::InvokeObjectPostAlterHook(class_id, object_id, 0)?;
 
     rel.close(RowExclusiveLock)?;
     Ok(())

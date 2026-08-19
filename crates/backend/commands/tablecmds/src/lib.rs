@@ -333,18 +333,33 @@ pub fn DefineRelation<'mcx>(
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
     }
-    let reloptions = reloptions::transformRelOptions(
-        mcx,
-        None,
-        &stmt.options,
-        None,
-        reloptions::HEAP_RELOPT_NAMESPACES,
-        true,
-        false,
-    )?;
-    // Reloptions validation moved below the access-method resolution: the
-    // pgrcolumnar AM owns its option namespace (cluster_key/codec/...), so the
-    // validator dispatches on the resolved relam, not just relkind.
+    // C's argument-consistency check runs FIRST (tablecmds.c:798-803), on the
+    // pre-namespace-adjustment persistence — before parent lookup, reloptions,
+    // everything.
+    if stmt.oncommit != OnCommitAction::ONCOMMIT_NOOP
+        && rv.relpersistence != types_core::RELPERSISTENCE_TEMP
+    {
+        return Err(Box::new(
+            PgError::new(ERROR, "ON COMMIT can only be used on temporary tables".to_string())
+                .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+    // Look up the namespace in which we are supposed to create the relation,
+    // check we have permission to create there, lock it against concurrent
+    // drop, and adjust the persistence if a temporary namespace is selected
+    // (tablecmds.c:829) — BEFORE parents are resolved.
+    let creation_rv = rel_vocab::RangeVar {
+        catalogname: rv.catalogname,
+        schemaname: rv.schemaname,
+        relname,
+        inh: rv.inh,
+        relpersistence: rv.relpersistence,
+        location: rv.location,
+    };
+    let (namespace_id, _existing_relid, relpersistence) =
+        catalog_namespace::RangeVarGetAndCheckCreationNamespace(mcx, &creation_rv, types_rel::NoLock, false)?;
+    reject_temp_in_security_restricted(relpersistence)?;
+
     // PARTITION OF: the parent's partition descriptor changes — take an
     // exclusive lock (C parentLockmode).
     let parent_lockmode = if stmt.partbound.is_some() {
@@ -359,67 +374,6 @@ pub fn DefineRelation<'mcx>(
     } else {
         None
     };
-    // C: explicit USING, else a partition inherits the parent's relam, else
-    // default_table_access_method; InvalidOid for relkinds without table AM.
-    let access_method_id = if let Some(amname) = stmt.accessMethod {
-        debug_assert!(
-            types_rel::RELKIND_HAS_TABLE_AM(relkind)
-                || relkind == types_rel::RELKIND_PARTITIONED_TABLE
-        );
-        commands_amcmds::get_table_am_oid(amname, false)?
-    } else if types_rel::RELKIND_HAS_TABLE_AM(relkind)
-        || relkind == types_rel::RELKIND_PARTITIONED_TABLE
-    {
-        let mut amoid = InvalidOid;
-        if stmt.partbound.is_some() {
-            amoid = lsyscache::get_rel_relam(inherit_oids[0])?;
-        }
-        if types_rel::RELKIND_HAS_TABLE_AM(relkind) && amoid == InvalidOid {
-            amoid = commands_amcmds::get_table_am_oid(
-                &tableam::default_table_access_method(),
-                false,
-            )?;
-        }
-        amoid
-    } else {
-        InvalidOid
-    };
-
-    match relkind {
-        types_rel::RELKIND_PARTITIONED_TABLE => {
-            reloptions::partitioned_table_reloptions(reloptions.as_deref(), true)?;
-        }
-        types_rel::RELKIND_RELATION if reloptions::relam_is_pgrcolumnar(access_method_id) => {
-            reloptions::pgrcolumnar_reloptions(mcx, reloptions.as_deref(), true)?;
-        }
-        _ => {
-            reloptions::heap_reloptions(mcx, relkind, reloptions.as_deref(), true)?;
-        }
-    }
-
-    // Look up the namespace in which we are supposed to create the relation,
-    // check we have permission to create there, lock it against concurrent
-    // drop, and adjust the persistence if a temporary namespace is selected
-    // (tablecmds.c:829).
-    let creation_rv = rel_vocab::RangeVar {
-        catalogname: rv.catalogname,
-        schemaname: rv.schemaname,
-        relname,
-        inh: rv.inh,
-        relpersistence: rv.relpersistence,
-        location: rv.location,
-    };
-    if stmt.oncommit != OnCommitAction::ONCOMMIT_NOOP
-        && rv.relpersistence != types_core::RELPERSISTENCE_TEMP
-    {
-        return Err(Box::new(
-            PgError::new(ERROR, "ON COMMIT can only be used on temporary tables".to_string())
-                .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
-        ));
-    }
-    let (namespace_id, _existing_relid, relpersistence) =
-        catalog_namespace::RangeVarGetAndCheckCreationNamespace(mcx, &creation_rv, types_rel::NoLock, false)?;
-    reject_temp_in_security_restricted(relpersistence)?;
 
     let mut tablespace_id = match stmt.tablespacename {
         Some(name) => {
@@ -471,6 +425,57 @@ pub fn DefineRelation<'mcx>(
     }
 
     let owner_id = if owner_id != InvalidOid { owner_id } else { miscinit::GetUserId() };
+
+    // Parse and validate reloptions at C's position (tablecmds.c:932-950):
+    // after namespace/parents/tablespace, before ofTypename.
+    let reloptions = reloptions::transformRelOptions(
+        mcx,
+        None,
+        &stmt.options,
+        None,
+        reloptions::HEAP_RELOPT_NAMESPACES,
+        true,
+        false,
+    )?;
+    // C: explicit USING, else a partition inherits the parent's relam, else
+    // default_table_access_method; InvalidOid for relkinds without table AM.
+    // C resolves the AM AFTER MergeAttributes (tablecmds.c:1032), so a bad
+    // USING name loses to MergeAttributes' errors; this provisional pass
+    // (missing_ok) only feeds the reloptions dispatch and the pgrcolumnar
+    // type gate — the erroring lookup runs at C's position, below.
+    let access_method_id = if let Some(amname) = stmt.accessMethod {
+        debug_assert!(
+            types_rel::RELKIND_HAS_TABLE_AM(relkind)
+                || relkind == types_rel::RELKIND_PARTITIONED_TABLE
+        );
+        commands_amcmds::get_am_oid(amname, true)?
+    } else if types_rel::RELKIND_HAS_TABLE_AM(relkind)
+        || relkind == types_rel::RELKIND_PARTITIONED_TABLE
+    {
+        let mut amoid = InvalidOid;
+        if stmt.partbound.is_some() {
+            amoid = lsyscache::get_rel_relam(inherit_oids[0])?;
+        }
+        if types_rel::RELKIND_HAS_TABLE_AM(relkind) && amoid == InvalidOid {
+            amoid = commands_amcmds::get_am_oid(&tableam::default_table_access_method(), true)?;
+        }
+        amoid
+    } else {
+        InvalidOid
+    };
+    // Reloptions validation dispatches on the resolved relam, not just
+    // relkind: the pgrcolumnar AM owns its option namespace.
+    match relkind {
+        types_rel::RELKIND_PARTITIONED_TABLE => {
+            reloptions::partitioned_table_reloptions(reloptions.as_deref(), true)?;
+        }
+        types_rel::RELKIND_RELATION if reloptions::relam_is_pgrcolumnar(access_method_id) => {
+            reloptions::pgrcolumnar_reloptions(mcx, reloptions.as_deref(), true)?;
+        }
+        _ => {
+            reloptions::heap_reloptions(mcx, relkind, reloptions.as_deref(), true)?;
+        }
+    }
 
     let of_type_id = match stmt.ofTypename {
         Some(tn_node) => {
@@ -551,11 +556,21 @@ pub fn DefineRelation<'mcx>(
             // C MergeAttributes (tablecmds.c:2675-2676): an enclosing command
             // still scanning the parent must not see its partition set grow.
             catalog_heap::CheckTableNotInUse(&parent, "CREATE TABLE .. PARTITION OF")?;
-            if parent.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
+            // C MergeAttributes' relkind gate (tablecmds.c:2693-2699): a
+            // non-partitioned table parent passes here — column merging (and
+            // its 42703s) runs first; "is not partitioned" (42P17) is the
+            // partition-bound step's error, after heap creation.
+            if parent.rd_rel.relkind != types_rel::RELKIND_RELATION
+                && parent.rd_rel.relkind != types_rel::RELKIND_FOREIGN_TABLE
+                && parent.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE
+            {
                 let pname = parent.name().to_string();
                 return Err(Box::new(
-                    PgError::new(ERROR, format!("\"{pname}\" is not partitioned"))
-                        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+                    PgError::new(
+                        ERROR,
+                        format!("inherited relation \"{pname}\" is not a table or foreign table"),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
                 ));
             }
             // MergeAttributes persistence checks (tablecmds.c:2700-2730).
@@ -857,6 +872,26 @@ pub fn DefineRelation<'mcx>(
         None => constraints::collect_column_defaults(mcx, table_elts)?,
     };
 
+    // C's access-method selection point (tablecmds.c:1027-1048): the erroring
+    // lookup runs here, after MergeAttributes' checks, so e.g. the partition
+    // persistence errors outrank "access method ... does not exist".
+    let access_method_id = if let Some(amname) = stmt.accessMethod {
+        commands_amcmds::get_table_am_oid(amname, false)?
+    } else if types_rel::RELKIND_HAS_TABLE_AM(relkind)
+        || relkind == types_rel::RELKIND_PARTITIONED_TABLE
+    {
+        let mut amoid = InvalidOid;
+        if stmt.partbound.is_some() {
+            amoid = lsyscache::get_rel_relam(inherit_oids[0])?;
+        }
+        if types_rel::RELKIND_HAS_TABLE_AM(relkind) && amoid == InvalidOid {
+            amoid = commands_amcmds::get_table_am_oid(&tableam::default_table_access_method(), false)?;
+        }
+        amoid
+    } else {
+        InvalidOid
+    };
+
     let relation_id = catalog_heap::heap_create_with_catalog(
         mcx,
         &catalog_heap::HeapCreateParams {
@@ -917,6 +952,15 @@ pub fn DefineRelation<'mcx>(
     if let Some(parent_oid) = parent_oid {
         let bound_spec_node = stmt.partbound.expect("checked above");
         let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
+        // C DefineRelation (tablecmds.c:1130-1136): the bound is validated
+        // against the parent's partition key, so it better have one.
+        if parent.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
+            let pname = parent.name().to_string();
+            return Err(Box::new(
+                PgError::new(ERROR, format!("\"{pname}\" is not partitioned"))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+            ));
+        }
         // Lock the default partition before validating: its constraint changes
         // with every sibling added (C DefineRelation tablecmds.c:1156).
         let pdesc = partdesc::RelationGetPartitionDesc(&parent, true)?;

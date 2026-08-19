@@ -8,6 +8,9 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+types_fmgr = { path = "../../../_support/types/fmgr" }
+init_small = { path = "../../utils/init/init_small" }
+pg_database_seams = { path = "../../catalog/pg_database_seams" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
@@ -40,3 +43,6 @@ heaptuple = { path = "../../access/common/heaptuple" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 varlena = { path = "../../utils/adt/varlena" }
 catalog_objectaddress = { path = "../../catalog/objectaddress" }
+
+[dev-dependencies]
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }

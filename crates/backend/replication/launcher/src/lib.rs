@@ -24,6 +24,7 @@ use types_error::{
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
+mod funcs;
 #[cfg(test)]
 mod tests;
 
@@ -206,6 +207,11 @@ fn logicalrep_worker_bgw_main(main_arg: u64) -> PgResult<()> {
     }
 }
 
+// ParallelApplyWorkerMain dispatch (launcher.c bgw_function_name arm).
+fn logicalrep_pa_worker_bgw_main(main_arg: u64) -> PgResult<()> {
+    logical_worker_seams::parallel_apply_worker_main::call(main_arg)
+}
+
 // Read-side helper: contexts that never launched workers (single-user, no
 // postmaster shmem pass) see an empty pool rather than a panic — in C the
 // zeroed shmem struct exists unconditionally.
@@ -248,6 +254,12 @@ pub fn worker_snapshot(slot: usize) -> Option<LogicalRepWorker> {
     with_ctx_opt(None, |ctx| ctx.workers.get(slot).cloned())
 }
 
+// pg_stat_get_subscription's consistent view (C: memcpy of every slot under
+// LogicalRepWorkerLock shared).
+pub fn workers_snapshot() -> Vec<LogicalRepWorker> {
+    with_ctx_opt(Vec::new(), |ctx| ctx.workers.clone())
+}
+
 fn logicalrep_worker_cleanup_locked(w: &mut LogicalRepWorker) {
     w.wtype = LogicalRepWorkerType::Unknown;
     w.in_use = false;
@@ -261,8 +273,9 @@ fn logicalrep_worker_cleanup_locked(w: &mut LogicalRepWorker) {
     w.parallel_apply = false;
 }
 
-// logicalrep_worker_launch (launcher.c:310), WORKERTYPE_APPLY/TABLESYNC arms
-// (parallel apply needs the DSM error queue — refused until that port).
+// logicalrep_worker_launch (launcher.c:310). `dsm_handle` is C's
+// subworker_dsm: the parallel-apply shared-state handle (0 = none), carried
+// to the worker in bgw_extra.
 pub fn logicalrep_worker_launch(
     wtype: LogicalRepWorkerType,
     dbid: Oid,
@@ -270,14 +283,14 @@ pub fn logicalrep_worker_launch(
     subname: &str,
     userid: Oid,
     relid: Oid,
+    dsm_handle: u64,
 ) -> PgResult<bool> {
     use LogicalRepWorkerType::*;
     let is_tablesync = wtype == TableSync;
+    let is_parallel_apply = wtype == ParallelApply;
     debug_assert!(wtype != Unknown);
     debug_assert_eq!(is_tablesync, relid != InvalidOid);
-    if wtype == ParallelApply {
-        panic!("logicalrep_worker_launch: parallel apply workers unported (DSM error queue)");
-    }
+    debug_assert_eq!(is_parallel_apply, dsm_handle != 0);
 
     let _ = log_report(
         DEBUG1,
@@ -333,6 +346,19 @@ pub fn logicalrep_worker_launch(
             if is_tablesync && nsyncworkers >= max_sync_workers_per_subscription() {
                 return Pick::SyncLimit;
             }
+            // Return false once parallel apply workers reached the per-
+            // subscription limit (launcher.c:421).
+            let npaworkers = ctx
+                .workers
+                .iter()
+                .filter(|w| w.in_use && w.subid == subid && w.is_parallel_apply())
+                .count() as i32;
+            if is_parallel_apply
+                && npaworkers
+                    >= MAX_PARALLEL_APPLY_WORKERS_PER_SUBSCRIPTION.load(Ordering::Relaxed)
+            {
+                return Pick::SyncLimit;
+            }
             let Some(slot) = free else {
                 return Pick::NoSlot;
             };
@@ -350,8 +376,8 @@ pub fn logicalrep_worker_launch(
             w.relid = relid;
             w.relstate = 0;
             w.relstate_lsn = InvalidXLogRecPtr;
-            w.leader_pid = InvalidPid;
-            w.parallel_apply = false;
+            w.leader_pid = if is_parallel_apply { g::MyProcPid() } else { InvalidPid };
+            w.parallel_apply = is_parallel_apply;
             w.last_lsn = InvalidXLogRecPtr;
             w.last_send_time = 0;
             w.last_recv_time = 0;
@@ -374,13 +400,22 @@ pub fn logicalrep_worker_launch(
         Pick::Slot(s, gen) => (s, gen),
     };
 
-    let (name, btype) = match wtype {
+    let (name, btype, bgw_main): (_, _, fn(u64) -> PgResult<()>) = match wtype {
         Apply => (
             format!(
                 "logical replication apply worker for subscription {}",
                 subid
             ),
             "logical replication apply worker",
+            logicalrep_worker_bgw_main as fn(u64) -> PgResult<()>,
+        ),
+        ParallelApply => (
+            format!(
+                "logical replication parallel apply worker for subscription {}",
+                subid
+            ),
+            "logical replication parallel worker",
+            logicalrep_pa_worker_bgw_main,
         ),
         TableSync => (
             format!(
@@ -389,9 +424,13 @@ pub fn logicalrep_worker_launch(
                 relid
             ),
             "logical replication tablesync worker",
+            logicalrep_worker_bgw_main,
         ),
         _ => unreachable!(),
     };
+
+    let mut bgw_extra = [0u8; bgworker::BGW_EXTRALEN];
+    bgw_extra[..8].copy_from_slice(&dsm_handle.to_ne_bytes());
 
     let bgw = bgworker::BackgroundWorker {
         bgw_name: name,
@@ -399,9 +438,9 @@ pub fn logicalrep_worker_launch(
         bgw_flags: bgworker::BGWORKER_SHMEM_ACCESS | bgworker::BGWORKER_BACKEND_DATABASE_CONNECTION,
         bgw_start_time: bgworker::BgWorkerStartTime::RecoveryFinished,
         bgw_restart_time: bgworker::BGW_NEVER_RESTART,
-        bgw_main: logicalrep_worker_bgw_main,
+        bgw_main,
         bgw_main_arg: slot as u64,
-        bgw_extra: [0; bgworker::BGW_EXTRALEN],
+        bgw_extra,
         bgw_notify_pid: g::MyProcPid(),
     };
 
@@ -684,10 +723,51 @@ fn logicalrep_worker_onexit(_code: i32, _arg: usize) {
 // MY_WORKER_SLOT take() makes it idempotent.
 pub fn logicalrep_worker_detach() {
     if let Some(slot) = my_worker_slot() {
+        // A dying leader apply worker stops its parallel apply workers first
+        // (launcher.c:754): C detaches the error queues (pa_detach_all_error_mq,
+        // done by the worker crate's own exit path) then SIGTERMs each one.
+        let pa_slots: Vec<usize> = with_ctx(|ctx| {
+            let me = &ctx.workers[slot];
+            if me.wtype != LogicalRepWorkerType::Apply {
+                return Vec::new();
+            }
+            let subid = me.subid;
+            (0..ctx.workers.len())
+                .filter(|&i| {
+                    let w = &ctx.workers[i];
+                    w.in_use && w.subid == subid && w.is_parallel_apply() && w.proc_pid != 0
+                })
+                .collect()
+        });
+        for pa in pa_slots {
+            let _ = logicalrep_worker_stop_internal(pa, procsignal::signums::SIGTERM);
+        }
         with_ctx(|ctx| logicalrep_worker_cleanup_locked(&mut ctx.workers[slot]));
         MY_WORKER_SLOT.with(|c| c.set(None));
     }
     ApplyLauncherWakeup();
+}
+
+// logicalrep_pa_worker_stop (launcher.c:643): SIGUSR2 so the parallel apply
+// worker exits cleanly; identified by (slot, generation) recorded in the
+// shared state at attach.
+pub fn logicalrep_pa_worker_stop(slot: usize, generation: u16) -> PgResult<()> {
+    let alive = with_ctx(|ctx| {
+        let w = &ctx.workers[slot];
+        debug_assert!(w.is_parallel_apply() || !w.in_use || w.generation != generation);
+        w.generation == generation && w.proc_pid != 0
+    });
+    if alive {
+        logicalrep_worker_stop_internal(slot, procsignal::signums::SIGUSR2)?;
+    }
+    Ok(())
+}
+
+// set_stream_options' MyLogicalRepWorker->parallel_apply write (worker.c:4465).
+pub fn my_worker_set_parallel_apply(v: bool) {
+    if let Some(slot) = my_worker_slot() {
+        with_ctx(|ctx| ctx.workers[slot].parallel_apply = v);
+    }
 }
 
 // ApplyLauncherWakeupAtCommit / AtEOXact_ApplyLauncher / ApplyLauncherWakeup
@@ -863,6 +943,7 @@ pub fn ApplyLauncherMain(_main_arg: u64) -> PgResult<()> {
                     &sub.name,
                     sub.owner,
                     InvalidOid,
+                    0,
                 )?;
                 if !launched {
                     wait_time = wait_time.min(wal_retrieve_retry_interval);
@@ -895,6 +976,7 @@ pub fn ApplyLauncherMain(_main_arg: u64) -> PgResult<()> {
 }
 
 pub fn init_seams() {
+    funcs::register_builtins();
     vars::max_logical_replication_workers.install(GucVarAccessors {
         get: max_logical_replication_workers,
         set: |v| MAX_LOGICAL_REPLICATION_WORKERS.store(v, Ordering::Relaxed),

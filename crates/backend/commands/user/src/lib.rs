@@ -113,6 +113,27 @@ fn err(msg: String, sqlstate: SqlState) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
 }
 
+// binary_upgrade_next_pg_authid_oid (user.c): set-once, consume-once
+// pg_authid.oid override used by CreateRole in binary upgrade mode
+// (pg_largeobject_metadata contains pg_authid.oid's).
+thread_local! {
+    static NEXT_PG_AUTHID_OID: Cell<Oid> = const { Cell::new(InvalidOid) };
+}
+
+pub fn SetNextPgAuthidOid(oid: Oid) {
+    NEXT_PG_AUTHID_OID.set(oid);
+}
+
+fn take_next_pg_authid_oid() -> Option<Oid> {
+    let oid = NEXT_PG_AUTHID_OID.get();
+    if oid != InvalidOid {
+        NEXT_PG_AUTHID_OID.set(InvalidOid);
+        Some(oid)
+    } else {
+        None
+    }
+}
+
 fn err_detail(msg: &str, detail: String, sqlstate: SqlState) -> Box<PgError> {
     Box::new(PgError::error(msg.to_string()).with_sqlstate(sqlstate).with_detail(detail))
 }
@@ -554,12 +575,21 @@ pub fn CreateRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &CreateRoleStmt<'a>) -> PgResu
 
     new_record[(Anum_pg_authid_rolbypassrls - 1) as usize] = Datum::from_bool(bypassrls);
 
-    let roleid = catalog::GetNewOidWithIndex(
-        mcx,
-        &pg_authid_rel,
-        catalog::AuthIdOidIndexId,
-        Anum_pg_authid_oid as AttrNumber,
-    )?;
+    let roleid = if init_small::globals::IsBinaryUpgrade() {
+        take_next_pg_authid_oid().ok_or_else(|| {
+            err(
+                "pg_authid OID value not set when in binary upgrade mode".to_string(),
+                ERRCODE_INVALID_PARAMETER_VALUE,
+            )
+        })?
+    } else {
+        catalog::GetNewOidWithIndex(
+            mcx,
+            &pg_authid_rel,
+            catalog::AuthIdOidIndexId,
+            Anum_pg_authid_oid as AttrNumber,
+        )?
+    };
     new_record[(Anum_pg_authid_oid - 1) as usize] = Datum::from_oid(roleid);
 
     let mut tuple =

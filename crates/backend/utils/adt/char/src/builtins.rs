@@ -118,4 +118,6 @@ pub const CHAR_BUILTINS: &[FmgrBuiltin] = &[
     b(1246, "charlt", 2, fc_charlt),
     b(2434, "charrecv", 1, fc_charrecv),
     b(2435, "charsend", 1, fc_charsend),
+    // skipsupport: native resolution; fmgr-lookup parity row.
+    b(6406, "btcharskipsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
 ];

@@ -1,11 +1,14 @@
 //! hba.c: pg_hba.conf / pg_ident.conf tokenizing, parsing, and connection
 //! matching. Scope: the line-parse/match engine with the trust / reject /
-//! password-family / peer / ident / cert keywords live (cert is hostssl-only
-//! and forces clientcert=verify-full, as in C's USE_SSL build). Regex auth
-//! tokens compile and match via the house regex engine. Deferred loud:
-//! radius / oauth method parse. gss / sspi / pam / bsd / ldap are rejected
-//! as "not supported by this build", faithful to a no-GSS/SSPI/PAM/BSD/LDAP
-//! C build.
+//! password-family / peer / ident / cert / ldap / radius / oauth / pam /
+//! gss keywords live (cert is hostssl-only and forces
+//! clientcert=verify-full, as in C's USE_SSL build; ldap parses all options
+//! including ldapurl; oauth parses issuer/scope/validator/
+//! delegate_ident_mapping + check_oauth_validator; gss parses its realm
+//! options — authentication only, hostgssenc lines parse but never match
+//! since gssencmode is unimplemented). Regex auth tokens compile and match
+//! via the house regex engine. sspi / bsd are rejected as "not supported by
+//! this build", faithful to a no-SSPI/BSD C build.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -13,6 +16,7 @@
 #![allow(clippy::too_many_arguments)]
 
 mod check;
+pub mod ldapurl;
 mod parse_hba;
 mod parse_ident;
 #[cfg(test)]

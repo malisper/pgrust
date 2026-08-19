@@ -1,5 +1,4 @@
-// heapam.c inplace lane. C divergence: the page mutates before XLogInsert
-// (an order C's comment calls equivalent), so no DELAY_CHKPT_START/stack copy.
+// heapam.c inplace lane.
 use ::mcx::Mcx;
 use ::tableam_vocab::TM_Result;
 use ::types_core::{Buffer, CommandId};
@@ -157,29 +156,86 @@ pub fn heap_inplace_update_and_unlock(
 
     inval::eoxact::PreInplace_Inval()?;
 
-    // NO EREPORT(ERROR) till done (crit section pends miscadmin, per dml.rs).
-    {
-        let offnum = ItemPointerGetOffsetNumber(&tuple.t_self);
-        // SAFETY: pin + exclusive content lock held since heap_inplace_lock.
-        let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buffer)) };
-        let lp = page.item_id(offnum);
-        let (ptr, len) = page.item_raw(lp);
-        debug_assert!(old_hoff as u32 + newlen as u32 <= len);
-        // SAFETY: within the item's storage; sole writer under the lock.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                src.as_ptr(),
-                ptr.cast_mut().add(old_hoff as usize),
-                newlen,
-            );
-        }
+    // NO EREPORT(ERROR) till changes complete: WAL goes first (a reader may
+    // have pinned + visibility-checked this tuple already), then the page
+    // mutates; DELAY_CHKPT_START makes XLogInsert-before-MarkBufferDirty
+    // safe, as in C's XLogSaveBufferForHint. A crash between memcpy and
+    // XLogInsert in the reverse order can let datfrozenxid overtake
+    // relfrozenxid (heapam.c's D/R scenario).
+    let my_proc = lmgr_proc::MyProc().map(lmgr_proc::GetPGProcByNumber);
+    if let Some(proc) = my_proc {
+        use core::sync::atomic::Ordering::Relaxed;
+        use ::types_storage::storage::DELAY_CHKPT_START;
+        debug_assert_eq!(proc.delayChkptFlags.load(Relaxed) & DELAY_CHKPT_START, 0);
+        init_small::globals::StartCriticalSection();
+        proc.delayChkptFlags.fetch_or(DELAY_CHKPT_START, Relaxed);
+    } else {
+        // MyProc is unset only in single-threaded unit harnesses.
+        init_small::globals::StartCriticalSection();
     }
 
-    bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    // An Err below leaves the critical section open so the escape check
+    // escalates it to PANIC, mirroring C's in-crit-section ereport promotion.
+    inplace_write_wal_and_page(
+        mcx,
+        relation,
+        tuple,
+        buffer,
+        src,
+        old_hoff,
+        newlen,
+        relcache_init_file_inval,
+        nmsgs,
+        &inval_messages,
+    )?;
+
+    // Shared-queue invals before UnlockTuple (SearchSysCacheLocked1 assumes
+    // it), still inside the critical section, as in C.
+    inval::eoxact::AtInplace_Inval()?;
+
+    if let Some(proc) = my_proc {
+        use core::sync::atomic::Ordering::Relaxed;
+        use ::types_storage::storage::DELAY_CHKPT_START;
+        proc.delayChkptFlags.fetch_and(!DELAY_CHKPT_START, Relaxed);
+    }
+    init_small::globals::EndCriticalSection();
+
+    lmgr::UnlockTuple(relation, &tuple.t_self, InplaceUpdateTupleLock)?;
+    inval::local::AcceptInvalidationMessages()?;
+
+    if !miscinit_seams::is_bootstrap_processing_mode::call() {
+        inval::invalidate::CacheInvalidateHeapTuple(relation, tuple, None)?;
+    }
+    Ok(())
+}
+
+#[repr(align(8))]
+struct AlignedBlock([u8; ::types_core::BLCKSZ]);
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn inplace_write_wal_and_page(
+    mcx: Mcx<'_>,
+    relation: &RelationData<'_>,
+    tuple: &HeapTupleData<'_>,
+    buffer: Buffer,
+    src: &[u8],
+    old_hoff: u8,
+    newlen: usize,
+    relcache_init_file_inval: bool,
+    nmsgs: i32,
+    inval_messages: &::mcx::PgVec<'_, SharedInvalidationMessage>,
+) -> PgResult<()> {
+    let offnum = ItemPointerGetOffsetNumber(&tuple.t_self);
+    // SAFETY: pin + exclusive content lock held since heap_inplace_lock.
+    let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buffer)) };
+    let lp = page.item_id(offnum);
+    let (ptr, len) = page.item_raw(lp);
+    debug_assert!(old_hoff as u32 + newlen as u32 <= len);
+    let dst = unsafe { ptr.cast_mut().add(old_hoff as usize) };
 
     if relation_needs_wal(relation) {
         let mut xlrec = [0u8; MIN_SIZE_OF_HEAP_INPLACE];
-        xlrec[0..2].copy_from_slice(&ItemPointerGetOffsetNumber(&tuple.t_self).to_ne_bytes());
+        xlrec[0..2].copy_from_slice(&offnum.to_ne_bytes());
         xlrec[4..8].copy_from_slice(&init_small::globals::MyDatabaseId().to_ne_bytes());
         xlrec[8..12].copy_from_slice(&init_small::globals::MyDatabaseTableSpace().to_ne_bytes());
         xlrec[12] = relcache_init_file_inval as u8;
@@ -193,33 +249,54 @@ pub fn heap_inplace_update_and_unlock(
             msgs_b.extend_from_slice(&m.to_wire_bytes());
         }
 
+        // Register a stack copy of the post-mutation block (an FPI candidate
+        // matching what the buffer will look like), before other sessions can
+        // see the mutation; the live page is still pre-image here.
+        let origdata = bufmgr_seams::buffer_get_page::call(buffer).as_ptr() as *const u8;
+        let lower = page.pd_lower() as usize;
+        let upper = page.pd_upper() as usize;
+        let mut copied = AlignedBlock([0u8; ::types_core::BLCKSZ]);
+        // SAFETY: origdata is a BLCKSZ page image under our pin + lock;
+        // lower <= upper <= BLCKSZ on a valid page (REGBUF_STANDARD layout).
+        unsafe {
+            core::ptr::copy_nonoverlapping(origdata, copied.0.as_mut_ptr(), lower);
+            core::ptr::copy_nonoverlapping(
+                origdata.add(upper),
+                copied.0.as_mut_ptr().add(upper),
+                ::types_core::BLCKSZ - upper,
+            );
+        }
+        let dst_offset_in_block = dst as usize - origdata as usize;
+        copied.0[dst_offset_in_block..dst_offset_in_block + newlen].copy_from_slice(src);
+
         let recptr = crate::wal::insert_record(
             RM_HEAP_ID,
             XLOG_HEAP_INPLACE,
             0,
             &[&xlrec, &msgs_b],
-            &[crate::wal::reg_block(
-                0,
-                relation.rd_locator.get(),
-                ItemPointerGetBlockNumber(&tuple.t_self),
-                buffer,
-                REGBUF_STANDARD,
-                &[src],
-            )],
+            &[crate::wal::RegBlock {
+                block_id: 0,
+                rlocator: relation.rd_locator.get(),
+                forknum: ::types_core::ForkNumber::MAIN_FORKNUM,
+                block: ItemPointerGetBlockNumber(&tuple.t_self),
+                page: &copied.0,
+                flags: REGBUF_STANDARD,
+                bufdata: &[src],
+            }],
         )?;
         // SAFETY: pin + exclusive content lock held.
         let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buffer)) };
         pm.set_lsn(recptr);
     }
 
+    // SAFETY: within the item's storage; sole writer under the lock.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, newlen);
+    }
+
+    bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+
     bufmgr_seams::lock_buffer::call(buffer, BUFFER_LOCK_UNLOCK)?;
-
-    // Shared-queue invals before UnlockTuple (SearchSysCacheLocked1 assumes it).
-    inval::eoxact::AtInplace_Inval()?;
-    lmgr::UnlockTuple(relation, &tuple.t_self, InplaceUpdateTupleLock)?;
-    inval::local::AcceptInvalidationMessages()?;
-
-    inval::invalidate::CacheInvalidateHeapTuple(relation, tuple, None)?;
     Ok(())
 }
 

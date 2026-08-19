@@ -436,6 +436,9 @@ const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmg
 }
 
 pub const TSVECTOR_BUILTINS: &[FmgrBuiltin] = &[
+    // ts_typanalyze.c hook (no crate of its own): ANALYZE dispatches
+    // natively; fmgr-lookup parity row.
+    b(3688, "ts_typanalyze", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(3319, "tsvector_filter", 2, fc_tsvector_filter),
     b(3320, "tsvector_setweight_by_filter", 3, fc_tsvector_setweight_by_filter),
     b(3321, "tsvector_delete_str", 2, fc_tsvector_delete_str),

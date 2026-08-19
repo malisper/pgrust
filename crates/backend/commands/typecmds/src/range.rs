@@ -111,7 +111,15 @@ pub fn DefineRange<'mcx>(
                 let names = commands_define::defGetQualifiedName(mcx, defel)?;
                 let mut buf = [""; 4];
                 let nnames = names.len();
-                assert!((1..=3).contains(&nnames), "improper qualified name");
+                if !(1..=3).contains(&nnames) {
+                    return Err(catalog_namespace::improper_qualified_name_joined(
+                        names
+                            .iter()
+                            .map(|n| n.as_string().expect("qualified name").sval)
+                            .collect::<Vec<_>>()
+                            .join("."),
+                    ));
+                }
                 for (i, n) in names.iter().enumerate() {
                     buf[i] = n.as_string().expect("qualified name").sval;
                 }
@@ -155,7 +163,15 @@ pub fn DefineRange<'mcx>(
             Some(names) => {
                 let mut buf = [""; 4];
                 let nnames = names.len();
-                assert!((1..=3).contains(&nnames), "improper qualified name");
+                if !(1..=3).contains(&nnames) {
+                    return Err(catalog_namespace::improper_qualified_name_joined(
+                        names
+                            .iter()
+                            .map(|n| n.as_string().expect("qualified name").sval)
+                            .collect::<Vec<_>>()
+                            .join("."),
+                    ));
+                }
                 for (i, n) in names.iter().enumerate() {
                     buf[i] = n.as_string().expect("qualified name").sval;
                 }

@@ -64,6 +64,7 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 elog = { path = "../../utils/error/elog" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 miscinit = { path = "../../utils/init/miscinit" }
+superuser = { path = "../../utils/misc/superuser" }
 acl_seams = { path = "../../utils/adt/acl_seams" }
 checkpointer_seams = { path = "../../postmaster/checkpointer_seams" }
 lockcmds = { path = "../../commands/lockcmds" }

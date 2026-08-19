@@ -71,7 +71,13 @@ fn create_toast_table<'mcx>(
     if rel.rd_rel.reltoastrelid != InvalidOid {
         return Ok(false);
     }
-    if !needs_toast_table(rel) {
+    if !init_small::globals::IsBinaryUpgrade() {
+        if !needs_toast_table(rel) {
+            return Ok(false);
+        }
+    } else if !catalog_heap::NextToastPgClassOidIsSet() {
+        // In binary-upgrade mode, create a TOAST table iff pg_upgrade
+        // provided a TOAST table OID (the old cluster had one).
         return Ok(false);
     }
     if check && lockmode != AccessExclusiveLock {

@@ -956,6 +956,17 @@ pub fn fc_jsonb_strip_nulls(
 
 // pg_proc.dat: all listed entries proisstrict except jsonb_set_lax; none retset.
 pub const JSONB_BUILTINS: &[FmgrBuiltin] = &[
+    // jsonb_gin.c opclass support + jsonbsubs.c handler: native dispatch;
+    // fmgr-lookup parity rows.
+    b(3482, "gin_extract_jsonb", 3, ::types_fmgr::fc_internal_dispatch_only),
+    b(3483, "gin_extract_jsonb_query", 7, ::types_fmgr::fc_internal_dispatch_only),
+    b(3484, "gin_consistent_jsonb", 8, ::types_fmgr::fc_internal_dispatch_only),
+    b(3485, "gin_extract_jsonb_path", 3, ::types_fmgr::fc_internal_dispatch_only),
+    b(3486, "gin_extract_jsonb_query_path", 7, ::types_fmgr::fc_internal_dispatch_only),
+    b(3487, "gin_consistent_jsonb_path", 8, ::types_fmgr::fc_internal_dispatch_only),
+    b(3488, "gin_triconsistent_jsonb", 7, ::types_fmgr::fc_internal_dispatch_only),
+    b(3489, "gin_triconsistent_jsonb_path", 7, ::types_fmgr::fc_internal_dispatch_only),
+    b(6098, "jsonb_subscript_handler", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(3480, "gin_compare_jsonb", 2, fc_gin_compare_jsonb),
     b(3207, "jsonb_array_length", 1, fc_jsonb_array_length),
     b(3262, "jsonb_strip_nulls", 2, fc_jsonb_strip_nulls),

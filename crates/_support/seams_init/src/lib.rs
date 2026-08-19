@@ -169,6 +169,7 @@ pub fn init_all_with_transport(transport: Transport) {
     nodememoize::init_seams();
     tuplesort::init_seams();
     auth::init_seams();
+    auth_oauth::init_seams();
     auth_scram::init_seams();
     crypt::init_seams();
     hba::init_seams();
@@ -387,6 +388,8 @@ pub fn init_all_with_transport(transport: Transport) {
     fmgr_core::register_late_builtins(prepare::PREPARE_BUILTINS);
     fmgr_core::register_late_builtins(mbutils::builtins::MBUTILS_BUILTINS);
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
+    fmgr_core::register_late_builtins(collationcmds::builtins::COLLATIONCMDS_BUILTINS);
+    multixactfuncs::register_builtins();
     fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
     fmgr_core::register_late_builtins(xmlmap::builtins::XMLMAP_BUILTINS);
     fmgr_core::register_late_builtins(be_fsstubs::fmgr_builtins::FSSTUBS_BUILTINS);

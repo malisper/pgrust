@@ -59,11 +59,11 @@ fn ilike_nondeterministic() -> Box<PgError> {
 }
 
 // unported: like_match.c MB arm for non-UTF8 multibyte database encodings.
-// This is a REACHABLE feature gap, not an invariant: such databases are
-// creatable — createdb accepts the full pg_valid_server_encoding set
-// (dbcommands/src/createdb.rs:527-551) — so LIKE in e.g. an EUC_JP database
-// hits this clean 0A000 feature error (safe unwind). Single-byte encodings
-// take the ported SB path.
+// Under the UTF-8-only server-encoding carve
+// (docs/design/carve-ratifications.md §11, ratified 2026-08-18) such
+// databases are refused at CREATE DATABASE and at connection time, so this
+// is a backstop, not a reachable surface (SQL_ASCII is single-byte and takes
+// the ported SB path). Kept as a clean 0A000 rather than deleted.
 #[cold]
 #[inline(never)]
 fn mb_matchtext_unported(encoding: pg_enc) -> Box<::types_error::PgError> {

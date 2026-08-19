@@ -461,6 +461,7 @@ impl DbDdlSuite {
                 b: &nb,
                 ulp_tol,
                 soft_cols: &[],
+                mask_explain_timing: false,
             });
             let c = apply_ruled(table, canon, raw);
             stats.cases += 1;

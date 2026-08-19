@@ -34,6 +34,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let yyr2 = ints(&src, "yyr2")?;
     let yyrline = ints(&src, "yyrline")?;
     let yytname = strings(&src, "yytname")?;
+    // Production RHS tables (bison's YYDEBUG block): rule r's right-hand
+    // side is yyrhs[yyprhs[r]..] up to the -1 terminator, in internal
+    // symbol numbering (< yyntokens = translated terminal, else
+    // nonterminal). Consumed by fuzzgen::gramwalk's grammar-derived
+    // generation; the parser itself never reads them.
+    let yyprhs = ints(&src, "yyprhs")?;
+    let yyrhs = ints(&src, "yyrhs")?;
 
     assert_eq!(yytranslate.len() as i64, yymaxutok + 1);
     assert_eq!(yypact.len() as i64, yynstates);
@@ -63,6 +70,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     // -1 marks nonterminals whose gotos always resolve through yypgoto/yytable.
     for &g in yydefgoto.iter() {
         assert!((-1..yynstates).contains(&g), "yydefgoto={g}");
+    }
+
+    assert_eq!(yyprhs.len() as i64, yynrules + 1);
+    for (r, &p) in yyprhs.iter().enumerate() {
+        assert!((0..yyrhs.len() as i64).contains(&p), "yyprhs[{r}]={p}");
+        // RHS length matches yyr2, terminated by -1 (rule 0 excepted: bison
+        // leaves yyr2[0] unused).
+        if r >= 1 {
+            let len = yyr2[r] as usize;
+            let start = p as usize;
+            for k in 0..len {
+                let s = yyrhs[start + k];
+                assert!((0..yyntokens + yynnts).contains(&s), "yyrhs[{}]={s}", start + k);
+            }
+            assert_eq!(yyrhs[start + len], -1, "rule {r} RHS not -1-terminated");
+        }
     }
 
     let cases = case_labels(&src)?;
@@ -137,6 +160,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     emit(&mut t, "YYCHECK", "i16", &yycheck);
     emit(&mut t, "YYR1", "u16", &yyr1);
     emit(&mut t, "YYR2", "u8", &yyr2);
+    emit(&mut t, "YYPRHS", "u16", &yyprhs);
+    emit(&mut t, "YYRHS", "i16", &yyrhs);
     emit(&mut t, "DISPATCH", "u8", &dispatch.iter().map(|&b| b as i64).collect::<Vec<_>>());
     fs::write(out.join("tables.rs"), t)?;
 

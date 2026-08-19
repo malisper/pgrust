@@ -307,7 +307,7 @@ pub fn classify_probe(
     let sql = probe_sql(table_name, "pk"); // ORDER BY presence is what matters
     // Probes select raw table columns: no soft-float mask (float cells
     // still get the ruled ulp slack via the classifier itself).
-    let raw = classify(&DiffInput { sql: &sql, a, b, ulp_tol, soft_cols: &[] });
+    let raw = classify(&DiffInput { sql: &sql, a, b, ulp_tol, soft_cols: &[], mask_explain_timing: false });
     let resolved = apply_ruled(table, &sql, raw);
     match resolved.class {
         DiffClass::Match | DiffClass::Ruled(_) | DiffClass::SessionDiverged(_) => resolved,
@@ -384,6 +384,9 @@ pub struct StreamStmt {
     pub stmt_index: u32,
     pub sql: String,
     pub soft_float_cols: Vec<usize>,
+    /// Opt-in H1 mask (DiffInput::mask_explain_timing): set for gramwalk
+    /// statements and --mask-explain-timing replays only.
+    pub mask_explain_timing: bool,
 }
 
 /// Apply one statement to both sides and classify, ruled table included.
@@ -397,7 +400,8 @@ pub fn apply_and_classify(
 ) -> Classified {
     let oa = a.apply(sql);
     let ob = b.apply(sql);
-    let raw = classify(&DiffInput { sql, a: &oa, b: &ob, ulp_tol, soft_cols });
+    let raw =
+        classify(&DiffInput { sql, a: &oa, b: &ob, ulp_tol, soft_cols, mask_explain_timing: false });
     apply_ruled(table, sql, raw)
 }
 
@@ -417,7 +421,7 @@ pub fn run_stream(
     let mut suppressed: Vec<String> = Vec::new();
     let mut since_probe = 0u32;
     let mut last_index = 0u32;
-    for StreamStmt { stmt_index, sql, soft_float_cols } in stmts {
+    for StreamStmt { stmt_index, sql, soft_float_cols, mask_explain_timing } in stmts {
         last_index = *stmt_index;
         let oa = a.apply(sql);
         let ob = b.apply(sql);
@@ -433,6 +437,7 @@ pub fn run_stream(
             b: &ob,
             ulp_tol,
             soft_cols: soft_float_cols,
+            mask_explain_timing: *mask_explain_timing,
         });
         let c = apply_ruled(table, sql, raw);
         stats.applied += 1;
@@ -582,6 +587,7 @@ mod tests {
                 stmt_index: i,
                 sql: "SELECT c FROM t;".to_string(),
                 soft_float_cols: Vec::new(),
+                mask_explain_timing: false,
             })
             .collect()
     }
@@ -924,6 +930,7 @@ mod tests {
             b: &swapped,
             ulp_tol: 4,
             soft_cols: &[],
+            mask_explain_timing: false,
         });
         assert_eq!(c.class, DiffClass::Match);
     }

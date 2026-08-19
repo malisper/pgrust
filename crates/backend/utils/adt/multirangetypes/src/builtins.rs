@@ -879,6 +879,8 @@ const fn b(
 
 // pg_proc.dat rows for multirangetypes.c, OID-ascending.
 pub const MULTIRANGETYPES_BUILTINS: &[FmgrBuiltin] = &[
+    // rangetypes_typanalyze.c hook: ANALYZE dispatches natively; parity row.
+    b(4242, "multirange_typanalyze", 1, true, false, ::types_fmgr::fc_internal_dispatch_only),
     b(1293, "unnest", 1, true, true, fc_multirange_unnest),
     b(4228, "range_merge", 1, true, false, fc_range_merge_from_multirange),
     b(4231, "multirange_in", 3, true, false, fc_multirange_in),

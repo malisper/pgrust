@@ -183,33 +183,52 @@ pub(crate) fn end_replication_step() -> PgResult<()> {
     xact::CommandCounterIncrement()
 }
 
-// should_apply_changes_for_rel (worker.c:461), leader-apply arm. Non-READY
+// should_apply_changes_for_rel (worker.c:461). Non-READY
 // states belong to tablesync (inc E) and refuse loudly rather than desync.
-fn should_apply_changes_for_rel(entry: &LogicalRepRelMapEntry) -> bool {
+fn should_apply_changes_for_rel(entry: &LogicalRepRelMapEntry) -> PgResult<bool> {
     const SUBREL_STATE_READY: u8 = b'r';
     const SUBREL_STATE_SYNCDONE: u8 = b's';
+    const SUBREL_STATE_UNKNOWN: u8 = 0;
     if crate::tablesync::AM_TABLESYNC_WORKER.with(std::cell::Cell::get) {
         // The tablesync worker applies only its own table's changes
         // (worker.c:461); localreloid match is implied by the relmap entry.
         let myrelid = launcher::worker_snapshot(launcher::my_worker_slot().expect("attached"))
             .map(|w| w.relid)
             .unwrap_or(types_core::InvalidOid);
-        return entry.localreloid == myrelid;
+        return Ok(entry.localreloid == myrelid);
     }
-    match entry.state {
+    if crate::parallel::am_parallel_apply_worker() {
+        // We can't decide for a non-READY table (remote_final_lsn unknown).
+        if entry.state != SUBREL_STATE_READY && entry.state != SUBREL_STATE_UNKNOWN {
+            let name = my_sub(|s| s.name.clone());
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg(format!(
+                    "logical replication parallel apply worker for subscription \"{name}\" will stop"
+                ))
+                .errdetail("Cannot handle streamed replication transactions using parallel apply workers until all tables have been synchronized.")
+                .finish(loc("should_apply_changes_for_rel"))?;
+        }
+        return Ok(entry.state == SUBREL_STATE_READY);
+    }
+    Ok(match entry.state {
         SUBREL_STATE_READY => true,
         SUBREL_STATE_SYNCDONE => entry.statelsn <= REMOTE_FINAL_LSN.get(),
         // INIT/DATASYNC/FINISHEDCOPY/SYNCWAIT/CATCHUP: the tablesync worker
         // owns those changes; the leader skips them.
         _ => false,
-    }
+    })
 }
 
 // apply_dispatch (worker.c:3368). C intercepts streamed chunks inside each
 // data-message handler (handle_streamed_transaction at their entry); doing it
 // once here is equivalent — inside a streamed chunk every data message spools
 // to the transaction's file instead of applying.
-pub(crate) fn apply_dispatch(mcx: Mcx<'static>, conn: &mut PgConn, buf: &[u8]) -> PgResult<()> {
+pub(crate) fn apply_dispatch(
+    mcx: Mcx<'static>,
+    mut conn: Option<&mut PgConn>,
+    buf: &[u8],
+) -> PgResult<()> {
     if buf.is_empty() {
         return Ok(());
     }
@@ -222,14 +241,21 @@ pub(crate) fn apply_dispatch(mcx: Mcx<'static>, conn: &mut PgConn, buf: &[u8]) -
     {
         return Ok(());
     }
+    // In a streamed chunk (or in a parallel apply worker) every data message
+    // carries the (sub)txn xid first; the payload starts after it.
+    let mut payload = &buf[1..];
     if matches!(
         action,
         MSG_RELATION | MSG_TYPE | MSG_INSERT | MSG_UPDATE | MSG_DELETE | MSG_TRUNCATE | MSG_MESSAGE
-    ) && crate::stream_apply::handle_streamed_transaction(action, buf)?
-    {
-        return Ok(());
+    ) {
+        use crate::stream_apply::StreamedHandling;
+        match crate::stream_apply::handle_streamed_transaction(mcx, action, buf)? {
+            StreamedHandling::Consumed => return Ok(()),
+            StreamedHandling::ContinueAt(off) => payload = &buf[off..],
+            StreamedHandling::NotStreamed => {}
+        }
     }
-    let mut r = Reader::new(&buf[1..]);
+    let mut r = Reader::new(payload);
     match action {
         MSG_BEGIN => apply_handle_begin(&mut r),
         MSG_COMMIT => apply_handle_commit(mcx, conn, &mut r),
@@ -248,11 +274,15 @@ pub(crate) fn apply_dispatch(mcx: Mcx<'static>, conn: &mut PgConn, buf: &[u8]) -
         MSG_DELETE => apply_handle_delete(mcx, &mut r),
         MSG_TRUNCATE => apply_handle_truncate(mcx, &mut r),
         MSG_MESSAGE => Ok(()), // transactional messages are ignored by apply
-        MSG_STREAM_START => crate::stream_apply::apply_handle_stream_start(mcx, &mut r),
-        MSG_STREAM_STOP => crate::stream_apply::apply_handle_stream_stop(mcx),
-        MSG_STREAM_COMMIT => crate::stream_apply::apply_handle_stream_commit(mcx, conn, &mut r),
-        MSG_STREAM_ABORT => crate::stream_apply::apply_handle_stream_abort(mcx, &mut r),
-        MSG_STREAM_PREPARE => crate::stream_apply::apply_handle_stream_prepare(mcx, conn, &mut r),
+        MSG_STREAM_START => crate::stream_apply::apply_handle_stream_start(mcx, buf),
+        MSG_STREAM_STOP => crate::stream_apply::apply_handle_stream_stop(mcx, buf),
+        MSG_STREAM_COMMIT => {
+            crate::stream_apply::apply_handle_stream_commit(mcx, conn.as_deref_mut(), buf)
+        }
+        MSG_STREAM_ABORT => crate::stream_apply::apply_handle_stream_abort(mcx, buf),
+        MSG_STREAM_PREPARE => {
+            crate::stream_apply::apply_handle_stream_prepare(mcx, conn.as_deref_mut(), buf)
+        }
         MSG_BEGIN_PREPARE => apply_handle_begin_prepare(&mut r),
         MSG_PREPARE => apply_handle_prepare(mcx, conn, &mut r),
         MSG_COMMIT_PREPARED => apply_handle_commit_prepared(mcx, conn, &mut r),
@@ -277,7 +307,11 @@ fn apply_handle_begin(r: &mut Reader<'_>) -> PgResult<()> {
 }
 
 // apply_handle_commit (worker.c:1010).
-fn apply_handle_commit(mcx: Mcx<'static>, conn: &mut PgConn, r: &mut Reader<'_>) -> PgResult<()> {
+fn apply_handle_commit(
+    mcx: Mcx<'static>,
+    conn: Option<&mut PgConn>,
+    r: &mut Reader<'_>,
+) -> PgResult<()> {
     let commit = logicalproto::logicalrep_read_commit(r)?;
 
     if commit.commit_lsn != REMOTE_FINAL_LSN.get() {
@@ -388,7 +422,11 @@ pub(crate) fn apply_handle_prepare_internal(
 }
 
 // apply_handle_prepare (worker.c:1102).
-fn apply_handle_prepare(mcx: Mcx<'static>, conn: &mut PgConn, r: &mut Reader<'_>) -> PgResult<()> {
+fn apply_handle_prepare(
+    mcx: Mcx<'static>,
+    conn: Option<&mut PgConn>,
+    r: &mut Reader<'_>,
+) -> PgResult<()> {
     let prepare_data = logicalproto::logicalrep_read_prepare(r)?;
 
     if prepare_data.prepare_lsn != REMOTE_FINAL_LSN.get() {
@@ -432,7 +470,7 @@ fn apply_handle_prepare(mcx: Mcx<'static>, conn: &mut PgConn, r: &mut Reader<'_>
 // apply_handle_commit_prepared (worker.c:1173).
 fn apply_handle_commit_prepared(
     mcx: Mcx<'static>,
-    conn: &mut PgConn,
+    conn: Option<&mut PgConn>,
     r: &mut Reader<'_>,
 ) -> PgResult<()> {
     let prepare_data = logicalproto::logicalrep_read_commit_prepared(r)?;
@@ -464,7 +502,7 @@ fn apply_handle_commit_prepared(
 // apply_handle_rollback_prepared (worker.c:1222).
 fn apply_handle_rollback_prepared(
     mcx: Mcx<'static>,
-    conn: &mut PgConn,
+    conn: Option<&mut PgConn>,
     r: &mut Reader<'_>,
 ) -> PgResult<()> {
     let rollback_data = logicalproto::logicalrep_read_rollback_prepared(r)?;
@@ -501,10 +539,14 @@ fn apply_handle_rollback_prepared(
 
 // apply_handle_relation (worker.c:2318).
 fn apply_handle_relation(mcx: Mcx<'_>, r: &mut Reader<'_>) -> PgResult<()> {
-    begin_replication_step(mcx)?;
+    // No transaction in C (worker.c:2317): the relmap update touches only the
+    // in-memory map. Opening one here used to leave it dangling when RELATION
+    // is applied OUTSIDE a remote transaction (the parallel-streaming leader
+    // applies forwarded RELATION/TYPE messages between chunks).
+    let _ = mcx;
     let rel = logicalproto::logicalrep_read_rel(r)?;
     logicalrelation::logicalrep_relmap_update(&rel);
-    end_replication_step()
+    Ok(())
 }
 
 // slot_store_data (worker.c:791).
@@ -1495,7 +1537,7 @@ fn apply_handle_insert(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     let subid = my_sub(|s| s.oid);
     let (entry, rel) =
         logicalrelation::logicalrep_rel_open(mcx, relid, types_rel::RowExclusiveLock, subid)?;
-    if !should_apply_changes_for_rel(&entry) {
+    if !should_apply_changes_for_rel(&entry)? {
         logicalrelation::logicalrep_rel_close(rel, types_rel::RowExclusiveLock)?;
         return end_replication_step();
     }
@@ -1541,7 +1583,7 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     let subid = my_sub(|s| s.oid);
     let (entry, rel) =
         logicalrelation::logicalrep_rel_open(mcx, upd.relid, types_rel::RowExclusiveLock, subid)?;
-    if !should_apply_changes_for_rel(&entry) {
+    if !should_apply_changes_for_rel(&entry)? {
         logicalrelation::logicalrep_rel_close(rel, types_rel::RowExclusiveLock)?;
         return end_replication_step();
     }
@@ -1626,7 +1668,7 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     let subid = my_sub(|s| s.oid);
     let (entry, rel) =
         logicalrelation::logicalrep_rel_open(mcx, relid, types_rel::RowExclusiveLock, subid)?;
-    if !should_apply_changes_for_rel(&entry) {
+    if !should_apply_changes_for_rel(&entry)? {
         logicalrelation::logicalrep_rel_close(rel, types_rel::RowExclusiveLock)?;
         return end_replication_step();
     }
@@ -1707,7 +1749,7 @@ fn apply_handle_truncate(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> 
             types_rel::AccessExclusiveLock,
             subid,
         )?;
-        if !should_apply_changes_for_rel(&entry) {
+        if !should_apply_changes_for_rel(&entry)? {
             logicalrelation::logicalrep_rel_close(rel, types_rel::AccessExclusiveLock)?;
             continue;
         }

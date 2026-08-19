@@ -40,6 +40,16 @@ pub type AddForeignUpdateTargets = for<'mcx> fn(
     &mut dyn FnMut(Node<'mcx>, &'static str) -> PgResult<()>,
 ) -> PgResult<()>;
 
+/// PlanDirectModify: may rewrite the ModifyTable's ForeignScan subplan into a
+/// direct remote UPDATE/DELETE; true = rewritten (skip PlanForeignModify and
+/// record the subplan in fdwDirectModifyPlans).
+pub type PlanDirectModify = for<'mcx> fn(
+    &mut PlannerRun<'mcx>,
+    &mut types_nodes::plannodes::ModifyTable<'mcx>,
+    u32,   // resultRelation rti
+    usize, // subplan_index
+) -> PgResult<bool>;
+
 /// PlanForeignModify: returns the per-result-rel fdw_private list appended to
 /// ModifyTable.fdwPrivLists (createplan.c make_modifytable's FDW loop).
 pub type PlanForeignModify = for<'mcx> fn(
@@ -49,11 +59,39 @@ pub type PlanForeignModify = for<'mcx> fn(
     usize, // subplan_index
 ) -> PgResult<NodeList<'mcx>>;
 
+/// GetForeignJoinPaths: (joinrel, outerrel, innerrel, jointype, sjinfo,
+/// extra->restrictlist) — called from add_paths_to_joinrel when the joinrel
+/// carries an fdwroutine (both sides same server/user).
+pub type GetForeignJoinPaths = for<'mcx> fn(
+    &mut PlannerRun<'mcx>,
+    RelId,
+    RelId,
+    RelId,
+    u32,
+    &types_pathnodes::SpecialJoinInfo<'mcx>,
+    &[RinfoId],
+) -> PgResult<()>;
+
+/// GetForeignUpperPaths (UPPERREL_GROUP_AGG lane): (stage, input_rel,
+/// output_rel, extra->havingQual). ORDERED/FINAL stages are not yet offered.
+pub type GetForeignUpperPaths = for<'mcx> fn(
+    &mut PlannerRun<'mcx>,
+    types_pathnodes::UpperRelationKind,
+    RelId,
+    RelId,
+    Option<Node<'mcx>>,
+) -> PgResult<()>;
+
 pub struct FdwPlanRoutine {
     pub get_foreign_rel_size: for<'mcx> fn(&mut PlannerRun<'mcx>, RelId, Oid) -> PgResult<()>,
     pub get_foreign_paths: for<'mcx> fn(&mut PlannerRun<'mcx>, RelId, Oid) -> PgResult<()>,
     pub get_foreign_plan: GetForeignPlan,
+    /// None = provider has no join pushdown (C's NULL slot).
+    pub get_foreign_join_paths: Option<GetForeignJoinPaths>,
+    /// None = provider has no upper-rel pushdown (C's NULL slot).
+    pub get_foreign_upper_paths: Option<GetForeignUpperPaths>,
     pub add_foreign_update_targets: Option<AddForeignUpdateTargets>,
+    pub plan_direct_modify: Option<PlanDirectModify>,
     pub plan_foreign_modify: Option<PlanForeignModify>,
     /// IsForeignPathAsyncCapable; None = never async (C's NULL slot).
     pub is_foreign_path_async_capable:

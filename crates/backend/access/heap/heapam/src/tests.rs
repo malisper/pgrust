@@ -985,8 +985,16 @@ pub(crate) fn wal_insert_record_hook(
         .lock()
         .unwrap()
         .push((info, main, blocks.len(), regs));
+    if let Some(cb) = WAL_INSPECT.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        cb(info, blocks);
+    }
     Ok(NEXT_LSN.fetch_add(8, Ordering::Relaxed) as u64)
 }
+
+#[allow(clippy::type_complexity)]
+static WAL_INSPECT: Mutex<
+    Option<Box<dyn for<'a, 'b> Fn(u8, &'a [crate::wal::RegBlock<'b>]) + Send>>,
+> = Mutex::new(None);
 
 fn install_dml_seams() {
     install_seams();
@@ -2265,5 +2273,78 @@ fn end_claim_release_drops_midclaim_pin_and_repositions() {
     assert_eq!(ntuples, 3, "full drain after the released claim");
 
     heap_endscan(scan).unwrap();
+    quiesced();
+}
+
+// Inplace-update crash discipline (heapam.c heap_inplace_update_and_unlock):
+// WAL is inserted BEFORE the live page mutates, registering a stack copy that
+// already carries the post-mutation image (the FPI candidate).
+#[test]
+fn inplace_update_wal_precedes_page_mutation() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(10, 0, 1))], false)],
+    );
+    let rel = test_relation(mcx, oid);
+    let buf = bufmgr_seams::read_buffer::call(&rel, 0).unwrap();
+    bufmgr_seams::lock_buffer::call(buf, bufmgr_seams::BUFFER_LOCK_EXCLUSIVE).unwrap();
+    let live = bufmgr_seams::buffer_get_page::call(buf).as_ptr() as usize;
+
+    let tid = ItemPointerData::new(0, 1);
+    let dst_off = {
+        // SAFETY: pinned above.
+        let page = unsafe {
+            ::types_storage::bufpage::PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf))
+        };
+        let (ptr, _len) = page.item_raw(page.item_id(1));
+        ptr as usize - live + 24
+    };
+
+    #[repr(align(8))]
+    struct Aligned([u8; 28]);
+    let mut a = Aligned([0; 28]);
+    a.0.copy_from_slice(&tuple_image(10, 0, 42));
+    // SAFETY: MAXALIGNed local image, header-complete, alive for the borrow.
+    let newtup = unsafe { HeapTupleData::from_raw_parts(a.0.as_ptr(), 28, tid, oid) };
+    let src = &a.0[24..28];
+
+    let saw = std::sync::Arc::new(AtomicUsize::new(0));
+    let saw_cb = saw.clone();
+    *WAL_INSPECT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(move |info, blocks| {
+        if info != crate::dml::XLOG_HEAP_INPLACE {
+            return;
+        }
+        assert_eq!(blocks.len(), 1);
+        let b = &blocks[0];
+        assert_eq!(b.flags, ::xloginsert_seams::REGBUF_STANDARD);
+        assert_eq!(b.page.len(), BLCKSZ);
+        // Registered image is a copy, not the live page...
+        assert_ne!(b.page.as_ptr() as usize, live);
+        // ...already carrying the post-mutation bytes...
+        assert_eq!(&b.page[dst_off..dst_off + 4], &42i32.to_ne_bytes());
+        // ...while the live page is still the pre-image at insert time.
+        // SAFETY: live page pinned for the whole test.
+        let live_val = unsafe { core::ptr::read((live + dst_off) as *const [u8; 4]) };
+        assert_eq!(live_val, 1i32.to_ne_bytes());
+        assert_eq!(b.bufdata.concat(), 42i32.to_ne_bytes());
+        saw_cb.fetch_add(1, Ordering::Relaxed);
+    }));
+
+    let msgs: PgVec<'_, ::types_storage::SharedInvalidationMessage> = PgVec::new_in(mcx);
+    crate::inplace::inplace_write_wal_and_page(mcx, &rel, &newtup, buf, src, 24, 4, false, 0, &msgs)
+        .unwrap();
+    *WAL_INSPECT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    assert_eq!(saw.load(Ordering::Relaxed), 1, "XLOG_HEAP_INPLACE was inserted");
+    // SAFETY: live page still registered and pinned.
+    let live_val = unsafe { core::ptr::read((live + dst_off) as *const [u8; 4]) };
+    assert_eq!(live_val, 42i32.to_ne_bytes(), "page mutated after WAL");
+
+    bufmgr_seams::release_buffer::call(buf).unwrap();
     quiesced();
 }

@@ -271,6 +271,20 @@ fn extra_builtin(id: Oid) -> Option<&'static FmgrBuiltin> {
 }
 
 #[inline]
+/// Test support: assert each row's metadata matches its canonical pg_proc row.
+pub fn assert_rows_match_canonical(rows: &[FmgrBuiltin]) {
+    for r in rows {
+        let i = CANONICAL
+            .binary_search_by_key(&r.foid, |c| c.0)
+            .unwrap_or_else(|_| panic!("OID {} not in the canonical table", r.foid));
+        let c = &CANONICAL[i];
+        assert_eq!(r.name, c.1, "name mismatch for OID {}", r.foid);
+        assert_eq!(r.nargs, c.2, "nargs mismatch for {} ({})", c.1, r.foid);
+        assert_eq!(r.strict, c.3, "strict mismatch for {} ({})", c.1, r.foid);
+        assert_eq!(r.retset, c.4, "retset mismatch for {} ({})", c.1, r.foid);
+    }
+}
+
 pub fn fmgr_isbuiltin(id: Oid) -> Option<&'static FmgrBuiltin> {
     match FMGR_BUILTIN_OID_INDEX.lookup(&FMGR_BUILTINS, id) {
         #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional

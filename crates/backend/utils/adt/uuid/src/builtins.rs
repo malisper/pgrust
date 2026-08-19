@@ -156,10 +156,13 @@ pub const UUID_BUILTINS: &[FmgrBuiltin] = &[
     b(2961, "uuid_recv", 1, fc_uuid_recv),
     b(2962, "uuid_send", 1, fc_uuid_send),
     b(2963, "uuid_hash", 1, fc_uuid_hash),
+    // sort/skip support: native comparator resolution; fmgr-lookup parity rows.
+    b(3300, "uuid_sortsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(3412, "uuid_hash_extended", 2, fc_uuid_hash_extended),
     b(3432, "gen_random_uuid", 0, fc_gen_random_uuid),
     b(6342, "uuid_extract_timestamp", 1, fc_uuid_extract_timestamp),
     b(6343, "uuid_extract_version", 1, fc_uuid_extract_version),
+    b(6410, "uuid_skipsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(6428, "gen_random_uuid", 0, fc_gen_random_uuid),
     b(6429, "uuidv7", 0, fc_uuidv7),
     b(6430, "uuidv7_interval", 1, fc_uuidv7_interval),

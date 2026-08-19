@@ -104,6 +104,9 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     rel: &Relation<'mcx>,
     cmd: &PartitionCmd<'mcx>,
+    // The bound already transformed by transform_partition_cmd (C: ATParse-
+    // TransformCmd ran transformPartitionCmd on cmd->def before this).
+    bound: Node<'mcx>,
     query_string: &str,
 ) -> PgResult<()> {
     let pdesc = partdesc::RelationGetPartitionDesc(rel, true)?;
@@ -269,14 +272,6 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
         check_no_transition_table_triggers(mcx, &attachrel)?;
     }
 
-    let mut pstate = parser_small1::make_parsestate(mcx, None);
-    pstate.p_sourcetext = Some(query_string.as_bytes());
-    let bound = crate::partition::transformPartitionBound(
-        mcx,
-        &mut pstate,
-        rel,
-        cmd.bound.expect("ATTACH PARTITION bound"),
-    )?;
     let spec = bound
         .as_variant::<PartitionBoundSpec>()
         .expect("PartitionBoundSpec");
@@ -1575,6 +1570,13 @@ fn RemoveInheritance<'mcx>(
     conrel.close(RowExclusiveLock)?;
 
     drop_parent_dependency(mcx, child_rel.rd_id, parent_rel.rd_id)?;
+    objectaccess::InvokeObjectPostAlterHookArg(
+        InheritsRelationId,
+        child_rel.rd_id,
+        0,
+        parent_rel.rd_id,
+        false,
+    )?;
     Ok(())
 }
 

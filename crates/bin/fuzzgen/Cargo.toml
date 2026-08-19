@@ -19,3 +19,18 @@ path = "src/bin/diffrunner.rs"
 [[bin]]
 name = "covapply"
 path = "src/bin/covapply.rs"
+
+[dependencies]
+pgsync = { path = "../../_support/pgsync" }
+# gramwalk: the grammar-derived generation module walks the SAME vendored
+# 18.3 bison automaton the parser runs on (gram_core::tables) and renders
+# terminals from the scanner's keyword list — no duplicated tables.
+gram_core = { path = "../../backend/parser/gram_core" }
+keywords = { path = "../../common/keywords" }
+scan_fgram = { path = "../../backend/parser/scan_fgram" }
+
+[dev-dependencies]
+# gramwalk's parse-rate pin re-parses generated statements with the real
+# parser entry point.
+mcx = { path = "../../_support/mcx" }
+parser_seams = { path = "../../backend/parser/parser_seams" }

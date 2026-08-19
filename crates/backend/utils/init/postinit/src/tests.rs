@@ -143,3 +143,34 @@ fn init_postgres_fails_loud_at_first_unported_seam() {
         "panic must name the missing unit, got: {msg}"
     );
 }
+
+// UTF-8-only server-encoding carve (docs/design/carve-ratifications.md §11,
+// ratified 2026-08-18): CheckMyDatabase refuses non-UTF8/non-SQL_ASCII
+// databases with a clean per-database FATAL naming the database, its
+// encoding, and the carve.
+#[test]
+fn utf8_only_connection_gate() {
+    assert!(unsupported_database_encoding_error("db", wchar::PG_UTF8).is_none());
+    assert!(unsupported_database_encoding_error("db", wchar::PG_SQL_ASCII).is_none());
+
+    for (enc, ename) in [(wchar::PG_LATIN1, "LATIN1"), (wchar::PG_EUC_JP, "EUC_JP")] {
+        let e = unsupported_database_encoding_error("legacy", enc).expect("must be refused");
+        assert_eq!(e.level(), types_error::FATAL);
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(
+            e.message(),
+            format!(
+                "database \"legacy\" has server encoding \"{ename}\", which is not supported \
+                 by pgrust; only \"UTF8\" and \"SQL_ASCII\" server encodings are accepted \
+                 (UTF-8-only carve, docs/design/carve-ratifications.md)"
+            )
+        );
+        assert_eq!(
+            e.hint(),
+            Some(
+                "Restore non-UTF8 dumps into a UTF8 database; client_encoding conversion is \
+                 supported."
+            )
+        );
+    }
+}

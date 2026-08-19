@@ -93,7 +93,7 @@ pub fn CastCreate<'mcx>(
 
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
-    // InvokeObjectPostCreateHook: object-access hooks are elided repo-wide.
+    objectaccess::InvokeObjectPostCreateHook(CastRelationId, castid, 0)?;
 
     relation.close(RowExclusiveLock)?;
 

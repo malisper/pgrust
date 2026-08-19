@@ -334,8 +334,11 @@ pub fn check_hba(port: &mut Port) -> PgResult<()> {
                     continue;
                 }
 
-                // Check GSSAPI state (no-GSS build: gssenc never true).
-                if !enable_gss() && hba.conntype == ctHostGSS {
+                // GSSAPI encryption is not implemented, so gssenc is never
+                // established: hostgssenc never matches (C: !(port->gss &&
+                // port->gss->enc) skips ctHostGSS).
+                let _ = enable_gss();
+                if hba.conntype == ctHostGSS {
                     continue;
                 }
 

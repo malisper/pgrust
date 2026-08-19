@@ -124,11 +124,21 @@ fn finish_sync_worker() -> PgResult<()> {
 // process_syncing_tables (tablesync.c:695).
 pub(crate) fn process_syncing_tables(
     mcx: Mcx<'static>,
-    conn: &mut PgConn,
+    conn: Option<&mut PgConn>,
     current_lsn: XLogRecPtr,
 ) -> PgResult<()> {
+    // Skip for parallel apply workers: the leader will do it (tablesync.c
+    // WORKERTYPE_PARALLEL_APPLY arm; also avoids the empty-xact accumulation
+    // C describes there).
+    if crate::parallel::am_parallel_apply_worker() {
+        return Ok(());
+    }
     if AM_TABLESYNC_WORKER.with(Cell::get) {
-        process_syncing_tables_for_sync(mcx, conn, current_lsn)
+        process_syncing_tables_for_sync(
+            mcx,
+            conn.expect("tablesync worker has a publisher connection"),
+            current_lsn,
+        )
     } else {
         process_syncing_tables_for_apply(mcx, current_lsn)
     }
@@ -265,6 +275,7 @@ fn process_syncing_tables_for_apply(mcx: Mcx<'static>, current_lsn: XLogRecPtr) 
                             &name,
                             w.userid,
                             relid,
+                            0,
                         )?;
                     }
                 }

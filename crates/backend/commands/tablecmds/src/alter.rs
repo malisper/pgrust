@@ -479,6 +479,66 @@ pub fn AlterTable<'mcx>(
     ATController(mcx, rel, &stmt.cmds, recurse, lockmode, query_string, Some(tag))
 }
 
+// transformPartitionCmd (parse_utilcmd.c:4225), reached from the exec arm
+// exactly where C's ATParseTransformCmd runs it: after ATPrepCmd's
+// permission/relkind checks, BEFORE the child relation is opened — a bound
+// spec invalid for the parent's strategy is 42P16 even when the named
+// partition doesn't exist. Returns the transformed bound for ATTACH on a
+// partitioned table (C stashes it in cmd->def->bound).
+fn transform_partition_cmd<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    pcmd: &types_nodes::rawnodes::PartitionCmd<'mcx>,
+    query_string: &str,
+) -> PgResult<Option<Node<'mcx>>> {
+    if let Some(e) =
+        partition_cmd_relkind_error(rel.rd_rel.relkind, pcmd.bound.is_some(), rel.name())
+    {
+        return Err(e);
+    }
+    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        if let Some(bound) = pcmd.bound {
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            // ParseState wants 'mcx source text for error cursors; the
+            // statement string outlives the command but not provably.
+            pstate.p_sourcetext =
+                Some(mcx::PgString::from_str_in(query_string, mcx)?.into_bytes().leak());
+            return Ok(Some(crate::partition::transformPartitionBound(
+                mcx, &mut pstate, rel, bound,
+            )?));
+        }
+    }
+    Ok(None)
+}
+
+// transformPartitionCmd's relkind dispatch (parse_utilcmd.c:4235-4278).
+fn partition_cmd_relkind_error(
+    relkind: u8,
+    has_bound: bool,
+    relname: &str,
+) -> Option<Box<PgError>> {
+    let msg = match relkind {
+        types_rel::RELKIND_PARTITIONED_TABLE => return None,
+        // ALTER INDEX's grammar forbids a bound; ALTER TABLE's doesn't.
+        types_rel::RELKIND_PARTITIONED_INDEX if !has_bound => return None,
+        types_rel::RELKIND_PARTITIONED_INDEX => {
+            format!("\"{relname}\" is not a partitioned table")
+        }
+        RELKIND_RELATION => format!("table \"{relname}\" is not partitioned"),
+        types_rel::RELKIND_INDEX => format!("index \"{relname}\" is not partitioned"),
+        // C's elog (XX000): parser shouldn't let this case through.
+        _ => {
+            return Some(Box::new(PgError::new(
+                ERROR,
+                format!("\"{relname}\" is not a partitioned table or index"),
+            )));
+        }
+    };
+    Some(Box::new(
+        PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+    ))
+}
+
 // AlterTableInternal (tablecmds.c:4563).
 pub fn AlterTableInternal<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1440,28 +1500,19 @@ fn ATRewriteCatalogs<'mcx>(
                         .expect("AT_AttachPartition PartitionCmd")
                         .as_variant::<types_nodes::rawnodes::PartitionCmd>()
                         .expect("PartitionCmd");
+                    // C: ATParseTransformCmd -> transformPartitionCmd, before
+                    // ATExecAttachPartition opens the child.
+                    let bound = transform_partition_cmd(mcx, &rel, pcmd, query_string)?;
                     if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
                         crate::attach::ATExecAttachPartition(
-                            mcx, wqueue, &rel, pcmd, query_string,
+                            mcx,
+                            wqueue,
+                            &rel,
+                            pcmd,
+                            bound.expect("transformed ATTACH PARTITION bound"),
+                            query_string,
                         )?;
                     } else {
-                        // transformPartitionCmd (parse_utilcmd.c:4239): ALTER
-                        // TABLE grammar allows a bound on a partitioned index;
-                        // a partitioned index cannot have one.
-                        if pcmd.bound.is_some() {
-                            return Err(Box::new(
-                                PgError::new(
-                                    ERROR,
-                                    format!(
-                                        "\"{}\" is not a partitioned table",
-                                        rel.name()
-                                    ),
-                                )
-                                .with_sqlstate(
-                                    types_error::ERRCODE_INVALID_OBJECT_DEFINITION,
-                                ),
-                            ));
-                        }
                         crate::attach::ATExecAttachPartitionIdx(
                             mcx,
                             &rel,
@@ -1475,6 +1526,9 @@ fn ATRewriteCatalogs<'mcx>(
                         .expect("AT_DetachPartition PartitionCmd")
                         .as_variant::<types_nodes::rawnodes::PartitionCmd>()
                         .expect("PartitionCmd");
+                    // C: ATParseTransformCmd -> transformPartitionCmd (relkind
+                    // checks; DETACH carries no bound).
+                    transform_partition_cmd(mcx, &rel, pcmd, query_string)?;
                     // Concurrent detach commits mid-command and reopens the
                     // parent; the returned handle carries the reopened rel.
                     rel = crate::attach::ATExecDetachPartition(
@@ -1749,6 +1803,7 @@ fn ATRewriteTableOne<'mcx>(
             multixact::ReadNextMultiXactId()?,
             persistence,
         )?;
+        objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, tab.relid, 0)?;
     } else if tab.rewrite > 0 {
         if tab.chg_persistence {
             sequence_seams::sequence_change_persistence::call(
@@ -3041,6 +3096,7 @@ fn ATExecSetExpression<'mcx>(
     }
 
     catalog_heap::RemoveStatistics(mcx, rel.rd_id, attnum)?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
     Ok(())
 }
 
@@ -3143,6 +3199,7 @@ fn ATExecDropExpression<'mcx>(
         attnum,
         &[(Anum_pg_attribute_attgenerated, Datum::from_i8(0))],
     )?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
 
     let attrdefoid = pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
     if attrdefoid == InvalidOid {
@@ -3344,6 +3401,7 @@ fn add_identity_internal<'mcx>(
         attnum,
         &[(Anum_pg_attribute_attidentity, Datum::from_i8(identity))],
     )?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
 
     // Identity is not inherited in regular inheritance children; recurse to
     // partitions only (tablecmds.c:8345-8362).
@@ -3436,6 +3494,7 @@ fn set_identity_internal<'mcx>(
             attnum,
             &[(Anum_pg_attribute_attidentity, Datum::from_i8(v as i8))],
         )?;
+        objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
 
         // Identity is not inherited in regular inheritance children; recurse
         // to partitions only (tablecmds.c:8462-8479).
@@ -3507,6 +3566,7 @@ pub(crate) fn ATExecDropIdentity<'mcx>(
         attnum,
         &[(Anum_pg_attribute_attidentity, Datum::from_i8(0))],
     )?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
 
     // Identity is not inherited in regular inheritance children; recurse to
     // partitions only.
@@ -3789,7 +3849,9 @@ fn ATExecDropNotNull<'mcx>(
         cmd.recurse,
         false,
         lockmode,
-    )
+    )?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
+    Ok(())
 }
 
 fn nn_con_shape(con: &pg_constraint::NotNullConTup) -> pg_constraint::ConShape {
@@ -4072,6 +4134,7 @@ fn create_notnull_constraint<'mcx>(
         rel,
         rel.rd_att.constr.as_deref().map(|c| c.num_check as i16).unwrap_or(0),
     )?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
 
     // An invalid constraint sets attnotnull without queueing verification.
     set_attnotnull(mcx, wqueue, rel, attnum, initially_valid)?;
@@ -4669,7 +4732,9 @@ fn ATExecSetStatistics<'mcx>(
             Datum::from_i16(newtarget as i16),
             newtarget_default,
         )],
-    )
+    )?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
+    Ok(())
 }
 
 fn ATExecSetStorage<'mcx>(
@@ -4699,6 +4764,7 @@ fn ATExecSetStorage<'mcx>(
         attnum,
         &[(Anum_pg_attribute_attstorage, Datum::from_i8(newstorage as i8))],
     )?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
     set_index_storage_properties(
         mcx,
         rel,
@@ -4735,6 +4801,7 @@ fn ATExecSetCompression<'mcx>(
         attnum,
         &[(Anum_pg_attribute_attcompression, Datum::from_i8(cmethod))],
     )?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
     set_index_storage_properties(
         mcx,
         rel,
@@ -5637,6 +5704,7 @@ fn ATExecAlterColumnType<'mcx>(
     }
 
     catalog_heap::RemoveStatistics(mcx, rel.rd_id, attnum)?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
 
     if let Some(defexpr) = defaultexpr {
         // A GENERATED default's INTERNAL dependency on the column would make
@@ -6603,6 +6671,7 @@ fn set_pg_class_bool<'mcx>(
     let otid = reltup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
     pg_class.close(RowExclusiveLock)
 }
 
@@ -6721,6 +6790,13 @@ fn relation_mark_replica_identity<'mcx>(
             let otid = tup.t_self;
             genam::systable_endscan(mcx, scan)?;
             catalog_indexing::CatalogTupleUpdate(mcx, &pg_index, &otid, &mut newtup)?;
+            objectaccess::InvokeObjectPostAlterHookArg(
+                types_core::INDEX_RELATION_ID,
+                this_index,
+                0,
+                InvalidOid,
+                true,
+            )?;
             inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
         } else {
             genam::systable_endscan(mcx, scan)?;
@@ -7151,6 +7227,7 @@ fn ATExecSetTableSpace<'mcx>(
         table::table_open(mcx, table_oid, lockmode)?
     };
     if !CheckRelationTableSpaceMove(&rel, new_tablespace)? {
+        objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
         return rel.close(NoLock);
     }
     let reltoastrelid = rel.rd_rel.reltoastrelid;
@@ -7178,6 +7255,7 @@ fn ATExecSetTableSpace<'mcx>(
     }
 
     SetRelationTableSpace(mcx, &rel, new_tablespace, newrelfilenumber)?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
     rel.rd_locator.set(newrlocator);
     relcache::invalidate::RelationAssumeNewRelfilelocator(&rel);
     rel.close(NoLock)?;
@@ -7989,6 +8067,42 @@ mod tests {
             alter_table_type_to_string(AlterTableType::AT_AttachPartition),
             Some("ATTACH PARTITION")
         );
+    }
+
+    // transformPartitionCmd relkind dispatch (parse_utilcmd.c:4225): the bound
+    // spec is judged against the parent BEFORE the child is opened, so a bad
+    // parent/bound pairing errors 42P16 even when the named partition is
+    // missing entirely.
+    #[test]
+    fn transform_partition_cmd_relkind_matrix_matches_c() {
+        use types_error::ERRCODE_INVALID_OBJECT_DEFINITION;
+        // partitioned table: never errors here (bound or not).
+        assert!(
+            partition_cmd_relkind_error(types_rel::RELKIND_PARTITIONED_TABLE, true, "p").is_none()
+        );
+        assert!(
+            partition_cmd_relkind_error(types_rel::RELKIND_PARTITIONED_TABLE, false, "p").is_none()
+        );
+        // partitioned index: a bound is rejected; detach/no-bound passes.
+        let e =
+            partition_cmd_relkind_error(types_rel::RELKIND_PARTITIONED_INDEX, true, "pi").unwrap();
+        assert_eq!(e.sqlstate(), ERRCODE_INVALID_OBJECT_DEFINITION);
+        assert_eq!(e.message(), "\"pi\" is not a partitioned table");
+        assert!(
+            partition_cmd_relkind_error(types_rel::RELKIND_PARTITIONED_INDEX, false, "pi")
+                .is_none()
+        );
+        // plain table / plain index: 42P16 with C's exact messages.
+        let e = partition_cmd_relkind_error(RELKIND_RELATION, true, "t").unwrap();
+        assert_eq!(e.sqlstate(), ERRCODE_INVALID_OBJECT_DEFINITION);
+        assert_eq!(e.message(), "table \"t\" is not partitioned");
+        let e = partition_cmd_relkind_error(types_rel::RELKIND_INDEX, false, "i").unwrap();
+        assert_eq!(e.sqlstate(), ERRCODE_INVALID_OBJECT_DEFINITION);
+        assert_eq!(e.message(), "index \"i\" is not partitioned");
+        // anything else is C's elog: internal error, not 42P16.
+        let e = partition_cmd_relkind_error(types_rel::RELKIND_VIEW, false, "v").unwrap();
+        assert_eq!(e.message(), "\"v\" is not a partitioned table or index");
+        assert_ne!(e.sqlstate(), ERRCODE_INVALID_OBJECT_DEFINITION);
     }
 
     // ATExecAddInherit parent targets: same C set, INHERIT action word.

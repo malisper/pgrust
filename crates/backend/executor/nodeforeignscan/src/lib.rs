@@ -47,6 +47,18 @@ pub struct FdwExecRoutine {
             &mut dyn FnMut(&str, FdwExplainProp<'_>) -> PgResult<()>,
         ) -> PgResult<()>,
     >,
+    /// BeginDirectModify / IterateDirectModify / EndDirectModify (fdwapi.h);
+    /// None = provider has no direct modification. `iterate_direct` fills the
+    /// scan slot for RETURNING rows (false = done).
+    pub begin_direct: Option<
+        for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>, i32) -> PgResult<()>,
+    >,
+    pub iterate_direct: Option<
+        for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>,
+    >,
+    pub end_direct: Option<
+        for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
+    >,
     /// ForeignAsyncRequest / ForeignAsyncConfigureWait / ForeignAsyncNotify
     /// (fdwapi.h); None = provider is never async-capable.
     pub async_request: Option<
@@ -162,7 +174,11 @@ impl<'mcx> ScanNode<'mcx> for ForeignScanState<'mcx> {
 
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
         let routine = fdw_exec_routine(self.fdwroutine);
-        let found = (routine.iterate)(self, estate)?;
+        let found = if self.plan.operation != CmdType::CMD_SELECT {
+            (routine.iterate_direct.expect("direct-modify provider"))(self, estate)?
+        } else {
+            (routine.iterate)(self, estate)?
+        };
         if found && self.table_oid != InvalidOid {
             estate.slot_mut(self.ss.ss_ScanTupleSlot).base_mut().tts_tableOid = self.table_oid;
         }
@@ -174,6 +190,10 @@ pub fn exec_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
+    // Direct modifications cannot be re-evaluated by EvalPlanQual.
+    if node.plan.operation != CmdType::CMD_SELECT && estate.es_epq_active {
+        return Ok(None);
+    }
     if estate.es_epq_active {
         return exec_scan(node, estate);
     }
@@ -202,52 +222,66 @@ pub fn exec_init_foreign_scan<'mcx>(
     eflags: i32,
 ) -> PgResult<ForeignScanState<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
-    // unported: ExecInitForeignScan (nodeForeignscan.c) direct-modify, FDW
-    // outer-plan, and fdw_scan_tlist lanes raise clean feature errors.
-    // These backstops are currently unreachable in production — revisit at
-    // phase-4 DML pushdown:
-    // - no PlanDirectModify hook exists: FdwPlanRoutine carries only
-    //   rel_size/paths/plan hooks (planner/src/fdwplan.rs:34-37), so
-    //   operation stays CMD_SELECT and resultRelation 0;
-    // - both create_foreignscan_path call sites pass fdw_outerpath None
-    //   (postgres_fdw/src/plan.rs:281-294, file_fdw/src/lib.rs:551-564),
-    //   so no outer subplan is attached;
-    // - both GetForeignPlan impls pass fdw_scan_tlist nil
-    //   (postgres_fdw/src/plan.rs:372-383, file_fdw/src/lib.rs:593-601),
-    //   and postgres_fdw refuses non-baserels at plan.rs:313-317, so
-    //   scanrelid is never 0.
-    if node.operation != CmdType::CMD_SELECT || node.resultRelation != 0 {
-        return Err(foreign_scan_unported("direct modification of a foreign table"));
-    }
+    // FDW outer subplans (EPQ alternative paths) are never generated: no
+    // provider passes fdw_outerpath. Clean refusal, never a mis-run.
     if node.scan.plan.lefttree.is_some() {
         return Err(foreign_scan_unported("a foreign scan with an outer subplan"));
     }
-    if node.scan.scanrelid == 0 || !node.fdw_scan_tlist.is_nil() {
-        return Err(foreign_scan_unported("a foreign scan with a custom scan tuple list"));
-    }
+    let direct = node.operation != CmdType::CMD_SELECT;
+    debug_assert_eq!(direct, node.resultRelation != 0);
 
     let ps_ExprContext = estate.exec_assign_expr_context();
-    let rel = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
-    let fdwroutine = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, rel.rd_id)?;
-    // C copies the descriptor: FDW rows need not satisfy NOT NULL.
-    let scan_tupdesc = tupdesc::CreateTupleDescCopy(mcx, &rel.rd_att)?;
-    let ss_ScanTupleSlot = estate.exec_init_extra_tuple_slot(
-        Some(alloc::rc::Rc::new(scan_tupdesc)),
-        TupleSlotKind::Virtual,
-    );
-    let table_oid = if node.fsSystemCol { rel.rd_id } else { InvalidOid };
+    let (rel, fdwroutine, scan_tupdesc, table_oid);
+    if node.scan.scanrelid > 0 {
+        let r = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
+        fdwroutine = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, r.rd_id)?;
+        // C copies the descriptor: FDW rows need not satisfy NOT NULL.
+        scan_tupdesc = alloc::rc::Rc::new(tupdesc::CreateTupleDescCopy(mcx, &r.rd_att)?);
+        table_oid = if node.fsSystemCol { r.rd_id } else { InvalidOid };
+        rel = Some(r);
+    } else {
+        // Foreign join/upper: tuple shape comes from fdw_scan_tlist; no base
+        // relation to open. (Whole-row RECORD fixup — C's
+        // get_tupdesc_for_join_scan_tuples — is the provider's concern.)
+        rel = None;
+        fdwroutine = foreigncmds_seams::get_fdw_routine_by_server_id::call(mcx, node.fs_server)?;
+        scan_tupdesc = execscan::exec_type_from_tl(mcx, &node.fdw_scan_tlist)?;
+        table_oid = InvalidOid;
+    }
+    let ss_ScanTupleSlot =
+        estate.exec_init_extra_tuple_slot(Some(scan_tupdesc), TupleSlotKind::Virtual);
 
     let mut ss = ScanState {
         qual: None,
         ps_ProjInfo: None,
         ps_ExprContext,
         scanrelid: node.scan.scanrelid,
-        ss_currentRelation: Some(rel),
+        ss_currentRelation: rel,
         ss_currentScanDesc: None,
         ss_ScanTupleSlot,
         instr_idx: None,
     };
-    execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
+    if node.scan.scanrelid > 0 {
+        execscan::exec_assign_scan_projection_info(
+            mcx, estate, &mut ss, &node.scan.plan.targetlist,
+        )?;
+    } else {
+        // ExecAssignScanProjectionInfoWithVarno(..., INDEX_VAR): the plan
+        // tlist references fdw_scan_tlist positions.
+        let tupdesc = estate
+            .slot(ss.ss_ScanTupleSlot)
+            .base()
+            .tts_tupleDescriptor
+            .clone()
+            .expect("scan slot descriptor set above");
+        ss.ps_ProjInfo = execscan::exec_conditional_assign_projection_info(
+            mcx,
+            estate,
+            &node.scan.plan.targetlist,
+            types_nodes::primnodes::INDEX_VAR as u32,
+            &tupdesc,
+        )?;
+    }
     ss.qual = {
         let pb = estate.param_bind();
         ::executils::with_subplan_compile_env(estate, |env| {
@@ -269,7 +303,13 @@ pub fn exec_init_foreign_scan<'mcx>(
         table_oid,
         fdw_state: None,
     };
-    (fdw_exec_routine(fdwroutine).begin)(&mut state, estate, eflags)?;
+    if direct {
+        (fdw_exec_routine(fdwroutine).begin_direct.expect("direct-modify provider"))(
+            &mut state, estate, eflags,
+        )?;
+    } else {
+        (fdw_exec_routine(fdwroutine).begin)(&mut state, estate, eflags)?;
+    }
     Ok(state)
 }
 
@@ -277,7 +317,12 @@ pub fn exec_end_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    (fdw_exec_routine(node.fdwroutine).end)(node, estate)?;
+    let routine = fdw_exec_routine(node.fdwroutine);
+    if node.plan.operation != CmdType::CMD_SELECT {
+        (routine.end_direct.expect("direct-modify provider"))(node, estate)?;
+    } else {
+        (routine.end)(node, estate)?;
+    }
     node.fdw_state = None;
     Ok(())
 }

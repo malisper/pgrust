@@ -759,3 +759,222 @@ fn interpret_ident_response_cases() {
     assert_eq!(got.len(), IDENT_USERNAME_MAX);
     assert!(got.bytes().all(|b| b == b'a'));
 }
+
+// ---------------- PAM (mock libpam FFI layer) ----------------
+//
+// A real PAM service needs root-owned /etc/pam.d entries, so the
+// conversation and CheckPAMAuth flow are unit-tested against a mock PamApi;
+// the e2e script exercises hba acceptance and the real-libpam failure path
+// (nonexistent service -> pam_deny via the "other" policy).
+
+use crate::pam_ffi::{self, pam_conv, pam_message, pam_response};
+use core::ffi::{c_char, c_int, c_void};
+
+thread_local! {
+    static MOCK_CONV: RefCell<usize> = const { RefCell::new(0) };
+    static MOCK_AUTH_RESULT: RefCell<c_int> = const { RefCell::new(pam_ffi::PAM_SUCCESS) };
+    static MOCK_SEEN_PASSWORD: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+unsafe extern "C" fn mock_pam_start(
+    _service: *const c_char,
+    _user: *const c_char,
+    conv: *const pam_conv,
+    pamh: *mut *mut pam_ffi::pam_handle_t,
+) -> c_int {
+    MOCK_CONV.with(|c| *c.borrow_mut() = conv as usize);
+    *pamh = 0x1 as *mut pam_ffi::pam_handle_t;
+    pam_ffi::PAM_SUCCESS
+}
+
+unsafe extern "C" fn mock_pam_set_item(
+    _pamh: *mut pam_ffi::pam_handle_t,
+    item_type: c_int,
+    item: *const c_void,
+) -> c_int {
+    if item_type == pam_ffi::PAM_CONV {
+        MOCK_CONV.with(|c| *c.borrow_mut() = item as usize);
+    }
+    pam_ffi::PAM_SUCCESS
+}
+
+// Drives the conversation like a PAM module asking for a password.
+unsafe extern "C" fn mock_pam_authenticate(
+    _pamh: *mut pam_ffi::pam_handle_t,
+    _flags: c_int,
+) -> c_int {
+    let scripted = MOCK_AUTH_RESULT.with(|r| *r.borrow());
+    if scripted != pam_ffi::PAM_SUCCESS {
+        return scripted;
+    }
+    let conv = MOCK_CONV.with(|c| *c.borrow()) as *const pam_conv;
+    assert!(!conv.is_null(), "mock: no conversation registered");
+    let msg = pam_message {
+        msg_style: pam_ffi::PAM_PROMPT_ECHO_OFF,
+        msg: c"Password:".as_ptr(),
+    };
+    let mut msgs: [*const pam_message; 1] = [&msg];
+    let mut resp: *mut pam_response = core::ptr::null_mut();
+    let rc = ((*conv).conv)(1, msgs.as_mut_ptr(), &mut resp, (*conv).appdata_ptr);
+    if rc != pam_ffi::PAM_SUCCESS {
+        return rc;
+    }
+    assert!(!resp.is_null());
+    let got = std::ffi::CStr::from_ptr((*resp).resp).to_string_lossy().into_owned();
+    libc::free((*resp).resp as *mut c_void);
+    libc::free(resp as *mut c_void);
+    MOCK_SEEN_PASSWORD.with(|p| *p.borrow_mut() = Some(got));
+    pam_ffi::PAM_SUCCESS
+}
+
+unsafe extern "C" fn mock_pam_acct_mgmt(
+    _pamh: *mut pam_ffi::pam_handle_t,
+    _flags: c_int,
+) -> c_int {
+    pam_ffi::PAM_SUCCESS
+}
+
+unsafe extern "C" fn mock_pam_end(_pamh: *mut pam_ffi::pam_handle_t, _status: c_int) -> c_int {
+    pam_ffi::PAM_SUCCESS
+}
+
+unsafe extern "C" fn mock_pam_strerror(
+    _pamh: *mut pam_ffi::pam_handle_t,
+    _errnum: c_int,
+) -> *const c_char {
+    c"mock PAM error".as_ptr()
+}
+
+fn install_pam_mock() {
+    pam_ffi::install_mock_for_tests(pam_ffi::PamApi {
+        pam_start: mock_pam_start,
+        pam_set_item: mock_pam_set_item,
+        pam_authenticate: mock_pam_authenticate,
+        pam_acct_mgmt: mock_pam_acct_mgmt,
+        pam_end: mock_pam_end,
+        pam_strerror: mock_pam_strerror,
+    });
+}
+
+fn pam_port(user: &str) -> Port {
+    let mut port = unix_port(user, "postgres");
+    let mut hba = types_startup::HbaLine::new_zeroed();
+    hba.auth_method = types_core::init::uaPAM;
+    hba.conntype = types_startup::ctLocal;
+    hba.sourcefile = "test_hba".to_string();
+    hba.linenumber = 1;
+    hba.rawline = "local all all pam".to_string();
+    port.hba = Some(hba);
+    port
+}
+
+// CheckPAMAuth full flow against the mock: pam_start -> set_item(USER/CONV)
+// -> authenticate (conversation returns the password) -> acct_mgmt -> end,
+// then set_authn_id records the identity.
+#[test]
+fn pam_mock_flow_succeeds_and_sets_authn_id() {
+    setup_backend(4271);
+    install_pam_mock();
+    MOCK_AUTH_RESULT.with(|r| *r.borrow_mut() = pam_ffi::PAM_SUCCESS);
+    let port = pam_port("pamuser");
+    // Non-empty password: the conversation answers from appdata without
+    // needing a client socket (the empty-password client round trip shares
+    // sendAuthRequest/recv_password_packet with the tested password arms).
+    let status = crate::pam::CheckPAMAuth(&port, "pamuser", "sekrit").unwrap();
+    assert_eq!(status, STATUS_OK);
+    assert_eq!(
+        MOCK_SEEN_PASSWORD.with(|p| p.borrow().clone()).as_deref(),
+        Some("sekrit")
+    );
+    let (authn_id, method) = miscinit::client_connection_info();
+    assert_eq!(authn_id, Some("pamuser"));
+    assert_eq!(method, types_core::init::uaPAM);
+}
+
+#[test]
+fn pam_mock_authenticate_failure_is_status_error() {
+    setup_backend(4272);
+    install_pam_mock();
+    MOCK_AUTH_RESULT.with(|r| *r.borrow_mut() = 9); // e.g. PAM_AUTH_ERR
+    let port = pam_port("pamuser");
+    let status = crate::pam::CheckPAMAuth(&port, "pamuser", "sekrit").unwrap();
+    assert_eq!(status, STATUS_ERROR);
+    assert_eq!(miscinit::client_connection_info().0, None);
+}
+
+// The conversation proc directly: TEXT_INFO / ERROR_MSG replies, unsupported
+// styles, and bad num_msg.
+#[test]
+fn pam_conv_proc_message_styles() {
+    install();
+    let passwd = std::ffi::CString::new("pw").unwrap();
+    let m1 = pam_message { msg_style: pam_ffi::PAM_PROMPT_ECHO_OFF, msg: c"Password:".as_ptr() };
+    let m2 = pam_message { msg_style: pam_ffi::PAM_TEXT_INFO, msg: c"info".as_ptr() };
+    let m3 = pam_message { msg_style: pam_ffi::PAM_ERROR_MSG, msg: c"boom".as_ptr() };
+    let mut msgs: [*const pam_message; 3] = [&m1, &m2, &m3];
+    let mut resp: *mut pam_response = core::ptr::null_mut();
+    // SAFETY: valid message array and out-pointer.
+    let rc = unsafe {
+        crate::pam::pam_passwd_conv_proc(
+            3,
+            msgs.as_mut_ptr(),
+            &mut resp,
+            passwd.as_ptr() as *mut c_void,
+        )
+    };
+    assert_eq!(rc, pam_ffi::PAM_SUCCESS);
+    assert!(!resp.is_null());
+    // SAFETY: conv allocated 3 responses.
+    unsafe {
+        let r0 = std::ffi::CStr::from_ptr((*resp).resp).to_str().unwrap();
+        assert_eq!(r0, "pw");
+        assert_eq!((*resp).resp_retcode, pam_ffi::PAM_SUCCESS);
+        let r1 = std::ffi::CStr::from_ptr((*resp.add(1)).resp).to_str().unwrap();
+        assert_eq!(r1, "");
+        let r2 = std::ffi::CStr::from_ptr((*resp.add(2)).resp).to_str().unwrap();
+        assert_eq!(r2, "");
+        for i in 0..3 {
+            libc::free((*resp.add(i)).resp as *mut c_void);
+        }
+        libc::free(resp as *mut c_void);
+    }
+
+    // Unsupported style fails the whole conversation.
+    let bad = pam_message { msg_style: 99, msg: core::ptr::null() };
+    let mut msgs: [*const pam_message; 1] = [&bad];
+    let mut resp: *mut pam_response = core::ptr::null_mut();
+    // SAFETY: valid message array and out-pointer.
+    let rc = unsafe {
+        crate::pam::pam_passwd_conv_proc(
+            1,
+            msgs.as_mut_ptr(),
+            &mut resp,
+            passwd.as_ptr() as *mut c_void,
+        )
+    };
+    assert_eq!(rc, pam_ffi::PAM_CONV_ERR);
+    assert!(resp.is_null());
+
+    // num_msg out of range.
+    let mut resp: *mut pam_response = core::ptr::null_mut();
+    // SAFETY: num_msg is rejected before the message array is read.
+    let rc = unsafe {
+        crate::pam::pam_passwd_conv_proc(
+            0,
+            core::ptr::null_mut(),
+            &mut resp,
+            passwd.as_ptr() as *mut c_void,
+        )
+    };
+    assert_eq!(rc, pam_ffi::PAM_CONV_ERR);
+    // SAFETY: as above; PAM_MAX_NUM_MSG+1 messages claimed but rejected.
+    let rc = unsafe {
+        crate::pam::pam_passwd_conv_proc(
+            pam_ffi::PAM_MAX_NUM_MSG + 1,
+            core::ptr::null_mut(),
+            &mut resp,
+            passwd.as_ptr() as *mut c_void,
+        )
+    };
+    assert_eq!(rc, pam_ffi::PAM_CONV_ERR);
+}

@@ -11,6 +11,7 @@ datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 namespace_seams = { path = "../../../catalog/namespace_seams" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
 keywords = { path = "../../../../common/keywords" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
 wchar = { path = "../../../../common/wchar" }

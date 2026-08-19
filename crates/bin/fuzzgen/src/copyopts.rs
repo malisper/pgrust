@@ -325,7 +325,7 @@ fn record_case(
     records: &mut Vec<Record>,
     stats: &mut CopyOptsStats,
 ) -> DiffClass {
-    let raw = classify(&DiffInput { sql, a: oa, b: ob, ulp_tol, soft_cols: &[] });
+    let raw = classify(&DiffInput { sql, a: oa, b: ob, ulp_tol, soft_cols: &[], mask_explain_timing: false });
     let c = apply_ruled(table, sql, raw);
     stats.cases += 1;
     match &c.class {

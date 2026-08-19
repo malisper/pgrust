@@ -579,7 +579,16 @@ fn compute_return_type<'mcx>(
             .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "CreateFunction"))?;
         let mut buf = [""; 4];
         let nnames = returnType.names.len();
-        assert!((1..=3).contains(&nnames), "improper qualified name");
+        if !(1..=3).contains(&nnames) {
+            return Err(catalog_namespace::improper_qualified_name_joined(
+                returnType
+                    .names
+                    .iter()
+                    .map(|n| n.as_string().expect("TypeName names").sval)
+                    .collect::<Vec<_>>()
+                    .join("."),
+            ));
+        }
         for (i, n) in returnType.names.iter().enumerate() {
             buf[i] = n.as_string().expect("TypeName names").sval;
         }

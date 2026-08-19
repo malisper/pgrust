@@ -245,6 +245,147 @@ fn squeeze_array<'mcx>(
     arrayfuncs::construct_array(mcx, &squeezed, elmtype, elmlen, elmbyval, elmalign)
 }
 
+/// `pg_extension_config_dump` (extension.c): add (or update) the table OID and
+/// WHERE condition in the creating extension's extconfig/extcondition arrays.
+pub(crate) fn extension_config_dump(
+    mcx: Mcx<'_>,
+    tableoid: Oid,
+    wherecond: &[u8],
+) -> PgResult<()> {
+    use types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_TABLE};
+
+    if !pg_depend::creating_extension() {
+        return Err(Box::new(
+            PgError::error(
+                "pg_extension_config_dump() can only be called from an SQL script \
+                 executed by CREATE EXTENSION",
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+
+    let Some(tablename) = lsyscache::get_rel_name(mcx, tableoid)? else {
+        return Err(Box::new(
+            PgError::error(format!("OID {tableoid} does not refer to a table"))
+                .with_sqlstate(ERRCODE_UNDEFINED_TABLE),
+        ));
+    };
+    let current_extension = pg_depend::CurrentExtensionObject();
+    if pg_depend::getExtensionOfObject(mcx, RELATION_RELATION_ID, tableoid)? != current_extension {
+        return Err(Box::new(
+            PgError::error(format!(
+                "table \"{}\" is not a member of the extension being created",
+                tablename.as_str()
+            ))
+            .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
+
+    let ext_rel = table::table_open(mcx, EXTENSION_RELATION_ID, RowExclusiveLock)?;
+    let key = oid_key(Anum_pg_extension_oid, current_extension);
+    let mut scan =
+        genam::systable_beginscan(mcx, &ext_rel, ExtensionOidIndexId, true, None, &[key])?;
+    let Some(ext_tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        // C: should not happen.
+        panic!("could not find tuple for extension {current_extension}");
+    };
+    let desc = ext_rel.descr();
+
+    let mut repl_val = [Datum::null(); Natts_pg_extension];
+    let repl_null = [false; Natts_pg_extension];
+    let mut repl_repl = [false; Natts_pg_extension];
+
+    // Build or modify the extconfig value.
+    let element = Datum::from_oid(tableoid);
+    let mut isnull = false;
+    // SAFETY: extconfig attno is within the pg_extension descriptor.
+    let config_datum = unsafe {
+        types_tuple::heap_getattr(ext_tup, Anum_pg_extension_extconfig, desc, &mut isnull)
+    };
+    let array_length: i32;
+    // 0-based position updated in both arrays (C's 1-based arrayIndex - 1);
+    // None = append (C's arrayLength + 1 array_set slot).
+    let array_index: Option<usize>;
+    let new_config;
+    if isnull {
+        array_length = 0;
+        array_index = None;
+        let (elmlen, elmbyval, elmalign) = builtin_array_meta(OIDOID);
+        new_config = arrayfuncs::construct_array(mcx, &[element], OIDOID, elmlen, elmbyval, elmalign)?;
+    } else {
+        let a = detoast_array_datum(mcx, config_datum)?;
+        array_length = arrayfuncs::arr_dim(&a, 0);
+        if arrayfuncs::arr_ndim(&a) != 1
+            || arrayfuncs::arr_lbound(&a, 0) != 1
+            || array_length < 0
+            || arrayfuncs::arr_hasnull(&a)
+            || arrayfuncs::arr_elemtype(&a) != OIDOID
+        {
+            return Err(PgError::error("extconfig is not a 1-D Oid array").into());
+        }
+        let (mut dvalues, _nulls) = arrayfuncs::deconstruct_array_builtin(mcx, &a, OIDOID, false)?;
+        array_index = dvalues.iter().position(|d| d.as_oid() == tableoid);
+        match array_index {
+            Some(i) => dvalues[i] = element,
+            None => dvalues.push(element),
+        }
+        let (elmlen, elmbyval, elmalign) = builtin_array_meta(OIDOID);
+        new_config = arrayfuncs::construct_array(mcx, &dvalues, OIDOID, elmlen, elmbyval, elmalign)?;
+    }
+    repl_val[Anum_pg_extension_extconfig as usize - 1] =
+        Datum::from_usize(new_config.as_ptr() as usize);
+    repl_repl[Anum_pg_extension_extconfig as usize - 1] = true;
+
+    // Build or modify the extcondition value.
+    let cond_text = varlena::cstring_to_text(mcx, wherecond)?;
+    let cond_elem = Datum::from_usize(cond_text.as_bytes().as_ptr() as usize);
+    let mut cond_isnull = false;
+    // SAFETY: extcondition attno is within the pg_extension descriptor.
+    let cond_datum = unsafe {
+        types_tuple::heap_getattr(ext_tup, Anum_pg_extension_extcondition, desc, &mut cond_isnull)
+    };
+    let new_condition;
+    if cond_isnull {
+        if array_length != 0 {
+            return Err(PgError::error("extconfig and extcondition arrays do not match").into());
+        }
+        let (elmlen, elmbyval, elmalign) = builtin_array_meta(TEXTOID);
+        new_condition =
+            arrayfuncs::construct_array(mcx, &[cond_elem], TEXTOID, elmlen, elmbyval, elmalign)?;
+    } else {
+        let a = detoast_array_datum(mcx, cond_datum)?;
+        if arrayfuncs::arr_ndim(&a) != 1
+            || arrayfuncs::arr_lbound(&a, 0) != 1
+            || arrayfuncs::arr_hasnull(&a)
+            || arrayfuncs::arr_elemtype(&a) != TEXTOID
+        {
+            return Err(PgError::error("extcondition is not a 1-D text array").into());
+        }
+        if arrayfuncs::arr_dim(&a, 0) != array_length {
+            return Err(PgError::error("extconfig and extcondition arrays do not match").into());
+        }
+        let (mut dvalues, _nulls) = arrayfuncs::deconstruct_array_builtin(mcx, &a, TEXTOID, false)?;
+        match array_index {
+            Some(i) => dvalues[i] = cond_elem,
+            None => dvalues.push(cond_elem),
+        }
+        let (elmlen, elmbyval, elmalign) = builtin_array_meta(TEXTOID);
+        new_condition =
+            arrayfuncs::construct_array(mcx, &dvalues, TEXTOID, elmlen, elmbyval, elmalign)?;
+    }
+    repl_val[Anum_pg_extension_extcondition as usize - 1] =
+        Datum::from_usize(new_condition.as_ptr() as usize);
+    repl_repl[Anum_pg_extension_extcondition as usize - 1] = true;
+
+    let tid = ext_tup.t_self;
+    let mut new_tup =
+        heaptuple::heap_modify_tuple(mcx, ext_tup, desc, &repl_val, &repl_null, &repl_repl)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &ext_rel, &tid, &mut new_tup)?;
+
+    genam::systable_endscan(mcx, scan)?;
+    ext_rel.close(RowExclusiveLock)
+}
+
 /// `extension_config_remove` (extension.c): remove the table OID from the
 /// extension's extconfig array (and the matching extcondition entry), if
 /// present.

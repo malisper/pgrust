@@ -136,7 +136,26 @@ pub fn fc_window_ntile_support(
     window_support(fcinfo, true)
 }
 
+// The WinFuncArgs bodies (window_row_number .. window_nth_value) execute
+// natively in nodeWindowAgg; rows exist for fmgr-lookup parity only.
+use types_fmgr::fc_internal_dispatch_only as fc_win_internal;
+
 pub const WINDOWFUNCS_BUILTINS: &[FmgrBuiltin] = &[
+    b(3100, "window_row_number", 0, false, fc_win_internal),
+    b(3101, "window_rank", 0, false, fc_win_internal),
+    b(3102, "window_dense_rank", 0, false, fc_win_internal),
+    b(3103, "window_percent_rank", 0, false, fc_win_internal),
+    b(3104, "window_cume_dist", 0, false, fc_win_internal),
+    b(3105, "window_ntile", 1, true, fc_win_internal),
+    b(3106, "window_lag", 1, true, fc_win_internal),
+    b(3107, "window_lag_with_offset", 2, true, fc_win_internal),
+    b(3108, "window_lag_with_offset_and_default", 3, true, fc_win_internal),
+    b(3109, "window_lead", 1, true, fc_win_internal),
+    b(3110, "window_lead_with_offset", 2, true, fc_win_internal),
+    b(3111, "window_lead_with_offset_and_default", 3, true, fc_win_internal),
+    b(3112, "window_first_value", 1, true, fc_win_internal),
+    b(3113, "window_last_value", 1, true, fc_win_internal),
+    b(3114, "window_nth_value", 2, true, fc_win_internal),
     b(6233, "window_row_number_support", 1, true, fc_window_row_number_support),
     b(6234, "window_rank_support", 1, true, fc_window_rank_support),
     b(6235, "window_dense_rank_support", 1, true, fc_window_dense_rank_support),

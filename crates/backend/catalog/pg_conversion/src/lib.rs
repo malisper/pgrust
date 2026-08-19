@@ -132,7 +132,7 @@ pub fn ConversionCreate<'mcx>(
     pg_depend::recordDependencyOnOwner(mcx, ConversionRelationId, oid, conowner)?;
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
-    // InvokeObjectPostCreateHook: object-access hooks are elided repo-wide.
+    objectaccess::InvokeObjectPostCreateHook(ConversionRelationId, oid, 0)?;
 
     rel.close(RowExclusiveLock)?;
     Ok(myself)

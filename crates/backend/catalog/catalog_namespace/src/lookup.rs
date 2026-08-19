@@ -189,7 +189,7 @@ fn improper_qualified_name(names: &[&str]) -> Box<PgError> {
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn improper_qualified_name_joined(joined: String) -> Box<PgError> {
+pub fn improper_qualified_name_joined(joined: String) -> Box<PgError> {
     Box::new(
         PgError::error(format!(
             "improper qualified name (too many dotted names): {joined}"

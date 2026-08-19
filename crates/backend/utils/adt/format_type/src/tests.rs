@@ -7,6 +7,13 @@ use crate::{format_type_be, format_type_with_typemod, quote_identifier};
 
 const VARCHARTYPMODOUT: types_core::Oid = 2915;
 
+// quote_identifier consults the quote_all_identifiers GUC; serialize the
+// tests whose expected output depends on its (default off) state.
+static QAI_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn qai_lock() -> std::sync::MutexGuard<'static, ()> {
+    QAI_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 const CHAROID: types_core::Oid = 18;
 const INT4ARRAYOID: types_core::Oid = 1007;
 const F_ARRAY_SUBSCRIPT_HANDLER: types_core::Oid = 6179;
@@ -120,6 +127,7 @@ fn varchartypmodout_fn(
 
 #[test]
 fn builtin_special_cases_and_default_arm() {
+    let _g = qai_lock();
     install_fixture();
     assert_eq!(format_type_be(INT4OID).unwrap(), "integer");
     assert_eq!(format_type_be(TEXTOID).unwrap(), "text");
@@ -137,6 +145,7 @@ fn unknown_oid_is_cache_lookup_error() {
 
 #[test]
 fn user_type_renders_via_type_is_visible() {
+    let _g = qai_lock();
     install_fixture();
     assert_eq!(format_type_be(20000).unwrap(), "mytype");
 }
@@ -146,12 +155,14 @@ fn user_type_renders_via_type_is_visible() {
 // information_schema.cardinal_number domain-violation message shape).
 #[test]
 fn invisible_initdb_band_type_renders_qualified() {
+    let _g = qai_lock();
     install_fixture();
     assert_eq!(format_type_be(20001).unwrap(), "information_schema.othertype");
 }
 
 #[test]
 fn with_typemod_matches_c() {
+    let _g = qai_lock();
     install_fixture();
     assert_eq!(format_type_with_typemod(INT4OID, -1).unwrap(), "integer");
     assert_eq!(format_type_with_typemod(TEXTOID, -1).unwrap(), "text");
@@ -164,6 +175,7 @@ fn with_typemod_matches_c() {
 
 #[test]
 fn quote_identifier_matches_ruleutils() {
+    let _g = qai_lock();
     assert_eq!(quote_identifier("text"), "text");
     assert_eq!(quote_identifier("mixedCase"), "\"mixedCase\"");
     assert_eq!(quote_identifier("select"), "\"select\"");
@@ -172,4 +184,23 @@ fn quote_identifier_matches_ruleutils() {
     // unreserved keywords stay bare; col-name keywords are quoted.
     assert_eq!(quote_identifier("abort"), "abort");
     assert_eq!(quote_identifier("interval"), "\"interval\"");
+}
+
+// C quote_identifier (ruleutils.c) force-quotes every identifier while the
+// quote_all_identifiers GUC is on.
+#[test]
+fn quote_identifier_honors_quote_all_identifiers() {
+    let _g = qai_lock();
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static QAI: AtomicBool = AtomicBool::new(false);
+    guc_tables::vars::quote_all_identifiers.install_if_absent(guc_tables::GucVarAccessors {
+        get: || QAI.load(Ordering::Relaxed),
+        set: |v| QAI.store(v, Ordering::Relaxed),
+    });
+    assert_eq!(quote_identifier("plain"), "plain");
+    guc_tables::vars::quote_all_identifiers.write(true);
+    assert_eq!(quote_identifier("plain"), "\"plain\"");
+    assert_eq!(quote_identifier("mixedCase"), "\"mixedCase\"");
+    guc_tables::vars::quote_all_identifiers.write(false);
+    assert_eq!(quote_identifier("plain"), "plain");
 }

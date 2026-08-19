@@ -965,9 +965,8 @@ fn CheckProcSignal(reason: ProcSignalReason) -> bool {
 //     and tcop/postgres/src/lib.rs:55, both via _support/seams_init) before any
 //     sender thread exists, and seams_init's lint test pins the installs — so
 //     an uninstalled seam means the process skipped seams_init entirely;
-//   * PROCSIG_PARALLEL_APPLY_MESSAGE: no sender exists at all, because
-//     parallel apply is unported (replication/logical/worker/src/stream_apply.rs)
-//     and nothing launches a WORKERTYPE_PARALLEL_APPLY worker.
+//   * PROCSIG_PARALLEL_APPLY_MESSAGE: seam-backed like the others
+//     (replication/logical/worker/src/parallel.rs installs it in init_seams).
 #[cold]
 #[inline(never)]
 fn unported_handler(what: &str) -> ! {
@@ -1002,7 +1001,11 @@ pub fn procsignal_sigusr1_handler() {
         mcxt_seams::handle_log_memory_context_interrupt::call();
     }
     if CheckProcSignal(PROCSIG_PARALLEL_APPLY_MESSAGE) {
-        unported_handler("HandleParallelApplyMessageInterrupt (applyparallelworker.c)");
+        if logical_worker_seams::handle_parallel_apply_message_interrupt::is_installed() {
+            logical_worker_seams::handle_parallel_apply_message_interrupt::call();
+        } else {
+            unported_handler("HandleParallelApplyMessageInterrupt (applyparallelworker.c)");
+        }
     }
     for conflict in [
         PROCSIG_RECOVERY_CONFLICT_DATABASE,

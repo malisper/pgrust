@@ -64,6 +64,11 @@ const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, strict: bool
 }
 
 pub const BLOOM_BUILTINS: &[FmgrBuiltin] = &[
+    // brin_bloom.c opclass support: native BRIN dispatch; fmgr-lookup parity.
+    b(4591, "brin_bloom_opcinfo", 1, true, ::fmgr::fc_internal_dispatch_only),
+    b(4592, "brin_bloom_add_value", 4, true, ::fmgr::fc_internal_dispatch_only),
+    b(4593, "brin_bloom_consistent", 4, true, ::fmgr::fc_internal_dispatch_only),
+    b(4594, "brin_bloom_union", 3, true, ::fmgr::fc_internal_dispatch_only),
     b(4595, "brin_bloom_options", 1, false, fc_options),
     b(4596, "brin_bloom_summary_in", 1, true, fc_summary_in),
     b(4597, "brin_bloom_summary_out", 1, true, fc_summary_out),

@@ -2,11 +2,9 @@
 //! relfilenumber overrides plus a handful of one-off upgrade helpers.
 #![allow(non_snake_case)]
 
-use core::cell::Cell;
-
 use datum::Datum;
 use elog::{elog, ereport};
-use types_core::{InvalidOid, InvalidXLogRecPtr, Oid, OidIsValid, TEXTOID};
+use types_core::{InvalidXLogRecPtr, Oid, TEXTOID};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_CANT_CHANGE_RUNTIME_PARAM,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERROR,
@@ -48,48 +46,6 @@ fn datum_str<'m>(mcx: mcx::Mcx<'m>, d: Datum) -> PgResult<&'m str> {
     // SAFETY: `d` is a live text datum sourced from a catalog array element.
     let bytes = unsafe { datum_varlena_packed(d, mcx)? }.data();
     Ok(core::str::from_utf8(bytes).expect("pg_upgrade_support: text datum is UTF-8"))
-}
-
-// binary_upgrade_next_{heap,index,toast}_pg_class_{oid,relfilenumber} and
-// binary_upgrade_next_pg_authid_oid, binary_upgrade_record_init_privs: no
-// consumer is ported yet (heap.c relfilenode assignment, user.c pg_authid
-// creation, aclchk.c init-privs recording are all still C-shaped elsewhere
-// in this repo). The setter itself is real state, held here until a
-// consumer lands; nothing reads it back yet.
-macro_rules! local_next_oid {
-    ($cell:ident, $take:ident) => {
-        thread_local! {
-            static $cell: Cell<Oid> = const { Cell::new(InvalidOid) };
-        }
-
-        #[allow(dead_code)]
-        fn $take() -> Option<Oid> {
-            let oid = $cell.get();
-            if OidIsValid(oid) {
-                $cell.set(InvalidOid);
-                Some(oid)
-            } else {
-                None
-            }
-        }
-    };
-}
-
-local_next_oid!(NEXT_HEAP_PG_CLASS_OID, take_next_heap_pg_class_oid);
-local_next_oid!(NEXT_HEAP_PG_CLASS_RELFILENUMBER, take_next_heap_pg_class_relfilenumber);
-local_next_oid!(NEXT_INDEX_PG_CLASS_OID, take_next_index_pg_class_oid);
-local_next_oid!(NEXT_INDEX_PG_CLASS_RELFILENUMBER, take_next_index_pg_class_relfilenumber);
-local_next_oid!(NEXT_TOAST_PG_CLASS_OID, take_next_toast_pg_class_oid);
-local_next_oid!(NEXT_TOAST_PG_CLASS_RELFILENUMBER, take_next_toast_pg_class_relfilenumber);
-local_next_oid!(NEXT_PG_AUTHID_OID, take_next_pg_authid_oid);
-
-thread_local! {
-    static RECORD_INIT_PRIVS: Cell<bool> = const { Cell::new(false) };
-}
-
-#[allow(dead_code)]
-fn record_init_privs() -> bool {
-    RECORD_INIT_PRIVS.get()
 }
 
 pub fn fc_binary_upgrade_set_next_pg_type_oid(
@@ -151,7 +107,7 @@ pub fn fc_binary_upgrade_set_next_pg_authid_oid(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_next_pg_authid_oid")?;
-    NEXT_PG_AUTHID_OID.set(fcinfo.arg_oid(0));
+    user::SetNextPgAuthidOid(fcinfo.arg_oid(0));
     Ok(Datum::from_usize(0))
 }
 
@@ -160,7 +116,7 @@ pub fn fc_binary_upgrade_set_next_heap_pg_class_oid(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_next_heap_pg_class_oid")?;
-    NEXT_HEAP_PG_CLASS_OID.set(fcinfo.arg_oid(0));
+    catalog_heap::SetNextHeapPgClassOid(fcinfo.arg_oid(0));
     Ok(Datum::from_usize(0))
 }
 
@@ -169,7 +125,7 @@ pub fn fc_binary_upgrade_set_next_heap_relfilenode(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_next_heap_relfilenode")?;
-    NEXT_HEAP_PG_CLASS_RELFILENUMBER.set(fcinfo.arg_oid(0));
+    catalog_heap::SetNextHeapPgClassRelfilenumber(fcinfo.arg_oid(0));
     Ok(Datum::from_usize(0))
 }
 
@@ -178,7 +134,7 @@ pub fn fc_binary_upgrade_set_next_index_pg_class_oid(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_next_index_pg_class_oid")?;
-    NEXT_INDEX_PG_CLASS_OID.set(fcinfo.arg_oid(0));
+    catalog_index::SetNextIndexPgClassOid(fcinfo.arg_oid(0));
     Ok(Datum::from_usize(0))
 }
 
@@ -187,7 +143,7 @@ pub fn fc_binary_upgrade_set_next_index_relfilenode(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_next_index_relfilenode")?;
-    NEXT_INDEX_PG_CLASS_RELFILENUMBER.set(fcinfo.arg_oid(0));
+    catalog_index::SetNextIndexPgClassRelfilenumber(fcinfo.arg_oid(0));
     Ok(Datum::from_usize(0))
 }
 
@@ -196,7 +152,7 @@ pub fn fc_binary_upgrade_set_next_toast_pg_class_oid(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_next_toast_pg_class_oid")?;
-    NEXT_TOAST_PG_CLASS_OID.set(fcinfo.arg_oid(0));
+    catalog_heap::SetNextToastPgClassOid(fcinfo.arg_oid(0));
     Ok(Datum::from_usize(0))
 }
 
@@ -205,7 +161,7 @@ pub fn fc_binary_upgrade_set_next_toast_relfilenode(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_next_toast_relfilenode")?;
-    NEXT_TOAST_PG_CLASS_RELFILENUMBER.set(fcinfo.arg_oid(0));
+    catalog_heap::SetNextToastPgClassRelfilenumber(fcinfo.arg_oid(0));
     Ok(Datum::from_usize(0))
 }
 
@@ -214,7 +170,7 @@ pub fn fc_binary_upgrade_set_record_init_privs(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_record_init_privs")?;
-    RECORD_INIT_PRIVS.set(fcinfo.arg_bool(0));
+    aclchk::SetRecordInitPrivs(fcinfo.arg_bool(0));
     Ok(Datum::from_usize(0))
 }
 
@@ -233,9 +189,11 @@ pub fn fc_binary_upgrade_set_missing_value(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_missing_value")?;
-    let _ = fcinfo;
-    // unported: SetAttrMissing (catalog/heap.c).
-    Err(upgrade_unported("binary_upgrade_set_missing_value"))
+    let table_id = fcinfo.arg_oid(0);
+    let attname = arg_str(fcinfo, 1)?;
+    let value = arg_str(fcinfo, 2)?;
+    catalog_heap::SetAttrMissing(fcinfo.result_mcx(), table_id, attname, value)?;
+    Ok(Datum::from_usize(0))
 }
 
 pub fn fc_binary_upgrade_logical_slot_has_caught_up(
@@ -448,25 +406,4 @@ mod tests {
         init_small::globals::SetIsBinaryUpgrade(false);
     }
 
-    #[test]
-    fn local_next_oid_set_take_once_roundtrip() {
-        assert_eq!(take_next_heap_pg_class_oid(), None);
-        NEXT_HEAP_PG_CLASS_OID.set(500);
-        assert_eq!(take_next_heap_pg_class_oid(), Some(500));
-        assert_eq!(take_next_heap_pg_class_oid(), None);
-
-        assert_eq!(take_next_pg_authid_oid(), None);
-        NEXT_PG_AUTHID_OID.set(501);
-        assert_eq!(take_next_pg_authid_oid(), Some(501));
-        assert_eq!(take_next_pg_authid_oid(), None);
-    }
-
-    #[test]
-    fn record_init_privs_set_get_roundtrip() {
-        RECORD_INIT_PRIVS.set(false);
-        assert!(!record_init_privs());
-        RECORD_INIT_PRIVS.set(true);
-        assert!(record_init_privs());
-        RECORD_INIT_PRIVS.set(false);
-    }
 }

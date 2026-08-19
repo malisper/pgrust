@@ -1343,10 +1343,21 @@ const Anum_pg_init_privs_initprivs: types_core::AttrNumber = 5;
 const Natts_pg_init_privs: usize = 5;
 pub(crate) const INITPRIVS_EXTENSION: i8 = b'e' as i8;
 
-// recordExtensionInitPriv (aclchk.c): only GRANT/REVOKE executed while an
-// extension script runs (creating_extension) records initial privileges.
-// C's second trigger, binary_upgrade_record_init_privs, has no pgrust
-// counterpart (binary upgrade unported).
+// binary_upgrade_record_init_privs (aclchk.c): while true, GRANT/REVOKE
+// issued by pg_upgrade's restore record initial extension privileges even
+// though CREATE EXTENSION is not used.
+thread_local! {
+    static BINARY_UPGRADE_RECORD_INIT_PRIVS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+pub fn SetRecordInitPrivs(value: bool) {
+    BINARY_UPGRADE_RECORD_INIT_PRIVS.set(value);
+}
+
+// recordExtensionInitPriv (aclchk.c): GRANT/REVOKE executed while an
+// extension script runs (creating_extension), or while pg_upgrade's
+// record-init-privs flag is set, records initial privileges.
 pub(crate) fn record_extension_init_priv<'mcx>(
     mcx: Mcx<'mcx>,
     objoid: Oid,
@@ -1354,7 +1365,7 @@ pub(crate) fn record_extension_init_priv<'mcx>(
     objsubid: i32,
     new_acl: &[AclItem],
 ) -> PgResult<()> {
-    if !pg_depend::creating_extension() {
+    if !pg_depend::creating_extension() && !BINARY_UPGRADE_RECORD_INIT_PRIVS.get() {
         return Ok(());
     }
     record_extension_init_priv_worker(mcx, objoid, classoid, objsubid, new_acl)

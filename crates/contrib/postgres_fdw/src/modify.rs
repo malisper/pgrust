@@ -2,9 +2,9 @@
 // postgresPlanForeignModify, postgresBeginForeignModify (create_foreign_modify),
 // postgresExecForeignInsert/Update/Delete (execute_foreign_modify over a
 // remote prepared statement), postgresEndForeignModify (finish_foreign_modify),
-// postgresIsForeignRelUpdatable. Batch insert (ExecForeignBatchInsert) and
-// direct modify are unmodeled: every row runs C's single-row leg (C's default
-// batch_size is 1; a larger batch_size option changes only round-trips).
+// postgresIsForeignRelUpdatable, batch insert (text params buffered here,
+// flushed as C's N-row VALUES prepare/execute), and direct modify
+// (postgresPlanDirectModify + Begin/Iterate/EndDirectModify, base-rel arm).
 use std::ffi::CStr;
 
 use datum::Datum;
@@ -258,6 +258,28 @@ pub(crate) fn is_foreign_rel_updatable<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgRe
     })
 }
 
+// get_batch_size_option: server option overridden by table option, default 1.
+fn get_batch_size_option(mcx: Mcx<'_>, relid: Oid) -> PgResult<i32> {
+    let mut batch_size = 1i32;
+    let table = foreigncmds::foreign::GetForeignTable(mcx, relid)?;
+    let server = foreigncmds::foreign::GetForeignServer(mcx, table.serverid)?;
+    for opt in server.options.iter() {
+        if opt.name == "batch_size" {
+            if let Ok(v) = opt.require_value()?.parse::<i32>() {
+                batch_size = v;
+            }
+        }
+    }
+    for opt in table.options.iter() {
+        if opt.name == "batch_size" {
+            if let Ok(v) = opt.require_value()?.parse::<i32>() {
+                batch_size = v;
+            }
+        }
+    }
+    Ok(batch_size)
+}
+
 fn parse_bool(value: &str) -> bool {
     // defGetBoolean's accepted spellings; validator-checked upstream.
     matches!(
@@ -268,12 +290,25 @@ fn parse_bool(value: &str) -> bool {
 
 // ---------- executor half ----------
 
-// C PgFdwModifyState (single-row leg; no batching, no aux_fmstate — routed
-// foreign inserts and COPY into foreign tables are refused upstream).
+// C PgFdwModifyState (no aux_fmstate — routed foreign inserts and COPY into
+// foreign tables are refused upstream). Batch insert buffers text params here
+// (C buffers slots in the executor; the wire shape — one N-row VALUES prepare
+// + one execute per batch — is identical).
 struct PgFdwModifyState {
     conn_key: Oid,
+    rti: u32,
     p_name: Option<String>,
     query: String,
+    orig_query: String,
+    values_end: i32,
+    /// Params per row (non-generated targets); 0 for DELETE.
+    p_nums: usize,
+    /// Effective batch size (1 = no batching).
+    batch_size: i32,
+    /// Rows the currently prepared statement's VALUES clause covers.
+    num_slots: i32,
+    pending_params: Vec<Option<String>>,
+    pending_rows: i32,
     target_attrs: Vec<i32>,
     // per-target_attrs entry: attgenerated columns transmit as DEFAULT.
     attgenerated: Vec<bool>,
@@ -332,7 +367,7 @@ pub(crate) fn begin_foreign_modify<'mcx>(
         .expect("fdw_private[1] is targetAttnums")
         .iter()
         .collect();
-    let _values_end = it
+    let values_end = it
         .next()
         .and_then(|n| n.as_integer())
         .expect("fdw_private[2] is values_end_len")
@@ -388,6 +423,43 @@ pub(crate) fn begin_foreign_modify<'mcx>(
     let conn_key = connection::get_connection(mcx, &user, true)?;
 
     let operation = node.operation;
+
+    // GetForeignModifyBatchSize (folded into begin: the option value, gated
+    // by RETURNING / WCO / row triggers, clamped by the 65535-param limit).
+    let p_nums = target_attrs
+        .iter()
+        .zip(attgenerated.iter())
+        .filter(|&(_, &g)| !g)
+        .count();
+    let batch_size = if operation != CmdType::CMD_INSERT {
+        1
+    } else {
+        let has_wco = !node.withCheckOptionLists.is_nil()
+            && !node
+                .withCheckOptionLists
+                .nth(list_index)
+                .as_list()
+                .map(|l| l.is_nil())
+                .unwrap_or(true);
+        let has_insert_row_triggers = {
+            let rel = estate.es_relations[(rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            rel.rd_hastriggers
+                && relcache_seams::relation_get_trigger_desc::call(rel.rd_id)?
+                    .is_some_and(|t| t.trig_insert_before_row || t.trig_insert_after_row)
+        };
+        if has_returning || has_wco || has_insert_row_triggers || target_attrs.is_empty() {
+            1
+        } else {
+            let opt = get_batch_size_option(mcx, rd_id)?;
+            if p_nums > 0 {
+                opt.min((65535 / p_nums) as i32).max(1)
+            } else {
+                opt.max(1)
+            }
+        }
+    };
     let mut p_flinfo: Vec<FmgrInfo> = Vec::with_capacity(out_fn_oids.len() + 1);
     let mut ctid_attno: i16 = 0;
     if operation == CmdType::CMD_UPDATE || operation == CmdType::CMD_DELETE {
@@ -414,8 +486,16 @@ pub(crate) fn begin_foreign_modify<'mcx>(
 
     Ok(Some(Box::new(PgFdwModifyState {
         conn_key,
+        rti,
         p_name: None,
+        orig_query: query.clone(),
         query,
+        values_end,
+        p_nums,
+        batch_size,
+        num_slots: 1,
+        pending_params: Vec::new(),
+        pending_rows: 0,
         target_attrs,
         attgenerated,
         has_returning,
@@ -488,6 +568,45 @@ fn execute_foreign_modify<'mcx>(
         .downcast_mut::<PgFdwModifyState>()
         .expect("ri_FdwState is PgFdwModifyState");
     st.returning_mcx.reset();
+
+    // Batch insert: buffer this row's text params; flush at batch_size (and
+    // at end-of-source via the flush hook). Batching is disabled whenever
+    // RETURNING/WCO/row triggers apply, so consuming the row here is exact.
+    if operation == CmdType::CMD_INSERT && st.batch_size > 1 {
+        let nestlevel = crate::transmission::set_transmission_modes();
+        let r = (|| -> PgResult<()> {
+            let mut j = 0usize;
+            for (k, &attnum) in st.target_attrs.iter().enumerate() {
+                if st.attgenerated[k] {
+                    continue;
+                }
+                let mut isnull = false;
+                let value = {
+                    let s = &mut estate.es_tupleTable[slot_id.0 as usize];
+                    exectuples::slot_getattr(s, attnum, &mut isnull)
+                };
+                if isnull {
+                    st.pending_params.push(None);
+                } else {
+                    st.pending_params.push(Some(output_to_string(
+                        &mut st.p_flinfo[j],
+                        &st.temp_mcx,
+                        value,
+                    )?));
+                }
+                j += 1;
+            }
+            Ok(())
+        })();
+        crate::transmission::reset_transmission_modes(nestlevel);
+        r?;
+        st.pending_rows += 1;
+        st.temp_mcx.reset();
+        if st.pending_rows >= st.batch_size {
+            flush_pending_inserts(st, estate)?;
+        }
+        return Ok(true);
+    }
 
     // Set up the prepared statement on the remote server, if we didn't yet.
     // Parameter types are intentionally unspecified (remote derives them).
@@ -592,6 +711,78 @@ fn execute_foreign_modify<'mcx>(
     Ok(n_rows > 0)
 }
 
+// The flush half of ExecBatchInsert/execute_foreign_modify: rebuild the
+// INSERT for the pending row count when it changed (rebuildInsertSql +
+// re-prepare, C's exact wire), then execute with the buffered params.
+fn flush_pending_inserts<'mcx>(
+    st: &mut PgFdwModifyState,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if st.pending_rows == 0 {
+        return Ok(());
+    }
+    let n = st.pending_rows;
+    if st.num_slots != n {
+        if let Some(name) = st.p_name.take() {
+            let sql = format!("DEALLOCATE {name}");
+            let res = connection::exec_query(st.conn_key, &sql)?;
+            if res.status != ExecStatus::CommandOk {
+                return Err(connection::remote_error(&res, Some(&sql)));
+            }
+        }
+        let mcx = estate.es_query_cxt;
+        let rel = estate.es_relations[(st.rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let mut sql: PgString<'mcx> = PgString::new_in(mcx);
+        deparse::rebuild_insert_sql(
+            &mut sql,
+            rel,
+            &st.orig_query,
+            &st.target_attrs,
+            st.values_end,
+            st.p_nums as i32,
+            n - 1,
+        );
+        st.query = sql.as_str().to_string();
+        st.num_slots = n;
+    }
+    if st.p_name.is_none() {
+        let name = format!("pgsql_fdw_prep_{}", connection::get_prep_stmt_number());
+        let res = connection::with_entry(st.conn_key, |e| -> PgResult<_> {
+            connection::park_pending_entry(e)?;
+            Ok(e.conn.as_mut().expect("live connection").prepare(&name, &st.query, &[]))
+        })???;
+        if res.status != ExecStatus::CommandOk {
+            return Err(connection::remote_error(&res, Some(&st.query)));
+        }
+        st.p_name = Some(name);
+    }
+    let params: Vec<Option<&str>> = st.pending_params.iter().map(|v| v.as_deref()).collect();
+    let p_name = st.p_name.as_deref().expect("prepared above").to_string();
+    let res = connection::with_entry(st.conn_key, |e| -> PgResult<_> {
+        connection::park_pending_entry(e)?;
+        Ok(e.conn.as_mut().expect("live connection").exec_prepared(&p_name, &params))
+    })???;
+    if res.status != ExecStatus::CommandOk {
+        return Err(connection::remote_error(&res, Some(&st.query)));
+    }
+    st.pending_params.clear();
+    st.pending_rows = 0;
+    Ok(())
+}
+
+// The FdwModifyRoutine flush hook (C ExecPendingInserts' per-rel half).
+pub(crate) fn flush_foreign_modify<'mcx>(
+    state: &mut dyn core::any::Any,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let st = state
+        .downcast_mut::<PgFdwModifyState>()
+        .expect("ri_FdwState is PgFdwModifyState");
+    flush_pending_inserts(st, estate)
+}
+
 // store_returning_result: convert the remote RETURNING row into the slot.
 fn store_returning_result<'mcx>(
     st: &mut PgFdwModifyState,
@@ -646,5 +837,464 @@ pub(crate) fn end_foreign_modify(state: Box<dyn core::any::Any>) -> PgResult<()>
         }
     }
     connection::release_connection(st.conn_key);
+    Ok(())
+}
+
+// postgresExplainForeignModify: "Remote SQL" under VERBOSE, plus "Batch
+// Size" for INSERT (recomputed plan-side; C reads ri_BatchSize). Divergence:
+// under EXPLAIN ANALYZE C additionally clamps by 65535/p_nums.
+pub(crate) fn explain_foreign_modify<'mcx>(
+    fdw_private: &NodeList<'mcx>,
+    relid: Oid,
+    has_wco: bool,
+    flags: types_nodes::FdwExplainFlags,
+    emit: &mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
+) -> PgResult<()> {
+    if !flags.verbose {
+        return Ok(());
+    }
+    let mut it = fdw_private.iter();
+    if let Some(sql) = it.next().and_then(|n| n.as_string()) {
+        emit("Remote SQL", types_nodes::FdwExplainProp::Text(sql.sval))?;
+    }
+    let target_attrs_empty =
+        it.next().and_then(|n| n.as_int_list()).map(|l| l.is_nil()).unwrap_or(true);
+    let values_end = it.next().and_then(|n| n.as_integer()).map(|i| i.ival).unwrap_or(-1);
+    let has_returning =
+        it.next().and_then(|n| n.as_boolean()).map(|b| b.boolval).unwrap_or(false);
+    if values_end >= 0 {
+        // INSERT: report the effective batch size.
+        let has_insert_row_triggers = relcache_seams::relation_get_trigger_desc::call(relid)?
+            .is_some_and(|t| t.trig_insert_before_row || t.trig_insert_after_row);
+        let batch = if has_returning || has_wco || has_insert_row_triggers || target_attrs_empty
+        {
+            1
+        } else {
+            let scratch = mcx::MemoryContext::new("postgres_fdw explain batch size");
+            get_batch_size_option(scratch.mcx(), relid)?.max(1)
+        };
+        emit(
+            "Batch Size",
+            types_nodes::FdwExplainProp::Integer { value: batch as i64, unit: "" },
+        )?;
+    }
+    Ok(())
+}
+
+// ---------- direct modify (postgresPlanDirectModify + executor half) ----------
+
+// find_modifytable_subplan: the target ForeignScan is the ModifyTable's
+// immediate child, or the subplan_index'th child of an Append (possibly
+// under a Result computing the UPDATE tlist).
+fn find_modifytable_subplan<'mcx>(
+    plan: &ModifyTable<'mcx>,
+    rtindex: u32,
+    subplan_index: usize,
+) -> Option<Node<'mcx>> {
+    use types_nodes::NodeTag;
+    let mut subplan = plan.plan.lefttree?;
+    if subplan.node_tag() == NodeTag::T_Append {
+        let app = subplan.as_append()?;
+        if subplan_index < app.appendplans.len() {
+            subplan = app.appendplans.nth(subplan_index);
+        }
+    } else if subplan.node_tag() == NodeTag::T_Result {
+        if let Some(l) = subplan.as_plan()?.lefttree {
+            if l.node_tag() == NodeTag::T_Append {
+                let app = l.as_append()?;
+                if subplan_index < app.appendplans.len() {
+                    subplan = app.appendplans.nth(subplan_index);
+                }
+            }
+        }
+    }
+    let fs = subplan.as_foreign_scan()?;
+    if fs.fs_base_relids.is_member(rtindex as i32) {
+        Some(subplan)
+    } else {
+        None
+    }
+}
+
+// postgresPlanDirectModify, base-relation arm. Divergences (both fall back
+// to the safe per-row DML path): inherited-child targets
+// (get_translated_update_targetlist) and foreign-join targets (no EPQ-capable
+// pushed join paths are generated under UPDATE/DELETE).
+pub(crate) fn plan_direct_modify<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: &mut ModifyTable<'mcx>,
+    result_relation: u32,
+    subplan_index: usize,
+) -> PgResult<bool> {
+    let mcx = run.mcx;
+    let operation = plan.operation;
+    if operation != CmdType::CMD_UPDATE && operation != CmdType::CMD_DELETE {
+        return Ok(false);
+    }
+    let Some(subplan) = find_modifytable_subplan(plan, result_relation, subplan_index) else {
+        return Ok(false);
+    };
+    {
+        let fs = subplan.as_foreign_scan().expect("checked");
+        if !fs.scan.plan.qual.is_nil() {
+            return Ok(false);
+        }
+        if fs.scan.scanrelid == 0 {
+            return Ok(false);
+        }
+    }
+    if result_relation as i32 != run.parse().resultRelation {
+        return Ok(false);
+    }
+    let foreignrel = run.root.simple_rel_array[result_relation as usize]
+        .expect("result relation has a RelOptInfo");
+
+    let mut tlist_nodes: Vec<Node<'mcx>> = Vec::new();
+    let mut target_attrs: Vec<i32> = Vec::new();
+    if operation == CmdType::CMD_UPDATE {
+        let colnos: Vec<i32> =
+            run.root.update_colnos.iter().map(|&a| a as i32).collect();
+        for (tle_node, &attno) in run.processed_tlist().iter().zip(colnos.iter()) {
+            let tle = tle_node.as_target_entry().expect("TargetEntry");
+            debug_assert!(!tle.resjunk);
+            if attno <= 0 {
+                return Err(Box::new(PgError::error(
+                    "system-column update is not supported",
+                )));
+            }
+            if !deparse::is_foreign_expr(run, foreignrel, tle.expr)? {
+                return Ok(false);
+            }
+            tlist_nodes.push(tle_node);
+            target_attrs.push(attno);
+        }
+    }
+
+    let remote_exprs: Vec<types_pathnodes::NodeId> =
+        crate::relinfo::fpinfo(run.root.rel(foreignrel))
+            .borrow()
+            .final_remote_exprs
+            .iter()
+            .copied()
+            .collect();
+
+    let returning_list: Vec<Node<'mcx>> = if plan.returningLists.is_nil() {
+        Vec::new()
+    } else {
+        plan.returningLists
+            .nth(subplan_index)
+            .as_list()
+            .expect("returningLists cell is a List")
+            .iter()
+            .collect()
+    };
+
+    let rte = run.rte(result_relation as usize);
+    let rel = table::table_open(mcx, rte.relid, types_rel::lock::NoLock)?;
+    let mut retrieved_attrs: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+    let mut ctx = deparse::DeparseCtx {
+        run,
+        foreignrel,
+        scanrel: foreignrel,
+        buf: PgString::new_in(mcx),
+        params_list: Some(PgVec::new_in(mcx)),
+        mcx,
+    };
+    match operation {
+        CmdType::CMD_UPDATE => deparse::deparse_direct_update_sql(
+            &mut ctx,
+            result_relation as i32,
+            &rel,
+            rte,
+            &tlist_nodes,
+            &target_attrs,
+            &remote_exprs,
+            &returning_list,
+            &mut retrieved_attrs,
+        )?,
+        CmdType::CMD_DELETE => deparse::deparse_direct_delete_sql(
+            &mut ctx,
+            result_relation as i32,
+            &rel,
+            rte,
+            &remote_exprs,
+            &returning_list,
+            &mut retrieved_attrs,
+        )?,
+        _ => unreachable!(),
+    }
+    let sql = ctx.buf;
+    let params = ctx.params_list.take().expect("params_list set above");
+    table::table_close(rel, types_rel::lock::NoLock)?;
+
+    let mut fdw_exprs: NodeList<'mcx> = NodeList::nil();
+    for p in params.iter() {
+        fdw_exprs.lappend(mcx, *p)?;
+    }
+    // fdw_private (FdwDirectModifyPrivateIndex order):
+    // [UpdateSql, HasReturning, RetrievedAttrs, SetProcessed].
+    let mut fdw_private: NodeList<'mcx> = NodeList::nil();
+    fdw_private.lappend(mcx, Node::mk_string(mcx, mcx_str(mcx, sql.as_str())?)?)?;
+    fdw_private.lappend(mcx, Node::mk_boolean(mcx, !retrieved_attrs.is_empty())?)?;
+    let mut ra: IntList<'mcx> = IntList::nil();
+    for &a in retrieved_attrs.iter() {
+        ra.lappend(mcx, a)?;
+    }
+    fdw_private.lappend(mcx, Node::mk_int_list(mcx, ra)?)?;
+    fdw_private.lappend(mcx, Node::mk_boolean(mcx, plan.canSetTag)?)?;
+
+    // SAFETY: exclusive plan-tree ownership at create_plan time (the same
+    // contract createplan/setrefs rely on for in-place plan rewrites).
+    unsafe {
+        subplan.with_mut::<types_nodes::plannodes::ForeignScan, _>(|f| {
+            f.operation = operation;
+            f.resultRelation = result_relation;
+            f.fdw_exprs = fdw_exprs;
+            f.fdw_private = fdw_private;
+            f.scan.plan.async_capable = false;
+        })
+    }
+    .expect("ForeignScan node");
+    Ok(true)
+}
+
+// C PgFdwDirectModifyState (executor half).
+struct PgFdwDirectModifyState {
+    conn_key: Oid,
+    query: &'static str,
+    has_returning: bool,
+    retrieved_attrs: Vec<i32>,
+    set_processed: bool,
+    param_flinfo: Vec<FmgrInfo>,
+    param_exprs: Vec<mcx::PgBox<'static, execexpr::ExprState<'static>>>,
+    /// -1 = statement not executed yet.
+    num_tuples: i64,
+    next_tuple: usize,
+    rows: Vec<(Vec<Datum>, Vec<bool>, ItemPointerData)>,
+    batch_mcx: mcx::MemoryContext,
+    attin: Option<AttInMeta>,
+}
+
+fn dmstate<'a>(
+    node: &'a mut nodeforeignscan::ForeignScanState<'_>,
+) -> Option<&'a mut PgFdwDirectModifyState> {
+    node.fdw_state.as_mut().and_then(|s| s.downcast_mut::<PgFdwDirectModifyState>())
+}
+
+// postgresBeginDirectModify.
+pub(crate) fn begin_direct_modify<'mcx>(
+    node: &mut nodeforeignscan::ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    eflags: i32,
+) -> PgResult<()> {
+    if eflags & types_slot::EXEC_FLAG_EXPLAIN_ONLY != 0 {
+        return Ok(());
+    }
+    let mcx = estate.es_query_cxt;
+    let fsplan = node.plan;
+    debug_assert!(fsplan.scan.scanrelid > 0, "join direct modify is not planned");
+
+    let userid = if fsplan.checkAsUser != InvalidOid {
+        fsplan.checkAsUser
+    } else {
+        miscinit::GetUserId()
+    };
+    let rel = node.ss.ss_currentRelation.as_ref().expect("direct modify scans the target rel");
+    let table = foreigncmds::foreign::GetForeignTable(mcx, rel.rd_id)?;
+    let user = foreigncmds::foreign::GetUserMapping(mcx, userid, table.serverid)?;
+    let conn_key = connection::get_connection(mcx, &user, false)?;
+
+    let mut it = fsplan.fdw_private.iter();
+    let query = it
+        .next()
+        .and_then(|n| n.as_string())
+        .expect("fdw_private[0] is the remote DML")
+        .sval;
+    let has_returning = it
+        .next()
+        .and_then(|n| n.as_boolean())
+        .expect("fdw_private[1] is has_returning")
+        .boolval;
+    let retrieved_attrs: Vec<i32> = it
+        .next()
+        .and_then(|n| n.as_int_list())
+        .expect("fdw_private[2] is retrieved_attrs")
+        .iter()
+        .collect();
+    let set_processed = it
+        .next()
+        .and_then(|n| n.as_boolean())
+        .expect("fdw_private[3] is set_processed")
+        .boolval;
+
+    let attin =
+        if has_returning { Some(AttInMeta::build(rel.name(), &rel.rd_att)?) } else { None };
+
+    let pb = estate.param_bind();
+    let mut param_flinfo = Vec::with_capacity(fsplan.fdw_exprs.len());
+    let mut param_exprs = Vec::with_capacity(fsplan.fdw_exprs.len());
+    for expr in fsplan.fdw_exprs.iter() {
+        let (typoutput, _isvarlena) =
+            lsyscache::getTypeOutputInfo(nodes_core::node_funcs::expr_type(expr))?;
+        param_flinfo.push(fmgr_seams::fmgr_info::call(typoutput)?);
+        let state = execexpr::exec_init_expr(mcx, Some(expr), pb)?
+            .expect("fdw_exprs entries are expressions");
+        // SAFETY: es_query_cxt restamp; dropped at end (PgFdwScanState precedent).
+        param_exprs.push(unsafe {
+            core::mem::transmute::<
+                mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>,
+                mcx::PgBox<'static, execexpr::ExprState<'static>>,
+            >(state)
+        });
+    }
+    // SAFETY: plan-lived string, restamped (PgFdwScanState precedent).
+    let query = unsafe { core::mem::transmute::<&'mcx str, &'static str>(query) };
+
+    node.fdw_state = Some(Box::new(PgFdwDirectModifyState {
+        conn_key,
+        query,
+        has_returning,
+        retrieved_attrs,
+        set_processed,
+        param_flinfo,
+        param_exprs,
+        num_tuples: -1,
+        next_tuple: 0,
+        rows: Vec::new(),
+        batch_mcx: mcx::MemoryContext::new_bump("postgres_fdw direct modify data"),
+        attin,
+    }));
+    Ok(())
+}
+
+// execute_dml_stmt: run the direct UPDATE/DELETE remotely (text params).
+fn execute_dml_stmt<'mcx>(
+    node: &mut nodeforeignscan::ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let ecxt = node.ss.ps_ExprContext;
+    let state = dmstate(node).expect("fdw_state set by BeginDirectModify");
+    let values = if state.param_exprs.is_empty() {
+        Vec::new()
+    } else {
+        let nestlevel = crate::transmission::set_transmission_modes();
+        let r = (|| -> PgResult<Vec<Option<String>>> {
+            let mut values: Vec<Option<String>> = Vec::with_capacity(state.param_exprs.len());
+            let scratch = mcx::MemoryContext::new_bump("postgres_fdw param output");
+            for (expr, flinfo) in
+                state.param_exprs.iter_mut().zip(state.param_flinfo.iter_mut())
+            {
+                let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+                // SAFETY: reset-only per-tuple context, outlives the evaluation.
+                unsafe { expr.arm_result_mcx_raw(per_tuple) };
+                let mut slots =
+                    execexpr::EvalSlots { scan: None, inner: None, outer: None };
+                let nd = execexpr::exec_eval_expr(expr, &mut slots)?;
+                if nd.isnull {
+                    values.push(None);
+                } else {
+                    let d = types_fmgr::function_call1_coll_in(
+                        flinfo,
+                        InvalidOid,
+                        scratch.mcx(),
+                        nd.value,
+                    )?;
+                    // SAFETY: output functions return a NUL-terminated cstring.
+                    let s =
+                        unsafe { CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
+                    values.push(Some(s.to_string_lossy().into_owned()));
+                }
+            }
+            Ok(values)
+        })();
+        crate::transmission::reset_transmission_modes(nestlevel);
+        estate.ecxt_mut(ecxt).reset();
+        r?
+    };
+    let params: Vec<Option<&str>> = values.iter().map(|v| v.as_deref()).collect();
+    let res = connection::exec_query_params(state.conn_key, state.query, &params)?;
+    let expected =
+        if state.has_returning { ExecStatus::TuplesOk } else { ExecStatus::CommandOk };
+    if res.status != expected {
+        return Err(connection::remote_error(&res, Some(state.query)));
+    }
+    if state.has_returning {
+        state.num_tuples = res.rows.len() as i64;
+        state.rows.clear();
+        state.batch_mcx.reset();
+        state.rows.reserve(res.rows.len());
+        for row in &res.rows {
+            let PgFdwDirectModifyState { attin, retrieved_attrs, batch_mcx, rows, .. } = state;
+            rows.push(convert_result_row(
+                attin.as_mut().expect("has_returning built attin"),
+                retrieved_attrs,
+                row,
+                batch_mcx.mcx(),
+            )?);
+        }
+    } else {
+        state.num_tuples = cmd_tuples(&res.cmd_tag);
+    }
+    Ok(())
+}
+
+// postgresIterateDirectModify (+ get_returning_data, base-rel arm).
+pub(crate) fn iterate_direct_modify<'mcx>(
+    node: &mut nodeforeignscan::ForeignScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if dmstate(node).expect("fdw_state set by BeginDirectModify").num_tuples == -1 {
+        execute_dml_stmt(node, estate)?;
+    }
+    let scan_slot = node.ss.ss_ScanTupleSlot;
+    let qmcx = estate.es_query_cxt;
+    let state = dmstate(node).expect("fdw_state set by BeginDirectModify");
+    if !state.has_returning {
+        if state.set_processed {
+            estate.es_processed += state.num_tuples as u64;
+            state.set_processed = false;
+        }
+        exectuples::exec_clear_tuple(estate.slot_mut(scan_slot), qmcx);
+        return Ok(false);
+    }
+    if state.next_tuple >= state.rows.len() {
+        exectuples::exec_clear_tuple(estate.slot_mut(scan_slot), qmcx);
+        return Ok(false);
+    }
+    if state.set_processed {
+        estate.es_processed += 1;
+    }
+    let (values, nulls, ctid) = &state.rows[state.next_tuple];
+    let ctid = *ctid;
+    let values = values.clone();
+    let nulls = nulls.clone();
+    state.next_tuple += 1;
+    let slot = estate.slot_mut(scan_slot);
+    exectuples::exec_clear_tuple(slot, qmcx);
+    {
+        let base = slot.base_mut();
+        base.tts_values.clear();
+        base.tts_values.extend_from_slice(&values);
+        base.tts_isnull.clear();
+        base.tts_isnull.extend_from_slice(&nulls);
+        base.tts_tid = ctid;
+    }
+    exectuples::exec_store_virtual_tuple(slot);
+    // Hand the rel-format RETURNING tuple to ModifyTable's direct arm (C
+    // stores it into ri_projectReturning's econtext scantuple).
+    estate.es_direct_returning_slot = Some(scan_slot);
+    Ok(true)
+}
+
+// postgresEndDirectModify.
+pub(crate) fn end_direct_modify<'mcx>(
+    node: &mut nodeforeignscan::ForeignScanState<'mcx>,
+    _estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let Some(state) = dmstate(node) else {
+        return Ok(()); // EXPLAIN
+    };
+    connection::release_connection(state.conn_key);
+    node.fdw_state = None;
     Ok(())
 }

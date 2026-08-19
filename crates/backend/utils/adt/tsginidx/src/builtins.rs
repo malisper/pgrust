@@ -32,4 +32,15 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 pub const TSGINIDX_BUILTINS: &[FmgrBuiltin] = &[
     b(2700, "gin_cmp_prefix", 4, fc_gin_cmp_prefix),
     b(3724, "gin_cmp_tslexeme", 2, fc_gin_cmp_tslexeme),
+    // tsvector/tsquery GIN opclass support: native GIN dispatch; fmgr-lookup
+    // parity rows.
+    b(3077, "gin_extract_tsvector_2args", 2, ::types_fmgr::fc_internal_dispatch_only),
+    b(3087, "gin_extract_tsquery_5args", 5, ::types_fmgr::fc_internal_dispatch_only),
+    b(3088, "gin_tsquery_consistent_6args", 6, ::types_fmgr::fc_internal_dispatch_only),
+    b(3656, "gin_extract_tsvector", 3, ::types_fmgr::fc_internal_dispatch_only),
+    b(3657, "gin_extract_tsquery", 7, ::types_fmgr::fc_internal_dispatch_only),
+    b(3658, "gin_tsquery_consistent", 8, ::types_fmgr::fc_internal_dispatch_only),
+    b(3791, "gin_extract_tsquery_oldsig", 7, ::types_fmgr::fc_internal_dispatch_only),
+    b(3792, "gin_tsquery_consistent_oldsig", 8, ::types_fmgr::fc_internal_dispatch_only),
+    b(3921, "gin_tsquery_triconsistent", 7, ::types_fmgr::fc_internal_dispatch_only),
 ];

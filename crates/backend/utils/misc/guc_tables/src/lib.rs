@@ -461,6 +461,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::EnableSSL,
         set: backing::set_EnableSSL,
     });
+    vars::oauth_validator_libraries_string.install(GucVarAccessors {
+        get: backing::oauth_validator_libraries,
+        set: backing::set_oauth_validator_libraries,
+    });
     vars::SSLPreferServerCiphers.install(GucVarAccessors {
         get: backing::SSLPreferServerCiphers,
         set: backing::set_SSLPreferServerCiphers,

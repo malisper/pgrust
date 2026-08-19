@@ -164,7 +164,11 @@ pub(crate) fn set_deparse_plan<'mcx>(
         _ => ps.inner_plan.map(|i| &plan_of(i).targetlist),
     };
 
-    ps.index_tlist = plan.as_index_only_scan().map(|ios| &ios.indextlist);
+    ps.index_tlist = if let Some(ios) = plan.as_index_only_scan() {
+        Some(&ios.indextlist)
+    } else {
+        plan.as_foreign_scan().map(|fs| &fs.fdw_scan_tlist)
+    };
 }
 
 

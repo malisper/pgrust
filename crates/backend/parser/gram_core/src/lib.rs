@@ -1,7 +1,11 @@
 mod actions;
 mod parse;
 mod stack;
-mod tables;
+// Public: the vendored 18.3 bison automaton tables double as the derivation
+// source for grammar-driven generation (fuzzgen::gramwalk random-shift walk)
+// and the rule-diff gate (tests_rule_gate). Read-only data; the parser
+// remains the only consumer with behavior.
+pub mod tables;
 mod yystype;
 
 use mcx::Mcx;
@@ -34,6 +38,8 @@ pub fn raw_parser<'mcx>(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_rule_gate;
 // `dump` (fuzz-only): the nodeToStringWithLocations renderer doubles as the
 // differential tree plane for fuzz/core's gram_core_diff target.
 #[cfg(any(test, feature = "dump"))]

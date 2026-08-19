@@ -67,6 +67,43 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(types_error::ERROR, msg).with_sqlstate(sqlstate))
 }
 
+// Set-once, consume-once binary-upgrade overrides (index.c globals).
+macro_rules! next_oid_override {
+    ($cell:ident, $setter:ident, $take:ident) => {
+        thread_local! {
+            static $cell: std::cell::Cell<Oid> = const { std::cell::Cell::new(InvalidOid) };
+        }
+
+        pub fn $setter(oid: Oid) {
+            $cell.set(oid);
+        }
+
+        fn $take() -> Option<Oid> {
+            let oid = $cell.get();
+            if types_core::OidIsValid(oid) {
+                $cell.set(InvalidOid);
+                Some(oid)
+            } else {
+                None
+            }
+        }
+    };
+}
+
+next_oid_override!(NEXT_INDEX_PG_CLASS_OID, SetNextIndexPgClassOid, take_next_index_pg_class_oid);
+next_oid_override!(
+    NEXT_INDEX_PG_CLASS_RELFILENUMBER,
+    SetNextIndexPgClassRelfilenumber,
+    take_next_index_pg_class_relfilenumber
+);
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn binary_upgrade_err(msg: &str) -> Box<PgError> {
+    err(msg.to_string(), types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+}
+
 fn oid_scankey(attno: usize, oid: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno as AttrNumber;
@@ -651,8 +688,26 @@ pub fn index_create<'mcx>(
         opclassIds,
     )?;
 
+    let create_storage = extra.old_number == types_core::InvalidRelFileNumber;
+    let mut relFileNumber = extra.old_number;
     let indexRelationId = if indexRelationId != InvalidOid {
         indexRelationId
+    } else if init_small::globals::IsBinaryUpgrade() {
+        // create_storage stays true: on-disk presence is required until the
+        // old cluster's file replaces it.
+        let oid = take_next_index_pg_class_oid().ok_or_else(|| {
+            binary_upgrade_err("pg_class index OID value not set when in binary upgrade mode")
+        })?;
+        relFileNumber = take_next_index_pg_class_relfilenumber().unwrap_or_else(|| {
+            types_core::InvalidRelFileNumber
+        });
+        if relkind == RELKIND_INDEX && relFileNumber == types_core::InvalidRelFileNumber {
+            return Err(binary_upgrade_err(
+                "index relfilenumber value not set when in binary upgrade mode",
+            ));
+        }
+        debug_assert!(create_storage);
+        oid
     } else {
         catalog::GetNewRelFileNumber(mcx, tableSpaceId, Some(&pg_class), relpersistence)?
     };
@@ -671,7 +726,7 @@ pub fn index_create<'mcx>(
         tableSpaceId,
         indexRelationId,
         InvalidOid,
-        extra.old_number,
+        relFileNumber,
         accessMethodId,
         &indexTupDesc,
         relkind,
@@ -680,6 +735,7 @@ pub fn index_create<'mcx>(
         // indexes on mapped catalogs are themselves mapped.
         heapRelation.is_mapped(),
         extra.allow_system_table_mods,
+        create_storage,
     )?;
     debug_assert!(relfrozenxid == 0 && relminmxid == 0);
 
@@ -1220,7 +1276,8 @@ fn index_update_stats<'mcx>(
         reltuples = -1.0;
     }
 
-    let mut update_stats = reltuples >= 0.0;
+    // Binary upgrade creates indexes before the data is moved into place.
+    let mut update_stats = reltuples >= 0.0 && !init_small::globals::IsBinaryUpgrade();
 
     if matches!(
         rel.rd_rel.relkind,

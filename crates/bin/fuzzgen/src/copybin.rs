@@ -236,7 +236,7 @@ fn record_case(
     stats: &mut CopyBinStats,
 ) -> DiffClass {
     let (na, nb) = (normalize_user_oids(oa), normalize_user_oids(ob));
-    let raw = classify(&DiffInput { sql, a: &na, b: &nb, ulp_tol, soft_cols: &[] });
+    let raw = classify(&DiffInput { sql, a: &na, b: &nb, ulp_tol, soft_cols: &[], mask_explain_timing: false });
     let c = apply_ruled(table, sql, raw);
     stats.cases += 1;
     match &c.class {

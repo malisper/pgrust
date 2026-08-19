@@ -83,6 +83,12 @@ pub fn load_file(filename: &str) -> PgResult<()> {
     Ok(())
 }
 
+// DynamicFileList walk (dfmgr.c get_first_loaded_module/get_next_loaded_module)
+// for pg_get_loaded_modules: this backend's loaded libraries, load order.
+pub fn loaded_module_names() -> Vec<&'static str> {
+    LOADED_LIBRARIES.with(|s| s.borrow().clone())
+}
+
 fn registry_resolve(key: &str, funcname: &str) -> Option<Option<PGFunction>> {
     let libs = BUILTIN_LIBRARIES.lock().unwrap();
     let entry = libs.iter().find(|e| e.name == key)?;

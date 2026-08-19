@@ -21,6 +21,7 @@ tupdesc = { path = "../../access/common/tupdesc" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 parse_clause = { path = "../../parser/parse_clause" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
+objectaccess = { path = "../../catalog/objectaccess" }
 catalog_heap = { path = "../../catalog/catalog_heap" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 miscinit = { path = "../../utils/init/miscinit" }

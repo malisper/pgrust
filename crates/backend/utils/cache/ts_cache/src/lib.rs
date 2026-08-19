@@ -587,8 +587,7 @@ fn check_default_text_search_config(
     let nspname = lsyscache::misc::get_namespace_name(mcx, cfg.cfgnamespace)?
         .unwrap_or_else(|| panic!("cache lookup failed for namespace {}", cfg.cfgnamespace));
     let name_str = core::str::from_utf8(cfg.cfgname.name_str()).unwrap_or("");
-    // quote_qualified_identifier minus quote_all_identifiers (format_type's
-    // GUC-less variant; the GUC slot is uninstalled repo-wide).
+    // quote_qualified_identifier (format_type's variant honors the GUC).
     let qualified = format!(
         "{}.{}",
         format_type::quote_identifier(nspname.as_str()),

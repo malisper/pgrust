@@ -160,6 +160,11 @@ pub fn add_paths_to_joinrel<'mcx>(
     if gucs::enable_hashjoin() || jointype == types_pathnodes::JOIN_FULL {
         hash_inner_and_outer(run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist, &param_source_rels, semifactors)?;
     }
+    if let Some(kind) = run.root.rel(joinrel).fdwroutine {
+        if let Some(f) = crate::fdwplan::fdw_plan_routine(kind).get_foreign_join_paths {
+            f(run, joinrel, outerrel, innerrel, jointype, sjinfo, restrictlist)?;
+        }
+    }
     Ok(())
 }
 

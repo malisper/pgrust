@@ -140,8 +140,7 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 }
 
 // pg_proc.dat rows (all proisstrict, none retset), OID-ascending.
-// 3359 macaddr_sortsupport unregistered (SortSupport node frame absent; the
-// uuid_sortsupport precedent).
+// 3359 macaddr_sortsupport: native comparator resolution; fmgr-lookup parity.
 pub const MAC_BUILTINS: &[FmgrBuiltin] = &[
     b(399, "hashmacaddr", 1, fc_hashmacaddr),
     b(436, "macaddr_in", 1, fc_macaddr_in),
@@ -160,4 +159,5 @@ pub const MAC_BUILTINS: &[FmgrBuiltin] = &[
     b(3144, "macaddr_not", 1, fc_macaddr_not),
     b(3145, "macaddr_and", 2, fc_macaddr_and),
     b(3146, "macaddr_or", 2, fc_macaddr_or),
+    b(3359, "macaddr_sortsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
 ];

@@ -1,5 +1,4 @@
-// SQL-callable extension SRFs (extension.c:2334-2790). pg_extension_config_dump
-// and pg_get_loaded_modules stay loud in fmgr's unported set.
+// SQL-callable extension functions (extension.c:2334-3020).
 use datum::Datum;
 use mcx::Mcx;
 use types_core::NAMEOID;
@@ -201,3 +200,42 @@ pub fn fc_pg_extension_update_paths(
     Ok(srf.finish(fcinfo))
 }
 
+
+pub fn fc_pg_extension_config_dump(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let tableoid = fcinfo.arg(0).as_oid();
+    // SAFETY: catalog arg type text — non-null varlena (strict function).
+    let wherecond: Vec<u8> = unsafe { fcinfo.arg_varlena_packed(1)? }.data().to_vec();
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    crate::contents::extension_config_dump(mcx, tableoid, &wherecond)?;
+    Ok(Datum::from_usize(0))
+}
+
+// pg_get_loaded_modules (extension.c). No-dlopen carve: modules are builtin
+// registry entries; every core module's PG_MODULE_MAGIC_EXT carries its own
+// name and PG_VERSION, so those columns are derived, and file_name takes the
+// jit.c DLSUFFIX shape.
+pub fn fc_pg_get_loaded_modules(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_get_loaded_modules: resolved FmgrInfo required");
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+
+    for name in dfmgr::loaded_module_names() {
+        let file_name = format!("{name}.so");
+        let values = [
+            text_datum(mcx, name)?,
+            text_datum(mcx, guc_tables::consts::PG_COMPAT_VERSION)?,
+            text_datum(mcx, &file_name)?,
+        ];
+        srf.putvalues(&values, &[false; 3])?;
+    }
+
+    Ok(srf.finish(fcinfo))
+}

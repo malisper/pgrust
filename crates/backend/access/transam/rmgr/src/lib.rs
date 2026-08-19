@@ -2,10 +2,10 @@
 //! (rmgr.h) lives in types_core, re-exported here. The table is a fixed
 //! compile-time array indexed by RmgrIds; entry order fixes the WAL-visible
 //! numeric ids. C divergences: custom-rmgr extension slots (ids 128..=255),
-//! RegisterCustomRmgr, and the pg_get_wal_resource_managers SRF are omitted —
-//! there is no extension ABI (unregistered ids take the same RmgrNotFound
-//! ERROR as C's empty slots; the SRF waits on funcapi/tuplestore). The
+//! RegisterCustomRmgr are omitted — there is no extension ABI (unregistered
+//! ids take the same RmgrNotFound ERROR as C's empty slots). The
 //! rm_decode column is omitted until logical-decoding vocabulary exists.
+//! pg_get_wal_resource_managers lives in funcs.rs (builtin ids only).
 //! Unported callbacks are #[cold] panics naming the owning unit; a manager
 //! landing replaces its row's fns with direct calls (or a seam iff the dep
 //! would cycle, e.g. transam_xlog).
@@ -20,6 +20,8 @@ use stringinfo::StringInfo;
 use types_core::{BlockNumber, RmgrId};
 use types_error::{ErrorLocation, PgResult, ERROR};
 use xlogreader_seams::XLogReaderState;
+
+mod funcs;
 
 pub type RmRedo = fn(record: &mut XLogReaderState) -> PgResult<()>;
 
@@ -375,4 +377,5 @@ fn maskable_rmgrs() -> Vec<(&'static str, u8)> {
 
 pub fn init_seams() {
     transam_xlog_seams::wal_consistency_maskable_rmgrs::set(maskable_rmgrs);
+    funcs::register_builtins();
 }

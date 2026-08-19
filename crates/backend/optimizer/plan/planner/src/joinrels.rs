@@ -821,6 +821,38 @@ pub fn min_join_parameterization<'mcx>(
     }
 }
 
+// set_foreign_rel_properties (relnode.c): join of two foreign rels on the
+// same server, with compatible users, inherits the FDW identity so
+// GetForeignJoinPaths can fire. A zero userid means "current user"; matching
+// it against an explicit current-user side sets useridiscurrent.
+fn set_foreign_rel_properties<'mcx>(
+    joinrel: &mut types_pathnodes::RelOptInfo<'mcx>,
+    outer_rel: &types_pathnodes::RelOptInfo<'mcx>,
+    inner_rel: &types_pathnodes::RelOptInfo<'mcx>,
+) {
+    if outer_rel.serverid == 0 || inner_rel.serverid != outer_rel.serverid {
+        return;
+    }
+    if inner_rel.userid == outer_rel.userid {
+        joinrel.serverid = outer_rel.serverid;
+        joinrel.userid = outer_rel.userid;
+        joinrel.useridiscurrent = outer_rel.useridiscurrent || inner_rel.useridiscurrent;
+        joinrel.fdwroutine = outer_rel.fdwroutine;
+    } else if inner_rel.userid == 0 && outer_rel.userid == miscinit_seams::get_user_id::call()
+    {
+        joinrel.serverid = outer_rel.serverid;
+        joinrel.userid = outer_rel.userid;
+        joinrel.useridiscurrent = true;
+        joinrel.fdwroutine = outer_rel.fdwroutine;
+    } else if outer_rel.userid == 0 && inner_rel.userid == miscinit_seams::get_user_id::call()
+    {
+        joinrel.serverid = outer_rel.serverid;
+        joinrel.userid = inner_rel.userid;
+        joinrel.useridiscurrent = true;
+        joinrel.fdwroutine = outer_rel.fdwroutine;
+    }
+}
+
 fn build_join_rel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     joinrelids: Relids<'mcx>,
@@ -852,6 +884,7 @@ fn build_join_rel<'mcx>(
     joinrel.lateral_relids = min_join_parameterization(run, &joinrelids, outer_rel, inner_rel);
     joinrel.pathtarget_id =
         Some(run.root.alloc_pathtarget(types_pathnodes::PathTarget::new(mcx)));
+    set_foreign_rel_properties(&mut joinrel, run.root.rel(outer_rel), run.root.rel(inner_rel));
     let joinrel = run.root.alloc_rel(joinrel);
 
     build_joinrel_tlist(

@@ -321,7 +321,10 @@ fn AlterDomainDefault<'mcx>(
         Ok(())
     })?;
 
-    rebuild_domain_dependencies(mcx, domainoid, &row, default_expr)
+    rebuild_domain_dependencies(mcx, domainoid, &row, default_expr)?;
+
+    objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, domainoid, 0)?;
+    Ok(())
 }
 
 // GenerateTypeDependencies (pg_type.c) rebuild arm, domain shape: delete +
@@ -427,7 +430,10 @@ fn AlterDomainNotNull<'mcx>(
         values[ix] = Datum::from_bool(not_null);
         replace[ix] = true;
         Ok(())
-    })
+    })?;
+
+    objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, domainoid, 0)?;
+    Ok(())
 }
 
 fn AlterDomainDropConstraint<'mcx>(
@@ -613,10 +619,14 @@ fn AlterDomainValidateConstraint<'mcx>(
     };
     let mut isnull = false;
     // SAFETY: fixed NOT NULL pg_constraint column under its descriptor.
-    let contype = unsafe {
-        types_tuple::heap_getattr(tup, Anum_pg_constraint_contype as i32, desc, &mut isnull)
-    }
-    .as_i8() as u8;
+    let (con_oid, contype) = unsafe {
+        (
+            types_tuple::heap_getattr(tup, Anum_pg_constraint_oid as i32, desc, &mut isnull)
+                .as_oid(),
+            types_tuple::heap_getattr(tup, Anum_pg_constraint_contype as i32, desc, &mut isnull)
+                .as_i8() as u8,
+        )
+    };
     if contype != pg_constraint::CONSTRAINT_CHECK {
         let dname = type_name_to_string(mcx, &typename)?;
         return Err(Box::new(
@@ -658,6 +668,9 @@ fn AlterDomainValidateConstraint<'mcx>(
     validateDomainCheckConstraint(mcx, domainoid, &conbin)?;
 
     catalog_indexing::CatalogTupleUpdate(mcx, &con_rel, &otid, &mut newtup)?;
+
+    objectaccess::InvokeObjectPostAlterHook(types_core::CONSTRAINT_RELATION_ID, con_oid, 0)?;
+
     con_rel.close(RowExclusiveLock)
 }
 
@@ -1001,6 +1014,8 @@ pub fn AlterTypeOwner_oid<'mcx>(
     if has_depend_entry {
         pg_shdepend::changeDependencyOnOwner(mcx, TYPE_RELATION_ID, type_oid, new_owner_id)?;
     }
+
+    objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, type_oid, 0)?;
     Ok(())
 }
 
@@ -1208,6 +1223,8 @@ pub fn AlterTypeNamespaceInternal<'mcx>(
             format_type::format_type_be(type_oid)?
         );
     }
+
+    objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, type_oid, 0)?;
 
     objs_moved.push(thisobj);
 
@@ -1501,6 +1518,8 @@ fn AlterTypeRecurse<'mcx>(
     }
 
     rebuild_alter_type_dependencies(mcx, type_oid, &row, is_implicit_array)?;
+
+    objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, type_oid, 0)?;
 
     if !is_implicit_array
         && (p.update_typmodin || p.update_typmodout)

@@ -73,6 +73,8 @@ pg_class = { path = "../../backend/catalog/pg_class" }
 pg_inherits = { path = "../../backend/catalog/pg_inherits" }
 indexcmds = { path = "../../backend/commands/indexcmds" }
 dbcommands = { path = "../../backend/commands/dbcommands" }
+collationcmds = { path = "../../backend/commands/collationcmds" }
+multixactfuncs = { path = "../../backend/access/transam/multixactfuncs" }
 executils = { path = "../../backend/executor/executils" }
 execexpr = { path = "../../backend/executor/execexpr" }
 execjunk = { path = "../../backend/executor/execjunk" }
@@ -98,6 +100,7 @@ nodematerial = { path = "../../backend/executor/nodematerial" }
 nodememoize = { path = "../../backend/executor/nodememoize" }
 tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
+auth_oauth = { path = "../../backend/libpq/auth_oauth" }
 auth_scram = { path = "../../backend/libpq/auth_scram" }
 crypt = { path = "../../backend/libpq/crypt" }
 be_secure = { path = "../../backend/libpq/be_secure" }

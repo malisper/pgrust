@@ -37,6 +37,7 @@ pub mod array_selfuncs;
 pub mod intarray_selfuncs;
 pub mod rangetypes_selfuncs;
 pub mod selfuncs;
+pub mod selfuncs_builtins;
 pub(crate) mod syscache_memo;
 pub mod ts_selfuncs;
 pub mod planmain;
@@ -129,6 +130,7 @@ pub mod gucs {
 }
 
 pub fn init_seams() {
+    fmgr_core::register_late_builtins(selfuncs_builtins::SELFUNCS_BUILTINS);
     planner_seams::planner::set(|mcx, parse, query_string, cursor_options, bound_params| {
         planner(mcx, parse, query_string, cursor_options, bound_params)
     });

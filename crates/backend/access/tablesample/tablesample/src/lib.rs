@@ -18,7 +18,30 @@ pub use tsm_system_time::SystemTimeSampler;
 pub const F_TSM_BERNOULLI_HANDLER: Oid = 3313;
 pub const F_TSM_SYSTEM_HANDLER: Oid = 3314;
 
-pub fn init_seams() {}
+// TABLESAMPLE dispatches by handler OID through the Tsm enum; rows exist for
+// fmgr-lookup parity.
+pub const TABLESAMPLE_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[
+    types_fmgr::FmgrBuiltin {
+        foid: F_TSM_BERNOULLI_HANDLER,
+        name: "tsm_bernoulli_handler",
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: types_fmgr::fc_internal_dispatch_only,
+    },
+    types_fmgr::FmgrBuiltin {
+        foid: F_TSM_SYSTEM_HANDLER,
+        name: "tsm_system_handler",
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: types_fmgr::fc_internal_dispatch_only,
+    },
+];
+
+pub fn init_seams() {
+    fmgr_core::register_late_builtins(TABLESAMPLE_BUILTINS);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tsm {
@@ -357,3 +380,11 @@ mcx::forget_safe_nodrop!(TsmState);
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod builtin_tests {
+    #[test]
+    fn rows_match_canonical() {
+        fmgr_core::assert_rows_match_canonical(crate::TABLESAMPLE_BUILTINS);
+    }
+}

@@ -192,12 +192,15 @@ pub(crate) fn loc(line: i32, func: &'static str) -> ErrorLocation {
     ErrorLocation::new("postgres.c", line, func)
 }
 
-/// A query string that survived `pg_client_to_server` but is not valid UTF-8:
-/// the bytes are in the DATABASE encoding (C carries them fine), but the
-/// engine processes SQL text as `&str`, so a non-UTF8 database encoding
-/// cannot be honored for non-ASCII query text. Fail loudly and honestly
-/// (0A000 naming the database encoding) instead of the old misleading
-/// XX000 "invalid byte sequence in query string".
+/// A query string that survived `pg_client_to_server` but is not valid UTF-8.
+/// This gate STAYS under the UTF-8-only server-encoding carve
+/// (docs/design/carve-ratifications.md §11, ratified 2026-08-18): it is
+/// SQL_ASCII's enforcement — SQL_ASCII databases stay creatable, and this
+/// per-query check is what holds their query text to ASCII/UTF-8. Non-UTF8
+/// multibyte encodings are refused at CREATE DATABASE and at connection
+/// time, so for them this is a backstop. Fail loudly and honestly (0A000
+/// naming the database encoding) instead of the old misleading XX000
+/// "invalid byte sequence in query string".
 #[cold]
 #[inline(never)]
 pub(crate) fn non_utf8_query_error() -> Box<::types_error::PgError> {
@@ -629,8 +632,10 @@ pub fn ProcessInterrupts() -> PgResult<()> {
     if g::LogMemoryContextPending() {
         mcxt_seams::process_log_memory_context_interrupt::call()?;
     }
-    // ParallelApplyMessagePending flag has no storage yet (logical-apply
-    // owner unported).
+
+    if logical_worker_seams::parallel_apply_message::pending() {
+        logical_worker_seams::process_parallel_apply_messages::call()?;
+    }
 
     // Serial-lease v2 safe-point admission (GL-SLEASE-2; pgrust extension):
     // a sweeper-flagged floor crossing acquires its execution permit HERE —

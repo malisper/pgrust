@@ -1065,3 +1065,87 @@ fn empty_array_without_cast_errors() {
     assert_eq!(err.message(), "cannot determine type of empty array");
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INDETERMINATE_DATATYPE);
 }
+
+/// F9 (gramwalk 2026-08-18): `xmlelement(name nchar, - default)`.
+/// transformXmlExpr's order is C's (parse_expr.c:2367): the element name
+/// maps through map_sql_identifier_to_xml_name FIRST, then the argument
+/// list transforms — where the SetToDefault raises 42601 "DEFAULT is not
+/// allowed in this context", exactly like a with-libxml C 18.3 build.
+/// (The pinned no-libxml oracle instead short-circuits 0A000 at the same
+/// name-mapping call site — build config, not transform order; ruled
+/// xml-config in the diff rig.)
+#[test]
+fn xmlelement_maps_name_then_transforms_args_default_is_42601() {
+    use types_nodes::primnodes::{SetToDefault, XmlExpr, XmlExprOp, XmlOptionType};
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let dflt = Node::mk(
+        mcx,
+        SetToDefault { typeId: InvalidOid, typeMod: -1, collation: InvalidOid, location: 30 },
+    )
+    .unwrap();
+    let mut args = NodeList::nil();
+    args.lappend(mcx, dflt).unwrap();
+    let x = Node::mk(
+        mcx,
+        XmlExpr {
+            op: XmlExprOp::IS_XMLELEMENT,
+            name: Some("nchar"),
+            named_args: NodeList::nil(),
+            arg_names: NodeList::nil(),
+            args,
+            xmloption: XmlOptionType::XMLOPTION_DOCUMENT,
+            indent: false,
+            r#type: InvalidOid,
+            typmod: -1,
+            location: 7,
+        },
+    )
+    .unwrap();
+
+    let err = transformExpr(mcx, &mut pstate, x, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .err()
+        .expect("DEFAULT inside xmlelement args must error");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert_eq!(err.message(), "DEFAULT is not allowed in this context");
+}
+
+/// Same order property, success side: a mappable name plus transformable
+/// args yields a transformed XmlExpr (type xml, name xml-mapped).
+#[test]
+fn xmlelement_transforms_name_and_args() {
+    use types_core::catalog::XMLOID;
+    use types_nodes::primnodes::{XmlExpr, XmlExprOp, XmlOptionType};
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let mut args = NodeList::nil();
+    args.lappend(mcx, int_const(mcx, 1, 25)).unwrap();
+    let x = Node::mk(
+        mcx,
+        XmlExpr {
+            op: XmlExprOp::IS_XMLELEMENT,
+            // '_x' prefix must escape (C map_sql_identifier_to_xml_name).
+            name: Some("_xel"),
+            named_args: NodeList::nil(),
+            arg_names: NodeList::nil(),
+            args,
+            xmloption: XmlOptionType::XMLOPTION_DOCUMENT,
+            indent: false,
+            r#type: InvalidOid,
+            typmod: -1,
+            location: 7,
+        },
+    )
+    .unwrap();
+
+    let out = transformExpr(mcx, &mut pstate, x, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .expect("valid xmlelement transforms");
+    let nx = out.as_xml_expr().unwrap();
+    assert_eq!(nx.r#type, XMLOID);
+    assert_eq!(nx.name, Some("_x005F_xel"));
+    assert_eq!(nx.args.iter().count(), 1);
+}

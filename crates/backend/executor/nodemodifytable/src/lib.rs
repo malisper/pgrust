@@ -71,6 +71,27 @@ pub struct FdwModifyRoutine {
     /// EndForeignModify: deallocate the prepared statement, release the
     /// connection.
     pub end: fn(Box<dyn core::any::Any>) -> PgResult<()>,
+    /// ExplainForeignModify; None = nothing extra to print (C's NULL slot).
+    pub explain: Option<FdwModifyExplain>,
+    /// Flush provider-buffered batch inserts (C ExecPendingInserts' per-rel
+    /// half); None = provider never buffers.
+    pub flush: Option<
+        for<'mcx> fn(&mut dyn core::any::Any, &mut EStateData<'mcx>) -> PgResult<()>,
+    >,
+}
+
+/// ExplainForeignModify surface: (fdwPrivLists[j], relid, has_wco, flags,
+/// emit). Plan-level — callable from EXPLAIN without executor state.
+pub type FdwModifyExplain = for<'mcx> fn(
+    &types_nodes::NodeList<'mcx>,
+    Oid,
+    bool,
+    types_nodes::FdwExplainFlags,
+    &mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
+) -> PgResult<()>;
+
+pub fn fdw_modify_explain(kind: types_nodes::FdwKind) -> Option<FdwModifyExplain> {
+    fdw_modify_routine(kind).and_then(|r| r.explain)
 }
 
 static FDW_MODIFY_ROUTINES: [core::sync::atomic::AtomicPtr<FdwModifyRoutine>;
@@ -160,6 +181,8 @@ pub struct ResultRelExec<'mcx> {
     ri_FdwRoutine: Option<types_nodes::FdwKind>,
     // C ri_FdwState; dropped in exec_end_modify_table.
     ri_FdwState: Option<Box<dyn core::any::Any>>,
+    // C ri_usesFdwDirectModify: the ForeignScan subplan performs the DML.
+    ri_usesFdwDirectModify: bool,
 }
 
 pub struct ModifyTableState<'mcx> {
@@ -546,7 +569,11 @@ pub fn exec_init_modify_table<'mcx>(
     // (nodeModifyTable.c:4846-4862); ri_FdwState stays None under
     // EXEC_FLAG_EXPLAIN_ONLY (the provider checks eflags, as C).
     for (idx, &(rti, i)) in kept.iter().enumerate() {
+        rels[idx].ri_usesFdwDirectModify = node.fdwDirectModifyPlans.is_member(i as i32);
         if let Some(kind) = rels[idx].ri_FdwRoutine {
+            if rels[idx].ri_usesFdwDirectModify {
+                continue; // the ForeignScan subplan performs the DML itself
+            }
             let routine =
                 fdw_modify_routine(kind).expect("check_valid_result_rel admitted this FDW");
             rels[idx].ri_FdwState = (routine.begin)(node, rti, i, estate, eflags)?;
@@ -1238,6 +1265,7 @@ fn init_result_rel<'mcx>(
         merge,
         ri_FdwRoutine: fdw_kind,
         ri_FdwState: None,
+        ri_usesFdwDirectModify: false,
     })
 }
 
@@ -1661,6 +1689,32 @@ pub fn mt_accept_row<'mcx>(
             }
         }
 
+        // Direct modify: the ForeignScan subplan already performed the DML;
+        // a fetched row only exists to feed RETURNING (C nodeModifyTable.c
+        // ri_usesFdwDirectModify arm). The RETURNING projection reads only
+        // the plan (outer) tuple — direct modify is disabled when RETURNING
+        // references OLD/NEW — so hand an all-NULL stand-in as the "returned
+        // tuple" to keep the slot wiring disjoint from the plan slot.
+        if mt.rel().ri_usesFdwDirectModify {
+            debug_assert!(mt.rel().project_returning.is_some());
+            let tuple = match estate.es_direct_returning_slot.take() {
+                Some(s) => s,
+                None => exec_get_all_null_slot(mt, estate)?,
+            };
+            let (old, new) = match mt.operation {
+                CmdType::CMD_DELETE => (Some(tuple), None),
+                _ => (None, Some(tuple)),
+            };
+            return Ok(Some(exec_process_returning(
+                mt,
+                estate,
+                mt.operation,
+                old,
+                new,
+                plan_slot,
+            )?));
+        }
+
         match mt.operation {
             CmdType::CMD_INSERT => {
                 if !mt.rel().ri_projectNewInfoValid {
@@ -1976,6 +2030,16 @@ pub fn mt_source_exhausted<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(estate.es_insert_pending_result_relations.is_empty());
+    // FDW batch-insert flush (C ExecPendingInserts before fireASTriggers).
+    for idx in 0..mt.rels.len() {
+        if let Some(kind) = mt.rels[idx].ri_FdwRoutine {
+            if let Some(f) = fdw_modify_routine(kind).and_then(|r| r.flush) {
+                if let Some(state) = mt.rels[idx].ri_FdwState.as_deref_mut() {
+                    f(state, estate)?;
+                }
+            }
+        }
+    }
     // pgrcolumnar statement-end flush: single-tuple inserts buffer in the AM's
     // per-statement ingest writer (pgrcolumnar::tuple_insert; RG-sized seals
     // instead of one row group per row), published here — before AS triggers
@@ -8648,7 +8712,7 @@ mcx::forget_safe_struct!(
     WcoExpr<'_> { kind, relname, polname; state },
     ResultRelExec<'_> { rti, rd_id, relkind, ri_newTupleSlot, ri_oldTupleSlot,
         ri_ReturningSlot, ri_AllNullSlot, ri_projectNewInfoValid, ri_RowIdAttNo,
-        update_cols, update_colnos, ri_FdwRoutine;
+        update_cols, update_colnos, ri_FdwRoutine, ri_usesFdwDirectModify;
         indexes, project_new, project_returning, check_exprs, partition_check, trigdesc,
         trig_fmgr, trig_old_slot, trig_when, all_updated_cols, child_to_root,
         generated_exprs, virtual_nn_exprs, wco_exprs, merge, ri_FdwState },

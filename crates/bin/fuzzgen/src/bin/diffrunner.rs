@@ -61,6 +61,10 @@ usage: diffrunner --a <host:port> --b <host:port> [options]
                       of generating from --seed — the ddmin-repro
                       re-verification path. stmt_index = 0-based position
                       among the kept statements.
+  --mask-explain-timing
+                      (with --replay) opt the replayed statements into the
+                      H1 EXPLAIN ANALYZE wall-clock mask, like a generated
+                      gramwalk stream (which opts in automatically).
   --xproto <seed>     per-statement seeded protocol-mode mix: each statement
                       deterministically rides simple query or extended
                       Parse/Bind/Execute (with occasional $n parameters —
@@ -141,6 +145,10 @@ struct Args {
     ulp: u64,
     guc_pin: bool,
     replay: Option<String>,
+    /// H1 opt-in for --replay decks: mask EXPLAIN ANALYZE wall-clock text
+    /// like a gramwalk-generated stream would (generated gramwalk
+    /// statements opt in automatically via their module tag).
+    mask_explain_timing: bool,
     xproto: Option<u64>,
     profile: String,
     copybin: bool,
@@ -172,6 +180,7 @@ fn parse_args() -> Result<Args, String> {
         ulp: 4,
         guc_pin: true,
         replay: None,
+        mask_explain_timing: false,
         xproto: None,
         profile: "default".to_string(),
         copybin: false,
@@ -216,6 +225,7 @@ fn parse_args() -> Result<Args, String> {
             "--no-guc-pin" => args.guc_pin = false,
             "--profile" => args.profile = value("--profile")?,
             "--replay" => args.replay = Some(value("--replay")?),
+            "--mask-explain-timing" => args.mask_explain_timing = true,
             "--xproto" => {
                 args.xproto = Some(
                     value("--xproto")?.parse().map_err(|e| format!("bad --xproto: {e}"))?,
@@ -551,6 +561,7 @@ fn run() -> Result<ExitCode, String> {
                         stmt_index: i as u32,
                         sql: l.trim().to_string(),
                         soft_float_cols: Vec::new(),
+                        mask_explain_timing: args.mask_explain_timing,
                     })
                     .collect();
                 if stream.is_empty() {
@@ -578,6 +589,13 @@ fn run() -> Result<ExitCode, String> {
                         stmt_index: s.stmt_index,
                         sql: s.sql.clone(),
                         soft_float_cols: s.soft_float_cols.clone(),
+                        // Opt-in H1 mask: gramwalk derives raw EXPLAIN
+                        // ANALYZE straight from the grammar and cannot
+                        // carry the explain module's TIMING OFF hygiene.
+                        mask_explain_timing: s
+                            .productions
+                            .iter()
+                            .any(|p| p == "module:gramwalk"),
                     })
                     .collect();
                 (stream, session.ddl_windows)

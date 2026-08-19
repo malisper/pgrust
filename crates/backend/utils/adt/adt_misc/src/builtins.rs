@@ -737,6 +737,88 @@ pub fn fc_pg_backup_stop(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     composite_result(flinfo, fcinfo, &values, &[false, false, false])
 }
 
+// pg_nextoid (catalog.c).
+pub fn fc_pg_nextoid(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use types_core::{AttrNumber, InvalidAttrNumber, OIDOID};
+    use types_error::{ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_COLUMN};
+    use types_rel::RowExclusiveLock;
+
+    let reloid = fcinfo.arg(0).as_oid();
+    // SAFETY: catalog arg type name — 64-byte NameData (strict function).
+    let attname_bytes = unsafe { fcinfo.arg_name(1) };
+    let len = attname_bytes.iter().position(|&b| b == 0).unwrap_or(attname_bytes.len());
+    let attname = core::str::from_utf8(&attname_bytes[..len])
+        .map_err(|_| PgError::error("invalid UTF-8 in name argument"))?
+        .to_owned();
+    let idxoid = fcinfo.arg(2).as_oid();
+
+    if !superuser_seams::superuser::call()? {
+        return Err(Box::new(
+            PgError::error("must be superuser to call pg_nextoid()")
+                .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let rel = table::table_open(mcx, reloid, RowExclusiveLock)?;
+    let idx = indexam::index_open(mcx, idxoid, RowExclusiveLock)?;
+
+    if !catalog::IsSystemRelation(rel.data_rc()) {
+        return Err(Box::new(
+            PgError::error("pg_nextoid() can only be used on system catalogs")
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+
+    let idx_form = idx.data_rc().rd_index.as_ref().expect("index relation carries rd_index");
+    if idx_form.indrelid != reloid {
+        return Err(Box::new(
+            PgError::error(format!(
+                "index \"{}\" does not belong to table \"{}\"",
+                idx.data_rc().name(),
+                rel.data_rc().name()
+            ))
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+
+    let attno: AttrNumber = lsyscache::get_attnum(reloid, &attname)?;
+    if attno == InvalidAttrNumber {
+        return Err(Box::new(
+            PgError::error(format!(
+                "column \"{attname}\" of relation \"{}\" does not exist",
+                rel.data_rc().name()
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
+        ));
+    }
+
+    if lsyscache::get_atttype(reloid, attno)? != OIDOID {
+        return Err(Box::new(
+            PgError::error(format!("column \"{attname}\" is not of type oid"))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+
+    if idx.data_rc().indnkeyatts() != 1 || idx_form.indkey0() != attno {
+        return Err(Box::new(
+            PgError::error(format!(
+                "index \"{}\" is not the index for column \"{attname}\"",
+                idx.data_rc().name()
+            ))
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+
+    let newoid = catalog::GetNewOidWithIndex(mcx, &rel, idxoid, attno)?;
+
+    rel.close(RowExclusiveLock)?;
+    idx.close(RowExclusiveLock)?;
+
+    Ok(Datum::from_oid(newoid))
+}
+
 pub fn fc_pg_stop_making_pinned_objects(
     _flinfo: Option<&mut FmgrInfo>,
     _fcinfo: &mut Fcinfo,
@@ -1379,6 +1461,7 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
         retset: true,
         func: fc_pg_wal_summary_contents,
     },
+    b(275, "pg_nextoid", 3, fc_pg_nextoid),
     b(6241, "pg_stop_making_pinned_objects", 0, fc_pg_stop_making_pinned_objects),
     FmgrBuiltin {
         foid: 3800,

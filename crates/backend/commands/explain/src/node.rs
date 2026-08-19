@@ -1284,19 +1284,75 @@ pub fn ExplainNode<'mcx>(
                 || (nrels == 1
                     && result_rtis[0] != mt.nominalRelation as i32
                     && unpruned(result_rtis[0]));
-            if labeltargets {
-                let opname = match mt.operation {
-                    types_nodes::CmdType::CMD_INSERT => "Insert",
-                    types_nodes::CmdType::CMD_UPDATE => "Update",
-                    types_nodes::CmdType::CMD_DELETE => "Delete",
-                    types_nodes::CmdType::CMD_MERGE => "Merge",
-                    _ => "???",
+            let (opname, fopname) = match mt.operation {
+                types_nodes::CmdType::CMD_INSERT => ("Insert", "Foreign Insert"),
+                types_nodes::CmdType::CMD_UPDATE => ("Update", "Foreign Update"),
+                types_nodes::CmdType::CMD_DELETE => ("Delete", "Foreign Delete"),
+                types_nodes::CmdType::CMD_MERGE => ("Merge", "Foreign Merge"),
+                _ => ("???", "Foreign ???"),
+            };
+            for (j, &rti) in result_rtis.iter().enumerate() {
+                let (is_foreign, relid) = {
+                    let rte = es
+                        .rtable
+                        .expect("ModifyTable explain after ExplainPrintPlan")
+                        .nth(rti as usize - 1)
+                        .as_range_tbl_entry()
+                        .expect("rtable holds RTEs");
+                    (
+                        rte.rtekind == RTEKind::RTE_RELATION
+                            && rte.relkind == types_rel::RELKIND_FOREIGN_TABLE,
+                        rte.relid,
+                    )
                 };
-                for &rti in &result_rtis {
+                if labeltargets {
                     crate::format::ExplainIndentText(es);
-                    append!(es, "{opname}");
+                    append!(es, "{}", if is_foreign { fopname } else { opname });
                     ExplainTargetRel(rti as types_core::Index, es)?;
                     append!(es, "\n");
+                    es.indent += 1;
+                }
+                // ExplainForeignModify (skipped for direct-modify subplans).
+                if is_foreign && !mt.fdwDirectModifyPlans.is_member(j as i32) {
+                    let mcx = es.str.allocator();
+                    let kind = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, relid)?;
+                    if let Some(f) = nodemodifytable::fdw_modify_explain(kind) {
+                        let fdw_private = mt
+                            .fdwPrivLists
+                            .iter()
+                            .nth(j)
+                            .and_then(|n| n.as_list())
+                            .map(|l| l.clone_in(mcx))
+                            .transpose()?
+                            .unwrap_or_else(NodeList::nil);
+                        let has_wco = !mt.withCheckOptionLists.is_nil()
+                            && mt
+                                .withCheckOptionLists
+                                .iter()
+                                .nth(j)
+                                .and_then(|n| n.as_list())
+                                .map(|l| !l.is_nil())
+                                .unwrap_or(false);
+                        let flags = types_nodes::FdwExplainFlags {
+                            costs: es.costs,
+                            verbose: es.verbose,
+                        };
+                        f(&fdw_private, relid, has_wco, flags, &mut |label, v| {
+                            match v {
+                                types_nodes::FdwExplainProp::Text(t) => {
+                                    ExplainPropertyText(label, t, es)
+                                }
+                                types_nodes::FdwExplainProp::Integer { value, unit } => {
+                                    let unit = if unit.is_empty() { None } else { Some(unit) };
+                                    ExplainPropertyInteger(label, unit, value, es)
+                                }
+                            }
+                            Ok(())
+                        })?;
+                    }
+                }
+                if labeltargets {
+                    es.indent -= 1;
                 }
             }
             // ON CONFLICT stanza (show_modifytable_info, explain.c:4632).
@@ -1813,6 +1869,12 @@ fn show_plan_tlist<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx
         NodeTag::T_Append | NodeTag::T_MergeAppend | NodeTag::T_RecursiveUnion
     ) {
         return Ok(());
+    }
+    // A direct-modify ForeignScan's tlist is junk/subplan noise (explain.c).
+    if let Some(fs) = node.as_foreign_scan() {
+        if fs.operation != types_nodes::CmdType::CMD_SELECT {
+            return Ok(());
+        }
     }
     let mcx = es.str.allocator();
     let useprefix = es.rtable_size > 1;

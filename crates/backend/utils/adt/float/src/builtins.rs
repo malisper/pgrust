@@ -477,6 +477,9 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 // (log/ln/round/... over the same prosrc) each get their row, as in C's
 // fmgr_builtins[].
 pub const FLOAT_BUILTINS: &[FmgrBuiltin] = &[
+    // sortsupport: native comparator resolution; fmgr-lookup parity rows.
+    b(3132, "btfloat4sortsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
+    b(3133, "btfloat8sortsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(2424, "float4recv", 1, fc_float4recv),
     b(2425, "float4send", 1, fc_float4send),
     b(2426, "float8recv", 1, fc_float8recv),

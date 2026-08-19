@@ -248,6 +248,7 @@ pub(crate) fn ATExecChangeOwner<'mcx>(
         change_owner_recurse_to_sequences(mcx, relation_oid, new_owner_id, lockmode)?;
     }
 
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, relation_oid, 0)?;
     class_rel.close(RowExclusiveLock)?;
     target_rel.close(NoLock)
 }

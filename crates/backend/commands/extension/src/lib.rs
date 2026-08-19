@@ -188,6 +188,8 @@ pub fn init_seams() {
     extension_seams::pg_available_extensions::set(funcs::fc_pg_available_extensions);
     extension_seams::pg_available_extension_versions::set(funcs::fc_pg_available_extension_versions);
     extension_seams::pg_extension_update_paths::set(funcs::fc_pg_extension_update_paths);
+    extension_seams::pg_extension_config_dump::set(funcs::fc_pg_extension_config_dump);
+    extension_seams::pg_get_loaded_modules::set(funcs::fc_pg_get_loaded_modules);
     extension_seams::get_extension_name::set(|ext_oid| {
         let cx = mcx::MemoryContext::new_bump("get_extension_name");
         let out = match get_extension_name(cx.mcx(), ext_oid) {

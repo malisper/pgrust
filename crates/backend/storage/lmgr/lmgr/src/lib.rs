@@ -590,6 +590,33 @@ pub fn UnlockSharedObjectForSession(
     Ok(())
 }
 
+// LockApplyTransactionForSession (lmgr.c): session lock on a remote
+// transaction being applied on a logical replication subscriber (the
+// leader/parallel apply worker deadlock-detection protocol).
+pub fn LockApplyTransactionForSession(
+    suboid: Oid,
+    xid: TransactionId,
+    objid: u16,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let tag =
+        LOCKTAG::apply_transaction(init_small::globals::MyDatabaseId(), suboid, xid, objid);
+    lock_seams::lock_acquire_extended::call(tag, lockmode, true, false, true, false)?;
+    Ok(())
+}
+
+pub fn UnlockApplyTransactionForSession(
+    suboid: Oid,
+    xid: TransactionId,
+    objid: u16,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let tag =
+        LOCKTAG::apply_transaction(init_small::globals::MyDatabaseId(), suboid, xid, objid);
+    lock_seams::lock_release::call(tag, lockmode, true)?;
+    Ok(())
+}
+
 #[cold]
 #[inline(never)]
 fn xact_wait_context(

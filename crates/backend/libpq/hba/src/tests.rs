@@ -1,7 +1,8 @@
 use std::sync::{Mutex, Once};
 
 use types_core::init::{
-    uaCert, uaImplicitReject, uaMD5, uaPassword, uaPeer, uaReject, uaSCRAM, uaTrust,
+    uaCert, uaGSS, uaImplicitReject, uaLDAP, uaMD5, uaPAM, uaPassword, uaPeer, uaRADIUS,
+    uaReject, uaSCRAM, uaTrust,
 };
 use types_error::LOG;
 use types_startup::{
@@ -195,9 +196,16 @@ fn parse_methods() {
         parse_one("local all all frobnicate").unwrap_err(),
         "invalid authentication method \"frobnicate\""
     );
+    // pam parses live in this build.
+    assert_eq!(parse_one("local all all pam").unwrap().auth_method, uaPAM);
+    assert_eq!(
+        parse_one("local all all sspi").unwrap_err(),
+        "invalid authentication method \"sspi\": not supported by this build"
+    );
+    // ldap now parses; without a mode option it fails the mandatory-arg check.
     assert_eq!(
         parse_one("local all all ldap").unwrap_err(),
-        "invalid authentication method \"ldap\": not supported by this build"
+        "authentication method \"ldap\" requires argument \"ldapbasedn\", \"ldapprefix\", or \"ldapsuffix\" to be set"
     );
     assert_eq!(
         parse_one("host all all all peer").unwrap_err(),
@@ -279,6 +287,54 @@ fn parse_field_errors() {
         parse_one("local all all trust pamservice=x").unwrap_err(),
         "authentication option \"pamservice\" is only valid for authentication methods pam"
     );
+}
+
+#[test]
+fn parse_pam_method_and_options() {
+    let h = parse_one("local all all pam").unwrap();
+    assert_eq!(h.auth_method, uaPAM);
+    assert_eq!(h.pamservice, None);
+    assert!(!h.pam_use_hostname);
+    let h = parse_one("host all all 0.0.0.0/0 pam pamservice=mysvc pam_use_hostname=1").unwrap();
+    assert_eq!(h.auth_method, uaPAM);
+    assert_eq!(h.pamservice.as_deref(), Some("mysvc"));
+    assert!(h.pam_use_hostname);
+    // Any value but "1" is false, as in C.
+    let h = parse_one("local all all pam pam_use_hostname=true").unwrap();
+    assert!(!h.pam_use_hostname);
+    assert_eq!(
+        parse_one("local all all pam krb_realm=X").unwrap_err(),
+        "authentication option \"krb_realm\" is only valid for authentication methods gssapi and sspi"
+    );
+}
+
+#[test]
+fn parse_gss_method_and_options() {
+    let h = parse_one("host all all 0.0.0.0/0 gss").unwrap();
+    assert_eq!(h.auth_method, uaGSS);
+    // include_realm defaults to true for gss.
+    assert!(h.include_realm);
+    assert_eq!(h.krb_realm, None);
+    let h = parse_one(
+        "host all all 0.0.0.0/0 gss include_realm=0 krb_realm=EXAMPLE.COM map=m1",
+    )
+    .unwrap();
+    assert!(!h.include_realm);
+    assert_eq!(h.krb_realm.as_deref(), Some("EXAMPLE.COM"));
+    assert_eq!(h.usermap.as_deref(), Some("m1"));
+    assert_eq!(
+        parse_one("local all all gss").unwrap_err(),
+        "gssapi authentication is not supported on local sockets"
+    );
+    assert_eq!(
+        parse_one("host all all 0.0.0.0/0 gss pamservice=x").unwrap_err(),
+        "authentication option \"pamservice\" is only valid for authentication methods pam"
+    );
+    // hostgssenc parses without the not-supported warning (ENABLE_GSS build).
+    let mut toks = tokenize("hostgssenc all all 0.0.0.0/0 gss\n");
+    let parsed = parse_hba_line(&mut toks[0], LOG).unwrap().expect("line loads");
+    assert_eq!(parsed.conntype, types_startup::ctHostGSS);
+    assert_eq!(toks[0].err_msg, None);
 }
 
 #[test]
@@ -422,23 +478,235 @@ fn check_hba_ipv6_and_ssl_skip() {
     assert_eq!(port.hba.as_ref().unwrap().auth_method, uaImplicitReject);
 }
 
-// C accepts radius/oauth in every build (hba.c:1750,1752); their handlers are
-// unported here, so the parse must produce C's clean per-line config error
-// (hba.c:1771 "not supported by this build") — never a panic. load_hba then
-// returns false, which the postmaster maps to reload-keeps-old-config
-// (process_pm_reload_request) or a clean startup FATAL (PostmasterMain).
+
 #[test]
-fn radius_oauth_unported_reject_cleanly() {
-    for method in ["radius", "oauth"] {
-        let err = parse_one(&format!("host all all 127.0.0.1/32 {method}")).unwrap_err();
+fn ldap_options_parse() {
+    // Simple bind mode.
+    let h = parse_one(
+        "host all all 127.0.0.1/32 ldap ldapserver=ldap.example.net ldapprefix=\"cn=\" ldapsuffix=\", dc=example, dc=net\"",
+    )
+    .unwrap();
+    assert_eq!(h.auth_method, uaLDAP);
+    assert_eq!(h.ldapserver.as_deref(), Some("ldap.example.net"));
+    assert_eq!(h.ldapprefix.as_deref(), Some("cn="));
+    assert_eq!(h.ldapsuffix.as_deref(), Some(", dc=example, dc=net"));
+    assert_eq!(h.ldapport, 0);
+
+    // Search+bind mode with explicit options.
+    let h = parse_one(
+        "host all all 127.0.0.1/32 ldap ldapserver=ldap.example.net ldapport=3389 ldapbasedn=\"dc=example, dc=net\" ldapbinddn=\"cn=search\" ldapbindpasswd=secret ldapsearchattribute=uid ldaptls=1",
+    )
+    .unwrap();
+    assert_eq!(h.ldapport, 3389);
+    assert_eq!(h.ldapbasedn.as_deref(), Some("dc=example, dc=net"));
+    assert_eq!(h.ldapbinddn.as_deref(), Some("cn=search"));
+    assert_eq!(h.ldapbindpasswd.as_deref(), Some("secret"));
+    assert_eq!(h.ldapsearchattribute.as_deref(), Some("uid"));
+    assert!(h.ldaptls);
+    assert_eq!(h.ldapscope, types_startup::LDAP_SCOPE_SUBTREE);
+
+    // ldapurl form.
+    let h = parse_one(
+        "host all all 127.0.0.1/32 ldap ldapurl=\"ldap://ldap.example.net:3389/dc=example,dc=net?uid?sub\"",
+    )
+    .unwrap();
+    assert_eq!(h.ldapscheme.as_deref(), Some("ldap"));
+    assert_eq!(h.ldapserver.as_deref(), Some("ldap.example.net"));
+    assert_eq!(h.ldapport, 3389);
+    assert_eq!(h.ldapbasedn.as_deref(), Some("dc=example,dc=net"));
+    assert_eq!(h.ldapsearchattribute.as_deref(), Some("uid"));
+    assert_eq!(h.ldapscope, types_startup::LDAP_SCOPE_SUBTREE);
+
+    // C quirk (hba.c:2094): any option after ldapurl resets scope to subtree.
+    let h = parse_one(
+        "host all all 127.0.0.1/32 ldap ldapurl=\"ldap://h/dc=x?uid?one\" ldaptls=0",
+    )
+    .unwrap();
+    assert_eq!(h.ldapscope, types_startup::LDAP_SCOPE_SUBTREE);
+
+    // Mode mixing is rejected.
+    assert_eq!(
+        parse_one(
+            "host all all 127.0.0.1/32 ldap ldapserver=x ldapprefix=cn= ldapbasedn=dc=x"
+        )
+        .unwrap_err(),
+        "cannot mix options for simple bind and search+bind modes"
+    );
+    assert_eq!(
+        parse_one(
+            "host all all 127.0.0.1/32 ldap ldapserver=x ldapbasedn=dc=x ldapsearchattribute=uid ldapsearchfilter=(uid=$username)"
+        )
+        .unwrap_err(),
+        "cannot use ldapsearchattribute together with ldapsearchfilter"
+    );
+    assert_eq!(
+        parse_one("host all all 127.0.0.1/32 ldap ldapserver=x ldapbasedn=dc=x ldapport=abc")
+            .unwrap_err(),
+        "invalid LDAP port number: \"abc\""
+    );
+    assert_eq!(
+        parse_one("host all all 127.0.0.1/32 ldap ldapurl=\"http://x/\" ldapbasedn=dc=x")
+            .unwrap_err(),
+        // BADSCHEME (3) read as an LDAP result code, C-exact nonsense.
+        "could not parse LDAP URL \"http://x/\": Time limit exceeded"
+    );
+    // Options demand the ldap method.
+    assert_eq!(
+        parse_one("host all all 127.0.0.1/32 trust ldapserver=x").unwrap_err(),
+        "authentication option \"ldapserver\" is only valid for authentication methods ldap"
+    );
+}
+
+#[test]
+fn radius_options_parse() {
+    let h = parse_one(
+        "host all all 127.0.0.1/32 radius radiusservers=\"localhost,127.0.0.1\" radiussecrets=\"s1,s2\" radiusports=\"1812,18120\" radiusidentifiers=pg",
+    )
+    .unwrap();
+    assert_eq!(h.auth_method, uaRADIUS);
+    assert_eq!(h.radiusservers, vec!["localhost", "127.0.0.1"]);
+    assert_eq!(h.radiussecrets, vec!["s1", "s2"]);
+    assert_eq!(h.radiusports, vec!["1812", "18120"]);
+    assert_eq!(h.radiusidentifiers, vec!["pg"]);
+    assert_eq!(h.radiusservers_s.as_deref(), Some("localhost,127.0.0.1"));
+
+    assert_eq!(
+        parse_one("host all all 127.0.0.1/32 radius radiusservers=localhost").unwrap_err(),
+        "authentication method \"radius\" requires argument \"radiussecrets\" to be set"
+    );
+    assert_eq!(
+        parse_one(
+            "host all all 127.0.0.1/32 radius radiusservers=\"localhost,127.0.0.1\" radiussecrets=\"a,b,c\""
+        )
+        .unwrap_err(),
+        "the number of RADIUS secrets (3) must be 1 or the same as the number of RADIUS servers (2)"
+    );
+    // The per-entry port check reports at LOG but, as in C, leaves *err_msg
+    // unset — the line still fails to parse.
+    assert_eq!(
+        parse_one(
+            "host all all 127.0.0.1/32 radius radiusservers=localhost radiussecrets=s radiusports=abc"
+        )
+        .unwrap_err(),
+        ""
+    );
+}
+
+fn with_validator_libraries<T>(value: &str, f: impl FnOnce() -> T) -> T {
+    setup();
+    let _guard = GUC_LOCK.lock().unwrap();
+    let vars = &guc_tables::vars::oauth_validator_libraries_string;
+    let saved = vars.read();
+    vars.write(Some(value.to_string()));
+    let out = f();
+    vars.write(saved);
+    out
+}
+
+// hba.c:2047-2071 + check_oauth_validator (auth-oauth.c:819): C's exact
+// option validation and error wordings for the oauth method.
+#[test]
+fn parse_oauth_method() {
+    with_validator_libraries("oauth_test_validator", || {
+        let h = parse_one(
+            "host all all 127.0.0.1/32 oauth issuer=https://ex.com scope=openid validator=oauth_test_validator",
+        )
+        .unwrap();
+        assert_eq!(h.auth_method, types_core::init::uaOAuth);
+        assert_eq!(h.oauth_issuer.as_deref(), Some("https://ex.com"));
+        assert_eq!(h.oauth_scope.as_deref(), Some("openid"));
+        assert_eq!(h.oauth_validator.as_deref(), Some("oauth_test_validator"));
+        assert!(!h.oauth_skip_usermap);
+
+        // A single configured library is the default validator.
+        let h = parse_one("host all all 127.0.0.1/32 oauth issuer=https://ex.com scope=openid")
+            .unwrap();
+        assert_eq!(h.oauth_validator.as_deref(), Some("oauth_test_validator"));
+
+        // map and delegate_ident_mapping both parse; combining them is an error.
+        let h = parse_one(
+            "host all all 127.0.0.1/32 oauth issuer=https://ex.com scope=openid map=m1",
+        )
+        .unwrap();
+        assert_eq!(h.usermap.as_deref(), Some("m1"));
+        let h = parse_one(
+            "host all all 127.0.0.1/32 oauth issuer=https://ex.com scope=openid delegate_ident_mapping=1",
+        )
+        .unwrap();
+        assert!(h.oauth_skip_usermap);
         assert_eq!(
-            err,
-            format!("invalid authentication method \"{method}\": not supported by this build")
+            parse_one(
+                "host all all 127.0.0.1/32 oauth issuer=https://ex.com scope=openid map=m1 delegate_ident_mapping=1",
+            )
+            .unwrap_err(),
+            "map cannot be used in combination with delegate_ident_mapping"
         );
-        assert!(!load_hba_content(
-            &format!("{method}.conf"),
-            &format!("local all all trust\nhost all all 127.0.0.1/32 {method}\n")
-        ));
+
+        // MANDATORY_AUTH_ARG: scope is checked before issuer, as in C.
+        assert_eq!(
+            parse_one("host all all 127.0.0.1/32 oauth issuer=https://ex.com").unwrap_err(),
+            "authentication method \"oauth\" requires argument \"scope\" to be set"
+        );
+        assert_eq!(
+            parse_one("host all all 127.0.0.1/32 oauth scope=openid").unwrap_err(),
+            "authentication method \"oauth\" requires argument \"issuer\" to be set"
+        );
+
+        // A validator outside oauth_validator_libraries is rejected.
+        assert_eq!(
+            parse_one(
+                "host all all 127.0.0.1/32 oauth issuer=https://ex.com scope=openid validator=rogue",
+            )
+            .unwrap_err(),
+            "validator \"rogue\" is not permitted by oauth_validator_libraries"
+        );
+    });
+}
+
+#[test]
+fn parse_oauth_validator_libraries_gating() {
+    // Empty GUC: oauth lines cannot be configured at all.
+    with_validator_libraries("", || {
+        assert_eq!(
+            parse_one("host all all 127.0.0.1/32 oauth issuer=https://ex.com scope=openid")
+                .unwrap_err(),
+            "oauth_validator_libraries must be set for authentication method oauth"
+        );
+    });
+    // Multiple libraries: the validator option becomes mandatory.
+    with_validator_libraries("v1, v2", || {
+        assert_eq!(
+            parse_one("host all all 127.0.0.1/32 oauth issuer=https://ex.com scope=openid")
+                .unwrap_err(),
+            "authentication method \"oauth\" requires argument \"validator\" to be set when oauth_validator_libraries contains multiple options"
+        );
+        let h = parse_one(
+            "host all all 127.0.0.1/32 oauth issuer=https://ex.com scope=openid validator=v2",
+        )
+        .unwrap();
+        assert_eq!(h.oauth_validator.as_deref(), Some("v2"));
+    });
+    // Bad list syntax in the GUC.
+    with_validator_libraries("v1,,v2", || {
+        assert_eq!(
+            parse_one("host all all 127.0.0.1/32 oauth issuer=https://ex.com scope=openid")
+                .unwrap_err(),
+            "invalid list syntax in parameter \"oauth_validator_libraries\""
+        );
+    });
+}
+
+// oauth options on other methods stay invalid (REQUIRE_AUTH_OPTION arms).
+#[test]
+fn oauth_options_require_oauth_method() {
+    for opt in ["issuer=x", "scope=x", "validator=x", "delegate_ident_mapping=1"] {
+        let name = opt.split('=').next().unwrap();
+        assert_eq!(
+            parse_one(&format!("local all all trust {opt}")).unwrap_err(),
+            format!(
+                "authentication option \"{name}\" is only valid for authentication methods oauth"
+            )
+        );
     }
 }
 

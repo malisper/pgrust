@@ -13,7 +13,6 @@ pub const NamespaceOidIndexId: Oid = 2685;
 pub const Anum_pg_namespace_oid: AttrNumber = 1;
 pub const Natts_pg_namespace: usize = 4;
 
-// InvokeObjectPostCreateHook: object-access hooks are elided repo-wide.
 pub fn NamespaceCreate<'mcx>(
     mcx: Mcx<'mcx>,
     nspName: &str,
@@ -76,6 +75,9 @@ pub fn NamespaceCreate<'mcx>(
         let myself = pg_depend::ObjectAddress::set(NAMESPACE_RELATION_ID, nspoid);
         pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
     }
+
+    objectaccess::InvokeObjectPostCreateHook(NAMESPACE_RELATION_ID, nspoid, 0)?;
+
     Ok(nspoid)
 }
 

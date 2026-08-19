@@ -4,6 +4,23 @@ use ::datum::{Datum, Varlena};
 use ::mcx::{Allocator, Mcx, PgVec};
 use ::types_error::PgResult;
 
+// Shared body for registered internal-protocol builtins (selectivity
+// estimators, AM/opclass support, window internals, RI trigger bodies, ...):
+// pgrust routes their catalog-driven dispatch natively, and SQL cannot form
+// `internal` arguments (C parity), so a call landing here is a dispatch bug.
+#[cold]
+#[inline(never)]
+pub fn fc_internal_dispatch_only(
+    flinfo: Option<&mut crate::fcinfo::FmgrInfo>,
+    _fcinfo: &mut crate::fcinfo::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let oid = flinfo.map_or(0, |f| f.fn_oid);
+    panic!(
+        "internal-protocol builtin (OID {oid}) called through fmgr; \
+         pgrust dispatches it natively"
+    );
+}
+
 // Results leak into the arming context and die at its reset (C's palloc ownership).
 #[inline]
 pub fn varlena_result(v: Varlena<'_>) -> Datum {

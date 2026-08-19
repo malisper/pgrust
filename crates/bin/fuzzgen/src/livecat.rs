@@ -1,7 +1,11 @@
 //! Live `CatalogSource`: introspect tables/columns/types over a client
-//! connection so the generator targets a real schema. Columns whose type
-//! the generator doesn't model are skipped; tables left with no usable
-//! columns are dropped from the snapshot. The fixture path stays the
+//! connection so the generator targets a real schema. All relation kinds
+//! with real column lists are included (plain/partitioned/inherited
+//! tables, matviews, foreign tables, views) — live-catalog sessions have
+//! no DML targets or state probes anyway, so the names only seed
+//! identifier rendering. Columns whose type the generator doesn't model
+//! are skipped; tables left with no usable columns are dropped from the
+//! snapshot. The fixture path stays the
 //! default (crate::catalog::FixtureCatalog).
 
 use crate::catalog::{Catalog, CatalogSource, Column, SqlType, Table};
@@ -12,7 +16,7 @@ SELECT c.relname, a.attname, a.atttypid::int4, a.attnotnull \
 FROM pg_catalog.pg_class c \
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
 JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
-WHERE c.relkind = 'r' AND n.nspname = 'public' \
+WHERE c.relkind IN ('r','p','m','f','v') AND n.nspname = 'public' \
   AND a.attnum > 0 AND NOT a.attisdropped \
 ORDER BY c.relname, a.attnum;";
 

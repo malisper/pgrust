@@ -1,9 +1,12 @@
 //! `contrib/postgres_fdw`: option validation, shippability, deparser, the
-//! planner arms (phase 1), and — phase 2 — the connection layer
-//! (connection.c over `crates/interfaces/pgclient`) plus the read-only
-//! executor data flow (cursor-batched foreign scans). Joins/upper pushdown,
-//! DML, async execution and remote estimates are phase 3 and raise clean
-//! named errors.
+//! planner arms (rel size/paths/plan, remote estimates, join and
+//! grouped-aggregate pushdown), the connection layer (connection.c over
+//! `crates/interfaces/pgclient`), the scan executor (cursor-batched, async),
+//! and DML (per-row prepared statements, batch insert, direct modify).
+//! Unported: sort/LIMIT (ORDERED/FINAL) pushdown, pathkey paths
+//! (add_paths_with_pathkeys_for_rel), EPQ-capable pushed join paths under
+//! UPDATE/DELETE/row locks, row triggers on foreign tables, COPY into
+//! foreign tables (BeginForeignInsert).
 #![allow(non_snake_case)]
 
 pub mod connection;

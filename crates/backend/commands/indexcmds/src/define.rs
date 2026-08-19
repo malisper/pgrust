@@ -480,53 +480,6 @@ pub fn DefineIndex<'mcx>(
         )?;
     }
     let exclusion = !stmt.excludeOpNames.is_nil() || stmt.iswithoutoverlaps;
-    let am = resolve_index_am(stmt.accessMethod)?;
-    let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol, amcaninclude) = (
-        am.oid,
-        am.name.as_str(),
-        am.amcanorder,
-        am.amcanunique,
-        am.amcanmulticol,
-        am.amcaninclude,
-    );
-    if stmt.unique && !stmt.iswithoutoverlaps && !amcanunique {
-        return Err(err(
-            format!("access method \"{amname}\" does not support unique indexes"),
-            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-        ));
-    }
-    if !stmt.indexIncludingParams.is_nil() {
-        if !amcaninclude {
-            return Err(err(
-                format!("access method \"{amname}\" does not support included columns"),
-                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-            ));
-        }
-    }
-    // C: exclusion requires amRoutine->amgettuple (gin and brin lack it).
-    if exclusion
-        && matches!(
-            am.kind,
-            types_relscan::IndexAmKind::Gin
-                | types_relscan::IndexAmKind::Brin
-                | types_relscan::IndexAmKind::Bloom
-        )
-    {
-        return Err(err(
-            format!("access method \"{amname}\" does not support exclusion constraints"),
-            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-        ));
-    }
-    if stmt.iswithoutoverlaps && amname != "gist" {
-        return Err(err(
-            format!("access method \"{amname}\" does not support WITHOUT OVERLAPS constraints"),
-            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-        ));
-    }
-
-    let reloptions =
-        reloptions::transformRelOptions(mcx, None, &stmt.options, None, &[], false, false)?;
-    reloptions::index_reloptions(mcx, accessMethodId, reloptions.as_deref(), true)?;
 
     let mut root_save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
@@ -537,12 +490,6 @@ pub fn DefineIndex<'mcx>(
     let mut allIndexParams = stmt.indexParams.clone_in(mcx)?;
     allIndexParams.concat(mcx, &stmt.indexIncludingParams)?;
     let numberOfAttributes = allIndexParams.len();
-    if numberOfKeyAttributes > 1 && !amcanmulticol {
-        return Err(err(
-            format!("access method \"{amname}\" does not support multicolumn indexes"),
-            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-        ));
-    }
     if numberOfKeyAttributes == 0 {
         return Err(err("must specify at least one column".into(), ERRCODE_INVALID_OBJECT_DEFINITION));
     }
@@ -680,12 +627,70 @@ pub fn DefineIndex<'mcx>(
         }
     };
 
+    // Look up the access method and verify it can handle the requested
+    // features — at C's position (indexcmds.c:840-901): AFTER the relkind /
+    // partitioned / temp / acl / tablespace checks, so e.g. "cannot create
+    // index on relation" outranks "access method ... does not exist".
+    let am = resolve_index_am(stmt.accessMethod)?;
+    let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol, amcaninclude) = (
+        am.oid,
+        am.name.as_str(),
+        am.amcanorder,
+        am.amcanunique,
+        am.amcanmulticol,
+        am.amcaninclude,
+    );
+    if stmt.unique && !stmt.iswithoutoverlaps && !amcanunique {
+        return Err(err(
+            format!("access method \"{amname}\" does not support unique indexes"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+    if !stmt.indexIncludingParams.is_nil() && !amcaninclude {
+        return Err(err(
+            format!("access method \"{amname}\" does not support included columns"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+    if numberOfKeyAttributes > 1 && !amcanmulticol {
+        return Err(err(
+            format!("access method \"{amname}\" does not support multicolumn indexes"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+    // C: exclusion requires amRoutine->amgettuple (gin and brin lack it).
+    if exclusion
+        && matches!(
+            am.kind,
+            types_relscan::IndexAmKind::Gin
+                | types_relscan::IndexAmKind::Brin
+                | types_relscan::IndexAmKind::Bloom
+        )
+    {
+        return Err(err(
+            format!("access method \"{amname}\" does not support exclusion constraints"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+    if stmt.iswithoutoverlaps && amname != "gist" {
+        return Err(err(
+            format!("access method \"{amname}\" does not support WITHOUT OVERLAPS constraints"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+
     // Must run as the table owner (indexcmds.c:906, after the :689-690
     // switch): contain_mutable_functions_after_planning pre-evaluates
     // constant immutable calls.
     if let Some(wc) = stmt.whereClause {
         CheckPredicate(mcx, wc)?;
     }
+
+    // Parse AM-specific options, convert to text array form, validate
+    // (indexcmds.c:908-913, after CheckPredicate).
+    let reloptions =
+        reloptions::transformRelOptions(mcx, None, &stmt.options, None, &[], false, false)?;
+    reloptions::index_reloptions(mcx, accessMethodId, reloptions.as_deref(), true)?;
 
     let mut indexInfo = IndexInfo {
         ii_NumIndexAttrs: numberOfAttributes as i32,

@@ -25,6 +25,7 @@ heaptuple = { path = "../../access/common/heaptuple" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog = { path = "../../catalog/catalog" }
 catalog_objectaddress = { path = "../../catalog/objectaddress" }
+objectaccess = { path = "../../catalog/objectaccess" }
 aclchk = { path = "../../catalog/aclchk" }
 adt_acl = { path = "../../utils/adt/acl" }
 miscinit = { path = "../../utils/init/miscinit" }

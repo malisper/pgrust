@@ -17,9 +17,7 @@ use types_nodes::parsenodes::{CreatedbStmt, DefElem};
 use types_nodes::NodeTag;
 use types_storage::lock::{AccessShareLock, RowExclusiveLock, ShareLock};
 use types_tuple::NameData;
-use wchar::PG_SQL_ASCII;
-#[cfg(test)]
-use wchar::PG_UTF8;
+use wchar::{PG_SQL_ASCII, PG_UTF8};
 
 // wasm32: no LC_* names in the wasi libc crate; musl numbering (the
 // pg_locale wasm arm's convention).
@@ -34,6 +32,35 @@ use crate::{
     check_db_file_conflict, database_is_invalid_form, get_db_info, have_createdb_privilege, loc,
     GLOBALTABLESPACE_OID, TableSpaceRelationId, XLOG_DBASE_CREATE_FILE_COPY,
 };
+
+// UTF-8-only server encodings (ratified carve,
+// docs/design/carve-ratifications.md §11, 2026-08-18): only UTF8 and
+// SQL_ASCII are accepted server encodings. SQL_ASCII stays creatable because
+// its query text is already gated to ASCII (a UTF-8 subset) per query; every
+// other encoding is refused here at the boundary instead of failing
+// per-feature later.
+fn server_encoding_gate(encoding: i32, position: i32) -> Option<Box<types_error::PgError>> {
+    if encoding < 0 || encoding == PG_UTF8 || encoding == PG_SQL_ASCII {
+        return None;
+    }
+    Some(
+        ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "server encoding \"{}\" is not supported by pgrust; only \"UTF8\" and \
+                 \"SQL_ASCII\" server encodings are accepted (UTF-8-only carve, \
+                 docs/design/carve-ratifications.md)",
+                mbutils::pg_encoding_to_char(encoding)
+            ))
+            .errhint(
+                "Restore non-UTF8 dumps into a UTF8 database; client_encoding conversion is \
+                 supported.",
+            )
+            .errposition(position)
+            .into_error()
+            .into(),
+    )
+}
 
 // collprovider_name (pg_collation.h).
 fn collprovider_name(c: u8) -> &'static str {
@@ -550,6 +577,9 @@ fn createdb_guts<'mcx>(
                         .into());
                 }
             }
+        }
+        if let Some(err) = server_encoding_gate(encoding, el.location + 1) {
+            return Err(err.into());
         }
     }
     let mut dbcollate = arg_str(collate_el)?;
@@ -1224,5 +1254,40 @@ mod tests {
                 mbutils::pg_encoding_to_char(PG_SQL_ASCII)
             )
         );
+    }
+
+    // UTF-8-only server-encoding carve (docs/design/carve-ratifications.md
+    // §11, ratified 2026-08-18): only UTF8 and SQL_ASCII pass the createdb
+    // gate; everything else is a clean 0A000 with the migration hint.
+    #[test]
+    fn utf8_only_server_encoding_gate() {
+        assert!(server_encoding_gate(-1, 0).is_none()); // inherited from template
+        assert!(server_encoding_gate(PG_UTF8, 0).is_none());
+        assert!(server_encoding_gate(PG_SQL_ASCII, 0).is_none());
+
+        for (enc, name) in
+            [(wchar::PG_LATIN1, "LATIN1"), (wchar::PG_EUC_JP, "EUC_JP")]
+        {
+            let e = server_encoding_gate(enc, 17).expect("must be rejected");
+            assert_eq!(
+                e.sqlstate(),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED
+            );
+            assert_eq!(
+                e.message(),
+                format!(
+                    "server encoding \"{name}\" is not supported by pgrust; only \"UTF8\" and \
+                     \"SQL_ASCII\" server encodings are accepted (UTF-8-only carve, \
+                     docs/design/carve-ratifications.md)"
+                )
+            );
+            assert_eq!(
+                e.hint(),
+                Some(
+                    "Restore non-UTF8 dumps into a UTF8 database; client_encoding conversion \
+                     is supported."
+                )
+            );
+        }
     }
 }

@@ -220,7 +220,7 @@ pub fn type_maximum_size(type_oid: Oid, typemod: i32) -> i32 {
     }
 }
 
-/// C `quote_identifier` (ruleutils.c) minus the quote_all_identifiers GUC.
+/// C `quote_identifier` (ruleutils.c).
 pub fn quote_identifier(ident: &str) -> std::borrow::Cow<'_, str> {
     let bytes = ident.as_bytes();
     let mut safe = matches!(bytes.first(), Some(b'a'..=b'z' | b'_'));
@@ -228,6 +228,13 @@ pub fn quote_identifier(ident: &str) -> std::borrow::Cow<'_, str> {
         safe = bytes
             .iter()
             .all(|&b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_'));
+    }
+    // Uninstalled slot = boot default (off), for unit tests of consumer crates.
+    if safe
+        && guc_tables::vars::quote_all_identifiers.installed()
+        && guc_tables::vars::quote_all_identifiers.read()
+    {
+        safe = false;
     }
     if safe {
         let kwnum = ScanKeywordLookup(bytes, &ScanKeywords);

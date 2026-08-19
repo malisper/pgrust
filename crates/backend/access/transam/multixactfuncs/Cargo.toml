@@ -1,0 +1,22 @@
+[package]
+name = "multixactfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "multixactfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+funcapi = { path = "../../../utils/fmgr/funcapi" }
+tupdesc = { path = "../../common/tupdesc" }
+heaptuple = { path = "../../common/heaptuple" }
+varlena = { path = "../../../utils/adt/varlena" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+multixact = { path = "../multixact" }

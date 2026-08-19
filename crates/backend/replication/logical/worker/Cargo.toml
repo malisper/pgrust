@@ -75,6 +75,11 @@ twophase = { path = "../../../access/transam/twophase" }
 typcache = { path = "../../../utils/cache/typcache" }
 walreceiver = { path = "../../walreceiver" }
 xact = { path = "../../../access/transam/xact" }
+shm_mq = { path = "../../../storage/ipc/shm_mq" }
+pgsync = { path = "../../../../_support/pgsync" }
 
 [dev-dependencies]
 adt_int = { path = "../../../utils/adt/int" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

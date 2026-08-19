@@ -189,7 +189,36 @@ fn unported(what: &str) -> ! {
     panic!("unported: ri_triggers {what}")
 }
 
+// Trigger bodies fire through ri_fkey_trigger's native tgfoid dispatch; the
+// fmgr rows exist for lookup parity only.
+pub const RI_TRIGGERS_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[
+    ri_row(1644, "RI_FKey_check_ins"),
+    ri_row(1645, "RI_FKey_check_upd"),
+    ri_row(1646, "RI_FKey_cascade_del"),
+    ri_row(1647, "RI_FKey_cascade_upd"),
+    ri_row(1648, "RI_FKey_restrict_del"),
+    ri_row(1649, "RI_FKey_restrict_upd"),
+    ri_row(1650, "RI_FKey_setnull_del"),
+    ri_row(1651, "RI_FKey_setnull_upd"),
+    ri_row(1652, "RI_FKey_setdefault_del"),
+    ri_row(1653, "RI_FKey_setdefault_upd"),
+    ri_row(1654, "RI_FKey_noaction_del"),
+    ri_row(1655, "RI_FKey_noaction_upd"),
+];
+
+const fn ri_row(foid: Oid, name: &'static str) -> types_fmgr::FmgrBuiltin {
+    types_fmgr::FmgrBuiltin {
+        foid,
+        name,
+        nargs: 0,
+        strict: true,
+        retset: false,
+        func: types_fmgr::fc_internal_dispatch_only,
+    }
+}
+
 pub fn init_seams() {
+    fmgr_core::register_late_builtins(RI_TRIGGERS_BUILTINS);
     ri_triggers_seams::ri_fkey_trigger::set(ri_fkey_trigger);
     ri_triggers_seams::ri_initial_check::set(RI_Initial_Check);
     ri_triggers_seams::ri_fkey_fk_upd_check_required::set(RI_FKey_fk_upd_check_required);

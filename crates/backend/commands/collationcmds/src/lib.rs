@@ -5,6 +5,8 @@
 
 #![allow(non_snake_case)]
 
+pub mod builtins;
+
 use datum::Datum;
 use mcx::Mcx;
 use pg_collation::CollationForm;
@@ -350,7 +352,15 @@ fn creation_namespace<'mcx, 'a>(
 ) -> PgResult<(Oid, &'a str)> {
     let mut names: [&str; 4] = [""; 4];
     let nnames = qualified.len();
-    assert!((1..=3).contains(&nnames), "improper qualified name");
+    if !(1..=3).contains(&nnames) {
+        return Err(catalog_namespace::improper_qualified_name_joined(
+            qualified
+                .iter()
+                .map(|n| n.as_string().expect("qualified name").sval)
+                .collect::<Vec<_>>()
+                .join("."),
+        ));
+    }
     for (i, n) in qualified.iter().enumerate() {
         names[i] = n.as_string().expect("qualified name").sval;
     }

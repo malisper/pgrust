@@ -1352,6 +1352,9 @@ const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmgr
 // their row, as in C's fmgr_builtins[] (the 1152-1157/1195-1196/1314/1389
 // rows are the timestamptz operators sharing the timestamp prosrc).
 pub const TIMESTAMP_BUILTINS: &[FmgrBuiltin] = &[
+    // sort/skip support: native comparator resolution; fmgr-lookup parity rows.
+    b(3137, "timestamp_sortsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
+    b(6409, "timestamp_skipsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(274, "timeofday", 0, fc_timeofday),
     srf(2856, "pg_timezone_names", 0, fc_pg_timezone_names),
     srf(6401, "pg_timezone_abbrevs_zone", 0, fc_pg_timezone_abbrevs_zone),

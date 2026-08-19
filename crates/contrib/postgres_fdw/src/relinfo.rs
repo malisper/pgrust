@@ -128,6 +128,13 @@ pub(crate) fn attach_fpinfo<'mcx>(
 /// only by [`attach_fpinfo`] in this crate, from an allocation in the run's
 /// arena — same lifetime as the RelOptInfo that points at it; single-threaded
 /// planning, aliasing policed by the RefCell.
+pub(crate) fn fpinfo_opt<'mcx>(
+    rel: &types_pathnodes::RelOptInfo<'mcx>,
+) -> Option<&'mcx RefCell<PgFdwRelationInfo<'mcx>>> {
+    // SAFETY: see fpinfo below.
+    rel.fdw_state.map(|p| unsafe { p.cast::<RefCell<PgFdwRelationInfo<'mcx>>>().as_ref() })
+}
+
 pub(crate) fn fpinfo<'mcx>(
     rel: &types_pathnodes::RelOptInfo<'mcx>,
 ) -> &'mcx RefCell<PgFdwRelationInfo<'mcx>> {

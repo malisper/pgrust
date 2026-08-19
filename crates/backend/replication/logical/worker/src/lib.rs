@@ -27,6 +27,7 @@ use types_error::{
 use walreceiver::client::{CopyData, PgConn};
 
 mod apply;
+mod parallel;
 mod stream_apply;
 mod tablesync;
 #[cfg(test)]
@@ -48,7 +49,7 @@ pub(crate) fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
-fn get_ts() -> TimestampTz {
+pub(crate) fn get_ts() -> TimestampTz {
     timestamp_seams::get_current_timestamp::call()
 }
 
@@ -274,13 +275,25 @@ fn maybe_reread_subscription_guts(mcx: Mcx<'_>) -> PgResult<()> {
 
     if let Some(why) = exit_msg {
         let name = my_sub(|s| s.name.clone());
-        let _ = elog::elog(
-            LOG,
-            format!(
-                "logical replication worker for subscription \"{name}\" will stop because {why}"
-            ),
-        );
-        APPLY_WORKER_EXIT.set(true);
+        if parallel::am_parallel_apply_worker() && newsub.is_some() {
+            // apply_worker_exit's parallel arm (worker.c:3929): don't stop —
+            // the leader detects the change and restarts logical replication;
+            // stopping here could trip the leader's queue error paths.
+            let _ = elog::elog(
+                LOG,
+                format!(
+                    "logical replication parallel apply worker for subscription \"{name}\" will stop because {why}"
+                ),
+            );
+        } else {
+            let _ = elog::elog(
+                LOG,
+                format!(
+                    "logical replication worker for subscription \"{name}\" will stop because {why}"
+                ),
+            );
+            APPLY_WORKER_EXIT.set(true);
+        }
         return Ok(());
     }
 
@@ -442,7 +455,7 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
                         return Ok(());
                     }
                     // Launch/advance tablesync when idle (worker.c:3735).
-                    tablesync::process_syncing_tables(mcx, conn, last_received)?;
+                    tablesync::process_syncing_tables(mcx, Some(conn), last_received)?;
                     if APPLY_WORKER_EXIT.get() {
                         return Ok(());
                     }
@@ -520,7 +533,7 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
                         if last_received < end_lsn {
                             last_received = end_lsn;
                         }
-                        apply::apply_dispatch(mcx, conn, &buf[25..])?;
+                        apply::apply_dispatch(mcx, Some(conn), &buf[25..])?;
                         if APPLY_WORKER_EXIT.get() {
                             return Ok(());
                         }
@@ -582,21 +595,14 @@ fn start_logical_streaming_opts(
         )
     });
 
-    // set_stream_options (worker.c:4429): streaming!=off requests the serial
-    // streamed-apply path. streaming=parallel — CREATE SUBSCRIPTION's DEFAULT
-    // (subscriptioncmds.c:154) — applies serially: applyparallelworker.c is
-    // not ported, and C's own leader serializes a parallel-mode transaction
-    // whenever no parallel worker is available, so the serial path is inside
-    // C's behavior space. Logged per worker start so the divergence is
-    // visible. two_phase is requested only by run_apply_worker's
+    // set_stream_options (worker.c:4437): streaming=parallel (CREATE
+    // SUBSCRIPTION's default) requests abort info on the wire and marks this
+    // worker parallel-capable; pa_can_start decides per transaction whether a
+    // parallel apply worker actually takes it (serial spooling remains the
+    // fallback). two_phase is requested only by run_apply_worker's
     // PENDING->ENABLED transition.
-    if stream_mode == pg_subscription::LOGICALREP_STREAM_PARALLEL {
-        let _ = elog::elog(
-            LOG,
-            "parallel streaming apply is not implemented; applying streamed transactions serially"
-                .to_string(),
-        );
-    }
+    let parallel = stream_mode == pg_subscription::LOGICALREP_STREAM_PARALLEL;
+    launcher::my_worker_set_parallel_apply(parallel);
     let pubnames = publications
         .iter()
         .map(|p| format!("\"{}\"", p.replace('"', "\"\"")))
@@ -616,7 +622,9 @@ fn start_logical_streaming_opts(
     if binary {
         cmd.push_str(", binary 'true'");
     }
-    if stream_mode != pg_subscription::LOGICALREP_STREAM_OFF {
+    if parallel {
+        cmd.push_str(", streaming 'parallel'");
+    } else if stream_mode != pg_subscription::LOGICALREP_STREAM_OFF {
         cmd.push_str(", streaming 'on'");
     }
     if two_phase {
@@ -651,7 +659,7 @@ fn replorigin_reset(_code: i32, _arg: datum::Datum) -> PgResult<()> {
 // C ProcessInterrupts' IsLogicalWorker() die arm (postgres.c:3321-3324),
 // carried by the SIGTERM disposition in the thread model (bgworker_die
 // precedent).
-fn logicalrep_worker_die() -> PgResult<()> {
+pub(crate) fn logicalrep_worker_die() -> PgResult<()> {
     ereport(FATAL)
         .errcode(ERRCODE_ADMIN_SHUTDOWN)
         .errmsg("terminating logical replication worker due to administrator command")
@@ -680,18 +688,25 @@ pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
 
     let result = apply_worker_body(slot);
 
-    // Detach on every exit path; the launcher notices and relaunches.
+    // Stop reading the parallel workers' error mailboxes before the detach
+    // SIGTERMs them (logicalrep_worker_detach's leader arm), then detach on
+    // every exit path; the launcher notices and relaunches.
+    parallel::pa_detach_all_error_mq();
     launcher::logicalrep_worker_detach();
     result
 }
 
-fn apply_worker_body(slot: usize) -> PgResult<()> {
-    let w = launcher::worker_snapshot(slot).expect("attached worker slot");
-
-    // InitializeLogRepWorker (worker.c:4661): run as the replica session
-    // replication role BEFORE connecting, so every apply-path trigger and
-    // rewrite rule sees `replica` — ENABLE REPLICA / ENABLE ALWAYS triggers
-    // fire, plain (ENABLE ORIGIN) ones stay silent, exactly as in C.
+// InitializeLogRepWorker (worker.c:4658), shared by the leader apply,
+// tablesync, and parallel apply workers. Returns None (after its own LOG)
+// when the subscription was removed/disabled during startup.
+pub(crate) fn initialize_logrep_worker(
+    mcx: Mcx<'static>,
+    w: &launcher::LogicalRepWorker,
+) -> PgResult<Option<String>> {
+    // Run as the replica session replication role BEFORE connecting, so
+    // every apply-path trigger and rewrite rule sees `replica` — ENABLE
+    // REPLICA / ENABLE ALWAYS triggers fire, plain (ENABLE ORIGIN) ones stay
+    // silent, exactly as in C.
     guc::SetConfigOption(
         "session_replication_role",
         Some("replica"),
@@ -702,18 +717,9 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     // Database connection + subscription load.
     bgworker::BackgroundWorkerInitializeConnectionByOid(w.dbid, w.userid, 0)?;
 
-    let top = MemoryContext::new("ApplyContext");
-    // SAFETY: `top` outlives the worker body; see apply_loop.
-    let mcx: Mcx<'static> = unsafe { std::mem::transmute(top.mcx()) };
-
     inval::invalidate::CacheRegisterSyscacheCallback(
         cache_syscache::cacheinfo::SUBSCRIPTIONOID,
         subscription_change_cb,
-        datum::Datum::null(),
-    )?;
-    inval::invalidate::CacheRegisterSyscacheCallback(
-        cache_syscache::cacheinfo::SUBSCRIPTIONRELMAP,
-        tablesync::invalidate_table_states_cb,
         datum::Datum::null(),
     )?;
 
@@ -741,11 +747,11 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
         // Ensure we remove the no-longer-useful entry for the worker's start
         // time (worker.c:4700), so a successor for a recreated subscription
         // isn't throttled by this incarnation's timestamp.
-        if !w.is_tablesync() {
+        if !w.is_tablesync() && !w.is_parallel_apply() {
             launcher::ApplyLauncherForgetWorkerStartTime(w.subid);
         }
         xact::CommitTransactionCommand()?;
-        return Ok(());
+        return Ok(None);
     };
     if !sub.enabled {
         let _ = elog::elog(
@@ -756,7 +762,7 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
             ),
         );
         xact::CommitTransactionCommand()?;
-        return Ok(());
+        return Ok(None);
     }
     let subname = sub.name.clone();
     MY_SUBSCRIPTION.with(|s| *s.borrow_mut() = Some(sub));
@@ -771,6 +777,26 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     // (on_shmem_exit at attach) and checkpointer's
     // pgstat_before_server_shutdown_cb (before_shmem_exit).
     ipc::before_shmem_exit(replorigin_reset, datum::Datum::null())?;
+
+    Ok(Some(subname))
+}
+
+fn apply_worker_body(slot: usize) -> PgResult<()> {
+    let w = launcher::worker_snapshot(slot).expect("attached worker slot");
+
+    let top = MemoryContext::new("ApplyContext");
+    // SAFETY: `top` outlives the worker body; see apply_loop.
+    let mcx: Mcx<'static> = unsafe { std::mem::transmute(top.mcx()) };
+
+    let Some(subname) = initialize_logrep_worker(mcx, &w)? else {
+        return Ok(());
+    };
+
+    inval::invalidate::CacheRegisterSyscacheCallback(
+        cache_syscache::cacheinfo::SUBSCRIPTIONRELMAP,
+        tablesync::invalidate_table_states_cb,
+        datum::Datum::null(),
+    )?;
 
     if w.is_tablesync() {
         let _ = elog::elog(
@@ -883,4 +909,5 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
 
 pub fn init_seams() {
     logical_worker_seams::apply_worker_main::set(ApplyWorkerMain);
+    parallel::init_seams();
 }

@@ -186,5 +186,10 @@ fn update_one<'mcx>(
     if locktup {
         lmgr::UnlockTuple(pgclass, &otid, InplaceUpdateTupleLock)?;
     }
+    if namspace == Some("toast") {
+        objectaccess::InvokeObjectPostAlterHookArg(RELATION_RELATION_ID, relid, 0, InvalidOid, true)?;
+    } else {
+        objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, relid, 0)?;
+    }
     Ok(())
 }

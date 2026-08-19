@@ -439,6 +439,71 @@ pub fn is_explain_stmt(sql: &str) -> bool {
     head.len() >= 7 && head[..7].eq_ignore_ascii_case("EXPLAIN")
 }
 
+/// SHOW ALL / pg_settings GUC-inventory statement detection (F4).
+/// pgrust deliberately ships a different GUC inventory than C — extra
+/// `pgrust.*` rows (docs/design/env-to-guc.md DIVERGENCE NOTICE) and
+/// retuned defaults (docs/design/jit-parallel-defaults.md) — so a
+/// row-COUNT difference on these statements is config surface, not
+/// conformance. Scope is deliberately tight: only SHOW ALL and SELECTs
+/// referencing pg_settings qualify; a wrong GUC *value* (equal-count
+/// rowset diff, SHOW <guc>, pg_settings value probes) stays a finding.
+pub fn is_guc_inventory_stmt(sql: &str) -> bool {
+    let head = sql.trim_start();
+    if head.len() >= 8 && head[..8].eq_ignore_ascii_case("SHOW ALL") {
+        return true;
+    }
+    (head.len() >= 6 && head[..6].eq_ignore_ascii_case("SELECT"))
+        && sql.to_ascii_lowercase().contains("pg_settings")
+}
+
+/// The no-libxml oracle's NO_XML_SUPPORT primary message (xml.c:235),
+/// verbatim and complete — the detail line rides a separate field.
+fn is_no_libxml_error(message: &str) -> bool {
+    message == "unsupported XML feature"
+}
+
+fn int_cell(c: &Option<String>) -> bool {
+    matches!(c, Some(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Ruled candidate for the GUC-inventory signature: a row-count diff on a
+/// SHOW ALL / pg_settings statement, or the `count(*)` rendering of the
+/// same inventory (both sides a single all-digit cell). Anything else on
+/// these statements — same-count rowsets with differing values — is NOT
+/// a candidate and escalates normally.
+fn guc_inventory_candidate(
+    sql: &str,
+    ra: &[Vec<Option<String>>],
+    rb: &[Vec<Option<String>>],
+) -> Option<Classified> {
+    if !is_guc_inventory_stmt(sql) {
+        return None;
+    }
+    if ra.len() != rb.len() {
+        return Some(Classified {
+            class: DiffClass::Ruled("guc-inventory".to_string()),
+            detail: format!("GUC-inventory row counts differ: {} vs {}", ra.len(), rb.len()),
+        });
+    }
+    if sql.to_ascii_lowercase().contains("count")
+        && ra.len() == 1
+        && ra[0].len() == 1
+        && rb.len() == 1
+        && rb[0].len() == 1
+        && int_cell(&ra[0][0])
+        && int_cell(&rb[0][0])
+    {
+        return Some(Classified {
+            class: DiffClass::Ruled("guc-inventory".to_string()),
+            detail: format!(
+                "GUC-inventory counts differ: {:?} vs {:?}",
+                ra[0][0], rb[0][0]
+            ),
+        });
+    }
+    None
+}
+
 /// Runtime resource counters inside EXPLAIN ANALYZE output whose values
 /// (and value-adjacent text, e.g. quicksort vs external merge) are
 /// implementation state, not planner conformance: masked before the
@@ -594,6 +659,43 @@ pub fn normalize_explain_cell(s: &str) -> String {
     out
 }
 
+/// Opt-in H1 mask: wall-clock digits after "actual time=" in EXPLAIN
+/// ANALYZE node lines. Deliberately NOT part of EXPLAIN_COUNTER_TOKENS —
+/// the explain module's ANALYZE arms always carry TIMING OFF so the text
+/// never prints there, and keeping it compared by default preserves that
+/// hygiene as a checked invariant. Only grammar-derived EXPLAIN ANALYZE
+/// (gramwalk, or --mask-explain-timing replays) opts in, and only when
+/// the remaining diff disappears under the mask ("actual rows=" and plan
+/// structure still compare strictly).
+pub fn normalize_explain_timing_cell(s: &str) -> String {
+    const TOK: &str = "actual time=";
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find(TOK) {
+        out.push_str(&rest[..pos + TOK.len()]);
+        out.push('X');
+        let after = &rest[pos + TOK.len()..];
+        let end = after
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn normalize_explain_timing_rows(
+    rows: &[Vec<Option<String>>],
+) -> Vec<Vec<Option<String>>> {
+    rows.iter()
+        .map(|r| {
+            r.iter()
+                .map(|c| c.as_ref().map(|s| normalize_explain_timing_cell(s)))
+                .collect()
+        })
+        .collect()
+}
+
 fn normalize_explain_rows(rows: &[Vec<Option<String>>]) -> Vec<Vec<Option<String>>> {
     rows.iter()
         .map(|r| {
@@ -647,6 +749,12 @@ pub struct DiffInput<'a> {
     /// aggregates (session::Statement::soft_float_cols): compared
     /// ruled-soft. Empty for replayed scripts without metadata.
     pub soft_cols: &'a [usize],
+    /// Opt-in (H1): additionally mask "actual time=" wall-clock digits on
+    /// EXPLAIN statements before ruling out a diff. Set only for gramwalk
+    /// statements (grammar-derived EXPLAIN ANALYZE cannot carry the
+    /// explain module's TIMING OFF hygiene) and --mask-explain-timing
+    /// replays; every other lane compares timing text strictly.
+    pub mask_explain_timing: bool,
 }
 
 /// Raw classification, before the ruled-divergence table is consulted
@@ -654,7 +762,7 @@ pub struct DiffInput<'a> {
 /// rowset agreements come out as `Ruled` candidates with placeholder ids
 /// resolved by the ruled table.
 pub fn classify(input: &DiffInput) -> Classified {
-    let DiffInput { sql, a, b, ulp_tol, soft_cols } = *input;
+    let DiffInput { sql, a, b, ulp_tol, soft_cols, mask_explain_timing } = *input;
     use StmtOutcome::*;
     match (a, b) {
         (ConnLost { detail }, ConnLost { .. }) => Classified {
@@ -670,6 +778,24 @@ pub fn classify(input: &DiffInput) -> Classified {
             detail: format!("B connection lost: {detail}"),
         },
         (Error { sqlstate: sa, message: ma }, Error { sqlstate: sb, message: mb }) => {
+            // gramwalk special rule (rig law addendum): a pgrust-side
+            // unimplemented-grammar-action fence error is ALWAYS a finding
+            // naming the rule — never noise — even when C errors too with
+            // the same SQLSTATE (the fence raises C's 0A000, so plain
+            // SQLSTATE identity would swallow the gap).
+            if let Some(rest) =
+                mb.split("not yet implemented (grammar rule ").nth(1)
+            {
+                let rule: String =
+                    rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                return Classified {
+                    class: DiffClass::ErrorDiff,
+                    detail: format!(
+                        "UNPORTED grammar rule {rule}: pgrust errored {sb} ({mb}); \
+                         A: {sa} ({ma})"
+                    ),
+                };
+            }
             if sa == sb {
                 Classified {
                     class: DiffClass::Match,
@@ -679,6 +805,20 @@ pub fn classify(input: &DiffInput) -> Classified {
                         format!("both error {sa} (messages differ: {ma:?} vs {mb:?})")
                     },
                 }
+            } else if is_no_libxml_error(ma) && sb != "XX000" {
+                // F9/LD1-N1 xml build-config class: the pinned oracle is a
+                // no-libxml build (its parse/exec paths short-circuit with
+                // 0A000 "unsupported XML feature"); pgrust deliberately
+                // dlopens libxml2 and proceeds, so any statement C rejects
+                // this way compares against a side the oracle cannot
+                // execute. A pgrust XX000 (caught panic) still escalates.
+                Classified {
+                    class: DiffClass::Ruled("xml-config".to_string()),
+                    detail: format!(
+                        "A no-libxml oracle rejected 0A000 unsupported XML \
+                         feature; B (libxml build) errored {sb} ({mb})"
+                    ),
+                }
             } else {
                 Classified {
                     class: DiffClass::ErrorDiff,
@@ -686,10 +826,21 @@ pub fn classify(input: &DiffInput) -> Classified {
                 }
             }
         }
-        (Error { sqlstate, message }, _) => Classified {
-            class: DiffClass::ErrorDiff,
-            detail: format!("A errored {sqlstate} ({message}); B succeeded"),
-        },
+        (Error { sqlstate, message }, _) => {
+            if is_no_libxml_error(message) {
+                Classified {
+                    class: DiffClass::Ruled("xml-config".to_string()),
+                    detail: "A no-libxml oracle rejected 0A000 unsupported XML \
+                             feature; B (libxml build) succeeded"
+                        .to_string(),
+                }
+            } else {
+                Classified {
+                    class: DiffClass::ErrorDiff,
+                    detail: format!("A errored {sqlstate} ({message}); B succeeded"),
+                }
+            }
+        }
         (_, Error { sqlstate, message }) => Classified {
             class: DiffClass::ErrorDiff,
             detail: format!("A succeeded; B errored {sqlstate} ({message})"),
@@ -777,6 +928,31 @@ pub fn classify(input: &DiffInput) -> Classified {
                     })
                 }
             };
+            // Opt-in H1 mask: counters + "actual time=" wall-clock digits.
+            // Tried only after the counter-only mask failed, so the ruled
+            // id records that timing text was load-bearing for the match.
+            let explain_timing_only = |d: &str| -> Option<Classified> {
+                if !mask_explain_timing || !is_explain_stmt(sql) {
+                    return None;
+                }
+                let na = normalize_explain_timing_rows(&normalize_explain_rows(ra));
+                let nb = normalize_explain_timing_rows(&normalize_explain_rows(rb));
+                let norm = if ordered {
+                    cmp_rows_ordered(&na, &nb, &modes, ulp_tol)
+                } else {
+                    cmp_rows_multiset(&na, &nb, &modes, ulp_tol)
+                };
+                if matches!(norm, RowsetCmp::Diff(_)) {
+                    None
+                } else {
+                    Some(Classified {
+                        class: DiffClass::Ruled("explain-timing".to_string()),
+                        detail: format!(
+                            "equal after masking wall-clock timing text: {d}"
+                        ),
+                    })
+                }
+            };
             if ordered {
                 match cmp_rows_ordered(ra, rb, &modes, ulp_tol) {
                     RowsetCmp::Equal => {
@@ -792,6 +968,12 @@ pub fn classify(input: &DiffInput) -> Classified {
                     },
                     RowsetCmp::Diff(d) => {
                         if let Some(c) = explain_counter_only(&d) {
+                            return c;
+                        }
+                        if let Some(c) = explain_timing_only(&d) {
+                            return c;
+                        }
+                        if let Some(c) = guc_inventory_candidate(sql, ra, rb) {
                             return c;
                         }
                         match cmp_rows_multiset(ra, rb, &modes, ulp_tol) {
@@ -832,6 +1014,12 @@ pub fn classify(input: &DiffInput) -> Classified {
                         if let Some(c) = explain_counter_only(&d) {
                             return c;
                         }
+                        if let Some(c) = explain_timing_only(&d) {
+                            return c;
+                        }
+                        if let Some(c) = guc_inventory_candidate(sql, ra, rb) {
+                            return c;
+                        }
                         Classified { class: DiffClass::RowsetDiff, detail: d }
                     }
                 }
@@ -856,7 +1044,150 @@ mod tests {
     }
 
     fn classify_sql(sql: &str, a: &StmtOutcome, b: &StmtOutcome) -> Classified {
-        classify(&DiffInput { sql, a, b, ulp_tol: 4, soft_cols: &[] })
+        classify(&DiffInput { sql, a, b, ulp_tol: 4, soft_cols: &[], mask_explain_timing: false })
+    }
+
+    /// gramwalk special rule: a pgrust-side unimplemented-grammar-action
+    /// fence error is a finding naming the rule even when C errors with the
+    /// SAME SQLSTATE (plain identity would swallow the gap as MATCH).
+    #[test]
+    fn unported_grammar_rule_error_is_always_a_finding() {
+        let a = StmtOutcome::Error {
+            sqlstate: "0A000".to_string(),
+            message: "some feature is not supported".to_string(),
+        };
+        let b = StmtOutcome::Error {
+            sqlstate: "0A000".to_string(),
+            message: "this SQL construct is not yet implemented (grammar rule 2445: \
+                      AexprConst, gram.y:17387)"
+                .to_string(),
+        };
+        let c = classify_sql("SELECT int4(1) '42';", &a, &b);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+        assert!(c.detail.contains("UNPORTED grammar rule 2445"), "{}", c.detail);
+        // Ordinary matched errors still MATCH.
+        let c = classify_sql("SELECT;", &a, &a);
+        assert_eq!(c.class, DiffClass::Match);
+    }
+
+    /// F9/LD1-N1: the no-libxml oracle's 0A000 "unsupported XML feature"
+    /// rejections are xml-config ruled candidates whatever the libxml-built
+    /// B side did — except a caught panic (XX000), which still escalates.
+    #[test]
+    fn no_libxml_oracle_rejection_is_xml_config_candidate() {
+        let a = StmtOutcome::Error {
+            sqlstate: "0A000".to_string(),
+            message: "unsupported XML feature".to_string(),
+        };
+        let ok = rowset(vec![142], rows(&[&[Some("<foo/>")]]));
+        let c = classify_sql("select xmlelement(name foo);", &a, &ok);
+        assert_eq!(c.class, DiffClass::Ruled("xml-config".to_string()));
+        let b = StmtOutcome::Error {
+            sqlstate: "42601".to_string(),
+            message: "DEFAULT is not allowed in this context".to_string(),
+        };
+        let c = classify_sql("select xmlelement(name nchar, - default);", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("xml-config".to_string()));
+        // A pgrust caught panic is never absorbed.
+        let b = StmtOutcome::Error {
+            sqlstate: "XX000".to_string(),
+            message: "panicked at ...".to_string(),
+        };
+        let c = classify_sql("select xmlelement(name foo);", &a, &b);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+        // Any other A-side 0A000 stays a finding when B succeeds.
+        let a = StmtOutcome::Error {
+            sqlstate: "0A000".to_string(),
+            message: "some other unsupported feature".to_string(),
+        };
+        let c = classify_sql("select 1;", &a, &ok);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// F4: SHOW ALL / pg_settings row-count divergence is a guc-inventory
+    /// ruled candidate; a wrong GUC VALUE (equal counts) stays a finding.
+    #[test]
+    fn guc_inventory_row_count_is_ruled_candidate_value_diff_is_not() {
+        // SHOW ALL: 2 rows vs 3 rows -> candidate.
+        let a = rowset(
+            vec![25, 25, 25],
+            rows(&[
+                &[Some("work_mem"), Some("4MB"), Some("d")],
+                &[Some("jit"), Some("on"), Some("d")],
+            ]),
+        );
+        let b = rowset(
+            vec![25, 25, 25],
+            rows(&[
+                &[Some("work_mem"), Some("4MB"), Some("d")],
+                &[Some("jit"), Some("on"), Some("d")],
+                &[Some("pgrust.runtime"), Some("native"), Some("d")],
+            ]),
+        );
+        let c = classify_sql("show all ;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("guc-inventory".to_string()));
+        // count(*) over pg_settings: 1x1 integer cells -> candidate.
+        let a = rowset(vec![20], rows(&[&[Some("398")]]));
+        let b = rowset(vec![20], rows(&[&[Some("460")]]));
+        let c = classify_sql("select count(*) from pg_settings ;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("guc-inventory".to_string()));
+        // Equal-count pg_settings rowset with a differing VALUE: finding.
+        let a = rowset(vec![25], rows(&[&[Some("4MB")]]));
+        let b = rowset(vec![25], rows(&[&[Some("64MB")]]));
+        let c = classify_sql(
+            "select setting from pg_settings where name = 'work_mem' ;",
+            &a,
+            &b,
+        );
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+        // A row-count diff on a NON-inventory statement stays a finding.
+        let a = rowset(vec![25], rows(&[&[Some("x")]]));
+        let b = rowset(vec![25], rows(&[&[Some("x")], &[Some("y")]]));
+        let c = classify_sql("select t from tbl ;", &a, &b);
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+    }
+
+    /// H1: "actual time=" digits rule out only under the opt-in flag, and
+    /// only when nothing else differs; plan-shape diffs stay findings.
+    #[test]
+    fn explain_timing_mask_is_opt_in_and_shape_strict() {
+        let mk = |t: &str| {
+            rowset(
+                vec![25],
+                rows(&[
+                    &[Some(t)],
+                    &[Some("Planning Time: 0.100 ms")],
+                    &[Some("Execution Time: 0.200 ms")],
+                ]),
+            )
+        };
+        let a = mk("Result  (cost=0.00..0.01 rows=1 width=4) (actual time=0.003..0.004 rows=1.00 loops=1)");
+        let b = mk("Result  (cost=0.00..0.01 rows=1 width=4) (actual time=0.011..0.190 rows=1.00 loops=1)");
+        let sql = "explain analyze select 1 ;";
+        // Without the opt-in: a finding (counter mask alone can't absorb it).
+        let c = classify_sql(sql, &a, &b);
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+        // With the opt-in: ruled candidate.
+        let c = classify(&DiffInput {
+            sql,
+            a: &a,
+            b: &b,
+            ulp_tol: 4,
+            soft_cols: &[],
+            mask_explain_timing: true,
+        });
+        assert_eq!(c.class, DiffClass::Ruled("explain-timing".to_string()));
+        // Plan-shape divergence is NOT absorbed even with the opt-in.
+        let b2 = mk("Materialize  (cost=0.00..0.01 rows=1 width=4) (actual time=0.011..0.190 rows=1.00 loops=1)");
+        let c = classify(&DiffInput {
+            sql,
+            a: &a,
+            b: &b2,
+            ulp_tol: 4,
+            soft_cols: &[],
+            mask_explain_timing: true,
+        });
+        assert_eq!(c.class, DiffClass::RowsetDiff);
     }
 
     fn classify_soft(
@@ -865,7 +1196,7 @@ mod tests {
         b: &StmtOutcome,
         soft_cols: &[usize],
     ) -> Classified {
-        classify(&DiffInput { sql, a, b, ulp_tol: 4, soft_cols })
+        classify(&DiffInput { sql, a, b, ulp_tol: 4, soft_cols, mask_explain_timing: false })
     }
 
     #[test]

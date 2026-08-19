@@ -23,6 +23,8 @@ adt_numeric = { path = "../numeric" }
 mbutils = { path = "../../mb/mbutils" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_rel = { path = "../../../../_support/types/rel" }
+catalog = { path = "../../../catalog/catalog" }
+indexam = { path = "../../../access/index/indexam" }
 types_scan = { path = "../../../../_support/types/types_scan" }
 genam_seams = { path = "../../../access/index/genam_seams" }
 table = { path = "../../../access/table/table" }
@@ -56,3 +58,6 @@ guc_tables = { path = "../../misc/guc_tables" }
 walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
 superuser_seams = { path = "../../misc/superuser_seams" }
 varsup = { path = "../../../access/transam/varsup" }
+
+[dev-dependencies]
+fmgr_core = { path = "../../fmgr/fmgr_core" }

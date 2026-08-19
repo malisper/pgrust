@@ -116,6 +116,7 @@ types_guc = { path = "../../../_support/types/types_guc" }
 
 event_trigger_seams = { path = "../../commands/event_trigger_seams" }
 janitor_seams = { path = "../../postmaster/janitor_seams" }
+logical_worker_seams = { path = "../../replication/logical_worker_seams" }
 
 [dev-dependencies]
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }

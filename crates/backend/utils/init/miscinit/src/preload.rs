@@ -40,8 +40,9 @@ fn string_get(cell: &'static RwLock<Option<String>>) -> Option<String> {
     }
 }
 
-// Restricted local_preload_libraries: only $libdir/plugins/<basename>.
-fn check_restricted_library_name(name: &str) -> PgResult<()> {
+// Restricted library names (dfmgr.c): only $libdir/plugins/<basename>.
+// Shared with the LOAD dispatch's !superuser() leg (utility.c).
+pub fn check_restricted_library_name(name: &str) -> PgResult<()> {
     if !name.starts_with(PLUGIN_PREFIX)
         || pg_path::first_dir_separator(&name[PLUGIN_PREFIX.len()..]).is_some()
     {

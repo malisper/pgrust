@@ -3175,6 +3175,19 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "tsm:err:repvar", default: 1.2 },
     ProdWeight { name: "tsm:err:distinct", default: 1.0 },
     ProdWeight { name: "tsm:err:neglimit", default: 1.0 },
+    // gramwalk module (GRAMWALK lane): statement token budget shape, then
+    // the per-step terminal-class bias of the random shift walk (idents and
+    // literals over bare keywords keeps a useful fraction of statements
+    // alive through parse analysis).
+    ProdWeight { name: "gramwalk:len:short", default: 3.0 },
+    ProdWeight { name: "gramwalk:len:mid", default: 2.0 },
+    ProdWeight { name: "gramwalk:len:long", default: 1.0 },
+    ProdWeight { name: "gramwalk:kw", default: 2.0 },
+    ProdWeight { name: "gramwalk:ident", default: 4.0 },
+    ProdWeight { name: "gramwalk:lit", default: 3.0 },
+    ProdWeight { name: "gramwalk:char", default: 2.0 },
+    ProdWeight { name: "gramwalk:op", default: 1.0 },
+    ProdWeight { name: "gramwalk:param", default: 0.3 },
 ];
 
 /// Resolved weight vector, parallel to `PROD_WEIGHTS`.

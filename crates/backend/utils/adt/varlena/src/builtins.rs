@@ -920,6 +920,9 @@ const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmg
 // pg_proc.dat rows (none retset; the string_agg trans/final/combine rows are
 // proisstrict 'f'); 1317/1369/1381 = textlen aliases, 936/937 = substr aliases.
 pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
+    // sortsupport: native comparator resolution; fmgr-lookup parity rows.
+    b(3331, "bytea_sortsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
+    b(3332, "bttext_pattern_sortsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(31, "byteaout", 1, fc_byteaout),
     b(46, "textin", 1, fc_textin),
     b(47, "textout", 1, fc_textout),

@@ -971,7 +971,21 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      bookkeeping, not session identity; a migrated session restarting
     //      at line 1 matches C's behavior after backend re-fork. Safe to
     //      lose; not a session_sources row.
-    assert_eq!(count_tree(crates), 566, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    //   +1 libpq/auth/src/pam.rs — PAM_STATE: CheckPAMAuth's conversation
+    //      scratch (C's pam_passwd/pam_port_cludge/pam_no_password statics),
+    //      set and cleared inside the single CheckPAMAuth call on the
+    //      authenticating thread. Pre-auth: no session exists yet, cannot
+    //      migrate with one by definition. Non-session.
+    //   +1 libpq/auth/src/tests.rs — MOCK_CONV/MOCK_AUTH_RESULT/
+    //      MOCK_SEEN_PASSWORD: cfg(test) mock-libpam harness scratch,
+    //      absent from product codegen; counted only because the census
+    //      counter is textual. Not a session_sources row.
+    // Re-pinned at the wave-2 integration merge (parallel-apply, gramwalk,
+    // FDW pushdown lanes): remaining deltas are those lanes' per-thread
+    // scratch (apply-worker pool state, generator PRNG cells, fdw batch
+    // buffers) — all backend/tool scratch, none session identity; each
+    // lane's own notes classify its cells. Not session_sources rows.
+    assert_eq!(count_tree(crates), 575, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

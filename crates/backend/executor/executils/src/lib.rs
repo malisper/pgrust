@@ -815,6 +815,11 @@ pub struct EStateData<'mcx> {
     pub es_tupleTable: PgVec<'mcx, SlotData<'mcx>>,
     pub es_processed: u64,
     pub es_total_processed: u64,
+    /// FDW direct modify: the rel-format RETURNING tuple slot the provider's
+    /// IterateDirectModify filled (C pokes ri_projectReturning's econtext
+    /// scantuple directly; this field is the pgrust-shaped hand-off, consumed
+    /// per row by ModifyTable's direct arm).
+    pub es_direct_returning_slot: Option<ExecSlotId>,
     pub es_top_eflags: i32,
     pub es_instrument: i32,
     // Keyed by plan_node_id (C: per-PlanState); empty when es_instrument == 0.
@@ -1220,6 +1225,7 @@ impl<'mcx> EStateData<'mcx> {
             es_queryEnv: None,
             es_tupleTable: PgVec::new_in(mcx),
             es_processed: 0,
+            es_direct_returning_slot: None,
             es_total_processed: 0,
             es_top_eflags: 0,
             es_instrument: 0,
@@ -1761,7 +1767,7 @@ mcx::forget_safe_struct!(
         es_opened_result_relations, es_tuple_routing_result_relations,
         es_trig_target_relations, es_insert_pending_result_relations,
         es_param_list_info, es_param_stable, es_queryEnv, es_processed,
-        es_total_processed,
+        es_total_processed, es_direct_returning_slot,
         es_top_eflags, es_instrument, es_finished, es_subplanstates,
         es_param_subplans, es_per_tuple_exprcontext,
         es_sourceText, es_use_parallel_mode, es_parallel_scan_wired,

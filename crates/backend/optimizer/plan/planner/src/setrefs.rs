@@ -322,10 +322,10 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_ForeignScan => {
             let s = plan.as_foreign_scan().unwrap();
             if !s.fdw_scan_tlist.is_nil() || s.scan.scanrelid == 0 {
-                panic!(
-                    "set_foreignscan_references (setrefs.c): fdw_scan_tlist / \
-                     scanrelid==0 (foreign join/upper) arm unported"
-                );
+                // Foreign join/upper: tlist/qual/fdw_exprs/fdw_recheck_quals
+                // retarget to INDEX_VAR positions in fdw_scan_tlist; the
+                // fdw_scan_tlist itself gets plain fix_scan_list treatment.
+                return set_foreignscan_upper_references(run, plan, rtoffset);
             }
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
             let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
@@ -1641,6 +1641,105 @@ fn expr_location(node: Node<'_>) -> i32 {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().location,
         _ => -1,
     }
+}
+
+// set_foreignscan_references (setrefs.c), fdw_scan_tlist / scanrelid==0 arm:
+// the scan emits fdw_scan_tlist-shaped tuples, so all expressions above it
+// retarget to INDEX_VAR positions in that tlist.
+fn set_foreignscan_upper_references<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    const INDEX_VAR: i32 = types_nodes::primnodes::INDEX_VAR;
+    let (scan_tlist, tlist, qual, fdw_exprs, fdw_recheck_quals, plan_rows) = {
+        let s = plan.as_foreign_scan().expect("ForeignScan node");
+        (
+            s.fdw_scan_tlist.clone_in(mcx)?,
+            s.scan.plan.targetlist.clone_in(mcx)?,
+            s.scan.plan.qual.clone_in(mcx)?,
+            s.fdw_exprs.clone_in(mcx)?,
+            s.fdw_recheck_quals.clone_in(mcx)?,
+            s.scan.plan.plan_rows,
+        )
+    };
+    let mut new_tlist = NodeList::nil();
+    for tle_node in &tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        let newexpr =
+            fix_upper_expr(run, tle.expr, &scan_tlist, rtoffset, INDEX_VAR, plan_rows)?;
+        new_tlist.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr: newexpr,
+                    resno: tle.resno,
+                    resname: tle.resname,
+                    ressortgroupref: tle.ressortgroupref,
+                    resorigtbl: tle.resorigtbl,
+                    resorigcol: tle.resorigcol,
+                    resjunk: tle.resjunk,
+                },
+            )?,
+        )?;
+    }
+    let fix_list = |run: &mut PlannerRun<'mcx>, list: &NodeList<'mcx>| -> PgResult<NodeList<'mcx>> {
+        let mut out = NodeList::nil();
+        for n in list {
+            out.lappend(
+                mcx,
+                fix_upper_expr(run, n, &scan_tlist, rtoffset, INDEX_VAR, 2.0 * plan_rows)?,
+            )?;
+        }
+        Ok(out)
+    };
+    let new_qual = fix_list(run, &qual)?;
+    let new_fdw_exprs = fix_list(run, &fdw_exprs)?;
+    let new_fdw_recheck = fix_list(run, &fdw_recheck_quals)?;
+    let new_scan_tlist =
+        fix_scan_list(run, &scan_tlist, rtoffset, plan_rows)?.unwrap_or(scan_tlist);
+    let (fs_relids, fs_base_relids) = {
+        let s = plan.as_foreign_scan().unwrap();
+        let shift = |old: &types_nodes::bitmapset::Bitmapset<'mcx>| {
+            let mut shifted = types_nodes::bitmapset::Bitmapset::empty();
+            let mut m = old.next_member(-1);
+            while m >= 0 {
+                shifted.add_member(mcx, m + rtoffset)?;
+                m = old.next_member(m);
+            }
+            Ok::<_, Box<types_error::PgError>>(shifted)
+        };
+        (shift(&s.fs_relids)?, shift(&s.fs_base_relids)?)
+    };
+    // SAFETY: exclusive plan-tree ownership (prologue note).
+    unsafe {
+        plan.with_mut::<types_nodes::plannodes::ForeignScan, _>(|p| {
+            p.scan.plan.targetlist = new_tlist;
+            p.scan.plan.qual = new_qual;
+            p.fdw_exprs = new_fdw_exprs;
+            p.fdw_recheck_quals = new_fdw_recheck;
+            p.fdw_scan_tlist = new_scan_tlist;
+            p.fs_relids = fs_relids;
+            p.fs_base_relids = fs_base_relids;
+            if p.scan.scanrelid > 0 {
+                p.scan.scanrelid += rtoffset as u32;
+            }
+            if p.resultRelation > 0 {
+                p.resultRelation += rtoffset as u32;
+            }
+        })
+    }
+    .expect("ForeignScan node");
+    // Early return skips set_plan_refs' common tail: recurse into the EPQ
+    // outer plan (if any) here.
+    if let Some(child) = plan.as_plan().expect("plan node").lefttree {
+        let new_child = set_plan_refs(run, child, rtoffset)?;
+        // SAFETY: exclusive plan-tree ownership (prologue note).
+        unsafe { plan.with_plan_mut(|p| p.lefttree = Some(new_child)) }.expect("plan node");
+    }
+    Ok(plan)
 }
 
 // fix_upper_expr_mutator (setrefs.c) over the plain-agg tlist shapes.

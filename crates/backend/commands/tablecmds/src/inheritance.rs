@@ -775,6 +775,13 @@ pub(crate) fn StoreCatalogInheritance<'mcx>(
                 pg_depend::DependencyType::Normal
             },
         )?;
+        objectaccess::InvokeObjectPostAlterHookArg(
+            pg_inherits::InheritsRelationId,
+            relation_id,
+            0,
+            parent_oid,
+            false,
+        )?;
         crate::partition::SetRelationHasSubclass(mcx, parent_oid, true)?;
     }
     Ok(())
@@ -1671,7 +1678,15 @@ pub(crate) fn RemoveInheritance<'mcx>(
         } else {
             pg_depend::DependencyType::Normal
         },
-    )
+    )?;
+    objectaccess::InvokeObjectPostAlterHookArg(
+        pg_inherits::InheritsRelationId,
+        child_rel.rd_id,
+        0,
+        parent_rel.rd_id,
+        false,
+    )?;
+    Ok(())
 }
 
 // drop_parent_dependency (tablecmds.c), pg_class-referencing arm.

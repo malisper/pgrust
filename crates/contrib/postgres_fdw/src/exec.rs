@@ -147,8 +147,16 @@ pub(crate) fn begin_foreign_scan<'mcx>(
         miscinit::GetUserId()
     };
 
-    let rel = node.ss.ss_currentRelation.as_ref().expect("base foreign scan has a relation");
-    let table = foreigncmds::foreign::GetForeignTable(mcx, rel.rd_id)?;
+    // C: rtindex = scanrelid, or the lowest fs_base_relids member for a
+    // pushed-down join/upper scan.
+    let rte_relid = if fsplan.scan.scanrelid > 0 {
+        node.ss.ss_currentRelation.as_ref().expect("base foreign scan has a relation").rd_id
+    } else {
+        let rtindex = fsplan.fs_base_relids.next_member(-1);
+        debug_assert!(rtindex > 0);
+        estate.es_range_table[(rtindex - 1) as usize].relid
+    };
+    let table = foreigncmds::foreign::GetForeignTable(mcx, rte_relid)?;
     let user = foreigncmds::foreign::GetUserMapping(mcx, userid, table.serverid)?;
 
     // Get the (cached) connection, with the remote transaction open.
@@ -186,7 +194,19 @@ pub(crate) fn begin_foreign_scan<'mcx>(
         return Err(system_columns_unported());
     }
 
-    let attin = AttInMeta::build(rel.name(), &rel.rd_att)?;
+    let attin = if fsplan.scan.scanrelid > 0 {
+        let rel = node.ss.ss_currentRelation.as_ref().expect("base foreign scan has a relation");
+        AttInMeta::build(rel.name(), &rel.rd_att)?
+    } else {
+        // Join/upper scan tuples follow the fdw_scan_tlist-shaped slot.
+        let desc = estate
+            .slot(node.ss.ss_ScanTupleSlot)
+            .base()
+            .tts_tupleDescriptor
+            .clone()
+            .expect("scan slot descriptor");
+        AttInMeta::build("foreign join", &desc)?
+    };
 
     // prepare_query_params: output functions + compiled expressions for
     // fdw_exprs (Params after replace_nestloop_params; no SubPlans — the

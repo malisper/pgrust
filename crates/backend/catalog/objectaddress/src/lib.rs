@@ -323,6 +323,14 @@ pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
             format!("type \"{}\" does not exist", TypeNameToString(tn)),
         ));
     }
+    // C LookupTypeNameExtended validates typmod decoration on every found
+    // type, even though LookupTypeNameOid discards the value (and BEFORE
+    // any caller's existence/kind checks). Scratch context: nothing the
+    // typmodin call allocates escapes.
+    if typoid != InvalidOid && !tn.typmods.is_nil() {
+        let scratch = mcx::MemoryContext::new("LookupTypeNameOid");
+        parse_utilcmd::typenameTypeMod(scratch.mcx(), None, tn, typoid)?;
+    }
     Ok(typoid)
 }
 

@@ -3182,7 +3182,6 @@ fn ChooseRelationName<'mcx>(
 }
 
 // quote_identifier + quote_qualified_identifier (ruleutils.c).
-// quote_all_identifiers GUC is unported (default off).
 fn ident_needs_quotes(ident: &str) -> bool {
     let b = ident.as_bytes();
     if b.is_empty() {
@@ -3192,6 +3191,11 @@ fn ident_needs_quotes(ident: &str) -> bool {
     let safe = safe_first
         && b.iter().all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_');
     if !safe {
+        return true;
+    }
+    if guc_tables::vars::quote_all_identifiers.installed()
+        && guc_tables::vars::quote_all_identifiers.read()
+    {
         return true;
     }
     let kwnum = keywords::ScanKeywordLookup(b, &keywords::ScanKeywords);

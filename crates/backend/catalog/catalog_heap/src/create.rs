@@ -35,6 +35,60 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
+// binary_upgrade_next_{heap,toast}_pg_class_{oid,relfilenumber}
+// (pg_upgrade_support.c / heap.c): set-once, consume-once overrides used by
+// heap_create_with_catalog while in binary upgrade mode.
+macro_rules! next_oid_override {
+    ($cell:ident, $setter:ident, $take:ident) => {
+        thread_local! {
+            static $cell: std::cell::Cell<Oid> = const { std::cell::Cell::new(InvalidOid) };
+        }
+
+        pub fn $setter(oid: Oid) {
+            $cell.set(oid);
+        }
+
+        pub fn $take() -> Option<Oid> {
+            let oid = $cell.get();
+            if types_core::OidIsValid(oid) {
+                $cell.set(InvalidOid);
+                Some(oid)
+            } else {
+                None
+            }
+        }
+    };
+}
+
+next_oid_override!(NEXT_HEAP_PG_CLASS_OID, SetNextHeapPgClassOid, take_next_heap_pg_class_oid);
+next_oid_override!(
+    NEXT_HEAP_PG_CLASS_RELFILENUMBER,
+    SetNextHeapPgClassRelfilenumber,
+    take_next_heap_pg_class_relfilenumber
+);
+next_oid_override!(NEXT_TOAST_PG_CLASS_OID, SetNextToastPgClassOid, take_next_toast_pg_class_oid);
+next_oid_override!(
+    NEXT_TOAST_PG_CLASS_RELFILENUMBER,
+    SetNextToastPgClassRelfilenumber,
+    take_next_toast_pg_class_relfilenumber
+);
+
+// toasting.c's binary-upgrade arm peeks without consuming; heap_create_with
+// _catalog does the consume.
+pub fn NextToastPgClassOidIsSet() -> bool {
+    NEXT_TOAST_PG_CLASS_OID.with(|c| types_core::OidIsValid(c.get()))
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn binary_upgrade_err(msg: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, msg.to_string())
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+    )
+}
+
 pub const CHKATYPE_ANYARRAY: i32 = 0x01;
 pub const CHKATYPE_ANYRECORD: i32 = 0x02;
 pub const CHKATYPE_IS_PARTKEY: i32 = 0x04;
@@ -242,6 +296,7 @@ pub fn heap_create<'mcx>(
     relpersistence: u8,
     mapped_relation: bool,
     allow_system_table_mods: bool,
+    create_storage: bool,
 ) -> PgResult<(Rc<RelationData<'static>>, TransactionId, MultiXactId)> {
     if ((catalog::IsCatalogNamespace(relnamespace) && relkind != types_rel::RELKIND_INDEX)
         || catalog::IsToastNamespace(relnamespace))
@@ -265,21 +320,14 @@ pub fn heap_create<'mcx>(
     if !RELKIND_HAS_TABLESPACE(relkind) {
         reltablespace = InvalidOid;
     }
-    // A caller-supplied relfilenumber means existing storage is being adopted
-    // (index_create's TryReuseIndex path); binary upgrade's create-anyway arm
-    // is unported.
     let mut relfilenumber = relfilenumber;
-    let create_storage = if RELKIND_HAS_STORAGE(relkind) {
-        if relfilenumber == InvalidRelFileNumber {
-            relfilenumber = relid;
-            true
-        } else {
-            false
-        }
-    } else {
-        debug_assert!(relfilenumber == InvalidRelFileNumber);
-        false
-    };
+    let mut create_storage = create_storage;
+    if !RELKIND_HAS_STORAGE(relkind) {
+        create_storage = false;
+    } else if relfilenumber == InvalidRelFileNumber {
+        // Unspecified by the caller: storage gets oid == relid.
+        relfilenumber = relid;
+    }
     if reltablespace == init_small::globals::MyDatabaseTableSpace() {
         reltablespace = InvalidOid;
     }
@@ -633,12 +681,43 @@ pub fn heap_create_with_catalog<'mcx>(
         .into());
     }
 
-    let relid = catalog::GetNewRelFileNumber(
-        mcx,
-        p.reltablespace,
-        Some(&pg_class_desc),
-        p.relpersistence,
-    )?;
+    // Binary-upgrade override for pg_class.oid and relfilenumber (heap.c);
+    // indexes use binary_upgrade_next_index_pg_class_oid instead.
+    let mut relid = InvalidOid;
+    let mut relfilenumber = InvalidRelFileNumber;
+    if init_small::globals::IsBinaryUpgrade() {
+        debug_assert!(p.relkind != types_rel::RELKIND_INDEX);
+        debug_assert!(p.relkind != types_rel::RELKIND_PARTITIONED_INDEX);
+        if p.relkind == types_rel::RELKIND_TOASTVALUE {
+            // There might be no TOAST table, so we have to test for it.
+            if let Some(oid) = take_next_toast_pg_class_oid() {
+                relid = oid;
+                relfilenumber = take_next_toast_pg_class_relfilenumber().ok_or_else(|| {
+                    binary_upgrade_err(
+                        "toast relfilenumber value not set when in binary upgrade mode",
+                    )
+                })?;
+            }
+        } else {
+            relid = take_next_heap_pg_class_oid().ok_or_else(|| {
+                binary_upgrade_err("pg_class heap OID value not set when in binary upgrade mode")
+            })?;
+            if RELKIND_HAS_STORAGE(p.relkind) {
+                relfilenumber = take_next_heap_pg_class_relfilenumber().ok_or_else(|| {
+                    binary_upgrade_err("relfilenumber value not set when in binary upgrade mode")
+                })?;
+            }
+        }
+    }
+    if !types_core::OidIsValid(relid) {
+        relid = catalog::GetNewRelFileNumber(
+            mcx,
+            p.reltablespace,
+            Some(&pg_class_desc),
+            p.relpersistence,
+        )?;
+    }
+    let relid = relid;
     lmgr::LockRelationOid(relid, AccessExclusiveLock)?;
 
     // C allocates the array-type oid after heap_create and the composite oid
@@ -688,13 +767,17 @@ pub fn heap_create_with_catalog<'mcx>(
         p.reltablespace,
         relid,
         new_type_oid,
-        InvalidRelFileNumber,
+        relfilenumber,
         p.accessmtd,
         tupdesc,
         p.relkind,
         p.relpersistence,
         p.mapped,
         p.allow_system_table_mods,
+        // create_storage = true is correct even for binary upgrade: the
+        // storage created here is replaced later, but something must exist
+        // on disk in the meanwhile.
+        true,
     )?;
 
     if make_rowtype {

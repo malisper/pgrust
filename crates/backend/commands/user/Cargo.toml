@@ -18,6 +18,7 @@ types_rel = { path = "../../../_support/types/rel" }
 types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 types_guc = { path = "../../../_support/types/types_guc" }
+init_small = { path = "../../utils/init/init_small" }
 adt_acl = { path = "../../utils/adt/acl" }
 adt_bool = { path = "../../utils/adt/bool" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }

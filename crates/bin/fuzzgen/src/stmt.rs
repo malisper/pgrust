@@ -51,6 +51,7 @@ use crate::exr::{gen_exr_module, ExrState};
 use crate::exr2::{gen_exr2_module, Exr2State};
 use crate::floatmath::gen_floatmath_module;
 use crate::geo::{gen_geo_module, GeoState};
+use crate::gramwalk::gen_gramwalk_module;
 use crate::groupingsets::gen_groupingsets_module;
 use crate::heap::{gen_heap_module, HeapState};
 use crate::like::gen_like_module;
@@ -427,6 +428,7 @@ pub const STMT_MODULES: &[StmtModuleDef] = &[
     StmtModuleDef { name: "bitstring", generate: gen_bitstring_module },
     StmtModuleDef { name: "groupingsets", generate: gen_groupingsets_module },
     StmtModuleDef { name: "tablesample", generate: gen_tablesample_module },
+    StmtModuleDef { name: "gramwalk", generate: gen_gramwalk_module },
 ];
 
 /// Produce one statement group from the named module (the toggle vector

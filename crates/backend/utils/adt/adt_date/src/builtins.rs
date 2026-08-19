@@ -1158,6 +1158,9 @@ const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmgr
 // pg_proc.dat rows for date.c; alias OIDs over the same prosrc each get
 // their row, as in C's fmgr_builtins[].
 pub const DATE_BUILTINS: &[FmgrBuiltin] = &[
+    // sort/skip support: native comparator resolution; fmgr-lookup parity rows.
+    b(3136, "date_sortsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
+    b(6407, "date_skipsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(2909, "timetypmodin", 1, fc_timetypmodin),
     b(3944, "time_support", 1, fc_time_support),
     b(2910, "timetypmodout", 1, fc_timetypmodout),

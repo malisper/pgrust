@@ -504,6 +504,13 @@ pub const REGISTRY: &[ModuleSpec] = &[
     // A moderate below-default weight keeps the create churn balanced like
     // spill/plansel.
     ModuleSpec { name: "tablesample", default_weight: 0.5 },
+    // gramwalk (GRAMWALK lane) derives statements by random shift walk over
+    // the real bison automaton (gram_core tables) — near-parse-boundary SQL
+    // most other modules never spell. One cheap statement per pick, but the
+    // stream is mostly error-path traffic, so a low weight keeps it from
+    // diluting the semantic modules in all-on runs; campaigns pin it via
+    // --modules gramwalk=on.
+    ModuleSpec { name: "gramwalk", default_weight: 0.3 },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -662,7 +669,7 @@ mod tests {
         // All-off is rejected.
         assert!(
             ToggleVector::parse(
-                "expr=off,joins=off,subq=off,agg=off,win=off,winfunc=off,dml=off,merge=off,txn=off,ddl=off,types=off,explain=off,util=off,part=off,partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,matview=off,geo=off,dtm=off,dtx=off,adtmisc=off,sqljson=off,jsonpath=off,jsonfuncs=off,plpg=off,coll=off,mbconv=off,xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,plansel=off,earm2=off,earm3=off,earm4=off,exr=off,exr2=off,numx=off,pubsub=off,ddldeep=off,pgram=off,opt2=off,opt3=off,cfgm=off,btbrin=off,heap=off,stats=off,tsrank=off,planner=off,partition=off,triggers=off,plpgsql=off,regex=off,mergex=off,aggwin=off,indexam=off,typeio=off,aclrls=off,lockcursor=off,largeobj=off,plancache=off,vacuum=off,seqident=off,ritrig=off,rangeops=off,udt=off,arrayops=off,altertable=off,byteaenc=off,srf=off,stringfunc=off,floatmath=off,numeric=off,ruleutils=off,cterec=off,castcoerce=off,intops=off,expreval=off,like=off,subplan=off,scalartypes=off,inherit=off,bitstring=off,groupingsets=off,tablesample=off"
+                "expr=off,joins=off,subq=off,agg=off,win=off,winfunc=off,dml=off,merge=off,txn=off,ddl=off,types=off,explain=off,util=off,part=off,partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,matview=off,geo=off,dtm=off,dtx=off,adtmisc=off,sqljson=off,jsonpath=off,jsonfuncs=off,plpg=off,coll=off,mbconv=off,xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,plansel=off,earm2=off,earm3=off,earm4=off,exr=off,exr2=off,numx=off,pubsub=off,ddldeep=off,pgram=off,opt2=off,opt3=off,cfgm=off,btbrin=off,heap=off,stats=off,tsrank=off,planner=off,partition=off,triggers=off,plpgsql=off,regex=off,mergex=off,aggwin=off,indexam=off,typeio=off,aclrls=off,lockcursor=off,largeobj=off,plancache=off,vacuum=off,seqident=off,ritrig=off,rangeops=off,udt=off,arrayops=off,altertable=off,byteaenc=off,srf=off,stringfunc=off,floatmath=off,numeric=off,ruleutils=off,cterec=off,castcoerce=off,intops=off,expreval=off,like=off,subplan=off,scalartypes=off,inherit=off,bitstring=off,groupingsets=off,tablesample=off,gramwalk=off"
             )
             .is_err()
         );
@@ -671,7 +678,7 @@ mod tests {
     #[test]
     fn disabled_modules_are_never_picked() {
         let tv = ToggleVector::parse(
-            "expr=on,joins=off,subq=off,agg=off,win=off,winfunc=off,dml=off,merge=off,txn=off,ddl=off,types=off,explain=off,util=off,part=off,partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,matview=off,geo=off,dtm=off,dtx=off,adtmisc=off,sqljson=off,jsonpath=off,jsonfuncs=off,plpg=off,coll=off,mbconv=off,xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,plansel=off,earm2=off,earm3=off,earm4=off,exr=off,exr2=off,numx=off,pubsub=off,ddldeep=off,pgram=off,opt2=off,opt3=off,cfgm=off,btbrin=off,heap=off,stats=off,tsrank=off,planner=off,partition=off,triggers=off,plpgsql=off,regex=off,mergex=off,aggwin=off,indexam=off,typeio=off,aclrls=off,lockcursor=off,largeobj=off,plancache=off,vacuum=off,seqident=off,ritrig=off,rangeops=off,udt=off,arrayops=off,altertable=off,byteaenc=off,srf=off,stringfunc=off,floatmath=off,numeric=off,ruleutils=off,cterec=off,castcoerce=off,intops=off,expreval=off,like=off,subplan=off,scalartypes=off,inherit=off,bitstring=off,groupingsets=off,tablesample=off"
+            "expr=on,joins=off,subq=off,agg=off,win=off,winfunc=off,dml=off,merge=off,txn=off,ddl=off,types=off,explain=off,util=off,part=off,partalt=off,objddl=off,idx=off,par=off,tsdl=off,cursor=off,views=off,matview=off,geo=off,dtm=off,dtx=off,adtmisc=off,sqljson=off,jsonpath=off,jsonfuncs=off,plpg=off,coll=off,mbconv=off,xnum=off,nodes=off,obs=off,admin=off,objid=off,einterp=off,exd=off,spill=off,earm=off,plansel=off,earm2=off,earm3=off,earm4=off,exr=off,exr2=off,numx=off,pubsub=off,ddldeep=off,pgram=off,opt2=off,opt3=off,cfgm=off,btbrin=off,heap=off,stats=off,tsrank=off,planner=off,partition=off,triggers=off,plpgsql=off,regex=off,mergex=off,aggwin=off,indexam=off,typeio=off,aclrls=off,lockcursor=off,largeobj=off,plancache=off,vacuum=off,seqident=off,ritrig=off,rangeops=off,udt=off,arrayops=off,altertable=off,byteaenc=off,srf=off,stringfunc=off,floatmath=off,numeric=off,ruleutils=off,cterec=off,castcoerce=off,intops=off,expreval=off,like=off,subplan=off,scalartypes=off,inherit=off,bitstring=off,groupingsets=off,tablesample=off,gramwalk=off"
         )
         .unwrap();
         let mut rng = Rng::new(5);

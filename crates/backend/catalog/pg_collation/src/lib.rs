@@ -1,5 +1,4 @@
-//! pg_collation.c. InvokeObjectPostCreateHook is the repo-wide objectaccess
-//! carve; everything else in CollationCreate is C-exact.
+//! pg_collation.c.
 
 #![allow(non_snake_case, non_upper_case_globals)]
 
@@ -165,6 +164,8 @@ pub fn CollationCreate<'mcx>(
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
     pg_depend::recordDependencyOnOwner(mcx, COLLATION_RELATION_ID, oid, collowner)?;
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
+
+    objectaccess::InvokeObjectPostCreateHook(COLLATION_RELATION_ID, oid, 0)?;
 
     rel.close(NoLock)?;
     Ok(oid)

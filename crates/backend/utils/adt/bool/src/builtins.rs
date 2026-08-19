@@ -216,6 +216,8 @@ pub const BOOL_BUILTINS: &[FmgrBuiltin] = &[
     bn(3497, "bool_accum_inv", 2, fc_bool_accum_inv),
     b(3498, "bool_alltrue", 1, fc_bool_alltrue),
     b(3499, "bool_anytrue", 1, fc_bool_anytrue),
+    // skipsupport: native resolution; fmgr-lookup parity row.
+    b(6408, "btboolskipsupport", 1, ::types_fmgr::fc_internal_dispatch_only),
     b(6417, "hashbool", 1, fc_hashbool),
     b(6418, "hashboolextended", 2, fc_hashboolextended),
 ];

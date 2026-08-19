@@ -193,6 +193,17 @@
 //! grouping column (NULLS LAST pinned), so the many NULL-extended output
 //! rows form a deterministic, byte-comparable multiset.
 
+//! GRAMWALK adds the grammar-derived generation module (`gramwalk`): a
+//! top-down random derivation over the REAL parser automaton's production
+//! tables (gram_core::tables YYPRHS/YYRHS — the vendored 18.3 bison output;
+//! nothing duplicated), with per-production visit caps, an expansion budget,
+//! and min-cost witness closing; terminals render from the scanner keyword
+//! list, self chars, and small literal pools with catalog-seeded IDENTs.
+//! Its statements live at the parse boundary, so most traffic is error-lane
+//! (SQLSTATE-identity compared); a pgrust "this SQL construct is not yet
+//! implemented (grammar rule N)" fence error is ALWAYS a finding (special
+//! rule in diff::classify), never noise.
+
 pub mod aclrls;
 pub mod admin;
 pub mod adtmisc;
@@ -235,6 +246,7 @@ pub mod exr2;
 pub mod expr;
 pub mod floatmath;
 pub mod geo;
+pub mod gramwalk;
 pub mod groupingsets;
 pub mod heap;
 pub mod idx;

@@ -978,6 +978,20 @@ pub fn fc_int4_avg_combine(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     }
 }
 
+// int2int4_sum (numeric.c): moving-aggregate final for sum(int2)/sum(int4);
+// SQL defines SUM of no values to be NULL.
+pub fn fc_int2int4_sum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg 0 is a non-null _int8 array transvalue.
+    let td = unsafe { int8_transarray(fcinfo, false)? };
+    // SAFETY: validated 2-slot int8 payload.
+    let (count, sum) = unsafe { (*td, *td.add(1)) };
+    if count == 0 {
+        fcinfo.isnull = true;
+        return Ok(Datum::null());
+    }
+    Ok(Datum::from_i64(sum))
+}
+
 pub fn fc_int8_avg(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 0 is a non-null _int8 array transvalue.
     let td = unsafe { int8_transarray(fcinfo, false)? };
@@ -1325,6 +1339,8 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(3387, "int8_avg_accum_inv", 2, false, fc_int8_avg_accum_inv),
     b(3570, "int2_avg_accum_inv", 2, true, fc_int2_avg_accum_inv),
     b(3571, "int4_avg_accum_inv", 2, true, fc_int4_avg_accum_inv),
+    b(3572, "int2int4_sum", 1, true, fc_int2int4_sum),
+    b(3283, "numeric_sortsupport", 1, true, ::types_fmgr::fc_internal_dispatch_only),
     b(2858, "numeric_avg_accum", 2, false, fc_numeric_avg_accum),
     b(3341, "numeric_combine", 2, false, fc_numeric_combine),
     b(3337, "numeric_avg_combine", 2, false, fc_numeric_avg_combine),

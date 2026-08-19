@@ -111,7 +111,7 @@ FILECOUNTS=$(cat <<'ROWS'
 2|crates/backend/commands/cluster/src/command.rs
 3|crates/backend/commands/cluster/src/lib.rs
 2|crates/backend/commands/comment/src/lib.rs
-1|crates/backend/commands/extension/src/contents.rs
+2|crates/backend/commands/extension/src/contents.rs
 5|crates/backend/commands/foreigncmds/src/lib.rs
 2|crates/backend/commands/indexcmds/src/define.rs
 1|crates/backend/commands/matview/src/lib.rs

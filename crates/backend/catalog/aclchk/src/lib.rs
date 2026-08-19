@@ -32,6 +32,7 @@ pub use defacl::{get_user_default_acl, ExecAlterDefaultPrivilegesStmt, DefaultAc
 mod grant;
 pub use grant::{
     get_rolespec_oid, ExecuteGrantStmt, RemoveRoleFromInitPriv, RemoveRoleFromObjectACL,
+    SetRecordInitPrivs,
 };
 mod lo;
 pub use lo::{object_ownercheck_lo, pg_largeobject_aclcheck_snapshot};
