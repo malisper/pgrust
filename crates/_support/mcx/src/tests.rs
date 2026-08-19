@@ -1308,3 +1308,45 @@ mod local_stack {
 
 
 }
+
+// The leak class GuardedContext exists for (upstream issue #63): a droppy
+// child context abandoned inside a no-drop arena — the abort-path shape for
+// executor state structs — is never torn down by the host's reset; its
+// arena stays allocated (and accounted) indefinitely.
+#[test]
+fn bare_child_forgotten_in_nodrop_arena_leaks_past_host_reset() {
+    let mut host = MemoryContext::new_bump("host");
+    let child = host.new_child_bump("spill");
+    let v = vec_with_capacity_in::<u8>(child.mcx(), 1 << 20).unwrap();
+    core::mem::forget(v); // arena-owned bytes: forgetting them is the model
+    core::mem::forget(child); // the abandoned-struct-on-abort shape
+    assert!(host.subtree_used() >= 1 << 20);
+    host.reset();
+    // The child's arena survived the host reset: leaked for good.
+    assert!(host.subtree_used() >= 1 << 20);
+}
+
+#[test]
+fn guarded_context_dies_with_host_reset() {
+    let mut host = MemoryContext::new_bump("host");
+    let guarded = GuardedContext::new(host.mcx(), host.new_child_bump("spill")).unwrap();
+    let v = vec_with_capacity_in::<u8>(guarded.mcx(), 1 << 20).unwrap();
+    core::mem::forget(v);
+    assert!(host.subtree_used() >= 1 << 20);
+    drop(guarded); // plain data: dropping the handle tears nothing down
+    host.reset(); // the registered callback is the child's destructor
+    assert!(
+        host.subtree_used() < 1 << 20,
+        "guarded child arena must die with the host reset"
+    );
+}
+
+#[test]
+fn guarded_context_fires_once_across_reset_and_drop() {
+    let mut host = MemoryContext::new_bump("host");
+    let guarded = GuardedContext::new(host.mcx(), host.new_child_bump("spill")).unwrap();
+    drop(guarded);
+    host.reset();
+    host.reset(); // is_reset short-circuit
+    drop(host); // Drop fires callbacks again; the drained list is empty
+}

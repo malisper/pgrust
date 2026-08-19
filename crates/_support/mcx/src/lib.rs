@@ -1355,6 +1355,75 @@ pub fn oom_named(context_name: &str, request: usize) -> PgError {
         ))
 }
 
+/// A child [`MemoryContext`] hosted inside another context's arena, with the
+/// host's reset callback as its sole destructor (docs/no-drop.md guard rule;
+/// the nodeagg `make_agg_state_node` precedent hoisted into `mcx` so call
+/// sites stay one line). Embed this — never a bare droppy `MemoryContext` —
+/// in structs that live in no-drop arenas and can be abandoned on error
+/// paths without their own drop glue running: the guard fires on both the
+/// normal and the abort path, exactly once, when the host resets or drops,
+/// before the host's arena bytes are reclaimed.
+///
+/// The handle itself is plain data and passes the [`forget_safe_struct!`]
+/// census:
+///
+/// ```
+/// struct SpillState { table_ctx: mcx::GuardedContext }
+/// mcx::forget_safe_struct!(SpillState { table_ctx });
+/// ```
+///
+/// A bare droppy `MemoryContext` field does not (this failing to compile is
+/// the audit for the leak class this type closes — upstream issue #63):
+///
+/// ```compile_fail
+/// struct SpillState { table_ctx: mcx::MemoryContext }
+/// mcx::forget_safe_struct!(SpillState { table_ctx });
+/// ```
+pub struct GuardedContext(NonNull<MemoryContext>);
+
+impl GuardedContext {
+    /// Hoist `child` into `host`'s arena and register `host`'s reset
+    /// callback as its destructor. `host` is normally the query context the
+    /// embedding struct itself lives in.
+    pub fn new(host: Mcx<'_>, child: MemoryContext) -> PgResult<GuardedContext> {
+        let layout = core::alloc::Layout::new::<MemoryContext>();
+        let raw = host.allocate(layout).map_err(|_| host.oom(layout.size()))?;
+        let p: NonNull<MemoryContext> = raw.cast();
+        // SAFETY: fresh allocation of the exact layout.
+        unsafe { p.write(child) };
+        // SAFETY: fires exactly once, before the arena bytes are reclaimed;
+        // no path reaches the pointee afterwards because every handle lives
+        // in that same arena.
+        host.context()
+            .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+        Ok(GuardedContext(p))
+    }
+}
+
+impl core::ops::Deref for GuardedContext {
+    type Target = MemoryContext;
+    #[inline]
+    fn deref(&self) -> &MemoryContext {
+        // SAFETY: the pointee lives in the host arena until the reset
+        // callback fires, and handles are unreachable after that.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl core::ops::DerefMut for GuardedContext {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut MemoryContext {
+        // SAFETY: as in Deref; &mut self gives unique access to the handle,
+        // and the pointee is not aliased elsewhere (sole handle by
+        // construction).
+        unsafe { self.0.as_mut() }
+    }
+}
+
+// SAFETY: the handle is a bare pointer (no drop glue); teardown is owned by
+// the host context's reset callback, so forgetting a handle leaks nothing.
+unsafe impl ForgetSafe for GuardedContext {}
+
 impl Drop for MemoryContext {
     fn drop(&mut self) {
         self.fire_reset_callbacks();
