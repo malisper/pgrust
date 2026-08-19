@@ -18,7 +18,7 @@ use ::execexpr::{
 };
 use ::execgrouping::TupleHashTable;
 use ::executils::{EStateData, ExecSlotId};
-use ::mcx::{vec_with_capacity_in, Allocator, Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, Allocator, Mcx, PgBox, PgVec};
 use ::sort_storage::{LogicalTapeSet, TapeIdx};
 use ::tuplesort::{Tuplesort, TUPLESORT_NONE};
 use ::types_core::Oid;
