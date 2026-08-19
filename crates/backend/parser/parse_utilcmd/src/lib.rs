@@ -167,9 +167,11 @@ fn typename_type_id_and_mod<'mcx>(
         return Ok((typoid, typmod));
     }
 
-    let (typoid, typname) = resolveTypeNames(mcx, tn)?;
+    // C typenameType errors via TypeNameToString(typeName), keeping the schema
+    // qualification (parse_type.c:243/272/279), not the bare last name.
+    let (typoid, _typname) = resolveTypeNames(mcx, tn)?;
     if typoid == InvalidOid {
-        return Err(at_tn(type_does_not_exist(typname)));
+        return Err(at_tn(type_does_not_exist(&typeNameToString(tn)?)));
     }
     // C LookupTypeNameExtended: array bounds convert to the array type.
     let typoid = if tn.arrayBounds.is_nil() {
@@ -177,7 +179,7 @@ fn typename_type_id_and_mod<'mcx>(
     } else {
         let arr = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
         if arr == InvalidOid {
-            return Err(at_tn(type_does_not_exist(typname)));
+            return Err(at_tn(type_does_not_exist(&typeNameToString(tn)?)));
         }
         arr
     };
@@ -186,13 +188,13 @@ fn typename_type_id_and_mod<'mcx>(
     // CheckAttributeType's job (heap.c: column "u" has pseudo-type unknown).
     match syscache_seams::pg_type_typtype::call(typoid)? {
         Some(_) => {}
-        None => return Err(type_does_not_exist(typname)),
+        None => return Err(type_does_not_exist(&typeNameToString(tn)?)),
     }
     // C order: typenameTypeMod (inside LookupTypeNameExtended) before
     // typenameType's shell check.
     let typmod = typenameTypeMod(mcx, pstate, tn, typoid)?;
     if !isdefined {
-        return Err(at_tn(type_is_only_a_shell(typname)));
+        return Err(at_tn(type_is_only_a_shell(&typeNameToString(tn)?)));
     }
     Ok((typoid, typmod))
 }
@@ -340,17 +342,18 @@ pub fn typenameTypeId<'mcx>(
         }
         return Ok(typoid);
     }
-    let (typoid, typname) = resolveTypeNames(mcx, tn)?;
-    let not_exist = |typname: &str| at_tn(type_does_not_exist(typname));
+    // C typenameType errors via TypeNameToString(typeName), keeping the schema
+    // qualification (parse_type.c:243/272/279), not the bare last name.
+    let (typoid, _typname) = resolveTypeNames(mcx, tn)?;
     if typoid == InvalidOid {
-        return Err(not_exist(typname));
+        return Err(at_tn(type_does_not_exist(&typeNameToString(tn)?)));
     }
     let typoid = if tn.arrayBounds.is_nil() {
         typoid
     } else {
         let arr = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
         if arr == InvalidOid {
-            return Err(not_exist(typname));
+            return Err(at_tn(type_does_not_exist(&typeNameToString(tn)?)));
         }
         arr
     };
@@ -362,7 +365,7 @@ pub fn typenameTypeId<'mcx>(
         Some(true) => {}
         // unported: C's typenameTypeId path (typenameType) raises exactly
         // this shell-type error; the shell-type USE lanes stay unported.
-        _ => return Err(at_tn(type_is_only_a_shell(typname))),
+        _ => return Err(at_tn(type_is_only_a_shell(&typeNameToString(tn)?))),
     }
     Ok(typoid)
 }
@@ -416,19 +419,21 @@ pub fn LookupTypeNameOidExtended<'mcx>(
         }
         return Ok(typoid);
     }
-    let (typoid, typname) = resolve_type_names_ext(mcx, tn, missing_ok)?;
+    let (typoid, _typname) = resolve_type_names_ext(mcx, tn, missing_ok)?;
     if typoid == InvalidOid {
         if missing_ok {
             return Ok(InvalidOid);
         }
-        return Err(type_does_not_exist(typname));
+        // C typenameType errors via TypeNameToString(typeName), which keeps the
+        // schema qualification (parse_type.c:272-273), not the bare last name.
+        return Err(type_does_not_exist(&typeNameToString(tn)?));
     }
     let typoid = if tn.arrayBounds.is_nil() {
         typoid
     } else {
         let arr = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
         if arr == InvalidOid {
-            return Err(type_does_not_exist(typname));
+            return Err(type_does_not_exist(&typeNameToString(tn)?));
         }
         arr
     };
@@ -440,7 +445,7 @@ pub fn LookupTypeNameOidExtended<'mcx>(
         // unported: C's LookupTypeNameOid returns shell types (their DDL
         // consumers accept them); pgrust's shell-type USE lanes are
         // unported, so raise the typenameType-shaped error cleanly.
-        _ => return Err(type_is_only_a_shell(typname)),
+        _ => return Err(type_is_only_a_shell(&typeNameToString(tn)?)),
     }
     Ok(typoid)
 }
@@ -1168,6 +1173,39 @@ fn transformColumnDefinition<'mcx>(
         }
     }
 
+    // transformColumnType (parse_utilcmd.c:647-649): verify the type reference
+    // and any COLLATE spec BEFORE the constraint scan, so a COLLATE-on-
+    // uncollatable error (42804) never preempts a default/identity/generation
+    // conflict (42601) that C reports first. Typed-table/partition columns
+    // carry no typeName (C: `if (column->typeName)`); C skips this for them.
+    if let Some(tn_node) = col!().typeName {
+        let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
+        // C typenameType(cxt->pstate, ...) attaches errposition at tn.location.
+        let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)
+            .map_err(|e| position_on_src(e, src, tn.location))?;
+        if let Some(cc) = col!().collClause {
+            let cc = cc.as_variant::<types_nodes::CollateClause>().expect("CollateClause");
+            catalog_namespace::get_collation_oid_list(&cc.collname, false)
+                .map_err(|e| position_on_src(e, src, cc.location))?;
+            let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
+                .expect("pg_type row vanished")
+                .typcollation;
+            if typcollation == InvalidOid {
+                return Err(position_on_src(
+                    Box::new(
+                        types_error::PgError::error(format!(
+                            "collations are not supported by type {}",
+                            format_type::format_type_be(type_oid)?
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                    ),
+                    src,
+                    cc.location,
+                ));
+            }
+        }
+    }
+
     let mut need_notnull = false;
     if is_serial_oid != InvalidOid {
         let (snamespace, sname) = generateSerialExtraStmts(
@@ -1638,37 +1676,9 @@ fn transformColumnDefinition<'mcx>(
         stmt.objtype = ObjectType::OBJECT_FOREIGN_TABLE;
         cxt.alist.lappend(mcx, stmt.seal())?;
     }
-    // Typed-table/partition column options carry no typeName; C skips
-    // transformColumnType for them (parse_utilcmd.c:1055).
-    let Some(tn_node) = col!().typeName else {
-        return Ok(());
-    };
-    let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
-    // transformColumnType: validate the type reference and any COLLATE spec.
-    // C typenameType(cxt->pstate, ...) attaches errposition at tn.location.
-    let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)
-        .map_err(|e| position_on_src(e, src, tn.location))?;
-    if let Some(cc) = col!().collClause {
-        let cc = cc.as_variant::<types_nodes::CollateClause>().expect("CollateClause");
-        catalog_namespace::get_collation_oid_list(&cc.collname, false)
-            .map_err(|e| position_on_src(e, src, cc.location))?;
-        let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
-            .expect("pg_type row vanished")
-            .typcollation;
-        if typcollation == InvalidOid {
-            return Err(position_on_src(
-                Box::new(
-                    types_error::PgError::error(format!(
-                        "collations are not supported by type {}",
-                        format_type::format_type_be(type_oid)?
-                    ))
-                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
-                ),
-                src,
-                cc.location,
-            ));
-        }
-    }
+    // transformColumnType ran earlier (parse_utilcmd.c:647-649), before the
+    // constraint scan, so type/COLLATE errors cannot preempt a constraint
+    // conflict that C reports first.
     Ok(())
 }
 
@@ -4141,5 +4151,33 @@ mod tests {
         );
         let e = unported_feature_at(None, -1, "USING INDEX with an index over a system column");
         assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    }
+
+    #[test]
+    fn type_does_not_exist_keeps_schema_qualification() {
+        // acl-periphery F1: LookupTypeNameOidExtended must render the missing
+        // type with its schema, matching C typenameType's TypeNameToString
+        // (parse_type.c:272-273). Before the fix the resolver returned the bare
+        // last name, so the message dropped the "fz_priv." qualifier.
+        let mcx = ctx().mcx();
+        let mut tn = Node::build::<TypeName>(mcx).unwrap();
+        let mut names = NodeList::nil();
+        names.lappend(mcx, Node::mk_string(mcx, "fz_priv").unwrap()).unwrap();
+        names.lappend(mcx, Node::mk_string(mcx, "hidden_ty").unwrap()).unwrap();
+        tn.names = names;
+        tn.location = -1;
+        let node = tn.seal();
+        let tnref = node.as_variant::<TypeName>().expect("TypeName");
+        assert_eq!(typeNameToString(tnref).unwrap(), "fz_priv.hidden_ty");
+        let e = type_does_not_exist(&typeNameToString(tnref).unwrap());
+        assert_eq!(e.message(), "type \"fz_priv.hidden_ty\" does not exist");
+        assert_eq!(e.sqlstate(), ERRCODE_UNDEFINED_OBJECT);
+        // A single (unqualified) name is unchanged — no regression.
+        let mut tn1 = Node::build::<TypeName>(mcx).unwrap();
+        tn1.names = NodeList::make1(mcx, Node::mk_string(mcx, "hidden_ty").unwrap()).unwrap();
+        tn1.location = -1;
+        let node1 = tn1.seal();
+        let tnref1 = node1.as_variant::<TypeName>().expect("TypeName");
+        assert_eq!(typeNameToString(tnref1).unwrap(), "hidden_ty");
     }
 }

@@ -324,24 +324,24 @@ pub fn DefineRelation<'mcx>(
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_TABLE } else { relkind };
     let rv = stmt.relation.expect("CreateStmt.relation");
     let relname = truncate_name(mcx, rv.relname.expect("RangeVar.relname"))?;
-    // Pre-adjustment persistence, like C (tablecmds.c:816-820).
-    if relkind == types_rel::RELKIND_PARTITIONED_TABLE
-        && rv.relpersistence == types_core::RELPERSISTENCE_UNLOGGED
-    {
-        return Err(Box::new(
-            PgError::new(ERROR, "partitioned tables cannot be unlogged".to_string())
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
-    }
-    // C's argument-consistency check runs FIRST (tablecmds.c:798-803), on the
+    // C's argument-consistency check runs FIRST (tablecmds.c:799-803), on the
     // pre-namespace-adjustment persistence — before parent lookup, reloptions,
-    // everything.
+    // everything, and before the unlogged-partitioned check below.
     if stmt.oncommit != OnCommitAction::ONCOMMIT_NOOP
         && rv.relpersistence != types_core::RELPERSISTENCE_TEMP
     {
         return Err(Box::new(
             PgError::new(ERROR, "ON COMMIT can only be used on temporary tables".to_string())
                 .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+    // Pre-adjustment persistence, like C (tablecmds.c:816-820) — AFTER ON COMMIT.
+    if relkind == types_rel::RELKIND_PARTITIONED_TABLE
+        && rv.relpersistence == types_core::RELPERSISTENCE_UNLOGGED
+    {
+        return Err(Box::new(
+            PgError::new(ERROR, "partitioned tables cannot be unlogged".to_string())
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
     }
     // Look up the namespace in which we are supposed to create the relation,
@@ -944,6 +944,30 @@ pub fn DefineRelation<'mcx>(
         table::table_close(rel, types_rel::NoLock)?;
     }
 
+    // Cook raw column DEFAULT and GENERATED expressions BEFORE processing the
+    // partitioning clauses — C DefineRelation (tablecmds.c:1104-1106): "This
+    // needs to be before processing the partitioning clauses because those
+    // could refer to generated columns." So a bad generation expression
+    // (42804/42883) is reported before partition-key validation (42P17/…).
+    if !raw_defaults.is_empty() {
+        // Make the newly-created pg_attribute rows visible before cooking reads
+        // column types (C bumps the command counter right after
+        // heap_create_with_catalog, tablecmds.c:1082, before opening the rel).
+        xact::CommandCounterIncrement()?;
+        let rel = table::table_open(mcx, relation_id, types_rel::AccessExclusiveLock)?;
+        constraints::add_relation_new_constraints(
+            mcx,
+            &rel,
+            &raw_defaults,
+            &types_nodes::NodeList::nil(),
+            Some(query_string),
+        )?;
+        rel.close(types_rel::NoLock)?;
+        // Make column generation expressions visible for use by partitioning
+        // (tablecmds.c:1111).
+        xact::CommandCounterIncrement()?;
+    }
+
     register_on_commit_action(relation_id, stmt.oncommit);
 
     xact::CommandCounterIncrement()?;
@@ -1107,22 +1131,15 @@ pub fn DefineRelation<'mcx>(
         Some(m) => &m.notnulls[..],
         None => &partition_notnulls[..],
     };
-    if !raw_defaults.is_empty()
-        || !stmt.constraints.is_nil()
+    // Raw DEFAULT/GENERATED expressions were already cooked above (before the
+    // partitioning clauses, per C tablecmds.c:1104). CHECK constraints
+    // (tablecmds.c:1339) and NOT NULL constraints (tablecmds.c:1354) are
+    // processed here, AFTER the partition key is stored.
+    if !stmt.constraints.is_nil()
         || !stmt.nnconstraints.is_nil()
         || !old_notnulls.is_empty()
     {
         let rel = table::table_open(mcx, relation_id, types_rel::AccessExclusiveLock)?;
-        if !raw_defaults.is_empty() {
-            constraints::add_relation_new_constraints(
-                mcx,
-                &rel,
-                &raw_defaults,
-                &types_nodes::NodeList::nil(),
-                Some(query_string),
-            )?;
-            xact::CommandCounterIncrement()?;
-        }
         let mut connames: mcx::PgVec<'_, &str> = mcx::PgVec::new_in(mcx);
         if !stmt.constraints.is_nil() {
             // C passes allow_merge=true here (tablecmds.c:1339); partitions
