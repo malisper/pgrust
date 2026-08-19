@@ -579,11 +579,8 @@ fn coverage_trip_drops_round_work_above_the_rewound_resume() {
     assert_eq!(resume, 3);
     let resume_bound = resume as u32;
 
-    // The leader's round consumption, as morsels.rs builds it today.
-    let runs = merge_dead_runs(&locals);
-    let mut deferred: Vec<u32> =
-        locals.iter().flat_map(|l| l.deferred_cleanup.iter().copied()).collect();
-    deferred.sort_unstable();
+    // The leader's round consumption, as morsels.rs builds it.
+    let (runs, deferred) = leader_round_work(&locals, Some(resume_bound));
 
     // Work below the hole is the round's to keep: the serial arm never
     // revisits it.
@@ -598,4 +595,50 @@ fn coverage_trip_drops_round_work_above_the_rewound_resume() {
         deferred.iter().all(|&b| b < resume_bound),
         "deferred pages at/above the resume point double-count num_items once the serial arm re-prunes them"
     );
+}
+
+// With no bound (a completed round), leader_round_work's collect+sort is
+// exactly the k-way merge plus the raw deferred ledger.
+#[test]
+fn leader_round_work_unbounded_matches_merge() {
+    let mut rng = Rng::new(0x66_66_66);
+    for _ in 0..200 {
+        let workers = 1 + rng.below(6) as usize;
+        let total_blocks = rng.below(200) as u32;
+        let mut locals: Vec<VacScanLocal> =
+            (0..workers).map(|w| VacScanLocal::new(w, 1000, 1000)).collect();
+        let mut b = 0u32;
+        while b < total_blocks {
+            let end = (b + 1 + rng.below(MAX_CLAIM) as u32).min(total_blocks);
+            let w = rng.below(workers as u64) as usize;
+            for blk in b..end {
+                if rng.chance(50) {
+                    locals[w].record_dead(blk, vec![1 + (blk % 7) as u16]);
+                }
+                if rng.chance(10) {
+                    locals[w].deferred_cleanup.push(blk);
+                }
+            }
+            b = end;
+        }
+        let (runs, deferred) = leader_round_work(&locals, None);
+        assert_eq!(runs, merge_dead_runs(&locals));
+        let mut expect: Vec<u32> =
+            locals.iter().flat_map(|l| l.deferred_cleanup.iter().copied()).collect();
+        expect.sort_unstable();
+        assert_eq!(deferred, expect);
+        // A bound splits both consistently: kept strictly below, rest gone.
+        let bound = (total_blocks / 2).max(1);
+        let (bruns, bdef) = leader_round_work(&locals, Some(bound));
+        assert!(bruns.iter().all(|r| r.block < bound));
+        assert!(bdef.iter().all(|&d| d < bound));
+        assert_eq!(
+            bruns,
+            runs.iter().filter(|r| r.block < bound).cloned().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            bdef,
+            deferred.iter().copied().filter(|&d| d < bound).collect::<Vec<_>>()
+        );
+    }
 }

@@ -492,5 +492,45 @@ pub fn merge_dead_runs(locals: &[VacScanLocal]) -> Vec<DeadRun> {
     out
 }
 
+/// The leader's round consumption — dead runs to merge into the round
+/// authority store plus deferred blocking-cleanup pages to process serially
+/// — bounded by the resume point (upstream issue #66). On a §5.2 coverage
+/// trip `resume_g` rewinds below granules other workers completed, and the
+/// serial arm re-scans everything from there: re-pruning re-collects the
+/// same LP_DEAD items, and `dead_items_add`'s num_items accounting is
+/// add-not-replace, so consuming at/above-bound work here too would count
+/// those dead tuples twice. `resume_bound` is the first block the serial
+/// arm will visit (`block_of(resume_g)`), `None` when the round completed.
+///
+/// The bound filters BEFORE the run merge: on an `OverlapAt` trip the
+/// double-claimed block sits at/above the bound, and the merge's
+/// blocks-disjoint-across-Locals contract only holds for the below-bound
+/// remainder. Healthy rounds carry nothing at/above the bound (the
+/// coverage guard errors on ScannedBeyondResume), so this is a no-op there.
+pub fn leader_round_work(
+    locals: &[VacScanLocal],
+    resume_bound: Option<u32>,
+) -> (Vec<DeadRun>, Vec<u32>) {
+    let below = |b: u32| resume_bound.is_none_or(|r| b < r);
+    let mut runs: Vec<DeadRun> = locals
+        .iter()
+        .flat_map(|l| l.runs.iter())
+        .filter(|r| below(r.block))
+        .cloned()
+        .collect();
+    runs.sort_unstable_by_key(|r| r.block);
+    debug_assert!(
+        runs.windows(2).all(|w| w[0].block < w[1].block),
+        "below-bound blocks are owned by exactly one Local"
+    );
+    let mut deferred: Vec<u32> = locals
+        .iter()
+        .flat_map(|l| l.deferred_cleanup.iter().copied())
+        .filter(|&b| below(b))
+        .collect();
+    deferred.sort_unstable();
+    (runs, deferred)
+}
+
 #[cfg(test)]
 mod tests;
