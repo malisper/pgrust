@@ -518,7 +518,7 @@ pub fn PredicateLockShmemInit(max_prepared_xacts: i32) -> PgResult<()> {
         info.entrysize = size_of::<SERIALIZABLEXID>();
         let xid_hash = hash_create(
             "SERIALIZABLEXID hash",
-            xact_count,
+            elem_count,
             &info,
             HASH_ELEM | HASH_BLOBS | HASH_FIXED_SIZE | HASH_SHARED_MEM,
         )?;
