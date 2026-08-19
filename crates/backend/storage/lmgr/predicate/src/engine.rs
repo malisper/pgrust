@@ -646,9 +646,13 @@ pub fn GetSerializableTransactionSnapshot<'m>(
 
 // SetSerializableTransactionSnapshot (predicate.c): in a parallel worker the
 // leader's SERIALIZABLEXACT arrives via AttachSerializableXact, so there is
-// nothing to do here. The snapshot-import arm (SET TRANSACTION SNAPSHOT,
-// GetSerializableTransactionSnapshotInt's sourcevxid path) is unported.
-pub fn SetSerializableTransactionSnapshot() -> PgResult<()> {
+// nothing to do here (nor is READ ONLY DEFERRABLE rejected — the leader
+// already determined its snapshot is safe).
+pub fn SetSerializableTransactionSnapshot(
+    _snapshot_xmin: TransactionId,
+    _sourcevxid: Option<VirtualTransactionId>,
+    _sourcepid: i32,
+) -> PgResult<()> {
     debug_assert!(xact_seams::isolation_is_serializable::call());
 
     if is_parallel_worker() {

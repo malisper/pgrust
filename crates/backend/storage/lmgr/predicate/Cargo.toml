@@ -37,6 +37,7 @@ transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 
 [dev-dependencies]
 libc = "0.2"
+varsup = { path = "../../../access/transam/varsup" }
 file_seams = { path = "../../file/file_seams" }
 sync_seams = { path = "../../sync/sync_seams" }
 pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }

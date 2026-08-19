@@ -552,7 +552,11 @@ fn SetTransactionSnapshot(sourcesnap: &SerializedSnapshot, source_proc: ProcNumb
 
         if xact_seams::isolation_uses_xact_snapshot::call() {
             if xact_seams::isolation_is_serializable::call() {
-                predicate_seams::set_serializable_transaction_snapshot::call()?;
+                predicate_seams::set_serializable_transaction_snapshot::call(
+                    current.xmin,
+                    None,
+                    0,
+                )?;
             }
             let copy = copy_snapshot_locked(s, &current);
             copy.regd_count.set(copy.regd_count.get() + 1);
