@@ -661,6 +661,8 @@ pub(crate) fn get_query_def<'mcx>(
     result_desc: Option<Rc<Vec<String>>>,
     col_names_visible: bool,
 ) -> PgResult<()> {
+    // C ruleutils.c:5634.
+    stack_depth_core::check_stack_depth()?;
     // C scribbles the flattened targetList/havingQual back into the Query;
     // the owned tree is immutable, so the flattened lists thread as params.
     let (target_list, having_qual, rtable_size) = if query.hasGroupRTE {
@@ -1770,6 +1772,8 @@ fn get_setop_query<'mcx>(
     query: &'mcx Query<'mcx>,
     ctx: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
+    // C ruleutils.c:6421.
+    stack_depth_core::check_stack_depth()?;
     match set_op.node_tag() {
         NodeTag::T_RangeTblRef => {
             let rtr = set_op.as_range_tbl_ref().unwrap();

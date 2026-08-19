@@ -45,6 +45,8 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
     parse: &mut Query<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<(Node<'mcx>, types_nodes::Bitmapset<'mcx>)> {
+    // C prepjointree.c:499.
+    stack_depth::check_stack_depth()?;
     let mcx = run.mcx;
     match node.node_tag() {
         NodeTag::T_RangeTblRef => {

@@ -100,6 +100,22 @@ fn log_tree(
             t.kind
         ))
         .finish(loc("MemoryContextStatsInternal"))?;
+    // C mcxt.c:905 (MemoryContextStatsInternal): when too deep, summarize the
+    // children instead of recursing (soft stack_is_too_deep, never an error).
+    if stack_depth_core::stack_is_too_deep() && !t.children.is_empty() {
+        for child in &t.children {
+            *grand_total += child.arena_footprint.max(child.used);
+            *grand_used += child.used;
+        }
+        ereport(LOG_SERVER_ONLY)
+            .errmsg(format!(
+                "level: {}; {} more child contexts not shown",
+                level + 1,
+                t.children.len()
+            ))
+            .finish(loc("MemoryContextStatsInternal"))?;
+        return Ok(());
+    }
     for child in t.children.iter().take(max_children) {
         log_tree(child, level + 1, max_children, grand_total, grand_used)?;
     }
@@ -214,6 +230,20 @@ fn fmt_tree(out: &mut String, t: &TreeStats, level: usize, max_children: usize, 
         t.nblocks.max(1),
         t.kind
     );
+    // C mcxt.c:905: soft stack_is_too_deep — summarize, never raise.
+    if stack_depth_core::stack_is_too_deep() && !t.children.is_empty() {
+        for child in &t.children {
+            *gt += child.arena_footprint.max(child.used);
+            *gu += child.used;
+        }
+        let _ = writeln!(
+            out,
+            "level: {}; {} more child contexts not shown",
+            level + 1,
+            t.children.len()
+        );
+        return;
+    }
     for child in t.children.iter().take(max_children) {
         fmt_tree(out, child, level + 1, max_children, gt, gu);
     }

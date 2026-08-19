@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+stack_depth_core = { path = "../../../backend/utils/misc/stack_depth_core" }
 datum = { path = "../datum" }
 mcx = { path = "../../mcx" }
 types_core = { path = "../types_core" }

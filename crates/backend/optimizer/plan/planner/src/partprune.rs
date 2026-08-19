@@ -865,6 +865,8 @@ fn get_steps_using_prefix_recurse<'mcx>(
     step_exprs: &mut Vec<Node<'mcx>>,
     step_cmpfns: &mut Vec<Oid>,
 ) -> PgResult<NodeList<'mcx>> {
+    // C partprune.c:2542.
+    stack_depth::check_stack_depth()?;
     let mcx = run.mcx;
     let mut result = NodeList::nil();
     let cur_keyno = prefix[start].keyno;

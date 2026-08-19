@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+stack_depth_core = { path = "../../utils/misc/stack_depth_core" }
 dependency_seams = { path = "../dependency_seams" }
 event_trigger_seams = { path = "../../commands/event_trigger_seams" }
 sequence_seams = { path = "../../commands/sequence_seams" }

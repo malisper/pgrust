@@ -716,6 +716,9 @@ pub(crate) unsafe fn subplan_expr_eval_hook<'a, 'b, 'mcx>(
     ecxt: EcxtId,
     outer: Option<&'b mut SlotData<'mcx>>,
 ) -> PgResult<NullableDatum> {
+    // C execExprInterp.c:5314 (ExecEvalSubPlan): nested-subplan execution
+    // recursion passes through this hook.
+    stack_depth_core::check_stack_depth()?;
     // SAFETY: caller contract; the 'mcx erased here is the estate's own.
     let sstate = unsafe { &mut *p.cast::<SubPlanExprState<'_>>().as_ptr() };
     let saved_dir = estate.es_direction;

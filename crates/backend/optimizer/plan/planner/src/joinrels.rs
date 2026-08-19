@@ -1177,6 +1177,8 @@ fn try_partitionwise_join<'mcx>(
     parent_restrictlist: &PgVec<'mcx, types_pathnodes::RinfoId>,
 ) -> PgResult<()> {
     use types_pathnodes::{JOIN_ANTI, JOIN_FULL, JOIN_SEMI};
+    // C joinrels.c:1435.
+    stack_depth::check_stack_depth()?;
     let mcx = run.mcx;
     let rel1_is_simple = is_simple_rel(&run.root, rel1);
     let rel2_is_simple = is_simple_rel(&run.root, rel2);

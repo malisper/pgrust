@@ -2487,6 +2487,8 @@ fn flatten_grouping_sets<'mcx>(
     toplevel: bool,
     has_grouping_sets: Option<&mut bool>,
 ) -> PgResult<Flattened<'mcx>> {
+    // C parse_clause.c:2261.
+    stack_depth::check_stack_depth()?;
     match expr.node_tag() {
         NodeTag::T_RowExpr => {
             let r = expr.as_row_expr().unwrap();

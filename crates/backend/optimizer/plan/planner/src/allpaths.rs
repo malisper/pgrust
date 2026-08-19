@@ -498,6 +498,8 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
 // set_append_rel_size (allpaths.c): size each live child, then aggregate.
 // Child ECs stay dead (no ECs exist on this lane).
 fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    // C allpaths.c:969.
+    stack_depth::check_stack_depth()?;
     let mcx = run.mcx;
     debug_assert!(
         run.root.rel(rel).reloptkind == RELOPT_BASEREL
@@ -1888,6 +1890,9 @@ pub(crate) fn generate_partitionwise_join_paths(
         return Ok(());
     }
     debug_assert!(run.root.rel(rel).consider_partitionwise_join);
+
+    // C allpaths.c:4381 (after the joinrel/partitioned checks).
+    stack_depth::check_stack_depth()?;
 
     let num_parts = run.root.rel(rel).nparts;
     let mut live_children: mcx::PgVec<'_, RelId> = mcx::PgVec::new_in(run.mcx);

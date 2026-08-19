@@ -5729,7 +5729,7 @@ mod grouping_sets {
         let mcx = cx.mcx();
         // (a),(a,b),(a,b,c) nest into one rollup chain.
         let sets = sets_of(mcx, &[&[1], &[1, 2], &[1, 2, 3]]);
-        let chains = crate::groupingsets::extract_rollup_sets(mcx, sets);
+        let chains = crate::groupingsets::extract_rollup_sets(mcx, sets).unwrap();
         assert_eq!(chains.len(), 1);
         assert_eq!(chains[0].len(), 3);
     }
@@ -5739,13 +5739,14 @@ mod grouping_sets {
         let cx = cx();
         let mcx = cx.mcx();
         let chains =
-            crate::groupingsets::extract_rollup_sets(mcx, sets_of(mcx, &[&[1], &[2]]));
+            crate::groupingsets::extract_rollup_sets(mcx, sets_of(mcx, &[&[1], &[2]])).unwrap();
         assert_eq!(chains.len(), 2);
         // (a,b),(b,c): neither is a subset of the other.
         let chains = crate::groupingsets::extract_rollup_sets(
             mcx,
             sets_of(mcx, &[&[1, 2], &[2, 3]]),
-        );
+        )
+        .unwrap();
         assert_eq!(chains.len(), 2);
     }
 
@@ -5756,7 +5757,8 @@ mod grouping_sets {
         let chains = crate::groupingsets::extract_rollup_sets(
             mcx,
             sets_of(mcx, &[&[], &[1], &[2]]),
-        );
+        )
+        .unwrap();
         assert_eq!(chains.len(), 2);
         assert_eq!(chains[0].iter().map(|s| s.to_vec()).collect::<Vec<_>>(), vec![
             Vec::<i32>::new(),

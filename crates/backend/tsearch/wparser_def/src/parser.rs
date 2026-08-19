@@ -578,6 +578,8 @@ fn p_isspecial(prs: &TParser) -> i32 {
 }
 
 fn p_ishost(prs: &mut TParser) -> PgResult<i32> {
+    // C wparser_def.c:640: recursion via TParserGet.
+    stack_depth::check_stack_depth()?;
     let mut tmpprs = tparser_copy_init(prs);
     let mut res = 0;
     tmpprs.wanthost = true;
@@ -597,6 +599,8 @@ fn p_ishost(prs: &mut TParser) -> PgResult<i32> {
 }
 
 fn p_isurlpath(prs: &mut TParser) -> PgResult<i32> {
+    // C wparser_def.c:669.
+    stack_depth::check_stack_depth()?;
     let mut tmpprs = tparser_copy_init(prs);
     let mut res = 0;
     let top = *tmpprs.top();

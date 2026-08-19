@@ -416,6 +416,8 @@ fn find_matching_subplans_recurse<'mcx>(
     validsubplans: &mut Bitmapset<'mcx>,
     validsubplan_rtis: &mut Option<&mut Bitmapset<'mcx>>,
 ) -> PgResult<()> {
+    // C execPartition.c:2581.
+    stack_depth_core::check_stack_depth()?;
     let mcx = estate.es_query_cxt;
     let partset = if initial_prune && !prunedata[idx].pinfo.initial_pruning_steps.is_nil() {
         get_matching_partitions(&mut prunedata[idx], estate, true)?

@@ -2215,6 +2215,8 @@ fn ATExecAddColumn<'mcx>(
     lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
+    // C tablecmds.c:7240 (ATExecAddColumn).
+    stack_depth::check_stack_depth()?;
     let myrelid = rel.rd_id;
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
     let if_not_exists = cmd.missing_ok;
@@ -2763,6 +2765,8 @@ fn ATExecDropColumn<'mcx>(
         )?;
     }
     debug_assert!(!recursing || addrs.is_some());
+    // C tablecmds.c:9306 (ATExecDropColumn, after the recursing permission check).
+    stack_depth::check_stack_depth()?;
     let mut own_addrs;
     let addrs: &mut catalog_dependency::ObjectAddresses = match addrs {
         Some(a) => a,
@@ -3989,6 +3993,8 @@ pub(crate) fn ATExecSetNotNull<'mcx>(
     recursing: bool,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
+    // C tablecmds.c:7925 (ATExecSetNotNull).
+    stack_depth::check_stack_depth()?;
     if recursing {
         ATSimplePermissions(
             AlterTableType::AT_AddConstraint,
@@ -4255,6 +4261,8 @@ pub(crate) fn ATAddCheckNNConstraint<'mcx>(
     lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
+    // C tablecmds.c:9923 (ATAddCheckNNConstraint).
+    stack_depth::check_stack_depth()?;
     if recursing {
         ATSimplePermissions(
             AlterTableType::AT_AddConstraint,
@@ -4446,6 +4454,8 @@ fn dropconstraint_internal<'mcx>(
     recursing: bool,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
+    // C tablecmds.c:14090 (dropconstraint_internal).
+    stack_depth::check_stack_depth()?;
     if recursing {
         ATSimplePermissions(
             AlterTableType::AT_DropConstraint,
@@ -7743,6 +7753,8 @@ fn find_composite_type_dependencies_impl<'mcx>(
     type_oid: Oid,
     origin: &CompositeDepOrigin,
 ) -> PgResult<()> {
+    // C tablecmds.c:6945 (find_composite_type_dependencies).
+    stack_depth::check_stack_depth()?;
     let dep_rel = table::table_open(mcx, pg_depend::DependRelationId, types_rel::AccessShareLock)?;
     const Anum_pg_depend_classid: usize = 1;
     const Anum_pg_depend_objid: usize = 2;

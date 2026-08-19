@@ -125,6 +125,17 @@ pub fn with_own_frame<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Guard for recursion sites whose signatures cannot carry `PgResult`
+/// (e.g. `equal()`): raises the C-identical 54001 as a `Box<PgError>` panic
+/// payload, which `pg_error_from_panic` restores losslessly at the
+/// statement boundary.
+#[inline]
+pub fn check_stack_depth_or_panic() {
+    if stack_is_too_deep() {
+        std::panic::panic_any(stack_depth_exceeded());
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn stack_depth_exceeded() -> Box<types_error::PgError> {

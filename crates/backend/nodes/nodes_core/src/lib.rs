@@ -134,6 +134,8 @@ pub fn expression_tree_walker_dyn<'mcx>(
     node: Node<'mcx>,
     w: &mut dyn NodeWalker<'mcx>,
 ) -> PgResult<bool> {
+    // C nodeFuncs.c:2111: guard against stack overflow from overly complex expressions.
+    stack_depth_core::check_stack_depth()?;
     match node.node_tag() {
         NodeTag::T_Var
         | NodeTag::T_Const
@@ -615,6 +617,8 @@ pub fn raw_expression_tree_walker_dyn<'mcx>(
     node: Node<'mcx>,
     w: &mut dyn NodeWalker<'mcx>,
 ) -> PgResult<bool> {
+    // C nodeFuncs.c:4010.
+    stack_depth_core::check_stack_depth()?;
     match node.node_tag() {
         NodeTag::T_JsonFormat
         | NodeTag::T_SetToDefault
@@ -1105,6 +1109,8 @@ pub fn expression_tree_mutator_dyn<'mcx>(
     node: Node<'mcx>,
     m: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
 ) -> PgResult<Option<Node<'mcx>>> {
+    // C nodeFuncs.c:2966.
+    stack_depth_core::check_stack_depth()?;
     match node.node_tag() {
         NodeTag::T_Var
         | NodeTag::T_Const

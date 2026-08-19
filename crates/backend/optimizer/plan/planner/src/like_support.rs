@@ -346,7 +346,7 @@ fn regex_fixed_prefix<'mcx>(
     let patt = varlena_payload(patt_const);
     match regexp_seams::regexp_fixed_prefix::call(mcx, patt, case_insensitive, collation)? {
         None => {
-            let rest = regex_selectivity(patt, case_insensitive, 0);
+            let rest = regex_selectivity(patt, case_insensitive, 0)?;
             Ok((PrefixStatus::None, None, rest))
         }
         Some((prefix_bytes, exact)) => {
@@ -354,7 +354,7 @@ fn regex_fixed_prefix<'mcx>(
             let rest = if exact {
                 1.0
             } else {
-                regex_selectivity(patt, case_insensitive, prefix_bytes.len())
+                regex_selectivity(patt, case_insensitive, prefix_bytes.len())?
             };
             let status =
                 if exact { PrefixStatus::Exact } else { PrefixStatus::Partial };
@@ -526,7 +526,9 @@ fn like_selectivity(patt: &[u8], _case_insensitive: bool) -> f64 {
     sel
 }
 
-fn regex_selectivity_sub(patt: &[u8], case_insensitive: bool) -> f64 {
+fn regex_selectivity_sub(patt: &[u8], case_insensitive: bool) -> PgResult<f64> {
+    // C like_support.c:1360.
+    stack_depth::check_stack_depth()?;
     let mut sel = 1.0f64;
     let mut paren_depth = 0i32;
     let mut paren_pos = 0usize;
@@ -542,10 +544,10 @@ fn regex_selectivity_sub(patt: &[u8], case_insensitive: bool) -> f64 {
         } else if c == b')' && paren_depth > 0 {
             paren_depth -= 1;
             if paren_depth == 0 {
-                sel *= regex_selectivity_sub(&patt[paren_pos + 1..pos], case_insensitive);
+                sel *= regex_selectivity_sub(&patt[paren_pos + 1..pos], case_insensitive)?;
             }
         } else if c == b'|' && paren_depth == 0 {
-            sel += regex_selectivity_sub(&patt[pos + 1..], case_insensitive);
+            sel += regex_selectivity_sub(&patt[pos + 1..], case_insensitive)?;
             break;
         } else if c == b'[' {
             pos += 1;
@@ -593,19 +595,23 @@ fn regex_selectivity_sub(patt: &[u8], case_insensitive: bool) -> f64 {
     if sel > 1.0 {
         sel = 1.0;
     }
-    sel
+    Ok(sel)
 }
 
-fn regex_selectivity(patt: &[u8], case_insensitive: bool, fixed_prefix_len: usize) -> f64 {
+fn regex_selectivity(
+    patt: &[u8],
+    case_insensitive: bool,
+    fixed_prefix_len: usize,
+) -> PgResult<f64> {
     let pattlen = patt.len();
     let mut sel;
     if pattlen > 0
         && patt[pattlen - 1] == b'$'
         && (pattlen == 1 || patt[pattlen - 2] != b'\\')
     {
-        sel = regex_selectivity_sub(&patt[..pattlen - 1], case_insensitive);
+        sel = regex_selectivity_sub(&patt[..pattlen - 1], case_insensitive)?;
     } else {
-        sel = regex_selectivity_sub(patt, case_insensitive);
+        sel = regex_selectivity_sub(patt, case_insensitive)?;
         sel *= FULL_WILDCARD_SEL;
     }
     if fixed_prefix_len > 0 {
@@ -614,7 +620,7 @@ fn regex_selectivity(patt: &[u8], case_insensitive: bool, fixed_prefix_len: usiz
             sel /= prefixsel;
         }
     }
-    clamp_probability(sel)
+    Ok(clamp_probability(sel))
 }
 
 const TEXT_PATTERN_BTREE_FAM_OID: Oid = 2095;

@@ -291,6 +291,8 @@ fn findDependentObjects<'mcx>(
     if stack_address_present_add_flags(object, objflags, stack) {
         return Ok(());
     }
+    // C dependency.c:476.
+    stack_depth_core::check_stack_depth()?;
     if object_address_present_add_flags(object, objflags, targetObjects) {
         return Ok(());
     }

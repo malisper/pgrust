@@ -570,6 +570,9 @@ pub fn ExplainNode<'mcx>(
     ancestors: Option<&Ancestors<'_, 'mcx>>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
+    // C nodeFuncs.c:4730 (planstate_tree_walker_impl): ExplainNode carries its
+    // hand-specialized plan-tree recursion.
+    stack_depth_core::check_stack_depth()?;
     let plan = plan_of(node);
     let save_indent = es.indent;
 

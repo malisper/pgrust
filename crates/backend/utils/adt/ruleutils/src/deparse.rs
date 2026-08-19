@@ -145,6 +145,8 @@ pub(crate) fn get_rule_expr<'mcx>(
     ctx: &mut DeparseContext<'mcx>,
     showimplicit: bool,
 ) -> PgResult<()> {
+    // C ruleutils.c:9262.
+    stack_depth_core::check_stack_depth()?;
     match node.node_tag() {
         NodeTag::T_Var => get_variable(node, node.as_var().unwrap(), 0, false, ctx).map(|_| ()),
         NodeTag::T_Const => get_const_expr(node.as_const().unwrap(), ctx, 0),

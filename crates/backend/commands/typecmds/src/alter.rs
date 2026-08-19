@@ -684,6 +684,8 @@ fn get_rels_with_domain<'mcx>(
     domain_oid: Oid,
     lockmode: LOCKMODE,
 ) -> PgResult<PgVec<'mcx, RelToCheck<'mcx>>> {
+    // C typecmds.c:3328 (get_rels_with_domain).
+    stack_depth::check_stack_depth()?;
     let domain_type_name = format_type::format_type_be(domain_oid)?;
     let mut result: PgVec<'mcx, RelToCheck<'mcx>> = PgVec::new_in(mcx);
     let dep_rel = table::table_open(mcx, pg_depend::DependRelationId, AccessShareLock)?;

@@ -833,3 +833,69 @@ fn array_expr_typmod_agrees_or_minus_one() {
     let p = extern_param(mcx, 1);
     assert_eq!(node_funcs::expr_typmod(arr(mcx, &[p])), -1);
 }
+
+// RECURSION GUARD (C parity: nodeFuncs.c:2111/2966/4010 — every walker
+// invocation calls check_stack_depth). Deep BoolExpr nesting must surface
+// as a structured 54001 under a lowered budget, and walk clean under a
+// generous one (control pins "guard fired", not "tree malformed").
+#[test]
+fn walker_deep_nesting_raises_54001_with_the_guard_armed() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            stack_depth_core::set_stack_base();
+            let ctx = cx();
+            let mcx = ctx.mcx();
+            fn deep<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+                let mut node = extern_param(mcx, 1);
+                for _ in 0..4000 {
+                    node = Node::mk(
+                        mcx,
+                        types_nodes::primnodes::BoolExpr {
+                            boolop: types_nodes::primnodes::BoolExprType::NOT_EXPR,
+                            args: NodeList::from_slice(mcx, &[node]).unwrap(),
+                            location: -1,
+                        },
+                    )
+                    .unwrap();
+                }
+                node
+            }
+            let node = deep(mcx);
+            let node_b = deep(mcx);
+
+            struct W(usize);
+            impl<'mcx> NodeWalker<'mcx> for W {
+                fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+                    self.0 += 1;
+                    expression_tree_walker(node, self)
+                }
+            }
+
+            // control: clean at a generous limit
+            stack_depth_core::assign_max_stack_depth(16 * 1024);
+            let mut w = W(0);
+            assert!(expression_tree_walker(node, &mut w).is_ok());
+            assert_eq!(w.0, 4000);
+
+            // guard: 54001 at a tight budget
+            stack_depth_core::set_enforced_stack_budget_for_tests(200 * 1024);
+            let mut w2 = W(0);
+            let err = expression_tree_walker(node, &mut w2)
+                .expect_err("walker guard must fire at a 200kB budget");
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_STATEMENT_TOO_COMPLEX);
+
+            // equal(): same witness through the panic-payload guard (distinct
+            // trees — ptr_eq short-circuits identical handles before the guard)
+            let err = std::panic::catch_unwind(|| types_nodes::equal(node, node_b))
+                .expect_err("equal() must trip the guard at a 200kB budget");
+            let err = types_error::pg_error_from_panic(err)
+                .expect("payload restores to the 54001 PgError");
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_STATEMENT_TOO_COMPLEX);
+
+            stack_depth_core::assign_max_stack_depth(100);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

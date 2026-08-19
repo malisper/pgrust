@@ -23,7 +23,7 @@ pub fn pull_up_subqueries<'mcx>(
         let jt = parse.jointree.expect("jointree is a FromExpr");
         let mut target: Option<(i32, Option<Node<'mcx>>)> = None;
         for child in &jt.fromlist {
-            find_pullable_subquery(parse, child, None, &mut target, &kept);
+            find_pullable_subquery(parse, child, None, &mut target, &kept)?;
             if target.is_some() {
                 break;
             }
@@ -53,7 +53,7 @@ pub fn pull_up_subqueries<'mcx>(
             }
             continue;
         }
-        if is_simple_union_all(rte.subquery.expect("RTE_SUBQUERY has a subquery")) {
+        if is_simple_union_all(rte.subquery.expect("RTE_SUBQUERY has a subquery"))? {
             pull_up_simple_union_all(run, parse, rti, rte_node)?;
         }
         kept.push(rti);
@@ -74,7 +74,7 @@ pub fn flatten_simple_union_all<'mcx>(
     if run.root.hasRecursion {
         return Ok(());
     }
-    if !is_simple_union_all_recurse(parse, topop_node, &topop.colTypes) {
+    if !is_simple_union_all_recurse(parse, topop_node, &topop.colTypes)? {
         return Ok(());
     }
     let mut leftmost = topop.larg.expect("setop larg");
@@ -212,7 +212,7 @@ fn pull_up_union_leaf_queries<'mcx>(
             let sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
             if is_simple_subquery(run.mcx, rte, None)? && is_safe_append_member(sub) {
                 pull_up_simple_subquery(run, parse, child_rtindex, rte_node, None, Some(ai))?;
-            } else if is_simple_union_all(sub) {
+            } else if is_simple_union_all(sub)? {
                 pull_up_simple_union_all(run, parse, child_rtindex, rte_node)?;
             }
             Ok(())
@@ -331,16 +331,16 @@ pub(crate) fn query_has_uplevel_vars<'mcx>(q: &'mcx Query<'mcx>) -> PgResult<boo
 }
 
 // is_simple_union_all + is_simple_union_all_recurse (prepjointree.c).
-fn is_simple_union_all(subquery: &Query<'_>) -> bool {
-    let Some(topop_node) = subquery.setOperations else { return false };
-    let Some(topop) = topop_node.as_set_operation_stmt() else { return false };
+fn is_simple_union_all(subquery: &Query<'_>) -> PgResult<bool> {
+    let Some(topop_node) = subquery.setOperations else { return Ok(false) };
+    let Some(topop) = topop_node.as_set_operation_stmt() else { return Ok(false) };
     if !subquery.sortClause.is_nil()
         || subquery.limitOffset.is_some()
         || subquery.limitCount.is_some()
         || !subquery.rowMarks.is_nil()
         || !subquery.cteList.is_nil()
     {
-        return false;
+        return Ok(false);
     }
     is_simple_union_all_recurse(subquery, topop_node, &topop.colTypes)
 }
@@ -349,7 +349,9 @@ fn is_simple_union_all_recurse<'mcx>(
     set_op_query: &Query<'mcx>,
     setop: Node<'mcx>,
     col_types: &types_nodes::list::OidList<'mcx>,
-) -> bool {
+) -> PgResult<bool> {
+    // C prepjointree.c:2246.
+    stack_depth::check_stack_depth()?;
     match setop.node_tag() {
         NodeTag::T_RangeTblRef => {
             let rtr = setop.as_range_tbl_ref().expect("RangeTblRef");
@@ -366,24 +368,27 @@ fn is_simple_union_all_recurse<'mcx>(
                 if tle.resjunk {
                     continue;
                 }
-                let Some(t) = ct.next() else { return false };
+                let Some(t) = ct.next() else { return Ok(false) };
                 if crate::costsize::expr_type_typmod(tle.expr).0 != t {
-                    return false;
+                    return Ok(false);
                 }
             }
-            ct.next().is_none()
+            Ok(ct.next().is_none())
         }
         NodeTag::T_SetOperationStmt => {
             let op = setop.as_set_operation_stmt().expect("SetOperationStmt");
             if op.op != types_nodes::parsenodes::SetOperation::SETOP_UNION || !op.all {
-                return false;
+                return Ok(false);
             }
-            is_simple_union_all_recurse(set_op_query, op.larg.expect("setop larg"), col_types)
-                && is_simple_union_all_recurse(
-                    set_op_query,
-                    op.rarg.expect("setop rarg"),
-                    col_types,
-                )
+            Ok(is_simple_union_all_recurse(
+                set_op_query,
+                op.larg.expect("setop larg"),
+                col_types,
+            )? && is_simple_union_all_recurse(
+                set_op_query,
+                op.rarg.expect("setop rarg"),
+                col_types,
+            )?)
         }
         other => panic!("is_simple_union_all_recurse (prepjointree.c): {other:?}"),
     }
@@ -414,10 +419,12 @@ fn find_pullable_subquery<'mcx>(
     lowest_outer_join: Option<Node<'mcx>>,
     target: &mut Option<(i32, Option<Node<'mcx>>)>,
     kept: &[i32],
-) {
+) -> PgResult<()> {
     if target.is_some() {
-        return;
+        return Ok(());
     }
+    // C prepjointree.c:1132 (pull_up_subqueries_recurse).
+    stack_depth::check_stack_depth()?;
     match node.node_tag() {
         NodeTag::T_RangeTblRef => {
             let rti = node.as_range_tbl_ref().expect("RangeTblRef").rtindex;
@@ -452,7 +459,7 @@ fn find_pullable_subquery<'mcx>(
         NodeTag::T_FromExpr => {
             let f = node.as_from_expr().unwrap();
             for child in &f.fromlist {
-                find_pullable_subquery(parse, child, lowest_outer_join, target, kept);
+                find_pullable_subquery(parse, child, lowest_outer_join, target, kept)?;
             }
         }
         NodeTag::T_JoinExpr => {
@@ -462,14 +469,15 @@ fn find_pullable_subquery<'mcx>(
             } else {
                 Some(node)
             };
-            find_pullable_subquery(parse, j.larg, loj, target, kept);
-            find_pullable_subquery(parse, j.rarg, loj, target, kept);
+            find_pullable_subquery(parse, j.larg, loj, target, kept)?;
+            find_pullable_subquery(parse, j.rarg, loj, target, kept)?;
         }
         other => panic!(
             "pull_up_subqueries_recurse (prepjointree.c): {other:?} jointree arm; \
              M2 join lane"
         ),
     }
+    Ok(())
 }
 
 // get_relids_in_jointree (prepjointree.c), include_outer_joins=true,

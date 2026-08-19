@@ -267,6 +267,8 @@ pub fn RelationGetPartitionQual<'mcx>(
 }
 
 fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'static>> {
+    // C partcache.c:349: recurses up the partition parent chain.
+    stack_depth_core::check_stack_depth()?;
     let relid = rel.rd_id;
     let cmcx0 = with_state(|st| st.mcx);
     if let Some(q) = with_state(|st| st.quals.get(&relid).map(|q| q.clone_in(cmcx0))) {

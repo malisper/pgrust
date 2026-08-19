@@ -80,12 +80,12 @@ pub fn preprocess_grouping_sets<'mcx>(
             }
         }
         if !sortable_sets.is_empty() {
-            extract_rollup_sets(mcx, sortable_sets)
+            extract_rollup_sets(mcx, sortable_sets)?
         } else {
             PgVec::new_in(mcx)
         }
     } else {
-        extract_rollup_sets(mcx, all_sets)
+        extract_rollup_sets(mcx, all_sets)?
     };
 
     let mut gd = GroupingSetsData {
@@ -172,7 +172,7 @@ pub fn remap_to_groupclause_idx<'mcx>(
 pub fn extract_rollup_sets<'mcx>(
     mcx: Mcx<'mcx>,
     grouping_sets: PgVec<'mcx, PgVec<'mcx, i32>>,
-) -> PgVec<'mcx, PgVec<'mcx, PgVec<'mcx, i32>>> {
+) -> PgResult<PgVec<'mcx, PgVec<'mcx, PgVec<'mcx, i32>>>> {
     let num_sets_raw = grouping_sets.len();
     let mut result: PgVec<'mcx, PgVec<'mcx, PgVec<'mcx, i32>>> = PgVec::new_in(mcx);
 
@@ -182,7 +182,7 @@ pub fn extract_rollup_sets<'mcx>(
     }
     if num_empty == num_sets_raw {
         result.push(grouping_sets);
-        return result;
+        return Ok(result);
     }
 
     let mut orig_sets: Vec<PgVec<'mcx, PgVec<'mcx, i32>>> = Vec::with_capacity(num_sets_raw + 1);
@@ -234,7 +234,7 @@ pub fn extract_rollup_sets<'mcx>(
     }
     let num_sets = i - 1;
 
-    let (pair_uv, pair_vu) = bipartite_match(num_sets, num_sets, &adjacency);
+    let (pair_uv, pair_vu) = bipartite_match(num_sets, num_sets, &adjacency)?;
 
     let mut chains: Vec<usize> = vec![0; num_sets + 1];
     let mut num_chains = 0usize;
@@ -268,14 +268,18 @@ pub fn extract_rollup_sets<'mcx>(
     for chain in results.into_iter().skip(1) {
         result.push(chain);
     }
-    result
+    Ok(result)
 }
 
 const HK_INFINITY: i16 = i16::MAX;
 
 /// BipartiteMatch (lib/bipartite_match.c): Hopcroft-Karp; adjacency is
 /// 1-based; returns (pair_uv, pair_vu).
-fn bipartite_match(u_size: usize, v_size: usize, adjacency: &[Vec<i16>]) -> (Vec<i16>, Vec<i16>) {
+fn bipartite_match(
+    u_size: usize,
+    v_size: usize,
+    adjacency: &[Vec<i16>],
+) -> PgResult<(Vec<i16>, Vec<i16>)> {
     assert!(u_size < i16::MAX as usize && v_size < i16::MAX as usize);
     let mut pair_uv: Vec<i16> = vec![0; u_size + 1];
     let mut pair_vu: Vec<i16> = vec![0; v_size + 1];
@@ -312,11 +316,11 @@ fn bipartite_match(u_size: usize, v_size: usize, adjacency: &[Vec<i16>]) -> (Vec
         }
         for u in 1..=u_size {
             if pair_uv[u] == 0 {
-                hk_depth_search(adjacency, &mut pair_uv, &mut pair_vu, &mut distance, u);
+                hk_depth_search(adjacency, &mut pair_uv, &mut pair_vu, &mut distance, u)?;
             }
         }
     }
-    (pair_uv, pair_vu)
+    Ok((pair_uv, pair_vu))
 }
 
 fn hk_depth_search(
@@ -325,26 +329,28 @@ fn hk_depth_search(
     pair_vu: &mut [i16],
     distance: &mut [i16],
     u: usize,
-) -> bool {
+) -> PgResult<bool> {
     if u == 0 {
-        return true;
+        return Ok(true);
     }
     if distance[u] == HK_INFINITY {
-        return false;
+        return Ok(false);
     }
     let nextdist = distance[u] + 1;
+    // C bipartite_match.c:161.
+    stack_depth::check_stack_depth()?;
     for idx in 0..adjacency[u].len() {
         let v = adjacency[u][idx] as usize;
         if distance[pair_vu[v] as usize] == nextdist
-            && hk_depth_search(adjacency, pair_uv, pair_vu, distance, pair_vu[v] as usize)
+            && hk_depth_search(adjacency, pair_uv, pair_vu, distance, pair_vu[v] as usize)?
         {
             pair_vu[v] = u as i16;
             pair_uv[u] = v as i16;
-            return true;
+            return Ok(true);
         }
     }
     distance[u] = HK_INFINITY;
-    false
+    Ok(false)
 }
 
 /// reorder_grouping_sets (planner.c): smallest-first chain in, largest-first

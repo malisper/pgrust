@@ -242,6 +242,8 @@ pub(crate) fn resolve_special_varno<'mcx>(
     ctx: &mut DeparseContext<'mcx>,
     callback: &mut dyn FnMut(Node<'mcx>, &mut DeparseContext<'mcx>) -> PgResult<()>,
 ) -> PgResult<()> {
+    // C ruleutils.c:7916.
+    stack_depth_core::check_stack_depth()?;
     let Some(var) = node.as_var() else {
         return callback(node, ctx);
     };

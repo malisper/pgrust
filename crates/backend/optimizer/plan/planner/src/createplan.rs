@@ -40,6 +40,8 @@ fn create_plan_recurse<'mcx>(
     path_id: PathId,
     flags: i32,
 ) -> PgResult<Node<'mcx>> {
+    // C createplan.c:393.
+    stack_depth::check_stack_depth()?;
     match run.root.path(path_id) {
         PathNode::Path(p)
             if p.pathtype == crate::pathnode::tag16(NodeTag::T_SeqScan)

@@ -3493,6 +3493,8 @@ fn apply_scanjoin_target_to_paths<'mcx>(
     scanjoin_target_parallel_safe: bool,
     tlist_same_exprs: bool,
 ) -> PgResult<()> {
+    // C planner.c:7841.
+    stack_depth::check_stack_depth()?;
     let scanjoin_target = scanjoin_targets[0];
     let rel_is_partitioned = {
         let r = run.root.rel(rel_id);

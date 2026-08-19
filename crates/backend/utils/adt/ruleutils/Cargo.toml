@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+stack_depth_core = { path = "../../misc/stack_depth_core" }
 amapi = { path = "../../../access/index/amapi" }
 arrayfuncs = { path = "../arrayfuncs" }
 cache_syscache = { path = "../../cache/cache_syscache" }

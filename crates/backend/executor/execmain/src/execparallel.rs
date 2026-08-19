@@ -178,6 +178,9 @@ fn for_each_parallel_scan<'mcx>(
     ps: &mut crate::procnode::PlanStateNode<'mcx>,
     f: &mut dyn FnMut(ParallelScanMut<'_, 'mcx>) -> PgResult<()>,
 ) -> PgResult<()> {
+    // C nodeFuncs.c:4730 (planstate_tree_walker_impl): this is one of its
+    // hand-specialized replacements.
+    stack_depth_core::check_stack_depth()?;
     use crate::procnode::PlanStateNode as N;
     match ps {
         N::Instrumented(w) => for_each_parallel_scan(&mut w.inner, f)?,

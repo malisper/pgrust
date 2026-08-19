@@ -433,6 +433,8 @@ fn exec_make_function_result_set<'mcx>(
     per_tuple: Mcx<'_>,
     query_mcx: Mcx<'mcx>,
 ) -> PgResult<(Datum, bool, ExprDoneCond)> {
+    // C execSRF.c:514 (ExecMakeFunctionResultSet).
+    stack_depth_core::check_stack_depth()?;
     if srf.result_store.is_some() {
         return read_result_store(srf, per_tuple, query_mcx);
     }

@@ -210,6 +210,8 @@ fn expand_partitioned_rtentry<'mcx>(
     top_parentrc: Option<types_pathnodes::PlanRowMarkId>,
     lockmode: i32,
 ) -> PgResult<()> {
+    // C inherit.c:328.
+    stack_depth::check_stack_depth()?;
     let mcx = run.mcx;
     debug_assert!(run.rte(parent_rti).inh);
     if !run.root.partColsUpdated {

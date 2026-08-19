@@ -16,6 +16,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 format_type = { path = "../../utils/adt/format_type" }
 outfuncs = { path = "../outfuncs" }
 elog = { path = "../../utils/error/elog" }
+stack_depth_core = { path = "../../utils/misc/stack_depth_core" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 datum = { path = "../../../_support/types/datum" }

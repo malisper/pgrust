@@ -1876,6 +1876,9 @@ pub fn relation_is_updatable<'mcx>(
         | (1 << CmdType::CMD_DELETE as i32);
     let mut events = 0;
 
+    // C rewriteHandler.c:2878: recurses over the view chain.
+    stack_depth_core::check_stack_depth()?;
+
     let Some(rel) = relation::try_relation_open(mcx, reloid, AccessShareLock)? else {
         return Ok(0);
     };

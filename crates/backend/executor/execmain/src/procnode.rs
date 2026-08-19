@@ -3588,6 +3588,8 @@ pub fn multi_exec_bitmap_node<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<::tidbitmap::TIDBitmap<'mcx>> {
+    // C execProcnode.c:511 (MultiExecProcNode).
+    stack_depth_core::check_stack_depth()?;
     match node {
         // C MultiExec* nodes self-instrument (nTuples = bitmap insertions).
         PlanStateNode::Instrumented(w) => {
@@ -4035,6 +4037,8 @@ fn exec_end_node_inner<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    // C execProcnode.c:575 (ExecEndNode).
+    stack_depth_core::check_stack_depth()?;
     match node {
         PlanStateNode::Instrumented(w) => exec_end_node(&mut w.inner, estate),
         PlanStateNode::Result(rs) => exec_end_result(rs, estate),
@@ -4203,6 +4207,8 @@ pub fn exec_shutdown_node<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    // C execProcnode.c:783 (ExecShutdownNode_walker).
+    stack_depth_core::check_stack_depth()?;
     match node {
         PlanStateNode::Instrumented(w) => exec_shutdown_node(&mut w.inner, estate),
         PlanStateNode::Result(rs) => {

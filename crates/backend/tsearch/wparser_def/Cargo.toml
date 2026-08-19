@@ -15,6 +15,7 @@ mbutils = { path = "../../utils/mb/mbutils" }
 wchar = { path = "../../../common/wchar" }
 pg_locale = { path = "../../utils/adt/pg_locale" }
 ts_locale = { path = "../ts_locale" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 tupdesc = { path = "../../access/common/tupdesc" }
 heaptuple = { path = "../../access/common/heaptuple" }

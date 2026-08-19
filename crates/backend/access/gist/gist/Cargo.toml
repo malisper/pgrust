@@ -40,3 +40,4 @@ vacuum_seams = { path = "../../../commands/vacuum_seams" }
 varsup = { path = "../../transam/varsup" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 elog = { path = "../../../utils/error/elog" }
+stack_depth_core = { path = "../../../utils/misc/stack_depth_core" }

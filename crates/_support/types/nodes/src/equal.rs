@@ -53,7 +53,9 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
     if tag != b.node_tag() {
         return false;
     }
-    // C: check_stack_depth() — recursion guard unported repo-wide (stack lane).
+    // C equalfuncs.c:243: `equal` returns bare bool, so the 54001 travels as a
+    // Box<PgError> panic payload (restored by pg_error_from_panic).
+    stack_depth_core::check_stack_depth_or_panic();
     macro_rules! cmp {
         ($as_variant:ident) => {
             a.$as_variant().unwrap().node_equal(b.$as_variant().unwrap())

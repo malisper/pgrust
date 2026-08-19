@@ -64,6 +64,8 @@ fn recurse_set_operations<'mcx>(
     col_collations: &OidList<'mcx>,
     refnames_tlist: &NodeList<'mcx>,
 ) -> PgResult<(RelId, NodeList<'mcx>, bool)> {
+    // C prepunion.c:221.
+    stack_depth::check_stack_depth()?;
     if let Some(rtr) = set_op.as_range_tbl_ref() {
         let rti = rtr.rtindex;
         let rte = run.rte(rti as usize);

@@ -1112,6 +1112,8 @@ pub fn gistSplit<'mcx>(
     itup: &[ITup],
     giststate: &mut GistState<'_>,
 ) -> PgResult<Vec<SplitPageLayout<'mcx>>> {
+    // C gist.c:1463: gistSplit recurses on both halves of the split.
+    stack_depth_core::check_stack_depth()?;
     let len = itup.len();
     debug_assert!(len > 0);
 
