@@ -15,7 +15,7 @@ use slru::{
     check_slru_buffers, LwGuard, SimpleLruDoesPhysicalPageExist, SimpleLruGetBankLock,
     SimpleLruInit, SimpleLruReadPage, SimpleLruReadPage_ReadOnly, SimpleLruShmemSize,
     SimpleLruTruncate, SimpleLruWriteAll, SimpleLruWritePage, SimpleLruZeroPage, SlruCtlData,
-    SlruDeleteSegment, SlruPagePrecedesUnitTests, SlruPath, SlruSyncFileTag,
+    SlruDeleteSegment, SlruPagePrecedesUnitTests, SlruPath, SlruScanDirectory, SlruSyncFileTag,
     SLRU_PAGES_PER_SEGMENT,
 };
 use types_core::xact::{MultiXactIdPrecedes, MultiXactIdPrecedesOrEquals};
@@ -33,7 +33,7 @@ use types_storage::storage::{
     LWTRANCHE_MULTIXACTMEMBER_BUFFER, LWTRANCHE_MULTIXACTMEMBER_SLRU,
     LWTRANCHE_MULTIXACTOFFSET_BUFFER, LWTRANCHE_MULTIXACTOFFSET_SLRU, NUM_AUXILIARY_PROCS,
 };
-use types_storage::storage::{MULTI_XACT_GEN_LOCK, MULTI_XACT_TRUNCATION_LOCK};
+use types_storage::storage::{DELAY_CHKPT_START, MULTI_XACT_GEN_LOCK, MULTI_XACT_TRUNCATION_LOCK};
 use types_storage::sync::{FileTag, SyncRequestHandler};
 use xlogreader_seams::XLogReaderState;
 
@@ -1939,20 +1939,194 @@ fn PerformOffsetsTruncation(
 
 pub fn TruncateMultiXact(
     new_oldest_multi: MultiXactId,
-    _new_oldest_multi_db: Oid,
+    new_oldest_multi_db: Oid,
 ) -> PgResult<()> {
-    // C-exact early exit: nothing to truncate away unless the horizon moved
-    // forward past the current oldest (datminmxid never advances until the
-    // freeze lane lands, so this is the live arm).
-    let oldest_multi = MultiXactState().oldestMultiXactId.load(Relaxed);
+    debug_assert!(!transam_xlog_seams::recovery_in_progress::call());
+    debug_assert!(MultiXactState().finishedStartup.load(Relaxed));
+
+    // Only one truncation at once, or parts of members could vanish under a
+    // concurrent lookup. Creation needs no interlock since the limits only
+    // grow, never shrink (multixact.c).
+    LWLockAcquire(MultiXactTruncationLock(), LW_EXCLUSIVE, globals::MyProcNumber())?;
+    let res = truncate_multixact_locked(new_oldest_multi, new_oldest_multi_db);
+    let released = LWLockRelease(MultiXactTruncationLock());
+    res?;
+    released
+}
+
+fn truncate_multixact_locked(
+    new_oldest_multi: MultiXactId,
+    new_oldest_multi_db: Oid,
+) -> PgResult<()> {
+    let st = MultiXactState();
+
+    LWLockAcquire(MultiXactGenLock(), LW_SHARED, globals::MyProcNumber())?;
+    let next_multi = st.nextMXact.load(Relaxed);
+    let next_offset = st.nextOffset.load(Relaxed);
+    let oldest_multi = st.oldestMultiXactId.load(Relaxed);
+    LWLockRelease(MultiXactGenLock())?;
     debug_assert!(MultiXactIdIsValid(oldest_multi));
+
+    // Only attempt truncation if there are values to truncate away. In
+    // normal processing values don't go backwards, but corner cases (due to
+    // bugs) can get there (multixact.c).
     if MultiXactIdPrecedesOrEquals(new_oldest_multi, oldest_multi) {
         return Ok(());
     }
-    panic!(
-        "unported caller path reached: TruncateMultiXact (multixact.c) — vacuum lane \
-         (vac_truncate_clog); needs delay-chkpt seam + WAL truncate record"
+
+    // Can't just plow ahead: with no segments to truncate, reading the
+    // offsets page to find the members truncation point would fail, so scan
+    // the directory for the earliest offsets page we can read. Near
+    // multiWrapLimit the scan can report some early segment other than the
+    // actual earliest (PagePrecedes answers differ across pairs there),
+    // likewise after a failed unlink or an earlier early return; the only
+    // consequence is returning early, wasting space we could have freed.
+    // The page oldestMulti is on may also already be truncated away if we
+    // crashed before updating oldestMulti (multixact.c).
+    let mut earliest_existing_page: i64 = -1;
+    SlruScanDirectory(OffsetCtl(), |ctl, _filename, segpage| {
+        if earliest_existing_page == -1 || (ctl.page_precedes())(segpage, earliest_existing_page)
+        {
+            earliest_existing_page = segpage;
+        }
+        Ok(false) // keep going
+    })?;
+    // C narrows the int64 page * offsets-per-page product into a 32-bit
+    // MultiXactId, wraparound and all.
+    let mut earliest = earliest_existing_page
+        .wrapping_mul(MULTIXACT_OFFSETS_PER_PAGE as i64) as MultiXactId;
+    if earliest < FirstMultiXactId {
+        earliest = FirstMultiXactId;
+    }
+
+    // If there's nothing to remove, we can bail out early.
+    if MultiXactIdPrecedes(oldest_multi, earliest) {
+        return Ok(());
+    }
+
+    // First, the safe members truncation start: the oldest multi's offset.
+    // find_multixact_start should always work here since oldestMulti doesn't
+    // precede the earliest on-disk multi, but if it fails, truncate nothing.
+    let oldest_offset = if oldest_multi == next_multi {
+        // there are NO MultiXacts
+        next_offset
+    } else {
+        match find_multixact_start(oldest_multi)? {
+            Some(offset) => offset,
+            None => {
+                dlog(
+                    LOG,
+                    format!("oldest MultiXact {oldest_multi} not found, earliest MultiXact {earliest}, skipping truncation"),
+                );
+                return Ok(());
+            }
+        }
+    };
+
+    // Secondly compute up to where to truncate: newOldestMulti's offset.
+    let new_oldest_offset = if new_oldest_multi == next_multi {
+        // there are NO MultiXacts
+        next_offset
+    } else {
+        match find_multixact_start(new_oldest_multi)? {
+            Some(offset) => offset,
+            None => {
+                dlog(
+                    LOG,
+                    format!("cannot truncate up to MultiXact {new_oldest_multi} because it does not exist on disk, skipping truncation"),
+                );
+                return Ok(());
+            }
+        }
+    };
+
+    // A crash in MultiXactIdCreateFromMembers can leave a multixid whose
+    // offset was never written out and reads back as zero; if that becomes
+    // oldestMulti its offset can't be looked up. Rare, so just skip and hope
+    // oldestMulti has advanced past it by the next attempt (multixact.c).
+    if new_oldest_offset == 0 {
+        dlog(
+            LOG,
+            format!("cannot truncate up to MultiXact {new_oldest_multi} because it has invalid offset, skipping truncation"),
+        );
+        return Ok(());
+    }
+
+    dlog(
+        DEBUG1,
+        format!(
+            "performing multixact truncation: offsets [{}, {}), offsets segments [{:x}, {:x}), members [{}, {}), members segments [{:x}, {:x})",
+            oldest_multi,
+            new_oldest_multi,
+            MultiXactIdToOffsetSegment(oldest_multi),
+            MultiXactIdToOffsetSegment(new_oldest_multi),
+            oldest_offset,
+            new_oldest_offset,
+            MXOffsetToMemberSegment(oldest_offset),
+            MXOffsetToMemberSegment(new_oldest_offset),
+        ),
     );
+
+    // Truncation and its WAL record in one critical section so offsets and
+    // members can't get out of sync: once consistent, newOldestMulti always
+    // exists in members even if we crash at the wrong moment (multixact.c).
+    globals::StartCriticalSection();
+
+    // Prevent checkpoints from being scheduled concurrently: otherwise the
+    // truncation record might not be replayed after a crash/basebackup even
+    // though the state of the data directory would require it (multixact.c).
+    let prev_flags = lmgr_proc_seams::my_proc_add_delay_chkpt_flags::call(DELAY_CHKPT_START);
+    debug_assert_eq!(prev_flags & DELAY_CHKPT_START, 0);
+
+    let res = (|| {
+        WriteMTruncateXlogRec(
+            new_oldest_multi_db,
+            oldest_multi,
+            new_oldest_multi,
+            oldest_offset,
+            new_oldest_offset,
+        )?;
+
+        // Update in-memory limits before truncating, while inside the
+        // critical section: before, to fence concurrent lookups of those
+        // values; inside, so a caller crash after truncating couldn't make
+        // a future call error out looking up the oldest member in offsets
+        // (multixact.c).
+        LWLockAcquire(MultiXactGenLock(), LW_EXCLUSIVE, globals::MyProcNumber())?;
+        st.oldestMultiXactId.store(new_oldest_multi, Relaxed);
+        st.oldestMultiXactDB.store(new_oldest_multi_db.into(), Relaxed);
+        LWLockRelease(MultiXactGenLock())?;
+
+        // First truncate members, then offsets.
+        PerformMembersTruncation(oldest_offset, new_oldest_offset)?;
+        PerformOffsetsTruncation(oldest_multi, new_oldest_multi)
+    })();
+
+    lmgr_proc_seams::my_proc_clear_delay_chkpt_flags::call(DELAY_CHKPT_START);
+    globals::EndCriticalSection();
+    res
+}
+
+// Write a TRUNCATE xlog record. Must flush the record to disk before
+// returning — see TruncateCLOG notes.
+fn WriteMTruncateXlogRec(
+    oldest_multi_db: Oid,
+    start_trunc_off: MultiXactId,
+    end_trunc_off: MultiXactId,
+    start_trunc_memb: MultiXactOffset,
+    end_trunc_memb: MultiXactOffset,
+) -> PgResult<()> {
+    let mut xlrec = [0u8; SIZE_OF_MULTIXACT_TRUNCATE];
+    xlrec[0..4].copy_from_slice(&u32::from(oldest_multi_db).to_ne_bytes());
+    xlrec[4..8].copy_from_slice(&start_trunc_off.to_ne_bytes());
+    xlrec[8..12].copy_from_slice(&end_trunc_off.to_ne_bytes());
+    xlrec[12..16].copy_from_slice(&start_trunc_memb.to_ne_bytes());
+    xlrec[16..20].copy_from_slice(&end_trunc_memb.to_ne_bytes());
+
+    let recptr =
+        xloginsert_seams::xlog_insert::call(RM_MULTIXACT_ID, XLOG_MULTIXACT_TRUNCATE_ID, &[&xlrec])?;
+    transam_xlog_seams::xlog_flush::call(recptr)?;
+    Ok(())
 }
 
 fn MultiXactOffsetPagePrecedes(page1: i64, page2: i64) -> bool {
@@ -2079,7 +2253,7 @@ pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
         dlog(
             DEBUG1,
             format!(
-                "replaying multixact truncation: offsets [{}, {}), offsets segments [{:X}, {:X}), members [{}, {}), members segments [{:X}, {:X})",
+                "replaying multixact truncation: offsets [{}, {}), offsets segments [{:x}, {:x}), members [{}, {}), members segments [{:x}, {:x})",
                 start_trunc_off,
                 end_trunc_off,
                 MultiXactIdToOffsetSegment(start_trunc_off),
