@@ -2794,8 +2794,15 @@ pub(crate) fn test_acquire_sxact(xmin: TransactionId) -> PgResult<()> {
         assert!(MySerializableXact() == InvalidSerializableXact);
         let procno = my_procno();
         LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
+        // Mirrors GetSerializableTransactionSnapshotInt's slot acquisition.
         let sxact = CreatePredXact();
-        assert!(!sxact.is_null());
+        if sxact.is_null() {
+            LWLockRelease(SerializableXactHashLock())?;
+            panic!(
+                "predicate.c SummarizeOldestCommittedSxact: SERIALIZABLEXACT slots exhausted \
+                 and the pg_serial summarization path is not ported"
+            );
+        }
         let px = shared().pred_xact;
 
         (*sxact).vxid = my_proc_vxid();

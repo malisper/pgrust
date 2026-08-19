@@ -122,6 +122,12 @@ pub fn SerialSetActiveSerXmin(xid: TransactionId) -> PgResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn test_serial_state() -> (i64, TransactionId, TransactionId) {
+    let c = serial_control();
+    (c.headPage, c.headXid, c.tailXid)
+}
+
 pub fn CheckPointPredicate() -> PgResult<()> {
     let lock = SerialControlLock();
     LWLockAcquire(lock, LW_EXCLUSIVE, my_procno())?;
