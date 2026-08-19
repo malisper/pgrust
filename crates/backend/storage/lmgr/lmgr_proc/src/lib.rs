@@ -1310,6 +1310,16 @@ pub fn init_seams() {
     });
     s::pg_semaphore_lock::set(|procno| pg_sema_seams::pg_semaphore_lock::call(procno));
     s::pg_semaphore_unlock::set(|procno| pg_sema_seams::pg_semaphore_unlock::call(procno));
+    s::my_proc_add_delay_chkpt_flags::set(|flags| {
+        GetPGProcByNumber(MyProc().expect("MyProc is not set"))
+            .delayChkptFlags
+            .fetch_or(flags, Relaxed)
+    });
+    s::my_proc_clear_delay_chkpt_flags::set(|flags| {
+        GetPGProcByNumber(MyProc().expect("MyProc is not set"))
+            .delayChkptFlags
+            .fetch_and(!flags, Relaxed);
+    });
 
     use guc_tables::{vars, GucVarAccessors};
     macro_rules! install_var {

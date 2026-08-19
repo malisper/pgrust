@@ -19,6 +19,7 @@ init_small = { path = "../../../utils/init/init_small" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
 pmsignal = { path = "../../../storage/ipc/pmsignal" }
 slru = { path = "../slru" }
 transam_seams = { path = "../transam_seams" }

@@ -52,3 +52,14 @@ seam_core::seam!(
     // Reachable from SetLatch in signal handlers: impl must be allocation-free.
     pub fn proc_latch(procno: ProcNumber) -> &'static types_storage::latch::Latch
 );
+
+seam_core::seam!(
+    // MyProc->delayChkptFlags |= flags; returns the prior flags so callers
+    // can assert the bit was clear (multixact.c TruncateMultiXact).
+    pub fn my_proc_add_delay_chkpt_flags(flags: i32) -> i32
+);
+
+seam_core::seam!(
+    // MyProc->delayChkptFlags &= ~flags.
+    pub fn my_proc_clear_delay_chkpt_flags(flags: i32)
+);
