@@ -710,7 +710,9 @@ struct PerHashData<'mcx> {
     // plain row index (cast at use).
     hashiter: u64,
     // C hash_tablecxt: entries + pergroups (transvalues stay in aggcontext).
-    table_ctx: MemoryContext,
+    // Guarded: dies with the query context's reset even on abort paths
+    // (docs/no-drop.md; upstream issue #63).
+    table_ctx: ::mcx::GuardedContext,
     spill: HashSpillState<'mcx>,
     // Lane-v2 compact-row table (Stage 2.2) when armed for this build; the
     // C tuplehash above stays the fallback + oracle (compact.rs module doc).
@@ -759,7 +761,7 @@ struct HashSpillState<'mcx> {
     // hashagg_batch_read scratch: one maxaligned minimal-tuple image.
     read_buf: PgVec<'mcx, u64>,
     // hashagg_spill_tuple's transient tuple copy; reset after every write.
-    tmp_ctx: MemoryContext,
+    tmp_ctx: ::mcx::GuardedContext,
     input_card: f64,
     used_bits: u32,
     hashentrysize: f64,
@@ -2101,8 +2103,10 @@ fn init_perhash<'mcx>(
     );
     let wslot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(outer_desc));
-    let table_ctx = mcx.context().new_child_bump("HashAgg table context");
-    let tmp_ctx = mcx.context().new_child_bump("HashAgg spill tuple");
+    let table_ctx =
+        ::mcx::GuardedContext::new(mcx, mcx.context().new_child_bump("HashAgg table context"))?;
+    let tmp_ctx =
+        ::mcx::GuardedContext::new(mcx, mcx.context().new_child_bump("HashAgg spill tuple"))?;
 
     let cell_layout = Layout::new::<NonNull<AggPerGroup>>();
     let raw = mcx.allocate(cell_layout).map_err(|_| mcx.oom(cell_layout.size()))?;
@@ -7364,8 +7368,10 @@ pub unsafe fn agg_register_callback(
 mcx::forget_safe_nodrop!(TransTyp, HashAggBatch);
 
 // Exempt: all released in exec_end_agg (proj/evaltrans via release_frames;
-// the spill tapeset via hashagg_reset_spill_state; the table/tmp contexts
-// die with the struct's normal drop).
+// the spill tapeset via hashagg_reset_spill_state). The table/tmp contexts
+// are GuardedContexts — the query context's reset callback is their
+// destructor, so abort paths that never reach exec_end_agg free them too
+// (upstream issue #63).
 mcx::forget_safe_struct!(
     PerAggData<'_> { transno, aggref, trans_shared, num_final_args,
         agg_collation, resulttype_len;
@@ -7373,12 +7379,13 @@ mcx::forget_safe_struct!(
     PerSortData<'_> { have_pending; first_slot, pending_slot, eq },
     HashSpillState<'_> { mode, ever_spilled, batches, all_cols_needed,
         max_colno_needed, colnos_needed, read_buf, input_card, used_bits,
-        hashentrysize;
-        spill, tapeset, rslot, wslot, tmp_ctx },
+        hashentrysize, tmp_ctx;
+        spill, tapeset, rslot, wslot },
     PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
-        hash_mem_limit, table_filled, hashiter, spill, sink_cap, sink_spill_ok;
-        hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact,
+        hash_mem_limit, table_filled, hashiter, spill, sink_cap, sink_spill_ok,
+        table_ctx;
+        hashtable, hashslot, retrieve_slot, first_slot, compact,
         exchange },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,

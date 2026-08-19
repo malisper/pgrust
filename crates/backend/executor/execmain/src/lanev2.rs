@@ -12938,7 +12938,9 @@ struct StagedFoldAggSink<'a, 'mcx> {
     nstaged: usize,
     /// Per-batch arena for by-ref staged values (guarded/K2 modes); reset
     /// after every flush.
-    stage_cxt: Option<::mcx::MemoryContext>,
+    // Guarded: dies with the query context's reset even on abort paths
+    // (docs/no-drop.md; upstream issue #63).
+    stage_cxt: Option<::mcx::GuardedContext>,
     idxs: Vec<u32>,
     groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     /// K2 scratch: the batch's grouping-key hashes (batched hash pre-pass).
@@ -13157,7 +13159,7 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
         stage_slot_memo: &mut Option<ExecSlotId>,
         shape: StagedFeedShape,
         estate: &mut EStateData<'mcx>,
-    ) -> Self {
+    ) -> PgResult<Self> {
         let StagedFeedShape { mode, fold_cols, fold_bound, needed, max_colno, natts, mk } =
             shape;
         // Guarded, K2 and Mk modes stage every needed column (guarded for
@@ -13178,10 +13180,10 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
                     s
                 }
             };
-            let cxt = estate
-                .es_query_cxt
-                .context()
-                .new_child_bump("lane-v2 staged join feed");
+            let cxt = ::mcx::GuardedContext::new(
+                estate.es_query_cxt,
+                estate.es_query_cxt.context().new_child_bump("lane-v2 staged join feed"),
+            )?;
             (Some(slot), Some(cxt))
         };
         let mut lanes = StagedLanes {
@@ -13197,7 +13199,7 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
             lanes.values[c as usize].reserve_exact(STAGE_ROWS);
             lanes.isnull[c as usize].reserve_exact(STAGE_ROWS);
         }
-        StagedFoldAggSink {
+        Ok(StagedFoldAggSink {
             agg,
             mode,
             fold_cols,
@@ -13219,7 +13221,7 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
                 keys1: Vec::new(),
                 keys2: Vec::new(),
             }),
-        }
+        })
     }
 
     /// Re-present staged row `k` in the replay slot: needed columns carry the
@@ -13899,7 +13901,7 @@ fn agg_hash_join_build_if_needed<'mcx>(
                         stage_slot,
                         shape,
                         estate,
-                    );
+                    )?;
                     join_probe_drain_dispatch(state, hstate, outer, &mut sink, estate)?;
                 }
                 None => {
@@ -14936,7 +14938,7 @@ fn agg_gather_build_if_needed<'mcx>(
                 StagedMode::Mk => "agg-over-gather: staged fold feed engaged (mk probe)",
                 StagedMode::Arrival => "agg-over-gather: staged fold feed engaged",
             });
-            let mut sink = StagedFoldAggSink::new(agg, out_slot, stage_slot, shape, estate);
+            let mut sink = StagedFoldAggSink::new(agg, out_slot, stage_slot, shape, estate)?;
             gather_drain(g, &mut sink, estate)
         }
         None => {
