@@ -84,7 +84,7 @@ pub struct SlruCtlData {
 }
 
 impl SlruCtlData {
-    fn page_precedes(&self) -> SlruPagePrecedes {
+    pub fn page_precedes(&self) -> SlruPagePrecedes {
         self.PagePrecedes
             .expect("SLRU PagePrecedes callback not installed (null function pointer call in C)")
     }
