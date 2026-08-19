@@ -357,7 +357,10 @@ pub(crate) struct SubPlanExprState<'mcx> {
     cur_buf: PgVec<'mcx, u8>,
     /// ARRAY accumulation scratch, reset per evaluation (C builds in the
     /// caller's per-tuple context).
-    array_ctx: Option<::mcx::MemoryContext>,
+    // Guarded: die with the query context's reset even on abort paths
+    // (docs/no-drop.md; upstream issue #63) — this struct is PgBox::leak'd,
+    // so struct drop glue never runs at all.
+    array_ctx: Option<::mcx::GuardedContext>,
     hashed: Option<HashedSubPlanState<'mcx>>,
 }
 
@@ -368,11 +371,11 @@ struct HashedSubPlanState<'mcx> {
     havenullrows: bool,
     hashtable: Option<::execgrouping::TupleHashTable<'mcx>>,
     hashnulls: Option<::execgrouping::TupleHashTable<'mcx>>,
-    table_ctx: ::mcx::MemoryContext,
+    table_ctx: ::mcx::GuardedContext,
     // C sstate->hashtempcxt: probe-time transient memory (detoast copies of
     // compressed by-ref keys above all), reset after each hashtable lookup
     // (build scan) / probe (ExecHashSubPlan) — never query-lifetime.
-    hashtempcxt: ::mcx::MemoryContext,
+    hashtempcxt: ::mcx::GuardedContext,
     key_col_idx: PgVec<'mcx, i16>,
     tab_eq_funcoids: PgVec<'mcx, ::types_core::Oid>,
     tab_hash_funcs: PgVec<'mcx, ::types_core::Oid>,
@@ -484,7 +487,10 @@ fn exec_init_sub_plan_expr<'mcx>(
     };
 
     let array_ctx = if subplan.subLinkType == SubLinkType::ARRAY_SUBLINK {
-        Some(mcx.context().new_child_bump("Subplan Array Context"))
+        Some(::mcx::GuardedContext::new(
+            mcx,
+            mcx.context().new_child_bump("Subplan Array Context"),
+        )?)
     } else {
         None
     };
@@ -650,8 +656,14 @@ fn init_hashed_state<'mcx>(
         havenullrows: false,
         hashtable: None,
         hashnulls: None,
-        table_ctx: mcx.context().new_child_bump("Subplan HashTable Context"),
-        hashtempcxt: mcx.context().new_child_bump("Subplan HashTable Temp Context"),
+        table_ctx: ::mcx::GuardedContext::new(
+            mcx,
+            mcx.context().new_child_bump("Subplan HashTable Context"),
+        )?,
+        hashtempcxt: ::mcx::GuardedContext::new(
+            mcx,
+            mcx.context().new_child_bump("Subplan HashTable Temp Context"),
+        )?,
         key_col_idx,
         tab_eq_funcoids,
         tab_hash_funcs,
@@ -1249,9 +1261,9 @@ fn build_sub_plan_hash<'mcx>(
             // C BuildTupleHashTable's tempcxt = sstate->hashtempcxt, reset
             // after each lookup: probe-time detoasts of compressed by-ref
             // keys must not accumulate for the query's lifetime.
-            // SAFETY: hashtempcxt lives in the leaked SubPlanExprState —
-            // address-stable at build time (exec), dropped with the table
-            // at executor end.
+            // SAFETY: hashtempcxt is a GuardedContext hosted in the query
+            // arena — address-stable for the query's lifetime, torn down by
+            // the query context's reset callback (issue #63).
             unsafe { ht.set_temp_ctx_raw(h.hashtempcxt.mcx()) };
             h.hashtable = Some(ht);
         }

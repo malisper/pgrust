@@ -106,7 +106,7 @@ pub(crate) struct HashSetsState<'mcx> {
     rslot: SlotData<'mcx>,
     wslot: SlotData<'mcx>,
     read_buf: PgVec<'mcx, u64>,
-    tmp_ctx: MemoryContext,
+    tmp_ctx: ::mcx::GuardedContext,
     table_filled: bool,
     current_set: usize,
 }
@@ -618,7 +618,8 @@ fn init_hash_sets<'mcx>(
     let rslot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(outer_desc.clone()));
     let wslot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(outer_desc));
-    let tmp_ctx = mcx.context().new_child_bump("HashAgg spill tuple");
+    let tmp_ctx =
+        ::mcx::GuardedContext::new(mcx, mcx.context().new_child_bump("HashAgg spill tuple"))?;
 
     let hash_first_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(scan_desc.clone()));
