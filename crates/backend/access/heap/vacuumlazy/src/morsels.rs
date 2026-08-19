@@ -62,7 +62,7 @@ use ::types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
 use ::types_storage::bufpage::PageRef;
 use ::types_storage::ReadBufferMode;
 use ::vacuum_morsels::{
-    merge_dead_runs, resume_granule, verify_prefix_coverage, ClaimRecord, CoverageError,
+    leader_round_work, resume_granule, verify_prefix_coverage, ClaimRecord, CoverageError,
     QuiesceState, ScanCounters, SkipMapParams, VacScanLocal, VacuumBlockSource, VM_ALL_FROZEN,
     VM_ALL_VISIBLE,
 };
@@ -415,12 +415,20 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         vacrel.skippedallvis |= source.skipsallvis_before(resume_g);
         clock.finalize_ns += t_finalize.elapsed().as_nanos() as u64;
 
+        // Everything at/above the (possibly rewound) resume point is the
+        // serial arm's to re-scan; consuming it in the round too would
+        // double-count num_items — dead_items_add is add-not-replace
+        // (issue #66). Healthy rounds carry nothing above the bound.
+        let resume_bound: Option<BlockNumber> =
+            if resume_g < total { Some(source.block_of(resume_g).block) } else { None };
+        let (round_runs, deferred) = leader_round_work(&locals, resume_bound);
+
         // Merge the per-worker dead-TID runs into the round authority store
         // (the ONE serial O(dead TIDs) step per round — doc §3.2).
         let t_merge = std::time::Instant::now();
         {
             let super::LVRelState { dead_items, dead_items_info, .. } = &mut *vacrel;
-            for run in merge_dead_runs(&locals) {
+            for run in &round_runs {
                 dead_items_add(
                     dead_items.as_mut().expect("dead_items live during scan"),
                     dead_items_info,
@@ -478,10 +486,9 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         }
 
         // Deferred blocking-cleanup pages (§5.3): leader-serial, BEFORE the
-        // round's INDEX phase, so the round's dead set is complete.
-        let mut deferred: Vec<BlockNumber> =
-            locals.iter().flat_map(|l| l.deferred_cleanup.iter().copied()).collect();
-        deferred.sort_unstable();
+        // round's INDEX phase, so the round's dead set is complete. Pages
+        // at/above the resume bound were dropped by leader_round_work — the
+        // serial arm's blocking-cleanup path handles them on the re-scan.
         for blk in deferred {
             leader_deferred_block(vacrel, &source, blk)?;
         }
