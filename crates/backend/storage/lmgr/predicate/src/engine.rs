@@ -2,9 +2,8 @@
 // global shmem/dynahash/LWLock substrate — same adaptation as lock/shared.rs:
 // one address space, structures behind a OnceLock, C's LWLock discipline kept.
 //
-// LOUD (not ported): DEFERRABLE safe snapshots (GetSafeSnapshot), snapshot
-// import (SetSerializableTransactionSnapshot), parallel-query sharing, 2PC
-// lock transfer, SLRU summarization (SummarizeOldestCommittedSxact/SerialAdd).
+// LOUD (not ported): DEFERRABLE safe snapshots (GetSafeSnapshot),
+// parallel-query sharing, 2PC lock transfer.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -29,8 +28,8 @@ use types_core::{
     VirtualTransactionId,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OUT_OF_MEMORY,
-    ERRCODE_T_R_SERIALIZATION_FAILURE,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ERRCODE_OUT_OF_MEMORY, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use types_hash::hsearch::{
     HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_ENTER, HASH_ENTER_NULL, HASH_FIND, HASH_FIXED_SIZE,
@@ -46,7 +45,10 @@ use types_storage::LWTRANCHE_PER_XACT_PREDICATE_LIST;
 
 use crate::ilist::*;
 use crate::internals::*;
-use crate::serial::{SerialGetMinConflictCommitSeqNo, SerialInit, SerialSetActiveSerXmin};
+use crate::serial::{
+    SerialAdd, SerialGetMinConflictCommitSeqNo, SerialInit, SerialSetActiveSerXmin,
+    SerialShmemSize,
+};
 
 thread_local! {
     static MY_SERIALIZABLE_XACT: Cell<*mut SERIALIZABLEXACT> = const { Cell::new(ptr::null_mut()) };
@@ -518,7 +520,7 @@ pub fn PredicateLockShmemInit(max_prepared_xacts: i32) -> PgResult<()> {
         info.entrysize = size_of::<SERIALIZABLEXID>();
         let xid_hash = hash_create(
             "SERIALIZABLEXID hash",
-            xact_count,
+            elem_count,
             &info,
             HASH_ELEM | HASH_BLOBS | HASH_FIXED_SIZE | HASH_SHARED_MEM,
         )?;
@@ -578,8 +580,7 @@ pub fn PredicateLockShmemSize(max_prepared_xacts: i32) -> Size {
     size += RWConflictPoolHeaderDataSize();
     size += max_table_size as usize * RWConflictDataSize();
     size += size_of::<dlist_head>();
-    // C adds SerialControlData + the pg_serial SLRU; that store is a loud
-    // panic here (serial.rs), so its bytes are not requested.
+    size += SerialShmemSize();
     size
 }
 
@@ -639,20 +640,26 @@ pub fn GetSerializableTransactionSnapshot<'m>(
         return GetSafeSnapshot(snapshot, mcx);
     }
 
-    GetSerializableTransactionSnapshotInt(snapshot, mcx)
+    GetSerializableTransactionSnapshotInt(IntSnapshotSource::Fresh(snapshot, mcx))
 }
 
 // SetSerializableTransactionSnapshot (predicate.c): in a parallel worker the
 // leader's SERIALIZABLEXACT arrives via AttachSerializableXact, so there is
-// nothing to do here. The snapshot-import arm (SET TRANSACTION SNAPSHOT,
-// GetSerializableTransactionSnapshotInt's sourcevxid path) is unported.
-pub fn SetSerializableTransactionSnapshot() -> PgResult<()> {
+// nothing to do here (nor is READ ONLY DEFERRABLE rejected — the leader
+// already determined that the snapshot it passed us is safe).
+pub fn SetSerializableTransactionSnapshot(
+    snapshot_xmin: TransactionId,
+    sourcevxid: Option<VirtualTransactionId>,
+    sourcepid: i32,
+) -> PgResult<()> {
     debug_assert!(xact_seams::isolation_is_serializable::call());
 
     if is_parallel_worker() {
         return Ok(());
     }
 
+    // No importing into SERIALIZABLE READ ONLY DEFERRABLE: there is no way
+    // to wait for a safe snapshot when we're using the snap we're told to.
     if xact_seams::xact_read_only::call() && xact_seams::xact_deferrable::call() {
         return Err(Box::new(
             PgError::error("a snapshot-importing transaction must not be READ ONLY DEFERRABLE")
@@ -660,7 +667,17 @@ pub fn SetSerializableTransactionSnapshot() -> PgResult<()> {
         ));
     }
 
-    panic!("predicate.c SetSerializableTransactionSnapshot: snapshot import into a serializable transaction is not ported");
+    // C's NULL-vxid fallthrough would take a fresh snapshot, but every
+    // non-parallel-worker caller is the snapshot-import lane, which always
+    // carries the source vxid.
+    let sourcevxid = sourcevxid.unwrap_or_else(|| {
+        panic!("SetSerializableTransactionSnapshot without a source vxid outside a parallel worker")
+    });
+    GetSerializableTransactionSnapshotInt(IntSnapshotSource::Import {
+        snapshot_xmin,
+        sourcevxid,
+        sourcepid,
+    })
 }
 
 pub fn ShareSerializableXact() -> usize {
@@ -676,6 +693,49 @@ pub fn AttachSerializableXact(handle: usize) -> PgResult<()> {
     Ok(())
 }
 
+// Free up shared memory structures by pushing the oldest sxact (the one at
+// the front of the FinishedSerializableTransactions list) into summary form
+// in the pg_serial SLRU. Each call frees exactly one SERIALIZABLEXACT and
+// may also free one or more SERIALIZABLEXID / PREDICATELOCK /
+// PREDICATELOCKTARGET / RWConflictData structures.
+unsafe fn SummarizeOldestCommittedSxact() -> PgResult<()> {
+    let procno = my_procno();
+    LWLockAcquire(SerializableFinishedListLock(), LW_EXCLUSIVE, procno)?;
+
+    // Only called when no sxact slot is available, so some must belong to
+    // old, already-finished transactions. Race: while we held no locks, a
+    // transaction may have ended and cleaned up all the finished entries
+    // already; nothing to do then — the caller finds the freed slot when it
+    // retries (predicate.c).
+    let finished = shared().finished;
+    if dlist_is_empty(finished) {
+        LWLockRelease(SerializableFinishedListLock())?;
+        return Ok(());
+    }
+
+    // The first sxact on the finished list is the earliest commit.
+    let sxact = dlist_container!(SERIALIZABLEXACT, finishedLink, (*finished).head.next);
+    dlist_delete_thoroughly(&raw mut (*sxact).finishedLink);
+
+    // Add to SLRU summary information.
+    if TransactionIdIsValid((*sxact).topXid) && !SxactIsReadOnly(sxact) {
+        SerialAdd(
+            (*sxact).topXid,
+            if SxactHasConflictOut(sxact) {
+                (*sxact).SeqNo.earliestOutConflictCommit
+            } else {
+                InvalidSerCommitSeqNo
+            },
+        )?;
+    }
+
+    // Summarize and release the detail.
+    ReleaseOneSerializableXact(sxact, false, true)?;
+
+    LWLockRelease(SerializableFinishedListLock())?;
+    Ok(())
+}
+
 // PG_WAIT_IPC | SafeSnapshot's index in wait_event_names.txt's IPC section.
 const WAIT_EVENT_SAFE_SNAPSHOT: u32 = 0x0800_0000 | 51;
 
@@ -686,7 +746,7 @@ fn GetSafeSnapshot<'m>(snapshot: &mut SnapshotData<'m>, mcx: mcx::Mcx<'m>) -> Pg
     debug_assert!(xact_seams::xact_read_only::call() && xact_seams::xact_deferrable::call());
 
     loop {
-        GetSerializableTransactionSnapshotInt(snapshot, mcx)?;
+        GetSerializableTransactionSnapshotInt(IntSnapshotSource::Fresh(snapshot, mcx))?;
 
         if MySerializableXact() == InvalidSerializableXact {
             return Ok(()); // no concurrent r/w xacts; it's safe
@@ -726,10 +786,20 @@ fn GetSafeSnapshot<'m>(snapshot: &mut SnapshotData<'m>, mcx: mcx::Mcx<'m>) -> Pg
     Ok(())
 }
 
-fn GetSerializableTransactionSnapshotInt<'m>(
-    snapshot: &mut SnapshotData<'m>,
-    mcx: mcx::Mcx<'m>,
-) -> PgResult<()> {
+// C's Int takes (snapshot, sourcevxid, sourcepid); sourcevxid set means an
+// import (SET TRANSACTION SNAPSHOT): skip GetSnapshotData — the contents are
+// already loaded — but re-check the source xact is still running once
+// SerializableXactHashLock is held.
+enum IntSnapshotSource<'a, 'm> {
+    Fresh(&'a mut SnapshotData<'m>, mcx::Mcx<'m>),
+    Import {
+        snapshot_xmin: TransactionId,
+        sourcevxid: VirtualTransactionId,
+        sourcepid: i32,
+    },
+}
+
+fn GetSerializableTransactionSnapshotInt(source: IntSnapshotSource<'_, '_>) -> PgResult<()> {
     unsafe {
         debug_assert!(MySerializableXact() == InvalidSerializableXact);
         debug_assert!(!recovery_in_progress());
@@ -744,18 +814,36 @@ fn GetSerializableTransactionSnapshotInt<'m>(
         let procno = my_procno();
 
         LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
-        let sxact = CreatePredXact();
-        if sxact.is_null() {
-            // C summarizes the oldest committed sxact into the pg_serial SLRU
-            // and retries; that store is not ported.
+        // If null, push out a committed sxact to the SLRU summary & retry.
+        let mut sxact = CreatePredXact();
+        while sxact.is_null() {
             LWLockRelease(SerializableXactHashLock())?;
-            panic!(
-                "predicate.c SummarizeOldestCommittedSxact: SERIALIZABLEXACT slots exhausted \
-                 and the pg_serial summarization path is not ported"
-            );
+            SummarizeOldestCommittedSxact()?;
+            LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
+            sxact = CreatePredXact();
         }
 
-        procarray::GetSnapshotData(snapshot, mcx)?;
+        // Get the snapshot, or check that it's safe to use.
+        let snapshot_xmin = match source {
+            IntSnapshotSource::Fresh(snapshot, mcx) => {
+                procarray::GetSnapshotData(snapshot, mcx)?;
+                snapshot.xmin
+            }
+            IntSnapshotSource::Import { snapshot_xmin, sourcevxid, sourcepid } => {
+                if !procarray::ProcArrayInstallImportedXmin(snapshot_xmin, Some(&sourcevxid))? {
+                    ReleasePredXact(sxact);
+                    LWLockRelease(SerializableXactHashLock())?;
+                    return Err(Box::new(
+                        PgError::error("could not import the requested snapshot")
+                            .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                            .with_detail(format!(
+                                "The source process with PID {sourcepid} is not running anymore."
+                            )),
+                    ));
+                }
+                snapshot_xmin
+            }
+        };
 
         let px = shared().pred_xact;
         let read_only = xact_seams::xact_read_only::call();
@@ -775,7 +863,7 @@ fn GetSerializableTransactionSnapshotInt<'m>(
         dlist_init(&raw mut (*sxact).possibleUnsafeConflicts);
         (*sxact).topXid = xact_seams::get_top_transaction_id_if_any::call();
         (*sxact).finishedBefore = InvalidTransactionId;
-        (*sxact).xmin = snapshot.xmin;
+        (*sxact).xmin = snapshot_xmin;
         (*sxact).pid = init_small::globals::MyProcPid();
         (*sxact).pgprocno = procno;
         dlist_init(&raw mut (*sxact).predicateLocks);
@@ -816,14 +904,14 @@ fn GetSerializableTransactionSnapshotInt<'m>(
 
         if !TransactionIdIsValid((*px).SxactGlobalXmin) {
             debug_assert!((*px).SxactGlobalXminCount == 0);
-            (*px).SxactGlobalXmin = snapshot.xmin;
+            (*px).SxactGlobalXmin = snapshot_xmin;
             (*px).SxactGlobalXminCount = 1;
-            SerialSetActiveSerXmin(snapshot.xmin)?;
-        } else if TransactionIdEquals(snapshot.xmin, (*px).SxactGlobalXmin) {
+            SerialSetActiveSerXmin(snapshot_xmin)?;
+        } else if TransactionIdEquals(snapshot_xmin, (*px).SxactGlobalXmin) {
             debug_assert!((*px).SxactGlobalXminCount > 0);
             (*px).SxactGlobalXminCount += 1;
         } else {
-            debug_assert!(TransactionIdFollows(snapshot.xmin, (*px).SxactGlobalXmin));
+            debug_assert!(TransactionIdFollows(snapshot_xmin, (*px).SxactGlobalXmin));
         }
 
         set_MySerializableXact(sxact);
@@ -2794,8 +2882,15 @@ pub(crate) fn test_acquire_sxact(xmin: TransactionId) -> PgResult<()> {
         assert!(MySerializableXact() == InvalidSerializableXact);
         let procno = my_procno();
         LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
-        let sxact = CreatePredXact();
-        assert!(!sxact.is_null());
+        // Mirrors GetSerializableTransactionSnapshotInt's slot acquisition:
+        // if null, push out a committed sxact to the SLRU summary & retry.
+        let mut sxact = CreatePredXact();
+        while sxact.is_null() {
+            LWLockRelease(SerializableXactHashLock())?;
+            SummarizeOldestCommittedSxact()?;
+            LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
+            sxact = CreatePredXact();
+        }
         let px = shared().pred_xact;
 
         (*sxact).vxid = my_proc_vxid();

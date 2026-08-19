@@ -7,8 +7,8 @@ use types_core::BackendType;
 // over the my_backend() call-site count or InitProcess FATALs mid-suite.
 const MAX_CONNECTIONS: i32 = 16;
 // Bump when claim_other() call sites grow: the claimable simulated-backend
-// range is MAX_BACKENDS - MAX_CONNECTIONS (12 today for 12 claim_other()s).
-const MAX_WORKER_PROCESSES: i32 = 5;
+// range is MAX_BACKENDS - MAX_CONNECTIONS (13 today for 13 claim_other()s).
+const MAX_WORKER_PROCESSES: i32 = 6;
 const NUM_SPECIAL: i32 = types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
 
@@ -1050,4 +1050,53 @@ fn minimum_active_backends_counts_other_active_backends() {
     op.pid.store(0, Relaxed);
     other_proc_end(other, 4001);
     my_pgproc.xid.value.store(InvalidTransactionId, Relaxed);
+}
+
+// ProcArrayInstallImportedXmin: the imported xmin lands only when the source
+// virtual transaction is still running in our database with a covering xmin
+// (procarray.c; the SET TRANSACTION SNAPSHOT lane, upstream issue #62).
+#[test]
+fn install_imported_xmin_requires_live_covering_source() {
+    let _g = test_lock();
+    let me = my_backend();
+    g::SetMyDatabaseId(31062);
+
+    let src = claim_other();
+    let p = GetPGProcByNumber(src);
+    p.vxid.procNumber.store(src, Relaxed);
+    p.vxid.lxid.store(777, Relaxed);
+    p.databaseId.store(31062, Relaxed);
+    p.xmin.value.store(500, Relaxed);
+    other_proc_running(src, 505);
+
+    let vxid = |lxid: u32| types_core::VirtualTransactionId {
+        procNumber: src,
+        localTransactionId: lxid,
+    };
+
+    // C's !sourcevxid arm.
+    assert!(!ProcArrayInstallImportedXmin(510, None).unwrap());
+    // Wrong lxid: that virtual transaction is over.
+    assert!(!ProcArrayInstallImportedXmin(510, Some(&vxid(778))).unwrap());
+    // Source xmin (500) does not cover the requested xmin (499).
+    assert!(!ProcArrayInstallImportedXmin(499, Some(&vxid(777))).unwrap());
+    // Another database's xmin does not cover us.
+    p.databaseId.store(31063, Relaxed);
+    assert!(!ProcArrayInstallImportedXmin(510, Some(&vxid(777))).unwrap());
+    p.databaseId.store(31062, Relaxed);
+    // Procs running LAZY VACUUM are ignored.
+    let off = p.pgxactoff.load(Relaxed) as usize;
+    ProcGlobal().statusFlags[off].store(PROC_IN_VACUUM, Relaxed);
+    assert!(!ProcArrayInstallImportedXmin(510, Some(&vxid(777))).unwrap());
+    ProcGlobal().statusFlags[off].store(0, Relaxed);
+
+    // Live, covering source: installs MyProc->xmin and TransactionXmin.
+    assert!(ProcArrayInstallImportedXmin(510, Some(&vxid(777))).unwrap());
+    assert_eq!(GetPGProcByNumber(me).xmin.read(), 510);
+    assert_eq!(TransactionXmin(), 510);
+
+    other_proc_end(src, 505);
+
+    // Source gone from the array entirely.
+    assert!(!ProcArrayInstallImportedXmin(510, Some(&vxid(777))).unwrap());
 }

@@ -3,7 +3,8 @@ use init_small::globals as g;
 use std::sync::{Mutex, Once};
 use types_core::{BackendType, ProcNumber};
 
-const MAX_CONNECTIONS: i32 = 16;
+// +2 headroom: the import test spawns a second (importer) backend thread.
+const MAX_CONNECTIONS: i32 = 18;
 const MAX_WORKER_PROCESSES: i32 = 2;
 const NUM_SPECIAL: i32 = 2;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
@@ -562,4 +563,72 @@ fn import_snapshot_missing_file_is_fd_routed() {
         "unexpected ImportSnapshot error: {}",
         err.message
     );
+}
+
+// SET TRANSACTION SNAPSHOT end to end (issue #62 lane): the import must go
+// through ProcArrayInstallImportedXmin — keyed on the exporter's LIVE vxid —
+// not the parallel-restore ProcArrayInstallRestoredXmin, which never checks
+// the source's virtual transaction identity.
+#[test]
+fn import_snapshot_installs_source_xmin_by_vxid() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let _g = test_lock();
+    let me = my_backend();
+    g::SetMyDatabaseId(5); // thread-local; only setup()'s thread has it set
+    let root = scratch_dir("snapimport_vxid");
+    let _cwd = enter_dir(&root);
+    vfs_mkdir("pg_snapshots");
+    end_xact();
+
+    // Source: this backend, with a live virtual transaction, exports.
+    let p = lmgr_proc::GetPGProcByNumber(me);
+    p.vxid.procNumber.store(me, Relaxed);
+    p.vxid.lxid.store(6262, Relaxed);
+    p.databaseId.store(5, Relaxed);
+    let snap = GetTransactionSnapshot().unwrap();
+    let src_xmin = snap.xmin;
+    let name = ExportSnapshot(&snap).unwrap();
+    drop(snap);
+
+    // Importer: a second backend session.
+    let name2 = name.clone();
+    let importer = std::thread::spawn(move || {
+        g::SetMaxConnections(MAX_CONNECTIONS);
+        g::set_max_worker_processes(MAX_WORKER_PROCESSES);
+        g::SetMaxBackends(MAX_BACKENDS);
+        g::SetMyDatabaseId(5);
+        let imp = my_backend();
+        ISO_USES_XACT_SNAPSHOT.set(true);
+
+        ImportSnapshot(&name2).unwrap();
+        assert_eq!(procarray::TransactionXmin(), src_xmin);
+        assert_eq!(
+            lmgr_proc::GetPGProcByNumber(imp).xmin.read(),
+            src_xmin,
+            "imported xmin must be pinned in the importer's PGPROC"
+        );
+        end_xact();
+
+        // The exporter's virtual transaction "ends" (new lxid): the same
+        // file must now be rejected — C's ImportedXmin identity check.
+        lmgr_proc::GetPGProcByNumber(me).vxid.lxid.store(6263, Relaxed);
+        let err = ImportSnapshot(&name2).unwrap_err();
+        assert!(
+            err.message.contains("could not import the requested snapshot"),
+            "unexpected: {}",
+            err.message
+        );
+        let detail = format!("{err:?}");
+        assert!(
+            detail.contains("is not running anymore."),
+            "unexpected detail: {detail}"
+        );
+        end_xact();
+        ISO_USES_XACT_SNAPSHOT.set(false);
+    });
+    importer.join().unwrap();
+
+    // Source cleanup: drop the exported snapshot's file with the xact.
+    end_xact();
 }

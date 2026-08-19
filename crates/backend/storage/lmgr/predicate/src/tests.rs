@@ -1,9 +1,9 @@
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering::SeqCst};
 use std::sync::mpsc;
-use std::sync::{Mutex, MutexGuard, Once};
+use std::sync::{Mutex, MutexGuard, Once, OnceLock};
 
 use init_small::globals as g;
-use types_core::BackendType;
+use types_core::{BackendType, ProcNumber};
 
 use crate::internals::*;
 
@@ -45,6 +45,11 @@ fn setup() {
     static SETUP: Once = Once::new();
     SETUP.call_once(|| {
         thread_globals();
+
+        // The pg_serial SLRU writes segment files relative to the datadir.
+        let tmp = std::env::temp_dir().join(format!("predicate_test_{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("pg_serial")).unwrap();
+        std::env::set_current_dir(&tmp).unwrap();
 
         pg_sema_seams::pg_semaphore_create::set(|_| {});
         pg_sema_seams::pg_semaphore_reset::set(|_| {});
@@ -107,6 +112,52 @@ fn setup() {
         shmem_seams::shmem_alloc::set(|size| {
             Ok(Box::leak(vec![0u8; size].into_boxed_slice()).as_mut_ptr())
         });
+        shmem_seams::shmem_init_struct::set(|name, size| {
+            static REG: OnceLock<Mutex<std::collections::HashMap<String, usize>>> =
+                OnceLock::new();
+            let mut reg = REG.get_or_init(|| Mutex::new(Default::default())).lock().unwrap();
+            if let Some(&addr) = reg.get(name) {
+                return Ok((std::ptr::with_exposed_provenance_mut(addr), true));
+            }
+            let layout = std::alloc::Layout::from_size_align(size, 128).unwrap();
+            let p = unsafe { std::alloc::alloc_zeroed(layout) };
+            assert!(!p.is_null());
+            reg.insert(name.to_string(), p.expose_provenance());
+            Ok((p, false))
+        });
+
+        // pg_serial SLRU I/O.
+        file_seams::open_transient_file::set(|name, flags| {
+            let c = std::ffi::CString::new(name).unwrap();
+            Ok(unsafe { libc::open(c.as_ptr(), flags, 0o600 as libc::c_uint) })
+        });
+        file_seams::close_transient_file::set(|fd| unsafe { libc::close(fd) });
+        file_seams::pg_fsync::set(|fd| unsafe { libc::fsync(fd) });
+        file_seams::fsync_fname::set(|_, _| Ok(()));
+        file_seams::data_sync_elevel::set(|e| e);
+        file_seams::with_allocated_dir::set(|dirname, cb| {
+            let mut ret = false;
+            for entry in std::fs::read_dir(dirname).unwrap() {
+                ret = cb(entry.unwrap().file_name().to_str().unwrap())?;
+                if ret {
+                    break;
+                }
+            }
+            Ok(ret)
+        });
+        sync_seams::register_sync_request::set(|_, _, _| Ok(true));
+        xlogutils_seams::in_recovery::set(|| false);
+        transam_xlog_seams::xlog_flush::set(|_| Ok(()));
+        transam_xlog_seams::count_ckpt_slru_written::set(|| {});
+        pgstat_seams::pgstat_get_slru_index::set(|_| 0);
+        pgstat_seams::pgstat_count_slru_page_zeroed::set(|_| {});
+        pgstat_seams::pgstat_count_slru_page_hit::set(|_| {});
+        pgstat_seams::pgstat_count_slru_page_read::set(|_| {});
+        pgstat_seams::pgstat_count_slru_page_written::set(|_| {});
+        pgstat_seams::pgstat_count_slru_page_exists::set(|_| {});
+        pgstat_seams::pgstat_count_slru_flush::set(|_| {});
+        pgstat_seams::pgstat_count_slru_truncate::set(|_| {});
+        pgstat_seams::pgstat_count_checkpointer_slru_written::set(|| {});
 
         twophase_seams::register_two_phase_record::set(|rmid, info, data| {
             REGISTERED.lock().unwrap().push((rmid, info, data.to_vec()));
@@ -116,6 +167,10 @@ fn setup() {
         lwlock::CreateLWLocks(false).unwrap();
         lmgr_proc::init_seams();
         lmgr_proc::InitProcGlobal(&CFG);
+        // Real proc array for the snapshot-import lane (its seams stay the
+        // stubs above; the import test adds its source proc directly).
+        varsup::VarsupShmemInit();
+        procarray::ProcArrayShmemInit();
         crate::engine::PredicateLockShmemInit(CFG.max_prepared_xacts).unwrap();
         crate::init_seams();
     });
@@ -420,4 +475,170 @@ fn twophase_recover_rebuilds_sxact_and_lock_then_finish_releases() {
         e.tag.locktag_field1 == TESTDB && e.tag.locktag_field2 == REL_A && e.tag.locktag_field3 == 5
     });
     assert!(!still, "recovered lock should be gone after ROLLBACK PREPARED finish");
+}
+
+// Issue #61 (upstream): when the SERIALIZABLEXACT pool — (MaxBackends +
+// max_prepared_xacts) * 10 slots — is exhausted, a new serializable snapshot
+// must summarize the oldest committed sxact into the pg_serial SLRU and
+// retry, not panic. A pinned old-xmin transaction in a second backend keeps
+// ClearOldPredicateLocks from freeing committed sxacts, so churning
+// committed writers drains the pool.
+#[test]
+fn sxact_exhaustion_summarizes_into_pg_serial() {
+    become_backend();
+    let (_gate, xmin) = exclusive();
+
+    // Registered xids deliberately straddle a pg_serial page boundary
+    // (1024 8-byte entries per page) so SerialAdd's page-advance runs.
+    let cur = NEXT_XID.load(SeqCst);
+    let base = (cur / 1024 + 1) * 1024 - 50;
+    NEXT_XID.store(base + 2000, SeqCst);
+
+    let slots = ((MAX_BACKENDS + CFG.max_prepared_xacts) * 10) as u32;
+    let churn = slots + 64;
+
+    let (to_main, from_pin) = mpsc::channel::<()>();
+    let (to_pin, from_main) = mpsc::channel::<()>();
+    let pin = std::thread::spawn(move || {
+        become_backend();
+        crate::engine::test_acquire_sxact(xmin).unwrap();
+        to_main.send(()).unwrap();
+        from_main.recv().unwrap();
+        crate::engine::ReleasePredicateLocks(false, false).unwrap();
+        to_main.send(()).unwrap();
+    });
+    from_pin.recv().unwrap();
+
+    let snap = mvcc_snapshot();
+    for i in 0..churn {
+        crate::engine::test_acquire_sxact(xmin).unwrap();
+        crate::engine::RegisterPredicateLockingXid(base + 1 + i).unwrap();
+        // A SIREAD lock for the summarize path to hand to OldCommittedSxact.
+        crate::engine::PredicateLockPage(TESTDB, 30031, false, 1, &snap).unwrap();
+        // Write a never-read relation: DidWrite without any rw-conflict.
+        crate::engine::CheckForSerializableConflictIn(TESTDB, 30032, false, Some((1, 1)), 1)
+            .unwrap();
+        crate::engine::PreCommit_CheckForSerializationFailure().unwrap();
+        crate::engine::ReleasePredicateLocks(true, false).unwrap();
+    }
+
+    // The overflow drove summaries into pg_serial: the window is
+    // [tailXid = pinned xmin, headXid = newest summarized xid].
+    let (head_page, head_xid, tail_xid) = crate::serial::test_serial_state();
+    assert!(head_page >= 0, "pg_serial never took a summary");
+    assert_eq!(tail_xid, xmin);
+    assert!(types_core::TransactionIdFollowsOrEquals(head_xid, base + 1));
+    assert!(types_core::TransactionIdPrecedes(head_xid, base + 1 + churn));
+
+    // The first churned xact was summarized first; it had no conflict out,
+    // so its stored value is InvalidSerCommitSeqNo. Past the head: 0.
+    assert_eq!(
+        crate::serial::SerialGetMinConflictCommitSeqNo(base + 1).unwrap(),
+        InvalidSerCommitSeqNo
+    );
+    assert_eq!(
+        crate::serial::SerialGetMinConflictCommitSeqNo(head_xid + 1).unwrap(),
+        0
+    );
+
+    // Checkpoint keeps the live window but flushes dirty pages to disk.
+    crate::serial::CheckPointPredicate().unwrap();
+    assert!(
+        std::path::Path::new("pg_serial/0000").exists(),
+        "checkpoint did not flush the pg_serial segment"
+    );
+    assert!(crate::serial::test_serial_state().0 >= 0);
+
+    // Drop the pin: SxactGlobalXmin goes invalid, the window empties, and
+    // the next checkpoint retires headPage.
+    to_pin.send(()).unwrap();
+    from_pin.recv().unwrap();
+    pin.join().unwrap();
+
+    let (_, head_xid2, tail_xid2) = crate::serial::test_serial_state();
+    assert!(!types_core::TransactionIdIsValid(head_xid2));
+    assert!(!types_core::TransactionIdIsValid(tail_xid2));
+    crate::serial::CheckPointPredicate().unwrap();
+    assert_eq!(crate::serial::test_serial_state().0, -1);
+    assert_eq!(crate::serial::SerialGetMinConflictCommitSeqNo(base + 1).unwrap(), 0);
+
+    // Pool fully recovered: a fresh acquire works without summarization.
+    crate::engine::test_acquire_sxact(NEXT_XID.load(SeqCst)).unwrap();
+    crate::engine::ReleasePredicateLocks(false, false).unwrap();
+}
+
+// Issue #62 (upstream): SET TRANSACTION SNAPSHOT into a SERIALIZABLE
+// transaction — GetSerializableTransactionSnapshotInt's sourcevxid arm. The
+// import must build a SERIALIZABLEXACT on the source's snapshot (installing
+// its xmin via ProcArrayInstallImportedXmin, C does this a second time after
+// snapmgr), and a vanished source must be a normal ERROR, not a panic.
+#[test]
+fn serializable_snapshot_import_builds_sxact_on_source_xmin() {
+    become_backend();
+    let (_gate, xmin) = exclusive();
+    const SOURCE_LXID: u32 = 90062;
+    const SOURCE_PID: i32 = 62062;
+
+    // Source backend: advertises vxid + xmin in the proc array, then stays
+    // alive until told to leave (as pg_export_snapshot's session would).
+    let (to_main, from_src) = mpsc::channel::<ProcNumber>();
+    let (to_src, from_main) = mpsc::channel::<()>();
+    let src = std::thread::spawn(move || {
+        become_backend();
+        let procno = lmgr_proc::MyProc().unwrap();
+        let p = lmgr_proc::GetPGProcByNumber(procno);
+        p.vxid.procNumber.store(procno, SeqCst);
+        p.vxid.lxid.store(SOURCE_LXID, SeqCst);
+        p.databaseId.store(TESTDB, SeqCst);
+        p.xmin.value.store(xmin, SeqCst);
+        procarray::ProcArrayAdd(procno).unwrap();
+        to_main.send(procno).unwrap();
+        from_main.recv().unwrap();
+        procarray::ProcArrayRemove(procno, types_core::InvalidTransactionId).unwrap();
+        to_main.send(procno).unwrap();
+    });
+    let src_procno = from_src.recv().unwrap();
+    let vxid = types_core::VirtualTransactionId {
+        procNumber: src_procno,
+        localTransactionId: SOURCE_LXID,
+    };
+
+    // The issue #62 path: import the source's snapshot xmin.
+    crate::engine::SetSerializableTransactionSnapshot(xmin, Some(vxid), SOURCE_PID).unwrap();
+
+    unsafe {
+        let mysx = crate::engine::test_my_sxact();
+        assert!(mysx != InvalidSerializableXact, "import must establish a SERIALIZABLEXACT");
+        assert_eq!((*mysx).xmin, xmin);
+    }
+    assert_eq!(procarray::TransactionXmin(), xmin, "imported xmin must be installed");
+    crate::engine::ReleasePredicateLocks(false, false).unwrap();
+
+    // A stale lxid is "source not running": ERROR, with no sxact leaked.
+    let stale = types_core::VirtualTransactionId {
+        procNumber: src_procno,
+        localTransactionId: SOURCE_LXID + 1,
+    };
+    let err = crate::engine::SetSerializableTransactionSnapshot(xmin, Some(stale), SOURCE_PID)
+        .unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(msg.contains("could not import the requested snapshot"), "got: {msg}");
+    assert!(
+        msg.contains(&format!(
+            "The source process with PID {SOURCE_PID} is not running anymore."
+        )),
+        "got: {msg}"
+    );
+    assert_eq!(crate::engine::test_my_sxact(), InvalidSerializableXact);
+
+    // Source session gone entirely: same ERROR arm.
+    to_src.send(()).unwrap();
+    from_src.recv().unwrap();
+    src.join().unwrap();
+    let err = crate::engine::SetSerializableTransactionSnapshot(xmin, Some(vxid), SOURCE_PID)
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("could not import the requested snapshot"),
+        "vanished source must be a normal error"
+    );
 }
