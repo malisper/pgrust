@@ -29,8 +29,8 @@ use types_core::{
     VirtualTransactionId,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OUT_OF_MEMORY,
-    ERRCODE_T_R_SERIALIZATION_FAILURE,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ERRCODE_OUT_OF_MEMORY, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use types_hash::hsearch::{
     HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_ENTER, HASH_ENTER_NULL, HASH_FIND, HASH_FIXED_SIZE,
@@ -641,17 +641,17 @@ pub fn GetSerializableTransactionSnapshot<'m>(
         return GetSafeSnapshot(snapshot, mcx);
     }
 
-    GetSerializableTransactionSnapshotInt(snapshot, mcx)
+    GetSerializableTransactionSnapshotInt(IntSnapshotSource::Fresh(snapshot, mcx))
 }
 
 // SetSerializableTransactionSnapshot (predicate.c): in a parallel worker the
 // leader's SERIALIZABLEXACT arrives via AttachSerializableXact, so there is
 // nothing to do here (nor is READ ONLY DEFERRABLE rejected — the leader
-// already determined its snapshot is safe).
+// already determined that the snapshot it passed us is safe).
 pub fn SetSerializableTransactionSnapshot(
-    _snapshot_xmin: TransactionId,
-    _sourcevxid: Option<VirtualTransactionId>,
-    _sourcepid: i32,
+    snapshot_xmin: TransactionId,
+    sourcevxid: Option<VirtualTransactionId>,
+    sourcepid: i32,
 ) -> PgResult<()> {
     debug_assert!(xact_seams::isolation_is_serializable::call());
 
@@ -659,6 +659,8 @@ pub fn SetSerializableTransactionSnapshot(
         return Ok(());
     }
 
+    // No importing into SERIALIZABLE READ ONLY DEFERRABLE: there is no way
+    // to wait for a safe snapshot when we're using the snap we're told to.
     if xact_seams::xact_read_only::call() && xact_seams::xact_deferrable::call() {
         return Err(Box::new(
             PgError::error("a snapshot-importing transaction must not be READ ONLY DEFERRABLE")
@@ -666,7 +668,17 @@ pub fn SetSerializableTransactionSnapshot(
         ));
     }
 
-    panic!("predicate.c SetSerializableTransactionSnapshot: snapshot import into a serializable transaction is not ported");
+    // C's NULL-vxid fallthrough would take a fresh snapshot, but every
+    // non-parallel-worker caller is the snapshot-import lane, which always
+    // carries the source vxid.
+    let sourcevxid = sourcevxid.unwrap_or_else(|| {
+        panic!("SetSerializableTransactionSnapshot without a source vxid outside a parallel worker")
+    });
+    GetSerializableTransactionSnapshotInt(IntSnapshotSource::Import {
+        snapshot_xmin,
+        sourcevxid,
+        sourcepid,
+    })
 }
 
 pub fn ShareSerializableXact() -> usize {
@@ -735,7 +747,7 @@ fn GetSafeSnapshot<'m>(snapshot: &mut SnapshotData<'m>, mcx: mcx::Mcx<'m>) -> Pg
     debug_assert!(xact_seams::xact_read_only::call() && xact_seams::xact_deferrable::call());
 
     loop {
-        GetSerializableTransactionSnapshotInt(snapshot, mcx)?;
+        GetSerializableTransactionSnapshotInt(IntSnapshotSource::Fresh(snapshot, mcx))?;
 
         if MySerializableXact() == InvalidSerializableXact {
             return Ok(()); // no concurrent r/w xacts; it's safe
@@ -775,10 +787,20 @@ fn GetSafeSnapshot<'m>(snapshot: &mut SnapshotData<'m>, mcx: mcx::Mcx<'m>) -> Pg
     Ok(())
 }
 
-fn GetSerializableTransactionSnapshotInt<'m>(
-    snapshot: &mut SnapshotData<'m>,
-    mcx: mcx::Mcx<'m>,
-) -> PgResult<()> {
+// C's Int takes (snapshot, sourcevxid, sourcepid); sourcevxid set means an
+// import (SET TRANSACTION SNAPSHOT): skip GetSnapshotData — the contents are
+// already loaded — but re-check the source xact is still running once
+// SerializableXactHashLock is held.
+enum IntSnapshotSource<'a, 'm> {
+    Fresh(&'a mut SnapshotData<'m>, mcx::Mcx<'m>),
+    Import {
+        snapshot_xmin: TransactionId,
+        sourcevxid: VirtualTransactionId,
+        sourcepid: i32,
+    },
+}
+
+fn GetSerializableTransactionSnapshotInt(source: IntSnapshotSource<'_, '_>) -> PgResult<()> {
     unsafe {
         debug_assert!(MySerializableXact() == InvalidSerializableXact);
         debug_assert!(!recovery_in_progress());
@@ -802,7 +824,27 @@ fn GetSerializableTransactionSnapshotInt<'m>(
             sxact = CreatePredXact();
         }
 
-        procarray::GetSnapshotData(snapshot, mcx)?;
+        // Get the snapshot, or check that it's safe to use.
+        let snapshot_xmin = match source {
+            IntSnapshotSource::Fresh(snapshot, mcx) => {
+                procarray::GetSnapshotData(snapshot, mcx)?;
+                snapshot.xmin
+            }
+            IntSnapshotSource::Import { snapshot_xmin, sourcevxid, sourcepid } => {
+                if !procarray::ProcArrayInstallImportedXmin(snapshot_xmin, Some(&sourcevxid))? {
+                    ReleasePredXact(sxact);
+                    LWLockRelease(SerializableXactHashLock())?;
+                    return Err(Box::new(
+                        PgError::error("could not import the requested snapshot")
+                            .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                            .with_detail(format!(
+                                "The source process with PID {sourcepid} is not running anymore."
+                            )),
+                    ));
+                }
+                snapshot_xmin
+            }
+        };
 
         let px = shared().pred_xact;
         let read_only = xact_seams::xact_read_only::call();
@@ -822,7 +864,7 @@ fn GetSerializableTransactionSnapshotInt<'m>(
         dlist_init(&raw mut (*sxact).possibleUnsafeConflicts);
         (*sxact).topXid = xact_seams::get_top_transaction_id_if_any::call();
         (*sxact).finishedBefore = InvalidTransactionId;
-        (*sxact).xmin = snapshot.xmin;
+        (*sxact).xmin = snapshot_xmin;
         (*sxact).pid = init_small::globals::MyProcPid();
         (*sxact).pgprocno = procno;
         dlist_init(&raw mut (*sxact).predicateLocks);
@@ -863,14 +905,14 @@ fn GetSerializableTransactionSnapshotInt<'m>(
 
         if !TransactionIdIsValid((*px).SxactGlobalXmin) {
             debug_assert!((*px).SxactGlobalXminCount == 0);
-            (*px).SxactGlobalXmin = snapshot.xmin;
+            (*px).SxactGlobalXmin = snapshot_xmin;
             (*px).SxactGlobalXminCount = 1;
-            SerialSetActiveSerXmin(snapshot.xmin)?;
-        } else if TransactionIdEquals(snapshot.xmin, (*px).SxactGlobalXmin) {
+            SerialSetActiveSerXmin(snapshot_xmin)?;
+        } else if TransactionIdEquals(snapshot_xmin, (*px).SxactGlobalXmin) {
             debug_assert!((*px).SxactGlobalXminCount > 0);
             (*px).SxactGlobalXminCount += 1;
         } else {
-            debug_assert!(TransactionIdFollows(snapshot.xmin, (*px).SxactGlobalXmin));
+            debug_assert!(TransactionIdFollows(snapshot_xmin, (*px).SxactGlobalXmin));
         }
 
         set_MySerializableXact(sxact);

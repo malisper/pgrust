@@ -510,10 +510,15 @@ pub fn RestoreTransactionSnapshot(
     snapshot: &SerializedSnapshot,
     source_proc: ProcNumber,
 ) -> PgResult<()> {
-    SetTransactionSnapshot(snapshot, source_proc)
+    SetTransactionSnapshot(snapshot, None, 0, Some(source_proc))
 }
 
-fn SetTransactionSnapshot(sourcesnap: &SerializedSnapshot, source_proc: ProcNumber) -> PgResult<()> {
+fn SetTransactionSnapshot(
+    sourcesnap: &SerializedSnapshot,
+    sourcevxid: Option<&types_core::VirtualTransactionId>,
+    sourcepid: i32,
+    sourceproc: Option<ProcNumber>,
+) -> PgResult<()> {
     with_state(|s| {
         debug_assert!(!s.first_snapshot_set);
         invalidate_catalog_snapshot_locked(s);
@@ -540,11 +545,27 @@ fn SetTransactionSnapshot(sourcesnap: &SerializedSnapshot, source_proc: ProcNumb
             Ok(())
         })?;
 
-        if !procarray::ProcArrayInstallRestoredXmin(current.xmin, source_proc)? {
+        // Fix what GetSnapshotData did with MyProc->xmin and TransactionXmin,
+        // atomically with checking the source xact is still running (so the
+        // global xmin can't go backwards); procarray does it. In serializable
+        // mode, predicate.c does this a second time (C keeps both calls).
+        if let Some(source_proc) = sourceproc {
+            if !procarray::ProcArrayInstallRestoredXmin(current.xmin, source_proc)? {
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .errmsg("could not import the requested snapshot")
+                    .errdetail("The source transaction is not running anymore.")
+                    .into_error()
+                    .with_error_location(loc("SetTransactionSnapshot"))
+                    .into());
+            }
+        } else if !procarray::ProcArrayInstallImportedXmin(current.xmin, sourcevxid)? {
             return Err(ereport(ERROR)
                 .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                 .errmsg("could not import the requested snapshot")
-                .errdetail("The source transaction is not running anymore.")
+                .errdetail(format!(
+                    "The source process with PID {sourcepid} is not running anymore."
+                ))
                 .into_error()
                 .with_error_location(loc("SetTransactionSnapshot"))
                 .into());
@@ -554,8 +575,8 @@ fn SetTransactionSnapshot(sourcesnap: &SerializedSnapshot, source_proc: ProcNumb
             if xact_seams::isolation_is_serializable::call() {
                 predicate_seams::set_serializable_transaction_snapshot::call(
                     current.xmin,
-                    None,
-                    0,
+                    sourcevxid.copied(),
+                    sourcepid,
                 )?;
             }
             let copy = copy_snapshot_locked(s, &current);
@@ -1112,8 +1133,8 @@ pub fn ImportSnapshot(idstr: &str) -> PgResult<()> {
     let vxid_raw = field("vxid:")?;
     let (src_procno_s, src_lxid_s) = vxid_raw.split_once('/').ok_or_else(invalid)?;
     let src_procno: i32 = src_procno_s.parse().map_err(|_| invalid())?;
-    let src_lxid: u64 = src_lxid_s.parse().map_err(|_| invalid())?;
-    let _src_pid: i64 = field("pid:")?.parse().map_err(|_| invalid())?;
+    let src_lxid: types_core::LocalTransactionId = src_lxid_s.parse().map_err(|_| invalid())?;
+    let src_pid: i32 = field("pid:")?.parse().map_err(|_| invalid())?;
     let src_dbid: types_core::Oid = field("dbid:")?.parse().map_err(|_| invalid())?;
     let src_isolevel: i32 = field("iso:")?.parse().map_err(|_| invalid())?;
     let src_readonly: i32 = field("ro:")?.parse().map_err(|_| invalid())?;
@@ -1194,7 +1215,11 @@ pub fn ImportSnapshot(idstr: &str) -> PgResult<()> {
         curcid: types_core::FirstCommandId,
         vistest: GlobalVisStateHandle::new(0),
     };
-    SetTransactionSnapshot(&snapshot, src_procno)
+    let sourcevxid = types_core::VirtualTransactionId {
+        procNumber: src_procno,
+        localTransactionId: src_lxid,
+    };
+    SetTransactionSnapshot(&snapshot, Some(&sourcevxid), src_pid, None)
 }
 
 pub fn ThereAreNoPriorRegisteredSnapshots() -> bool {
