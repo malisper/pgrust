@@ -537,3 +537,65 @@ fn run_merge_degenerate_shapes() {
     assert_eq!(merged[0].block, 3);
     assert_eq!(merged[1].block, 9);
 }
+
+// ---------------------------------------------------------------------------
+// 5. §5.2 recovery vs the leader's round consumption (upstream issue #66)
+// ---------------------------------------------------------------------------
+
+// On a coverage trip the resume point rewinds below work other workers
+// already completed, and the serial arm re-scans from there. Re-pruning a
+// pruned page re-collects the same LP_DEAD items, and dead_items_add's
+// num_items accounting is add-not-replace: any dead run or deferred-cleanup
+// page at/above the rewound resume point that the leader also consumes in
+// the round is counted twice — debug builds trip collect_dead_tids'
+// num_items assert, release builds silently misreport dead tuples.
+#[test]
+fn coverage_trip_drops_round_work_above_the_rewound_resume() {
+    // Identity granule->block mapping (no skips). Worker 0 owned [3,5) and
+    // is LOST (§9 lose-local). Worker 1 scanned [0,3): a dead run below the
+    // hole plus a deferred page below it. Worker 2 scanned [5,8): a dead
+    // run and a deferred blocking-cleanup page ABOVE the hole.
+    let mut w1 = VacScanLocal::new(1, 1000, 1000);
+    w1.claims = vec![ClaimRecord { start: 0, end: 3, scanned: true }];
+    w1.record_dead(1, vec![1, 2]);
+    w1.deferred_cleanup.push(2);
+    let mut w2 = VacScanLocal::new(2, 1000, 1000);
+    w2.claims = vec![ClaimRecord { start: 5, end: 8, scanned: true }];
+    w2.record_dead(6, vec![3]);
+    w2.deferred_cleanup.push(7);
+    let locals = vec![w1, w2];
+
+    let total = 8;
+    let mut resume = resume_granule(&locals, total);
+    assert_eq!(resume, 8, "no no-op'd claims: the lost Local leaves a silent hole");
+    let err = verify_prefix_coverage(&locals, resume).unwrap_err();
+    assert_eq!(err, CoverageError::HoleAt(3));
+    // The documented §5.2 recovery (morsels.rs scan_rounds): rewind to the
+    // hole and hand [resume, ...) to the serial arm.
+    resume = match err {
+        CoverageError::HoleAt(g) | CoverageError::OverlapAt(g) => g.min(resume),
+        CoverageError::ScannedBeyondResume { .. } => resume,
+    };
+    assert_eq!(resume, 3);
+    let resume_bound = resume as u32;
+
+    // The leader's round consumption, as morsels.rs builds it today.
+    let runs = merge_dead_runs(&locals);
+    let mut deferred: Vec<u32> =
+        locals.iter().flat_map(|l| l.deferred_cleanup.iter().copied()).collect();
+    deferred.sort_unstable();
+
+    // Work below the hole is the round's to keep: the serial arm never
+    // revisits it.
+    assert!(runs.iter().any(|r| r.block == 1));
+    assert!(deferred.contains(&2));
+    // Work at/above the rewound resume point belongs to the serial re-scan.
+    assert!(
+        runs.iter().all(|r| r.block < resume_bound),
+        "dead runs at/above the resume point double-count num_items once the serial arm re-prunes them"
+    );
+    assert!(
+        deferred.iter().all(|&b| b < resume_bound),
+        "deferred pages at/above the resume point double-count num_items once the serial arm re-prunes them"
+    );
+}
