@@ -2,9 +2,8 @@
 // global shmem/dynahash/LWLock substrate — same adaptation as lock/shared.rs:
 // one address space, structures behind a OnceLock, C's LWLock discipline kept.
 //
-// LOUD (not ported): DEFERRABLE safe snapshots (GetSafeSnapshot), snapshot
-// import (SetSerializableTransactionSnapshot), parallel-query sharing, 2PC
-// lock transfer.
+// LOUD (not ported): DEFERRABLE safe snapshots (GetSafeSnapshot),
+// parallel-query sharing, 2PC lock transfer.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]

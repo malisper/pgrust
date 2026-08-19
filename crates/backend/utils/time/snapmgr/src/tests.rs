@@ -3,7 +3,8 @@ use init_small::globals as g;
 use std::sync::{Mutex, Once};
 use types_core::{BackendType, ProcNumber};
 
-const MAX_CONNECTIONS: i32 = 16;
+// +2 headroom: the import test spawns a second (importer) backend thread.
+const MAX_CONNECTIONS: i32 = 18;
 const MAX_WORKER_PROCESSES: i32 = 2;
 const NUM_SPECIAL: i32 = 2;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
