@@ -42,7 +42,12 @@ Claims are made at three levels, each with its own evidence:
   no-drop node trees, enum dispatch instead of function pointers,
   resolve-once carriers, thread-per-backend instead of process-per-backend.
   Deviations from C's shape are taken only when they are the *reason* we
-  can be faster, and are proven by benchmark.
+  can be faster, and are proven by benchmark. Thread-per-backend changes
+  the crash-isolation contract — caught panics get C's full
+  SIGQUIT-and-reset choreography in-process, but memory-unsafety signals
+  kill the whole server and an external supervisor must restart it; the
+  contract, its torn-state reasoning, and its tests are documented in
+  `docs/crash-isolation.md`.
 - Anything unported fails loudly with a named panic — no silent wrong
   answers, ever. The frontier of named panics is the work queue.
 - When a unit loses to C, the loss is attributed at the assembly level and
