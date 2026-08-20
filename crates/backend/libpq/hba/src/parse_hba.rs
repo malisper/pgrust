@@ -932,18 +932,12 @@ pub(crate) fn parse_hba_auth_opt(
             }
             hbaline.pam_use_hostname = val == "1";
         }
-        "ldapurl" => invalid_auth_option!("ldapurl", "ldap"),
-        "ldaptls" => invalid_auth_option!("ldaptls", "ldap"),
-        "ldapscheme" => invalid_auth_option!("ldapscheme", "ldap"),
-        "ldapserver" => invalid_auth_option!("ldapserver", "ldap"),
-        "ldapport" => invalid_auth_option!("ldapport", "ldap"),
-        "ldapbinddn" => invalid_auth_option!("ldapbinddn", "ldap"),
-        "ldapbindpasswd" => invalid_auth_option!("ldapbindpasswd", "ldap"),
-        "ldapsearchattribute" => invalid_auth_option!("ldapsearchattribute", "ldap"),
-        "ldapsearchfilter" => invalid_auth_option!("ldapsearchfilter", "ldap"),
-        "ldapbasedn" => invalid_auth_option!("ldapbasedn", "ldap"),
-        "ldapprefix" => invalid_auth_option!("ldapprefix", "ldap"),
-        "ldapsuffix" => invalid_auth_option!("ldapsuffix", "ldap"),
+        // NB: the ldap* options are handled in full by the arms above, whose
+        // require_auth_option!(uaLDAP, ...) already emits the identical
+        // invalid_auth_option!(opt, "ldap") when the method is not LDAP. The
+        // duplicate reject-only arms that used to live here (a leftover from
+        // before the LDAP leg was ported) were dead code — a newer rustc flags
+        // them as unreachable and the lint gate rejects them tree-wide.
         // gssapi and sspi in C; sspi is rejected at method parse here.
         "krb_realm" => {
             if hbaline.auth_method != types_core::init::uaGSS {
