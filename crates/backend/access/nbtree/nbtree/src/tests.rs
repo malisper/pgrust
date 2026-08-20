@@ -1610,3 +1610,83 @@ fn upgrademetapage_lifts_v2_meta_to_novac_v3() {
     pin.release();
     assert_eq!(PINS.with(Cell::get), 0);
 }
+
+/// Regression for the CRITICAL parallel-scan uninterruptible-park hang: a
+/// worker parked in `bt_parallel_seize`'s Advancing arm must be able to
+/// observe a leader-initiated die and unwind, even though the error/unwind
+/// path never reaches `bt_parallel_release`/`bt_parallel_done` and therefore
+/// never bumps the parklot epoch to wake it.
+///
+/// This transcribes the Advancing-arm wait loop (the same shape the loom
+/// models `relscan_seize_release_wake_never_lost` transcribe, since the real
+/// `bt_parallel_seize` needs Relation machinery no unit test can build) over
+/// the REAL `types_relscan::BTParallelScanShared`, using the interruptible
+/// `park_timeout` + a die poll — exactly what production's `park_timeout(seen,
+/// SEIZE_PARK_POLL)` followed by `crate::check_for_interrupts()?` does over
+/// `init_small::globals::InterruptPending`. The leader sets the die flag
+/// WITHOUT touching the shared state, so nothing bumps the epoch; the seizer
+/// must still wake and unwind.
+///
+/// Pre-fix (bare `ParkLot::park`) the parked seizer would never wake and this
+/// test's `join()` would hang forever — the deadlock the fix removes. The
+/// concurrency proof of the same property lives in the loom model
+/// `relscan_seize_die_interrupt_wakes_waiter` (runtime/tests/loom.rs).
+#[test]
+fn parallel_seize_park_is_interruptible_on_die() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use ::types_relscan::{BTParallelScanShared, BtPsState};
+
+    // Short poll in the test; production uses parallel.rs::SEIZE_PARK_POLL.
+    const POLL: core::time::Duration = core::time::Duration::from_millis(5);
+
+    let sh = Arc::new(BTParallelScanShared::new());
+    // A winner backend is advancing the scan; our seizer parks on Advancing.
+    sh.state.lock().unwrap().page_status = BtPsState::Advancing;
+
+    // The per-worker die flag the seizer polls after each bounded park (the
+    // InterruptPending stand-in; check_for_interrupts turns it into a FATAL).
+    let die = Arc::new(AtomicBool::new(false));
+
+    let seizer = {
+        let sh = Arc::clone(&sh);
+        let die = Arc::clone(&die);
+        std::thread::spawn(move || -> Result<(), ()> {
+            loop {
+                let (st, seen) = {
+                    let g = sh.state.lock().unwrap_or_else(|e| e.into_inner());
+                    (g.page_status, sh.lot.epoch())
+                };
+                match st {
+                    BtPsState::Advancing => {
+                        // The interruptible park: bounded wait, then poll the
+                        // die flag (== production's check_for_interrupts()?).
+                        sh.lot.park_timeout(seen, POLL);
+                        if die.load(Ordering::SeqCst) {
+                            return Err(()); // the FATAL unwind
+                        }
+                    }
+                    BtPsState::Done => return Ok(()),
+                    other => unreachable!("model never enters {other:?}"),
+                }
+            }
+        })
+    };
+
+    // Leader error-unwind: ask the worker to die, WITHOUT bumping the epoch
+    // (the general error path never reaches bt_parallel_done). A bare park
+    // would strand the seizer here forever.
+    std::thread::sleep(core::time::Duration::from_millis(20));
+    die.store(true, Ordering::SeqCst);
+
+    let got = seizer.join().expect("seizer thread did not panic");
+    assert_eq!(got, Err(()), "parked seizer observed the die and unwound");
+    // The die path never touched shared state, so the wake came purely from
+    // the interruptible park's timeout poll — not from an epoch bump.
+    assert_eq!(
+        sh.state.lock().unwrap().page_status,
+        BtPsState::Advancing,
+        "shared state untouched: the seizer woke via interruptibility, not a release/done"
+    );
+}

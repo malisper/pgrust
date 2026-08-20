@@ -367,6 +367,37 @@ impl ParkLot {
         }
     }
 
+    /// Interruptible-park sibling of [`ParkLot::park`]: waits like `park`, but
+    /// returns after at most `timeout` even when the epoch is still `seen`, so
+    /// the caller can poll a condition this primitive itself cannot see. This
+    /// is the pgrust analog of C's `ConditionVariableSleep`, whose `WaitLatch`
+    /// timeout + `CHECK_FOR_INTERRUPTS` let a parked parallel worker observe a
+    /// leader-initiated die/cancel: our eventcount condvar is not wired to a
+    /// backend's latch, so a bounded wait is what lets the parker come up for
+    /// air and re-check its own interrupt state (the caller runs its
+    /// `check_for_interrupts` after we return).
+    ///
+    /// Returns on epoch change past `seen`, on timeout, or spuriously — the
+    /// caller re-checks its real condition and re-parks, exactly as `park`'s
+    /// own loop does. Every out-of-`seen` transition still bumps the epoch and
+    /// notifies (`wake_all`/`wake_legacy`), so the timeout is a liveness floor,
+    /// never the primary wake path of a legitimate park. The no-lost-wakeup
+    /// guarantee is preserved identically to `park`: the pre-wait epoch recheck
+    /// is under `m`, and `legacy_parked` is maintained across the wait so a
+    /// concurrent `wake_all`/`wake_legacy` still counts and notifies this
+    /// parker.
+    pub fn park_timeout(&self, seen: u64, timeout: core::time::Duration) {
+        let g = lock(&self.m);
+        if self.epoch.load(atomic::Ordering::SeqCst) != seen {
+            return;
+        }
+        self.legacy_parked.fetch_add(1, atomic::Ordering::SeqCst);
+        let (g2, _res) =
+            self.cv.wait_timeout(g, timeout).unwrap_or_else(|e| e.into_inner());
+        self.legacy_parked.fetch_sub(1, atomic::Ordering::SeqCst);
+        drop(g2);
+    }
+
     pub fn wake_all(&self) {
         // Bump BEFORE the mutex (see the struct doc's lost-wakeup argument).
         self.epoch.fetch_add(1, atomic::Ordering::SeqCst);
@@ -554,5 +585,50 @@ impl ParkLot {
 impl Default for ParkLot {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(test, not(any(loom, pgrust_sim))))]
+mod parklot_tests {
+    use super::ParkLot;
+
+    /// `park_timeout` must RETURN on its timeout even when the epoch is never
+    /// bumped — the property that makes a parked parallel seizer interruptible
+    /// (a bare `park` would block forever here). This is the primitive behind
+    /// the fix for the CRITICAL parallel-scan uninterruptible-park hang.
+    #[test]
+    fn park_timeout_returns_without_a_wake() {
+        let lot = ParkLot::new();
+        let seen = lot.epoch();
+        let start = std::time::Instant::now();
+        // No other thread ever wakes the lot; only the timeout can return us.
+        lot.park_timeout(seen, core::time::Duration::from_millis(20));
+        assert!(
+            start.elapsed() < core::time::Duration::from_secs(5),
+            "park_timeout returned via its timeout, not blocked forever"
+        );
+        assert_eq!(lot.epoch(), seen, "epoch untouched: return was the timeout");
+    }
+
+    /// `park_timeout` still honours the no-lost-wakeup contract: an epoch bump
+    /// by `wake_all` returns it just like `park`. Uses a long timeout so the
+    /// wake (not the timeout) is what frees the parker.
+    #[test]
+    fn park_timeout_is_woken_by_wake_all() {
+        use std::sync::Arc;
+        let lot = Arc::new(ParkLot::new());
+        let seen = lot.epoch();
+        let t = {
+            let lot = Arc::clone(&lot);
+            std::thread::spawn(move || {
+                lot.park_timeout(seen, core::time::Duration::from_secs(30));
+            })
+        };
+        // Give the parker time to enter the wait, then wake it.
+        std::thread::sleep(core::time::Duration::from_millis(50));
+        lot.wake_all();
+        t.join().expect("parker woke on the epoch bump and returned");
+        assert_ne!(lot.epoch(), seen, "wake_all bumped the epoch");
+        assert!(lot.unparks() >= 1, "wake_all counted the park_timeout parker");
     }
 }

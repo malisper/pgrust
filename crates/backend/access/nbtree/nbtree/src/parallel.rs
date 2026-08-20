@@ -17,6 +17,14 @@ fn lock(shared: &BTParallelScanShared) -> pgsync::MutexGuard<'_, BtParallelScanS
     shared.state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Poll cadence for the interruptible seize park (see `bt_parallel_seize`'s
+/// Advancing arm). A parked seizer is normally woken by another participant's
+/// `wake_all` (release/done) long before this fires; the timeout only bounds
+/// how long a seizer can stay parked before it re-checks for a pending
+/// die/cancel that the error-unwind path never delivers as an epoch bump —
+/// the pgrust stand-in for C's latch-driven `ConditionVariableSleep` wakeup.
+const SEIZE_PARK_POLL: core::time::Duration = core::time::Duration::from_millis(10);
+
 /// btparallelrescan.
 pub fn btparallelrescan(shared: &BTParallelScanShared) {
     let mut g = lock(shared);
@@ -81,9 +89,22 @@ pub(crate) fn bt_parallel_seize(
                 // transition bumps it strictly after its own state change),
                 // release the lock, park. Spurious/early returns are safe:
                 // the loop re-reads page_status under the re-taken lock.
+                //
+                // Interruptible park (matches C's _bt_parallel_seize, whose
+                // ConditionVariableSleep wakes on the process latch and runs
+                // CHECK_FOR_INTERRUPTS on every wakeup/timeout): a bounded
+                // park + check_for_interrupts here is what lets a parked
+                // seizer observe a leader-initiated die/cancel and exit,
+                // instead of blocking forever on an epoch bump that the
+                // error-unwind path never delivers. Our eventcount condvar is
+                // not wired to the backend latch, so the timeout is the poll
+                // that brings the parker up for air; check_for_interrupts()
+                // then propagates the pending FATAL/cancel (a no-op on the
+                // normal path, where wake_all wakes us long before timeout).
                 let seen = shared.lot.epoch();
                 drop(g);
-                shared.lot.park(seen);
+                shared.lot.park_timeout(seen, SEIZE_PARK_POLL);
+                crate::check_for_interrupts()?;
                 g = lock(shared);
                 continue;
             }
