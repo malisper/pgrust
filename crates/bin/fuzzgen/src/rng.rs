@@ -28,6 +28,7 @@ impl Rng {
     }
 
     pub fn next_u64(&mut self) -> u64 {
+        #[cfg_attr(feature = "antithesis", allow(unused_variables))]
         let result = self.s[1]
             .wrapping_mul(5)
             .rotate_left(7)
@@ -39,6 +40,16 @@ impl Rng {
         self.s[0] ^= self.s[3];
         self.s[2] ^= t;
         self.s[3] = self.s[3].rotate_left(45);
+        // Antithesis harness builds: every generator decision draws from the
+        // SDK entropy source instead, so the platform's coverage-guided
+        // scheduler owns the whole decision stream (steerable, and replayed
+        // exactly by the timeline — the SDK falls back to its own PRNG
+        // outside Antithesis). next_u64 is the single choke point: below/
+        // range_i64/chance/pick/f64_unit all reduce to it. The xoshiro
+        // state above still advances so the feature changes no code shape;
+        // --seed becomes provenance rather than the replay witness.
+        #[cfg(feature = "antithesis")]
+        let result = antithesis_sdk::random::get_random();
         result
     }
 

@@ -6565,6 +6565,7 @@ dependencies = [
 name = "fuzzgen"
 version = "0.0.0"
 dependencies = [
+ "antithesis_sdk",
  "gram_core",
  "keywords",
  "mcx",
@@ -9138,6 +9139,7 @@ dependencies = [
  "memwatchdog",
  "mimalloc",
  "pg_locale",
+ "pgsync",
  "postgres_seams",
  "postmaster",
  "ps_status",
@@ -9145,6 +9147,7 @@ dependencies = [
  "seams_init",
  "stack_depth",
  "types_error",
+ "xlogutils",
 ]
 
 [[package]]
@@ -13253,6 +13256,7 @@ dependencies = [
 name = "pgsync"
 version = "0.1.0"
 dependencies = [
+ "antithesis_sdk",
  "loom",
  "pg_clock",
  "pg_strong_random",
@@ -21246,6 +21250,7 @@ dependencies = [
 name = "xlogutils"
 version = "0.0.0"
 dependencies = [
+ "antithesis_sdk",
  "bufmgr_seams",
  "elog",
  "file_seams",

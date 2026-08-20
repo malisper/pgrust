@@ -8,7 +8,14 @@ publish.workspace = true
 name = "xlogutils"
 path = "src/lib.rs"
 
+[features]
+# Antithesis harness builds only (antithesis/ directory): the FPI-restore
+# steering assertion. OFF by default; enabled transitively by main_main's
+# `antithesis` feature. Product builds compile none of it.
+antithesis = ["dep:antithesis_sdk"]
+
 [dependencies]
+antithesis_sdk = { version = "0.2.9", optional = true }
 init_small = { path = "../../../utils/init/init_small" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 types_core = { path = "../../../../_support/types/types_core" }

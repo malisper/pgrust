@@ -340,6 +340,35 @@ struct IdleStack {
     wakes: u32,
 }
 
+// Antithesis harness builds only: the ParkLot interrupt-observation probe.
+// The backend registers its thread-local interrupt-pending reader at boot
+// (main_main, feature `antithesis`); until then the probe reads false. A fn
+// pointer keeps this leaf crate free of any backend dependency.
+#[cfg(feature = "antithesis")]
+mod antithesis_probe {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static PARK_INTERRUPT_PROBE: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn set(f: fn() -> bool) {
+        PARK_INTERRUPT_PROBE.store(f as usize, Ordering::SeqCst);
+    }
+
+    pub fn interrupt_pending() -> bool {
+        let p = PARK_INTERRUPT_PROBE.load(Ordering::SeqCst);
+        // SAFETY: only ever 0 or a `fn() -> bool` stored by `set`.
+        p != 0 && unsafe { std::mem::transmute::<usize, fn() -> bool>(p) }()
+    }
+}
+
+/// Register the interrupt-pending probe evaluated inside [`ParkLot::park`]
+/// waits (Antithesis harness builds only). The probe runs on the parked
+/// thread, so a thread-local flag reader gives per-backend semantics.
+#[cfg(feature = "antithesis")]
+pub fn set_park_interrupt_probe(f: fn() -> bool) {
+    antithesis_probe::set(f);
+}
+
 impl ParkLot {
     pub fn new() -> Self {
         ParkLot {
@@ -363,6 +392,15 @@ impl ParkLot {
             self.legacy_parked.fetch_add(1, atomic::Ordering::SeqCst);
             let r = self.cv.wait(g);
             self.legacy_parked.fetch_sub(1, atomic::Ordering::SeqCst);
+            // Antithesis steering: a pending interrupt while a thread sits in
+            // this loop is exactly the state a wedged wait can never leave
+            // (the #1512 shape); the probe is a registered fn so this leaf
+            // crate takes no backend dependency.
+            #[cfg(feature = "antithesis")]
+            antithesis_sdk::assert_sometimes!(
+                antithesis_probe::interrupt_pending(),
+                "pgrust: interrupt observed inside ParkLot wait"
+            );
             g = r.unwrap_or_else(|e| e.into_inner());
         }
     }

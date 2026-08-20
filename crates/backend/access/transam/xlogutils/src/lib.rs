@@ -336,6 +336,12 @@ pub fn XLogReadBufferForRedoExtended(
                 .finish(loc("XLogReadBufferForRedoExtended"))?;
         }
 
+        // Antithesis steering: this is the only mechanism that heals a torn
+        // data-page write, and no self-check can distinguish "tears healed"
+        // from "no tear ever landed" without it.
+        #[cfg(feature = "antithesis")]
+        antithesis_sdk::assert_reachable!("pgrust: recovery restored a full-page image");
+
         if !bufmgr_seams::buffer_page_is_new::call(buf) {
             bufmgr_seams::buffer_page_set_lsn::call(buf, lsn);
         }

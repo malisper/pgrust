@@ -212,6 +212,10 @@ fn main() {
     {
         antithesis_sdk::antithesis_init();
         antithesis_sdk::assert_reachable!("pgrust: server process entered main");
+        // ParkLot steering probe: the parked thread reads its own
+        // thread-local interrupt-pending flag, giving per-backend semantics
+        // without a pgsync→backend dependency.
+        pgsync::set_park_interrupt_probe(init_small::globals::InterruptPending);
     }
     // ipc::proc_exit ends the process by unwinding a ProcExitThread payload
     // rather than calling exit(2) — a thread must never _exit the shared

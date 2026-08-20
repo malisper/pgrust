@@ -20,7 +20,14 @@ path = "src/bin/diffrunner.rs"
 name = "covapply"
 path = "src/bin/covapply.rs"
 
+[features]
+# Antithesis harness builds only: Rng::next_u64 draws from the SDK entropy
+# source so coverage-guided exploration steers the generator (see rng.rs).
+# OFF by default — local/CI cluster fuzz rigs keep the deterministic xoshiro.
+antithesis = ["dep:antithesis_sdk"]
+
 [dependencies]
+antithesis_sdk = { version = "0.2.9", optional = true }
 pgsync = { path = "../../_support/pgsync" }
 # gramwalk: the grammar-derived generation module walks the SAME vendored
 # 18.3 bison automaton the parser runs on (gram_core::tables) and renders

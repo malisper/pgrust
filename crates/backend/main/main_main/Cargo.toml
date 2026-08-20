@@ -18,12 +18,26 @@ path = "src/bin/postgres.rs"
 # none of it. The harness image build (root Dockerfile, ARG ANTITHESIS=1)
 # enables it together with the coverage rustflags; the crate and the flags
 # are a single unit (either alone produces an invalid binary).
-antithesis = ["dep:antithesis_sdk", "dep:antithesis-instrumentation"]
+antithesis = [
+    "dep:antithesis_sdk",
+    "dep:antithesis-instrumentation",
+    # Steering assertions in the SUT (already in the dependency graph
+    # transitively; the direct optional rows below exist only to flip their
+    # features from here): FPI restore during redo, ParkLot interrupt probe.
+    "dep:pgsync",
+    "pgsync/antithesis",
+    "dep:xlogutils",
+    "xlogutils/antithesis",
+]
 
 [dependencies]
 # Antithesis SDK (assertions/lifecycle); portable, but only compiled under
 # the `antithesis` feature.
 antithesis_sdk = { version = "0.2.9", optional = true }
+# Antithesis-only install rows (see the `antithesis` feature): probe
+# registration target + feature carriers for the SUT steering assertions.
+pgsync = { path = "../../../_support/pgsync", optional = true }
+xlogutils = { path = "../../access/transam/xlogutils", optional = true }
 ipc = { path = "../../storage/ipc/ipc" }
 libc = "0.2"
 mcx = { path = "../../../_support/mcx" }

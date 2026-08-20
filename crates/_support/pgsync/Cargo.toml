@@ -22,6 +22,14 @@ loom = "0.7"
 [dependencies]
 pg_clock = { path = "../../port/pg_clock" }
 pg_strong_random = { path = "../../port/pg_strong_random" }
+antithesis_sdk = { version = "0.2.9", optional = true }
+
+[features]
+# Antithesis harness builds only (antithesis/ directory): the ParkLot
+# interrupt-observation steering assertion. The interrupt probe is a
+# registered fn pointer so this leaf crate takes no backend dependency.
+# OFF by default; enabled transitively by main_main's `antithesis` feature.
+antithesis = ["dep:antithesis_sdk"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"] }
