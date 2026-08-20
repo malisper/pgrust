@@ -822,18 +822,22 @@ fn RevalidateCachedQuery(
 
     if is_valid {
         let matches = match matcher.as_mut() {
-            Some(m) => catalog_namespace::SearchPathMatchesCurrentEnvironment(m)?,
+            Some(m) => catalog_namespace::SearchPathMatchesCurrentEnvironment(m),
             None => panic!("RevalidateCachedQuery: valid revalidatable source lost its search_path"),
         };
-        with_cache(|pc| {
-            let src = source_mut(pc, h);
-            src.search_path = matcher;
-            if !matches {
+        // Restore the taken search_path unconditionally BEFORE propagating any
+        // error. The check is fallible; an Err here early-returns, and leaving
+        // a still-valid entry with search_path=None corrupts the cache (the
+        // next access hits the None arm and panics, killing the connection).
+        with_cache(|pc| source_mut(pc, h).search_path = matcher);
+        if !matches? {
+            with_cache(|pc| {
+                let src = source_mut(pc, h);
                 if let Some(gplan) = invalidate_source_entry(src) {
                     plan_mut(pc, gplan).is_valid = false;
                 }
-            }
-        });
+            });
+        }
     }
 
     // The rewrite had an RLS dependency: redo it if the role or the

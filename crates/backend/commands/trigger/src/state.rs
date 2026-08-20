@@ -210,7 +210,6 @@ pub fn AfterTriggerSetState<'mcx>(mcx: Mcx<'mcx>, stmt: &ConstraintsSetStmt<'_>)
                 &keys,
             )?;
             let td = tgrel.descr();
-            let mut found = false;
             while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
                 let mut isnull = false;
                 // SAFETY (both): declared pg_trigger columns under its
@@ -226,10 +225,13 @@ pub fn AfterTriggerSetState<'mcx>(mcx: Mcx<'mcx>, stmt: &ConstraintsSetStmt<'_>)
                     .as_oid();
                     tgoidlist.push(oid);
                 }
-                found = true;
             }
             genam::systable_endscan(mcx, scan)?;
-            assert!(found, "no triggers found for constraint with OID {conoid}");
+            // An empty trigger list is a legal no-op: a DEFERRABLE constraint
+            // can have zero triggers (e.g. a NOT ENFORCED foreign key, whose
+            // trigger creation is gated on is_enforced while condeferrable may
+            // still be set). C's AfterTriggerSetState iterates whatever it
+            // finds and simply does nothing when the scan is empty.
         }
         tgrel.close(AccessShareLock)?;
 

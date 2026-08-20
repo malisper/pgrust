@@ -17,6 +17,19 @@ fn lock(shared: &BTParallelScanShared) -> pgsync::MutexGuard<'_, BtParallelScanS
     shared.state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+// Test seam (bug_f4d66247): arm to force `restore_arrays` to fail as if its
+// allocating Byref branch hit OOM, so the fallible NeedPrimscan path in
+// `bt_parallel_seize` can be exercised without constructing a failing arena.
+#[cfg(test)]
+thread_local! {
+    static RESTORE_ARRAYS_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn arm_restore_arrays_fault(on: bool) {
+    RESTORE_ARRAYS_FAULT.with(|f| f.set(on));
+}
+
 /// Poll cadence for the interruptible seize park (see `bt_parallel_seize`'s
 /// Advancing arm). A parked seizer is normally woken by another participant's
 /// `wake_all` (release/done) long before this fires; the timeout only bounds
@@ -75,7 +88,21 @@ pub(crate) fn bt_parallel_seize(
                 debug_assert!(so.numArrayKeys > 0);
                 if first {
                     g.page_status = BtPsState::Advancing;
-                    restore_arrays(&g.arr_elems, so)?;
+                    if let Err(e) = restore_arrays(&g.arr_elems, so) {
+                        // restore_arrays is fallible (it allocates); on failure
+                        // the scan must not be left stuck in Advancing, or every
+                        // other seizer parks on it forever with no waker (this
+                        // error/unwind path never reaches bt_parallel_done). Roll
+                        // back to the terminal Done state (what bt_parallel_done
+                        // sets) and wake every parked seizer before propagating.
+                        // Drop the state lock before wake_all, matching the
+                        // lock ordering of every other out-of-Advancing path
+                        // (bt_parallel_release, bt_parallel_done_shared).
+                        g.page_status = BtPsState::Done;
+                        drop(g);
+                        shared.lot.wake_all();
+                        return Err(e);
+                    }
                 } else {
                     status = false;
                 }
@@ -255,6 +282,10 @@ fn restore_arrays(
     so: &mut BTScanOpaqueData<'_>,
 ) -> PgResult<()> {
     let mcx: Mcx<'_> = *so.keyData.allocator();
+    #[cfg(test)]
+    if RESTORE_ARRAYS_FAULT.with(|f| f.get()) {
+        return Err(Box::new(mcx.oom(0)));
+    }
     let BTScanOpaqueData { keyData, arrayKeys, .. } = so;
     debug_assert!(elems.len() == arrayKeys.len());
     for (array, elem) in arrayKeys.iter_mut().zip(elems.iter()) {

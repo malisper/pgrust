@@ -694,3 +694,23 @@ fn local_preload_libraries_rejects_paths_outside_plugins() {
     preload::session_preload_libraries_string_set(Some("".into()));
     preload::local_preload_libraries_string_set(Some("".into()));
 }
+
+#[test]
+fn make_absolute_path_canonicalizes() {
+    // C's make_absolute_path (port/path.c) finishes with canonicalize_path(),
+    // a purely lexical normalizer. Absolute inputs are canonicalized in place;
+    // this is what lets path_is_prefix_of_path recognize a tablespace location
+    // nested under a non-canonical DataDir (bug_42bdb036).
+    assert_eq!(make_absolute_path("/data/./dd"), "/data/dd");
+    assert_eq!(make_absolute_path("/data//x"), "/data/x");
+    assert_eq!(make_absolute_path("/data/dd/"), "/data/dd");
+    assert_eq!(make_absolute_path("/data/../dd"), "/dd");
+
+    // Relative input: prepend cwd, then canonicalize the whole thing.
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .into_os_string()
+        .into_string()
+        .unwrap();
+    assert_eq!(make_absolute_path("sub/./x"), format!("{cwd}/sub/x"));
+}

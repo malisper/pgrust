@@ -723,3 +723,71 @@ fn release_after_exit_reclaim_is_abandoned_not_stale() {
     ReleaseCachedPlan(p2);
     DropCachedPlan(h2);
 }
+
+// Regression (bug_797bd58f): RevalidateCachedQuery `.take()`s the source's
+// search_path before the fallible SearchPathMatchesCurrentEnvironment probe.
+// The buggy code applied `?` inside the match arm, so an Err early-returned
+// BEFORE the block that restores search_path — leaving a still-valid cache
+// entry with is_valid=true, search_path=None. The entry survives the aborting
+// transaction and the next access panics ("valid revalidatable source lost its
+// search_path"), killing the connection. The fix restores search_path
+// unconditionally before propagating the error.
+//
+// The mockable seams are set-once, so we fault the real check with a
+// deterministic, seam-free error: point the source at a fresh (uncached)
+// search_path string with invalid list syntax (a trailing separator), which
+// makes preprocessNamespacePath -> split_identifier_string return an
+// "invalid list syntax" error out of recomputeNamespacePath, and thus out of
+// SearchPathMatchesCurrentEnvironment.
+#[test]
+fn revalidate_restores_search_path_when_environment_probe_errors() {
+    install();
+    push_snapshot();
+    // Wire the real namespace search_path GUC accessor so we can drive the
+    // crate's NAMESPACE_SEARCH_PATH string (init_seams installs it once).
+    if !guc_tables::vars::namespace_search_path.installed() {
+        catalog_namespace::init_seams();
+    }
+
+    let h = make_saved_source(true);
+    // Warm the source: builds the generic plan and leaves it valid + revalidatable
+    // with a captured search_path.
+    let p = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    ReleaseCachedPlan(p);
+
+    let (valid_before, has_path_before, requires_reval) =
+        with_source(h, |s| (s.is_valid, s.search_path.is_some(), s.requires_reval));
+    assert!(valid_before, "source should be valid before the fault");
+    assert!(has_path_before, "revalidatable source should hold a search_path");
+    assert!(requires_reval, "SELECT source must require revalidation");
+
+    // Repoint the environment at a fresh, syntactically-invalid search path and
+    // invalidate the base path so the next probe recomputes and errors.
+    guc_tables::vars::namespace_search_path.write(Some("a,".to_string()));
+    catalog_namespace::assign_search_path(Some("a,"));
+
+    // The environment probe now errors; RevalidateCachedQuery must propagate it.
+    let res = RevalidateCachedQuery(h, QueryEnvHandle::NULL, true);
+    assert!(res.is_err(), "faulted environment probe should propagate an error");
+
+    // ...and critically, must have restored the source's search_path first, and
+    // left is_valid unchanged, so the cache entry is not corrupted.
+    let (valid_after, has_path_after) = with_source(h, |s| (s.is_valid, s.search_path.is_some()));
+    assert!(
+        has_path_after,
+        "search_path must be restored on the error path (regression: was left None)"
+    );
+    assert_eq!(
+        valid_after, valid_before,
+        "is_valid must be unchanged on the error path"
+    );
+
+    // Clear the fault and restore a valid environment; a subsequent
+    // revalidation must NOT panic on a lost search_path.
+    guc_tables::vars::namespace_search_path.write(None);
+    catalog_namespace::assign_search_path(None);
+    // Must not panic:
+    let _ = RevalidateCachedQuery(h, QueryEnvHandle::NULL, true);
+
+    DropCachedPlan(h);
+}

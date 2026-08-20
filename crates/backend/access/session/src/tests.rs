@@ -985,7 +985,16 @@ fn tls_source_census_and_session_surface_are_pinned() {
     // scratch (apply-worker pool state, generator PRNG cells, fdw batch
     // buffers) — all backend/tool scratch, none session identity; each
     // lane's own notes classify its cells. Not session_sources rows.
-    assert_eq!(count_tree(crates), 575, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 576, re-pinned at the detail-scan bug-fix landing (fix/detail-scan-bugs):
+    //   +1 access/nbtree/nbtree/src/parallel.rs — RESTORE_ARRAYS_FAULT
+    //      (bug_f4d66247): cfg(test) fault-injection seam forcing
+    //      restore_arrays to fail as if its allocating Byref branch hit OOM,
+    //      so the fallible NeedPrimscan rollback+wake path in
+    //      bt_parallel_seize can be exercised. Test-harness scratch on the
+    //      test's own thread, compiled out of every product build; counted
+    //      only because the census counter is textual. Not a session_sources
+    //      row.
+    assert_eq!(count_tree(crates), 576, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

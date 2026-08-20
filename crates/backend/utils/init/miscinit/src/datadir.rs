@@ -6,16 +6,21 @@ use types_error::{PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, FATAL};
 
 use crate::process::{loc, ValidatePgVersion};
 
-// make_absolute_path (port/path.c): prepend cwd, no canonicalization.
+// make_absolute_path (port/path.c): prepend cwd and canonicalize.
 pub fn make_absolute_path(path: &str) -> String {
-    if path.starts_with('/') {
-        return path.to_string();
-    }
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.into_os_string().into_string().ok())
-        .expect("make_absolute_path: could not get current working directory");
-    format!("{cwd}/{path}")
+    let abs = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.into_os_string().into_string().ok())
+            .expect("make_absolute_path: could not get current working directory");
+        format!("{cwd}/{path}")
+    };
+    // C's make_absolute_path finishes with canonicalize_path(): a purely
+    // lexical normalizer (collapses //, /./, resolves /../ textually, strips a
+    // trailing slash) — no realpath/symlink resolution and no existence check.
+    pg_path::canonicalize_path(&abs)
 }
 
 pub fn SetDataDir(dir: &str) {

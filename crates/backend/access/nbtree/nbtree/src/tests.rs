@@ -1611,6 +1611,73 @@ fn upgrademetapage_lifts_v2_meta_to_novac_v3() {
     assert_eq!(PINS.with(Cell::get), 0);
 }
 
+// bug_f4d66247: bt_parallel_seize's NeedPrimscan arm sets page_status =
+// Advancing BEFORE the fallible restore_arrays. Before the fix, an Err from
+// restore_arrays left the scan stuck in Advancing forever with no wake, so
+// every other seizer parked on shared.lot indefinitely (nothing on the
+// error/unwind path calls bt_parallel_done). The fix rolls the state back to
+// the terminal Done and wake_all()s before propagating. This drives the REAL
+// bt_parallel_seize with restore_arrays faulted and asserts (a) the state
+// ends terminal Done and (b) the lot epoch advanced — the wake signal that
+// releases any parked seizer (park() loops while epoch == the value it
+// captured), so a worker parked before the call cannot be lost. A real
+// thread parked on that pre-call epoch is joined to prove it terminates.
+#[test]
+fn parallel_seize_restore_failure_rolls_back_to_done_and_wakes() {
+    use std::sync::Arc;
+
+    use ::types_relscan::parallel::{BTParallelScanShared, BtParallelScanState, BtPsState};
+    use ::types_core::InvalidBlockNumber;
+
+    use crate::parallel::{arm_restore_arrays_fault, bt_parallel_seize};
+
+    let cx = MemoryContext::new("seize");
+    let mcx = cx.mcx();
+
+    // A minimal scan opaque: one array key (satisfies the NeedPrimscan
+    // debug_assert) but no serialized elems — restore_arrays is faulted
+    // before it would touch them.
+    let mut so = ::types_nbtree::BTScanOpaqueData::alloc_in(mcx).unwrap();
+    so.numArrayKeys = 1;
+
+    let shared = Arc::new(BTParallelScanShared {
+        state: pgsync::Mutex::new(BtParallelScanState {
+            next_scan_page: InvalidBlockNumber,
+            last_curr_page: InvalidBlockNumber,
+            page_status: BtPsState::NeedPrimscan,
+            arr_elems: Vec::new(),
+        }),
+        lot: pgsync::ParkLot::new(),
+    });
+
+    // A worker that captured the pre-call epoch and parks on it. When seize
+    // wakes (epoch bump), it must return — no lost wakeup / no deadlock.
+    let seen = shared.lot.epoch();
+    let waiter = {
+        let shared = Arc::clone(&shared);
+        std::thread::spawn(move || shared.lot.park(seen))
+    };
+
+    arm_restore_arrays_fault(true);
+    let res = bt_parallel_seize(&mut so, &shared, /* first = */ true);
+    arm_restore_arrays_fault(false);
+
+    // The faulted restore_arrays propagated as an error...
+    assert!(res.is_err(), "faulted restore_arrays must propagate Err");
+    // (a) ...with the scan rolled back to the terminal Done state...
+    assert_eq!(
+        shared.state.lock().unwrap().page_status,
+        BtPsState::Done,
+        "restore failure must leave the scan Done, not stuck in Advancing",
+    );
+    // (b) ...and the wake delivered: the epoch advanced past what any earlier
+    // seizer captured, so none can park forever.
+    assert_ne!(shared.lot.epoch(), seen, "wake_all must bump the lot epoch");
+
+    // The concurrently-parked worker was woken and terminates.
+    waiter.join().unwrap();
+}
+
 /// Regression for the CRITICAL parallel-scan uninterruptible-park hang: a
 /// worker parked in `bt_parallel_seize`'s Advancing arm must be able to
 /// observe a leader-initiated die and unwind, even though the error/unwind

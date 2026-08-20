@@ -1711,6 +1711,84 @@ fn relscan_seize_release_wake_never_lost() {
     });
 }
 
+/// Companion to `relscan_seize_release_wake_never_lost`, modeling the
+/// nbtree `bt_parallel_seize` NeedPrimscan ERROR path (bug
+/// bug_f4d66247-472a-4401-be3e-90f5948d123e). A "first" seizer that observes
+/// NeedPrimscan sets `page_status = Advancing` and then calls the FALLIBLE
+/// `restore_arrays` (it allocates; OOM returns Err). On failure the scan must
+/// transition to the terminal `Done` state AND `wake_all()` before
+/// propagating the error — nothing else on the error/unwind path ever wakes
+/// waiters (bt_parallel_done is not reached). The model precondition is
+/// `Advancing` already set (the first-seizer past the state store, about to
+/// fail restore); the winner runs the rollback, one waiter is parked on
+/// Advancing. In every interleaving the waiter terminates having observed
+/// Done — never parked forever.
+///
+/// RED: swap `rollback` for `rollback_buggy` (the pre-fix shape: leave
+/// Advancing, no wake — exactly `restore_arrays(...)?` bailing after the
+/// Advancing store): the waiter parks forever — loom deadlock, CAUGHT.
+#[test]
+fn relscan_seize_restore_failure_wakes_waiter() {
+    use types_relscan::parallel::{BTParallelScanShared, BtPsState};
+
+    // The fixed error path: roll the state back to terminal Done, drop the
+    // state lock, then bump+notify — matching every other out-of-Advancing
+    // transition's lock ordering (release, done).
+    fn rollback(sh: &BTParallelScanShared) {
+        {
+            let mut g = sh.state.lock().unwrap();
+            g.page_status = BtPsState::Done;
+        }
+        sh.lot.wake_all();
+    }
+
+    // RED helper: the buggy pre-fix shape — `restore_arrays(...)?` returns
+    // with the state still Advancing and no wake at all.
+    #[allow(dead_code)]
+    fn rollback_buggy(_sh: &BTParallelScanShared) {}
+
+    // The seize wait loop (nbtree bt_parallel_seize Advancing arm): epoch
+    // captured UNDER the state lock, park OUTSIDE it; Done terminates.
+    fn seize_wait(sh: &BTParallelScanShared) -> BtPsState {
+        loop {
+            let (st, seen) = {
+                let g = sh.state.lock().unwrap();
+                (g.page_status, sh.lot.epoch())
+            };
+            match st {
+                BtPsState::Advancing => {
+                    sh.lot.park(seen);
+                }
+                BtPsState::Done => return BtPsState::Done,
+                other => unreachable!("model never enters {other:?}"),
+            }
+        }
+    }
+
+    loom::model(|| {
+        let sh = Arc::new(BTParallelScanShared::new());
+        // First-seizer has set Advancing and is about to call the fallible
+        // restore_arrays (the model's precondition).
+        sh.state.lock().unwrap().page_status = BtPsState::Advancing;
+
+        let waiter_t = {
+            let sh = Arc::clone(&sh);
+            thread::spawn(move || seize_wait(&sh))
+        };
+
+        // Winner: restore_arrays failed — roll back to a terminal state and
+        // wake every parked seizer before propagating the error.
+        rollback(&sh); // RED: rollback_buggy(&sh)
+
+        let got = waiter_t.join().unwrap();
+        // (b) the concurrently-parked waiter woke and terminated (no lost
+        // wakeup / no deadlock)...
+        assert_eq!(got, BtPsState::Done, "waiter woke and observed Done");
+        // (a) ...with the scan in the terminal Done state.
+        assert_eq!(sh.state.lock().unwrap().page_status, BtPsState::Done);
+    });
+}
+
 /// Row 3 (MIRROR over the real waiter Slot core): the converted bitmapheap
 /// build wait — `bitmap_should_initialize_shared_state`'s InProgress arm.
 /// The waiter REGISTERS its waker word in the shared state under the lock,
