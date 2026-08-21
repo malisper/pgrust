@@ -226,9 +226,8 @@ fn int_set_spill(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
     let (bank, pool) = (ctx.bank, ctx.pool);
     let units = ctx.faces.walk(bank, a_k);
     let sv = ctx.faces.stats(bank, a_k);
-    let max_ok =
-        (0..bank.parts.len()).all(|pi| sv.part(pi).map_or(true, |r| (r.max_key as u64) != u64::MAX));
-    assert!(max_ok, "distinct int_set: key+1 encoding unsound");
+    // [q5-fulldomain] full signed domain; the all-ones word rides the
+    // escape flag (see int_set — one law, both arms).
     let ndv = (sv.ndv_est_sum() as usize).max(1 << 16);
     let p = partition_count(ndv, node.params.slot_bytes, node.params.l2_bytes, pool.threads());
     let shift = 64 - p.trailing_zeros();
@@ -244,6 +243,7 @@ fn int_set_spill(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
         resident: usize,
         sp: Option<BW>,
         w: usize,
+        neg1: bool,
     }
     let pass1 = pool.run_finish(
         units.len(),
@@ -254,14 +254,20 @@ fn int_set_spill(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
             resident: 0,
             sp: None,
             w,
+            neg1: false,
         },
         |s: &mut S, i| {
             let (pi, g, rows, _) = units[i];
             let d = s.su.decode_full(s.cur.get(bank, pi), g, rows as usize);
             let mut pushed = 0usize;
+            // [q5-fulldomain] escape divert (see int_set).
             if rc {
                 let mut prev = u64::MAX;
                 for &x in d {
+                    if x == u64::MAX {
+                        s.neg1 = true;
+                        continue;
+                    }
                     if x != prev {
                         prev = x;
                         s.bk[(hash64(x) >> shift) as usize].push(x);
@@ -270,9 +276,13 @@ fn int_set_spill(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
                 }
             } else {
                 for &x in d {
+                    if x == u64::MAX {
+                        s.neg1 = true;
+                        continue;
+                    }
                     s.bk[(hash64(x) >> shift) as usize].push(x);
+                    pushed += 1;
                 }
-                pushed = d.len();
             }
             s.resident += pushed * 8;
             if s.resident > share {
@@ -296,7 +306,7 @@ fn int_set_spill(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
         },
         |s| {
             crate::scan::scratch_park(s.su);
-            (s.bk, s.sp.map(|w| (w.m, w.chunks)))
+            (s.bk, s.sp.map(|w| (w.m, w.chunks)), s.neg1)
         },
     );
     let dsum_armed = node
@@ -448,8 +458,16 @@ fn int_set_spill(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
             }
         },
     );
-    let n: u64 = counts.iter().map(|c| c.0).sum();
-    let dsum: i128 = counts.iter().map(|c| c.1).sum();
+    // [q5-fulldomain] fold the escape key exactly once.
+    let neg1 = pass1.iter().any(|s| s.2);
+    let mut n: u64 = counts.iter().map(|c| c.0).sum();
+    let mut dsum: i128 = counts.iter().map(|c| c.1).sum();
+    if neg1 {
+        n += 1;
+        if dsum_armed {
+            dsum += -1;
+        }
+    }
     drop(counts);
     pool.drop_par(pass1);
     set_render(node, n, dsum)
@@ -494,6 +512,7 @@ fn text_set_spill(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
         resident: usize,
         sp: Option<BW>,
         w: usize,
+        neg1: bool,
     }
     let flush = |s: &mut S, p: usize| {
         SSPILL_FLUSHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -522,6 +541,7 @@ fn text_set_spill(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
             resident: 0,
             sp: None,
             w,
+            neg1: false,
         },
         |s, pi| {
             let df = ctx.faces.dict(bank, pi, a_k);
@@ -809,6 +829,7 @@ fn int_grouped_spill(ctx: &SqeCtx, node: &PlanNode, a_d: u32) -> AnswerSet {
         resident: usize,
         sp: Option<BW>,
         w: usize,
+        neg1: bool,
     }
     let pass1 = pool.run_finish(
         units.len(),
@@ -819,6 +840,7 @@ fn int_grouped_spill(ctx: &SqeCtx, node: &PlanNode, a_d: u32) -> AnswerSet {
             resident: 0,
             sp: None,
             w,
+            neg1: false,
         },
         |s: &mut S1, i| {
             let (pi, gr, rows, _) = units2[i];
@@ -1086,10 +1108,11 @@ fn int_set(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
     let (bank, pool) = (ctx.bank, ctx.pool);
     let units = ctx.faces.walk(bank, a_k);
     let sv = ctx.faces.stats(bank, a_k);
-    // key+1 sentinel soundness (hot-shape law): exact max must not be u64::MAX.
-    let max_ok =
-        (0..bank.parts.len()).all(|pi| sv.part(pi).map_or(true, |r| (r.max_key as u64) != u64::MAX));
-    assert!(max_ok, "distinct int_set: key+1 encoding unsound");
+    // [q5-fulldomain] key+1 slot encoding over the FULL signed domain:
+    // the ONE colliding word (all-ones — value -1, key+1 == empty slot)
+    // is diverted to a per-worker escape flag before scatter and folded
+    // exactly once at finalize. No domain witness is consumed; the old
+    // non-negative admission gate is retired with it.
     let ndv = (sv.ndv_est_sum() as usize).max(1 << 16);
     let p = partition_count(ndv, node.params.slot_bytes, node.params.l2_bytes, ctx.pool.threads());
     let shift = 64 - p.trailing_zeros();
@@ -1112,6 +1135,7 @@ fn int_set(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
                 CurCache::new(a_k),
                 parked.unwrap_or_default(),
                 0u64,
+                false,
             );
             if s.2.len() != p {
                 s.2 = (0..p).map(|_| Vec::with_capacity(per_bucket)).collect();
@@ -1122,13 +1146,20 @@ fn int_set(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
             }
             s
         },
-        |s: &mut (Scratch, CurCache, Vec<Vec<u64>>, u64), i| {
+        |s: &mut (Scratch, CurCache, Vec<Vec<u64>>, u64, bool), i| {
             let (pi, g, rows, _) = units[i];
             let d = s.0.decode_full(s.1.get(bank, pi), g, rows as usize);
             let bk = &mut s.2;
+            // [q5-fulldomain] the all-ones word never reaches a slot or
+            // the run-collapse compare: diverted to the escape flag (so
+            // the `prev = u64::MAX` "no previous" seed stays sound too).
             if rc {
                 let mut prev = u64::MAX;
                 for &x in d {
+                    if x == u64::MAX {
+                        s.4 = true;
+                        continue;
+                    }
                     if x != prev {
                         prev = x;
                         bk[(hash64(x) >> shift) as usize].push(x);
@@ -1136,6 +1167,10 @@ fn int_set(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
                 }
             } else {
                 for &x in d {
+                    if x == u64::MAX {
+                        s.4 = true;
+                        continue;
+                    }
                     bk[(hash64(x) >> shift) as usize].push(x);
                 }
             }
@@ -1143,7 +1178,7 @@ fn int_set(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
         },
         |s| {
             crate::scan::scratch_park(s.0);
-            (s.2, s.3)
+            (s.2, s.3, s.4)
         },
     );
     let scattered: Vec<&Vec<Vec<u64>>> = pass1.iter().map(|s| &s.0).collect();
@@ -1191,8 +1226,16 @@ fn int_set(ctx: &SqeCtx, node: &PlanNode, a_k: u32) -> AnswerSet {
             *acc += cnt;
         },
     );
-    let n: u64 = counts.iter().map(|c| c.1).sum();
-    let dsum: i128 = counts.iter().map(|c| c.2).sum();
+    // [q5-fulldomain] fold the escape key exactly once.
+    let neg1 = pass1.iter().any(|s| s.2);
+    let mut n: u64 = counts.iter().map(|c| c.1).sum();
+    let mut dsum: i128 = counts.iter().map(|c| c.2).sum();
+    if neg1 {
+        n += 1;
+        if dsum_armed {
+            dsum += -1;
+        }
+    }
     drop(scattered);
     for s in pass1.drain(..) {
         let b = s.0.iter().map(|v| v.capacity() * 8).sum::<usize>() + s.0.capacity() * 24;
@@ -1382,7 +1425,7 @@ fn gid_grouped(ctx: &SqeCtx, node: &PlanNode, a_d: u32) -> AnswerSet {
         // [fpcombine] fingerprint pair engine: no closure, no hit sorts,
         // fragments carry their fingerprints into the combine.
         let t_fill = std::time::Instant::now();
-        let (mut runs, side_raw) =
+        let (mut runs, side_raw, pf) =
             pm::pair_distinct_fp(ctx, node.q, a_t, a_d, drop_empty);
         crate::engine::phn(node, "scatter_own", t_fill);
         let t_m = std::time::Instant::now();
@@ -1392,7 +1435,8 @@ fn gid_grouped(ctx: &SqeCtx, node: &PlanNode, a_d: u32) -> AnswerSet {
             sf.push((crate::fp::entry_fp128(b), side_intern.key(b), *c));
         }
         runs.push(sf);
-        let pf = pm::dict_faces(ctx, a_t);
+        // [p2-phase-widening] faces hoisted out of the render leg:
+        // pair_distinct_fp already fetched+prewarmed them this exec.
         let kb = pm::KeyBytes { pf: &pf, interns: vec![side_intern.tab.as_slice()] };
         let k = node.params.emit_cap();
         let cands = pm::fp_combine_pre(pool, &runs, k);

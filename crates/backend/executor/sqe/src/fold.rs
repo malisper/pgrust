@@ -119,7 +119,7 @@ pub fn fold_op_of(op: crate::ir::AggOp) -> Option<AggFoldOp> {
     use crate::ir::AggOp;
     match op {
         AggOp::Sum | AggOp::SumShifted => Some(AggFoldOp::Sum),
-        AggOp::Avg | AggOp::AvgLen => Some(AggFoldOp::Sum),
+        AggOp::Avg | AggOp::AvgLen | AggOp::AvgCharLen => Some(AggFoldOp::Sum),
         AggOp::Min => Some(AggFoldOp::Min),
         AggOp::Max => Some(AggFoldOp::Max),
         AggOp::VarSamp | AggOp::VarPop | AggOp::StddevSamp | AggOp::StddevPop => {

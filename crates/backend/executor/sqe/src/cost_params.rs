@@ -258,6 +258,28 @@ impl CostParams {
         self.grouped_budget_per_worker_bytes
             .saturating_mul(width.max(1) as u64)
     }
+
+    /// E18-M — the MACHINE floor of the grouped budget (the wave-3
+    /// submission unrefusal, fp lineage 4e7396f9/45d921c8/24e4ef2c/
+    /// 6ca60acb/3f343893/bac34e64): the width law prices the SAME
+    /// statement differently on boxes whose vCPU:memory ratios differ
+    /// (c6a.4xlarge 16t/32GiB refused the six 100m grouped shapes at a
+    /// 1 GiB budget that the c8g.16xlarge tax rig served RESIDENT at
+    /// 4 GiB — the scatter plane's true size, rows x SCATTER_ROW_BYTES,
+    /// is machine-independent). The budget's real law is "unbounded
+    /// materialization stays a fraction of THIS machine's memory" (the
+    /// direct-array authority, re-cut to the box): the effective budget
+    /// is the width law OR one eighth of physical RAM, whichever is
+    /// larger. The floor is a monotone widening: it admits resident
+    /// service (or keeps a spill-armed shape resident) where the width
+    /// law refused or spilled — answers are arm-independent (the spill
+    /// identity gates) and state stays under the floor by the same
+    /// accounting. Kill switch PGRUST_SQE_GROUPED_MEM_FLOOR=0 restores
+    /// the width law verbatim.
+    #[inline]
+    pub fn grouped_machine_floor_bytes(&self, machine_mem_bytes: u64) -> u64 {
+        machine_mem_bytes / 8
+    }
 }
 
 #[cfg(test)]

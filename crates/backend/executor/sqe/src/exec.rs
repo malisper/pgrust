@@ -48,7 +48,7 @@ pub fn empty_bank_answer(node: &PlanNode) -> AnswerSet {
                     c.validity = Validity::Mask(vec![false]);
                     c
                 }
-                AggOp::Avg | AggOp::AvgLen | AggOp::AvgDistinct => {
+                AggOp::Avg | AggOp::AvgLen | AggOp::AvgCharLen | AggOp::AvgDistinct => {
                     AnswerCol::ratios(a.out, vec![(0, 0)], false)
                 }
                 AggOp::Min | AggOp::Max | AggOp::BitAnd | AggOp::BitOr => {

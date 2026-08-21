@@ -316,6 +316,40 @@ pub fn nested_bytes<T>(v: &[Vec<T>]) -> usize {
     std::mem::size_of_val(v) + v.iter().map(vec_bytes).sum::<usize>()
 }
 
+// ---------------------------------------------------------------------------
+// [p2-phase-widening] Combine/scatter transient-arena parking. The P2
+// residual decomposition (p2-residual-decomposition.md §4) measured the
+// served arm's remaining per-shape widening on exactly the phases whose
+// scratch was still allocated FRESH per execution (hash_plane's combine
+// scatter/fold arenas, drivers::pair_distinct_owned's pass-1 buckets and
+// pass-2 seen tables): under mimalloc's purge (the q32-residual
+// conviction, allocator-decision doc) every served execution re-commits
+// those pages, while the rig's 1 ms rep cadence reuses them inside the
+// purge delay — a per-work cost only the server pays. These sites now
+// ride the same capped park discipline as their pass-1 siblings.
+// ---------------------------------------------------------------------------
+
+/// Kill switch for the [p2-phase-widening] parks (default ON;
+/// `PGRUST_SQE_SCATTER_PARK=0` restores the fresh-alloc-per-exec arm).
+/// Behavioral only in the memory-law sense — answers never depend on it.
+pub fn scatter_park_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_SQE_SCATTER_PARK").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// Arm a fetched bucket set to exactly `n` cleared vectors (capacity-only
+/// law: contents of a parked state are garbage; only armed sizes count).
+pub fn arm_buckets<T>(mut b: Vec<Vec<T>>, n: usize) -> Vec<Vec<T>> {
+    if b.len() != n {
+        b = (0..n).map(|_| Vec::new()).collect();
+    } else {
+        b.iter_mut().for_each(Vec::clear);
+    }
+    b
+}
+
 /// Lazy release of PLAIN-DATA buffers: `MADV_FREE` the page-aligned
 /// interior of a scalar Vec's allocation. The kernel may reclaim (and
 /// later zero-fill) the pages under pressure; re-dirtying un-frees them
@@ -486,6 +520,27 @@ mod tests {
         p.cfg_force(OvercapMode::Drop, false);
         p.park(vec![0u8; 65], 65);
         assert_eq!(p.stats(), (0, 0));
+    }
+
+    /// [p2-phase-widening] arm_buckets: a fetched bucket set is armed to
+    /// exactly n CLEARED vectors regardless of parked shape (capacity-only
+    /// law — stale contents never survive the arm).
+    #[test]
+    fn arm_buckets_clears_and_resizes() {
+        // right shape: cleared in place, capacity retained
+        let mut b: Vec<Vec<u64>> = (0..4).map(|_| Vec::with_capacity(8)).collect();
+        b[2].extend_from_slice(&[1, 2, 3]);
+        let armed = arm_buckets(b, 4);
+        assert_eq!(armed.len(), 4);
+        assert!(armed.iter().all(Vec::is_empty));
+        assert!(armed[2].capacity() >= 8, "in-place arm must keep capacity");
+        // wrong shape: rebuilt to n empties
+        let armed = arm_buckets(vec![vec![9u64]; 2], 4);
+        assert_eq!(armed.len(), 4);
+        assert!(armed.iter().all(Vec::is_empty));
+        // empty fetch (park miss): built from nothing
+        let armed: Vec<Vec<u64>> = arm_buckets(Vec::new(), 3);
+        assert_eq!(armed.len(), 3);
     }
 
     #[test]

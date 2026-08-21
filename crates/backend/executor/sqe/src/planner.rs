@@ -125,6 +125,9 @@ pub enum AKeyExpr {
 pub enum AValExpr {
     Col(u32),
     OctetLength { col: u32 },
+    /// `length(text)` — UTF-8 CHARACTER count (PG textlen). Lowers to
+    /// AggOp::AvgCharLen under AVG; same shape law as OctetLength.
+    CharLength { col: u32 },
     /// [P4-1] col + k (col - k authors k negated; k + col commutes here).
     /// `w` = the PG add/sub op's RESULT width (2/4/8) — the overflow-
     /// proof obligation (see ir::FoldExpr's overflow law).
@@ -1410,7 +1413,7 @@ fn lower_arith_agg(
             Ok(ir::AggSpec::new(op, Some(a), Some(bank.typ(a)))
                 .with_expr(ir::FoldExpr::PackedMulK2 { k1, sub1, b, k2, sub2, c }))
         }
-        AValExpr::Col(_) | AValExpr::OctetLength { .. } => {
+        AValExpr::Col(_) | AValExpr::OctetLength { .. } | AValExpr::CharLength { .. } => {
             Err(Refuse::AggUnsupported { what: "agg-expr-shape" })
         }
     }
@@ -1828,7 +1831,7 @@ fn check_currency(bank: &Bank, node: &PlanNode) -> Result<(), Refuse> {
             // lanes refused above. Keys and every other lane keep the
             // refusal.
             ir::Family::TwoLevelCodeAgg
-                if node.agg.iter().any(|a| a.op == AggOp::AvgLen && a.col == Some(c))
+                if node.agg.iter().any(|a| a.op.is_avglen() && a.col == Some(c))
                     && !node.params.group_cols.contains(&c) => {}
             f => return Err(Refuse::NullableUnsupported { attno: c, family: f }),
         }
@@ -2101,6 +2104,9 @@ pub fn plan_from_ap(bank: &Bank, faces: &Faces, ap: &APlan) -> Result<PlanNode, 
             }
             AAgg::Avg { e: AValExpr::OctetLength { col } } => {
                 agg.push(ir::AggSpec::new(AggOp::AvgLen, Some(*col), Some(bank.typ(*col))))
+            }
+            AAgg::Avg { e: AValExpr::CharLength { col } } => {
+                agg.push(ir::AggSpec::new(AggOp::AvgCharLen, Some(*col), Some(bank.typ(*col))))
             }
             AAgg::Min { e: AValExpr::Col(c) } => {
                 // MinDate is dead: Min + DATE out TypMeta (the render law
@@ -2707,13 +2713,13 @@ pub fn direct_sum_fits(bank: &Bank, faces: &Faces, col: u32, rows: u64) -> bool 
 /// an empty entry adds 0 to the byte sum) — nothing drops silently. The
 /// agg set is exactly one AvgLen plus COUNT(*) columns.
 fn entrylen_ne_consumed(bank: &Bank, node: &PlanNode) -> bool {
-    let mut avglens = node.agg.iter().filter(|a| a.op == AggOp::AvgLen);
+    let mut avglens = node.agg.iter().filter(|a| a.op.is_avglen());
     let src = match (avglens.next().and_then(|a| a.col), avglens.next()) {
         (Some(c), None) => c,
         _ => return false,
     };
     crate::stencils::col_width(bank, src) == 0
-        && node.agg.iter().all(|a| matches!(a.op, AggOp::AvgLen | AggOp::CountStar))
+        && node.agg.iter().all(|a| a.op.is_avglen() || a.op == AggOp::CountStar)
         && node.params.ne_empty_cols.as_slice() == [src]
         && node.pred.is_none()
 }
@@ -3025,11 +3031,20 @@ pub fn check_server_grouped(bank: &Bank, faces: &Faces, node: &PlanNode) -> Resu
             let dw = crate::stencils::col_width(bank, d);
             match widths.as_slice() {
                 [] => {
-                    // Byval set: the key+1 sentinel needs a non-negative
-                    // exact-stats witness (all-ones keys are unreachable).
-                    if dw > 0 && !fits(d, 0, i64::MAX) {
-                        return refuse("grouped-distinct-domain");
-                    }
+                    // [q5-fulldomain] Byval set: served over the FULL
+                    // signed domain. The key+1 slot encoding's ONE
+                    // colliding key (the all-ones word — value -1, whose
+                    // key+1 is the empty slot) is handled out-of-band by
+                    // the stencil's escape flag (int_set/int_set_spill
+                    // divert it before scatter and fold it exactly once
+                    // at finalize), so no domain witness is required —
+                    // the same posture as the text arm. History: this
+                    // arm demanded a witnessed non-negative domain
+                    // ("grouped-distinct-domain"), which refused
+                    // COUNT(DISTINCT UserID) on EVERY ClickBench hits
+                    // bank (UserID is a full-range u64 hash: stored
+                    // signed, min < 0 on real data — cbsubmit cell
+                    // 20260821T151744Z, cause tier/step/group).
                     // The text set renders exactly one count column.
                     if dw == 0 && node.agg.len() != 1 {
                         return refuse("grouped-distinct-agg");
@@ -3092,8 +3107,7 @@ pub fn check_server_grouped(bank: &Bank, faces: &Faces, node: &PlanNode) -> Resu
                 match node.params.order {
                     crate::ir::OrderBy::None | crate::ir::OrderBy::CountDesc => {}
                     crate::ir::OrderBy::AggDesc(i)
-                        if node.agg.get(i as usize).map(|a| a.op)
-                            == Some(AggOp::AvgLen) => {}
+                        if node.agg.get(i as usize).map(|a| a.op).is_some_and(|o| o.is_avglen()) => {}
                     _ => return refuse("grouped-entrylen-order"),
                 }
                 return Ok(());
@@ -3166,6 +3180,7 @@ pub fn check_server_grouped(bank: &Bank, faces: &Faces, node: &PlanNode) -> Resu
                     | AggOp::AvgDistinct
                     | AggOp::SumShifted
                     | AggOp::AvgLen
+                    | AggOp::AvgCharLen
                     | AggOp::VarSamp
                     | AggOp::VarPop
                     | AggOp::StddevSamp
@@ -3514,6 +3529,7 @@ pub fn check_server_grouped(bank: &Bank, faces: &Faces, node: &PlanNode) -> Resu
                             | AggOp::AvgDistinct
                             | AggOp::SumShifted
                             | AggOp::AvgLen
+                            | AggOp::AvgCharLen
                             | AggOp::EmitMatches
                             | AggOp::StringAgg
                             | AggOp::ArrayAgg
@@ -3622,7 +3638,15 @@ pub fn check_server_grouped(bank: &Bank, faces: &Faces, node: &PlanNode) -> Resu
         // set over the SAME source column (the derivation and the folds
         // read one entry byte image). Order/HAVING/slice apply shell-side
         // over the full emitted group set (the group-count witness above
-        // bounds it).
+        // bounds it) — EXCEPT the [q28-serve] k-bounded lane: the seam
+        // may fuse a strict `COUNT(*) > k` HAVING into the stencil's
+        // `having_min_count` law and push the ORDER/LIMIT as a non-
+        // native `topk` (survivors filter at pass-2 emission, the
+        // answer-boundary selection keeps the top n — HAVING-before-
+        // topk by construction), which admits through the k_bounded
+        // exception above without a group-count witness. The general
+        // `params.having` comparator is NOT implemented by this stencil
+        // and refuses fail-closed below.
         F::DerivedKeyFold => {
             if nterms != 0 || nvar != 0 {
                 return refuse("grouped-derived-pred");
@@ -3640,15 +3664,21 @@ pub fn check_server_grouped(bank: &Bank, faces: &Faces, node: &PlanNode) -> Resu
             for a in &node.agg {
                 match a.op {
                     AggOp::CountStar => {}
-                    AggOp::AvgLen | AggOp::MinBytes if a.col == Some(src) => {}
+                    AggOp::AvgLen | AggOp::AvgCharLen | AggOp::MinBytes if a.col == Some(src) => {}
                     _ => return refuse("grouped-derived-agg"),
                 }
             }
             match node.params.order {
                 crate::ir::OrderBy::None => {}
                 crate::ir::OrderBy::AggDesc(i)
-                    if node.agg.get(i as usize).map(|a| a.op) == Some(AggOp::AvgLen) => {}
+                    if node.agg.get(i as usize).map(|a| a.op).is_some_and(|o| o.is_avglen()) => {}
                 _ => return refuse("grouped-derived-order"),
+            }
+            // [q28-serve] the stencil implements the COUNT(*)-only
+            // `having_min_count` filter; the generalized `having`
+            // comparator would be silently ignored — refuse fail-closed.
+            if node.params.having.is_some() {
+                return refuse("grouped-derived-having");
             }
         }
         // [sqe-expr-keys] dense minute-domain fold: GROUP BY
@@ -4059,7 +4089,21 @@ pub fn check_server_scan(bank: &Bank, faces: &Faces, node: &PlanNode) -> Result<
     // planes + part-record row counts — sound upper bound, no estimate
     // can produce the gate's input type).
     let bound = Witness::scan_survivor_bound(bank, faces, node);
-    if bound.value() > GROUP_ROW_CAP {
+    if bound.value() > faces.cfg.scan_answer_cap() {
+        // [scan-cap-retire] The q19 unrefusal (the q1/q5 idiom): on real
+        // data the sound pre-scan bound can be structurally unreachable
+        // (equality on a full-range hash column prunes no granule — the
+        // zone bound is rows_total on EVERY bank), so the witness gate
+        // refused shapes whose true answer is tiny. The retire arm
+        // SERVES them under the answer-face law instead: the scan_serve
+        // stencil counts the TRUE survivors and raises the typed
+        // `scan-answer-over-cap` refusal the moment they exceed the cap
+        // (bounded state, never truncates, never OOMs) — the grouped
+        // cap-retire posture (RULED 2026-08-19) at the scan face. Kill
+        // switch PGRUST_SQE_SCAN_CAP_RETIRE=0 restores this gate.
+        if faces.cfg.scan_cap_retire {
+            return Ok(());
+        }
         return Err(Refuse::ScanRowsUnwitnessed { what: "bound-over-cap" });
     }
     Ok(())

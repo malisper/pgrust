@@ -3515,3 +3515,540 @@ pub fn byte_spill(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// [q3334 textgroup] fp128-first spilled combine for the k-bounded single
+// text key band ([0] widths, CountStar) — the ClickBench q33/q34 class.
+//
+// WHY: `bytes_spill_engaged` fires whenever `rows × SCATTER_ROW_BYTES`
+// crosses the E18 width-scaled budget (64 MiB × pool width). On a
+// 16-wide box a 100m-row bank prices at 2.8 GB against a 1 GiB budget,
+// so `SELECT URL, COUNT(*) … GROUP BY URL ORDER BY c DESC LIMIT 10`
+// leaves the tuned text128 arm and rides `byte_spill` — which scatters
+// the FULL key payload per collapsed run (20 B header + the key bytes;
+// URL-class keys average 60-80 B, ~3.6× the 28 B the planner priced) and
+// refolds it with a per-record heap alloc + byte-key memcmp fold. The
+// wave-3 c6a.4xlarge submission cell measured that route at ~25 s warm
+// where the 64-wide tax rig (4 GiB budget → tuned text128) answers the
+// same bank in ~70 ms.
+//
+// THE ARM: text128's own fp128-first two-pass (the partmerge fp-identity
+// convention — part_merge.rs: collision odds ~1e-20 at 100m NDV, the
+// standing text128 identity), with the ONE change that pass-1 scatter
+// buckets flush to spill chunks at the E18b worker share instead of
+// resting whole. Records stay the priced FIXED 28 B
+// (h1 u64 | h2 u64 | cnt u32 | part u32 | code u32) — dict parts fold to
+// entry grain first, raw parts carry a (granule, row) locator — and key
+// BYTES resolve lazily at the top-k admission boundary only (dict entry
+// or a decode_sel of the surviving row), exactly the tuned arm's law.
+//
+// ELECTION FLOORS (documented arithmetic; every miss falls back to
+// byte_spill — behavior unchanged):
+//   - k-bounded: `topk(node) != usize::MAX` (a native pushed bound
+//     ≤ NATIVE_TOPK_MAX), further floored so the per-partition sorted-
+//     insert selection stays L2-resident: the insert memmove moves
+//     ~40 B/entry ((Vec<u8>, u64) pairs), so `kw × 40 ≤ l2_bytes`
+//     (26,214 at the 1 MiB default; q33/q34 run at kw = 10).
+//   - pass-2 owner residency: one partition's records stream back and
+//     fold into an open-addressed table. Worst case (all-raw parts, no
+//     adjacency) is 1 record/row: `ceil(rows/p)` records at
+//     28 B (stream) + 2 × 32 B (table slots at ≤ 1/2 load) = 92 B each;
+//     with a 2× partition-skew allowance the price is
+//     `ceil(rows/p) × 184 ≤ share` (the E18 worker allowance,
+//     budget/width). At 100m rows, p = 2048, share = 64 MiB: 48.9k ×
+//     184 = 9.0 MB — in by 7×.
+//
+// Kill switch: PGRUST_SQE_TEXT128_SPILL=0 restores the byte_spill route
+// (read per statement — no process-cached arm, the A/B twin law).
+// ---------------------------------------------------------------------------
+
+/// [q3334 textgroup] engagement census: statements served by the arm /
+/// pass-1 scatter flushes (the tests' no-vacuous-green gate).
+pub static TSPILL_ENGAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static TSPILL_FLUSHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The election law above, as a function over the standing faces.
+pub(crate) fn text128_spill_elects(ctx: &SqeCtx, node: &PlanNode) -> bool {
+    if std::env::var("PGRUST_SQE_TEXT128_SPILL").is_ok_and(|v| v == "0") {
+        return false;
+    }
+    let bank = ctx.bank;
+    let g = &node.params.group_cols;
+    if g.len() != 1 || col_width(bank, g[0]) != 0 {
+        return false;
+    }
+    if !node.agg.iter().all(|a| a.op == AggOp::CountStar) {
+        return false;
+    }
+    let kw = topk(node);
+    if kw == usize::MAX || kw.saturating_mul(40) > node.params.l2_bytes {
+        return false;
+    }
+    let attno = g[0];
+    let entries = ndv_face(ctx, attno);
+    let p = partition_count(entries, 32, node.params.l2_bytes, ctx.pool.threads());
+    let share = ctx.faces.cfg.grouped_budget_bytes() / ctx.pool.threads().max(1) as u64;
+    bank.rows_total().div_ceil(p as u64).saturating_mul(184) <= share
+}
+
+/// Fold one partition's 28 B fp128 records and run the tuned admission:
+/// (count DESC, bytes ASC) top-k with LAZY byte resolve — `resolve`
+/// fires only for candidates that pass the count gate (the text128
+/// admission law verbatim). Factored for the pm_tests combine-law rig.
+fn t128s_partition_top(
+    recs: &[(u64, u64, u32, u32, u32)],
+    k: usize,
+    resolve: &mut dyn FnMut(u32, u32) -> Vec<u8>,
+) -> Vec<(Vec<u8>, u64)> {
+    #[derive(Clone, Copy, Default)]
+    struct FS {
+        h1: u64,
+        h2: u64,
+        cnt: u32,
+        pl: u32,
+        code: u32,
+    }
+    let cap = (recs.len() * 2).next_power_of_two().max(64);
+    let mask = cap - 1;
+    let mut slots = vec![FS::default(); cap];
+    for &(h1, h2, c, pl, code) in recs {
+        let mut i = (h1 as usize) & mask;
+        loop {
+            let e = &mut slots[i];
+            if e.cnt == 0 {
+                *e = FS { h1, h2, cnt: c, pl, code };
+                break;
+            }
+            if e.h1 == h1 && e.h2 == h2 {
+                e.cnt += c;
+                break;
+            }
+            i = (i + 1) & mask;
+        }
+    }
+    // partition top-k (cnt desc, bytes asc); lazy byte resolve.
+    let mut top: Vec<(Vec<u8>, u64)> = Vec::new();
+    for fs in slots.iter() {
+        let cnt = fs.cnt as u64;
+        if cnt == 0 {
+            continue;
+        }
+        if top.len() == k && cnt < top.last().expect("full selection").1 {
+            continue;
+        }
+        let bytes = resolve(fs.pl, fs.code);
+        if top.len() == k {
+            let w = top.last().expect("full selection");
+            if cnt < w.1 || (cnt == w.1 && bytes >= w.0) {
+                continue;
+            }
+            top.pop();
+        }
+        let pos = top
+            .binary_search_by(|pr| cnt.cmp(&pr.1).then_with(|| pr.0.as_slice().cmp(&bytes)))
+            .unwrap_or_else(|q| q);
+        top.insert(pos, (bytes, cnt));
+    }
+    top
+}
+
+pub fn text128_spill(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
+    use crate::fp::entry_fp128;
+    let (bank, pool) = (ctx.bank, ctx.pool);
+    assert!(node.agg.iter().all(|a| a.op == AggOp::CountStar));
+    let attno = node.params.group_cols[0];
+    let k = topk(node);
+    assert!(k != usize::MAX, "text128_spill: election is k-bounded");
+    let entries = ndv_face(ctx, attno);
+    let p = partition_count(entries, 32, node.params.l2_bytes, pool.threads());
+    let pbits = p.trailing_zeros();
+    let t = pool.threads();
+    let budget = ctx.faces.cfg.grouped_budget_bytes();
+    let share = ((budget / t.max(1) as u64).max(1)) as usize;
+    TSPILL_ENGAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Engagement implies a registered factory (fail-closed, the byte_spill law).
+    let store: std::sync::Arc<dyn crate::spill::SpillStore> = crate::spill::new_store()
+        .unwrap_or_else(|| {
+            crate::refuse::raise_runtime(crate::refuse::Refuse::GroupedSpillUnavailable {
+                what: "no-substrate",
+                est: bank
+                    .rows_total()
+                    .saturating_mul(crate::stencils::hash_plane::SCATTER_ROW_BYTES),
+                budget,
+            })
+        });
+    let pf = pm::dict_faces(ctx, attno);
+    let t_fpb = std::time::Instant::now();
+    let fps = pm::build_fps_cached(ctx, &pf, attno);
+    crate::engine::phn(node, "fp_build", t_fpb);
+    let fpr: &[Vec<u128>] = &fps;
+    const ROW_BIT: u32 = 0x8000_0000;
+    const REC: usize = 28;
+    #[inline]
+    fn push_rec(buf: &mut Vec<u8>, h1: u64, h2: u64, cnt: u32, pl: u32, code: u32) {
+        buf.extend_from_slice(&h1.to_ne_bytes());
+        buf.extend_from_slice(&h2.to_ne_bytes());
+        buf.extend_from_slice(&cnt.to_ne_bytes());
+        buf.extend_from_slice(&pl.to_ne_bytes());
+        buf.extend_from_slice(&code.to_ne_bytes());
+    }
+    struct S {
+        su: Scratch,
+        codes: Vec<u32>,
+        counts: Vec<u32>,
+        buckets: Vec<Vec<u8>>,
+        resident: usize,
+        sp: Option<BW>,
+        w: usize,
+        nulls: u64,
+    }
+    struct SK {
+        buckets: Vec<Vec<u8>>,
+        sp: Option<(Box<dyn crate::spill::SpillMedium>, Vec<(u32, u64, u64)>)>,
+        nulls: u64,
+    }
+    let (pfr, storer) = (&pf, &store);
+    let t_p1 = std::time::Instant::now();
+    let pass1 = pool.run_finish(
+        bank.parts.len(),
+        |w| S {
+            su: crate::scan::scratch_fetch(),
+            codes: vec![0; 8192],
+            counts: Vec::new(),
+            buckets: (0..p).map(|_| Vec::new()).collect(),
+            resident: 0,
+            sp: None,
+            w,
+            nulls: 0,
+        },
+        |s, pi| {
+            // [E18b] flush at the worker share: every bucket becomes one
+            // chunk on the worker's private spill file (28 B fp128
+            // records — the priced form, never key payloads).
+            let flush_if_over = |s: &mut S| {
+                if s.resident <= share {
+                    return;
+                }
+                TSPILL_FLUSHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let w = s.w;
+                let sp = s.sp.get_or_insert_with(|| BW::new(&**storer, "t128scatter", w));
+                for b in 0..p {
+                    if s.buckets[b].is_empty() {
+                        continue;
+                    }
+                    sp.begin();
+                    sp.push(&s.buckets[b]);
+                    let (off, len) = sp.end();
+                    sp.chunks.push((b as u32, off, len));
+                    s.buckets[b].clear();
+                }
+                s.resident = 0;
+            };
+            let df = &pfr[pi];
+            if df.dh.is_some() {
+                let mut cur = crate::scan::open_cursor(bank, pi, attno);
+                let n = df.ncodes as usize;
+                s.counts.clear();
+                s.counts.resize(n, 0);
+                for g in 0..cur.granule_count() {
+                    let rows = cur.rows_in_granule(g) as usize;
+                    if s.codes.len() < rows {
+                        s.codes.resize(rows, 0);
+                    }
+                    cur.decode_codes(g, &mut s.codes[..rows]).expect("codes");
+                    // 3VL key law (the text128 body verbatim): NULL rows
+                    // fold into the one NULL group.
+                    if s.su.validity(&mut cur, g, rows).all_valid() {
+                        for r in 0..rows {
+                            s.counts[s.codes[r] as usize] += 1;
+                        }
+                    } else {
+                        for r in 0..rows {
+                            if s.su.row_valid(r) {
+                                s.counts[s.codes[r] as usize] += 1;
+                            } else {
+                                s.nulls += 1;
+                            }
+                        }
+                    }
+                }
+                let mut census_n = 0u64;
+                let fpp = &fpr[pi];
+                for c in 0..n {
+                    let cnt = s.counts[c];
+                    if cnt != 0 {
+                        census_n += 1;
+                        let h = fpp[c];
+                        let (h1, h2) = ((h >> 64) as u64, h as u64);
+                        let b = (h1 >> (64 - pbits)) as usize;
+                        push_rec(&mut s.buckets[b], h1, h2, cnt, pi as u32, c as u32);
+                        s.resident += REC;
+                    }
+                }
+                crate::engine::census_entries(census_n);
+                flush_if_over(s);
+            } else {
+                let mut cu = crate::scan::open_cursor(bank, pi, attno);
+                for g in 0..cu.granule_count() {
+                    let rows = cu.rows_in_granule(g) as usize;
+                    let all_valid = s.su.validity(&mut cu, g, rows).all_valid();
+                    s.su.decode_full(&mut cu, g, rows);
+                    for r in 0..rows {
+                        if !all_valid && !s.su.row_valid(r) {
+                            s.nulls += 1;
+                            continue;
+                        }
+                        let x = s.su.datums[r];
+                        let pl = unsafe { crate::scan::varlena_payload(x) };
+                        let h = entry_fp128(pl);
+                        let (h1, h2) = ((h >> 64) as u64, h as u64);
+                        let b = (h1 >> (64 - pbits)) as usize;
+                        push_rec(
+                            &mut s.buckets[b],
+                            h1,
+                            h2,
+                            1,
+                            ROW_BIT | pi as u32,
+                            (g << 16) | r as u32,
+                        );
+                        s.resident += REC;
+                    }
+                    flush_if_over(s);
+                }
+            }
+        },
+        |s| {
+            crate::scan::scratch_park(s.su);
+            SK { buckets: s.buckets, sp: s.sp.map(|w| (w.m, w.chunks)), nulls: s.nulls }
+        },
+    );
+    crate::engine::phn(node, "pass1", t_p1);
+    let t_p2 = std::time::Instant::now();
+    let null_total: u64 = pass1.iter().map(|s| s.nulls).sum();
+    let scattered: Vec<&SK> = pass1.iter().collect();
+    let chunk_slab = crate::spill::SLAB_BYTES.min(share.max(REC));
+    type P2State = (Vec<(Vec<u8>, u64)>, Scratch, CurCache, Vec<(u64, u64, u32, u32, u32)>);
+    let owned = pool.run_finish(
+        p,
+        |_| -> P2State {
+            (Vec::new(), crate::scan::scratch_fetch(), CurCache::new(attno), Vec::new())
+        },
+        |(out, rs, rc, recs): &mut P2State, part| {
+            recs.clear();
+            let take_rec = |b: &[u8]| -> (u64, u64, u32, u32, u32) {
+                (
+                    u64::from_ne_bytes(b[..8].try_into().expect("rec h1")),
+                    u64::from_ne_bytes(b[8..16].try_into().expect("rec h2")),
+                    u32::from_ne_bytes(b[16..20].try_into().expect("rec cnt")),
+                    u32::from_ne_bytes(b[20..24].try_into().expect("rec part")),
+                    u32::from_ne_bytes(b[24..28].try_into().expect("rec code")),
+                )
+            };
+            // Spilled chunks first (sequential reads), then the resident
+            // residue — arrival order is erased by the fp128 fold.
+            for sk in &scattered {
+                if let Some((m, chunks)) = &sk.sp {
+                    for &(cb, off, len) in chunks {
+                        if cb as usize != part {
+                            continue;
+                        }
+                        let mut cur = crate::spill::ByteCursor::new(&**m, off, len, chunk_slab);
+                        while let Some(b) = cur.take(REC) {
+                            recs.push(take_rec(b));
+                        }
+                    }
+                }
+            }
+            for sk in &scattered {
+                let arena = &sk.buckets[part];
+                for b in arena.chunks_exact(REC) {
+                    recs.push(take_rec(b));
+                }
+            }
+            let mut resolve = |pl: u32, code: u32| -> Vec<u8> {
+                if pl & ROW_BIT != 0 {
+                    let (g, r) = (code >> 16, (code & 0xFFFF) as u16);
+                    let d = rs.decode_sel(rc.get(bank, (pl & !ROW_BIT) as usize), g, &[r]);
+                    unsafe { crate::scan::varlena_payload(d[0]) }.to_vec()
+                } else {
+                    pm::face_bytes(pfr, pl as usize, code).to_vec()
+                }
+            };
+            out.extend(t128s_partition_top(recs, k, &mut resolve));
+        },
+        |s| {
+            crate::scan::scratch_park(s.1);
+            s.0
+        },
+    );
+    let mut all: Vec<(Vec<u8>, u64)> = Vec::new();
+    for out in owned {
+        all.extend(out);
+    }
+    drop(scattered);
+    pool.drop_par(pass1);
+    crate::engine::phn(node, "pass2", t_p2);
+    pm::park_fps(fps);
+    all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    all.truncate(k);
+    // The NULL group joins at the global cut (the text128 body verbatim).
+    let mut rows: Vec<(Option<&[u8]>, u64)> =
+        all.iter().map(|(b, c)| (Some(b.as_slice()), *c)).collect();
+    if null_total > 0 {
+        let pos = rows.partition_point(|r| r.1 >= null_total);
+        rows.insert(pos, (None, null_total));
+        rows.truncate(k);
+    }
+    let mut sink = LineSink::new(bank, node);
+    for &(bytes, c) in rows.iter().skip(node.params.offset) {
+        match bytes {
+            Some(b) => sink.push(node, &|_| 0, Some(b), c, &|_| 0, 0, 0),
+            None => sink.push_null_key(node, c),
+        }
+    }
+    sink.finish()
+}
+
+// ---------------------------------------------------------------------------
+// [q3334 textgroup] combine-law tests (in-file mod — the pm_tests idiom)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pm_tests {
+    use super::t128s_partition_top;
+
+    /// Deterministic value stream (no dev-dep; splitmix-class).
+    fn rng(seed: &mut u64) -> u64 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut x = *seed;
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51afd7ed558ccd);
+        x ^ (x >> 33)
+    }
+
+    /// High-NDV text keys, URL-shaped: a shared scheme/host prefix and a
+    /// long distinct tail (the q33/q34 key class — most groups are
+    /// singletons, a heavy head repeats).
+    fn key_of(j: u64) -> Vec<u8> {
+        format!("http://example.test/page/{j:07}?ref=abcdefgh").into_bytes()
+    }
+
+    /// Row stream over `ndv` distinct keys: key 0 is the heavy head
+    /// (~1/4 of rows), the rest spread uniformly (mostly singletons once
+    /// `rows` ≈ `ndv`).
+    fn keys(rows: u64, ndv: u64, seed: &mut u64) -> Vec<u64> {
+        (0..rows)
+            .map(|_| {
+                let r = rng(seed);
+                if r % 4 == 0 {
+                    0
+                } else {
+                    1 + (r >> 8) % (ndv - 1)
+                }
+            })
+            .collect()
+    }
+
+    /// Scatter the stream into fp128 records exactly as pass 1 does for
+    /// raw parts: one record/row, cnt = 1, the locator carries the key
+    /// ordinal (the tests' resolve map). Splitting the stream across
+    /// `parts` reproduces the multi-worker arrival mix.
+    fn records(ks: &[u64]) -> Vec<(u64, u64, u32, u32, u32)> {
+        ks.iter()
+            .map(|&j| {
+                let h = crate::fp::entry_fp128(&key_of(j));
+                ((h >> 64) as u64, h as u64, 1u32, (j >> 32) as u32, j as u32)
+            })
+            .collect()
+    }
+
+    fn loc_key(pl: u32, code: u32) -> Vec<u8> {
+        key_of(((pl as u64) << 32) | code as u64)
+    }
+
+    /// The scalar reference law: exact count fold by KEY BYTES, then the
+    /// (count DESC, bytes ASC) cut.
+    fn oracle(ks: &[u64], k: usize) -> Vec<(Vec<u8>, u64)> {
+        let mut m: std::collections::BTreeMap<Vec<u8>, u64> = Default::default();
+        for &j in ks {
+            *m.entry(key_of(j)).or_insert(0) += 1;
+        }
+        let mut v: Vec<(Vec<u8>, u64)> = m.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v.truncate(k);
+        v
+    }
+
+    /// Identity: the fp128 fold + lazy-resolve selection answers the
+    /// scalar oracle exactly — high-NDV singleton-dominated streams,
+    /// pre-folded dict-grain records, and tie storms.
+    #[test]
+    fn fold_select_vs_oracle() {
+        let mut seed = 0x51_7cc1;
+        for (rows, ndv, k) in [(20_000u64, 8_000u64, 10usize), (5_000, 4_999, 25), (3_000, 8, 3)]
+        {
+            let ks = keys(rows, ndv, &mut seed);
+            let recs = records(&ks);
+            let mut top =
+                t128s_partition_top(&recs, k, &mut |pl, code| loc_key(pl, code));
+            top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            assert_eq!(top, oracle(&ks, k), "rows={rows} ndv={ndv} k={k}");
+        }
+    }
+
+    /// Pre-folded (dict-grain) records combine with raw per-row records
+    /// of the same keys — the mixed dict/raw part arrival.
+    #[test]
+    fn fold_select_mixed_grain() {
+        let mut seed = 0xfeed;
+        let ks = keys(8_000, 3_000, &mut seed);
+        let mut recs = records(&ks[..4_000]);
+        // second half arrives pre-folded per key (entry grain)
+        let mut m: std::collections::BTreeMap<u64, u32> = Default::default();
+        for &j in &ks[4_000..] {
+            *m.entry(j).or_insert(0) += 1;
+        }
+        for (&j, &c) in &m {
+            let h = crate::fp::entry_fp128(&key_of(j));
+            recs.push(((h >> 64) as u64, h as u64, c, (j >> 32) as u32, j as u32));
+        }
+        let mut top = t128s_partition_top(&recs, 12, &mut |pl, code| loc_key(pl, code));
+        top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        assert_eq!(top, oracle(&ks, 12));
+    }
+
+    /// The lazy-resolve law: byte resolution touches candidates that
+    /// pass the count gate only — with a separated count head the
+    /// resolve census stays ~k-proportional, never group-proportional
+    /// (the ~25 s byte-materialization class this arm retires).
+    #[test]
+    fn lazy_resolve_bounded() {
+        // 64 heavy keys (counts 1000+) over 50k singletons.
+        let mut ks: Vec<u64> = Vec::new();
+        for j in 0..64u64 {
+            ks.extend(std::iter::repeat(j).take(1_000 + j as usize));
+        }
+        ks.extend(64..50_064u64);
+        let recs = records(&ks);
+        let mut resolves = 0u64;
+        let k = 10;
+        let top = t128s_partition_top(&recs, k, &mut |pl, code| {
+            resolves += 1;
+            loc_key(pl, code)
+        });
+        assert_eq!(top.len(), k);
+        // Selection admits by count before any byte touch: once the
+        // standing k-th count clears the singleton mass, singletons skip
+        // WITHOUT resolving (the byte_spill contrast materializes every
+        // group's bytes up front). Table order is hash-random but the
+        // stream is seedless-deterministic, so the census is a fixed
+        // number — the law gates it well under the group count.
+        let groups = 64 + 50_000u64;
+        assert!(
+            resolves < groups / 2,
+            "lazy resolve law: {resolves} resolves for k={k} over {groups} groups"
+        );
+        // and the cut is the true top-10 by count (keys 54..=63)
+        assert_eq!(top.last().expect("k rows").1, 1_054);
+    }
+}

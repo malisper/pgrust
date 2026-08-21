@@ -39,12 +39,16 @@ pub fn entrylen_dense_bounds(sv: &crate::statsview::StatsView) -> Option<(i64, u
 pub fn dense_int_entrylen(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
     let (bank, pool) = (ctx.bank, ctx.pool);
     let a_key = node.params.group_cols[0];
-    let a_text = node
+    let len_agg = node
         .agg
         .iter()
-        .find(|a| a.op == AggOp::AvgLen)
-        .and_then(|a| a.col)
-        .expect("dense_int code_agg: AvgOctetLen agg");
+        .find(|a| a.op.is_avglen())
+        .expect("dense_int code_agg: avg-length agg");
+    // [q27-charlen] the one kernel split: AvgCharLen folds stored UTF-8
+    // char counts (dict index char_len field / payload lead-byte walk),
+    // AvgLen folds byte lengths. Everything else is shared verbatim.
+    let charmode = len_agg.op == AggOp::AvgCharLen;
+    let a_text = len_agg.col.expect("dense_int code_agg: avg-length input");
     let units = ctx.faces.walk(bank, a_key);
     let tp = pool.threads();
 
@@ -80,7 +84,11 @@ pub fn dense_int_entrylen(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                             let n = df.ncodes as usize;
                             let mut lens = vec![0u32; n];
                             for ci in 0..n {
-                                lens[ci] = dh.byte_len_only(ci as u32).expect("byte_len");
+                                lens[ci] = if charmode {
+                                    dh.lengths(ci as u32).expect("char_len").1
+                                } else {
+                                    dh.byte_len_only(ci as u32).expect("byte_len")
+                                };
                             }
                             lens
                         });
@@ -218,7 +226,9 @@ pub fn dense_int_entrylen(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                         if !(all_valid || s.su.row_valid(r)) {
                             continue;
                         }
-                        let len = unsafe { crate::scan::varlena_payload(x) }.len() as u64;
+                        let pl = unsafe { crate::scan::varlena_payload(x) };
+                        let len =
+                            if charmode { crate::stencils::utf8_chars(pl) } else { pl.len() as u64 };
                         if len != 0 {
                             let k = (cid[r] as i64 - dlo) as usize;
                             s.dense_sl[k] += len;
@@ -335,7 +345,7 @@ pub fn dense_int_entrylen(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
     let mut cols: Vec<AnswerCol> = vec![AnswerCol::i64s(node.ty_of(a_key), keys)];
     for a in &node.agg {
         match a.op {
-            AggOp::AvgLen => cols.push(AnswerCol {
+            AggOp::AvgLen | AggOp::AvgCharLen => cols.push(AnswerCol {
                 ty: a.out,
                 data: ColData::Ratio {
                     pairs: window.iter().map(|&&(_, s, c)| (s as i128, c as i64)).collect(),

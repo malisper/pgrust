@@ -247,6 +247,12 @@ const DATE_TRUNC_TS_PROC: Oid = 2020;
 const REGEXP_REPLACE_PROC: Oid = 2284;
 /// octet_length(text) — textoctetlen.
 const OCTET_LENGTH_TEXT_PROC: Oid = 1374;
+/// length(text) / char_length(text) — the textlen alias set (1257 +
+/// catalog aliases 1317/1369/1381; all bind fc_textlen): UTF-8 CHARACTER
+/// count, the official ClickBench q27/q28 expression. Lowered to the
+/// engine's AvgCharLen (dict index char_len / lead-byte walk) — NEVER to
+/// the byte-length fold, whose answer differs on multibyte text.
+const TEXTLEN_PROCS: [Oid; 4] = [1257, 1317, 1369, 1381];
 /// Same-width integer minus procs (int2mi/int4mi/int8mi): result type ==
 /// input type, so the derived key renders under the source column's
 /// render class. Cross-width minus stays outside the vocabulary.
@@ -402,7 +408,10 @@ impl JsonLaneMap {
     }
     fn map_val(&self, e: &mut AValExpr) {
         match e {
-            AValExpr::Col(c) | AValExpr::OctetLength { col: c } | AValExpr::AddK { col: c, .. } => {
+            AValExpr::Col(c)
+            | AValExpr::OctetLength { col: c }
+            | AValExpr::CharLength { col: c }
+            | AValExpr::AddK { col: c, .. } => {
                 *c = self.map(*c)
             }
             AValExpr::MulCC { a, b, .. }
@@ -3357,6 +3366,31 @@ pub(crate) fn rowtopk_enabled() -> bool {
     }
 }
 
+/// [q28-serve] DerivedKeyFold bounded-answer master switch: the seam's
+/// top-k push extended to the derived-key fold (with the COUNT(*)
+/// HAVING fused into the stencil's `having_min_count` law), so the
+/// k-bounded admission exception serves the ClickBench-q28 shape
+/// without a group-count witness. Default ON; opt-OUT
+/// (`PGRUST_SQE_DERIVED_TOPK=0`/`off`) restores the witness-gate world
+/// verbatim (`0A000 tier/step/group-count-unwitnessed` on the
+/// unwitnessed derived-key LIMIT shapes).
+pub(crate) fn derived_topk_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
+    static CELL: AtomicU8 = AtomicU8::new(0);
+    match CELL.load(Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = !matches!(
+                std::env::var("PGRUST_SQE_DERIVED_TOPK").as_deref(),
+                Ok("0") | Ok("off")
+            );
+            CELL.store(if on { 1 } else { 2 }, Relaxed);
+            on
+        }
+    }
+}
+
 /// Approximate RENDERED bytes of the delivery window — the spool byte
 /// law's pricing input. Counts per-row datum payloads (fixed widths per
 /// answer class; byte-string rows at their true lengths) plus a
@@ -3478,6 +3512,7 @@ fn family_bound_name(family: &'static str) -> &'static str {
         "survivorgather" => "survivorgather+bound",
         "distinct" => "distinct+bound",
         "densegroup" => "densegroup+bound",
+        "derivedkey" => "derivedkey+bound",
         "scanserve" => "scanserve+bound",
         "windowreplay" => "windowreplay+bound",
         other => other,
@@ -8725,6 +8760,7 @@ fn lower_agg<'mcx>(
             // [scale-alg] fused packed products need the fused fold
             // (stats records carry column facts, never row products).
             AValExpr::OctetLength { .. }
+            | AValExpr::CharLength { .. }
             | AValExpr::AddK { .. }
             | AValExpr::MulCC { .. }
             | AValExpr::MulKSub { .. }
@@ -8990,7 +9026,26 @@ fn lower_agg<'mcx>(
     // only where collector-mode emission is proven (the hash plane).
     // HAVING keeps the full answer: groups filter BEFORE any bound, so a
     // pushed top-k under a group filter would keep the wrong window.
-    if grouped && having.is_none() {
+    //
+    // [q28-serve] ONE exception: the derived-key fold FUSES the exact
+    // `COUNT(*) > k` HAVING into the stencil (its `having_min_count`
+    // law filters at pass-2 emission — strict Gt, unfiltered count), so
+    // survivors are decided BEFORE the answer materializes and the
+    // pushed bound then selects among survivors only: HAVING-before-
+    // topk holds engine-side and the wrong-window hazard cannot arise.
+    // Any other HAVING form keeps the full-answer law unchanged.
+    let dkf = family == sqe::planner::AFamily::DerivedKeyFold && derived_topk_enabled();
+    let dkf_having_fusible = dkf
+        && having.as_ref().is_some_and(|h| {
+            h.code == CmpCode::Gt
+                && u64::try_from(h.rhs).is_ok()
+                && h.col
+                    .checked_sub(n_group)
+                    .and_then(|i| legs.get(i))
+                    .is_some_and(|l| matches!(l.agg, AAgg::CountStar) && l.filter.is_none())
+        });
+    let mut derived_fused = false;
+    if grouped && (having.is_none() || dkf_having_fusible) {
         if let (Some(s), Some(c)) = (&slice, slice.as_ref().and_then(|s| s.count)) {
             let o = s.offset.unwrap_or(0);
             let n = (o as u64).saturating_add(c as u64);
@@ -9100,9 +9155,65 @@ fn lower_agg<'mcx>(
                             .collect()
                     })
                 };
-                if let (false, true, Some(ks)) = (keys_plain, var_lane, span_keys) {
+                // [q28-serve] DerivedKeyFold k-bounded law: every pushed
+                // sort key must resolve to an EXACTLY-ordered answer
+                // class this family emits — the derived key bytes
+                // (canonical byte order), an unfiltered COUNT(*), the
+                // exact {sum,count} AVG ratio (`apply_topk` compares it
+                // by i128 cross-multiplication, never a rendered f64),
+                // or the MIN byte image. Any key outside this set keeps
+                // the full-answer law and its witness gate (typed
+                // refusal — the admission excludes what the selection
+                // cannot order exactly, it never assumes).
+                let dkf_key_exact = |slot: usize| {
+                    slot < n_group
+                        || slot
+                            .checked_sub(n_group)
+                            .and_then(|i| legs.get(i))
+                            .is_some_and(|l| match &l.agg {
+                                AAgg::CountStar => l.filter.is_none(),
+                                AAgg::Avg { e: AValExpr::OctetLength { .. } } => true,
+                                AAgg::MinBytes { .. } => true,
+                                _ => false,
+                            })
+                };
+                let dkf_push = dkf
+                    && keys_plain
+                    && (having.is_none() || dkf_having_fusible)
+                    && sort
+                        .as_ref()
+                        .is_some_and(|sp| sp.keys.iter().all(|k| !k.trim && dkf_key_exact(k.slot)));
+                if dkf_push {
+                    // Non-native collector bound: the stencil folds and
+                    // finalizes EVERY group (survivors only when the
+                    // HAVING fuses below), the answer boundary keeps the
+                    // top n. The canonical-key ASC tie-break appended
+                    // here makes the kept window EXACTLY the rig
+                    // oracle's (order keys, then key bytes) — the q28
+                    // tie-law identity surface.
+                    let mut ks = keys;
+                    if !ks.iter().any(|k| (k.col as usize) < n_group) {
+                        ks.push(sqe::ir::TopKKey {
+                            col: 0,
+                            desc: false,
+                            nulls_first: false,
+                            lo: None,
+                            trim: false,
+                        });
+                    }
+                    node.params.topk =
+                        Some(sqe::ir::TopK { keys: ks, n: n as usize, native: false });
+                    if let Some(h) = &having {
+                        // Checked fusible above (guard): strict Gt on an
+                        // unfiltered COUNT(*), rhs in the u64 domain.
+                        node.params.having_min_count =
+                            u64::try_from(h.rhs).expect("dkf_having_fusible");
+                        derived_fused = true;
+                    }
+                } else if let (false, true, Some(ks)) = (keys_plain, var_lane, span_keys) {
                     node.params.topk = Some(sqe::ir::TopK { keys: ks, n: n as usize, native: false });
-                } else if keys_plain
+                } else if having.is_none()
+                    && keys_plain
                     && (native
                         || family == sqe::planner::AFamily::HashPlaneOwnedGroup
                         || var_lane)
@@ -9173,7 +9284,7 @@ fn lower_agg<'mcx>(
         scan_node_id: scan.scan.plan.plan_node_id,
         slice,
         sort,
-        having: if fused_having { None } else { having },
+        having: if fused_having || derived_fused { None } else { having },
         win_filter: Vec::new(),
         aux_node_ids: Vec::new(),
         memo_bar: below_gate.is_some(),
@@ -9645,6 +9756,7 @@ fn lower_grouping_sets<'mcx>(
                             || matches!(bank.face(*c), sqe::bank::Face::PackedNumeric { .. }))
                 }
                 AValExpr::OctetLength { .. }
+                | AValExpr::CharLength { .. }
                 | AValExpr::AddK { .. }
                 | AValExpr::MulCC { .. }
                 | AValExpr::MulKSub { .. }
@@ -22066,10 +22178,11 @@ fn recognize_aggref_plain<'p>(
     // avg(octet_length(text_col)) — the varlena-length fold (the engine's
     // AvgLen op; families outside its stencil refuse server-side).
     if te.expr.node_tag() == NodeTag::T_FuncExpr && ar.aggfnoid == AGG_AVG_INT4 {
-        let f = te
-            .expr
-            .as_func_expr()
-            .filter(|f| f.funcid == OCTET_LENGTH_TEXT_PROC && f.args.len() == 1);
+        let f = te.expr.as_func_expr().filter(|f| {
+            (f.funcid == OCTET_LENGTH_TEXT_PROC || TEXTLEN_PROCS.contains(&f.funcid))
+                && f.args.len() == 1
+        });
+        let charlen = f.is_some_and(|f| TEXTLEN_PROCS.contains(&f.funcid));
         let attno = f
             .and_then(|f| f.args.iter().next())
             .and_then(|a| resolve_var(a, tls, scanrelid))
@@ -22078,11 +22191,12 @@ fn recognize_aggref_plain<'p>(
         let Some(attno) = attno else {
             return Err(refuse(RefuseCause::UnsupportedExpr(NodeTag::T_FuncExpr)));
         };
-        return Ok(RecLeg::new(
-            AAgg::Avg { e: AValExpr::OctetLength { col: attno } },
-            Render::AvgNumeric,
-            Some(attno),
-        ));
+        let e = if charlen {
+            AValExpr::CharLength { col: attno }
+        } else {
+            AValExpr::OctetLength { col: attno }
+        };
+        return Ok(RecLeg::new(AAgg::Avg { e }, Render::AvgNumeric, Some(attno)));
     }
     // [json-rung1] a recognized jsonb extraction as the agg input: the
     // pending lane column rides the plain-Var type-dispatch arms below
@@ -22121,7 +22235,9 @@ fn recognize_aggref_plain<'p>(
                     | AValExpr::MulKSub { a, .. }
                     | AValExpr::PackedMulK { a, .. }
                     | AValExpr::PackedMulK2 { a, .. } => a,
-                    AValExpr::Col(c) | AValExpr::OctetLength { col: c } => c,
+                    AValExpr::Col(c)
+                    | AValExpr::OctetLength { col: c }
+                    | AValExpr::CharLength { col: c } => c,
                 };
                 let (agg, render) = match ar.aggfnoid {
                     AGG_SUM_INT2 | AGG_SUM_INT4 => (AAgg::Sum { e }, Render::SumI64),

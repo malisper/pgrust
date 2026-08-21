@@ -133,6 +133,14 @@ pub struct SqeConfig {
     /// work_mem-class default). GUC plumbing at the pool/guc seam's
     /// lane, per the sortagg/window budget precedent.
     pub grouped_budget_override: Option<u64>,
+    /// [E18-M] Physical RAM of THIS machine, bytes, for the grouped
+    /// budget's machine floor (`cost_params::grouped_machine_floor_bytes`
+    /// — the wave-3 submission unrefusal). Default = the box probe
+    /// (/proc/meminfo, macOS sysctl), 0 when unprobeable or when the
+    /// kill switch PGRUST_SQE_GROUPED_MEM_FLOOR=0/off disarms the floor
+    /// (0 reproduces the width law verbatim). Tests set the field
+    /// directly — no process-global state.
+    pub machine_mem_bytes: u64,
     /// [cap-retire] Grouped ANSWER-plane budget OVERRIDE, bytes, for
     /// pricing/gate arms (env PGRUST_SQE_ANSWER_BUDGET). `None` = the
     /// E17 answer-face law (`cost_params::answer_budget_bytes()` — the
@@ -141,6 +149,23 @@ pub struct SqeConfig {
     /// the effective value; GUC plumbing at the pool/guc seam's lane,
     /// per the grouped-budget precedent.
     pub answer_budget_override: Option<u64>,
+    /// [scan-cap-retire] Serve UNWITNESSED unbounded row-returning scans
+    /// under the answer-face law (the q1/q5 idiom, extending the RULED
+    /// cap-retire posture to the scan face): admission no longer demands
+    /// the zone-plane survivor witness — the stencil counts the TRUE
+    /// survivors and refuses typed (`scan-answer-over-cap`) the moment
+    /// they exceed the cap, bounded state, never truncates, never OOMs.
+    /// Provenance: ClickBench q19 (equality on a full-range hash column
+    /// — zone planes prune nothing, the pre-scan witness can never exist
+    /// on real data; r14 tax cells 20260821T035653Z/035759Z, M2
+    /// `Q19|refused|tier/step/scan-rows-unwitnessed`). Default ON; env
+    /// is opt-OUT: PGRUST_SQE_SCAN_CAP_RETIRE=0 (or "off") restores the
+    /// admission witness gate verbatim.
+    pub scan_cap_retire: bool,
+    /// [scan-cap-retire] Scan ANSWER-plane row-cap OVERRIDE for
+    /// pricing/gate arms (env PGRUST_SQE_SCAN_ANSWER_CAP, rows). `None`
+    /// = `planner::GROUP_ROW_CAP` (the one answer-row cap law).
+    pub scan_answer_cap_override: Option<u64>,
 }
 
 /// Opt-OUT env gate for the default-ON fp arms: only an explicit "0" /
@@ -159,6 +184,37 @@ fn env_not_disabled(name: &str) -> bool {
 pub fn bulk_entries_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| env_not_disabled("PGRUST_SQE_BULK_ENTRIES"))
+}
+
+/// [E18-M] Physical RAM probe, bytes — Linux via /proc/meminfo (the
+/// benchmark targets; the same source the entry conf's memory formulas
+/// read), macOS via `sysctl hw.memsize` (dev boxes / `cargo test`); 0
+/// when neither answers (the floor then contributes nothing and the
+/// width law stands alone). Probed once per process.
+fn machine_mem_probe() -> u64 {
+    static MEM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MEM.get_or_init(|| {
+        if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
+            for line in s.lines() {
+                if let Some(rest) = line.strip_prefix("MemTotal:") {
+                    if let Some(kb) = rest.split_whitespace().next().and_then(|t| t.parse::<u64>().ok()) {
+                        return kb.saturating_mul(1024);
+                    }
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Ok(out) =
+            std::process::Command::new("/usr/sbin/sysctl").args(["-n", "hw.memsize"]).output()
+        {
+            if let Some(b) =
+                String::from_utf8(out.stdout).ok().and_then(|s| s.trim().parse::<u64>().ok())
+            {
+                return b;
+            }
+        }
+        0
+    })
 }
 
 impl Default for SqeConfig {
@@ -187,7 +243,16 @@ impl Default for SqeConfig {
             grouped_budget_override: std::env::var("PGRUST_SQE_GROUPED_BUDGET")
                 .ok()
                 .and_then(|v| v.parse().ok()),
+            machine_mem_bytes: if env_not_disabled("PGRUST_SQE_GROUPED_MEM_FLOOR") {
+                machine_mem_probe()
+            } else {
+                0
+            },
             answer_budget_override: std::env::var("PGRUST_SQE_ANSWER_BUDGET")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            scan_cap_retire: env_not_disabled("PGRUST_SQE_SCAN_CAP_RETIRE"),
+            scan_answer_cap_override: std::env::var("PGRUST_SQE_SCAN_ANSWER_CAP")
                 .ok()
                 .and_then(|v| v.parse().ok()),
         }
@@ -200,8 +265,11 @@ impl SqeConfig {
     /// configured pool width (spill-design.md §2).
     #[inline]
     pub fn grouped_budget_bytes(&self) -> u64 {
-        self.grouped_budget_override
-            .unwrap_or_else(|| crate::cost_params::target().grouped_budget_bytes(self.threads))
+        self.grouped_budget_override.unwrap_or_else(|| {
+            let cp = crate::cost_params::target();
+            cp.grouped_budget_bytes(self.threads)
+                .max(cp.grouped_machine_floor_bytes(self.machine_mem_bytes))
+        })
     }
 
     /// [cap-retire] The effective grouped ANSWER-plane budget, bytes:
@@ -211,6 +279,14 @@ impl SqeConfig {
     pub fn answer_budget_bytes(&self) -> u64 {
         self.answer_budget_override
             .unwrap_or_else(|| crate::cost_params::target().answer_budget_bytes())
+    }
+
+    /// [scan-cap-retire] The effective scan answer-row cap: the env/gate
+    /// override when present, else the one answer-row cap law
+    /// (`planner::GROUP_ROW_CAP`).
+    #[inline]
+    pub fn scan_answer_cap(&self) -> u64 {
+        self.scan_answer_cap_override.unwrap_or(crate::planner::GROUP_ROW_CAP)
     }
 }
 

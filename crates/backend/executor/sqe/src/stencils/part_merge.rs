@@ -495,13 +495,17 @@ fn hit_lists_len(m: &std::sync::Mutex<Vec<&mut Vec<(u64, u64)>>>) -> usize {
 /// Fingerprint-carrying fragment: (group fp, rep key, cnt).
 pub(crate) type FpFrag = (u128, u64, u64);
 
+/// Returns the group column's dict faces as the third element so the
+/// caller's combine/render leg reuses them — [p2-phase-widening] the
+/// refetch was a second per-exec faces walk + prewarm pool fan-out
+/// (q10's `merge_render` served widening).
 pub(crate) fn pair_distinct_fp(
     ctx: &SqeCtx,
     q: u32,
     a_t: u32,
     a_d: u32,
     drop_empty: bool,
-) -> (Vec<Vec<FpFrag>>, Vec<((Vec<u8>, u64), u64)>) {
+) -> (Vec<Vec<FpFrag>>, Vec<((Vec<u8>, u64), u64)>, Vec<Arc<DictFace>>) {
     use crate::grouped::{hash128, hash64, radix_of, Cnt128, RADIX_P};
     use crate::kernels_g::ColState;
     use crate::scan::CurCache;
@@ -728,7 +732,7 @@ pub(crate) fn pair_distinct_fp(
     }
     park_fps(fps);
     crate::engine::ph(q, "pd_own", t_own);
-    (owner_runs, side.into_iter().collect())
+    (owner_runs, side.into_iter().collect(), pf)
 }
 
 // ---------------------------------------------------------------------------

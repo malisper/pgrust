@@ -249,15 +249,22 @@ pub fn pair_distinct_owned<S: Send>(
     init: impl Fn(usize) -> S + Sync,
     fill: impl Fn(&mut S, usize, &mut Vec<(u64, u64)>) + Sync,
 ) -> DistinctOut {
+    use crate::stencils::statepark::{arm_buckets, nested_bytes, scatter_park_on, vec_bytes, StatePark};
+    // [p2-phase-widening] the pass-1 pair-scatter arena and the pass-2
+    // seen/counts states were the last fresh-per-exec allocations in the
+    // pair-distinct band (q8's flat ~9% served widening — the largest
+    // per-exec scratch of the violator set); park them like their
+    // part_merge siblings (PARKPDF/PARKPDT). Scatter-arena class cap /
+    // table class cap; over-cap admission rides the ruled OVERCAP law.
+    static PARKPO: StatePark<(Vec<Vec<u128>>, Vec<(u64, u64)>)> = StatePark::new(256 << 20);
+    static PARKPOT: StatePark<(Cnt128, Vec<u32>)> = StatePark::new(64 << 20);
     let pass1 = pool.run(
         units.len(),
         |ti| {
-            (
-                init(ti),
-                (0..RADIX_P).map(|_| Vec::new()).collect::<Vec<Vec<u128>>>(),
-                Vec::with_capacity(8192),
-                0u64,
-            )
+            let (buckets, mut pairbuf) = if scatter_park_on() { PARKPO.fetch() } else { None }
+                .unwrap_or_else(|| (Vec::new(), Vec::with_capacity(8192)));
+            pairbuf.clear();
+            (init(ti), arm_buckets(buckets, RADIX_P), pairbuf, 0u64)
         },
         |(st, buckets, pairbuf, touched): &mut (S, Vec<Vec<u128>>, Vec<(u64, u64)>, u64), i| {
             pairbuf.clear();
@@ -273,10 +280,18 @@ pub fn pair_distinct_owned<S: Send>(
     let scattered: Vec<&Vec<Vec<u128>>> = pass1.iter().map(|p| &p.1).collect();
     let owned = pool.run(
         RADIX_P,
-        |_| (vec![0u32; dense_groups], 0u64),
-        |(counts, pairs), p| {
+        |_| {
+            let (seen, mut counts) = if scatter_park_on() { PARKPOT.fetch() } else { None }
+                .unwrap_or_else(|| (Cnt128::new(16), Vec::new()));
+            counts.clear();
+            counts.resize(dense_groups, 0);
+            (counts, 0u64, seen)
+        },
+        |(counts, pairs, seen): &mut (Vec<u32>, u64, Cnt128), p| {
             let n: usize = scattered.iter().map(|b| b[p].len()).sum();
-            let mut seen = Cnt128::new(n);
+            // per-partition dedupe scope, exactly the fresh-table law
+            // (pairs land in one partition; reset keeps scopes disjoint).
+            seen.reset(n.max(16));
             for b in &scattered {
                 for &pair in &b[p] {
                     if seen.add(pair, 1) {
@@ -289,10 +304,20 @@ pub fn pair_distinct_owned<S: Send>(
     );
     let mut dense = vec![0u64; dense_groups];
     let mut pairs_distinct = 0u64;
-    for (c, pr) in &owned {
+    for (c, pr, _) in &owned {
         pairs_distinct += pr;
         for (i, &v) in c.iter().enumerate() {
             dense[i] += v as u64;
+        }
+    }
+    if scatter_park_on() {
+        for (counts, _, seen) in owned {
+            let b = seen.keys.capacity() * 16 + seen.cnt.capacity() * 4 + vec_bytes(&counts);
+            PARKPOT.park((seen, counts), b);
+        }
+        for (_, buckets, pairbuf, _) in pass1 {
+            let b = nested_bytes(&buckets) + vec_bytes(&pairbuf);
+            PARKPO.park((buckets, pairbuf), b);
         }
     }
     let groups: Vec<(u64, u64)> = dense
@@ -698,5 +723,48 @@ pub fn count_merge_64<S: Send>(
         groups,
         rows_counted,
         touched,
+    }
+}
+
+#[cfg(test)]
+mod pd_park_tests {
+    use super::*;
+
+    /// [p2-phase-widening] pair_distinct_owned through the parked
+    /// scatter/seen path: consecutive executions must be byte-identical,
+    /// including a SMALLER second shape (guards the capacity-only laws —
+    /// counts clear+resize, per-partition seen.reset, arm_buckets — a
+    /// stale parked state must never leak pairs or counts forward).
+    #[test]
+    fn pair_distinct_owned_park_reuse_identity() {
+        let pool = Pool::new(4);
+        let run = |nunits: usize, dense: usize, stride: u64| {
+            let units: Vec<Unit> = (0..nunits).map(|i| (0, i as u32, 10, 0)).collect();
+            let mut out = pair_distinct_owned(
+                &pool,
+                &units,
+                dense,
+                |_| (),
+                |_, i, buf| {
+                    for r in 0..10u64 {
+                        // duplicated pairs across units exercise the dedupe
+                        buf.push(((r % dense as u64), (i as u64 * stride + r) % 7));
+                    }
+                },
+            );
+            out.groups.sort_unstable();
+            out
+        };
+        let a1 = run(16, 8, 3);
+        let a2 = run(16, 8, 3);
+        assert_eq!(a1.groups, a2.groups, "parked rerun diverged (groups)");
+        assert_eq!(a1.pairs_distinct, a2.pairs_distinct, "parked rerun diverged (pairs)");
+        assert_eq!(a1.touched, a2.touched);
+        // shrink: fewer units, smaller dense domain, different pair mix —
+        // must equal its own fresh recompute despite larger parked states
+        let b1 = run(4, 3, 5);
+        let b2 = run(4, 3, 5);
+        assert_eq!(b1.groups, b2.groups, "post-shrink parked rerun diverged");
+        assert_eq!(b1.pairs_distinct, b2.pairs_distinct);
     }
 }

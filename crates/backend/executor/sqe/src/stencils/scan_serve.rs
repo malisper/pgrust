@@ -268,6 +268,14 @@ pub fn run_scan_serve(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
     }
     let keyed = !keys.is_empty();
     let prune_at = bound_n.map(|n| (2 * n).max(256));
+    // [scan-cap-retire] Unbounded scans hold answer state (survivor
+    // locators): the shared count bounds it — a worker that pushes the
+    // total past the answer-row cap raises the typed answer-face refusal
+    // right there (the merge repeats the check exactly). Witnessed or
+    // k-bounded scans can never trip it.
+    let answer_cap = ctx.faces.cfg.scan_answer_cap();
+    let survivor_ct = std::sync::atomic::AtomicU64::new(0);
+    let survivor_ct = &survivor_ct;
     // [sqe-topn-gap] Part-subdivided claim plane (see pool::part_claim_chunks):
     // shallow part planes starve the claim-depth guard to n/4 workers.
     // cmp_cand is a STRICT total order ((ui, row) tiebreak), so the
@@ -378,6 +386,21 @@ pub fn run_scan_serve(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                         None => s.sel.len(),
                     };
                     s.locs.extend(s.sel[..take].iter().map(|&r| (ui as u32, r)));
+                    // [scan-cap-retire] answer-face law for the
+                    // unbounded arm: count-and-refuse, never truncate.
+                    if bound_n.is_none() && take > 0 {
+                        let tot = survivor_ct
+                            .fetch_add(take as u64, std::sync::atomic::Ordering::Relaxed)
+                            + take as u64;
+                        if tot > answer_cap {
+                            crate::refuse::raise_runtime(
+                                crate::refuse::Refuse::ScanAnswerOverCap {
+                                    got: tot,
+                                    cap: answer_cap,
+                                },
+                            );
+                        }
+                    }
                     continue;
                 }
                 for &di in &key_di {
@@ -471,6 +494,14 @@ pub fn run_scan_serve(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
         all.sort_unstable();
         if let Some(n) = bound_n {
             all.truncate(n);
+        } else if all.len() as u64 > answer_cap {
+            // [scan-cap-retire] the exact merge-point account (the
+            // worker-side raise is the early exit; this one is the
+            // authority).
+            crate::refuse::raise_runtime(crate::refuse::Refuse::ScanAnswerOverCap {
+                got: all.len() as u64,
+                cap: answer_cap,
+            });
         }
         all
     };

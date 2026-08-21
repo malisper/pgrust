@@ -34,6 +34,14 @@ use crate::bank::Bank;
 
 /// Byval width of a column (0 = varlena) — the TypMeta consult (the PoC's
 /// StorageClass shim is dead; currency-insertion.md §2).
+/// UTF-8 character count of one varlena payload: bytes minus
+/// continuation bytes (the bank stores server-encoding UTF-8; PG's
+/// textlen counts chars the same way). Exact on well-formed UTF-8.
+#[inline]
+pub(crate) fn utf8_chars(bytes: &[u8]) -> u64 {
+    bytes.iter().filter(|&&b| (b as i8) >= -0x40).count() as u64
+}
+
 pub(crate) fn col_width(bank: &Bank, attno: u32) -> u8 {
     let t = bank.typ(attno);
     if t.is_varlena() {

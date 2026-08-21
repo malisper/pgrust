@@ -22,6 +22,12 @@ pub(crate) fn register_spill_store() {
 
 fn factory() -> Option<Arc<dyn sqe::spill::SpillStore>> {
     static GEN: AtomicU64 = AtomicU64::new(0);
+    // [SPILL-WITNESS] a store is only minted when a statement's grouped
+    // arm actually ENGAGES spill (over-budget election) — this census
+    // row is the submission kit's hard witness that a benchmark ladder
+    // ran disk-free (pg_stat_sqe_engagements: family 'spill-engaged',
+    // posture witness; the cb-run harness fails the cell on N > 0).
+    super::stat::tick_witness("spill-engaged", "-");
     let set = sqe_spill::SpillSet::create().ok()?;
     Some(Arc::new(FdStore {
         set,

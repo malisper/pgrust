@@ -855,6 +855,15 @@ pub fn run_hash_plane_owned_group(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                 || matches!(widths.as_slice(), [w, 0] if *w > 0),
             "SpillableBytes classification must match the dispatchable text layouts"
         );
+        // [q3334 textgroup] the k-bounded single-text band rides the
+        // fp128-first spilled combine (28 B priced records, lazy byte
+        // resolve — the partmerge idiom) instead of the byte-payload
+        // scatter; election floors + kill switch live with the arm.
+        if matches!(widths.as_slice(), [0])
+            && super::hash_group::text128_spill_elects(ctx, node)
+        {
+            return super::hash_group::text128_spill(ctx, node);
+        }
         return super::hash_group::byte_spill(ctx, node);
     }
     match widths.as_slice() {
@@ -3127,9 +3136,20 @@ fn frame_owned_u128(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                 let fs = if src.is_empty() { NOSRC_FP } else { entry_fp128(src) };
                 fs ^ entry_fp128(dst).rotate_left(3) ^ imix(iw)
             };
+            // [p2-phase-widening] combine scatter/fold arenas ride the
+            // park (q39's `combine` +0.43 ms served vs rig was exactly
+            // this leg's fresh-per-exec scratch; see statepark.rs note).
+            use crate::stencils::statepark::{arm_buckets, scatter_park_on};
+            static PARKCS: crate::stencils::statepark::StatePark<Vec<Vec<(u128, u64, u64)>>> =
+                crate::stencils::statepark::StatePark::new(256 << 20);
+            static PARKCF: crate::stencils::statepark::StatePark<Vec<(u128, u64, u64)>> =
+                crate::stencils::statepark::StatePark::new(64 << 20);
             let scat = pool.run(
                 nchunk_u + nchunk_s,
-                |_| (0..CB).map(|_| Vec::<(u128, u64, u64)>::new()).collect::<Vec<_>>(),
+                |_| {
+                    let b = if scatter_park_on() { PARKCS.fetch() } else { None };
+                    arm_buckets(b.unwrap_or_default(), CB)
+                },
                 |b: &mut Vec<Vec<(u128, u64, u64)>>, ci| {
                     if ci < nchunk_u {
                         let lo = ci * chunk;
@@ -3152,20 +3172,32 @@ fn frame_owned_u128(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
             let scatr = &scat;
             let folded = pool.run(
                 CB,
-                |_| (Vec::<(u64, u64)>::new(), 0u64, 0u64),
-                |(out, g, r): &mut (Vec<(u64, u64)>, u64, u64), bk| {
+                |_| {
+                    let slots = if scatter_park_on() { PARKCF.fetch() } else { None };
+                    (Vec::<(u64, u64)>::new(), 0u64, 0u64, slots.unwrap_or_default())
+                },
+                |(out, g, r, slots): &mut (Vec<(u64, u64)>, u64, u64, Vec<(u128, u64, u64)>), bk| {
                     let n: usize = scatr.iter().map(|b| b[bk].len()).sum();
                     if n == 0 {
                         return;
                     }
                     let cap = (n * 2).next_power_of_two().max(16);
                     let mask = cap - 1;
-                    let mut slots: Vec<(u128, u64, u64)> = vec![(0, 0, 0); cap];
+                    // Parked slots are capacity-only: arm the size, then
+                    // reset the count lane (the emptiness witness — the
+                    // same `e.2 = 0` law as PARKT's owner tables above).
+                    if slots.len() < cap {
+                        slots.resize(cap, (0, 0, 0));
+                    }
+                    for e in slots[..cap].iter_mut() {
+                        e.2 = 0;
+                    }
+                    let tbl = &mut slots[..cap];
                     for b in scatr.iter() {
                         for &(m, rf, c) in &b[bk] {
                             let mut i = (ghash128f(m) as usize) & mask;
                             loop {
-                                let e = &mut slots[i];
+                                let e = &mut tbl[i];
                                 if e.2 == 0 {
                                     *e = (m, rf, c);
                                     break;
@@ -3179,7 +3211,7 @@ fn frame_owned_u128(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                         }
                     }
                     let mut all: Vec<(u64, u64)> = Vec::new();
-                    for e in &slots {
+                    for e in tbl.iter() {
                         if e.2 != 0 {
                             all.push((e.1, e.2));
                             *r += e.2;
@@ -3197,10 +3229,20 @@ fn frame_owned_u128(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
             groups = 0;
             total_rows = 0;
             let mut cands: Vec<(u64, u64)> = Vec::new();
-            for (o, g, r) in folded {
+            for (o, g, r, slots) in folded {
                 groups += g;
                 total_rows += r;
                 cands.extend(o);
+                if scatter_park_on() {
+                    let b = crate::stencils::statepark::vec_bytes(&slots);
+                    PARKCF.park(slots, b);
+                }
+            }
+            if scatter_park_on() {
+                for b in scat {
+                    let bytes = crate::stencils::statepark::nested_bytes(&b);
+                    PARKCS.park(b, bytes);
+                }
             }
             let mut counts: Vec<u64> = cands.iter().map(|e| e.1).collect();
             let cb = if counts.len() > k {

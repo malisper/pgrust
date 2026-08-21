@@ -746,3 +746,60 @@ fn distinct_family_budget_law() {
     check_server_grouped(&legacy.bank, &legacy.faces, &mk(&legacy))
         .expect("kill switch: the legacy arm, verbatim");
 }
+
+// ---------------------------------------------------------------------------
+// [q3334 textgroup] the fp128-first spilled text128 arm (k-bounded [0])
+// ---------------------------------------------------------------------------
+
+/// The q33/q34 class at bank grain: a k-bounded single-text group-by
+/// whose E18 scatter price crosses the budget. The forced engine rides
+/// `text128_spill` (28 B fp128 records + lazy byte resolve); the twin
+/// rides the tuned arms. EXACT-ORDER identity + engagement + the kill
+/// switch (which restores the byte_spill route, itself identity-gated
+/// above). `l2_bytes` shrinks so the partition law spreads this small
+/// bank far enough for the arm's pass-2 residency floor
+/// (`ceil(rows/p) × 184 ≤ share`): at 60k rows, l2 = 32 KiB, ndv ~30k
+/// → p = 64, 938 × 184 = 173 KB ≤ share = (1 MiB)/3 = 349 KB.
+#[test]
+fn text128_spill_arm_identity_and_engagement() {
+    use sqe::stencils::hash_group::{TSPILL_ENGAGED, TSPILL_FLUSHES};
+    use std::sync::atomic::Ordering::Relaxed;
+    let run = |eng: &Engine, g: Vec<u32>, bound: (OrderBy, usize, usize)| -> Vec<String> {
+        let mut node = plan_from_ap(&eng.bank, &eng.faces, &ap(g, None)).expect("lower");
+        node.params.l2_bytes = 32 * 1024;
+        (node.params.order, node.params.limit, node.params.offset) = bound;
+        to_lines(&eng.run(&node))
+    };
+    let twin = engine(None, true);
+    let sp = engine(Some(1 << 20), true);
+    let f0 = TSPILL_FLUSHES.load(Relaxed);
+    // engagement cases: high-NDV dict (30k) and raw (5k) text keys
+    for (g, bound, name) in [
+        (vec![2u32], (OrderBy::CountDesc, 10, 0), "highndv-topk"),
+        (vec![2], (OrderBy::CountDesc, 7, 3), "highndv-offset"),
+        (vec![5], (OrderBy::CountDesc, 10, 0), "raw-topk"),
+    ] {
+        let e0 = TSPILL_ENGAGED.load(Relaxed);
+        let a = run(&sp, g.clone(), bound);
+        assert!(TSPILL_ENGAGED.load(Relaxed) > e0, "arm must engage: {name}");
+        let b = run(&twin, g, bound);
+        assert_eq!(a, b, "text128_spill exact-order identity: {name}");
+    }
+    assert!(TSPILL_FLUSHES.load(Relaxed) > f0, "pass-1 fp128 scatter spill engaged");
+    // determinism: rerun byte-identical (parked/file state included)
+    let a = run(&sp, vec![2], (OrderBy::CountDesc, 10, 0));
+    let b = run(&sp, vec![2], (OrderBy::CountDesc, 10, 0));
+    assert_eq!(a, b, "text128_spill rerun determinism");
+    // low-NDV dict key (p at the width floor): the residency floor
+    // declines, the byte arm serves — identity holds either way
+    let c = run(&sp, vec![3], (OrderBy::CountDesc, 10, 0));
+    assert_eq!(c, run(&twin, vec![3], (OrderBy::CountDesc, 10, 0)), "floor-fallback identity");
+    // kill switch: PGRUST_SQE_TEXT128_SPILL=0 restores byte_spill (read
+    // per statement; set/unset inside the one test that asserts on it)
+    std::env::set_var("PGRUST_SQE_TEXT128_SPILL", "0");
+    let e1 = TSPILL_ENGAGED.load(Relaxed);
+    let k = run(&sp, vec![2], (OrderBy::CountDesc, 10, 0));
+    std::env::remove_var("PGRUST_SQE_TEXT128_SPILL");
+    assert_eq!(TSPILL_ENGAGED.load(Relaxed), e1, "kill switch: the arm stays silent");
+    assert_eq!(k, run(&twin, vec![2], (OrderBy::CountDesc, 10, 0)), "kill-switch twin identity");
+}

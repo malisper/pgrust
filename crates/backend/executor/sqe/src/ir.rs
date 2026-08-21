@@ -702,6 +702,13 @@ pub enum AggOp {
     /// AVG(octet_length(col)) — varlena length average (hot-shape; over
     /// rows with len != 0 when the plan carries the `<> ''` conjunct).
     AvgLen,
+    /// AVG(length(col)) — varlena CHARACTER-count average (the official
+    /// ClickBench q27/q28 text: `length(text)` = textlen, chars not
+    /// bytes). Identical shape/fold law to AvgLen; only the per-value
+    /// length kernel differs (UTF-8 char count — continuation bytes
+    /// excluded). len != 0 gates coincide: a value has 0 chars iff it
+    /// has 0 bytes.
+    AvgCharLen,
     /// var_samp/variance over an int word column ({count,sum,sumsq}
     /// decomposition — fold.rs AggFoldOp::SumSq; finisher = PG's
     /// numeric_poly_stddev_internal closed form at the answer seam).
@@ -747,6 +754,16 @@ pub enum AggOp {
     /// run-boundary dedup over the sorted group slice (adjacent-equal
     /// skip; two NULLs are NOT DISTINCT — one NULL element kept).
     ArrayAggDistinct,
+}
+
+impl AggOp {
+    /// Both varlena length averages (byte and char kernels) — the shape
+    /// gates that route AvgLen route AvgCharLen identically; only the
+    /// per-value length kernel differs at the accumulation sites.
+    #[inline]
+    pub fn is_avglen(self) -> bool {
+        matches!(self, AggOp::AvgLen | AggOp::AvgCharLen)
+    }
 }
 
 /// [P4-1] Fused arithmetic on a fold INPUT: the CLOSED monomorphic
@@ -875,7 +892,7 @@ impl AggSpec {
             // sum(int2/int4)→int8, sum(int8)→numeric; the i128 answer lane
             // renders both correctly.
             AggOp::Sum | AggOp::SumShifted | AggOp::SumDistinct => TypMeta::NUMERIC,
-            AggOp::Avg | AggOp::AvgLen | AggOp::AvgDistinct => TypMeta::NUMERIC,
+            AggOp::Avg | AggOp::AvgLen | AggOp::AvgCharLen | AggOp::AvgDistinct => TypMeta::NUMERIC,
             // PG: variance/stddev over any int family answer numeric.
             AggOp::VarSamp | AggOp::VarPop | AggOp::StddevSamp | AggOp::StddevPop => {
                 TypMeta::NUMERIC

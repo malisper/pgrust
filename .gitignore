@@ -53,3 +53,4 @@ wire-diff-out/
 .tpchconv/
 .tpch22/
 scripts/sqe/matrix/selftest-work/
+scripts/sqe/CI cluster/*/launch-scratch/

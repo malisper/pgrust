@@ -107,6 +107,14 @@ pub enum Refuse {
     /// group-count witness cap on spill-served shapes: they now serve
     /// the correct answer or refuse HERE — never truncate, never OOM.
     GroupAnswerOverBudget { got: u64, budget: u64 },
+    /// [scan-cap-retire] The scan answer-face law (the q19 unrefusal —
+    /// the grouped cap-retire posture extended to row-returning scans):
+    /// an unbounded scan served without a pre-scan survivor witness
+    /// counted its TRUE survivors past the answer-row cap. Minted at the
+    /// answer face (worker count or the merge's exact check), with
+    /// bounded state in hand — never a truncated answer, never an OOM.
+    /// 53400-class: raising the cap is a legitimate remedy.
+    ScanAnswerOverCap { got: u64, cap: u64 },
     /// [spill-2] A spill substrate I/O event failed mid-statement
     /// (create/append/read on a temp spill file). v1 PANICKED here; the
     /// typed seam raises it as a RUNTIME error through the same
@@ -193,6 +201,9 @@ impl std::fmt::Display for Refuse {
             }
             Refuse::GroupedSpillUnavailable { what, est, budget } => {
                 write!(f, "grouped-spill-unavailable:{what}:est={est}:budget={budget}")
+            }
+            Refuse::ScanAnswerOverCap { got, cap } => {
+                write!(f, "scan-answer-over-cap:got={got}:cap={cap}")
             }
             Refuse::GroupAnswerOverBudget { got, budget } => {
                 write!(f, "group-answer-over-budget:got={got}:budget={budget}")

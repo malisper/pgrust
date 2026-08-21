@@ -806,6 +806,11 @@ pub fn from_engine(r: &sqe::refuse::Refuse) -> RefuseCause {
         // the exact-counted grouped answer plane over the E17 answer-face
         // budget — 53400 (raising the budget is a legitimate remedy).
         R::GroupAnswerOverBudget { .. } => RefuseCause::AnswerBytes { what: "group-emit" },
+        // [scan-cap-retire] the scan answer-face law (the q19 unrefusal):
+        // an unwitnessed unbounded scan counted its TRUE survivors past
+        // the answer-row cap — 53400-class (raising the cap is a
+        // legitimate remedy), same lattice as the grouped answer plane.
+        R::ScanAnswerOverCap { .. } => RefuseCause::AnswerBytes { what: "scan-emit" },
         // [spill-2] a failed spill temp-file event mid-statement: the
         // typed runtime I/O error (the RunRefusal transport; the OS
         // detail rides the engine-side Display into the server log).

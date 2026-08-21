@@ -128,6 +128,10 @@ pub fn run_derived_key_fold(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
     // the family law; asserted present so a plan without it is caught.
     let drop_empty = node.params.ne_empty_cols.contains(&col);
     let having = node.params.having_min_count;
+    // [q28-charlen] AvgCharLen sums stored UTF-8 char counts (dict entry
+    // char_len / payload lead-byte walk); AvgLen sums byte lengths.
+    let charmode = node.agg.iter().any(|a| a.op == AggOp::AvgCharLen);
+    let len_of = |b: &[u8]| if charmode { crate::stencils::utf8_chars(b) } else { b.len() as u64 };
 
     // ---- elections (pre-rep; stats face is a standing face) --------------
     let sv = ctx.faces.stats(bank, col);
@@ -264,7 +268,7 @@ pub fn run_derived_key_fold(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                         mptr: e.bytes.as_ptr() as usize,
                         mlen: e.bytes.len() as u32,
                         cnt,
-                        sum_len: e.bytes.len() as u64 * cnt,
+                        sum_len: if charmode { e.char_len as u64 * cnt } else { e.bytes.len() as u64 * cnt },
                     };
                     let slot = &mut st.pre[(h as usize) & (PRE - 1)];
                     if slot.cnt == 0 {
@@ -303,7 +307,7 @@ pub fn run_derived_key_fold(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                     match st.local.get_mut(k) {
                         Some(gr) => {
                             gr.c += 1;
-                            gr.sum_len += pbytes.len() as u64;
+                            gr.sum_len += len_of(pbytes);
                             if pbytes < gr.min_ref.as_slice() {
                                 gr.min_ref = pbytes.to_vec();
                             }
@@ -313,7 +317,7 @@ pub fn run_derived_key_fold(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                                 k.to_vec(),
                                 Acc {
                                     c: 1,
-                                    sum_len: pbytes.len() as u64,
+                                    sum_len: len_of(pbytes),
                                     min_ref: pbytes.to_vec(),
                                 },
                             );
@@ -487,10 +491,9 @@ pub fn run_derived_key_fold(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
 fn render(node: &PlanNode, mut rows: Vec<(Vec<u8>, Acc)>) -> AnswerSet {
     match node.params.order {
         OrderBy::AggDesc(idx) => {
-            assert_eq!(
-                node.agg[idx as usize].op,
-                AggOp::AvgLen,
-                "derived_key_fold: AggDesc order supported over AvgLen"
+            assert!(
+                node.agg[idx as usize].op.is_avglen(),
+                "derived_key_fold: AggDesc order supported over AvgLen/AvgCharLen"
             );
             rows.sort_by(|a, b| {
                 let l = (b.1.sum_len as u128 * a.1.c as u128)
@@ -515,7 +518,7 @@ fn render(node: &PlanNode, mut rows: Vec<(Vec<u8>, Acc)>) -> AnswerSet {
     let mut cols: Vec<AnswerCol> = vec![kb.finish(key_ty)];
     for a in &node.agg {
         match a.op {
-            AggOp::AvgLen => cols.push(AnswerCol {
+            AggOp::AvgLen | AggOp::AvgCharLen => cols.push(AnswerCol {
                 ty: a.out,
                 data: ColData::Ratio {
                     pairs: rows.iter().map(|(_, g)| (g.sum_len as i128, g.c as i64)).collect(),
