@@ -600,14 +600,53 @@ fn transformDeclareCursorStmt<'mcx>(
     }
 
     // C's three FOR UPDATE conflict ereports (WITH HOLD / SCROLL /
-    // INSENSITIVE): rowMarks is always NIL today — transformLockingClause is
-    // a loud panic upstream — so a non-NIL list here is a missed wire-up.
+    // INSENSITIVE), each naming the locking clause via LCS_asString.
     if !query.rowMarks.is_nil() {
-        assert!(
-            stmt.options & (CURSOR_OPT_HOLD | CURSOR_OPT_SCROLL | CURSOR_OPT_INSENSITIVE) == 0,
-            "transformDeclareCursorStmt (analyze.c): FOR UPDATE conflict ereports need \
-             LCS_asString (LockingClause vocabulary) — unit backend-parser-analyze"
-        );
+        let strength = query
+            .rowMarks
+            .nth(0)
+            .as_row_mark_clause()
+            .expect("rowMarks cell")
+            .strength;
+
+        // FOR UPDATE and WITH HOLD are not compatible
+        if stmt.options & CURSOR_OPT_HOLD != 0 {
+            return Err(elog::ereport(types_error::ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "DECLARE CURSOR WITH HOLD ... {} is not supported",
+                    LCS_asString(strength)
+                ))
+                .errdetail("Holdable cursors must be READ ONLY.")
+                .into_error()
+                .into());
+        }
+
+        // FOR UPDATE and SCROLL are not compatible
+        if stmt.options & CURSOR_OPT_SCROLL != 0 {
+            return Err(elog::ereport(types_error::ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "DECLARE SCROLL CURSOR ... {} is not supported",
+                    LCS_asString(strength)
+                ))
+                .errdetail("Scrollable cursors must be READ ONLY.")
+                .into_error()
+                .into());
+        }
+
+        // FOR UPDATE and INSENSITIVE are not compatible
+        if stmt.options & CURSOR_OPT_INSENSITIVE != 0 {
+            return Err(elog::ereport(types_error::ERROR)
+                .errcode(ERRCODE_INVALID_CURSOR_DEFINITION)
+                .errmsg(format!(
+                    "DECLARE INSENSITIVE CURSOR ... {} is not valid",
+                    LCS_asString(strength)
+                ))
+                .errdetail("Insensitive cursors must be READ ONLY.")
+                .into_error()
+                .into());
+        }
     }
 
     let query_node = Node::mk(mcx, query)?;

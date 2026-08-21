@@ -1778,6 +1778,63 @@ mod from_where {
         assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_COLUMN);
     }
 
+    // C 18.3 transformDeclareCursorStmt (analyze.c): a cursor query with row
+    // marks conflicts with WITH HOLD (checked first), SCROLL, and INSENSITIVE
+    // — each message names the locking clause via LCS_asString.
+    #[test]
+    fn declare_cursor_locking_conflicts() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        // WITH HOLD × each locking strength: 0A000.
+        for (clause, lcs) in [
+            ("FOR UPDATE", "FOR UPDATE"),
+            ("FOR NO KEY UPDATE", "FOR NO KEY UPDATE"),
+            ("FOR SHARE", "FOR SHARE"),
+            ("FOR KEY SHARE", "FOR KEY SHARE"),
+        ] {
+            let sql = format!("DECLARE c CURSOR WITH HOLD FOR SELECT x FROM u {clause}");
+            let err = analyze_sql(mcx, &sql).map(|_| ()).unwrap_err();
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED, "{sql}");
+            assert_eq!(
+                err.message(),
+                format!("DECLARE CURSOR WITH HOLD ... {lcs} is not supported")
+            );
+            assert_eq!(err.detail(), Some("Holdable cursors must be READ ONLY."));
+        }
+
+        // SCROLL: 0A000.
+        let err = analyze_sql(mcx, "DECLARE c SCROLL CURSOR FOR SELECT x FROM u FOR UPDATE")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message(), "DECLARE SCROLL CURSOR ... FOR UPDATE is not supported");
+        assert_eq!(err.detail(), Some("Scrollable cursors must be READ ONLY."));
+
+        // INSENSITIVE: 42P11, "is not valid".
+        let err =
+            analyze_sql(mcx, "DECLARE c INSENSITIVE CURSOR FOR SELECT x FROM u FOR KEY SHARE")
+                .map(|_| ())
+                .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_CURSOR_DEFINITION);
+        assert_eq!(err.message(), "DECLARE INSENSITIVE CURSOR ... FOR KEY SHARE is not valid");
+        assert_eq!(err.detail(), Some("Insensitive cursors must be READ ONLY."));
+
+        // C checks WITH HOLD before SCROLL when both apply.
+        let err = analyze_sql(
+            mcx,
+            "DECLARE c SCROLL CURSOR WITH HOLD FOR SELECT x FROM u FOR SHARE",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.message(), "DECLARE CURSOR WITH HOLD ... FOR SHARE is not supported");
+
+        // No conflict: a plain (NO SCROLL default) FOR UPDATE cursor is fine.
+        let q = analyze_sql(mcx, "DECLARE c CURSOR FOR SELECT x FROM u FOR UPDATE").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_UTILITY);
+    }
+
     #[test]
     fn bare_values_order_by_end_to_end() {
         install();
