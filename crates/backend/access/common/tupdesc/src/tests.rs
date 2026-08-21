@@ -242,7 +242,12 @@ fn with_constraints<'m>(mcx: Mcx<'m>) -> TupleDescData<'m> {
     });
     let mut missing: PgVec<AttrMissing> = vec_with_capacity_in(mcx, 2).unwrap();
     missing.push(AttrMissing { am_present: true, am_value: Datum::from_i32(7) });
-    let varlena: &'static [u8] = &[0x1D, b'h', b'e', b'y'];
+    // 1-byte varlena header: total length INCLUDING the header byte, shifted
+    // left by one with the low bit set — (4 << 1) | 1 = 0x09 for "hey".
+    // (Was 0x1D, which declares a total length of 14 on this 4-byte buffer;
+    // `datum_copy_in` then reads 10 bytes past the end — caught by Miri and
+    // by Thermite's interpreter as out-of-bounds.)
+    let varlena: &'static [u8] = &[0x09, b'h', b'e', b'y'];
     missing.push(AttrMissing {
         am_present: true,
         am_value: Datum::from_usize(varlena.as_ptr() as usize),
