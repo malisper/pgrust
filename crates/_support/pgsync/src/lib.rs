@@ -425,6 +425,19 @@ impl ParkLot {
     /// concurrent `wake_all`/`wake_legacy` still counts and notifies this
     /// parker.
     pub fn park_timeout(&self, seen: u64, timeout: core::time::Duration) {
+        // Antithesis steering: evaluated on ENTRY to every poll iteration
+        // (the caller's check_for_interrupts → re-park loop calls this
+        // repeatedly), so a cancel landing while a thread cycles through a
+        // bounded parallel wait registers as the interesting state. The
+        // wake-edge probe in `park()` alone never fires here — the #1512
+        // fix's poll loop parks through THIS entry point, not `park`.
+        // Distinct property id from `park`'s wake-edge probe: assertion ids
+        // must be unique per callsite for cataloging.
+        #[cfg(feature = "antithesis")]
+        antithesis_sdk::assert_sometimes!(
+            antithesis_probe::interrupt_pending(),
+            "pgrust: interrupt observed inside ParkLot timed wait"
+        );
         let g = lock(&self.m);
         if self.epoch.load(atomic::Ordering::SeqCst) != seen {
             return;

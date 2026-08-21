@@ -98,6 +98,43 @@ pub enum ColCmp {
     GeoUlp,
 }
 
+/// C's FirstNormalObjectId: everything at or above it is a user-created
+/// object whose OID came off the shared allocator.
+const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
+
+/// Column-type-oid equivalence for A-vs-B rowsets. Builtin OIDs (below
+/// FirstNormalObjectId) must match exactly. User-range OIDs are NOT
+/// comparable by value: pgrust backfills a constant number of builtin
+/// pg_type rows per database, shifting every subsequent user-type OID
+/// allocation by a constant (observed +9), so the invariant is one
+/// CONSISTENT per-resultset offset — every user-range column pair must
+/// carry the same B−A delta, and user-range must pair with user-range.
+fn col_oids_equivalent(oa: &[u32], ob: &[u32]) -> bool {
+    if oa.len() != ob.len() {
+        return false;
+    }
+    let mut delta: Option<i64> = None;
+    for (&a, &b) in oa.iter().zip(ob) {
+        match (a >= FIRST_NORMAL_OBJECT_ID, b >= FIRST_NORMAL_OBJECT_ID) {
+            (false, false) => {
+                if a != b {
+                    return false;
+                }
+            }
+            (true, true) => {
+                let d = i64::from(b) - i64::from(a);
+                match delta {
+                    None => delta = Some(d),
+                    Some(prev) if prev == d => {}
+                    Some(_) => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// Compare modes from the result-column type oids plus the generator's
 /// soft-column mask (soft applies only where the column really is float —
 /// a lying mask never weakens a non-float column).
@@ -895,7 +932,7 @@ pub fn classify(input: &DiffInput) -> Classified {
             detail: format!("A returned command tag {tag:?}; B returned rows"),
         },
         (Rows { col_oids: oa, rows: ra }, Rows { col_oids: ob, rows: rb }) => {
-            if oa != ob {
+            if !col_oids_equivalent(oa, ob) {
                 return Classified {
                     class: DiffClass::RowsetDiff,
                     detail: format!("column type oids differ: {oa:?} vs {ob:?}"),
@@ -1386,6 +1423,33 @@ mod tests {
         let c = classify_sql("SELECT c FROM t;", &a, &b);
         assert_eq!(c.class, DiffClass::RowsetDiff);
         assert!(c.detail.contains("column type oids"));
+    }
+
+    #[test]
+    fn user_range_oids_match_under_one_consistent_offset() {
+        // pgrust's builtin-row backfill shifts user OID allocation by a
+        // constant (observed +9); a consistent per-resultset offset is a
+        // match, builtin columns still compare exactly.
+        let a = rowset(vec![23, 16385, 16401], rows(&[&[Some("1"), Some("x"), Some("y")]]));
+        let b = rowset(vec![23, 16394, 16410], rows(&[&[Some("1"), Some("x"), Some("y")]]));
+        let c = classify_sql("SELECT a, b, c FROM t;", &a, &b);
+        assert_eq!(c.class, DiffClass::Match);
+    }
+
+    #[test]
+    fn user_range_oids_with_inconsistent_offsets_are_rowset_diff() {
+        let a = rowset(vec![16385, 16401], rows(&[&[Some("x"), Some("y")]]));
+        let b = rowset(vec![16394, 16411], rows(&[&[Some("x"), Some("y")]]));
+        let c = classify_sql("SELECT b, c FROM t;", &a, &b);
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn user_range_oid_against_builtin_is_rowset_diff() {
+        let a = rowset(vec![16385], rows(&[&[Some("x")]]));
+        let b = rowset(vec![25], rows(&[&[Some("x")]]));
+        let c = classify_sql("SELECT b FROM t;", &a, &b);
+        assert_eq!(c.class, DiffClass::RowsetDiff);
     }
 
     #[test]
