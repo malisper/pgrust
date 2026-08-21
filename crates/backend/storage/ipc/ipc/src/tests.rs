@@ -285,3 +285,29 @@ fn seams_delegate_to_this_crate() {
     assert_eq!(code, 3);
     assert_eq!(take_log(), vec!["via-seam"]);
 }
+
+/// Unwind-policy escalation (RULED 2026-08-18): a KilledBySignal unwinding
+/// out of an exit callback must NOT be demoted to the WARNING-and-keep-
+/// draining arm — the crash payload keeps unwinding to the thread top so
+/// the postmaster runs the crash cycle (run_callback_guarded's re-raise
+/// triple, mirroring main_loop.rs's boundary).
+#[test]
+fn exit_callback_panic_reraises_killed_by_signal() {
+    install();
+    init_small::globals::SetMyProcPid(9393);
+    init_small::globals::SetIsUnderPostmaster(true);
+    let _ = take_log();
+
+    on_proc_exit(
+        |_, _| std::panic::panic_any(KilledBySignal { signo: 9 }),
+        0,
+    );
+    let payload = catch_unwind(AssertUnwindSafe(|| proc_exit(0, 9393))).unwrap_err();
+    assert_eq!(payload.downcast_ref::<ProcExitThread>().unwrap().code, 0);
+
+    let drained = catch_unwind(AssertUnwindSafe(|| run_deferred_exit_callbacks(0)));
+    let crash = drained.expect_err("KilledBySignal must keep unwinding, not drain-and-return");
+    assert_eq!(crash.downcast_ref::<KilledBySignal>().unwrap().signo, 9);
+    on_exit_reset();
+    init_small::globals::SetIsUnderPostmaster(false);
+}

@@ -540,6 +540,7 @@ fn run_child_task(
         init_small::globals::SetMyClientSocket(cs);
     }
 
+    // unwind-ok: log-then-die
     let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         main_fn(&startup_data)
     })) else {
@@ -562,6 +563,7 @@ fn run_child_task(
     let payload = match payload.downcast_ref::<ipc::ProcExitThread>() {
         Some(p) => {
             let code = p.code;
+            // unwind-ok: log-then-die
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 ipc::run_deferred_exit_callbacks(code)
             })) {
@@ -1296,9 +1298,22 @@ pub mod wpool {
     /// parallel_register_count admission charge): contain it and report a
     /// miss so the caller takes the postmaster spawn path.
     pub fn dispatch(slot: i32, generation: u64, dboid: Oid) -> i32 {
+        // unwind-ok: worker-containment
         match std::panic::catch_unwind(|| dispatch_inner(slot, generation, dboid)) {
             Ok(pid) => pid,
-            Err(_) => {
+            Err(payload) => {
+                // Exit-committed unwinds (proc_exit / PANIC / crash-injected
+                // SIGKILL) must keep unwinding to the thread's crash
+                // boundary — this thread is dying and demoting the payload
+                // to a "dispatch miss" would resurrect it mid-statement
+                // (main_loop.rs precedent). The admission-charge leak the
+                // containment protects against is moot on a dying thread.
+                if payload.is::<ipc::ProcExitThread>()
+                    || payload.is::<types_error::PanicExitThread>()
+                    || payload.is::<ipc::KilledBySignal>()
+                {
+                    std::panic::resume_unwind(payload);
+                }
                 eprintln!(
                     "wpool: parallel worker pool dispatch panicked (slot {slot}); \
                      falling back to postmaster launch"
@@ -1718,6 +1733,7 @@ pub mod rtpool {
 
         // Shared-memory identity is deferred to the first serve gate
         // (pool_identity_complete) — see the fn doc.
+        // unwind-ok: worker-containment
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
         match outcome {
             // Clean loop exit (request_stop — tests/shutdown only): the
@@ -1729,6 +1745,37 @@ pub mod rtpool {
                 // no shared-memory touch (safe on the raw arm too; the
                 // gang exit discipline).
                 parallel::standing::sticky_clear_on_pool_exit();
+                // PANIC-class death (PanicExitThread / crash-injected
+                // KilledBySignal) on an executor thread: C parity is the
+                // postmaster crash cascade — terminate-all + shmem reset +
+                // WAL replay. The fsync law (docs/design/sqe/
+                // fsync-failure-audit.md) depends on it: demoting a PANIC
+                // to WARNING+respawn converts a failed fsync back into
+                // "retry and trust". Announce the C-shaped crash status;
+                // the reaper's untracked-crash arm runs HandleChildCrash.
+                // Exit RAW (no shmem drain — the cascade resets shared
+                // memory wholesale) but keep the respawn (the pool must
+                // never shrink; bring-up waits out the crash window at the
+                // serve gate). Seam absent (unit harness, no postmaster):
+                // fall through to the containment drain below, loudly.
+                if (payload.is::<types_error::PanicExitThread>()
+                    || payload.is::<ipc::KilledBySignal>())
+                    && postmaster_seams::announce_child_exit::is_installed()
+                {
+                    let _ = elog::elog(
+                        types_error::WARNING,
+                        format!(
+                            "pool executor {ordinal} died on a PANIC-class \
+                             unwind; requesting cluster crash-restart"
+                        ),
+                    );
+                    postmaster_seams::announce_child_exit::call(
+                        child_pid,
+                        super::panic_payload_to_exit_status(payload.as_ref()),
+                    );
+                    respawn_pool_slot(ordinal);
+                    return;
+                }
                 if payload.is::<parallel::standing::PoolRetireRaw>() {
                     // Crash fence: NO shared-memory interaction — the
                     // PGPROC was reset wholesale with shared memory.
@@ -1766,6 +1813,7 @@ pub mod rtpool {
                         // sinval cleanup) releases identity against LIVE
                         // shared memory.
                         let code = p.code;
+                        // unwind-ok: log-then-die
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             ipc::run_deferred_exit_callbacks(code)
                         }));
@@ -1785,9 +1833,11 @@ pub mod rtpool {
                         // mid-serve panic dies VISIBLE and the double-add's
                         // own failure is swallowed so the drain still runs).
                         parallel::standing::pool_exit_rejoin_procarray();
+                        // unwind-ok: log-then-die
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             ipc::proc_exit(2, init_small::globals::MyProcPid())
                         }));
+                        // unwind-ok: log-then-die
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             ipc::run_deferred_exit_callbacks(2)
                         }));
@@ -1870,11 +1920,10 @@ pub mod rtpool {
             // scan arm reaches the runtime through `runtime::global()`,
             // avoiding an execmain -> launch_backend dependency).
             runtime::install_global(Arc::clone(&rt));
-            // Publish pool liveness where plan-time code can see it: the
-            // M5-3 suppression probe (guc_tables::parallel_engine) requires
-            // a LIVE pool before suppressing any Gather — never suppress
-            // what the runtime cannot pick up (t34-config review, defect 3).
-            guc_tables::runtime_pool::set_runtime_pool_live();
+            // (P7-2 D-8: the M5-3 suppression probe and its pool-liveness
+            // flag — guc_tables::parallel_engine/runtime_pool — are deleted
+            // with the lanev2 GUC tombstone pass; nothing consumes liveness
+            // at plan time anymore.)
             // M4 background-job dispatcher (docs/design/m4-bgjobs.md §3.2):
             // its own kill switch on top of the pool's; with
             // PGRUST_RUNTIME_BGJOBS unset this is a no-op and no dispatcher
@@ -2342,6 +2391,7 @@ pub mod rtgang {
         // boot-reserved PGPROC against live shmem); GangExit::Raw and
         // pre-InitProcess failures exit with no shmem interaction; other
         // panics are logged and the slot is left respawnable.
+        // unwind-ok: worker-containment
         let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if let Err(e) = lmgr_proc::InitProcess(types_core::init::BackendType::BgWorker) {
                 let _ = elog::elog(
@@ -2369,8 +2419,35 @@ pub mod rtgang {
         match body {
             Ok(()) => {} // Raw exit (crash fence) or pre-PGPROC failure.
             Err(payload) => {
+                // PANIC-class death (PanicExitThread / crash-injected
+                // KilledBySignal): C parity is the postmaster crash cascade
+                // (see the rtpool twin above — the fsync law depends on
+                // it). Announce the C-shaped crash status; the reaper's
+                // untracked-crash arm runs HandleChildCrash, whose shmem
+                // reset is the identity backstop this registry-invisible
+                // thread otherwise lacks. Exit RAW — no drain against
+                // shared memory the cascade is about to reset. Seam absent
+                // (unit harness): fall through to the drain below, loudly.
+                if (payload.is::<types_error::PanicExitThread>()
+                    || payload.is::<ipc::KilledBySignal>())
+                    && postmaster_seams::announce_child_exit::is_installed()
+                {
+                    let _ = elog::elog(
+                        types_error::WARNING,
+                        format!(
+                            "standing executor {ordinal} died on a PANIC-class \
+                             unwind; requesting cluster crash-restart"
+                        ),
+                    );
+                    postmaster_seams::announce_child_exit::call(
+                        child_pid,
+                        super::panic_payload_to_exit_status(payload.as_ref()),
+                    );
+                    return;
+                }
                 if let Some(p) = payload.downcast_ref::<ipc::ProcExitThread>() {
                     let code = p.code;
+                    // unwind-ok: log-then-die
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         ipc::run_deferred_exit_callbacks(code)
                     }));
@@ -2391,9 +2468,11 @@ pub mod rtgang {
                     // proc_exit arms the deferred-callback flag (and
                     // unwinds ProcExitThread, caught here); the drain then
                     // actually runs the stack.
+                    // unwind-ok: log-then-die
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         ipc::proc_exit(2, init_small::globals::MyProcPid())
                     }));
+                    // unwind-ok: log-then-die
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         ipc::run_deferred_exit_callbacks(2)
                     }));

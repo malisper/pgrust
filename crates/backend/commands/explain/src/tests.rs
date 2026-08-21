@@ -643,8 +643,9 @@ fn option_defaults_match_c() {
 }
 
 // pgrust-only EXPLAIN (ENGINE) (single-executor migration Phase 0.2):
-// default-absent, ordinary boolean parse, requires ANALYZE in increment 1
-// (the TIMING requires-analyze validation shape).
+// default-absent, ordinary boolean parse. The inc-1 requires-ANALYZE gate
+// is retired: ENGINE without ANALYZE is the plan-time attribution preview
+// (sqe statement verdict; ExplainOnePlan evaluation-order note).
 #[test]
 fn engine_option_parses_and_requires_analyze() {
     install_fixtures();
@@ -660,11 +661,11 @@ fn engine_option_parses_and_requires_analyze() {
     ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap();
     assert!(!es.engine);
 
-    // ENGINE without ANALYZE errors with the requires-ANALYZE sqlstate.
+    // ENGINE without ANALYZE parses (the plan-time preview).
     let mut es = NewExplainState(mcx).unwrap();
     let opts = NodeList::make1(mcx, opt(mcx, "engine", None)).unwrap();
-    let err = ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap_err();
-    assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+    ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap();
+    assert!(es.engine && !es.analyze);
 
     // ENGINE OFF without ANALYZE is fine (matches WAL/TIMING-off semantics).
     let mut es = NewExplainState(mcx).unwrap();

@@ -16,7 +16,7 @@ use types_core::{BackendType, InvalidOid, Oid, XACT_SERIALIZABLE};
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TRANSACTION_STATE,
-    ERRCODE_UNDEFINED_OBJECT, LOG, NOTICE,
+    ERRCODE_UNDEFINED_OBJECT, LOG, NOTICE, WARNING,
 };
 use types_guc::{GucSource, PGC_S_DEFAULT, PGC_S_INTERACTIVE, PGC_S_TEST};
 
@@ -769,6 +769,56 @@ pub fn show_unix_socket_permissions() -> String {
     )
 }
 
+/// P7-2 D-8 lanev2 GUC tombstones (docs/design/sqe/p72-deletion-plan.md §1.3):
+/// the registry keeps every slot — SET/SHOW/pg_settings stay byte-compatible —
+/// but no consumer remains, so the value has no effect. Warn once per process
+/// on the first non-default-source assignment across the tombstoned family
+/// (boot env / config / session SET alike: accepted, warned, ignored).
+fn lanev2_tombstone_warn_once(source: GucSource) -> PgResult<()> {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if source == PGC_S_DEFAULT || WARNED.swap(true, Ordering::Relaxed) {
+        return Ok(());
+    }
+    ereport(WARNING)
+        .errmsg(
+            "this pgrust setting is a lanev2 tombstone and has no effect \
+             (pgrust.lane_executor / pgrust.lane_parallel_pool / \
+             pgrust.runtime_{scan,agg,distinct,hashjoin,sort,bitmap}_pool / \
+             pgrust.runtime_dop / pgrust.parallel_engine / \
+             pgrust.explain_runtime_verdicts): the lane-v2 executor was removed \
+             (P7-2); the value is accepted and ignored",
+        )
+        .finish(loc("lanev2_tombstone"))?;
+    Ok(())
+}
+
+pub fn check_lanev2_tombstone_bool(
+    _newval: &mut bool,
+    _extra: &mut Option<GucHookExtra>,
+    source: GucSource,
+) -> PgResult<bool> {
+    lanev2_tombstone_warn_once(source)?;
+    Ok(true)
+}
+
+pub fn check_lanev2_tombstone_int(
+    _newval: &mut i32,
+    _extra: &mut Option<GucHookExtra>,
+    source: GucSource,
+) -> PgResult<bool> {
+    lanev2_tombstone_warn_once(source)?;
+    Ok(true)
+}
+
+pub fn check_lanev2_tombstone_enum(
+    _newval: &mut i32,
+    _extra: &mut Option<GucHookExtra>,
+    source: GucSource,
+) -> PgResult<bool> {
+    lanev2_tombstone_warn_once(source)?;
+    Ok(true)
+}
+
 pub fn check_bonjour(
     newval: &mut bool,
     _extra: &mut Option<GucHookExtra>,
@@ -840,6 +890,9 @@ pub fn init_seams() {
     hooks::show_log_file_mode.install(show_log_file_mode);
     hooks::show_unix_socket_permissions.install(show_unix_socket_permissions);
     hooks::check_bonjour.install(check_bonjour);
+    hooks::check_lanev2_tombstone_bool.install(check_lanev2_tombstone_bool);
+    hooks::check_lanev2_tombstone_int.install(check_lanev2_tombstone_int);
+    hooks::check_lanev2_tombstone_enum.install(check_lanev2_tombstone_enum);
     hooks::check_default_with_oids.install(check_default_with_oids);
     hooks::check_ssl.install(check_ssl);
 

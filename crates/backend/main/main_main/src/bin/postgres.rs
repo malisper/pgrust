@@ -223,6 +223,7 @@ fn main() {
     // turned even a CLEAN shutdown into exit code 101: `docker stop` and any
     // k8s liveness/restart policy read that as a crash. Carry the intended
     // code through instead. Real panics are re-raised untouched.
+    // unwind-ok: log-then-die
     match std::panic::catch_unwind(run) {
         Ok(()) => {}
         Err(payload) => {

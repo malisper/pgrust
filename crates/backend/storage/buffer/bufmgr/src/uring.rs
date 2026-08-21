@@ -45,6 +45,7 @@ pub fn start_read(
     // deadlock: an smgr start_buffer_read arm that believed itself
     // unreachable panicked right here). Terminate the IO and drop the pin
     // before letting the panic keep crashing.
+    // unwind-ok: log-then-die
     let seam_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         smgr_seams::smgr_start_buffer_read::call(smgr, forknum, blkno, buffer)
     }));

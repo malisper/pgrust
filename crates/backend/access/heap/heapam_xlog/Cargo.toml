@@ -11,6 +11,7 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 bufmask = { path = "../../common/bufmask" }
 elog = { path = "../../../utils/error/elog" }
+fd = { path = "../../../storage/file/fd" }
 init_small = { path = "../../../utils/init/init_small" }
 xlogutils = { path = "../../transam/xlogutils" }
 xlogreader_seams = { path = "../../transam/xlogreader_seams" }

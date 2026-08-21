@@ -347,6 +347,30 @@ pub fn TimestampTimestampTzRequiresRewrite() -> bool {
     true
 }
 
+/// The session zone's constant UTC offset in seconds (east positive) when
+/// it has one (`pg_get_timezone_offset`); None for DST-varying zones.
+pub fn session_fixed_offset() -> Option<i64> {
+    let zone = tz::session_timezone()?;
+    let mut offset: i64 = 0;
+    tz::pg_get_timezone_offset(zone, &mut offset).then_some(offset)
+}
+
+/// The session zone's UTC offset in seconds when it is CONSTANT over the
+/// unix-second span `[lo, hi]`: a fixed zone, or a varying zone with no
+/// transition inside the span (transition instants are UTC, so the probe
+/// frame matches `pg_localtime`'s). None: varying inside, or no zone.
+pub fn session_offset_over(lo: i64, hi: i64) -> Option<i64> {
+    if let Some(off) = session_fixed_offset() {
+        return Some(off);
+    }
+    let zone = tz::session_timezone()?;
+    match localtime::pg_next_dst_boundary(lo, zone) {
+        localtime::NextDstBoundary::NoTransition { before_gmtoff, .. } => Some(before_gmtoff),
+        localtime::NextDstBoundary::Boundary(b) if b.boundary > hi => Some(b.before_gmtoff),
+        _ => None,
+    }
+}
+
 pub fn timestamp2tm(
     dt: Timestamp,
     tzp: Option<&mut i32>,

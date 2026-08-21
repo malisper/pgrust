@@ -895,6 +895,7 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
                 for _ in 0..MAX_RECOVERY_ATTEMPTS {
                     let attempt_is_first = first_attempt;
                     first_attempt = false;
+                    // unwind-ok: stmt-boundary
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         error_recovery(&pending, &mut state, attempt_is_first)
                     })) {
@@ -933,6 +934,7 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
 // sigsetjmp path. Panics from unported seams are mapped to ERROR-level errors
 // so the backend recovers as C does from ereport(ERROR).
 pub(crate) fn run_one_iteration(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
+    // unwind-ok: stmt-boundary
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_one_iteration_inner(mcx, state)
     }));

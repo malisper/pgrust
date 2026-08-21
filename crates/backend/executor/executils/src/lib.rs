@@ -806,6 +806,11 @@ pub struct EStateData<'mcx> {
     pub es_insert_pending_result_relations: PgVec<'mcx, ResultRelInfo>,
     pub es_insert_pending_modifytables: PgVec<'mcx, ModifyTableP3>,
     pub es_param_list_info: Option<&'mcx [ParamExternData]>,
+    /// [sqe-cursors] PL provenance of `es_param_list_info` (C's
+    /// `params->paramFetch != NULL`): true for a hooked PL-built list
+    /// (plpgsql's datum-table environment), false for protocol/SQL bind
+    /// values. Read by the sqe dispatch's bind-params gate only.
+    pub es_param_list_hooked: bool,
     // Executor-skeleton stable extern-param images (no C counterpart):
     // compiled ParamExtern steps resolve into this estate-owned buffer
     // instead of the portal's per-EXECUTE array; restamped on skeleton reuse.
@@ -976,6 +981,19 @@ pub struct EStateData<'mcx> {
     /// as the two fields above. Knob-OFF and tcount-0 runs always read
     /// None.
     pub es_spi_run_budget: Option<u64>,
+    /// [sqe-cursors] P6-4: the sqe cursor spool — the statement's full
+    /// materialized answer plane, retained across executor_run entries
+    /// so bounded pulls (cursor FETCH, portal suspension, SPI tcount,
+    /// SQL-function lazy eval) STREAM from one run-to-completion answer
+    /// instead of re-running the engine (whose parallel fold order is
+    /// not a per-run determinism). Type-erased (`sqeshell::seam` owns
+    /// the concrete `CursorSpool`; executils must not depend on sqe).
+    /// Created only by a bounded run of a served columnar statement,
+    /// priced against the E17 answer-face budget at creation (over
+    /// budget = typed 53400, the spool never exists), freed with the
+    /// estate at ExecutorEnd/unwind. Heap statements never touch it
+    /// beyond the `None` init.
+    pub es_sqe_spool: Option<alloc::boxed::Box<dyn core::any::Any>>,
 }
 
 /// One worker's instrumentation snapshot: `instrument` is indexed by
@@ -1080,6 +1098,8 @@ pub enum EngineKind {
     FusedArm,
     /// Morsel-runtime arm engaged (pipeline identity via RuntimeEaPipeline).
     Runtime,
+    /// sqe stencil engine owns the node (P2-1 dispatch slot).
+    Sqe,
 }
 
 /// One per-node engine attribution record (EXPLAIN (ENGINE); emission-gate
@@ -1220,6 +1240,7 @@ impl<'mcx> EStateData<'mcx> {
             es_insert_pending_result_relations: PgVec::new_in(mcx),
             es_insert_pending_modifytables: PgVec::new_in(mcx),
             es_param_list_info: None,
+            es_param_list_hooked: false,
             es_param_stable: None,
             es_param_exec_vals: PgVec::new_in(mcx),
             es_queryEnv: None,
@@ -1234,6 +1255,7 @@ impl<'mcx> EStateData<'mcx> {
             es_cursor_run_budget: None,
             es_lane_cursor_parked: false,
             es_spi_run_budget: None,
+            es_sqe_spool: None,
             es_instrumentation: PgVec::new_in(mcx),
             es_runtime_ea_refusals: PgVec::new_in(mcx),
             es_runtime_ea_pipelines: PgVec::new_in(mcx),
@@ -1710,6 +1732,10 @@ impl<'mcx> EStateData<'mcx> {
         }
         self.es_aux_contexts.clear();
         self.es_jit_blocks.clear();
+        // [sqe-cursors] the spool is a droppy owner (Box): released here
+        // so the forget path reclaims it (partial-FETCH-then-CLOSE
+        // hygiene rides this line).
+        self.es_sqe_spool = None;
     }
 
     /// True iff every census-exempt owner has been released — the
@@ -1724,6 +1750,7 @@ impl<'mcx> EStateData<'mcx> {
             && self.es_worktable_shared.iter().all(Option::is_none)
             && self.es_aux_contexts.is_empty()
             && self.es_jit_blocks.is_empty()
+            && self.es_sqe_spool.is_none()
             && self.es_subplan_expr_states.is_empty()
             && self
                 .es_tupleTable
@@ -1766,7 +1793,7 @@ mcx::forget_safe_struct!(
         es_unpruned_relids, es_output_cid, es_result_relations,
         es_opened_result_relations, es_tuple_routing_result_relations,
         es_trig_target_relations, es_insert_pending_result_relations,
-        es_param_list_info, es_param_stable, es_queryEnv, es_processed,
+        es_param_list_info, es_param_list_hooked, es_param_stable, es_queryEnv, es_processed,
         es_total_processed, es_direct_returning_slot,
         es_top_eflags, es_instrument, es_finished, es_subplanstates,
         es_param_subplans, es_per_tuple_exprcontext,
@@ -1776,6 +1803,10 @@ mcx::forget_safe_struct!(
         es_epq_active, es_lane_leaf_fast, es_lane_trace_owned, es_cursor_run_budget,
         es_lane_cursor_parked,
         es_spi_run_budget, es_rowmarks;
+        // [sqe-cursors] es_sqe_spool: droppy Box owner, released in
+        // teardown() before the bundle is forgotten (owners_released
+        // asserts it) — exempt group [1].
+        es_sqe_spool,
         es_jit_blocks,
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
         es_tupleTable, es_exprcontexts, es_cte_shared, es_worktable_shared,

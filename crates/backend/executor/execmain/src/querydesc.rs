@@ -226,6 +226,18 @@ pub fn registry_len() -> usize {
     ENTRIES.with(|e| e.borrow().iter().filter(|s| s.is_some()).count())
 }
 
+// memgrowth-discriminator (suspect-A census): the registry Vec is a raw-Rust
+// slab — its backing allocation is plain global-allocator memory, invisible
+// to both the mcx context ledger and the accounted-contexts watchdog line.
+// (slots len, slots capacity, free-list len); live entries = len − free.
+pub fn slot_census() -> (usize, usize, usize) {
+    let (len, cap) = ENTRIES.with(|e| {
+        let e = e.borrow();
+        (e.len(), e.capacity())
+    });
+    (len, cap, FREE.with(|f| f.borrow().len()))
+}
+
 fn remove(h: QueryDescHandle) -> QueryDescData {
     assert!(!h.is_null(), "execmain: FreeQueryDesc of NULL handle");
     let (idx, generation) = decode(h);
@@ -413,6 +425,18 @@ pub(crate) fn query_desc_runtime_ea_pipeline_seam(
     })
 }
 
+/// sqe P2-1: the statement-level EXPLAIN verdict (census-surface §3 —
+/// plain EXPLAIN prints the engine/refused disposition instead of
+/// raising; the refusal tick happens inside the probe's `refuse()`).
+pub(crate) fn query_desc_sqe_verdict_seam(
+    h: QueryDescHandle,
+) -> Option<(bool, String, String)> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_mut()?;
+        exec.with_mut(|d| crate::sqeshell::seam::statement_verdict(&mut d.estate))
+    })
+}
+
 /// EXPLAIN (ENGINE) attribution records for one node (single-executor Phase
 /// 0.2). None = nothing recorded — the EXEC_FLAG_ENGINE_REPORT emission gate
 /// in data form. The executils EngineKind is converted to its types_core
@@ -442,6 +466,7 @@ pub(crate) fn query_desc_engine_events_seam(
                         ::executils::EngineKind::Spine => EngineKindWire::Spine,
                         ::executils::EngineKind::FusedArm => EngineKindWire::FusedArm,
                         ::executils::EngineKind::Runtime => EngineKindWire::Runtime,
+                        ::executils::EngineKind::Sqe => EngineKindWire::Sqe,
                     };
                     (kind, e.class, e.detail)
                 })

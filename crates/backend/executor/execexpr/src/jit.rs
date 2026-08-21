@@ -397,6 +397,7 @@ unsafe extern "C" fn jitq_step(env: *mut HelperEnv, ix: u32) -> i64 {
     } else {
         Some(unsafe { &mut *(env.result_slot as *mut SlotData<'static>) })
     };
+    // unwind-ok: c-callback
     let r = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
         crate::interp::exec_one_step(state, slots, ret, result_slot, ix)
     }));
@@ -454,6 +455,7 @@ unsafe extern "C" fn jitq_call(
         frame: u32::MAX,
         nargs,
     };
+    // unwind-ok: c-callback
     let r = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
         if fusage {
             crate::interp::invoke_fusage(&call)

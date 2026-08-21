@@ -29,8 +29,6 @@ pub mod pathnode;
 pub mod plancat;
 pub mod partprune;
 pub mod like_support;
-mod m5_partwise;
-pub mod m5_suppress;
 pub mod multirangetypes_selfuncs;
 pub mod network_selfuncs;
 pub mod array_selfuncs;
@@ -297,12 +295,6 @@ pub fn standard_planner<'mcx>(
     cursor_options: i32,
     bound_params: ParamListHandle,
 ) -> PgResult<PlannedStmt<'mcx>> {
-    // Step-2 cost-shadow EXPLAIN hygiene (m5_suppress::cost_shadow): a stale
-    // sample from an earlier planning must never annotate this query's
-    // EXPLAIN. One cached-bool load when PGRUST_M5_COST_EXPLAIN is off (the
-    // m5 probe's own inertness idiom).
-    m5_suppress::cost_shadow::clear_last_sample();
-
     // C frees the planner's data with one context reset; the run is forgotten
     // (drop glue never runs), success or error — mcx reclaims it wholesale.
     let mut run_owner = mcx::ArenaForget::new(PlannerRun::new(mcx));

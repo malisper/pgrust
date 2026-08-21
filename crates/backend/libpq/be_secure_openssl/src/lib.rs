@@ -221,6 +221,7 @@ unsafe extern "C" fn ssl_external_passwd_cb(
     let is_server_start = SSL_IS_SERVER_START.load(Ordering::Relaxed);
     // SAFETY: OpenSSL hands a writable buffer of `size` bytes.
     let slice = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), size as usize) };
+    // unwind-ok: c-callback
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         be_secure_common::run_ssl_passphrase_command(prompt, is_server_start, slice)
     }));
@@ -301,6 +302,7 @@ unsafe extern "C" fn info_cb(ssl: *const openssl_sys::SSL, type_: libc::c_int, a
         _ => None,
     };
     if let Some(msg) = msg {
+        // unwind-ok: c-callback
         let _ = std::panic::catch_unwind(|| {
             let _ = ereport(DEBUG4).errmsg_internal(msg).finish(loc("info_cb"));
         });

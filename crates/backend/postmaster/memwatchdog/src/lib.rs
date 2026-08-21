@@ -350,6 +350,7 @@ pub fn start() {
                 std::thread::sleep(std::time::Duration::from_millis(ms as u64));
                 // The tick is written panic-free (no unwrap/index); the guard
                 // is defense in depth for unwinding builds.
+                // unwind-ok: log-then-die
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     tick(&mut state)
                 }));

@@ -908,6 +908,15 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             ),
             None => {
                 log_child_exit("untracked child process", pid, exitstatus);
+                // Untracked-thread crash announce: the runtime pool/standing
+                // executors are registry-invisible (no pmchild slot), but a
+                // PANIC-class death there must still run the crash cascade —
+                // the fsync law depends on it (a demoted PANIC converts a
+                // failed fsync back into "retry and trust"). Clean/FATAL
+                // statuses stay log-only, exactly as before.
+                if !(status0 || status1) {
+                    handle_child_crash("untracked child process", pid, exitstatus)?;
+                }
             }
         }
     }

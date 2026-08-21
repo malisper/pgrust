@@ -1,0 +1,16 @@
+[package]
+name = "pgrc2_claim"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrc2_claim"
+path = "src/lib.rs"
+
+# The minimal XC-1/XC-2 claim substrate (lanev4-parallel-contract.md §2/§3).
+# Deliberately dependency-free: claim advance is one atomic cursor (PC-2.3
+# "claim DISPATCH carries no locks"), and both the writer (parallel COPY,
+# consumer #1) and the M3-L3 reader (consumer #2) sit above it, so this
+# crate must sit below every pgrc2 sibling.
+[dependencies]

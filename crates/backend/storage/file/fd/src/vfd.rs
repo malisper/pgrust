@@ -107,6 +107,13 @@ pub(crate) fn with_fd<R>(f: impl FnOnce(&mut FdState) -> R) -> R {
     FD.with(|cell| f(&mut cell.borrow_mut()))
 }
 
+/// False once this thread's FD cache TLS has been destroyed (thread exit).
+/// Drop impls that would reach `with_fd` must check this and skip: touching
+/// a destroyed TLS panics, and panic-in-dtor aborts the whole server.
+pub(crate) fn fd_tls_alive() -> bool {
+    FD.try_with(|_| ()).is_ok()
+}
+
 macro_rules! scalar_global {
     ($($cell:ident, $get:ident, $set:ident, $ty:ty, $init:expr;)+) => {
         $(
@@ -413,6 +420,19 @@ pub fn InitFileAccess() {
         debug_assert_eq!(fd.size_vfd_cache(), 0, "call me only once");
         fd.vfd_cache.push(Vfd::zeroed());
     });
+}
+
+/// Whether this thread's fd substrate is temp-file-ready
+/// (`InitTemporaryFileAccess`/`ReattachRetainedFileAccess` ran and the exit
+/// callback has not cleared it). Additive M2-B probe, COPY-AS-IS from
+/// `origin/lanev3` fd/src/vfd.rs:428-430 @ `dc3c67c56214` (carried with the
+/// lx4_spill port — its `SpillSet::create` admission gate is the one
+/// caller): spill-eligible admission FAIL-CLOSES on threads without fd TLS,
+/// and per the debug-assert-masking law that bar must be RELEASE-effective —
+/// the `debug_assert!(temporary_files_allowed)` belts inside temp.rs vanish
+/// in release builds, so callers gate here instead.
+pub fn TempFileAccessReady() -> bool {
+    with_fd(|fd| fd.temporary_files_allowed)
 }
 
 pub fn InitTemporaryFileAccess() -> PgResult<()> {

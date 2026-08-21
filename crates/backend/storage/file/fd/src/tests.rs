@@ -362,6 +362,49 @@ fn durable_rename_and_unlink() {
     assert_eq!(crate::sync::durable_unlink(&new, ::types_error::LOG).unwrap(), -1);
 }
 
+/// Fsyncgate elevel routing (fd.c:4001): data_sync_elevel promotes any
+/// level to PANIC unless data_sync_retry=on (GUC default off,
+/// guc_tables.c:2102) — a failed data fsync must never be retried at a
+/// catchable level. Every mapping-file / segment / SLRU fsync site routes
+/// through this; the default MUST stay PANIC.
+#[test]
+fn data_sync_elevel_panics_unless_retry_guc() {
+    setup();
+    assert!(!vfd::data_sync_retry(), "GUC boot default is off");
+    assert_eq!(crate::sync::data_sync_elevel(::types_error::ERROR), ::types_error::PANIC);
+    assert_eq!(crate::sync::data_sync_elevel(::types_error::WARNING), ::types_error::PANIC);
+    vfd::set_data_sync_retry(true);
+    assert_eq!(crate::sync::data_sync_elevel(::types_error::ERROR), ::types_error::ERROR);
+    vfd::set_data_sync_retry(false);
+}
+
+/// fsync_fname (fd.c:3846) raises at data_sync_elevel(ERROR): with the GUC
+/// at default a failure must escalate to backend exit (PanicExitThread
+/// unwind), never return a catchable Err — the guard the rewriteheap
+/// mapping-file sites (rewriteheap.c:923/1238/1252) now rely on.
+#[test]
+fn fsync_fname_failure_escalates_to_thread_exit() {
+    setup();
+    let dir = scratch_dir("fsyncfname_panic");
+    let missing = format!("{dir}/does_not_exist");
+    let r = std::panic::catch_unwind(|| crate::sync::fsync_fname(&missing, false));
+    match r {
+        Err(payload) => assert!(
+            payload.is::<::types_error::PanicExitThread>(),
+            "fsync_fname failure must unwind PanicExitThread"
+        ),
+        Ok(inner) => panic!("fsync_fname failure returned control at default GUC: {inner:?}"),
+    }
+    // With data_sync_retry=on the same failure is an ordinary Err.
+    vfd::set_data_sync_retry(true);
+    let r = std::panic::catch_unwind(|| crate::sync::fsync_fname(&missing, false));
+    vfd::set_data_sync_retry(false);
+    match r {
+        Ok(inner) => assert!(inner.is_err(), "retry=on demotes to a catchable ERROR"),
+        Err(_) => panic!("retry=on must not panic"),
+    }
+}
+
 #[test]
 fn allocate_dir_walks_entries() {
     setup();

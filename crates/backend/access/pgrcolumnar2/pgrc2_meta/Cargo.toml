@@ -1,0 +1,13 @@
+[package]
+name = "pgrc2_meta"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrc2_meta"
+path = "src/lib.rs"
+
+[dependencies]
+order_key = { path = "../../../../_support/order_key" }
+pgrc2_format = { path = "../pgrc2_format" }

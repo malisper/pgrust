@@ -656,11 +656,6 @@ fn lane_feed_random_access_delegates_and_rescan_replays() {
     let rows = vec![vec![Some(3)], vec![Some(1)], vec![Some(2)]];
     let (mut node, mut estate, desc, mut feed) = setup(1, rows, EXEC_FLAG_REWIND);
     assert!(node.randomAccess);
-    // RA side-memo roundtrip (the bare-hook verdict store).
-    assert_eq!(sort_lane_ra_fusible(&node), None);
-    sort_lane_ra_fusible_set(&mut node, true);
-    assert_eq!(sort_lane_ra_fusible(&node), Some(true));
-
     lane_feed(&mut node, &mut estate, &desc, &mut feed);
     // The one read-back face is the row-path Tuplesort (no substituted
     // lane emit face) — randomAccess reads are sound exactly here.

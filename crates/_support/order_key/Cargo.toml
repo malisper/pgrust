@@ -1,0 +1,11 @@
+[package]
+name = "order_key"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "order_key"
+path = "src/lib.rs"
+
+[dependencies]

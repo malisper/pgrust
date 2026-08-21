@@ -50,9 +50,11 @@ thread_local! {
     // C MyLogicalRepWorker->stream_fileset: created on the first streamed
     // transaction, lives for the worker (= this thread). Arc so the leader
     // can hand it to a parallel apply worker at FS_SERIALIZE_DONE.
+    // tls-dtor: try_with-safe — FileSet::drop skips its dir walk after fd-TLS teardown (startup reaper is the belt).
     static STREAM_FILESET: RefCell<Option<Arc<FileSet>>> = const { RefCell::new(None) };
     // C stream_fd: the open spool file between STREAM START and STREAM STOP,
     // and during spooled replay.
+    // tls-dtor: plain-data TODAY — BufFile has no Drop (VFDs leak to the fd belts); adding one makes this an offender.
     static STREAM_FD: RefCell<Option<BufFile<'static>>> = const { RefCell::new(None) };
     // C subxact_data (subxacts + subxact_last); nsubxacts_max is Vec growth.
     static SUBXACTS: RefCell<Vec<SubXactInfo>> = const { RefCell::new(Vec::new()) };

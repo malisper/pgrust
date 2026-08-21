@@ -981,13 +981,22 @@ impl ParCopyShared {
 
 impl runtime::TaskSetWork for ParCopyShared {
     fn run_morsel(&self, worker: usize, range: runtime::MorselRange) {
+        // unwind-ok: worker-containment
         let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(worker, range)));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(e)) => self.fail_hard(e),
-            Err(_panic) => self.fail_hard(
-                PgError::new(ERROR, "parallel COPY worker panicked in a chunk").into(),
-            ),
+            Err(unwind) => {
+                self.fail_hard(
+                    PgError::new(ERROR, "parallel COPY worker panicked in a chunk").into(),
+                );
+                // Exit-committed unwinds rethrow to the driver (a dying
+                // thread must not claim the next chunk; the COPY commit
+                // path fsyncs beneath — the fsync law).
+                if parallel::standing::is_exit_unwind(&*unwind) {
+                    std::panic::resume_unwind(unwind);
+                }
+            }
         }
     }
 
@@ -1474,6 +1483,7 @@ fn parallel_copy_worker_main(pshared: &parallel::ParallelShared) -> PgResult<()>
     let Some(private) = pshared.private() else { return Ok(()) };
     let Ok(shared) = private.downcast::<ParCopyShared>() else { return Ok(()) };
 
+    // unwind-ok: worker-containment
     let r = catch_unwind(AssertUnwindSafe(|| worker_drive(&shared)));
     let outcome = match r {
         Ok(o) => o,
@@ -1903,6 +1913,7 @@ fn merge_sorted_runs(
                     // dropped its sender (end of input / error / abort) and
                     // the queue is drained.
                     let Some(b) = rx.recv() else { break };
+                    // unwind-ok: worker-containment
                     let r = catch_unwind(AssertUnwindSafe(
                         || -> PgResult<pgrcolumnar::EncodedRg> {
                             let mut enc =
@@ -1924,10 +1935,18 @@ fn merge_sorted_runs(
                     ));
                     let r = match r {
                         Ok(r) => r,
-                        Err(_) => Err(Box::new(PgError::new(
-                            ERROR,
-                            "parallel load-sort encoder panicked",
-                        ))),
+                        Err(unwind) => {
+                            // Exit-committed unwinds rethrow (scope join
+                            // propagates them to the leader) — a dying
+                            // thread must not be demoted to a soft error.
+                            if parallel::standing::is_exit_unwind(&*unwind) {
+                                std::panic::resume_unwind(unwind);
+                            }
+                            Err(Box::new(PgError::new(
+                                ERROR,
+                                "parallel load-sort encoder panicked",
+                            )))
+                        }
                     };
                     let failed = r.is_err();
                     if tx.send((b.idx, r)).is_err() || failed {

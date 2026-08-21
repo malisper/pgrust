@@ -340,6 +340,7 @@ pub fn init_all_with_transport(transport: Transport) {
     backend_progress::init_seams();
     init_waitevent_seams_with_lease_posture();
     mcxt_stats::init_seams();
+    mcxt_stats::set_slot_census(slot_census_line);
     pgstat::init_seams();
     adt_acl::init_seams();
     adt_timestamp::init_seams();
@@ -458,10 +459,10 @@ pub fn init_all_with_transport(transport: Transport) {
         ruleutils::builtins::RULEUTILS_BUILTINS,
         statistics::builtins::STATISTICS_BUILTINS,
         stats_import::STATS_IMPORT_BUILTINS,
-        // pgrust-native (reserved-range oids, no C counterpart): the lane
-        // coverage view SRF (execmain lanev2/coverage.rs; created on demand
-        // by scripts/lane-coverage-view.sql — no catalog delta by default).
-        execmain::LANEV2_BUILTINS,
+        // pgrust-native (reserved-range oids 9010/9011): the sqe census
+        // SRFs (execmain sqeshell/stat.rs; created on demand by
+        // scripts/sqe-stat-views.sql — no catalog delta by default).
+        execmain::SQE_BUILTINS,
         // pgrust-native (reserved-range oids 9001/9002/9005): the
         // ephemeral-db janitor's pin/unpin/seal surface — TRUE builtins
         // whose pg_proc rows janitor::bootstrap backfills into every
@@ -491,4 +492,25 @@ fn install_panic_hook() {
             default_hook(info);
         }));
     });
+}
+
+// memgrowth-discriminator (suspect-A census): one line over every raw-Rust
+// slot registry — thread-local Vec slabs invisible to the context ledger.
+// Installed into mcxt_stats so both the `pgrust: memctx` debug command and
+// the pg_log_backend_memory_contexts interrupt dump (which executes on the
+// TARGET backend thread) report the calling backend's registries.
+fn slot_census_line() -> String {
+    let (qd_len, qd_cap, qd_free) = execmain::slot_census();
+    let (sl_len, sl_cap, sl_free) = pquery::stmt_list::slot_census();
+    let (qe_len, qe_cap, qe_free) = queryenvironment::hold::slot_census();
+    let (ts_len, ts_cap, ts_free) = tuplestore::hold::slot_census();
+    let (ro_len, ro_cap, ro_free) = resowner::arena_census();
+    format!(
+        "slot census: querydesc len={qd_len} cap={qd_cap} free={qd_free}; \
+stmt_list len={sl_len} cap={sl_cap} free={sl_free}; \
+queryenv len={qe_len} cap={qe_cap} free={qe_free}; \
+tuplestore len={ts_len} cap={ts_cap} free={ts_free}; \
+resowner len={ro_len} cap={ro_cap} free={ro_free} arena_bytes={}",
+        ro_cap * 1024
+    )
 }

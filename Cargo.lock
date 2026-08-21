@@ -475,6 +475,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_jsonb_shred"
+version = "0.1.0"
+dependencies = [
+ "adt_jsonb",
+ "adt_numeric",
+ "adt_uuid",
+ "mbutils",
+ "mcx",
+ "types_error",
+ "wchar",
+]
+
+[[package]]
 name = "adt_jsonpath"
 version = "0.1.0"
 dependencies = [
@@ -1367,6 +1380,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "alp"
+version = "0.0.0"
+
+[[package]]
 name = "alter_seams"
 version = "0.0.0"
 dependencies = [
@@ -1985,6 +2002,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
+
+[[package]]
 name = "basebackup"
 version = "0.0.0"
 dependencies = [
@@ -2296,6 +2319,9 @@ name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "blkreftable"
@@ -5556,6 +5582,7 @@ dependencies = [
  "aclchk_seams",
  "adt_bool",
  "adt_float",
+ "adt_jsonb",
  "adt_numeric",
  "adt_timestamp",
  "aio_seams",
@@ -5578,6 +5605,7 @@ dependencies = [
  "controldata_utils",
  "datum",
  "deadlock_seams",
+ "detoast",
  "elog",
  "execexpr",
  "execgrouping",
@@ -5604,9 +5632,6 @@ dependencies = [
  "inval",
  "ipc",
  "ipc_seams",
- "laneexec",
- "lanefold",
- "lanestitch",
  "latch",
  "lmgr_proc",
  "lmgr_seams",
@@ -5616,6 +5641,7 @@ dependencies = [
  "logical_worker_seams",
  "lsyscache",
  "lwlock",
+ "mbutils",
  "mcx",
  "miscinit",
  "miscinit_seams",
@@ -5656,12 +5682,18 @@ dependencies = [
  "nodevaluesscan",
  "nodewindowagg",
  "nodeworktablescan",
+ "orderedsetaggs",
  "origin_seams",
  "parallel",
  "partprune",
  "pg_clock",
  "pg_enum",
  "pg_sema_seams",
+ "pglz",
+ "pgrc2_am",
+ "pgrc2_format",
+ "pgrc2_read",
+ "pgrc2_write",
  "pgstat",
  "pgstat_seams",
  "pgsync",
@@ -5693,6 +5725,8 @@ dependencies = [
  "snapmgr",
  "spi_seams",
  "spillset",
+ "sqe",
+ "sqe_spill",
  "stack_depth_core",
  "subtrans",
  "sync_seams",
@@ -5700,6 +5734,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "tableam",
+ "tableam_vocab",
  "tablecmds_seams",
  "tcop_dest",
  "tidbitmap",
@@ -5736,6 +5771,7 @@ dependencies = [
  "waiter",
  "waitevent_seams",
  "waiteventset",
+ "wchar",
  "xact",
  "xloginsert",
  "xlogutils",
@@ -8342,46 +8378,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "lanefold"
-version = "0.0.0"
-dependencies = [
- "adt_float",
- "adt_numeric",
- "datum",
- "execexpr",
- "exectuples",
- "lanereg",
- "mbutils_seams",
- "mcx",
- "pg_locale",
- "types_core",
- "types_error",
- "types_nodes",
- "types_tuple",
- "varlena",
-]
-
-[[package]]
 name = "lanereg"
 version = "0.0.0"
 dependencies = [
  "types_core",
-]
-
-[[package]]
-name = "lanestitch"
-version = "0.0.0"
-dependencies = [
- "datum",
- "jit_deform",
- "types_error",
-]
-
-[[package]]
-name = "lanetable"
-version = "0.0.0"
-dependencies = [
- "mcx",
 ]
 
 [[package]]
@@ -9709,13 +9709,12 @@ dependencies = [
  "hyperloglog",
  "init_small",
  "ipc_seams",
- "lanefold",
- "lanetable",
  "lsyscache",
  "mcx",
  "mcxt_stats",
  "miscinit_seams",
  "nodes_core",
+ "pg_locale",
  "pglz",
  "pgstat_seams",
  "postgres_seams",
@@ -10268,6 +10267,7 @@ dependencies = [
  "pg_enum_seams",
  "pg_inherits",
  "pg_sema_seams",
+ "pgrc2_am",
  "pgstat",
  "planner",
  "pmsignal_seams",
@@ -10482,7 +10482,6 @@ dependencies = [
  "heapam_visibility_seams",
  "jit_deform",
  "laneexec",
- "lanestitch",
  "mcx",
  "miscinit_seams",
  "nodehash",
@@ -10904,10 +10903,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "order_key"
+version = "0.0.0"
+
+[[package]]
 name = "orderedsetaggs"
 version = "0.1.0"
 dependencies = [
  "adt_datetime",
+ "adt_float",
  "adt_timestamp",
  "arrayfuncs",
  "datum",
@@ -13057,6 +13061,176 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgrc2_am"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "elog",
+ "exectuples",
+ "inval",
+ "libc",
+ "mbutils",
+ "pg_locale_seams",
+ "pgrc2_codec",
+ "pgrc2_format",
+ "pgrc2_meta",
+ "pgrc2_read",
+ "pgrc2_scan",
+ "pgrc2_write",
+ "pgsync",
+ "procarray_seams",
+ "relpath",
+ "snapmgr",
+ "syscache_seams",
+ "tableam_vocab",
+ "transam_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "vfs",
+ "wchar",
+ "xact",
+ "xact_seams",
+]
+
+[[package]]
+name = "pgrc2_batch"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "order_key",
+ "pgrc2_format",
+ "types_core",
+ "types_tuple",
+]
+
+[[package]]
+name = "pgrc2_claim"
+version = "0.0.0"
+
+[[package]]
+name = "pgrc2_codec"
+version = "0.0.0"
+dependencies = [
+ "adt_jsonb",
+ "adt_jsonb_shred",
+ "adt_numeric",
+ "alp",
+ "mbutils",
+ "mcx",
+ "pgrc2_format",
+ "pgsync",
+ "wchar",
+ "zstd",
+]
+
+[[package]]
+name = "pgrc2_delta"
+version = "0.0.0"
+dependencies = [
+ "loom",
+ "pgrc2_format",
+ "pgsync",
+]
+
+[[package]]
+name = "pgrc2_format"
+version = "0.0.0"
+dependencies = [
+ "crc32c",
+]
+
+[[package]]
+name = "pgrc2_ingest_par"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "pgrc2_format",
+ "pgrc2_write",
+ "runtime",
+]
+
+[[package]]
+name = "pgrc2_meta"
+version = "0.0.0"
+dependencies = [
+ "order_key",
+ "pgrc2_format",
+]
+
+[[package]]
+name = "pgrc2_qa"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "pgrc2_codec",
+ "pgrc2_format",
+ "pgrc2_read",
+ "pgrc2_write",
+]
+
+[[package]]
+name = "pgrc2_read"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "loom",
+ "pgrc2_batch",
+ "pgrc2_format",
+ "pgsync",
+ "vfs",
+]
+
+[[package]]
+name = "pgrc2_scan"
+version = "0.0.0"
+dependencies = [
+ "adt_jsonb",
+ "datum",
+ "mbutils",
+ "mcx",
+ "pgrc2_batch",
+ "pgrc2_claim",
+ "pgrc2_codec",
+ "pgrc2_format",
+ "pgrc2_meta",
+ "pgrc2_qa",
+ "pgrc2_read",
+ "pgrc2_write",
+ "pgsync",
+ "wchar",
+]
+
+[[package]]
+name = "pgrc2_write"
+version = "0.0.0"
+dependencies = [
+ "adt_jsonb",
+ "adt_jsonb_shred",
+ "adt_numeric",
+ "libc",
+ "loom",
+ "mbutils",
+ "mcx",
+ "pglz",
+ "pgrc2_claim",
+ "pgrc2_codec",
+ "pgrc2_format",
+ "pgrc2_meta",
+ "pgrc2_read",
+ "pgsync",
+ "simdutf8",
+ "vfs",
+ "wchar",
+ "write_governor",
+ "xact_seams",
+]
+
+[[package]]
 name = "pgrcolumnar"
 version = "0.0.0"
 dependencies = [
@@ -13482,7 +13656,6 @@ dependencies = [
  "indxpath",
  "init_small",
  "inval",
- "lanefold",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -15731,6 +15904,7 @@ dependencies = [
  "bulkwrite",
  "catalog",
  "elog",
+ "fd",
  "heapam",
  "heapam_visibility",
  "heaptoast",
@@ -15912,6 +16086,18 @@ dependencies = [
  "types_tuple",
  "xact",
  "xlogreader_seams",
+]
+
+[[package]]
+name = "ron"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b91f7eff05f748767f183df4320a63d6936e9c6107d97c9e6bdd9784f4289c94"
+dependencies = [
+ "base64",
+ "bitflags",
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -17565,6 +17751,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqe"
+version = "0.0.0"
+dependencies = [
+ "adt_numeric",
+ "adt_regexp",
+ "hashbrown",
+ "mbutils",
+ "mcx",
+ "mimalloc",
+ "pgrc2_codec",
+ "pgrc2_format",
+ "pgrc2_meta",
+ "pgrc2_read",
+ "pgrc2_write",
+ "postgres_seams",
+ "regex_core",
+ "ron",
+ "serde",
+ "sqe",
+ "types_core",
+ "types_error",
+ "wchar",
+]
+
+[[package]]
+name = "sqe_lanestitch"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "jit_deform",
+ "sqe",
+ "types_error",
+]
+
+[[package]]
+name = "sqe_spill"
+version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "datum",
+ "elog",
+ "fd",
+ "guc_tables",
+ "ipc_seams",
+ "libc",
+ "nodehashjoin",
+ "pgstat_seams",
+ "postgres_seams",
+ "resowner",
+ "resowner_seams",
+ "runtime",
+ "types_error",
+ "types_resowner",
+ "types_storage",
+ "waitevent_seams",
+ "xact_seams",
+]
+
+[[package]]
 name = "sql_functions"
 version = "0.1.0"
 dependencies = [
@@ -18241,6 +18486,7 @@ dependencies = [
  "init_small",
  "mcx",
  "multixact",
+ "pgrc2_am",
  "pgrcolumnar",
  "procarray",
  "smgr",
@@ -20799,6 +21045,16 @@ dependencies = [
  "types_tuple",
  "varlena",
  "wchar",
+]
+
+[[package]]
+name = "write_governor"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "libc",
+ "pgsync",
+ "vfs",
 ]
 
 [[package]]

@@ -568,14 +568,23 @@ impl runtime::TaskSetWork for PvPoolPass {
             // Already aborting: the claim drains without work.
             return;
         }
+        // unwind-ok: worker-containment
         let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(range)));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(e)) => self.fail(e),
-            Err(_panic) => self.fail(
-                PgError::new(ERROR, "parallel index vacuum worker panicked in a morsel")
-                    .into(),
-            ),
+            Err(unwind) => {
+                self.fail(
+                    PgError::new(ERROR, "parallel index vacuum worker panicked in a morsel")
+                        .into(),
+                );
+                // Exit-committed unwinds rethrow to the driver (a dying
+                // thread must not claim the next morsel; ambulkdelete WALs
+                // beneath — the fsync law).
+                if parallel::standing::is_exit_unwind(&*unwind) {
+                    std::panic::resume_unwind(unwind);
+                }
+            }
         }
     }
 
@@ -886,6 +895,7 @@ fn parallel_vacuum_pool_driver(shared: &parallel::ParallelShared) {
     }
     let target = Arc::clone(&pass.target);
     let entered = std::cell::Cell::new(false);
+    // unwind-ok: worker-containment
     let r = catch_unwind(AssertUnwindSafe(|| {
         parallel::with_query_task_binding(&target, || {
             entered.set(true);

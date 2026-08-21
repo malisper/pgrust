@@ -24,7 +24,7 @@ use types_nodes::primnodes::{
     MergeMatchKind, MinMaxExpr, MinMaxOp, NamedArgExpr, NextValueExpr, NullTest, NullTestType,
     OpExpr, OverridingKind, Param, ParamKind, RangeTblRef, CollateExpr, RelabelType,
     ScalarArrayOpExpr, SubLink, SubLinkType, TableFunc, TableFuncType, TargetEntry, Var,
-    VarReturningType, WindowFunc, XmlExpr, XmlExprOp, XmlOptionType,
+    VarReturningType, WindowFunc, WindowFuncRunCondition, XmlExpr, XmlExprOp, XmlOptionType,
 };
 use types_nodes::Node;
 
@@ -476,6 +476,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"INFERENCEELEM" => self.read_inference_elem(),
             b"SUBSCRIPTINGREF" => self.read_subscripting_ref(),
             b"WINDOWFUNC" => self.read_window_func(),
+            b"WINDOWFUNCRUNCONDITION" => self.read_window_func_run_condition(),
             b"MERGESUPPORTFUNC" => self.read_merge_support_func(),
             b"WINDOWCLAUSE" => self.read_window_clause(),
             b"COMMONTABLEEXPR" => self.read_common_table_expr(),
@@ -706,6 +707,23 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         w.winagg = self.read_bool("winagg");
         w.location = self.read_location("location");
         Ok(w.seal())
+    }
+
+    fn read_window_func_run_condition(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let opno = self.read_u32("opno");
+        let inputcollid = self.read_u32("inputcollid");
+        let wfunc_left = self.read_bool("wfunc_left");
+        let arg = self.read_node("arg")?.expect("WindowFuncRunCondition has an arg");
+        Node::mk(
+            mcx,
+            WindowFuncRunCondition {
+                opno,
+                inputcollid,
+                wfunc_left,
+                arg,
+            },
+        )
     }
 
     fn read_window_clause(&mut self) -> PgResult<Node<'mcx>> {

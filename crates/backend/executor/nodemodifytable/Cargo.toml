@@ -35,6 +35,10 @@ tupdesc = { path = "../../access/common/tupdesc" }
 execindexing = { path = "../execindexing" }
 tableam = { path = "../../access/table/tableam" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
+# The M3-H trickle-DML gate's refusal constructor (pgrc2_am::dml, the #1034
+# ready face) — restored per the M5e scout's F-1; the v3 tree carried the
+# same edge (lanev3 @ dc3c67c56214 Cargo.toml:37).
+pgrc2_am = { path = "../../access/pgrcolumnar2/pgrc2_am" }
 xact = { path = "../../access/transam/xact" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

@@ -132,12 +132,11 @@ pub fn gm_leader_min_tuple_cost() -> f64 {
 // displaced the raw-row-GM-into-serial-leader catastrophe; at fresh-stats
 // estimate regimes the election slides into the PLAIN-Gather variant of
 // the same class — ship-every-raw-row-to-the-leader into a serial leader
-// aggregation that also evaluates the grouping expression per row (the
-// exact family gather_tuple_cost's armed-pool carve already dodges for
-// `pgrust.lane_parallel_pool` sessions; this floor is the stock-defaults
-// guard). Scope: raw-row Gathers only — partial-agg-fed Gathers hand
-// tables by pointer (the §4.4 exchange pricing) and their leader
-// consumption is per-group, not per-row. Same self-scoping as the GM
+// aggregation that also evaluates the grouping expression per row (an
+// armed-pool carve in gather_tuple_cost once dodged this for
+// `pgrust.lane_parallel_pool` sessions — tombstoned P7-2 D-8; this floor
+// is the stock-defaults guard). Scope: raw-row Gathers only. Same
+// self-scoping as the GM
 // floor: the delta vanishes at SET parallel_tuple_cost >= the floor
 // (C-parity sessions) and at explicitly zeroed transport (forced-plan
 // bench seams — incl. the cost-route gate's zeroed conf).

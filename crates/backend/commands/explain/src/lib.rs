@@ -183,13 +183,6 @@ pub fn standard_ExplainOneQuery<'mcx>(
     let plan = postgres::simple_query::pg_plan_query(mcx, mcx::leak_in(mcx::alloc_in(mcx, query)?), query_string, cursor_options, params)?
         .expect("planner will not cope with utility statements");
     let planduration = planstart.elapsed();
-    // Step-2 cost-shadow EXPLAIN sample (runtime-cost-model design §5 step
-    // 2): take the sample this planning recorded (the planner cleared the
-    // slot at entry, so a query that never classified covered yields None).
-    // One cached-bool load when PGRUST_M5_COST_EXPLAIN is off.
-    if planner::m5_suppress::cost_shadow::explain_armed() {
-        es.m5_cost_route = planner::m5_suppress::cost_shadow::take_last_sample();
-    }
     let mem_counters = mem_before.map(|b| mem_counters_since(mcx, b));
     let bufusage = bufusage_start.map(|start| {
         let mut b = BufferUsage::default();
@@ -578,9 +571,71 @@ fn ExplainOnePlanRef<'mcx>(
         totaltime += elapsed_time(&starttime);
     }
 
+    // sqe P2-1 statement verdict, plan-only evaluation order: on the
+    // non-ANALYZE path the verdict must be taken BEFORE ExplainPrintPlan —
+    // statement_verdict's record_engaged is what fills es_engine_events
+    // (under EXEC_FLAG_ENGINE_REPORT), and ExplainPrintPlan is what prints
+    // the per-node `Engine: sqe (engaged: <family>)` lines from those
+    // records. Evaluated after it (the old order), EXPLAIN (ENGINE)
+    // without ANALYZE printed an attribution-less plan. The ANALYZE path
+    // keeps its execution-recorded events and takes the verdict at the
+    // original post-print site (output byte-identical there).
+    let sqe_verdict = if es.analyze {
+        None
+    } else {
+        execmain_seams::query_desc_sqe_verdict::call(qd)
+    };
     ExplainOpenGroup("Query", None, true, es);
     es.qd = qd;
     ExplainPrintPlan(mcx, es, pstmt)?;
+    // sqe P2-1 statement-level verdict (census-surface §3): appears ONLY
+    // for statements over pgrcolumnar2 relations (heap EXPLAIN output
+    // stays byte-identical). Plain EXPLAIN prints the refusal instead of
+    // raising; execution (and EXPLAIN ANALYZE) raises the R1 error.
+    let sqe_verdict = if es.analyze {
+        execmain_seams::query_desc_sqe_verdict::call(qd)
+    } else {
+        sqe_verdict
+    };
+    if let Some((engaged, detail, sqlstate)) = sqe_verdict {
+        // Heap-face rung 2: an unrecognized heap shape routes to the
+        // incumbent (censused, not refused) — its verdict is the miss
+        // class, distinguished by the `heap-miss/` detail (no sqlstate:
+        // nothing errors on this path).
+        let incumbent = !engaged && sqlstate.is_empty() && detail.starts_with("heap-miss/");
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            ExplainIndentText(es);
+            if engaged {
+                es.str.append_str(&format!("SQE: engine (family: {detail})\n"))?;
+            } else if incumbent {
+                es.str.append_str(&format!("SQE: incumbent (miss: {detail})\n"))?;
+            } else {
+                es.str.append_str(&format!(
+                    "SQE: refused (cause: {detail}, sqlstate: {sqlstate})\n"
+                ))?;
+            }
+        } else {
+            ExplainPropertyText(
+                "SQE",
+                if engaged {
+                    "engine"
+                } else if incumbent {
+                    "incumbent"
+                } else {
+                    "refused"
+                },
+                es,
+            );
+            if engaged {
+                ExplainPropertyText("SQE Family", &detail, es);
+            } else if incumbent {
+                ExplainPropertyText("SQE Miss Class", &detail, es);
+            } else {
+                ExplainPropertyText("SQE Refusal Cause", &detail, es);
+                ExplainPropertyText("SQE Refusal SQLSTATE", &sqlstate, es);
+            }
+        }
+    }
     es.qd = types_portal::QueryDescHandle::NULL;
 
     if bufusage.is_some_and(|bu| peek_buffer_usage(es, bu)) || mem_counters.is_some() {
@@ -600,28 +655,6 @@ fn ExplainOnePlanRef<'mcx>(
             es.indent -= 1;
         }
         ExplainCloseGroup("Planning", Some("Planning"), true, es);
-    }
-
-    // pgrust-only "M5 Cost Route" line (knob-gated: the field is only ever
-    // filled while PGRUST_M5_COST_EXPLAIN is armed — default OFF keeps every
-    // EXPLAIN golden byte-identical). Shows the shadow verdict pair of the
-    // planning that produced this plan: the whitelist/floor verdict, the
-    // cost-model verdict, and which mechanism decided.
-    if let Some(s) = es.m5_cost_route {
-        ExplainPropertyText(
-            "M5 Cost Route",
-            &format!(
-                "class={} r_pred={:.3} model={} whitelist={} decided_by={} rows={:.0} dop={}",
-                s.class,
-                s.ratio,
-                if s.model_suppress { "suppress" } else { "gather" },
-                if s.whitelist_suppress { "suppress" } else { "gather" },
-                s.decided_by,
-                s.rows,
-                s.dop,
-            ),
-            es,
-        );
     }
 
     if es.summary {

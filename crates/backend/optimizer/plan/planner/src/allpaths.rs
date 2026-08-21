@@ -1428,6 +1428,24 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
             if lsyscache::get_rel_persistence(rte.relid)? != b'p' as i8 {
                 return Ok(());
             }
+            // M4-S4 at consider_parallel grain (the partitioned hole,
+            // [sqe-generic-b]): zeroing the pgrc2 baserel's workers in
+            // create_plain_partial_paths kept Gather off SINGLE-rel
+            // plans, but an appendrel parent could still build a
+            // Parallel Append from the children's NON-partial paths and
+            // Gather it (observed: partitioned pgrc2 at scale plans
+            // `Gather Merge -> Sort -> Parallel Append`, refusing
+            // node/gather-merge instead of reaching the Append
+            // recognizer). Parallelism over pgrcolumnar2 is the sqe
+            // pool's (v2-76 / PC-2.2); mark the rel parallel-unsafe so
+            // line-610 child propagation turns every ancestor appendrel
+            // serial. The `PGRUST_SQE_PLANNER_GATHER=1` hatch restores
+            // the old posture wholesale.
+            if run.root.rel(rel).amflags & types_pathnodes::AMFLAG_PGRCOLUMNAR2 != 0
+                && !sqe_planner_gather_enabled()
+            {
+                return Ok(());
+            }
             if let Some(ts) = rte.tablesample {
                 let tsc = ts.as_table_sample_clause().expect("TableSampleClause");
                 const PROPARALLEL_SAFE: i8 = b's' as i8;
@@ -1588,22 +1606,60 @@ fn create_pgrcolumnar_sorted_paths<'mcx>(
 }
 
 // create_plain_partial_paths (allpaths.c).
+/// gather-hop (M5 close): the pgrc2 planner-parallel lever —
+/// `PGRUST_SQE_PLANNER_GATHER=1|on` lifts the M4-S4 no-partial-paths
+/// suppression over lanev4-engine rels so the planner emits its natural
+/// Gather/GatherMerge trees and the engine seam hops them. DEFAULT OFF (the
+/// M4-S4 production posture); boot env, OnceLock-cached — the lane-knob
+/// idiom (process-constant per run, never per statement).
+fn sqe_planner_gather_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_SQE_PLANNER_GATHER").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 fn create_plain_partial_paths(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     let parallel_workers = {
         let r = run.root.rel(rel);
         let max = crate::gucs::max_parallel_workers_per_gather();
-        // Stage-4 pool arming (guc_tables::lane_pool): a pgrcolumnar baserel in
-        // an armed session plans exactly the requested DOP (clamped to the
-        // gather GUC; the helper already clamped to available cores) — the
-        // plan's forced-plans posture, no shape rules. Unarmed pgrcolumnar rels
-        // size from their own scan geometry (row-group count; see
-        // compute_pgrcolumnar_parallel_worker), honoring the parallel_workers
-        // reloption first. Heap rels keep C's page-ladder sizing untouched.
-        if r.amflags & types_pathnodes::AMFLAG_PGRCOLUMNAR != 0 {
-            match ::guc_tables::lane_pool::lane_parallel_pool_dop() {
-                dop if dop > 0 => dop.min(max),
-                _ => ::allpaths::compute_pgrcolumnar_parallel_worker(r, r.tuples, max),
+        // pgrcolumnar rels size from their own scan geometry (row-group
+        // count; see compute_pgrcolumnar_parallel_worker), honoring the
+        // parallel_workers reloption first. Heap rels keep C's page-ladder
+        // sizing untouched. (P7-2 D-8: the Stage-4 lane_pool forced-DOP
+        // arming is deleted with the pgrust.lane_parallel_pool tombstone.)
+        if r.amflags & types_pathnodes::AMFLAG_PGRCOLUMNAR2 != 0 {
+            // M4-S4: NO planner partial paths over lanev4-engine rels —
+            // and therefore no Gather (generate_gather_paths no-ops on an
+            // empty partial list). Parallelism over pgrcolumnar2 is the
+            // sqe statement-grain pool's, elected at the seam over the
+            // claim plane (v2-76 / PC-2.2 "no PG Gather hosting"; ES-4.4
+            // curve-empty election). Before this arm, the pgrc2 estimate
+            // arm's honest rel sizing (real part bytes) fed the heap page
+            // ladder below and Gathered every big-bank plan out of the
+            // seam's routed class (the S3-cells finding-3 posture pin,
+            // now retired engine-side).
+            //
+            // gather-hop (M5 close): `PGRUST_SQE_PLANNER_GATHER=1` LIFTS
+            // the suppression — the planner sizes parallelism off the
+            // honest rel pages exactly like heap and the SEAM hops the
+            // resulting Gather/GatherMerge interposition (the v4 engine's
+            // own DOP replaces the classic scaffolding on every routed
+            // shape; unrouted shapes fall to the classic machinery — or
+            // to the Amendment 7 refusal when strict is armed). DEFAULT
+            // OFF: the M4-S4 posture stays the production stance; the
+            // lever exists for the parallel-posture routing e2e and the
+            // pool-vs-planner DOP attribution takes.
+            if sqe_planner_gather_enabled() {
+                ::allpaths::compute_parallel_worker(r, r.pages as f64, -1.0, max)
+            } else {
+                0
             }
+        } else if r.amflags & types_pathnodes::AMFLAG_PGRCOLUMNAR != 0 {
+            // (P7-2 D-8: the Stage-4 lane_pool forced-DOP arm is deleted with
+            // the pgrust.lane_parallel_pool tombstone — the disarmed default,
+            // the ordinary pgrcolumnar worker computation, is the only arm.)
+            ::allpaths::compute_pgrcolumnar_parallel_worker(r, r.tuples, max)
         } else {
             ::allpaths::compute_parallel_worker(r, r.pages as f64, -1.0, max)
         }
@@ -1694,21 +1750,6 @@ pub(crate) fn generate_useful_gather_paths(
     override_rows: bool,
 ) -> PgResult<()> {
     if run.root.rel(rel).partial_pathlist.is_empty() {
-        return Ok(());
-    }
-
-    // M5-3 coverage-keyed suppression (m5_suppress, design §2.3): under
-    // pgrust.parallel_engine=runtime a COVERED shape gets no Gather/Gather
-    // Merge anywhere in its plan — the serial-shaped plan reaches the
-    // executor and the runtime router engages it. Uncovered shapes (and
-    // every query under the default legacy engine) fall through unchanged.
-    if crate::m5_suppress::m5_suppress_gather(run)? {
-        return Ok(());
-    }
-    // NLIDX (GL-NLIDX-2, rel-aware): the final joinrel's serial election is
-    // itself the NL-inner-index shape the morsel arm engages — no Gather of
-    // any form; uncovered shapes and knob-OFF fall through unchanged.
-    if crate::m5_suppress::m5_suppress_gather_nlidx(run, rel)? {
         return Ok(());
     }
 

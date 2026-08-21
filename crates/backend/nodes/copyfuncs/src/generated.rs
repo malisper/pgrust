@@ -31,7 +31,7 @@ use types_nodes::primnodes::{
 use types_nodes::parsenodes::{
     ATAlterConstraint, AccessPriv, AlterCollationStmt, AlterDatabaseRefreshCollStmt,
     AlterDatabaseSetStmt, AlterDatabaseStmt, AlterDefaultPrivilegesStmt, AlterDomainStmt,
-    AlterEventTrigStmt, AlterFunctionStmt, AlterObjectSchemaStmt, AlterOpFamilyStmt,
+    AlterEventTrigStmt, AlterFunctionStmt, AlterObjectDependsStmt, AlterObjectSchemaStmt, AlterOpFamilyStmt,
     AlterOperatorStmt, AlterOwnerStmt, AlterPolicyStmt, AlterPublicationStmt, AlterRoleSetStmt,
     AlterRoleStmt, AlterSubscriptionStmt, AlterSystemStmt, AlterTableCmd,
     AlterTableMoveAllStmt, AlterTableSpaceOptionsStmt, AlterTableStmt, CTECycleClause,
@@ -172,6 +172,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_AlterFunctionStmt => {
             let s = node.as_variant::<AlterFunctionStmt>().expect("AlterFunctionStmt");
             Node::mk(mcx, copy_AlterFunctionStmt(mcx, s)?)?
+        }
+        NodeTag::T_AlterObjectDependsStmt => {
+            let s = node.as_variant::<AlterObjectDependsStmt>().expect("AlterObjectDependsStmt");
+            Node::mk(mcx, copy_AlterObjectDependsStmt(mcx, s)?)?
         }
         NodeTag::T_AlterObjectSchemaStmt => {
             let s = node.as_variant::<AlterObjectSchemaStmt>().expect("AlterObjectSchemaStmt");
@@ -1586,6 +1590,16 @@ pub(crate) fn copy_AlterFunctionStmt<'d>(mcx: Mcx<'d>, s: &AlterFunctionStmt<'_>
         objtype: s.objtype,
         func: match s.func { Some(v) => Some(mk_ref(mcx, copy_ObjectWithArgs(mcx, v)?)?), None => None },
         actions: copy_node_list(mcx, &s.actions)?,
+    })
+}
+
+pub(crate) fn copy_AlterObjectDependsStmt<'d>(mcx: Mcx<'d>, s: &AlterObjectDependsStmt<'_>) -> PgResult<AlterObjectDependsStmt<'d>> {
+    Ok(AlterObjectDependsStmt {
+        objectType: s.objectType,
+        relation: match s.relation { Some(v) => Some(mk_ref(mcx, copy_RangeVar(mcx, v)?)?), None => None },
+        object: copy_node_opt(mcx, s.object)?,
+        extname: copy_node_opt(mcx, s.extname)?,
+        remove: s.remove,
     })
 }
 

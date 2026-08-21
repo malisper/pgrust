@@ -11,7 +11,7 @@ use types_rel::{
 };
 use types_slot::TupleSlotKind;
 use types_storage::Spinlock;
-use types_tuple::{NameData, TupleDescData};
+use types_tuple::{ItemPointerData, NameData, TupleDescData};
 
 use crate::*;
 
@@ -374,6 +374,10 @@ fn write_buffer_begin_gates_on_switch_and_am() {
     let ctx = MemoryContext::new("test");
     let heap = make(ctx.mcx(), 1, RELKIND_RELATION, HEAP_TABLE_AM_OID);
     let foreign = make(ctx.mcx(), 2, RELKIND_FOREIGN_TABLE, 0);
+    // pgrcolumnar2 relation for the F-1 multi-insert census pin below.
+    const PGRC2_TEST_AM_OID: Oid = 77104;
+    register_pgrcolumnar2_table_am(PGRC2_TEST_AM_OID);
+    let pgrc2 = make(ctx.mcx(), 3, RELKIND_RELATION, PGRC2_TEST_AM_OID);
 
     // Default OFF: never arms, heap AM or not.
     crate::write_buffer::write_multi_insert_set_for_tests(false);
@@ -387,6 +391,53 @@ fn write_buffer_begin_gates_on_switch_and_am() {
     assert_eq!(buf.bytes, 0);
     assert!(buf.slots.is_empty());
     assert!(crate::write_buffer::write_buffer_begin(&foreign).is_none());
+    // The F-1 cross-check's multi-insert census pin: the W1 write buffer is
+    // the only non-COPY table_multi_insert driver in-tree, and it must
+    // NEVER arm for a pgrcolumnar2 relation — its CTAS/matview receivers
+    // stay on the per-tuple + table_finish_bulk_insert path (the ONE
+    // publish point). A caller that reached table_multi_insert on a v2
+    // relation and never called table_finish_bulk_insert would buffer rows
+    // the eoxact purge silently abandons (the F-1 loss mechanism).
+    assert!(crate::write_buffer::write_buffer_begin(&pgrc2).is_none());
 
     crate::write_buffer::write_multi_insert_set_for_tests(false);
+}
+
+#[test]
+fn pgrc2_tuple_update_delete_refuse_typed_at_the_dispatch() {
+    // The F-1 re-pin's standing half: UPDATE/DELETE on a pgrcolumnar2
+    // relation refuse typed AT THE AM DISPATCH (defense in depth beneath
+    // the restored ModifyTable trickle gate — same 0A000 identity at both
+    // altitudes, so error-parity suites see one message shape).
+    const PGRC2_TEST_AM_OID: Oid = 77103;
+    register_pgrcolumnar2_table_am(PGRC2_TEST_AM_OID);
+    let ctx = MemoryContext::new("test");
+    let rel = make(ctx.mcx(), 7, RELKIND_RELATION, PGRC2_TEST_AM_OID);
+    let tid = ItemPointerData::default();
+    let mut tmfd = TM_FailureData::default();
+
+    let e = table_tuple_delete(ctx.mcx(), &rel, &tid, 0, &None, &None, true, &mut tmfd, false)
+        .unwrap_err();
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(e.message(), "pgrcolumnar2 does not support DELETE");
+
+    let mut slot = table_slot_create(ctx.mcx(), &rel).expect("virtual slot for a pgrc2 rel");
+    let mut lockmode = LockTupleMode::LockTupleExclusive;
+    let mut update_indexes = TU_UpdateIndexes::TU_None;
+    let e = table_tuple_update(
+        ctx.mcx(),
+        &rel,
+        &tid,
+        &mut slot,
+        0,
+        &None,
+        &None,
+        true,
+        &mut tmfd,
+        &mut lockmode,
+        &mut update_indexes,
+    )
+    .unwrap_err();
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(e.message(), "pgrcolumnar2 does not support UPDATE");
 }

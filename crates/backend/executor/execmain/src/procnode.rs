@@ -174,15 +174,9 @@ pub struct BitmapCombineState<'mcx> {
 pub struct AggPlanState<'mcx> {
     pub agg: ::nodeagg::AggStateData<'mcx>,
     pub outer: PlanStateNode<'mcx>,
-    /// Lane-v2 memoized structural choice for the hash-agg breaker (None =
-    /// undecided); all lane logic lives in `lanev2`.
-    pub lane_choice: Option<crate::lanev2::AggLaneChoice>,
     /// Lane-v2 staged join-feed replay slot, memoized across rescan rebuilds
     /// (a fresh extra slot per rebuild would grow es_tupleTable per rescan).
     pub lane_stage_slot: Option<::executils::ExecSlotId>,
-    /// Lane-v2 expression-group-key state (projected-scan builds), memoized
-    /// with the choice; all logic lives in `lanev2::exprkey`.
-    pub lane_exprkey: Option<Box<crate::lanev2::ExprKeyState>>,
 }
 
 // The WindowAgg node's outer child lives here (nodesort/nodeagg precedent).
@@ -363,11 +357,6 @@ pub struct MergeJoinNode<'mcx> {
     pub state: ::nodemergejoin::MergeJoinState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     pub inner: PgBox<'mcx, PlanStateNode<'mcx>>,
-    /// MJSORT adopted result (lanev2/runtime_mergejoin — the "merge join
-    /// after sort" car, PGRUST_RUNTIME_MJSORT): both sides' published
-    /// runs + the joined pair lists; the emit face serves them per pull.
-    /// Dropped on rescan/end (the adopted-sort lifecycle).
-    pub mjsort: Option<Box<crate::lanev2::MjSortAdopted>>,
     /// MJSORT probe-once law: only a node's FIRST pull may engage (a
     /// refused probe is sticky), so the FSM's stream can never be
     /// double-fed by a mid-stream engagement. Reset with `mjsort`.
@@ -579,6 +568,12 @@ pub fn exec_init_node<'mcx>(
     // C: check_stack_depth() (ExecInitNode, execProcnode.c) — bounds
     // user-code recursion (plpgsql/SQL-function/trigger re-entry via SPI).
     stack_depth_core::check_stack_depth()?;
+
+    if crate::p8census::armed() {
+        if let Some(t) = crate::p8census::tag_ix(node.node_tag()) {
+            crate::p8census::tick_init(t, estate);
+        }
+    }
 
     let result = match node.node_tag() {
         NodeTag::T_Result => {
@@ -1070,7 +1065,6 @@ pub fn exec_init_node<'mcx>(
                         plan: lr_plan.plan.lefttree,
                         recheck: None,
                         result_rti: state.lr_arowMarks.first().map_or(0, |a| a.rti),
-                        lane_verdicts: None,
                     };
                     PlanStateNode::LockRows(::mcx::alloc_in(
                         estate.es_query_cxt,
@@ -1101,9 +1095,7 @@ pub fn exec_init_node<'mcx>(
                     AggPlanState {
                         agg,
                         outer,
-                        lane_choice: None,
                         lane_stage_slot: None,
-                        lane_exprkey: None,
                     },
                 )?)
             })
@@ -1292,7 +1284,6 @@ pub fn exec_init_node<'mcx>(
                             state,
                             outer: ::mcx::alloc_in(mcx, outer)?,
                             inner: ::mcx::alloc_in(mcx, inner)?,
-                            mjsort: None,
                             mjsort_probed: false,
                         },
                     )?)
@@ -1638,7 +1629,6 @@ pub fn exec_init_node<'mcx>(
                         recheck: None,
                         // Set per-row by the dispatch closure (multi-resultrel).
                         result_rti: 0,
-                        lane_verdicts: None,
                     };
                     PlanStateNode::ModifyTable(::mcx::alloc_in(
                         mcx,
@@ -1779,6 +1769,12 @@ pub fn exec_proc_node<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
+    // P8 census, default OFF (Instrumented ticks via its inner recursion).
+    if crate::p8census::armed() {
+        if let Some(t) = census_tag(node) {
+            crate::p8census::tick_exec(t, estate);
+        }
+    }
     match node {
         PlanStateNode::Instrumented(w) => exec_proc_node_instr(w, estate),
         PlanStateNode::Result(rs) => result_arm(rs, estate),
@@ -1823,6 +1819,54 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::MergeJoin(mj) => merge_join_arm(mj, estate),
         PlanStateNode::Gather(g) => gather_arm(g, estate),
         PlanStateNode::GatherMerge(gm) => gather_merge_arm(gm, estate),
+    }
+}
+
+/// P8 census index; None = Instrumented (its inner dispatch ticks).
+fn census_tag(node: &PlanStateNode<'_>) -> Option<usize> {
+    use crate::p8census::tag_ix;
+    match node {
+        PlanStateNode::Instrumented(_) => None,
+        PlanStateNode::Result(_) => tag_ix(NodeTag::T_Result),
+        PlanStateNode::ProjectSet(_) => tag_ix(NodeTag::T_ProjectSet),
+        PlanStateNode::SeqScan(_) => tag_ix(NodeTag::T_SeqScan),
+        PlanStateNode::SampleScan(_) => tag_ix(NodeTag::T_SampleScan),
+        PlanStateNode::FunctionScan(_) => tag_ix(NodeTag::T_FunctionScan),
+        PlanStateNode::ValuesScan(_) => tag_ix(NodeTag::T_ValuesScan),
+        PlanStateNode::ForeignScan(_) => tag_ix(NodeTag::T_ForeignScan),
+        PlanStateNode::TableFuncScan(_) => tag_ix(NodeTag::T_TableFuncScan),
+        PlanStateNode::CteScan(_) => tag_ix(NodeTag::T_CteScan),
+        PlanStateNode::IndexScan(_) => tag_ix(NodeTag::T_IndexScan),
+        PlanStateNode::TidScan(_) => tag_ix(NodeTag::T_TidScan),
+        PlanStateNode::TidRangeScan(_) => tag_ix(NodeTag::T_TidRangeScan),
+        PlanStateNode::IndexOnlyScan(_) => tag_ix(NodeTag::T_IndexOnlyScan),
+        PlanStateNode::Agg(_) => tag_ix(NodeTag::T_Agg),
+        PlanStateNode::WindowAgg(_) => tag_ix(NodeTag::T_WindowAgg),
+        PlanStateNode::Sort(_) => tag_ix(NodeTag::T_Sort),
+        PlanStateNode::IncrementalSort(_) => tag_ix(NodeTag::T_IncrementalSort),
+        PlanStateNode::Material(_) => tag_ix(NodeTag::T_Material),
+        PlanStateNode::Memoize(_) => tag_ix(NodeTag::T_Memoize),
+        PlanStateNode::Unique(_) => tag_ix(NodeTag::T_Unique),
+        PlanStateNode::Group(_) => tag_ix(NodeTag::T_Group),
+        PlanStateNode::Limit(_) => tag_ix(NodeTag::T_Limit),
+        PlanStateNode::LockRows(_) => tag_ix(NodeTag::T_LockRows),
+        PlanStateNode::BitmapHeapScan(_) => tag_ix(NodeTag::T_BitmapHeapScan),
+        PlanStateNode::BitmapIndexScan(_) => tag_ix(NodeTag::T_BitmapIndexScan),
+        PlanStateNode::BitmapAnd(_) => tag_ix(NodeTag::T_BitmapAnd),
+        PlanStateNode::BitmapOr(_) => tag_ix(NodeTag::T_BitmapOr),
+        PlanStateNode::ModifyTable(_) => tag_ix(NodeTag::T_ModifyTable),
+        PlanStateNode::Append(_) => tag_ix(NodeTag::T_Append),
+        PlanStateNode::MergeAppend(_) => tag_ix(NodeTag::T_MergeAppend),
+        PlanStateNode::SubqueryScan(_) => tag_ix(NodeTag::T_SubqueryScan),
+        PlanStateNode::SetOp(_) => tag_ix(NodeTag::T_SetOp),
+        PlanStateNode::RecursiveUnion(_) => tag_ix(NodeTag::T_RecursiveUnion),
+        PlanStateNode::WorkTableScan(_) => tag_ix(NodeTag::T_WorkTableScan),
+        PlanStateNode::NamedTuplestoreScan(_) => tag_ix(NodeTag::T_NamedTuplestoreScan),
+        PlanStateNode::NestLoop(_) => tag_ix(NodeTag::T_NestLoop),
+        PlanStateNode::HashJoin(_) => tag_ix(NodeTag::T_HashJoin),
+        PlanStateNode::MergeJoin(_) => tag_ix(NodeTag::T_MergeJoin),
+        PlanStateNode::Gather(_) => tag_ix(NodeTag::T_Gather),
+        PlanStateNode::GatherMerge(_) => tag_ix(NodeTag::T_GatherMerge),
     }
 }
 
@@ -1942,14 +1986,6 @@ pub(crate) fn fused_arm_set_for_tests(env_suffix: &str, on: bool) {
 
 #[inline(never)]
 fn result_arm<'mcx>(rs: &mut ResultState<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-4 glue: the no-FROM row / the
-    // projection stream over the sort breaker): falls through to the
-    // UNCHANGED exec_result on refuse. Lane logic + refuse-set in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_result(rs, estate)? {
-            return Ok(r);
-        }
-    }
     exec_result(rs, estate)
 }
 
@@ -1958,16 +1994,6 @@ fn project_set_arm<'mcx>(
     ps: &mut PgBox<'mcx, ProjectSetState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (row-mode facility, Phase 0): the
-    // default-OFF `PGRUST_LANE_V2_ROWMODE` shape (`ProjectSet ← childless
-    // Result`, the no-FROM SRF tlist) — knob OFF this ticks the documented
-    // wholesale refuse exactly as before and falls through to the UNCHANGED
-    // exec_project_set. Lane logic + refuse-set in `lanev2` (rowmode.rs).
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_project_set(ps, estate)? {
-            return Ok(r);
-        }
-    }
     exec_project_set(ps, estate)
 }
 
@@ -1976,14 +2002,6 @@ fn seq_scan_arm<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 (Phase 1) dispatch hook: when enabled, the lane may
-    // *own* this SeqScan; all lane logic + the refuse-set live in `lanev2`.
-    // On refuse this falls through to the UNCHANGED per-tuple path.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_seq_scan(ss, estate)? {
-            return Ok(r);
-        }
-    }
     ::nodeseqscan::exec_seq_scan(ss, estate)
 }
 
@@ -1992,16 +2010,6 @@ fn sample_scan_arm<'mcx>(
     ss: &mut PgBox<'mcx, ::nodesamplescan::SampleScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
-    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
-    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
-    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
-    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
-        if let Some(r) = crate::lanev2::try_own_sample_scan(ss, estate)? {
-            return Ok(r);
-        }
-    }
     ::nodesamplescan::exec_sample_scan(ss, estate)
 }
 
@@ -2010,16 +2018,6 @@ fn function_scan_arm<'mcx>(
     fs: &mut PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
-    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
-    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
-    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
-    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
-        if let Some(r) = crate::lanev2::try_own_function_scan(fs, estate)? {
-            return Ok(r);
-        }
-    }
     ::nodefunctionscan::exec_function_scan(fs, estate)
 }
 
@@ -2028,16 +2026,6 @@ fn table_func_scan_arm<'mcx>(
     ts: &mut PgBox<'mcx, ::nodetablefuncscan::TableFuncScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
-    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
-    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
-    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
-    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
-        if let Some(r) = crate::lanev2::try_own_table_func_scan(ts, estate)? {
-            return Ok(r);
-        }
-    }
     ::nodetablefuncscan::exec_table_func_scan(ts, estate)
 }
 
@@ -2046,14 +2034,6 @@ fn values_scan_arm<'mcx>(
     vs: &mut PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
-        // SH-E ownership verdict: accounting only — the call below IS the
-        // delegated body (tail-call shape preserved on both knob arms).
-        crate::lanev2::values_scan_pull_verdict(estate);
-    }
     ::nodevaluesscan::exec_values_scan(vs, estate)
 }
 
@@ -2070,13 +2050,6 @@ fn cte_scan_arm<'mcx>(
     cs: &mut PgBox<'mcx, ::nodectescan::CteScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
-        // SH-E ownership verdict (accounting only; single body below).
-        crate::lanev2::cte_scan_pull_verdict(estate);
-    }
     ::nodectescan::exec_cte_scan(cs, estate)
 }
 
@@ -2085,13 +2058,6 @@ fn index_scan_arm<'mcx>(
     is: &mut ::nodeindexscan::IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook: on refuse this falls through to the
-    // UNCHANGED per-tuple path. All lane logic + refuse-set live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_index_scan(is, estate)? {
-            return Ok(r);
-        }
-    }
     ::nodeindexscan::exec_index_scan(is, estate)
 }
 
@@ -2100,16 +2066,6 @@ fn tid_scan_arm<'mcx>(
     ts: &mut ::nodetidscan::TidScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
-    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
-    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
-    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
-    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
-        if let Some(r) = crate::lanev2::try_own_tid_scan(ts, estate)? {
-            return Ok(r);
-        }
-    }
     ::nodetidscan::exec_tid_scan(ts, estate)
 }
 
@@ -2118,16 +2074,6 @@ fn tid_range_scan_arm<'mcx>(
     ts: &mut ::nodetidrangescan::TidRangeScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
-    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
-    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
-    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
-    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
-        if let Some(r) = crate::lanev2::try_own_tid_range_scan(ts, estate)? {
-            return Ok(r);
-        }
-    }
     ::nodetidrangescan::exec_tid_range_scan(ts, estate)
 }
 
@@ -2136,13 +2082,6 @@ fn index_only_scan_arm<'mcx>(
     ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook: falls through to the UNCHANGED per-tuple
-    // path on refuse. Lane logic + refuse-set live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_index_only_scan(ios, estate)? {
-            return Ok(r);
-        }
-    }
     ::nodeindexonlyscan::exec_index_only_scan(ios, estate)
 }
 
@@ -2152,69 +2091,9 @@ fn agg_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let aps = &mut **aps;
-    let AggPlanState {
-        agg,
-        outer,
-        lane_choice,
-        lane_stage_slot,
-        lane_exprkey,
-    } = aps;
-    // EA-on-morsels dispatch (docs/design/ea-morsels.md §5): under EXPLAIN
-    // ANALYZE every child is an `Instrumented` wrapper, so the concrete-
-    // variant arms below cannot match — which is CORRECT for the serial
-    // fused drives (they rely on the mismatch to keep EA C-exact), but the
-    // runtime arms' EA admission (whose workers run uninstrumented) must
-    // still get its walk. Peel ONE wrapper layer for the LANE HOOK ONLY:
-    // the serial lane arms re-refuse instrumented shapes themselves
-    // (instr_idx gates inside seq_scan_fusible / decide paths), so only the
-    // runtime EA walks can own the node; a refusal falls through to the
-    // unchanged per-tuple instrumented exec below, byte-identically.
-    if estate.es_instrument != 0 && crate::lanev2::enabled() {
-        if let PlanStateNode::Instrumented(w) = &mut *outer {
-            match &mut w.inner {
-                PlanStateNode::SeqScan(ss) => {
-                    if let Some(r) = crate::lanev2::try_own_agg_over_seq_scan(
-                        agg,
-                        ss,
-                        lane_choice,
-                        lane_stage_slot,
-                        lane_exprkey,
-                        estate,
-                    )? {
-                        return Ok(r);
-                    }
-                }
-                PlanStateNode::Sort(s) => {
-                    // The DISTINCT sink's dedicated EA walk (its serial
-                    // dispatch sits behind the sort fusibility memo, which
-                    // rightly refuses instrumented trees).
-                    if let Some(r) =
-                        crate::lanev2::try_own_sorted_distinct_runtime_ea(agg, s, estate)?
-                    {
-                        return Ok(r);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    let AggPlanState { agg, outer, .. } = aps;
     match outer {
         PlanStateNode::SeqScan(ss) => {
-            // Lane-executor-v2 dispatch hook (Phase-2 hash-agg breaker):
-            // falls through to the UNCHANGED fused/per-tuple agg paths on
-            // refuse. Lane logic + refuse-set live in `lanev2`.
-            if crate::lanev2::enabled() {
-                if let Some(r) = crate::lanev2::try_own_agg_over_seq_scan(
-                    agg,
-                    ss,
-                    lane_choice,
-                    lane_stage_slot,
-                    lane_exprkey,
-                    estate,
-                )? {
-                    return Ok(r);
-                }
-            }
             // P2 gate (flip-ladder §5 arm #1): PGRUST_FUSED_ARM_AGG_SEQ.
             if fused_arm_enabled(FusedArm::AggSeq)
                 && seq_agg_fusible(agg, ss, estate)
@@ -2238,29 +2117,6 @@ fn agg_arm<'mcx>(
             }
         }
         PlanStateNode::IndexScan(is) => {
-            // Lane-executor-v2 dispatch hook (sorted-agg streaming operator
-            // over an index-ordered feed): falls through to the UNCHANGED
-            // fused/per-tuple paths on refuse. Lane logic + refuse-set live
-            // in `lanev2`.
-            if crate::lanev2::enabled() {
-                if let Some(r) = crate::lanev2::try_own_sorted_agg_over_index_scan(agg, is, estate)?
-                {
-                    return Ok(r);
-                }
-                // --- WS-AE (wave-8): AGG_INDEX arm re-earn ---
-                // The fused drive below, routed through the
-                // BatchGranuleSource storage seam — behind
-                // PGRUST_LANE_V2_AGG_INDEXFEED (default ON since the
-                // SE8-GATES AE2 flip; `=0`/`off` = permanent kill switch;
-                // knob-OFF cost = one cached-bool test). Refuses fall
-                // through to the UNCHANGED fused/per-tuple paths,
-                // byte-identically (the WS-F IndexOnlyScan hook's posture,
-                // one arm up).
-                if let Some(r) = crate::lanev2::try_own_agg_over_index_source(agg, is, estate)? {
-                    return Ok(r);
-                }
-                // --- end WS-AE (wave-8) ---
-            }
             // Fused arm #2 (AGG_INDEX, flip-ladder §5 / PGRUST_FUSED_ARM_AGG_INDEX)
             // DELETED — se/deletion-prep SE-AGG arm-deletions. The WS-AE
             // agg-over-index_source lane seam above re-drives the SAME
@@ -2279,25 +2135,6 @@ fn agg_arm<'mcx>(
             // `exec_agg` tail below — a correct fallback either way.
         }
         PlanStateNode::IndexOnlyScan(ios) => {
-            // Lane-executor-v2 dispatch hook (sorted-agg streaming operator
-            // over an index-ordered feed); see the IndexScan arm.
-            if crate::lanev2::enabled() {
-                if let Some(r) =
-                    crate::lanev2::try_own_sorted_agg_over_index_only_scan(agg, &mut **ios, estate)?
-                {
-                    return Ok(r);
-                }
-                // WS-F (single-executor Phase 1): the fused drive below,
-                // routed through the BatchGranuleSource storage seam —
-                // behind PGRUST_LANE_V2_INDEXSOURCE (default OFF; knob-OFF
-                // cost = one cached-bool test). Refuses fall through to the
-                // UNCHANGED fused/per-tuple paths, byte-identically.
-                if let Some(r) =
-                    crate::lanev2::try_own_agg_over_index_only_source(agg, &mut **ios, estate)?
-                {
-                    return Ok(r);
-                }
-            }
             // Fused arm #3 (AGG_IOS, flip-ladder §5 / PGRUST_FUSED_ARM_AGG_IOS)
             // DELETED — se/deletion-prep SE-AGG arm-deletions. The WS-F
             // agg-over-index_only_source lane seam above re-drives the SAME
@@ -2319,29 +2156,6 @@ fn agg_arm<'mcx>(
         }
         PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
-            // bitmap-morsels: the runtime bitmap-heap arm (morselized claims
-            // over the frozen shared bitmap at DOP N). Falls through to the
-            // UNCHANGED fused/per-tuple paths on refuse; when the bitmap was
-            // built and the geometry floor refused, the classic setup
-            // already ran and the fused drive below skips its own. Lane
-            // logic + refuse-set live in `lanev2::runtime_bitmap`.
-            if crate::lanev2::enabled() {
-                if let Some(r) = crate::lanev2::try_own_agg_over_bitmap_heap_scan(agg, b, estate)? {
-                    return Ok(r);
-                }
-                // --- SE-AGGBITMAP: AGG_BITMAP arm re-host (deletion-prep
-                // arm #4). The fused drive below, hosted at the lane
-                // chokepoint — behind PGRUST_LANE_V2_AGG_BITMAP (default
-                // OFF; knob-OFF cost = one cached-bool test). Serial AND
-                // parallel-aware (the shared-iterator setup runs below the
-                // seam). Refuses fall through to the UNCHANGED
-                // fused/per-tuple paths, byte-identically (the WS-AE
-                // agg-over-IndexScan hook's posture, two arms up).
-                if let Some(r) = crate::lanev2::try_own_agg_over_bitmap_feed(agg, b, estate)? {
-                    return Ok(r);
-                }
-                // --- end SE-AGGBITMAP ---
-            }
             // P2 gate (flip-ladder §5 arm #4): PGRUST_FUSED_ARM_AGG_BITMAP.
             if fused_arm_enabled(FusedArm::AggBitmap)
                 && agg_fusible_common(agg, estate)
@@ -2360,135 +2174,24 @@ fn agg_arm<'mcx>(
             }
         }
         PlanStateNode::Sort(s) => {
-            // Lane-executor-v2 dispatch hooks: the skip-sort exact-DISTINCT
-            // drive (AGG_PLAIN whose every transition replays from a set —
-            // the Sort's only observable effect is the dedup, so it is
-            // skipped), then the sorted-agg streaming operator over the sort
-            // breaker. Both fall through to the UNCHANGED per-tuple exec_agg
-            // over exec_sort on refuse. Lane logic + refuse-sets in `lanev2`.
-            if crate::lanev2::enabled() {
-                if let Some(r) =
-                    crate::lanev2::try_own_plain_distinct_agg_over_sort(agg, s, estate)?
-                {
-                    return Ok(r);
-                }
-                if let Some(r) = crate::lanev2::try_own_sorted_agg_over_sort(agg, s, estate)? {
-                    return Ok(r);
-                }
-            }
         }
         // GatherMerge outers take the catch-all: the lane-v2-pardistinct
         // GM-hybrid leader drives were DELETED at Phase-5 D1 — agg over
         // GatherMerge always runs the per-tuple exec_agg over
         // exec_gather_merge path below (which stays until Phase-5 D5).
         PlanStateNode::MergeJoin(mj) => {
-            // GL-MJSORT-FOLD dispatch hook (the merge-join duplicate-band
-            // fold lever, PGRUST_RUNTIME_MJSORT_FOLD, default OFF, layered
-            // under the car's kill): AGG-level ownership exactly like the
-            // hashjoin arm — the car's phases 1-3 run verbatim, then the
-            // joined pairs fold into partial-agg states on the pool. Falls
-            // through to the UNCHANGED per-tuple agg over exec_merge_join
-            // on refuse, and a fold-gate refusal leaves the MJ node's own
-            // dispatch hook (the plain car) fully armed. Lane logic +
-            // refuse-set in `lanev2::runtime_mergejoin`.
-            if crate::lanev2::enabled() {
-                if let Some(r) = crate::lanev2::try_own_agg_over_merge_join(agg, &mut **mj, estate)?
-                {
-                    return Ok(r);
-                }
-            }
         }
         PlanStateNode::HashJoin(hj) => {
-            // Lane-executor-v2 dispatch hook (Phase-2 breaker-to-breaker
-            // composition: hash-agg breaker over the hash-join breaker over
-            // lane scans). Falls through to the UNCHANGED per-tuple agg over
-            // exec_hash_join on refuse. Lane logic + refuse-set in `lanev2`.
-            if crate::lanev2::enabled() {
-                if let Some(r) =
-                    crate::lanev2::try_own_agg_over_hash_join(agg, hj, lane_stage_slot, estate)?
-                {
-                    return Ok(r);
-                }
-            }
         }
         PlanStateNode::NestLoop(nl) => {
-            // Runtime NL-inner-index arm (lanev2/runtime_nlindex.rs): a
-            // plain-Agg root over NestLoop(heap SeqScan, btree IndexScan)
-            // executed with the OUTER side morselized across the runtime
-            // gang, each helper driving private inner index probes.
-            // FORCED/explicit and DEFAULT OFF (PGRUST_RUNTIME_NLINDEX=1 +
-            // pgrust.runtime_nlindex_pool); dispatched BEFORE the serial
-            // lane arm (the runtime_bitmap precedent). Falls through on
-            // refuse — byte-identically, nothing consumed.
-            if crate::lanev2::enabled() {
-                if let Some(r) = crate::lanev2::runtime_nlindex::try_own_plain_agg_runtime_nl_index(
-                    agg, nl, estate,
-                )? {
-                    return Ok(r);
-                }
-            }
-            // Lane-executor-v2 dispatch hook (§4: hash-agg breaker over the
-            // NestLoop TupleOp over a lane outer scan; the inner stays
-            // Volcano). Falls through to the UNCHANGED per-tuple agg over
-            // exec_nest_loop on refuse. Lane logic + refuse-set in `lanev2`.
-            if crate::lanev2::enabled() {
-                if let Some(r) = crate::lanev2::try_own_agg_over_nest_loop(agg, nl, estate)? {
-                    return Ok(r);
-                }
-            }
         }
         PlanStateNode::Gather(g) => {
-            // Lane-executor-v2 dispatch hook (agg-over-gather: the leader-
-            // side hash-agg breaker fed by the gather machinery as a source;
-            // the workers stay row-path). Falls through to the UNCHANGED
-            // per-tuple agg over exec_gather on refuse. Lane logic +
-            // refuse-set in `lanev2`.
-            if crate::lanev2::enabled() {
-                if let Some(r) =
-                    crate::lanev2::try_own_agg_over_gather(agg, g, lane_stage_slot, estate)?
-                {
-                    return Ok(r);
-                }
-            }
         }
         PlanStateNode::SubqueryScan(sqs) => {
-            // Lane-executor-v2 dispatch hook (wave-4 glue: hash-agg breaker
-            // over a SubqueryScan over lane scans — pipelines chaining
-            // through the subquery boundary). Falls through to the UNCHANGED
-            // per-tuple agg over exec_scan on refuse. Lane logic + refuse-set
-            // in `lanev2`.
-            if crate::lanev2::enabled() {
-                if let Some(r) = crate::lanev2::try_own_agg_over_subquery_scan(agg, sqs, estate)? {
-                    return Ok(r);
-                }
-            }
         }
         PlanStateNode::Append(apn) => {
-            // PARTWISE-MORSELS dispatch hook (night/partitionwise-morsels,
-            // knob-gated default OFF): plain fold agg over a partitioned
-            // table's serial Append — the runtime scan arm's partition-as-
-            // morsel engagement (lanev2/runtime_partwise.rs). Falls through
-            // to the UNCHANGED per-tuple agg over exec_append on refuse.
-            if crate::lanev2::enabled() {
-                if let Some(r) = crate::lanev2::try_own_agg_over_append(agg, &mut **apn, estate)? {
-                    return Ok(r);
-                }
-            }
         }
         PlanStateNode::Agg(child) => {
-            // GL-ALPHA1-EMIT-1 dispatch hook (PGRUST_LANE_AGG_EMIT_BATCH,
-            // default OFF): plain Agg over a hashed-Agg child — drain the
-            // child's runtime-sink ADOPTED EMIT in per-bucket blocks instead
-            // of the per-emitted-row pull chain. Falls through to the
-            // UNCHANGED per-tuple agg over the child's own dispatch on
-            // refuse, byte-identically.
-            if crate::lanev2::enabled() {
-                if let Some(r) =
-                    crate::lanev2::try_own_plain_agg_over_agg_emit(agg, &mut **child, estate)?
-                {
-                    return Ok(r);
-                }
-            }
         }
         _ => {}
     }
@@ -2788,27 +2491,6 @@ fn window_agg_arm<'mcx>(
     w: &mut PgBox<'mcx, WindowAggNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hooks (all default-OFF; on refuse each
-    // falls through — ultimately to the UNCHANGED path below). First the
-    // Phase-1 W1 batch lane (PGRUST_LANE_V2_WINDOWS, sticky owner of its
-    // admitted shapes), then the wave-3 WS-R T2-B framed batch drive
-    // (PGRUST_LANE_V2_WINDOWS_T2B, sticky, hosts the framed remainder over
-    // admitted sort feeds), then the wave-2 WS-M T2-A row-mode delegation
-    // (PGRUST_LANE_V2_WINDOWS_T2, per-pull, hosts everything both batch
-    // lanes refused). Lane logic + refuse-sets live in `lanev2::windows`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_window_agg(w, estate)? {
-            return Ok(r);
-        }
-        // --- WS-R T2-B (wave-3) ---
-        if let Some(r) = crate::lanev2::try_own_window_agg_t2b(w, estate)? {
-            return Ok(r);
-        }
-        // --- end WS-R T2-B ---
-        if let Some(r) = crate::lanev2::try_own_window_agg_t2(w, estate)? {
-            return Ok(r);
-        }
-    }
     let w = &mut **w;
     let outer = &mut w.outer;
     ::nodewindowagg::exec_window_agg(&mut w.state, estate, |e| exec_proc_node(outer, e))
@@ -2816,16 +2498,6 @@ fn window_agg_arm<'mcx>(
 
 #[inline(never)]
 fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    // Lane-executor-v2 dispatch hook: the Phase-2 sort pipeline-breaker.
-    // (The lane-v2-pardistinct worker-partial hook that ran first was
-    // DELETED at Phase-5 D1 with the GM-hybrid leader drives.) On refuse
-    // this falls through to the UNCHANGED paths below. Lane logic +
-    // refuse-sets live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_sort(s, estate)? {
-            return Ok(r);
-        }
-    }
     // Arm #5 SORT_FEED is DELETED (se/deletion-prep C1): with AD2
     // (`PGRUST_LANE_V2_SORT_RANDOMACCESS`) default ON and the FEED-ONLY fix
     // (0d4bf241c) the lane sort surface is an admission SUPERSET of the old
@@ -2862,15 +2534,6 @@ fn material_arm<'mcx>(
     m: &mut PgBox<'mcx, MaterialNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Mark/restore enters through execami directly, never through
-    // this hosting. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
-        // SH-E ownership verdict: accounting only — the call below IS the
-        // delegated body (tail-call shape preserved on both knob arms).
-        crate::lanev2::material_pull_verdict(m, estate);
-    }
     let m = &mut **m;
     ::nodematerial::exec_material(&mut m.state, &mut *m.outer, estate)
 }
@@ -2880,14 +2543,6 @@ fn memoize_arm<'mcx>(
     m: &mut PgBox<'mcx, MemoizeNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE; delegation leaf per the WS-L OQ ruling —
-    // lane-owned-child composition is a ledgered later increment): falls
-    // through to the UNCHANGED per-tuple path on refuse.
-    if crate::lanev2::rowmode_tail_active() {
-        // SH-E ownership verdict (accounting only; single body below).
-        crate::lanev2::memoize_pull_verdict(m, estate);
-    }
     let m = &mut **m;
     let plan = m.state.plan.plan.lefttree.expect("Memoize outer plan");
     let mut outer = MemoizeOuter {
@@ -2922,14 +2577,6 @@ fn unique_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let u = &mut **u;
-    // Lane-executor-v2 dispatch hook (Phase-2 streaming unique over the sort
-    // breaker): falls through to the UNCHANGED exec_unique on refuse. Lane
-    // logic + refuse-set live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_unique(u, estate)? {
-            return Ok(r);
-        }
-    }
     let outer = &mut u.outer;
     ::nodeunique::exec_unique(&mut u.state, estate, |e| exec_proc_node(outer, e))
 }
@@ -2939,14 +2586,6 @@ fn group_arm<'mcx>(
     g: &mut PgBox<'mcx, GroupNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-4 glue: streaming sorted grouping
-    // over the sort breaker): falls through to the UNCHANGED exec_group on
-    // refuse. Lane logic + refuse-set live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_group(g, estate)? {
-            return Ok(r);
-        }
-    }
     let g = &mut **g;
     let outer = &mut g.outer;
     ::nodegroup::exec_group(&mut g.state, estate, |e| exec_proc_node(outer, e))
@@ -2954,14 +2593,6 @@ fn group_arm<'mcx>(
 
 #[inline(never)]
 fn limit_arm<'mcx>(l: &mut LimitNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (Phase-2 streaming limit over lane-owned
-    // chains): falls through to the UNCHANGED exec_limit on refuse. Lane
-    // logic + refuse-set live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_limit(l, estate)? {
-            return Ok(r);
-        }
-    }
     let LimitNode { state, outer } = l;
     ::nodelimit::exec_limit(state, &mut **outer, estate)
 }
@@ -2971,26 +2602,6 @@ fn lockrows_arm<'mcx>(
     l: &mut PgBox<'mcx, LockRowsNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE; LockRows-without-EPQ — es_epq_active refuses
-    // inside; the RowSource closure boundary is the pinned WS-N inc-2b seam,
-    // docs/design/rowmode-tail.md §4): falls through to the UNCHANGED
-    // per-tuple path on refuse.
-    let rowmode_admitted =
-        crate::lanev2::rowmode_tail_active() && crate::lanev2::lock_rows_pull_verdict(l, estate);
-    // --- WS-T wave-3 inc-2b (LockRows TupleOp behind PGRUST_LANE_V2_DML;
-    // lanev2/dml.rs). Offered only when the rowmode-tail verdict did NOT
-    // admit — exactly the pulls the retired delegation hook fell through
-    // on, so hook priority and the ROWMODE knob's behavior are unchanged
-    // at both of its arms; knob-OFF cost is the same one-byte dml_active()
-    // gate the modify_table arm carries. Falls through to the UNCHANGED
-    // exec_lock_rows on refuse. ---
-    if !rowmode_admitted && crate::lanev2::dml_active() {
-        if let Some(r) = crate::lanev2::try_own_lock_rows_dml(l, estate)? {
-            return Ok(r);
-        }
-    }
-    // --- end WS-T wave-3 inc-2b ---
     let LockRowsNode { state, outer, epq } = &mut **l;
     ::nodelockrows::exec_lock_rows(state, &mut **outer, estate, |subs, e, inputslot| {
         crate::epq::eval_plan_qual(epq, subs, e, inputslot)
@@ -3005,14 +2616,6 @@ fn bitmap_heap_scan_arm<'mcx>(
     let b = &mut **b;
     if !b.scan.initialized {
         bitmap_table_scan_setup_dispatch(b, estate)?;
-    }
-    // Lane-executor-v2 dispatch hook: the bitmap is now built, so the lane may
-    // own the heap-scan drive. Falls through to the UNCHANGED per-tuple path on
-    // refuse. Lane logic + refuse-set live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_bitmap_heap_scan(&mut b.scan, estate)? {
-            return Ok(r);
-        }
     }
     ::nodebitmapheapscan::exec_bitmap_heap_scan(&mut b.scan, estate)
 }
@@ -3042,16 +2645,9 @@ fn modify_table_arm<'mcx>(
     mps: &mut PgBox<'mcx, ModifyTablePlanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 WS-N inc-1: INSERT-no-triggers
-    // hosting behind PGRUST_LANE_V2_DML — a delegation over the SAME mt_*
-    // seams the fallback below drives): falls through to the UNCHANGED
-    // exec_modify_table on refuse. Lane logic + refuse-set live in
-    // `lanev2::dml` (the merge_join_arm pattern).
-    if crate::lanev2::dml_active() {
-        if let Some(r) = crate::lanev2::try_own_modify_table(mps, estate)? {
-            return Ok(r);
-        }
-    }
+    // (The WS-N DML hosting hook — INSERT-no-triggers behind
+    // PGRUST_LANE_V2_DML — was DELETED at p72 D-2 with the DML hosting
+    // island, lanev2/dml.rs.)
     let mps = &mut **mps;
     let subplan = &mut mps.subplan;
     let epq = &mut mps.epq;
@@ -3079,15 +2675,6 @@ fn append_arm<'mcx>(
     a: &mut PgBox<'mcx, AppendNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave 5: the serial Append over
-    // lane-fusible scan children — the node's own exec_append body over lane
-    // child pipelines): falls through to the UNCHANGED exec_append on
-    // refuse. Lane logic + refuse-set live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_append(a, estate)? {
-            return Ok(r);
-        }
-    }
     let AppendNode {
         state, substates, ..
     } = &mut **a;
@@ -3150,13 +2737,6 @@ fn merge_append_arm<'mcx>(
     m: &mut PgBox<'mcx, MergeAppendNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
-        // SH-E ownership verdict (accounting only; single body below).
-        crate::lanev2::merge_append_pull_verdict(m, estate);
-    }
     let MergeAppendNode {
         state,
         substates,
@@ -3170,14 +2750,6 @@ fn subquery_scan_arm<'mcx>(
     s: &mut PgBox<'mcx, SubqueryScanNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-4 glue: pass-through
-    // filter/project over the sort breaker): falls through to the UNCHANGED
-    // exec_scan on refuse. Lane logic + refuse-set live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_subquery_scan(s, estate)? {
-            return Ok(r);
-        }
-    }
     ::execscan::exec_scan(&mut **s, estate)
 }
 
@@ -3186,13 +2758,6 @@ fn set_op_arm<'mcx>(
     s: &mut PgBox<'mcx, SetOpNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
-        // SH-E ownership verdict (accounting only; single body below).
-        crate::lanev2::set_op_pull_verdict(s, estate);
-    }
     let SetOpNode {
         state,
         outer,
@@ -3211,14 +2776,6 @@ fn recursive_union_arm<'mcx>(
     ru: &mut PgBox<'mcx, RecursiveUnionNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE; the iteration protocol stays inside the ported
-    // body — docs/design/rowmode-tail.md §3): falls through to the UNCHANGED
-    // per-tuple path on refuse.
-    if crate::lanev2::rowmode_tail_active() {
-        // SH-E ownership verdict (accounting only; single body below).
-        crate::lanev2::recursive_union_pull_verdict(ru, estate);
-    }
     let RecursiveUnionNode {
         state,
         outer,
@@ -3232,14 +2789,6 @@ fn work_table_scan_arm<'mcx>(
     wts: &mut PgBox<'mcx, ::nodeworktablescan::WorkTableScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE; shared-slot law — the body resolves rustate
-    // from the estate per call): falls through to the UNCHANGED per-tuple
-    // path on refuse.
-    if crate::lanev2::rowmode_tail_active() {
-        // SH-E ownership verdict (accounting only; single body below).
-        crate::lanev2::work_table_scan_pull_verdict(estate);
-    }
     ::nodeworktablescan::exec_work_table_scan(wts, estate)
 }
 
@@ -3248,29 +2797,11 @@ fn named_tuplestore_scan_arm<'mcx>(
     nts: &mut PgBox<'mcx, ::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
-    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
-    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
-    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
-    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
-        if let Some(r) = crate::lanev2::try_own_named_tuplestore_scan(nts, estate)? {
-            return Ok(r);
-        }
-    }
     ::nodenamedtuplestorescan::exec_named_tuplestore_scan(nts, estate)
 }
 
 #[inline(never)]
 fn nest_loop_arm<'mcx>(nl: &mut NestLoopNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (§4 NestLoop TupleOp over a lane outer
-    // scan; the inner stays Volcano): falls through to the UNCHANGED
-    // exec_nest_loop on refuse. Lane logic + refuse-set live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_nest_loop(nl, estate)? {
-            return Ok(r);
-        }
-    }
     let NestLoopNode {
         state,
         outer,
@@ -3300,17 +2831,6 @@ fn hash_join_arm<'mcx>(
         } else {
             probe_batch_probe(state, &mut **outer, estate, probe_batch)?
         };
-    }
-    // Lane-executor-v2 dispatch hook (Phase-2 join breaker, bare). The
-    // admission-economics gate — engage only where the legacy fused probe
-    // drive does NOT (never preempt the faster existing path) — lives inside
-    // `try_own_hash_join` (via `ProbeBatch::mode()`) so its refusals are
-    // ticked in the lane accounting. Falls through to the UNCHANGED
-    // exec_hash_join on refuse. Lane logic + refuse-set live in `lanev2`.
-    if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_hash_join(hj, estate)? {
-            return Ok(r);
-        }
     }
     let HashJoinNode {
         state,
@@ -3510,33 +3030,6 @@ fn merge_join_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let mj = &mut **mj;
-    // MJSORT dispatch hook (the "merge join after sort" runtime car,
-    // PGRUST_RUNTIME_MJSORT, DEFAULT ON since the GL-MJSORT-1 flip, kill
-    // iff exactly 0|off — lanev2/runtime_mergejoin.rs):
-    // whole-node ownership (both sorts + the merge run on the morsel
-    // runtime; the adopted face serves the joined pairs). One relaxed
-    // cached-bool load + compare on the default path; on refuse this
-    // falls through byte-identically to the arms below.
-    if let Some(r) = crate::lanev2::try_own_merge_join_mjsort(mj, estate)? {
-        return Ok(r);
-    }
-    // WS-MJ1 lane-NATIVE dispatch hook (LANE-MERGEJOIN inc-1, contract §4.1:
-    // "one relaxed cached-bool load + compare at the head of the mergejoin
-    // dispatch arm" — PGRUST_LANE_V2_MERGEJOIN_NATIVE, default OFF): on
-    // refuse this falls through byte-identically to the verdict + Volcano
-    // body below (worklog notes/mergejoin-ws-mj1.md §1.5).
-    if let Some(r) = crate::lanev2::try_own_merge_join(mj, estate)? {
-        return Ok(r);
-    }
-    // Lane-executor-v2 dispatch hook (Phase-1 row-mode LEAF hosting behind
-    // PGRUST_LANE_V2_ROWMODE; both children stay Volcano inside the ported
-    // FSM): falls through to the UNCHANGED exec_merge_join on refuse. Lane
-    // logic + refuse-set live in `lanev2` (the nest_loop_arm pattern).
-    // SH-E ownership verdict: accounting only — the call below IS the
-    // delegated body (tail-call shape preserved on both knob arms). SH-F:
-    // no arm-level enabled() gate — the MERGEJOIN knob heads the verdict,
-    // the GUC rides the fast-admit byte / slow-path head.
-    crate::lanev2::merge_join_pull_verdict(mj, estate);
     let MergeJoinNode {
         state,
         outer,
@@ -3590,6 +3083,11 @@ pub fn multi_exec_bitmap_node<'mcx>(
 ) -> PgResult<::tidbitmap::TIDBitmap<'mcx>> {
     // C execProcnode.c:511 (MultiExecProcNode).
     stack_depth_core::check_stack_depth()?;
+    if crate::p8census::armed() {
+        if let Some(t) = census_tag(node) {
+            crate::p8census::tick_exec(t, estate);
+        }
+    }
     match node {
         // C MultiExec* nodes self-instrument (nTuples = bitmap insertions).
         PlanStateNode::Instrumented(w) => {
@@ -3746,10 +3244,8 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
             gm.state.tuple_buffers_release();
         }
         PlanStateNode::HashJoin(hj) => hj.probe_batch.filter = None,
-        // Exempt lane_exprkey: heap-owned census/scratch (+ the dicteval
-        // memo arena) released here; the arena reset must not forget it.
-        PlanStateNode::Agg(a) => a.lane_exprkey = None,
-        PlanStateNode::LockRows(_)
+        PlanStateNode::Agg(_)
+        | PlanStateNode::LockRows(_)
         | PlanStateNode::Append(_)
         | PlanStateNode::MergeAppend(_)
         | PlanStateNode::SetOp(_)
@@ -4188,10 +3684,6 @@ fn exec_end_node_inner<'mcx>(
         }
         PlanStateNode::MergeJoin(mj) => {
             let mj = &mut **mj;
-            // MJSORT adopted result: released HERE (the exec_end_sort
-            // exemption pattern — the field is forget-exempt in the
-            // census below, so the normal end path must drop it).
-            mj.mjsort = None;
             ::nodemergejoin::exec_end_merge_join(&mut mj.state);
             exec_end_node(&mut mj.outer, estate)?;
             exec_end_node(&mut mj.inner, estate)
@@ -4468,11 +3960,6 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
             let engaged = arm_on
                 && hash_build_fusible(ss, estate)
                 && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?;
-            // SE-HASHOFF census tick (stats-armed runs only): classify this
-            // build event at the arm chokepoint before any drive-side
-            // effect. Accounting only — the engage decision above is
-            // untouched.
-            crate::lanev2::fused_hash_build_census_seq(engaged, proj_slot.is_some());
             if engaged {
                 ::nodeseqscan::seq_scan_batch_soa_prepare(
                     ss,
@@ -4495,9 +3982,6 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
                 }
             }
         } else {
-            // SE-HASHOFF census: non-SeqScan build child — outside both
-            // fused hash-build arms' surface by construction.
-            crate::lanev2::fused_hash_build_census_other();
         }
         ::nodehash::multi_exec_hash(hs, self, estate)
     }
@@ -4597,7 +4081,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     ModifyTablePlanState<'_> { mt, subplan, epq },
     BitmapHeapPlanState<'_> { scan, bitmapqual },
     BitmapCombineState<'_> { substates },
-    AggPlanState<'_> { agg, outer, lane_choice, lane_stage_slot; lane_exprkey },
+    AggPlanState<'_> { agg, outer, lane_stage_slot },
     WindowAggNode<'_> { state, outer, lane_admit, lane_framed_admit, lane_framed; lane },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },
@@ -4615,9 +4099,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     NestLoopNode<'_> { state, outer, inner, lane_fusible },
     HashSubNode<'_> { state, child },
     HashJoinNode<'_> { state, outer, hash, probe_batch, lane_fusible },
-    // MergeJoinNode.mjsort exempt: released in exec_end_node's MergeJoin
-    // arm and on every rescan (the SortState runtime_full precedent).
-    MergeJoinNode<'_> { state, outer, inner, mjsort_probed; mjsort },
+    MergeJoinNode<'_> { state, outer, inner, mjsort_probed },
     GatherNode<'_> { state, outer },
     GatherMergeNode<'_> { state, outer },
 );

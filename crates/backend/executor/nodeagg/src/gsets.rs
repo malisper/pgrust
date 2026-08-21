@@ -65,9 +65,8 @@ pub(crate) struct PerHashSetData<'mcx> {
     largest_grp_col_idx: i32,
     grouped_cols: PgVec<'mcx, i16>,
     cell: NonNull<NonNull<AggPerGroup>>,
-    // u64: in hashtable mode this is execgrouping's packed (start,visited)
-    // cursor, whose high-32 packing must survive 32-bit wasm; in compact
-    // mode it is a plain row index (cast at use).
+    // u64: execgrouping's packed (start,visited) cursor, whose high-32
+    // packing must survive 32-bit wasm.
     hashiter: u64,
     // hash_agg_set_limits' input_groups for this set's hashagg_spill_init
     // calls (C: perhash->aggnode->numGroups).

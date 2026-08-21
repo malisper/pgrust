@@ -488,15 +488,10 @@ pub fn compute_gather_rows(rows: f64, parallel_workers: i32) -> f64 {
 // (sub)query prices the whole plan's Gathers.
 fn gather_setup_cost(run: &PlannerRun<'_>) -> f64 {
     if pgrcolumnar_feeds_plan(run) {
-        // Stage-4 pool arming (guc_tables::lane_pool): a session that set
-        // `pgrust.lane_parallel_pool` is asking for the parallel shape —
-        // drop the provisional pre-pool surcharge back to the regular knob
-        // so the forced-DOP partial paths actually win.
-        if guc_tables::lane_pool::lane_parallel_pool_armed() {
-            gucs::parallel_setup_cost()
-        } else {
-            gucs::pgrcolumnar_parallel_setup_cost()
-        }
+        // (P7-2 D-8: the Stage-4 armed-pool discount rode
+        // pgrust.lane_parallel_pool — tombstoned, no effect; the unarmed
+        // pgrcolumnar surcharge is the only arm.)
+        gucs::pgrcolumnar_parallel_setup_cost()
     } else {
         gucs::parallel_setup_cost()
     }
@@ -508,17 +503,10 @@ fn gather_setup_cost(run: &PlannerRun<'_>) -> f64 {
 // gather_setup_cost.
 fn gather_tuple_cost(run: &PlannerRun<'_>) -> f64 {
     if pgrcolumnar_feeds_plan(run) {
-        // Armed pool sessions price Gather transfer at the regular rate too:
-        // the measured pgrcolumnar chunked-transport rate (0.005/tuple) is cheap
-        // enough that at high forced DOP the planner starts preferring
-        // ship-every-row-to-the-leader plans (HashAggregate ABOVE Gather)
-        // over the partial-agg shape the pool exists for. Heap semantics for
-        // armed pgrcolumnar plans; the measured rate stays for unarmed costing.
-        if guc_tables::lane_pool::lane_parallel_pool_armed() {
-            gucs::parallel_tuple_cost()
-        } else {
-            gucs::pgrcolumnar_parallel_tuple_cost()
-        }
+        // (P7-2 D-8: the armed-pool heap-rate arm rode
+        // pgrust.lane_parallel_pool — tombstoned, no effect; the measured
+        // pgrcolumnar chunked-transport rate is the only arm.)
+        gucs::pgrcolumnar_parallel_tuple_cost()
     } else {
         gucs::parallel_tuple_cost()
     }
@@ -536,29 +524,19 @@ pub fn pgrcolumnar_feeds_plan(run: &PlannerRun<'_>) -> bool {
 // outer is empty at every ported call site).
 pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId, rows: Option<f64>) {
     let rel_rows = run.root.rel(rel).rows;
-    let (sub_startup, sub_total, sub_disabled, sub_id) = {
+    let (sub_startup, sub_total, sub_disabled) = {
         let PathNode::GatherPath(g) = run.root.path(path_id) else {
             panic!("cost_gather: not a GatherPath")
         };
         let sub_id = g.subpath.expect("Gather subpath");
         let sub = run.root.path(sub_id).base();
-        (sub.startup_cost, sub.total_cost, sub.disabled_nodes, sub_id)
+        (sub.startup_cost, sub.total_cost, sub.disabled_nodes)
     };
     let setup_cost = gather_setup_cost(run);
-    // Stage-4 §4.4 exchange transfer pricing: an admitted partial hashed Agg
-    // under this Gather hands its tables to the finalize by pointer (the
-    // radix-partitioned handoff), never through tuple-queue serialization —
-    // price its "transfer" at the measured pgrcolumnar chunked-transport rate
-    // (the install relocation memcpy class) instead of parallel_tuple_cost.
-    // Ship-all-raw-rows Gathers (subpath ≠ partial Agg) keep the armed
-    // pool's heap-rate pricing, so the degenerate leader-hash plan cannot
-    // win on a free transfer.
-    let exchange_partial = lane_exchange_partial_agg(run, sub_id);
-    let tuple_cost = if exchange_partial {
-        gucs::pgrcolumnar_parallel_tuple_cost()
-    } else {
-        gather_tuple_cost(run)
-    };
+    // (P7-2 D-8: the Stage-4 §4.4 exchange transfer pricing rode the
+    // lane_pool admission — pgrust.lane_parallel_pool is tombstoned, no
+    // effect — so the ordinary Gather transfer rate is the only arm.)
+    let tuple_cost = gather_tuple_cost(run);
     let p = run.root.path_mut(path_id).base_mut();
     debug_assert!(p.param_info.is_none());
     p.rows = rows.unwrap_or(rel_rows);
@@ -576,9 +554,7 @@ pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, r
     // Gathers are exempt (pointer handoff, per-group leader work — the
     // exchange pricing above). Self-scoping per-row: low-row Gathers and
     // LIMIT-prorated consumers barely feel it.
-    if !exchange_partial {
-        run_cost += gather_leader_uplift(tuple_cost, p.rows);
-    }
+    run_cost += gather_leader_uplift(tuple_cost, p.rows);
     p.disabled_nodes = sub_disabled;
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + run_cost;
@@ -692,7 +668,12 @@ fn pgrcolumnar_scan_col_fraction(
     use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
     {
         let r = run.root.rel(rel);
-        if r.amflags & types_pathnodes::AMFLAG_PGRCOLUMNAR == 0 || r.pgrcolumnar_col_bytes.is_empty() {
+        // M5a: the pgrcolumnar2 arm feeds the same face (plancat's S-2
+        // consult populates pgrcolumnar_col_bytes for both AMs — one
+        // consumer, two producers; the exactness class is identical:
+        // section-table byte accounting from sealed footers).
+        let columnar = types_pathnodes::AMFLAG_PGRCOLUMNAR | types_pathnodes::AMFLAG_PGRCOLUMNAR2;
+        if r.amflags & columnar == 0 || r.pgrcolumnar_col_bytes.is_empty() {
             return 1.0;
         }
     }
@@ -1962,10 +1943,9 @@ pub fn cost_agg_shape(
 // never materializes; (b) partial output crosses to the finalize by pointer
 // handoff, not tuple-queue serialization; (c) the finalize's per-input work
 // runs on the bucket-claim claimer pool (DOP+1 threads), not serially.
-// The adjustments below apply ONLY when the executor's own admission
-// (guc_tables::lane_pool::agg_exchange_admits over the same plan-time group
-// estimate) says the exchange will engage — armed pool + NDV floor —
-// and the plan is pgrcolumnar-fed; everything else keeps C costing untouched.
+// (P7-2 D-8: the exchange adjustments themselves are deleted with the
+// pgrust.lane_parallel_pool tombstone — the honest leader-spill pricing
+// below is the surviving Step-0b arm; C costing stays untouched elsewhere.)
 // ---------------------------------------------------------------------------
 
 // The AGG_HASHED disk-spill surcharge exactly as cost_agg_shape adds it
@@ -2025,75 +2005,6 @@ fn peel_projection(run: &PlannerRun<'_>, id: types_pathnodes::PathId) -> types_p
     }
 }
 
-/// The exchange-eligible PARTIAL half: a parallel hashed
-/// AGGSPLIT_INITIAL_SERIAL AggPath whose group estimate clears the
-/// admission floor. Shared by cost_gather (transfer pricing) and the
-/// finalize-side shape check.
-pub fn lane_exchange_partial_agg(run: &PlannerRun<'_>, subpath_id: types_pathnodes::PathId) -> bool {
-    if !pgrcolumnar_feeds_plan(run) {
-        return false;
-    }
-    match run.root.path(peel_projection(run, subpath_id)) {
-        PathNode::AggPath(a) => {
-            a.aggstrategy == types_pathnodes::AGG_HASHED
-                && a.aggsplit == types_pathnodes::AGGSPLIT_INITIAL_SERIAL
-                && guc_tables::lane_pool::agg_exchange_admits(a.numGroups)
-        }
-        _ => false,
-    }
-}
-
-/// create_agg_path's exchange rider: adjust the just-written costs of an
-/// admitted shape. No-op (bit-exact untouched costs) everywhere else.
-#[allow(clippy::too_many_arguments)]
-pub fn cost_agg_lane_exchange_adjust(
-    run: &mut PlannerRun<'_>,
-    path_id: types_pathnodes::PathId,
-    aggstrategy: u32,
-    aggsplit: u32,
-    subpath_id: types_pathnodes::PathId,
-    aggcosts: &types_pathnodes::AggClauseCosts,
-    num_groups: f64,
-    input_tuples: f64,
-    input_width: i32,
-    input_total_cost: f64,
-) {
-    if aggstrategy != types_pathnodes::AGG_HASHED
-        || !guc_tables::lane_pool::agg_exchange_admits(num_groups)
-        || !pgrcolumnar_feeds_plan(run)
-    {
-        return;
-    }
-    let is_partial = aggsplit == types_pathnodes::AGGSPLIT_INITIAL_SERIAL
-        && run.root.path(path_id).base().parallel_workers > 0;
-    let is_final = aggsplit == types_pathnodes::AGGSPLIT_FINAL_DESERIAL
-        && match run.root.path(subpath_id) {
-            PathNode::GatherPath(g) => g
-                .subpath
-                .is_some_and(|s| lane_exchange_partial_agg(run, s)),
-            _ => false,
-        };
-    if !is_partial && !is_final {
-        return;
-    }
-    // (a) Neither side spills: the partial table is cap-bounded and the
-    // finalize merges handed tables bucket-by-bucket in place.
-    let (s_add, t_add) =
-        hashed_agg_spill_surcharge(run, aggcosts, num_groups, input_tuples, input_width);
-    let p = run.root.path_mut(path_id).base_mut();
-    p.startup_cost = (p.startup_cost - s_add).max(input_total_cost);
-    p.total_cost = (p.total_cost - t_add).max(p.startup_cost);
-    if is_final {
-        // (c) The finalize's build-above-input work (combines + hashing over
-        // the handed entries) runs on the claimer pool; the group emit tail
-        // (total − startup) stays serial behind the RootAdapter.
-        let claimers = (guc_tables::lane_pool::lane_parallel_pool_dop().max(1) + 1) as f64;
-        let emit = p.total_cost - p.startup_cost;
-        p.startup_cost = input_total_cost + (p.startup_cost - input_total_cost) / claimers;
-        p.total_cost = p.startup_cost + emit;
-    }
-}
-
 /// Step-0b honest-Gather spill pricing (runtime cost-model design §5,
 /// scratchpad/night/runtime-cost-model-design.md): a leader-side hashed Agg
 /// fed by a Gather/GatherMerge on a pgrcolumnar-fed plan re-prices its
@@ -2129,17 +2040,14 @@ pub fn cost_agg_leader_spill_adjust(
     // Leader-side only: the agg's direct input is a Gather/GatherMerge —
     // raw rows (the leader-hashagg AGGSPLIT_SIMPLE shape) or a gathered partial agg's
     // finalize; either way the leader builds the num_groups-entry table.
-    let gather_sub = match run.root.path(peel_projection(run, subpath_id)) {
-        PathNode::GatherPath(g) => g.subpath,
-        PathNode::GatherMergePath(g) => g.subpath,
+    match run.root.path(peel_projection(run, subpath_id)) {
+        PathNode::GatherPath(_) | PathNode::GatherMergePath(_) => {}
         _ => return,
     };
-    // The admitted radix exchange hands partial tables to the finalize by
-    // pointer and merges in place — cost_agg_lane_exchange_adjust owns that
-    // shape's pricing (and deliberately strips the spill surcharge).
-    if gather_sub.is_some_and(|s| lane_exchange_partial_agg(run, s)) {
-        return;
-    }
+    // (P7-2 D-8: the radix-exchange carve-out rode the lane_pool admission —
+    // pgrust.lane_parallel_pool is tombstoned, no effect — so the honest
+    // spill pricing owns every gathered-agg shape, exactly the disarmed
+    // behavior.)
     let (s_base, t_base) =
         hashed_agg_spill_surcharge_scaled(run, aggcosts, num_groups, input_tuples, input_width, 1.0);
     let (s_honest, t_honest) = hashed_agg_spill_surcharge_scaled(

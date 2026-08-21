@@ -31,7 +31,8 @@ pub use execute::{
 };
 pub use cursor::{
     SPI_cursor_close, SPI_cursor_close_portal, SPI_cursor_fetch, SPI_cursor_open,
-    SPI_cursor_open_extended, SPI_scroll_cursor_fetch, SPI_scroll_cursor_move, SpiCursor,
+    SPI_cursor_open_extended, SPI_cursor_open_with_paramlist, SPI_scroll_cursor_fetch,
+    SPI_scroll_cursor_move, SpiCursor,
 };
 pub use plan::{
     SPI_freeplan, SPI_getargcount, SPI_getargtypeid, SPI_keepplan, SPI_plan_command_tags,

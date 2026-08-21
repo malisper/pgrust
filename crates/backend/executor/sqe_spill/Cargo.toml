@@ -1,0 +1,46 @@
+[package]
+name = "sqe_spill"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sqe_spill"
+path = "src/lib.rs"
+
+[dependencies]
+# THE fd/VFD choke (determinism lint s2.1): every spill-file syscall in this
+# crate goes through fd's sanctioned temp-file surface (FileSet naming,
+# PathName*TemporaryFile, FileRead/FileWrite/FileClose) — sqe_spill itself
+# adds ZERO raw fs sites, so the FD_TEMP_FILE_LIMIT accounting, resowner
+# registration, and the pgsql_tmp reaper all engage by construction
+# (O-M2-3: fd/FileSet under pgsql_tmp, temp_file_limit + pendingDeletes
+# parity).
+fd = { path = "../../storage/file/fd" }
+# The declared-blocking-section facade: armed permit donation on registered
+# pool workers, no-op elsewhere. Its loom model lives with the runtime;
+# this crate is a named call-site owner (runtime/src/blocking.rs).
+runtime = { path = "../runtime" }
+elog = { path = "../../utils/error/elog" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+libc = "0.2"
+
+[dev-dependencies]
+# Golden byte contract for join batch records (the grace-hash consumer's
+# frozen format): reference images built by the C-ported writer.
+nodehashjoin = { path = "../nodehashjoin" }
+# fd test-harness seam set (mirrors fd/src/tests.rs setup): resowner-backed
+# temp registration, xact/aio/waitevent/pgstat seams, GUC backing for the
+# temp_file_limit pin, the active-vfs fixture domain.
+resowner = { path = "../../utils/resowner/resowner" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+datum = { path = "../../../_support/types/datum" }

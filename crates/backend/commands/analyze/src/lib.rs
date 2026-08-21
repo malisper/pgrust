@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 mod array_typanalyze;
+mod pgrc2_fold;
 mod range_typanalyze;
 mod ts_typanalyze;
 pub mod sampling;
@@ -20,6 +21,7 @@ use types_rel::{
     Relation, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use types_scan::sdir::ScanDirection;
 use types_slot::SlotData;
 use types_tuple::{FormData_pg_attribute, HeapTupleData, TupleDescData};
 
@@ -241,6 +243,7 @@ fn vacuum<'mcx>(
     commands_vacuum::set_in_vacuum(true);
     // catch_unwind = C's PG_FINALLY (panics become ERRORs at tcop and the
     // session survives, so in_vacuum must reset on every exit path).
+    // unwind-ok: log-then-die
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> PgResult<()> {
         for vrel in vacrels.iter() {
             if use_own_xacts {
@@ -310,10 +313,7 @@ pub fn analyze_rel(
     let relkind = onerel.rd_rel.relkind;
     let mut acquirefunc: Option<AcquireSampleRowsFn> = None;
     let relpages = match relkind {
-        RELKIND_RELATION | RELKIND_MATVIEW => bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
-            &onerel,
-            ForkNumber::MAIN_FORKNUM,
-        )?,
+        RELKIND_RELATION | RELKIND_MATVIEW => analyzable_relpages(&onerel)?,
         RELKIND_PARTITIONED_TABLE => 0,
         RELKIND_FOREIGN_TABLE => {
             let kind = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, onerel.rd_id)?;
@@ -596,11 +596,11 @@ fn do_analyze_rel<'mcx>(
             targrows = targrows.max(s.minrows);
         }
     }
-    targrows = targrows.max(statistics::ComputeExtStatisticsRows(
-        anl_mcx,
-        onerel.rd_id,
-        &colstats,
-    )?);
+    // Captured (not just maxed into targrows) — extended statistics REQUIRE
+    // sample rows, so their presence is a P6-5 fold-admission gate below.
+    let ext_stats_rows =
+        statistics::ComputeExtStatisticsRows(anl_mcx, onerel.rd_id, &colstats)?;
+    targrows = targrows.max(ext_stats_rows);
 
     let mut totalrows = 0.0f64;
     let mut totaldeadrows = 0.0f64;
@@ -616,8 +616,69 @@ fn do_analyze_rel<'mcx>(
         );
     }
     let anl_trace = analyze_trace();
+
+    // P6-5 (M5a ST-2 made LIVE end-to-end): ANALYZE on a pgrcolumnar2 table
+    // serves pg_statistic from the AM's seal-built fold — footer facts,
+    // Stats sidecars, HLL NDV — with NO sampling scan. Admission is
+    // conservative: single-rel std-typanalyze pass with no index or
+    // extended statistics (those require sample rows). Any decline — the
+    // AM's typed vocabulary or the consumer's render gates — falls OPEN to
+    // the sampling path below (never an error, never wrong stats). WITNESS
+    // MEMBRANE: everything written here feeds planning only.
+    let fold_served = 'fold: {
+        if inline_sample.is_some()
+            || inh
+            || hasindex
+            || ext_stats_rows > 0
+            || acquirefunc.is_some()
+            || tableam::TableAm::of(onerel) != Some(tableam::TableAm::Pgrcolumnar2)
+            || !pgrc2_fold::fold_enabled()
+        {
+            break 'fold false;
+        }
+        let fold = match tableam::pgrc2_analyze_fold(onerel)? {
+            tableam::Pgrc2AnalyzeFold::Folded(f) => f,
+            tableam::Pgrc2AnalyzeFold::Declined(d) => {
+                if anl_trace {
+                    eprintln!(
+                        "ANALYZE|TRACE|pgrc2-fold declined rel={} cause={}",
+                        onerel.rd_id,
+                        d.cause()
+                    );
+                }
+                break 'fold false;
+            }
+        };
+        if !pgrc2_fold::apply_fold(anl_mcx, &fold, &mut vacattrstats)? {
+            if anl_trace {
+                eprintln!(
+                    "ANALYZE|TRACE|pgrc2-fold declined rel={} cause=render-inadmissible",
+                    onerel.rd_id
+                );
+            }
+            break 'fold false;
+        }
+        update_attstats(onerel.rd_id, false, &vacattrstats)?;
+        // Fold-vintage witness AFTER the pg_statistic write (the S-1 honest
+        // source-stamping contract).
+        tableam::pgrc2_record_stats_fold_vintage(onerel);
+        totalrows = fold.total_rows as f64;
+        totaldeadrows = 0.0;
+        if anl_trace {
+            eprintln!(
+                "ANALYZE|TRACE|pgrc2-fold served rel={} cols={} rows={}",
+                onerel.rd_id,
+                vacattrstats.len(),
+                fold.total_rows
+            );
+        }
+        true
+    };
+
     let t_acquire = std::time::Instant::now();
-    let numrows = if let Some((prows, ptotal)) = inline_sample {
+    let numrows = if fold_served {
+        0
+    } else if let Some((prows, ptotal)) = inline_sample {
         debug_assert!(!inh, "inline sample is a single-relation (non-inh) pass");
         for t in prows {
             // SAFETY: the caller's sample images outlive this call (they
@@ -1464,6 +1525,9 @@ fn acquire_sample_rows<'mcx>(
     if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar) {
         return pgrcolumnar_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
     }
+    if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar2) {
+        return pgrc2_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
+    }
     let base = rows.len();
     let mut numrows: i32 = 0;
     let mut samplerows = 0.0f64;
@@ -1550,6 +1614,110 @@ fn acquire_sample_rows<'mcx>(
         *totaldeadrows = 0.0;
     }
 
+    Ok(numrows)
+}
+
+// P6-5 relstats truth: the relpages ANALYZE writes to pg_class. pgrc2's main
+// fork is a deliberately EMPTY smgr file (the O-7 directory lifecycle), so
+// the heap block count sized every pgrc2 rel at relpages 0 — a lie beside
+// the footer-derived pages plan-time estimation serves. Serve the SAME
+// convention table_relation_estimate_size uses: on-disk part bytes at
+// BLCKSZ grain (0 while never-published — C's never-analyzed convention).
+fn analyzable_relpages(onerel: &Relation<'_>) -> PgResult<BlockNumber> {
+    if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar2) {
+        return Ok(match tableam::pgrc2_footer_size(onerel)? {
+            Some((_rows, bytes)) => bytes.div_ceil(types_core::BLCKSZ as u64) as BlockNumber,
+            None => 0,
+        });
+    }
+    bufmgr_seams::relation_get_number_of_blocks_in_fork::call(onerel, ForkNumber::MAIN_FORKNUM)
+}
+
+// pgrc2's acquirefunc (P6-5): the FAIL-OPEN leg under the M5a ANALYZE fold —
+// runs only when the fold declines (or is killed off). A uniform Vitter
+// reservoir over the AM's one visibility-honest read path (`getnextslot`,
+// Dv-applied): pgrc2 exposes no granule-random fetch face, so skipped rows
+// are decoded and discarded (the conservative election the fold's decline
+// vocabulary buys out of on banked data). totalrows is exact from the
+// manifest (live rows = part rows − Dv deletions); parts carry no dead rows.
+fn pgrc2_acquire_sample_rows<'mcx>(
+    mcx: Mcx<'mcx>,
+    onerel: &Relation<'mcx>,
+    rows: &mut PgVec<'mcx, HeapTupleData<'mcx>>,
+    targrows: i32,
+    totalrows: &mut f64,
+    totaldeadrows: &mut f64,
+) -> PgResult<i32> {
+    let tupdesc = onerel.descr();
+    let mut scan = tableam::table_beginscan_analyze(mcx, onerel)?;
+    let mut slot = tableam::table_slot_create(mcx, onerel)?;
+    *totalrows = tableam::pgrc2_analyze_total_rows(&scan) as f64;
+    *totaldeadrows = 0.0;
+
+    let form = |mcx: Mcx<'mcx>, slot: &SlotData<'mcx>| -> PgResult<HeapTupleData<'mcx>> {
+        let b = slot.base();
+        let owned = heaptuple::heap_form_tuple(mcx, tupdesc, &b.tts_values, &b.tts_isnull)?;
+        let (ptr, len, tid, oid) = (
+            owned.image().as_ptr(),
+            owned.as_tuple().t_len,
+            owned.as_tuple().t_self,
+            owned.as_tuple().t_tableOid,
+        );
+        core::mem::forget(owned);
+        // SAFETY: the image was just formed in `mcx` and, forgotten, lives
+        // until that context's teardown; nothing else writes it.
+        Ok(unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, oid) })
+    };
+
+    let mut rstate = sampling::reservoir_init_selection_state(
+        pg_prng::global_prng(|p| p.next_u64()),
+        targrows as u32,
+    );
+
+    // (stream ordinal, tuple): replacements land at random reservoir slots;
+    // physical order is restored by the final sort (the correlation stat
+    // reads rows order — the same shape as the v1 sampler).
+    let mut sample: Vec<(u64, HeapTupleData<'mcx>)> = Vec::new();
+    let mut samplerows = 0.0f64;
+    let mut rowstoskip = -1.0f64;
+    let mut ord: u64 = 0;
+    while tableam::table_scan_getnextslot(
+        mcx,
+        &mut scan,
+        ScanDirection::ForwardScanDirection,
+        &mut slot,
+    )? {
+        if (sample.len() as i32) < targrows {
+            let t = form(mcx, &slot)?;
+            sample.push((ord, t));
+        } else {
+            if rowstoskip < 0.0 {
+                rowstoskip =
+                    sampling::reservoir_get_next_s(&mut rstate, samplerows, targrows as u32);
+            }
+            if rowstoskip <= 0.0 {
+                let k = (targrows as f64 * sampling::sampler_random_fract(&mut rstate.randstate))
+                    as usize;
+                debug_assert!(k < targrows as usize);
+                let t = form(mcx, &slot)?;
+                sample[k] = (ord, t);
+            }
+            rowstoskip -= 1.0;
+        }
+        ord += 1;
+        samplerows += 1.0;
+    }
+    drop(slot);
+    tableam::table_endscan(scan)?;
+
+    sample.sort_unstable_by_key(|&(o, _)| o);
+    let numrows = sample.len() as i32;
+    for (_, t) in sample {
+        rows.push(t);
+    }
+    // The stream is the whole live relation: sampled == live truth (the
+    // manifest count and the scanned count agree by the one-read-path law).
+    debug_assert!(samplerows == *totalrows || *totalrows == 0.0);
     Ok(numrows)
 }
 
@@ -1912,10 +2080,7 @@ fn acquire_inherited_sample_rows<'mcx>(
         }
         match childrel.rd_rel.relkind {
             RELKIND_RELATION | RELKIND_MATVIEW => {
-                let relpages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
-                    &childrel,
-                    ForkNumber::MAIN_FORKNUM,
-                )?;
+                let relpages = analyzable_relpages(&childrel)?;
                 totalblocks += relpages as f64;
                 children.push((childrel, relpages as f64, None));
             }

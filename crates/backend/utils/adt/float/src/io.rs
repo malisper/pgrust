@@ -774,6 +774,13 @@ fn pg_strfromd_f64(num: f64, ndig: i32, buf: &mut [u8]) -> usize {
     format_g(num, ndig, buf)
 }
 
+/// PG-snprintf `%.*g` as errmsg renders floats: "NaN"/"Infinity"/"-Infinity"
+/// spellings, else `%g` with `ndig` significant digits (port/snprintf.c
+/// fmtfloat — libc %g would print "nan"/"inf").
+pub fn format_g_message(num: f64, ndig: i32, buf: &mut [u8]) -> usize {
+    pg_strfromd_f64(num, ndig, buf)
+}
+
 struct SliceWriter<'a> {
     buf: &'a mut [u8],
     len: usize,

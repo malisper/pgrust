@@ -22,7 +22,8 @@ type FxHashMap<K, V> = HashMap<K, V, rustc_hash::FxBuildHasher>;
 use datum::Datum;
 use mcx::{Mcx, MemoryContext};
 use spi::{
-    SPI_cursor_close, SPI_cursor_fetch, SPI_cursor_open, SpiCursor, SpiPlanPtr, TuptabHandle,
+    SPI_cursor_close, SPI_cursor_fetch, SPI_cursor_open, SPI_cursor_open_with_paramlist,
+    SpiCursor, SpiPlanPtr, TuptabHandle,
 };
 use types_core::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, SqlState, ERROR};
@@ -231,6 +232,7 @@ std::thread_local! {
     // expr_id -> saved SPI plan (C stores expr->plan in the function AST;
     // the side table keeps the shared AST immutable). Entries die with the
     // compiled function (free_function_plans).
+    // tls-dtor: try_with-safe — SimpleExpr::drop is proc_exit-guarded and plancache CACHE is ManuallyDrop (dtor-less), so late releases cannot hit a destroyed key.
     static EXPR_PLANS: core::cell::RefCell<FxHashMap<u32, PlanEntry>> =
         core::cell::RefCell::new(FxHashMap::default());
     // expr_id -> CALL OUT-arg row varnos (C stmt->target, cached in fn_cxt).
@@ -2539,6 +2541,7 @@ impl<'a> Estate<'a> {
         // still die with the unwind or a later ROLLBACK walks a stack with a
         // leaked SUBINPROGRESS over a block-less top (C's PG_CATCH cannot be
         // bypassed this way).
+        // unwind-ok: c-callback
         let body_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.exec_stmts(&block.body)
         })) {
@@ -2949,7 +2952,7 @@ impl<'a> Estate<'a> {
             (e.plan, e.paramnos.clone(), e.argtypes.clone())
         });
         let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
-        let cursor = SPI_cursor_open(None, plan, &values, &nulls, self.readonly_func)
+        let cursor = SPI_cursor_open_with_paramlist(None, plan, &values, &nulls, self.readonly_func)
             .map_err(|e| spi_ctx_err(e, &query.query, query.parse_mode))?;
 
         let result = self.exec_for_query(label, var, &cursor, body, true);
@@ -4525,7 +4528,7 @@ impl<'a> Estate<'a> {
             (e.plan, e.paramnos.clone(), e.argtypes.clone())
         });
         let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
-        let cursor = spi::SPI_cursor_open(curname, plan, &values, &nulls, self.readonly_func)
+        let cursor = spi::SPI_cursor_open_with_paramlist(curname, plan, &values, &nulls, self.readonly_func)
             .map_err(|e| spi_ctx_err(e, &query.query, query.parse_mode))?;
         if curname.is_none() {
             // Verify assignability before storing the portal name
@@ -4741,7 +4744,7 @@ impl<'a> Estate<'a> {
         });
         let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
         let cursor =
-            spi::SPI_cursor_open(curname.as_deref(), plan, &values, &nulls, self.readonly_func)
+            spi::SPI_cursor_open_with_paramlist(curname.as_deref(), plan, &values, &nulls, self.readonly_func)
                 .map_err(|e| spi_ctx_err(e, &cq.query, cq.parse_mode))?;
         if curname.is_none() {
             let name = cursor.portal.borrow().name.as_str().to_string();

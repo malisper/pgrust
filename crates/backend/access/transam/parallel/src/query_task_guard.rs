@@ -117,6 +117,7 @@ pub(super) fn with_query_task_binding<T>(
     super::gtrace("w.qtb.bind.begin");
     let mut guard = QueryTaskBindingGuard::bind(shared)?;
     super::gtrace("w.qtb.bind.end");
+    // unwind-ok: worker-containment
     let outcome = catch_unwind(AssertUnwindSafe(body));
     super::gtrace("w.qtb.body.end");
     match outcome {
@@ -126,14 +127,26 @@ pub(super) fn with_query_task_binding<T>(
             Ok(value)
         }
         Ok(Err(error)) => {
-            if catch_unwind(AssertUnwindSafe(|| guard.finish(false))).is_err() {
+            // unwind-ok: log-then-die
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| guard.finish(false))) {
                 guard.retry_cleanup_after_panic();
+                // Exit-committed unwinds keep unwinding (a dying thread
+                // must not be resurrected by cleanup containment).
+                if is_exit_unwind_payload(&*payload) {
+                    resume_unwind(payload);
+                }
             }
             Err(error)
         }
         Err(payload) => {
-            if catch_unwind(AssertUnwindSafe(|| guard.finish(false))).is_err() {
+            // unwind-ok: log-then-die
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| guard.finish(false))) {
                 guard.retry_cleanup_after_panic();
+                // Exit-committed unwinds keep unwinding (a dying thread
+                // must not be resurrected by cleanup containment).
+                if is_exit_unwind_payload(&*payload) {
+                    resume_unwind(payload);
+                }
             }
             resume_unwind(payload)
         }
@@ -354,8 +367,14 @@ impl QueryTaskBindingGuard {
         })();
 
         if let Err(error) = setup {
-            if catch_unwind(AssertUnwindSafe(|| guard.finish(false))).is_err() {
+            // unwind-ok: log-then-die
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| guard.finish(false))) {
                 guard.retry_cleanup_after_panic();
+                // Exit-committed unwinds keep unwinding (a dying thread
+                // must not be resurrected by cleanup containment).
+                if is_exit_unwind_payload(&*payload) {
+                    resume_unwind(payload);
+                }
             }
             return Err(error);
         }
@@ -544,8 +563,14 @@ impl QueryTaskBindingGuard {
             Ok(())
         })();
         if let Err(error) = setup {
-            if catch_unwind(AssertUnwindSafe(|| self.finish(false))).is_err() {
+            // unwind-ok: log-then-die
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| self.finish(false))) {
                 self.retry_cleanup_after_panic();
+                // Exit-committed unwinds keep unwinding (a dying thread
+                // must not be resurrected by cleanup containment).
+                if is_exit_unwind_payload(&*payload) {
+                    resume_unwind(payload);
+                }
             }
             return Err(error);
         }
@@ -554,6 +579,7 @@ impl QueryTaskBindingGuard {
 
     fn retry_cleanup_after_panic(&mut self) {
         init_small::wretain::refuse_park();
+        // unwind-ok: log-then-die
         let _ = catch_unwind(AssertUnwindSafe(|| self.finish(false)));
         self.armed = false;
     }
@@ -697,6 +723,7 @@ pub fn sticky_parked() -> bool {
 /// `DeferredQueryTaskBinding::new` and `sticky_evict_parked`.
 fn finish_evicted_sticky(mut sticky: StickySession) -> PgResult<()> {
     super::gtrace("w.qtb.unstick.begin");
+    // unwind-ok: log-then-die
     let r = catch_unwind(AssertUnwindSafe(|| sticky.guard.finish(true)));
     super::gtrace("w.qtb.unstick.end");
     match r {
@@ -822,8 +849,14 @@ impl DeferredQueryTaskBinding {
                 WARNING,
                 "query-task deferred binding: cleaning a stale bound guard".to_string(),
             );
-            if catch_unwind(AssertUnwindSafe(|| guard.finish(false))).is_err() {
+            // unwind-ok: log-then-die
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| guard.finish(false))) {
                 guard.retry_cleanup_after_panic();
+                // Exit-committed unwinds keep unwinding (a dying thread
+                // must not be resurrected by cleanup containment).
+                if is_exit_unwind_payload(&*payload) {
+                    resume_unwind(payload);
+                }
             }
         }
         let evict = STICKY.with(|slot| {
@@ -904,7 +937,13 @@ impl DeferredQueryTaskBinding {
             super::gtrace("w.qtb.stickybind.begin");
             if let Err(e) = validate_for_sticky_resume(&self.shared) {
                 // Conservative: a dirty resume boundary ends the retention.
-                let _ = catch_unwind(AssertUnwindSafe(|| sticky.guard.finish(true)));
+                // unwind-ok: log-then-die
+                if let Err(payload) = catch_unwind(AssertUnwindSafe(|| sticky.guard.finish(true))) {
+                    // Exit-committed unwinds keep unwinding.
+                    if is_exit_unwind_payload(&*payload) {
+                        resume_unwind(payload);
+                    }
+                }
                 return Err(e);
             }
             sticky.guard.resume_statement(&self.shared)?;
@@ -949,6 +988,7 @@ impl DeferredQueryTaskBinding {
             // unchanged-pin test = no retention.
             && self.shared.guc_pin.is_some()
         {
+            // unwind-ok: log-then-die
             match catch_unwind(AssertUnwindSafe(|| guard.finish_for_sticky_park())) {
                 Ok(Ok(())) => {
                     super::gtrace("w.qtb.stickypark");
@@ -983,8 +1023,14 @@ impl DeferredQueryTaskBinding {
         if commit {
             guard.finish(true)
         } else {
-            if catch_unwind(AssertUnwindSafe(|| guard.finish(false))).is_err() {
+            // unwind-ok: log-then-die
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| guard.finish(false))) {
                 guard.retry_cleanup_after_panic();
+                // Exit-committed unwinds keep unwinding (a dying thread
+                // must not be resurrected by cleanup containment).
+                if is_exit_unwind_payload(&*payload) {
+                    resume_unwind(payload);
+                }
             }
             Ok(())
         }
@@ -994,7 +1040,9 @@ impl DeferredQueryTaskBinding {
 /// Exit-committed unwinds must keep unwinding (mirror of
 /// standing::is_exit_unwind, local to avoid a module cycle).
 fn is_exit_unwind_payload(payload: &(dyn std::any::Any + Send)) -> bool {
-    payload.is::<ipc::ProcExitThread>() || payload.is::<types_error::PanicExitThread>()
+    payload.is::<ipc::ProcExitThread>()
+        || payload.is::<types_error::PanicExitThread>()
+        || payload.is::<ipc::KilledBySignal>()
 }
 
 fn unsupported(message: &'static str) -> Box<PgError> {

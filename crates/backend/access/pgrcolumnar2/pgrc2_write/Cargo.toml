@@ -1,0 +1,76 @@
+[package]
+name = "pgrc2_write"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrc2_write"
+path = "src/lib.rs"
+
+[dependencies]
+# The minimal claim plane (XC-1/XC-2; lanev4-parallel-contract.md §2/§3).
+# Parallel COPY is its FIRST consumer (the ruled COPY-on-morsels amendment):
+# workers claim capture-chunk morsels through the shared cursor; ordering
+# lives wholly in the sink (the input-order cut cursor).
+pgrc2_claim = { path = "../pgrc2_claim" }
+pgrc2_format = { path = "../pgrc2_format" }
+pgrc2_codec = { path = "../pgrc2_codec" }
+# TY-3 writer wiring (lanev4): the vendored jsonb shred machinery behind the
+# `ShredLaneSource` seam (`src/shred_jsonb.rs`). Already in the cone via
+# pgrc2_codec — no new dependency surface, no cycle. `mcx` is the scratch
+# context `shred_chunk` requires (locally scoped per seal; no statics).
+adt_jsonb_shred = { path = "../../../utils/adt/jsonb_shred" }
+mcx = { path = "../../../../_support/mcx" }
+# M3-E's real metadata plane. The seal driver has always spoken the frozen
+# `ColumnMetaBuilder` ABI (spec §19.7); until this lane it drove a stand-in
+# that emitted exact `nonnull` and nothing else, so every sealed part carried
+# no min/max, no PSMA, no blooms and no NDV. Pure crate (no I/O, no locks, no
+# statics) and it depends only on pgrc2_format + order_key, so this closes no
+# cycle. See `src/meta_wire.rs`.
+pgrc2_meta = { path = "../pgrc2_meta" }
+# Inline-compressed varlena normalization on ingest (detoast-and-decompress
+# law, charter §7). Pure crate, zero deps.
+pglz = { path = "../../../../common/pglz" }
+# All file I/O routes through the sanctioned Vfs choke (determinism-lint law;
+# under --cfg pgrust_sim the same calls hit SimVfs, composing M3-K's crash
+# batteries under this writer unchanged).
+vfs = { path = "../../../../backend/storage/file/vfs" }
+# GL-BULKWRITE-1 (#686): the bulk-write dirty-page governor. Hooked ONLY in
+# RealVfs (production); MemVfs and the sim harness never see governor ops
+# (the governor self-disarms under --cfg pgrust_sim).
+write_governor = { path = "../../../../backend/storage/file/write_governor" }
+libc = "0.2"
+# The #253 commit fence: publish arms a synchronous commit-record flush
+# exactly like the cbstore precedent (seam-guarded; uninstalled in unit
+# tests, installed by xact in a real backend).
+xact_seams = { path = "../../transam/xact_seams" }
+# NOTE (M3-I): NO `runtime` dependency here, deliberately — since M3-H
+# (#473) `pgrc2_am` depends on this crate inside the table-AM cone, and
+# runtime → parallel → … → tableam → pgrc2_am would close a cycle. The
+# rtpool binding for parallel ingest lives one crate up (`pgrc2_ingest_par`).
+# THE single lock library (three worlds: native/loom/sim). The parallel
+# ingest coordinator's Mutex/Condvar come from here so the same faces run
+# under loom models unchanged.
+pgsync = { path = "../../../../_support/pgsync" }
+# FSST-UNLOCK: SIMD UTF-8 validation for the per-part text-semantics claim
+# verification (elect.rs resolve_text_policy) — the same crate parquet_read
+# uses for its decode-side validators.
+simdutf8 = "0.1"
+
+[dev-dependencies]
+pgrc2_read = { path = "../pgrc2_read" }
+adt_numeric = { path = "../../../utils/adt/numeric" }
+# The shred_jsonb tests feed REAL jsonb images (jsonb_in) — the same
+# dev-dep set pgrc2_codec's jsonb_lanes suite carries.
+adt_jsonb = { path = "../../../utils/adt/jsonb" }
+mbutils = { path = "../../../utils/mb/mbutils" }
+wchar = { path = "../../../../common/wchar" }
+
+# tests/loom.rs model builders (the pgsync pattern: the loom dependency for
+# the crate's own loom models).
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

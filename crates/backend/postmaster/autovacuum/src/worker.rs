@@ -61,7 +61,10 @@ pub(crate) fn pg_error_from_panic(
     payload: Box<dyn std::any::Any + Send>,
     fallback_msg: &str,
 ) -> PgError {
-    if payload.is::<ipc::ProcExitThread>() || payload.is::<types_error::PanicExitThread>() {
+    if payload.is::<ipc::ProcExitThread>()
+        || payload.is::<types_error::PanicExitThread>()
+        || payload.is::<ipc::KilledBySignal>()
+    {
         std::panic::resume_unwind(payload);
     }
     match ::types_error::pg_error_from_panic(payload) {
@@ -112,6 +115,7 @@ pub fn AutoVacWorkerMain(startup_data: &StartupData) -> ! {
     // worker exits 0 (C 1440-1457). Loud panics unwind as ERROR here — an
     // escaped panic reaches launch_backend's SIGABRT mapping and cycles the
     // whole cluster (postgres.c run_one_iteration precedent).
+    // unwind-ok: stmt-boundary
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(worker_body))
         .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload, "autovacuum worker panicked"))))
     {
@@ -620,6 +624,7 @@ pub fn do_autovacuum() -> PgResult<()> {
 
         if let (Some(relname), Some(nspname), Some(datname)) = (relname, nspname, datname) {
             autovac_report_activity(&tab, &nspname, &relname);
+            // unwind-ok: stmt-boundary
             let vac_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 #[cfg(debug_assertions)]
                 if std::env::var("PGRUST_TEST_AUTOVAC_PANIC_TABLE").as_deref() == Ok(relname.as_str()) {
@@ -806,6 +811,7 @@ fn perform_work_item(workitem: &shmem::WorkItem) -> PgResult<()> {
     let avw_type = workitem.avw_type;
     let avw_relation = workitem.avw_relation;
     let avw_block_number = workitem.avw_block_number;
+    // unwind-ok: stmt-boundary
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match avw_type {
             AVW_BRIN_SUMMARIZE_RANGE => {

@@ -322,6 +322,7 @@ impl TaskSetWork for CycleWork {
         let job = Arc::clone(&self.job);
         let reason = self.reason;
         if let Ok(outcome) =
+            // unwind-ok: worker-containment
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || job.run_cycle(reason)))
         {
             *self.outcome.lock().unwrap() = Some(outcome);
@@ -587,6 +588,7 @@ fn dispatcher_loop(shared: Arc<Shared>) {
 /// dispatcher itself must never die of a job's panic — an unannounced
 /// virtual child wedges the postmaster's shutdown legs.
 fn contain<R>(job: &dyn BgJob, hook: &str, f: impl FnOnce() -> R) -> Option<R> {
+    // unwind-ok: worker-containment
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(r) => Some(r),
         Err(_) => {
@@ -594,7 +596,16 @@ fn contain<R>(job: &dyn BgJob, hook: &str, f: impl FnOnce() -> R) -> Option<R> {
                 "bgjobs: job \"{}\" {hook} panicked; crash-retiring it",
                 job.name()
             ));
-            if hook != "crashed" && hook != "teardown" {
+            // crashed() is excluded only to stop announce recursion. A
+            // TEARDOWN panic must still announce: teardown owns the clean
+            // exit announce itself, so a panic before that announce would
+            // otherwise leave the virtual child unannounced forever — the
+            // exact shutdown wedge this containment exists to prevent. The
+            // SIGABRT-shaped crashed() announce routes the postmaster into
+            // ordinary crash handling (C parity: daemon dying mid-exit with
+            // an abnormal status is a child crash).
+            if hook != "crashed" {
+                // unwind-ok: worker-containment
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.crashed()));
             }
             None
@@ -605,6 +616,7 @@ fn contain<R>(job: &dyn BgJob, hook: &str, f: impl FnOnce() -> R) -> Option<R> {
 /// LOG-level self-report. elog is the production channel; fall back to
 /// stderr if the error infrastructure is not up on this thread (tests).
 fn elog_report(msg: &str) {
+    // unwind-ok: log-then-die
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = elog::elog(types_error::LOG, msg.to_string());
     }))

@@ -72,6 +72,13 @@ pub static check_huge_page_size: GucIntCheckHook = GucSlot::new("check_huge_page
 pub static check_io_max_concurrency: GucIntCheckHook = GucSlot::new("check_io_max_concurrency");
 // pgrust-only (no C counterpart): refuses unported io methods; owner aio_core.
 pub static check_io_method: GucEnumCheckHook = GucSlot::new("check_io_method");
+// pgrust-only (no C counterpart): P7-2 D-8 lanev2 GUC tombstones — the registry
+// keeps each slot (SET/SHOW/pg_settings byte-compatible) but no consumer remains;
+// the hooks warn once per process that the value has no effect. Owner
+// commands/variable (deletion plan docs/design/sqe/p72-deletion-plan.md §1.3).
+pub static check_lanev2_tombstone_bool: GucBoolCheckHook = GucSlot::new("check_lanev2_tombstone_bool");
+pub static check_lanev2_tombstone_int: GucIntCheckHook = GucSlot::new("check_lanev2_tombstone_int");
+pub static check_lanev2_tombstone_enum: GucEnumCheckHook = GucSlot::new("check_lanev2_tombstone_enum");
 pub static check_locale_messages: GucStringCheckHook = GucSlot::new("check_locale_messages");
 pub static check_locale_monetary: GucStringCheckHook = GucSlot::new("check_locale_monetary");
 pub static check_locale_numeric: GucStringCheckHook = GucSlot::new("check_locale_numeric");

@@ -15,6 +15,23 @@
 //! - never ereport: the first failure is parked as raw (path, errno, op)
 //!   in a mutex and raised as a normal `ereport(ERROR)` by the janitor
 //!   thread after every worker stopped;
+//!
+//!   RULED DIVERGENCE (fsyncgate law): C's copydir fsyncs each copied
+//!   file via `fsync_fname(tofile, false)` → data_sync_elevel(ERROR) →
+//!   PANIC at default data_sync_retry=off (copydir.c:116). Here a parked
+//!   per-file fsync failure is raised as a plain, catchable ERROR. That
+//!   is safe where the general law is not, because the failure path never
+//!   retries an fsync over possibly-dropped dirty pages: the error aborts
+//!   the whole batch, `cleanup_orphaned_datadirs` REMOVES every partial
+//!   destination directory, and the serial fallback re-copies from
+//!   scratch into freshly created files (create_new) — every byte is
+//!   rewritten and fsynced anew, so a kernel that consumed the error
+//!   state has nothing left to silently "succeed" over. No checkpoint or
+//!   WAL record ever claims durability for the failed copies (the
+//!   XLOG_DBASE_CREATE_FILE_COPY records are inserted only after the
+//!   parallel phase fully succeeds). If this park-and-raise is ever
+//!   reused for files that survive the failure (retry-in-place), it must
+//!   escalate at fd::data_sync_elevel like everything else;
 //! - poll a shared abort flag between files AND inside the copy loops at
 //!   C's own CFI cadence (per 64KB buffered chunk / per 1MB clone chunk;
 //!   the macOS copyfile arm is C's own uninterruptible-single-call shape),
@@ -201,6 +218,7 @@ pub(crate) fn copy_dirs_parallel(
         for _ in 0..threads {
             handles.push(scope.spawn(|| {
                 let started = std::time::Instant::now();
+                // unwind-ok: worker-containment
                 let caught = catch_unwind(AssertUnwindSafe(|| {
                     worker_loop(&queue, &abort, &failure, knobs);
                 }));

@@ -390,10 +390,7 @@ fn sweeper() -> ! {
                 // per run; Deficit re-flags don't re-count). GL-SLEASE-3's
                 // admission-census witness — zero-cost when the lanev2
                 // stats arm is off (the tick is armed-gated).
-                let newly = !slot.admit.swap(true, Ordering::SeqCst);
-                if newly && state == S_PENDING {
-                    crate::lanev2::tick_serial_lease_floor_crossing();
-                }
+                slot.admit.swap(true, Ordering::SeqCst);
                 // Raise the owner's CFI flag (timer-thread posting parity).
                 // No latch wake on purpose: a BLOCKED session needs no
                 // permit; it processes the flag at its first safe point
@@ -449,7 +446,6 @@ impl SerialLease {
                 // serial-pool-overhead gate): v2 ticks at ENTER — the lease
                 // machinery engaging — not at permit acquisition, which the
                 // floor makes workload-dependent.
-                crate::lanev2::tick_serial_lease();
                 true
             } else {
                 false
@@ -571,7 +567,6 @@ pub fn wait_hook_start() {
         if let Some(rt) = LEASE_RT.get() {
             rt.execution_permits().release();
             set_state(slot, S_DONATED);
-            crate::lanev2::tick_serial_lease_donation();
         }
     }
 }
@@ -636,7 +631,6 @@ pub fn admission_tap() {
             if let Some(rt) = LEASE_RT.get() {
                 if rt.execution_permits().acquire_timeout(ADMIT_TIMEOUT) {
                     set_state(slot, S_HELD);
-                    crate::lanev2::tick_serial_lease_admitted();
                 } else {
                     set_state(slot, S_DEFICIT);
                 }

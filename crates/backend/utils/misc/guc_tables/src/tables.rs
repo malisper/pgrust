@@ -664,22 +664,22 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     GucBoolSetting { name: "sync_replication_slots", context: PGC_SIGHUP, group: REPLICATION_STANDBY, short_desc: Some("Enables a physical standby to synchronize logical failover replication slots from the primary server."), long_desc: None, flags: 0, variable: &vars::sync_replication_slots, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "md5_password_warnings", context: PGC_USERSET, group: CONN_AUTH_AUTH, short_desc: Some("Enables deprecation warnings for MD5 passwords."), long_desc: None, flags: 0, variable: &vars::md5_password_warnings, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "vacuum_truncate", context: PGC_USERSET, group: VACUUM_DEFAULT, short_desc: Some("Enables vacuum to truncate empty pages at the end of the table."), long_desc: None, flags: 0, variable: &vars::vacuum_truncate, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
-    // pgrust-only (no C counterpart): the lane-v2 push executor's master
-    // switch. Default ON (2026-07-14); the PGRUST_LANE_V2 boot env var sets
-    // the startup default (=0|off -> default off) via
-    // initialize_guc_options_from_environment (PGC_S_ENV_VAR) — the CI cluster
-    // harness / kill-switch path. The session backing cell IS the gate the
-    // executor reads, so SET / SET LOCAL re-evaluates it on the next query.
-    GucBoolSetting { name: "pgrust.lane_executor", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the lane-v2 push executor."), long_desc: None, flags: 0, variable: &vars::pgrust_lane_executor, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust-only (no C counterpart): the lane-v2 push executor's former
+    // master switch — TOMBSTONE (P7-2 D-8; default OFF since S-1
+    // 2026-08-19). The executor is deleted and nothing reads the cell; the
+    // row keeps its slot per the tombstone law (SET accepted, warn-once, no
+    // effect). PGRUST_LANE_V2 no longer seeds it (accepted and ignored).
+    GucBoolSetting { name: "pgrust.sqe_heap", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the sqe engine over heap tables (v1, recognized shapes only)."), long_desc: Some("Off by default. When on, recognized heap analytic shapes are served by the sqe engine or fail with a typed, censused error; unrecognized shapes keep running on the incumbent executors."), flags: 0, variable: &vars::pgrust_sqe_heap, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
+    GucBoolSetting { name: "pgrust.lane_executor", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the lane-v2 push executor."), long_desc: None, flags: 0, variable: &vars::pgrust_lane_executor, boot_val: GucDefaultValue::Bool(false), check_hook: Some(&hooks::check_lanev2_tombstone_bool), assign_hook: None, show_hook: None },
     // pgrust.condition_cache: the pgrcolumnar per-granule qual-verdict cache
     // (ClickHouse QueryConditionCache counterpart; approved 2026-07-10 as
     // the one sanctioned cross-query in-memory cache, GUC-gated). Default
     // OFF; benchmark arms enable it explicitly and record it in manifests.
     GucBoolSetting { name: "pgrust.condition_cache", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the pgrcolumnar condition cache (cross-query cached qual verdicts per granule)."), long_desc: None, flags: 0, variable: &vars::pgrust_condition_cache, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
-    // pgrust.explain_runtime_verdicts (pgrust-only): EXPLAIN ANALYZE display
-    // gate for the runtime admission walk's refusal verdicts (E1-A: default
-    // EXPLAIN output must stay C-parity, so the diagnostics are opt-in).
-    GucBoolSetting { name: "pgrust.explain_runtime_verdicts", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Shows runtime-engine refusal verdicts in EXPLAIN ANALYZE output."), long_desc: Some("Off (the default) keeps EXPLAIN output identical to PostgreSQL. On adds a per-node diagnostic line naming the reason the parallel runtime declined to execute a node."), flags: 0, variable: &vars::pgrust_explain_runtime_verdicts, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.explain_runtime_verdicts (pgrust-only): TOMBSTONE (P7-2 D-8).
+    // The runtime admission walk and its EXPLAIN refusal display are
+    // deleted; the row keeps its slot (SET accepted, warn-once, no effect).
+    GucBoolSetting { name: "pgrust.explain_runtime_verdicts", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Shows runtime-engine refusal verdicts in EXPLAIN ANALYZE output."), long_desc: Some("Off (the default) keeps EXPLAIN output identical to PostgreSQL. On adds a per-node diagnostic line naming the reason the parallel runtime declined to execute a node."), flags: 0, variable: &vars::pgrust_explain_runtime_verdicts, boot_val: GucDefaultValue::Bool(false), check_hook: Some(&hooks::check_lanev2_tombstone_bool), assign_hook: None, show_hook: None },
     // pgrust.runtime (pgrust-only, env-to-guc train): the M0 master switch for
     // the morsel runtime worker pool, replacing the PGRUST_RUNTIME env var as
     // the product surface. PGC_POSTMASTER (the pool spawns once at boot),
@@ -985,25 +985,30 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     // the measurements). Counts are cached per template in the janitor
     // registry and re-observed after any observed unseal.
     GucIntSetting { name: "pgrust.ephemeral_db_wal_log_threshold", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Swept-relation count at or above which the janitor mints ephemeral databases with STRATEGY wal_log (-1 = never)."), long_desc: Some("A template whose pg_class sweep (every relation with storage, system catalogs included) counts at least this many relations is cloned with CREATE DATABASE STRATEGY wal_log, which requests no checkpoints; smaller templates keep STRATEGY file_copy and the janitor's batched checkpoint machinery. -1 disables wal_log picks entirely. The count is observed once per sealed template and cached; unsealing a template invalidates the cache."), flags: 0, variable: &vars::pgrust_ephemeral_db_wal_log_threshold, boot_val: GucDefaultValue::Int(-1), min: -1, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
-    // pgrust.runtime_dop (M5-0, docs/design/m5-planner.md §2.2): the product
-    // DOP cap for runtime-engine engagements, consulted ONLY under
-    // pgrust.parallel_engine=runtime (the M5-1 router reads it; the per-arm
-    // bench pool GUCs never do). 0 = auto (available cores at engagement).
-    GucIntSetting { name: "pgrust.runtime_dop", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the degree of parallelism for runtime-engine engagements (0 = number of cores)."), long_desc: None, flags: 0, variable: &vars::pgrust_runtime_dop, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
-    // Per-arm runtime pool DOP force-overrides (env-to-guc train; deferred
-    // pool-GUC recipe, docs/design/jit-parallel-defaults.md §3). Registered
-    // faces of the formerly-unregistered `pgrust.*` placeholder options; the
-    // arm readers (runtime_pool.rs / lane_pool.rs) resolve them through the
-    // get_config_option seam, which now returns these registered cells.
-    // 0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime
-    // (behavior-neutral at the default). PGC_USERSET, same bounds as runtime_dop.
-    GucIntSetting { name: "pgrust.runtime_scan_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime scan arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_scan_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
-    GucIntSetting { name: "pgrust.runtime_agg_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime aggregation-sink arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_agg_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
-    GucIntSetting { name: "pgrust.runtime_distinct_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime distinct-sink arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop (or pgrust.runtime_scan_pool) under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_distinct_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
-    GucIntSetting { name: "pgrust.runtime_hashjoin_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime hash-join arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_hashjoin_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
-    GucIntSetting { name: "pgrust.runtime_sort_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime sort arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_sort_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
-    GucIntSetting { name: "pgrust.runtime_bitmap_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime bitmap-heap arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_bitmap_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
-    GucIntSetting { name: "pgrust.lane_parallel_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the lane-v2 parallel arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_lane_parallel_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.runtime_dop (M5-0): TOMBSTONE (P7-2 D-8). The M5-1 router died
+    // with the lane body; the row keeps its slot (SET accepted, warn-once,
+    // no effect).
+    GucIntSetting { name: "pgrust.runtime_dop", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the degree of parallelism for runtime-engine engagements (0 = number of cores)."), long_desc: None, flags: 0, variable: &vars::pgrust_runtime_dop, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: Some(&hooks::check_lanev2_tombstone_int), assign_hook: None, show_hook: None },
+    // pgrust.sqe_threads: the sqe server engine's worker width (the seam's
+    // SqeConfig.threads). 0 = auto (available cores), N = cap at N. The
+    // boot default is 0 = auto per Michael's ruling (auto, 2026-08-18):
+    // single-query speed wins the default; a width budget governor stays
+    // the eventual multi-session-fairness mechanism per
+    // docs/design/sqe/election-inputs-law.md. PGRUST_SQE_THREADS seeds
+    // the startup default (PGC_S_ENV_VAR, env-to-guc train).
+    GucIntSetting { name: "pgrust.sqe_threads", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the worker width of the sqe columnar server engine (0 = number of cores)."), long_desc: Some("Nonzero values cap the engine pool at that many workers; 0 uses all available cores. The PGRUST_SQE_THREADS environment variable seeds the startup default."), flags: 0, variable: &vars::pgrust_sqe_threads, boot_val: GucDefaultValue::Int(0), min: 0, max: 512, check_hook: None, assign_hook: None, show_hook: None },
+    // Per-arm runtime pool DOP force-overrides (env-to-guc train) —
+    // TOMBSTONED P7-2 D-8 with their arm readers (runtime_pool.rs /
+    // lane_pool.rs, deleted): the rows keep their slots per the tombstone
+    // law (SET accepted, warn-once via check_lanev2_tombstone_int, no
+    // effect). PGC_USERSET, same bounds as runtime_dop.
+    GucIntSetting { name: "pgrust.runtime_scan_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime scan arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_scan_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: Some(&hooks::check_lanev2_tombstone_int), assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.runtime_agg_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime aggregation-sink arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_agg_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: Some(&hooks::check_lanev2_tombstone_int), assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.runtime_distinct_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime distinct-sink arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop (or pgrust.runtime_scan_pool) under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_distinct_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: Some(&hooks::check_lanev2_tombstone_int), assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.runtime_hashjoin_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime hash-join arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_hashjoin_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: Some(&hooks::check_lanev2_tombstone_int), assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.runtime_sort_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime sort arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_sort_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: Some(&hooks::check_lanev2_tombstone_int), assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.runtime_bitmap_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime bitmap-heap arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_bitmap_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: Some(&hooks::check_lanev2_tombstone_int), assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.lane_parallel_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the lane-v2 parallel arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_lane_parallel_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: Some(&hooks::check_lanev2_tombstone_int), assign_hook: None, show_hook: None },
     // Gather read-fairness stride: after N consecutive tuples from one queue
     // the Gather leader advances its read cursor round-robin. 0 = C parity
     // (drain one queue until it would block). A tuple count, not a DOP.
@@ -1213,14 +1218,11 @@ pub static ConfigureNamesEnum: &[GucEnumSetting] = &[
     GucEnumSetting { name: "recovery_init_sync_method", context: PGC_SIGHUP, group: ERROR_HANDLING_OPTIONS, short_desc: Some("Sets the method for synchronizing the data directory before crash recovery."), long_desc: None, flags: 0, variable: &vars::recovery_init_sync_method, boot_val: GucDefaultValue::Enum(DATA_DIR_SYNC_METHOD_FSYNC), options: GucEnumOptions::Inline(recovery_init_sync_method_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "debug_logical_replication_streaming", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Forces immediate streaming or serialization of changes in large transactions."), long_desc: Some("On the publisher, it allows streaming or serializing each change in logical decoding. On the subscriber, it allows serialization of all changes to files and notifies the parallel apply workers to read and apply them at the end of the transaction."), flags: GUC_NOT_IN_SAMPLE, variable: &vars::debug_logical_replication_streaming, boot_val: GucDefaultValue::Enum(DEBUG_LOGICAL_REP_STREAMING_BUFFERED), options: GucEnumOptions::Inline(debug_logical_replication_streaming_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "regex_engine", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Selects the regexp engine: auto dispatches compatible patterns to RE2, the rest to Spencer."), long_desc: None, flags: GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::regex_engine, boot_val: GucDefaultValue::Enum(REGEX_ENGINE_AUTO), options: GucEnumOptions::Inline(regex_engine_options), check_hook: None, assign_hook: None, show_hook: None },
-    // pgrust.parallel_engine (M5-0, docs/design/m5-planner.md §2.2): the
-    // product parallel-engine selector. legacy (default) = today's ported
-    // Gather machinery byte-for-byte, runtime arms only via the per-arm bench
-    // pool GUCs (which layer BENEATH this switch and are never affected by
-    // it); runtime = the M5 unified admission router owns plan-shape routing.
-    // Visible row (the condition_cache precedent): a product surface, not a
-    // debug toggle.
-    GucEnumSetting { name: "pgrust.parallel_engine", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects the parallel query engine: legacy Gather machinery or the morsel runtime router."), long_desc: None, flags: 0, variable: &vars::pgrust_parallel_engine, boot_val: GucDefaultValue::Enum(PARALLEL_ENGINE_RUNTIME), options: GucEnumOptions::Inline(pgrust_parallel_engine_options), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.parallel_engine (M5-0): TOMBSTONE (P7-2 D-8). The M5 router and
+    // its planner probe are deleted — every session plans the legacy Gather
+    // machinery regardless of this value; the row keeps its slot (SET
+    // accepted, warn-once, no effect; boot_val untouched per the S-1 law).
+    GucEnumSetting { name: "pgrust.parallel_engine", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects the parallel query engine: legacy Gather machinery or the morsel runtime router."), long_desc: None, flags: 0, variable: &vars::pgrust_parallel_engine, boot_val: GucDefaultValue::Enum(PARALLEL_ENGINE_RUNTIME), options: GucEnumOptions::Inline(pgrust_parallel_engine_options), check_hook: Some(&hooks::check_lanev2_tombstone_enum), assign_hook: None, show_hook: None },
     // pgrust-only (dl-verstring ruling 2026-08-06): which identity leads in
     // version()'s banner. postgres_first (default) leads with the PostgreSQL
     // compatibility version — matching C PostgreSQL's own "PostgreSQL <ver>

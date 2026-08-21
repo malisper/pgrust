@@ -29,8 +29,7 @@
 //!
 //! The set is deliberately minimal open addressing (linear probe, pow2
 //! table, entry-index slots): the C-ported tuplehash carries MinimalTuple +
-//! per-entry context machinery this state does not need. A compact-set /
-//! ported-tuplehash A/B is the Stage-2.2 companion measurement.
+//! per-entry context machinery this state does not need.
 //!
 //! Merge-shaped by design (Stage-4 payoff): the state is a plain value set —
 //! set-union of two `DistinctSet`s over the same key kind is the natural
@@ -356,7 +355,7 @@ impl<'mcx> DistinctSet<'mcx> {
     /// Flush-time reset: values only — `seen_null` (never spilled) and the
     /// spill state survive; capacities are retained for the next epoch.
     /// Stringhash arms clear by CONTENTS (the value arrays), not capacity:
-    /// the pooled per-group reuse (codedgroup emit) lets one big group
+    /// the pooled per-group reuse (the retired dict-code emit) lets one big group
     /// inflate the retained table, and a capacity-bounded memset would then
     /// tax every later small group with it (the train-10 near-unique +17%).
     fn reset_values(&mut self) {
@@ -619,7 +618,7 @@ impl<'mcx> DistinctSet<'mcx> {
     }
 
     // ------------------------------------------------------------------
-    // Parallel-partial export/import (pardistinct.rs). Plain-data views of
+    // Parallel-partial export/import (the lanev2 parallel-DISTINCT partials, retired). Plain-data views of
     // the held values, and a values-only constructor for merged results.
     // ------------------------------------------------------------------
 

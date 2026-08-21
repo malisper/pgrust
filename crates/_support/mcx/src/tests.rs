@@ -183,6 +183,27 @@ fn child_charges_propagate_to_ancestors() {
     assert_eq!(root.subtree_peak(), 150);
 }
 
+// Retention-cap law (execmain skeleton cap, portalmem context pools):
+// retention caps measure the SUBTREE — children of a parked skeleton are
+// retained memory. A parent whose own accounting reads empty still retains
+// every byte charged to a live child, so self_used alone under-reads exactly
+// the allocations that accumulate across parked executions.
+#[test]
+fn retention_measures_subtree_not_self() {
+    let query = MemoryContext::new("es_query_cxt");
+    let expr = query.new_child("ExprContext");
+
+    let v = vec_with_capacity_in::<u8>(expr.mcx(), 4096).unwrap();
+    assert_eq!(query.used(), 0, "self accounting blind to the child");
+    assert_eq!(query.subtree_used(), 4096, "the cap's measure sees it");
+
+    // Dead children fall out of the subtree: the cap never counts memory
+    // that was actually released.
+    drop(v);
+    drop(expr);
+    assert_eq!(query.subtree_used(), 0);
+}
+
 #[test]
 fn ancestor_limit_caps_descendants() {
     let root = MemoryContext::new("hash-agg").with_limit(1000);

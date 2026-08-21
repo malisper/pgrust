@@ -29,3 +29,34 @@ seam_core::seam!(
     // matches GetCachedPlan's result at the next bind.
     pub fn discard_parked_portal(plansource: types_portal::PlanSourceHandle)
 );
+
+seam_core::seam!(
+    // The statement-plane program cache's identity supply (the lanev4 A1
+    // #512 seam, carried into the sqe statement memo): positional plan
+    // identity for a running CachedPlan —
+    // (plansource handle id, generation at build, is-current-generic-plan).
+    // The executor keys plan-lifetime memoized artifacts on (handle,
+    // generation); the generic bit gates caching (one-shot custom plans
+    // never recur — GetCachedPlan can only ever hand the generic plan back
+    // unchanged, so caching a custom execution's artifact can never hit).
+    pub fn plan_identity(cplan: types_portal::CachedPlanHandle) -> (u64, i64, bool)
+);
+
+seam_core::seam!(
+    // Statement-memo invalidation, the EAGER half (the lanev4 #511 face):
+    // DropCachedPlan (DEALLOCATE / DISCARD ALL / prepared-stmt teardown)
+    // releases every memoized artifact of the dropped plansource.
+    // Invalidation-driven staleness is the LAZY half and needs no callback:
+    // every plan rebuild bumps the source generation, so a stale artifact is
+    // a structural (handle, generation) miss — the discard_parked_portal
+    // two-mode discipline, applied to the statement memo.
+    pub fn engine_plan_dropped(plansource: types_portal::PlanSourceHandle)
+);
+
+seam_core::seam!(
+    // Statement-memo invalidation, the sys-reset face (#511): the
+    // ResetPlanCache event class drops the whole memo plane
+    // (GC/defense-in-depth — soundness rides the generation key; resources
+    // ride this face).
+    pub fn engine_plan_cache_reset()
+);

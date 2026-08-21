@@ -1,0 +1,26 @@
+[package]
+name = "pgrc2_delta"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrc2_delta"
+path = "src/lib.rs"
+
+[dependencies]
+# The frozen format vocabulary this crate writes OVER, never amends: the
+# §15 tombstone/DV shapes, the §10 RowId split, §2 geometry (spec
+# `docs/design/pgrc2-format.md`; consumers never edit it).
+pgrc2_format = { path = "../pgrc2_format" }
+# THE single lock library (determinism-lint law; three worlds native/loom/
+# sim). Used only for the scan-state publication cell (`scanstate.rs`).
+pgsync = { path = "../../../../_support/pgsync" }
+
+# tests/loom.rs model builders (the pgsync pattern: the loom dependency for
+# the crate's own loom models).
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

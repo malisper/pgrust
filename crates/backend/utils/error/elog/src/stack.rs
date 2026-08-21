@@ -298,6 +298,15 @@ pub fn errfinish(filename: Option<&str>, lineno: i32, funcname: Option<&str>) ->
         // C abort(): under the thread model the catchable crash class — the
         // unwind escapes the backend thread and the postmaster runs the crash
         // choreography (notes/crash-restart-design.md).
+        //
+        // DURABILITY LAW (fsyncgate): every fsync-failure site raises at
+        // data_sync_elevel(ERROR) == PANIC by default, and the whole scheme
+        // rests on this unwind actually reaching thread exit. NO
+        // catch_unwind may swallow PanicExitThread on a durability path —
+        // any containment layer between an fsync site and thread exit must
+        // rethrow it (see parallel/standing.rs is_thread_exit_payload).
+        // Catching it silently converts "crash and WAL-replay" back into
+        // "retry a failed fsync and trust the kernel", i.e. data loss.
         std::panic::panic_any(types_error::PanicExitThread);
     }
 

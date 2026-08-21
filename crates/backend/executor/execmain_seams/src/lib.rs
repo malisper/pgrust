@@ -240,6 +240,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // sqe P2-1 statement verdict for EXPLAIN (census-surface §3): the
+    // engine's plain-EXPLAIN probe over a columnar statement. None =
+    // no columnar relation / slot bypassed (heap EXPLAIN output stays
+    // byte-identical). Some((engaged, detail, sqlstate)): engaged=true
+    // detail=family; engaged=false detail=census cause key.
+    pub fn query_desc_sqe_verdict(
+        query_desc: QueryDescHandle,
+    ) -> Option<(bool, String, String)>
+);
+
+seam_core::seam!(
     // Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).
     pub fn query_desc_workers_launched(
         query_desc: QueryDescHandle,
@@ -409,3 +420,5 @@ seam_core::seam!(
     ) -> bool
 );
 // --- end SE-R41 ------------------------------------------------------------------
+
+pub mod p8ctx;

@@ -84,6 +84,7 @@ pub fn run_protected<R>(
     if !portal_owner.is_null() {
         resowner_seams::set_current_resource_owner::call(portal_owner);
     }
+    // unwind-ok: c-callback
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
     let restore = |save: Option<Portal<'static>>| {
         if may_commit && save_owner == save_top_owner {
@@ -1127,6 +1128,7 @@ pub fn PortalRunFetch(
 ) -> PgResult<u64> {
     portalmem::MarkPortalActive(portal)?;
 
+    let _p8 = execmain_seams::p8ctx::cursor_scope();
     let result = run_protected(portal, false, || -> PgResult<u64> {
         let strategy = portal.borrow().strategy;
         match strategy {

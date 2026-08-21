@@ -323,6 +323,74 @@ pub fn heap_deform_tuple(
     }
 }
 
+/// [`heap_deform_tuple`] narrowed to the leading `want` attributes — the
+/// column-pruned deform for consumers that reference an attno prefix
+/// (the sqe heap face: the offset walk is left-to-right, so a prefix is
+/// the natural pruning grain; per-column static-offset plans are the
+/// finer rung). Attributes past `want` are untouched. A tuple narrower
+/// than `want` (added-columns tail) falls back to the full walk.
+pub fn heap_deform_tuple_prefix(
+    tuple: &HeapTupleData<'_>,
+    tupleDesc: &TupleDescData<'_>,
+    values: &mut [Datum],
+    isnull: &mut [bool],
+    want: usize,
+) {
+    let tup = tuple.t_data();
+    let hasnulls = tuple.has_nulls();
+    let atts: &[crate::tupdesc::CompactAttribute] = &tupleDesc.compact_attrs;
+    let want = want.min(atts.len());
+    if (tup.natts() as usize) < want {
+        return heap_deform_tuple(tuple, tupleDesc, values, isnull);
+    }
+    let tp = tuple.getstruct();
+    let bp = tuple.bits_ptr();
+    let atts_n = &atts[..want];
+    let (values_n, isnull_n) = (&mut values[..want], &mut isnull[..want]);
+    // SAFETY: descriptor matches the image; want <= tuple natts (checked).
+    if let Some((attnum, off)) = unsafe { deform_walk(atts_n, values_n, isnull_n, tp, bp, hasnulls) } {
+        // SAFETY: same walk contract (resume at the cstring attribute).
+        unsafe {
+            deform_cstring_rest(atts_n, values_n, isnull_n, tp, bp, hasnulls, attnum, off);
+        }
+    }
+}
+
+/// [`heap_deform_tuple_prefix`] over a bare attribute slice (detached
+/// page images crossing threads; a TupleDesc's offset cells can't). A
+/// tuple narrower than `want` NULL-fills the tail — callers must gate
+/// `atthasmissing` descriptors off this path (defaults live on the desc).
+pub fn heap_deform_tuple_prefix_atts(
+    tuple: &HeapTupleData<'_>,
+    atts: &[crate::tupdesc::CompactAttribute],
+    values: &mut [Datum],
+    isnull: &mut [bool],
+    want: usize,
+) {
+    let tup = tuple.t_data();
+    let hasnulls = tuple.has_nulls();
+    let want = want.min(atts.len());
+    let present = (tup.natts() as usize).min(want);
+    for i in present..want {
+        values[i] = Datum::null();
+        isnull[i] = true;
+    }
+    if present == 0 {
+        return;
+    }
+    let tp = tuple.getstruct();
+    let bp = tuple.bits_ptr();
+    let atts_n = &atts[..present];
+    let (values_n, isnull_n) = (&mut values[..present], &mut isnull[..present]);
+    // SAFETY: as heap_deform_tuple; present <= tuple natts (clamped).
+    if let Some((attnum, off)) = unsafe { deform_walk(atts_n, values_n, isnull_n, tp, bp, hasnulls) } {
+        // SAFETY: same walk contract (resume at the cstring attribute).
+        unsafe {
+            deform_cstring_rest(atts_n, values_n, isnull_n, tp, bp, hasnulls, attnum, off);
+        }
+    }
+}
+
 /// The walk must stay call-free: a non-diverging call inside (or before) the
 /// loop pushes the loop state into callee-saved registers — a 6-pair
 /// prologue/epilogue paid on every deform. The cstring arm (the strlen call C

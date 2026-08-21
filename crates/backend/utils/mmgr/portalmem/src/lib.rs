@@ -614,9 +614,12 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
     // Park empty contexts whole (C's AllocSetDelete -> context_freelists):
     // reset runs outside the manager borrow (reset callbacks are user code).
     // A context with live (leaked-in) allocations takes the full destroy path.
+    // Retention caps measure the SUBTREE — children of a parked skeleton are
+    // retained memory: a live child still parented here rides into the pool's
+    // next life, so "empty" means the whole subtree, not self_used alone.
     let park = |cb: Option<PgBox<'static, MemoryContext>>| {
         cb.and_then(|mut cb| {
-            if cb.used() == 0 {
+            if cb.subtree_used() == 0 {
                 cb.reset();
                 cb.set_ident(None);
                 Some(cb)
@@ -766,7 +769,9 @@ fn try_park(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<bool> {
     // re-attaches a pooled one (CreatePortal parity).
     let ctx = portal.borrow_mut().portalContext.take();
     let parked_ctx = ctx.and_then(|mut cb| {
-        if cb.used() == 0 {
+        // Subtree, not self: see the park-empty law above (retention caps
+        // measure the SUBTREE).
+        if cb.subtree_used() == 0 {
             cb.reset();
             cb.set_ident(None);
             Some(cb)
@@ -833,7 +838,9 @@ fn discard_shell(shell: &Portal<'static>) {
         plancache_portal_seams::release_cached_plan::call(cplan);
     }
     let parked_ctx = ctx.and_then(|mut cb| {
-        if cb.used() == 0 {
+        // Subtree, not self: see the park-empty law above (retention caps
+        // measure the SUBTREE).
+        if cb.subtree_used() == 0 {
             cb.reset();
             cb.set_ident(None);
             Some(cb)

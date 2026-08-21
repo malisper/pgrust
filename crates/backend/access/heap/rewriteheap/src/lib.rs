@@ -277,7 +277,9 @@ fn logical_end_heap_rewrite(state: &mut RewriteState<'_>) -> PgResult<()> {
     }
     for src in state.rs_logical_mappings.values() {
         if let Err(e) = src.file.sync_all() {
-            return ereport(ERROR)
+            // C rewriteheap.c:923: data_sync_elevel(ERROR) — PANIC at default
+            // data_sync_retry=off; a failed fsync must never be retried.
+            return ereport(fd::data_sync_elevel(ERROR))
                 .errcode_for_file_access()
                 .errmsg(format!("could not fsync file \"{}\": {e}", src.path.display()))
                 .finish(loc(921, "logical_end_heap_rewrite"));
@@ -678,17 +680,25 @@ pub fn CheckPointLogicalRewriteHeap() -> PgResult<()> {
                 }
             };
             if let Err(e) = f.sync_all() {
-                return ereport(ERROR)
+                // C rewriteheap.c:1238: data_sync_elevel(ERROR) — PANIC at
+                // default data_sync_retry=off. This is the fsyncgate file
+                // shape (written by a backend, fsynced by the checkpoint);
+                // trusting a retry would let a checkpoint complete over
+                // lost mapping data.
+                return ereport(fd::data_sync_elevel(ERROR))
                     .errcode_for_file_access()
                     .errmsg(format!("could not fsync file \"{}\": {e}", path.display()))
                     .finish(loc(1249, "CheckPointLogicalRewriteHeap"));
             }
         }
     }
-    // Persist directory entries to disk (fsync_fname(..., true)).
-    if let Ok(d) = std::fs::File::open(&dir) {
-        let _ = d.sync_all();
-    }
+    // Persist directory entries to disk. C rewriteheap.c:1252:
+    // fsync_fname(PG_LOGICAL_MAPPINGS_DIR, true) — failure raises at
+    // data_sync_elevel(ERROR), i.e. PANIC at default data_sync_retry=off.
+    fd::fsync_fname(
+        dir.to_str().expect("pg_logical/mappings path is not valid UTF-8"),
+        true,
+    )?;
     Ok(())
 }
 

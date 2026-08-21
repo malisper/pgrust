@@ -310,3 +310,42 @@ fn cycle_panic_crash_retires_job_dispatcher_survives() {
     );
     assert_eq!(good.cycles.load(Ordering::SeqCst), 3);
 }
+
+/// Unwind-policy escalation (RULED 2026-08-18): a TEARDOWN panic must still
+/// announce via crashed() — teardown owns the clean exit announce itself,
+/// so a swallowed teardown panic would leave the virtual child unannounced
+/// forever (the shutdown wedge). Only the crashed() hook itself stays
+/// recursion-free.
+#[test]
+fn teardown_panic_still_announces_crash() {
+    struct TdPanicJob {
+        crashed: AtomicU64,
+    }
+    impl BgJob for TdPanicJob {
+        fn name(&self) -> &'static str {
+            "tdpanic"
+        }
+        fn latch(&self) -> Option<&'static Latch> {
+            None
+        }
+        fn crashed(&self) {
+            self.crashed.fetch_add(1, Ordering::SeqCst);
+        }
+        fn teardown(&self) {
+            panic!("synthetic teardown panic");
+        }
+        fn run_cycle(&self, _reason: CycleReason) -> CycleOutcome {
+            CycleOutcome::Exit
+        }
+    }
+    let job = TdPanicJob { crashed: AtomicU64::new(0) };
+    assert!(crate::contain(&job, "teardown", || job.teardown()).is_none());
+    assert_eq!(
+        job.crashed.load(Ordering::SeqCst),
+        1,
+        "teardown panic must crash-announce (shutdown-wedge guard)"
+    );
+    // The announce hook itself must not recurse into another announce.
+    assert!(crate::contain(&job, "crashed", || panic!("announce panic")).is_none());
+    assert_eq!(job.crashed.load(Ordering::SeqCst), 1);
+}

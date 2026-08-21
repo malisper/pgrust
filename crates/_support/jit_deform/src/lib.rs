@@ -121,6 +121,64 @@ pub fn install_code(words: &[u32]) -> Option<CodeBlock> {
     Some(CodeBlock { code, len: words.len() * 4 })
 }
 
+/// Process-shared W^X body for cross-thread code caches (the sqe Tier-B
+/// stitched-body cache): one private anonymous mapping per install. The
+/// pages are writable ONLY inside `install_code_shared`, before any other
+/// thread can observe the mapping; from return to Drop they are immutable
+/// RX with no later writable window — strictly stronger than the arena's
+/// temporal W^X, which is why concurrent execution from many threads is
+/// sound here and not there. Drop unmaps: callers refcount (Arc) and hold
+/// the value across every execution.
+pub struct SharedCode {
+    alloc: imp::SharedAlloc,
+    len: usize,
+}
+
+// SAFETY: after install_code_shared returns, the mapping is immutable RX
+// until Drop; base/len are plain values. Concurrent reads and executions
+// race with no write; munmap runs once, after the last owner is gone.
+unsafe impl Send for SharedCode {}
+unsafe impl Sync for SharedCode {}
+
+impl SharedCode {
+    #[inline]
+    pub fn base(&self) -> *const u8 {
+        self.alloc.base()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Page-rounded bytes actually mapped: the currency of any byte-cap
+    /// accounting over cached bodies (per-body mappings round up to the
+    /// host page — 16KiB on darwin/aarch64).
+    #[inline]
+    pub fn mapped_bytes(&self) -> usize {
+        self.alloc.mapped_bytes()
+    }
+
+    /// The installed instruction bytes (golden-encoding comparisons).
+    #[inline]
+    pub fn bytes(&self) -> &[u8] {
+        // SAFETY: base..base+len is inside our RX mapping, readable and
+        // immutable for self's lifetime.
+        unsafe { core::slice::from_raw_parts(self.base(), self.len) }
+    }
+}
+
+/// None = refused (arch, empty body, mmap failure): callers fail open.
+pub fn install_code_shared(words: &[u32]) -> Option<SharedCode> {
+    let alloc = imp::alloc_code_shared(words)?;
+    Some(SharedCode { alloc, len: words.len() * 4 })
+}
+
 // C JitInstrumentation slice we can attribute (created_functions +
 // generation time; inlining/optimization/emission are LLVM phases that stay
 // zero under copy-and-patch). Lives here so executor state crates can carry
@@ -142,6 +200,18 @@ mod imp {
         }
     }
     pub(crate) fn alloc_code(_words: &[u32]) -> Option<CodeAlloc> {
+        None
+    }
+    pub(crate) struct SharedAlloc;
+    impl SharedAlloc {
+        pub(crate) fn base(&self) -> *const u8 {
+            unreachable!("no shared bodies are installed off-aarch64")
+        }
+        pub(crate) fn mapped_bytes(&self) -> usize {
+            unreachable!("no shared bodies are installed off-aarch64")
+        }
+    }
+    pub(crate) fn alloc_code_shared(_words: &[u32]) -> Option<SharedAlloc> {
         None
     }
     pub(crate) fn install(
@@ -276,6 +346,72 @@ mod imp {
             chunk.live.set(chunk.live.get() + 1);
             Some(CodeAlloc { chunk, off })
         })
+    }
+
+    /// One private mapping per shared body. RW only inside
+    /// alloc_code_shared (the mapping is unshared until we return, so no
+    /// thread can be executing it during the copy window); RX and
+    /// immutable from return to Drop.
+    pub(crate) struct SharedAlloc {
+        base: *mut u8,
+        map_len: usize,
+    }
+
+    impl SharedAlloc {
+        #[inline]
+        pub(crate) fn base(&self) -> *const u8 {
+            self.base
+        }
+
+        #[inline]
+        pub(crate) fn mapped_bytes(&self) -> usize {
+            self.map_len
+        }
+    }
+
+    impl Drop for SharedAlloc {
+        fn drop(&mut self) {
+            // SAFETY: we own the whole mapping; Drop runs once, after the
+            // last owner (the caller's Arc) is gone.
+            unsafe { libc::munmap(self.base.cast(), self.map_len) };
+        }
+    }
+
+    pub(crate) fn alloc_code_shared(words: &[u32]) -> Option<SharedAlloc> {
+        let len = words.len() * 4;
+        if len == 0 {
+            return None;
+        }
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as usize;
+        let map_len = len.div_ceil(page) * page;
+        // SAFETY: fresh private anon mapping; RW only until the mprotect
+        // below, before any other thread can see the address.
+        let base = unsafe {
+            libc::mmap(
+                core::ptr::null_mut(),
+                map_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            return None;
+        }
+        let base: *mut u8 = base.cast();
+        let alloc = SharedAlloc { base, map_len };
+        // SAFETY: len <= map_len; the mapping is ours alone; after the
+        // RX flip it is never writable again (W^X by construction).
+        unsafe {
+            core::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), base, len);
+            let rc = libc::mprotect(base.cast(), map_len, libc::PROT_READ | libc::PROT_EXEC);
+            if rc != 0 {
+                return None; // alloc's Drop unmaps
+            }
+            flush_icache(base, len);
+        }
+        Some(alloc)
     }
 
     unsafe fn flush_icache(start: *mut u8, len: usize) {

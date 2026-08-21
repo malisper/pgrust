@@ -32,11 +32,14 @@ pub fn word_buf_take() -> Vec<u16> {
 }
 
 // pub for proofs/numeric-probe (see word_buf_take).
+// tls-dtor: try_with-safe — NumericImage::drop runs inside OTHER TLS
+// destructors (ToCharScratch et al.); after teardown the buffer just
+// frees instead of pooling (docs/design/sqe/tls-teardown-law.md).
 pub fn word_buf_put(v: Vec<u16>) {
     if v.capacity() == 0 {
         return;
     }
-    WORD_POOL.with(|p| {
+    let _ = WORD_POOL.try_with(|p| {
         let mut p = p.borrow_mut();
         if p.len() < DIGIT_POOL_SLOTS {
             p.push(v);

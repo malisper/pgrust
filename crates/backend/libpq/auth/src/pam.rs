@@ -46,6 +46,8 @@ pub(crate) unsafe extern "C" fn pam_passwd_conv_proc(
     resp: *mut *mut pam_response,
     appdata_ptr: *mut c_void,
 ) -> c_int {
+    // unwind-ok: c-callback — called from inside libpam; must not unwind
+    // across the FFI boundary.
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: libpam passes valid msg/resp pointers for num_msg entries.
         unsafe { conv_body(num_msg, msg, resp, appdata_ptr) }

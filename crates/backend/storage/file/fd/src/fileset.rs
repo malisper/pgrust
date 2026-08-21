@@ -96,7 +96,12 @@ impl FileSet {
 }
 
 impl Drop for FileSet {
+    // tls-dtor: try_with-safe — a TLS-parked SpillSet/FileSet can be dropped
+    // during TLS teardown, where delete_all's dir walk (AllocateDir -> FD.with)
+    // aborts. Skip then; the startup pgsql_tmp reaper removes the leak.
     fn drop(&mut self) {
-        let _ = self.delete_all();
+        if crate::vfd::fd_tls_alive() {
+            let _ = self.delete_all();
+        }
     }
 }

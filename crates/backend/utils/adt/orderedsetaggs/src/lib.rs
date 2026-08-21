@@ -372,10 +372,13 @@ fn null_result(fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     Ok(Datum::null())
 }
 
-// C errmsg uses %g; the values a query can produce render identically under
-// {} except NaN (C prints "nan").
-fn percentile_range_error(p: f64) -> Box<PgError> {
-    let rendered = if p.is_nan() { "nan".to_string() } else { format!("{p}") };
+/// C's exact 22003 (orderedsetaggs.c): errmsg renders the fraction with
+/// PG-snprintf %g ("NaN", not libc's "nan"). One constructor — the sqe
+/// seam raises the same identity for served ordered-set shapes.
+pub fn percentile_range_error(p: f64) -> Box<PgError> {
+    let mut buf = [0u8; 40];
+    let n = ::adt_float::io::format_g_message(p, 6, &mut buf);
+    let rendered = core::str::from_utf8(&buf[..n]).expect("ascii");
     Box::new(
         PgError::error(format!("percentile value {rendered} is not between 0 and 1"))
             .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),

@@ -180,6 +180,20 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_bool(out, f.winagg);
             w!(out, " :location -1}}");
         }
+        NodeTag::T_WindowFuncRunCondition => {
+            let r = node
+                .as_window_func_run_condition()
+                .expect("WindowFuncRunCondition");
+            w!(
+                out,
+                "{{WINDOWFUNCRUNCONDITION :opno {} :inputcollid {} :wfunc_left ",
+                r.opno, r.inputcollid
+            );
+            out_bool(out, r.wfunc_left);
+            w!(out, " :arg ");
+            out_node(out, r.arg)?;
+            w!(out, "}}");
+        }
         NodeTag::T_WindowClause => {
             let c = node.as_window_clause().expect("WindowClause");
             w!(out, "{{WINDOWCLAUSE :name ");

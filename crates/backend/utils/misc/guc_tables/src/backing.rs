@@ -34,13 +34,12 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     (log_executor_stats_cell, bool, log_executor_stats, set_log_executor_stats, false),
     (log_statement_stats_cell, bool, log_statement_stats, set_log_statement_stats, false),
     (row_security_cell, bool, row_security, set_row_security, true),
-    // pgrust.lane_executor (pgrust-only): the lane-v2 push executor's master
-    // gate. This TLS cell IS the state lanev2::enabled() (and nodeagg's
-    // mirror) reads, so the GUC assign path (set_pgrust_lane_executor)
-    // re-evaluates the gate for the session's next query. Boot default ON
-    // (2026-07-14); PGRUST_LANE_V2=0|off at boot flips the startup default
-    // (PGC_S_ENV_VAR, initialize_guc_options_from_environment).
-    (pgrust_lane_executor_cell, bool, pgrust_lane_executor, set_pgrust_lane_executor, true),
+    // pgrust.lane_executor (pgrust-only): TOMBSTONE (P7-2 D-8; boot default
+    // OFF since S-1 2026-08-19). The lane-v2 executor is deleted; the cell
+    // stays so the registered GUC keeps its slot (SET accepted, warn-once,
+    // no effect — no consumer reads it). PGRUST_LANE_V2 no longer seeds it
+    // (accepted and ignored for one release).
+    (pgrust_lane_executor_cell, bool, pgrust_lane_executor, set_pgrust_lane_executor, false),
     // pgrust.condition_cache (pgrust-only): the pgrcolumnar per-granule
     // qual-verdict cache (ClickHouse QueryConditionCache counterpart).
     // Default OFF — the benchmark arms enable it explicitly and record it in
@@ -72,15 +71,28 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     // pgrust.runtime_dop (pgrust-only, M5-0): the product DOP knob, consulted
     // ONLY under engine=runtime (the M5-1 router). 0 = auto (available cores).
     (pgrust_runtime_dop_cell, i32, pgrust_runtime_dop, set_pgrust_runtime_dop, 0),
+    // pgrust.sqe_heap (pgrust-only): heap-on-sqe v1 (heap-face.md). OFF by
+    // default — the v1 safety switch: when off, heap statements never enter
+    // the sqe slot (one TLS read per SELECT). When on, recognized heap
+    // analytic shapes serve through the sqe heap face (R1: serve or typed
+    // ERROR); unrecognized shapes keep routing to the incumbent engines
+    // until their rung lands.
+    (pgrust_sqe_heap_cell, bool, pgrust_sqe_heap, set_pgrust_sqe_heap, false),
+    // pgrust.sqe_threads (pgrust-only): the sqe server engine's worker width
+    // (SqeConfig.threads at the seam's engine build). 0 = auto (available
+    // cores); N caps at N. Default 0 = auto per Michael's ruling (auto,
+    // 2026-08-18; a width budget governor is the eventual fairness
+    // mechanism — see seam.rs::engine_threads). PGRUST_SQE_THREADS seeds
+    // the startup default (PGC_S_ENV_VAR).
+    (pgrust_sqe_threads_cell, i32, pgrust_sqe_threads, set_pgrust_sqe_threads, 0),
     // pgrust.runtime_*_pool / lane_parallel_pool / gather_fair_stride
     // (pgrust-only, env-to-guc train): the per-arm DEV/BENCH force-override
     // layer BENEATH pgrust.parallel_engine. Registered (env-to-guc) so they
     // are discoverable/tunable in pg_settings; each defaults 0 = auto (inherit
-    // pgrust.runtime_dop under engine=runtime). The arm readers
-    // (runtime_pool.rs / lane_pool.rs / gather_fair.rs) resolve them through
-    // the get_config_option string seam, which now returns THIS registered
-    // cell's value — behavior-neutral at the default 0. PGC_USERSET session
-    // scope: SET applies to the setting session's next engagement only.
+    // pgrust.runtime_dop under engine=runtime). TOMBSTONED P7-2 D-8 with the
+    // per-arm readers (runtime_pool.rs / lane_pool.rs — deleted): the cells
+    // stay so the registered GUCs keep their slots (SET accepted, warn-once,
+    // no effect).
     (pgrust_runtime_scan_pool_cell, i32, pgrust_runtime_scan_pool, set_pgrust_runtime_scan_pool, 0),
     (pgrust_runtime_agg_pool_cell, i32, pgrust_runtime_agg_pool, set_pgrust_runtime_agg_pool, 0),
     (pgrust_runtime_distinct_pool_cell, i32, pgrust_runtime_distinct_pool, set_pgrust_runtime_distinct_pool, 0),
@@ -177,8 +189,8 @@ bool_var!(B_data_checksums, data_checksums, set_data_checksums, false);
 // defect 3): runtime::runtime_enabled() IS a read of this cell, so the pool
 // spawn gate (launch_backend::rtpool::start_if_enabled) and every executor arm
 // read the same value; `pgrust.runtime=off` fully disables the engine (no pool
-// -> runtime::global() None + runtime_pool::runtime_pool_live() false -> the
-// M5-3 probe stays inert and every arm stays serial).
+// -> runtime::global() None -> every arm stays serial). (P7-2 D-8: the M5-3
+// probe and its runtime_pool liveness flag are deleted.)
 bool_var!(B_pgrust_runtime, pgrust_runtime, set_pgrust_runtime, true);
 
 // pgrust.mem_autotune (pgrust-only, env-to-guc train): gates the machine-scaled

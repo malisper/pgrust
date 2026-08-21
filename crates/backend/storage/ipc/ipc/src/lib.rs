@@ -131,6 +131,7 @@ pub fn run_deferred_exit_callbacks(mut code: i32) -> i32 {
         if !EXIT_CALLBACKS_DEFERRED.with(|c| c.replace(false)) {
             return code;
         }
+        // unwind-ok: log-then-die
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             drain_exit_callbacks(code)
         }));
@@ -200,10 +201,14 @@ fn drain_exit_callbacks(code: i32) {
 // A panic escaping an exit callback is announced SIGABRT (cluster-wide
 // crash-restart); degrade to WARNING and keep draining callbacks.
 fn run_callback_guarded(what: &str, f: impl FnOnce()) {
+    // unwind-ok: log-then-die
     let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) else {
         return;
     };
-    if payload.is::<ProcExitThread>() || payload.is::<types_error::PanicExitThread>() {
+    if payload.is::<ProcExitThread>()
+        || payload.is::<types_error::PanicExitThread>()
+        || payload.is::<KilledBySignal>()
+    {
         std::panic::resume_unwind(payload);
     }
     let msg = payload
@@ -213,6 +218,7 @@ fn run_callback_guarded(what: &str, f: impl FnOnce()) {
         .or_else(|| payload.downcast_ref::<PgError>().map(|e| e.message().to_string()))
         .unwrap_or_else(|| "unknown panic".to_string());
     let what = what.to_string();
+    // unwind-ok: log-then-die
     let _ = std::panic::catch_unwind(move || {
         let _ = elog::elog(
             types_error::WARNING,

@@ -445,6 +445,7 @@ pub fn vacuum<'mcx>(
     init_small::globals::SetVacuumCostBalance(0);
     // catch_unwind = C's PG_FINALLY: panics become ERRORs at the tcop
     // boundary and the session survives, so in_vacuum must reset here too.
+    // unwind-ok: log-then-die
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> PgResult<()> {
         for vrel in vacrels.iter() {
             if params.options & VACOPT_VACUUM != 0 {

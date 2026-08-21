@@ -58,6 +58,7 @@ pub use vfd::{
     io_direct_flags, max_files_per_process, max_safe_fds, set_io_direct_flags, set_max_safe_fds,
     AcquireExternalFD, BasicOpenFile, BasicOpenFilePerm, InitFileAccess, InitTemporaryFileAccess,
     MakePGDirectory, ReattachRetainedFileAccess, ReleaseExternalFD, ReserveExternalFD,
+    TempFileAccessReady,
 };
 
 pub fn init_seams() {

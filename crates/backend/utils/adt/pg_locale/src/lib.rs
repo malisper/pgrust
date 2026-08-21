@@ -696,6 +696,28 @@ fn collation_is_deterministic(collid: Oid) -> PgResult<bool> {
     Ok(pg_newlocale_from_collation(collid)?.deterministic)
 }
 
+// M4-S8 (the engine-cut substrate finding): collate_is_c through the one
+// locale resolve. DEFAULT before init_database_collation answers FALSE
+// (never a panic, never an error) — callers keep their conservative
+// classification; postinit stamps the default locale before any relation
+// open can reach a classifier.
+fn collation_collate_is_c(collid: Oid) -> PgResult<bool> {
+    if collid == DEFAULT_COLLATION_OID && DEFAULT_LOCALE.with(Cell::get).is_none() {
+        return Ok(false);
+    }
+    Ok(pg_newlocale_from_collation(collid)?.collate_is_c)
+}
+
+// ctype_is_c through the same resolve (the lx4 rx-key admission's pin —
+// see the seam declaration): DEFAULT before init_database_collation
+// answers FALSE, the collate_is_c law verbatim.
+fn collation_ctype_is_c(collid: Oid) -> PgResult<bool> {
+    if collid == DEFAULT_COLLATION_OID && DEFAULT_LOCALE.with(Cell::get).is_none() {
+        return Ok(false);
+    }
+    Ok(pg_newlocale_from_collation(collid)?.ctype_is_c)
+}
+
 // hashtext/hashbpchar nondeterministic leg (hashfunc.c/varchar.c): hash the
 // pg_strnxfrm sort key INCLUDING its NUL (C hashes bsize+1 bytes).
 fn varstr_nondeterministic_hash(
@@ -765,6 +787,8 @@ pub fn icu_unicode_version_str() -> Option<&'static str> {
 pub fn init_seams() {
     pg_locale_seams::varstr_cmp_locale::set(varstr_cmp_locale);
     pg_locale_seams::collation_is_deterministic::set(collation_is_deterministic);
+    pg_locale_seams::collation_collate_is_c::set(collation_collate_is_c);
+    pg_locale_seams::collation_ctype_is_c::set(collation_ctype_is_c);
     pg_locale_seams::pg_perm_setlocale::set(setup::pg_perm_setlocale);
     pg_locale_seams::set_database_ctype_is_c::set(setup::set_database_ctype_is_c);
     pg_locale_seams::init_database_collation::set(init_database_collation);

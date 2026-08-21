@@ -1417,6 +1417,7 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
     let prev_dest = elog::config::where_to_send_output();
     elog::config::set_where_to_send_output(types_dest::CommandDest::Remote);
 
+    // unwind-ok: worker-containment
     let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         parallel_worker_body(&shared, worker_number)
     }));
@@ -1432,7 +1433,8 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
         // leader we are gone and keep unwinding.
         Err(payload)
             if payload.is::<ipc::ProcExitThread>()
-                || payload.is::<types_error::PanicExitThread>() =>
+                || payload.is::<types_error::PanicExitThread>()
+                || payload.is::<ipc::KilledBySignal>() =>
         {
             MY_PROGRESS_SENDER.with(|c| *c.borrow_mut() = None);
             drop(sender);
@@ -1482,7 +1484,20 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
     // not corrupt the already-sent outcome.
     if outcome.is_ok() {
         for f in post_task_park_hooks() {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&shared)));
+            // unwind-ok: worker-containment
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                f(&shared)
+            })) {
+                // Exit-committed unwinds (proc_exit / PANIC / crash-
+                // injected SIGKILL) keep unwinding — a park hook must not
+                // leave a dying thread alive in the pool.
+                if payload.is::<ipc::ProcExitThread>()
+                    || payload.is::<types_error::PanicExitThread>()
+                    || payload.is::<ipc::KilledBySignal>()
+                {
+                    std::panic::resume_unwind(payload);
+                }
+            }
         }
     }
     outcome

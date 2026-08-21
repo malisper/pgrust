@@ -35,15 +35,16 @@ mod execasync;
 mod execcurrent;
 mod execmain;
 mod execparallel;
-mod lanev2;
 mod nodegather;
 mod nodegathermerge;
 mod nodeprojectset;
 mod noderesult;
 mod nodesubplan;
+pub mod p8census;
 mod procnode;
 mod querydesc;
 mod slease;
+mod sqeshell;
 mod typefromtl;
 
 #[cfg(test)]
@@ -58,23 +59,12 @@ pub use execmain::{
 pub use execparallel::{parallel_query_main, register_parallel_query_main};
 // Serial-lease v2 boot surface (GL-SLEASE-2): seams_init installs the armed
 // wait-seam wrappers + the ProcessInterrupts admission tap through these.
-pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE};
+pub use sqeshell::stat::{PGRUST_FOID_RANGE, SQE_BUILTINS};
 pub use slease::{
     admission_tap as serial_lease_admission_tap, armed as serial_lease_armed,
     donation_enabled as serial_lease_donation_enabled, wait_hook_end as serial_lease_wait_hook_end,
     wait_hook_start as serial_lease_wait_hook_start,
 };
-// WS-CB wave-10 (cursors inc-2 contract §8; worklog notes/se-wave10-cb.md
-// EX-CB-1): the CA-facing portal seam — pquery must not link lanev2
-// internals. Knob face for store arming (§7.3), the §6 assert-arming note,
-// and the §3.3 tick face; coverage-export precedent above.
-pub use lanev2::{
-    ctas_funnel_engagements, cursor_store_armed_note, cursor_store_fill_enabled,
-    cursor_store_fill_set_for_tests, funnel_engagements,
-};
-// GL-STMTTASK-1: the engagement counters (tests/diagnostics; the arming
-// face lives in postgres_seams::stmt_task_arm — the seam-boundary crate).
-pub use lanev2::stmt_task_engagements;
 pub use nodegather::GatherState;
 pub use nodegathermerge::GatherMergeState;
 pub use nodeprojectset::ProjectSetState;
@@ -82,7 +72,7 @@ pub use noderesult::ResultState;
 pub use procnode::{
     exec_end_node, exec_init_node, exec_proc_node, exec_shutdown_node, PlanStateBase, PlanStateNode,
 };
-pub use querydesc::{registry_len, with_qd, ExecData, ExecutorHandle, QueryDescData};
+pub use querydesc::{registry_len, slot_census, with_qd, ExecData, ExecutorHandle, QueryDescData};
 pub use typefromtl::{exec_clean_type_from_tl, exec_type_from_tl, expr_collation, expr_typmod};
 
 pub fn init_seams() {
@@ -110,6 +100,7 @@ pub fn init_seams() {
         querydesc::query_desc_runtime_ea_pipeline_seam,
     );
     execmain_seams::query_desc_engine_events::set(querydesc::query_desc_engine_events_seam);
+    execmain_seams::query_desc_sqe_verdict::set(querydesc::query_desc_sqe_verdict_seam);
     execmain_seams::query_desc_foreign_explain::set(querydesc::query_desc_foreign_explain_seam);
     execmain_seams::query_desc_prune_result::set(querydesc::query_desc_prune_result_seam);
     execmain_seams::query_desc_rti_unpruned::set(querydesc::query_desc_rti_unpruned_seam);
@@ -148,19 +139,27 @@ pub fn init_seams() {
         execcurrent::cursor_plan_current_of_eligible_seam,
     );
     execmain_seams::cursor_capture_current::set(execcurrent::cursor_capture_current_seam);
+    // [sqe-cursors] The portal store-arming faces, re-homed onto the sqe
+    // spool posture (p72 D-5 deleted the lanev2 installs with the lane
+    // body; the uninstalled seam read as store_armed=false and every
+    // SCROLL/implicit-SCROLL portal refused resource/scrollable-cursor).
+    // pquery must not link execmain internals — the seam stays the face.
+    execmain_seams::cursor_store_fill_enabled::set(
+        sqeshell::seam::cursor_store_fill_enabled_seam,
+    );
+    execmain_seams::cursor_store_armed_note::set(sqeshell::seam::cursor_store_armed_note_seam);
     // --- end WS-CA wave-10 ---
-    // --- SEAM-WIRING (SE10-GATES item 1): the EX-CB-1 faces, seam-installed
-    // for the portal layer (production pquery links execmain_seams, not
-    // execmain) — single knob cell, §6 assert arming, §3.3 tick face.
-    execmain_seams::cursor_store_fill_enabled::set(lanev2::cursor_store_fill_enabled);
-    execmain_seams::cursor_store_armed_note::set(lanev2::cursor_store_armed_note);
-    // R1a: cursor_fill_tid_capture_refused (reason 41) retired with arm B.
-    // --- end SEAM-WIRING ---
     // --- SE-R41 (reason-41 retirement): the §3.1 capture-batchable probe ---
     execmain_seams::cursor_plan_capture_batch_fill::set(
         execcurrent::cursor_plan_capture_batch_fill_seam,
     );
     // --- end SE-R41 ---
+    // --- sqe C8: the statement-plane memo's #511 invalidation handlers
+    // (engine_plan_dropped/engine_plan_cache_reset) + the engine
+    // registry's relcache flush face into pgrc2_am's invalidation seam.
+    sqeshell::memo::init_seams();
+    ::pgrc2_am::inval::set_engine_flush_hook(sqeshell::seam::flush_engines_for_relid);
+    // --- end sqe C8 ---
     execparallel::register_parallel_query_main();
     {
         guc_tables::session_guc_bool!(

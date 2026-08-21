@@ -9,9 +9,6 @@ pub mod backing;
 pub mod consts;
 pub mod gather_fair;
 pub mod hooks;
-pub mod lane_pool;
-pub mod parallel_engine;
-pub mod runtime_pool;
 pub mod option_sets;
 pub mod session;
 mod slots;
@@ -223,6 +220,14 @@ fn install_guc_tables_owned_vars() {
     vars::pgrust_runtime_dop.install(GucVarAccessors {
         get: backing::pgrust_runtime_dop,
         set: backing::set_pgrust_runtime_dop,
+    });
+    vars::pgrust_sqe_heap.install(GucVarAccessors {
+        get: backing::pgrust_sqe_heap,
+        set: backing::set_pgrust_sqe_heap,
+    });
+    vars::pgrust_sqe_threads.install(GucVarAccessors {
+        get: backing::pgrust_sqe_threads,
+        set: backing::set_pgrust_sqe_threads,
     });
     vars::pgrust_runtime.install(GucVarAccessors {
         get: backing::pgrust_runtime,

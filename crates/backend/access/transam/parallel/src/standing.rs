@@ -641,10 +641,15 @@ pub enum GangExit {
 }
 
 /// True when an unwind payload is EXIT-COMMITTED (FATAL's ProcExitThread /
-/// PanicExitThread): drivers and containment layers must rethrow these —
-/// the thread is dying and its proc_exit callback chain owns cleanup.
+/// PanicExitThread / crash-injected KilledBySignal): drivers and containment
+/// layers must rethrow these — the thread is dying and its proc_exit
+/// callback chain (or the postmaster crash choreography) owns cleanup.
+/// KilledBySignal matches main_loop.rs's boundary: demoting it makes a
+/// SIGKILL'd thread "recover" and skips the crash cascade.
 pub fn is_exit_unwind(payload: &(dyn std::any::Any + Send)) -> bool {
-    payload.is::<ipc::ProcExitThread>() || payload.is::<types_error::PanicExitThread>()
+    payload.is::<ipc::ProcExitThread>()
+        || payload.is::<types_error::PanicExitThread>()
+        || payload.is::<ipc::KilledBySignal>()
 }
 
 // ---------------------------------------------------------------------------
@@ -840,6 +845,7 @@ fn warm_connect(entry: &Arc<StandingEngagement>) {
         return;
     }
     super::gtrace("g.warmconn.begin");
+    // unwind-ok: log-then-die
     let connected = catch_unwind(AssertUnwindSafe(|| {
         bgworker::BackgroundWorkerInitializeConnectionByOid(
             entry.shared.database_id,
@@ -971,6 +977,7 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
             return;
         }
         super::gtrace("g.conn.begin");
+        // unwind-ok: log-then-die
         let connected = catch_unwind(AssertUnwindSafe(|| {
             bgworker::BackgroundWorkerInitializeConnectionByOid(
                 shared.database_id,
@@ -1115,6 +1122,7 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
             // lock-group leave; swallowing it would leave a terminated
             // worker serving future engagements. DetachGuard already
             // covers the leader's join on this path.
+            // unwind-ok: worker-containment
             let r = catch_unwind(AssertUnwindSafe(|| (driver.drive)(shared)));
             // POOL-QOS: settle a granted serve-yield AFTER the driver has
             // fully returned (teardown done — no arena refs remain on this
@@ -1127,11 +1135,18 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
                 entry.yield_detach();
             }
             if let Err(payload) = r {
-                if payload.is::<ipc::ProcExitThread>()
-                    || payload.is::<types_error::PanicExitThread>()
-                {
+                if is_exit_unwind(&*payload) {
                     resume_unwind(payload);
                 }
+                // Generic panic swallowed by design (the driver recorded
+                // its own failure into the payload slot) — but never
+                // silently: leave a trace for the sliver-panic case the
+                // driver's inner catch cannot see.
+                let _ = elog::elog(
+                    WARNING,
+                    "standing executor drive panicked outside the driver's own containment"
+                        .to_string(),
+                );
             }
             lmgr_proc::LeaveLockGroup();
         }
@@ -1528,6 +1543,7 @@ pub fn pool_exit_rejoin_procarray() {
     if init_small::globals::MyDatabaseId() == InvalidOid {
         return;
     }
+    // unwind-ok: log-then-die
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = procarray_seams::proc_array_add::call(init_small::globals::MyProcNumber());
     }));

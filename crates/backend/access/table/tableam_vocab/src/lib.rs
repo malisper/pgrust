@@ -227,6 +227,10 @@ pub const HEAP_TABLE_AM_OID: Oid = 2;
 pub enum TableAm {
     Heap,
     Pgrcolumnar,
+    /// The pgrcolumnar2 sibling AM (lanev3 M3; O-M3-2 ruling: sibling name,
+    /// no format-routing knob; identified by pg_am.amname = "pgrcolumnar2"
+    /// at relcache build, same closed-AM mechanism as Pgrcolumnar).
+    Pgrcolumnar2,
 }
 
 impl TableAm {
@@ -242,6 +246,8 @@ impl TableAm {
                     Some(TableAm::Heap)
                 } else if relam != 0 && is_registered_pgrcolumnar_am(relam) {
                     Some(TableAm::Pgrcolumnar)
+                } else if relam != 0 && is_registered_pgrcolumnar2_am(relam) {
+                    Some(TableAm::Pgrcolumnar2)
                 } else {
                     None
                 }
@@ -326,6 +332,37 @@ pub fn is_pgrcolumnar_am_oid(relam: Oid) -> bool {
 
 pub fn register_pgrcolumnar_table_am(relam: Oid) {
     PGRCOLUMNAR_AMS.with(|v| {
+        let mut v = v.borrow_mut();
+        if !v.contains(&relam) {
+            v.push(relam);
+        }
+    });
+}
+
+thread_local! {
+    // pg_am oids whose amname is "pgrcolumnar2" (lanev3 M3-H; O-M3-2 ruling:
+    // sibling AM name for the pgrcolumnar2 engine during coexistence, one
+    // DDL-minted pg_am row, count-ledger pinned; same closed-AM name-probe
+    // registration as PGRCOLUMNAR_AMS above — handlers are never invoked).
+    // Same cold/second-arm shape as the pgrcolumnar registry: the heap fast
+    // arm of TableAm::of is untouched (se-entrycost pairs unmoved).
+    static PGRCOLUMNAR2_AMS: std::cell::RefCell<Vec<Oid>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cold]
+fn is_registered_pgrcolumnar2_am(relam: Oid) -> bool {
+    PGRCOLUMNAR2_AMS.with(|v| v.borrow().contains(&relam))
+}
+
+/// Registry probe by relam oid (vacuum/DDL gates that hold a RelationData,
+/// not a Relation) — the pgrcolumnar2 sibling of `is_pgrcolumnar_am_oid`.
+pub fn is_pgrcolumnar2_am_oid(relam: Oid) -> bool {
+    relam != 0 && is_registered_pgrcolumnar2_am(relam)
+}
+
+pub fn register_pgrcolumnar2_table_am(relam: Oid) {
+    PGRCOLUMNAR2_AMS.with(|v| {
         let mut v = v.borrow_mut();
         if !v.contains(&relam) {
             v.push(relam);

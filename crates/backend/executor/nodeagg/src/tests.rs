@@ -2791,49 +2791,6 @@ fn sorted_group_by_compressed_text_key_detoasts_in_boundary_eq() {
     assert_eq!(counts, vec![2, 1]);
 }
 
-// ---------------------------------------------------------------------------
-// sorted-arm lane: SortedEmitAcc capture round trip (byval + varlena deep
-// copy, 8-aligned arena, end-resolved fixups).
-// ---------------------------------------------------------------------------
-
-#[test]
-fn sorted_emit_acc_round_trip() {
-    use crate::sortedsink::SortedEmitAcc;
-    // Columns: [int8 byval, varlena text, null varlena].
-    let spec: crate::sortedsink::SortedByrefSpec = vec![0, -1, -1];
-    let mut acc = SortedEmitAcc::new(3);
-    // A 4B-header varlena image: total size 9 (4 header + 5 payload).
-    let mut img = vec![0u8; 9];
-    let hdr = (9u32) << 2; // 4B uncompressed varsize encoding
-    img[..4].copy_from_slice(&hdr.to_le_bytes());
-    img[4..].copy_from_slice(b"hello");
-    let values = [
-        Datum::from_i64(42),
-        Datum::from_usize(img.as_ptr() as usize),
-        Datum::null(),
-    ];
-    let nulls = [false, false, true];
-    // SAFETY: img is a live 4B-U varlena image for the duration of the push.
-    unsafe { acc.push_row(&values, &nulls, &spec).unwrap() };
-    unsafe { acc.push_row(&values, &nulls, &spec).unwrap() };
-    assert!(!acc.is_empty());
-    let seg = acc.finish();
-    drop(img); // the seg must be self-contained
-    assert_eq!(seg.nrows, 2);
-    assert_eq!(seg.natts, 3);
-    for row in 0..2 {
-        let base = row * 3;
-        assert_eq!(seg.values[base].as_i64(), 42);
-        assert!(!seg.nulls[base]);
-        assert!(seg.nulls[base + 2]);
-        let p = seg.values[base + 1].as_usize() as *const u8;
-        assert_eq!(p as usize % 8, 0, "arena images are 8-aligned");
-        // SAFETY: points into seg.arena (self-contained copy).
-        let got = unsafe { core::slice::from_raw_parts(p, 9) };
-        assert_eq!(&got[4..], b"hello");
-    }
-}
-
 // q18fin r3 red/green unit — byref merge under variable hash IVs (the t26
 // integration ledger's "q18fin-t26-r2 re-earn verdict" defect). Participants
 // (leader partial = worker -1, workers 0 and 1) build their partial tables
@@ -2943,41 +2900,6 @@ fn byref_merge_handed_tables_share_leader_bucket_mapping_under_variable_iv() {
         keys.len(),
         "one merged group per key — duplicate finalize groups otherwise (write_parallel unique-index class)",
     );
-}
-
-/// SE-GROUPONLY knob (night/subquery-admission): `PGRUST_LANE_V2_GROUPONLY`
-/// is DEFAULT ON since t36 flips2 (GL-GROUPONLY-1 FLIP-RECOMMENDED) and
-/// only the exact kill spellings `0`/`off` disarm it — the flipped-kill
-/// idiom (a typo'd kill leaves the measured-winning default in place).
-/// Pins the flipped-default posture + the kill's exact spellings.
-#[test]
-fn grouponly_knob_is_default_on_with_kill() {
-    assert!(crate::grouponly_spelling_on(None), "unset must be ON (t36 flipped default)");
-    assert!(!crate::grouponly_spelling_on(Some("0")), "kill spelling");
-    assert!(!crate::grouponly_spelling_on(Some("off")), "kill spelling");
-    assert!(crate::grouponly_spelling_on(Some("")), "non-kill spellings stay ON");
-    assert!(crate::grouponly_spelling_on(Some("true")), "non-kill spellings stay ON");
-    assert!(
-        crate::grouponly_spelling_on(Some("OFF")),
-        "kill is case-sensitive, like the arm kills"
-    );
-    assert!(crate::grouponly_spelling_on(Some("1")));
-    assert!(crate::grouponly_spelling_on(Some("on")));
-}
-
-/// SE-GROUPONLY: the vacuous fold plan is structurally empty — no
-/// transitions, no lane columns, no guards, unguarded — so every grouped
-/// fold over it is a no-op by construction and the dangling pergroup
-/// sentinels the zero-trans probes hand back are never dereferenced.
-#[test]
-fn grouponly_empty_plan_is_vacuous() {
-    let ctx = ::mcx::MemoryContext::new("grouponly-test");
-    let plan = ::lanefold::empty_plan(ctx.mcx());
-    assert!(plan.trans.is_empty());
-    assert!(plan.cols.is_empty());
-    assert!(plan.guards.is_empty() && plan.vguards.is_empty() && plan.uguards.is_empty());
-    assert!(plan.filters.is_empty() && plan.resid.is_empty());
-    assert!(!plan.guarded);
 }
 
 // find_cols_walker (nodeAgg.c) parity: the walker special-cases exactly Var

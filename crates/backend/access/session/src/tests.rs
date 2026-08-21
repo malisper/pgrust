@@ -994,7 +994,53 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      test's own thread, compiled out of every product build; counted
     //      only because the census counter is textual. Not a session_sources
     //      row.
-    assert_eq!(count_tree(crates), 576, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 572, re-pinned (debt cleared) at the sqe P2-1 AM-bridge port for the
+    //      P1-0/P1-1 landings that arrived while this tooth wasn't run:
+    //   +1 access/pgrcolumnar2/pgrc2_meta/src/batch.rs — SKIP_LAST_HLL:
+    //      seeded-divergence tooth arm flag inside a #[cfg(test)] mod —
+    //      never in a product binary; counted because the census counter is
+    //      textual (the lanev4 564 stanza's class, carried with the P1-0
+    //      format port).
+    //   +6 executor/sqe (P1-1 engine): engine.rs (face-build permit +
+    //      per-thread phase scratch) and the per-worker persistent scratch
+    //      arenas of the stencil bodies (fused_filter_agg, code_agg,
+    //      hash_group, two_level, distinct — constitution law 11:
+    //      truncate-refill scratch owned by the pool worker thread for its
+    //      lifetime). Engine-pool/worker machinery with no session identity
+    //      an envelope could capture or restore; backend threads touching
+    //      them hold the statement for the duration (the Waiter
+    //      CURRENT-slot class). Non-session TLS, not session_sources rows.
+    // 573, re-pinned at the sqe P2-1 AM-bridge port (pgrc2_am, from the
+    //      lanev4 M4-S3 landing, v3-verbatim on the substance):
+    //   +1 access/pgrcolumnar2/pgrc2_am/src/session.rs — the pgrc2 AM's
+    //      backend-thread writer registry + pending dir ops + hook latches
+    //      + election-candidate/footer-fact caches (ONE co-located block by
+    //      the crate's own census law). Transaction-owned on the substance:
+    //      purged UNCONDITIONALLY at top-level commit AND abort (the M3-D
+    //      law), so it is empty at every point a session could migrate; the
+    //      caches are lazily rebuilt per thread. The "abandoned by
+    //      construction" class — no envelope capture/restore applies.
+    // 574, re-pinned at the sqe P2-1 tableam integration:
+    //   +1 access/table/tableam_vocab/src/lib.rs — PGRCOLUMNAR2_AMS: the
+    //      pgrcolumnar2 amname-probe oid registry, the EXACT shape and
+    //      argument as the two sibling registries already in the base count
+    //      in this same file (HEAP_HANDLER_AMS, PGRCOLUMNAR_AMS): immutable
+    //      pg_am facts cached per thread, lazily re-registered by relcache
+    //      at entry build; no session identity, safe to lose on migration.
+    // 574 -> 573 (p72 D-4): the m5_suppress cost_shadow LAST_SAMPLE slot
+    // (row 61) deleted with the module (planner m5_suppress.rs excised) —
+    // a deletion-explained movement, not an unclassified source.
+    // 573 -> 559 (p72 D-5): the 14 lanev2-module worker/engagement TLS
+    // sites (router, runtime_{agg,agg_sorted,distinct,hashjoin,nlindex,
+    // passthrough,plaindistinct,scan,sort} incl. row 63 WORKER_NLEXEC,
+    // stats, stmt_task x3) deleted with lanev2.rs + lanev2/ — all
+    // deletion-explained movements, not unclassified sources.
+    // MERGE RECONCILIATION (sqe -> main, 2026-08-21): mainline's additions
+    // (576 lineage) and the sqe campaign's D-4/D-5 deletions (559 lineage)
+    // meet here; the merged tree counts 573 by direct census (this test's
+    // own predicate replicated over crates/). Every delta above is
+    // classified in its own lineage block.
+    assert_eq!(count_tree(crates), 573, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

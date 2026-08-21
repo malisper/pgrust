@@ -701,6 +701,7 @@ sim_inherited! {
 /// half must have completed on the booting thread). Returns the session's
 /// exit code; dumps this thread's artifacts on a clean ProcExitThread.
 fn run_session_on_this_thread(transcript_env: &str, oplog_env: &str) -> i32 {
+    // unwind-ok: log-then-die
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> core::convert::Infallible {
             let err = match crate::stdio_wire::stdio_wire_session_half() {
@@ -1386,6 +1387,7 @@ fn run_second_session_inner() -> ::types_error::PgResult<core::convert::Infallib
 }
 
 fn run_second_session(spec: &SessionSpec) -> i32 {
+    // unwind-ok: log-then-die
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> core::convert::Infallible {
             let err = match run_second_session_inner() {
@@ -1404,6 +1406,7 @@ fn run_second_session(spec: &SessionSpec) -> i32 {
         Some(p) => {
             // Under-postmaster-style thread: the exit-callback drain is
             // deferred to the thread top — run_child_task's shape.
+            // unwind-ok: log-then-die
             let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 ipc::run_deferred_exit_callbacks(p.code)
             }))
@@ -1499,6 +1502,7 @@ fn second_session_thread(
             if !std::env::var("PGRUST_SIM_FAULT_PLAN").is_ok() {
                 return second_session_body(argv, datadir, snap, adopt, spec);
             }
+            // unwind-ok: log-then-die
             let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 second_session_body(argv, datadir, snap, adopt, spec)
             }));
@@ -1986,6 +1990,7 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
                 postmaster_seams::rtgang_procs_wanted::call(),
             );
         }
+        // unwind-ok: log-then-die
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> core::convert::Infallible {
                 let err = match (|| {

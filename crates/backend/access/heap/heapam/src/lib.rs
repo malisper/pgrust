@@ -1155,6 +1155,87 @@ pub fn heap_adopt_midpage_batch(scan: &mut HeapScanDescData<'_>) -> Option<(u32,
     Some((start, scan.rs_ntuples))
 }
 
+/// Granule-grain fill support (sqe heap face, heap-face.md Q8: reuse the
+/// pagemode visibility verbatim, build the fill ABOVE the SoA batch ABI):
+/// visit the STAGED page's visible tuples (post `heap_getnextpagebatch`),
+/// in `rs_vistuples` order, handing each to `f`. Every image aliases the
+/// page pinned by `rs_cbuf` and is valid for the callback's duration only
+/// — callers copy what outlives the call (detoast/copy-at-fill law).
+pub fn heap_page_visible_tuples<'mcx>(
+    scan: &HeapScanDescData<'mcx>,
+    mut f: impl FnMut(u32, &HeapTupleData<'_>),
+) {
+    let n = scan.rs_ntuples;
+    debug_assert!(!scan.rs_cpage.is_null() || n == 0);
+    if n == 0 {
+        return;
+    }
+    let relid = scan.rs_base.rs_rd.rd_id;
+    // SAFETY: as heap_batch_deform_soa — pinned page, offsets from
+    // page_collect_tuples under the per-page bound.
+    let page: PageRef<'_> = unsafe { PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage)) };
+    for i in 0..n {
+        let (ptr, len, lineoff) = unsafe {
+            let lineoff = *scan.rs_vistuples.get_unchecked(i as usize);
+            let lpp = page.item_id_unchecked(lineoff);
+            debug_assert!(lpp.is_normal());
+            let (ptr, len) = page.item_raw_unchecked(lpp);
+            (ptr, len, lineoff)
+        };
+        // SAFETY: image on the page pinned by rs_cbuf for this call.
+        let tuple = unsafe {
+            HeapTupleData::from_raw_parts(
+                ptr,
+                len,
+                ItemPointerData::new(scan.rs_cblock, lineoff),
+                relid,
+            )
+        };
+        f(i, &tuple);
+    }
+}
+
+/// Detached page image for the sqe heap pack fill (the heap-face perf
+/// rung): copy the STAGED page (post [`heap_getnextpagebatch`]) and its
+/// collected visible offsets out of the pin, so deform runs off the
+/// backend thread with no pin/bufmgr traffic. `page` is one BLCKSZ
+/// image, MAXALIGN-aligned by the caller (in-page tuple offsets are
+/// MAXALIGNed, so alignment transfers); returns rows copied.
+pub fn heap_copy_staged_page(
+    scan: &HeapScanDescData<'_>,
+    page: &mut [u8],
+    vis: &mut [OffsetNumber],
+) -> u32 {
+    let n = scan.rs_ntuples;
+    debug_assert!(!scan.rs_cpage.is_null() || n == 0);
+    if n == 0 {
+        return 0;
+    }
+    assert_eq!(page.len(), ::types_core::BLCKSZ);
+    // SAFETY: rs_cpage is the page image pinned by rs_cbuf (BLCKSZ
+    // readable for the pin's duration); dst is a distinct caller buffer.
+    unsafe { core::ptr::copy_nonoverlapping(scan.rs_cpage, page.as_mut_ptr(), page.len()) };
+    vis[..n as usize].copy_from_slice(&scan.rs_vistuples[..n as usize]);
+    n
+}
+
+/// Extra pin + address + visible offsets of the STAGED page; the caller
+/// owns the pin and releases it on its own thread (sqe heap scan rung).
+pub fn heap_pin_staged_page(
+    scan: &HeapScanDescData<'_>,
+    vis: &mut [OffsetNumber],
+) -> (*const u8, BufferPin) {
+    let n = scan.rs_ntuples;
+    debug_assert!(n > 0 && !scan.rs_cpage.is_null());
+    let pin = scan
+        .rs_cbuf
+        .as_ref()
+        .expect("staged page is pinned")
+        .incr_clone();
+    vis[..n as usize].copy_from_slice(&scan.rs_vistuples[..n as usize]);
+    (scan.rs_cpage.cast_const(), pin)
+}
+
 pub fn heap_batch_deform_soa<'mcx>(
     scan: &mut HeapScanDescData<'mcx>,
     plan: &exectuples::SoaDeformPlan<'_>,

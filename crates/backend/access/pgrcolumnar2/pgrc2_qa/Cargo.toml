@@ -1,0 +1,28 @@
+# pgrc2_qa — the M3-K storage QA battery (tests-only crate).
+#
+# Composes the MERGED product crates (format/codec/write/read) into the
+# adversarial suites: SimVfs crash batteries, kill -9 ladders, the #254
+# clog-fence regression, and the regrown read-path fuzzer. No product code
+# ships from here; the lib is rig scaffolding for the tests + the crash
+# harness binary.
+
+[package]
+name = "pgrc2_qa"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrc2_qa"
+path = "src/lib.rs"
+
+[[bin]]
+name = "qa_crash_harness"
+path = "src/bin/qa_crash_harness.rs"
+
+[dependencies]
+libc = "0.2"
+pgrc2_codec = { path = "../pgrc2_codec" }
+pgrc2_format = { path = "../pgrc2_format" }
+pgrc2_read = { path = "../pgrc2_read" }
+pgrc2_write = { path = "../pgrc2_write" }

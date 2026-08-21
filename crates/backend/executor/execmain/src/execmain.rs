@@ -394,7 +394,12 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
     // notes/memleak-tpcc-lane.md) get their executor torn down on the normal
     // reset/recycle path once the arena crosses the cap; non-growing
     // statements (point selects) park forever and pay only this load+cmp.
-    if exec.context().used() > SKELETON_RETAIN_MAX_BYTES {
+    // Retention caps measure the SUBTREE — children of a parked skeleton are
+    // retained memory: the planstate's ExprContexts and per-node contexts
+    // (executils children of es_query_cxt) live inside the parked bundle, so
+    // per-execution allocations landing in a child accumulate across reuses
+    // exactly like self allocations; self_used alone never trips the cap.
+    if exec.context().subtree_used() > SKELETON_RETAIN_MAX_BYTES {
         return Ok(None);
     }
     exec.with_mut(|data| -> PgResult<Option<i32>> {
@@ -503,6 +508,9 @@ pub(crate) fn executor_rewind_seam(h: QueryDescHandle) -> PgResult<()> {
             .expect("ExecutorRewind before ExecutorStart");
         exec.with_mut(|data| {
             let ExecData { estate, planstate } = data;
+            // [sqe-cursors] rewind over a served statement's spool is a
+            // replay from the start (the answer plane is fixed).
+            crate::sqeshell::seam::spool_rewind(estate);
             let ps = planstate
                 .as_mut()
                 .expect("ExecutorRewind without a plan state");
@@ -729,17 +737,6 @@ fn exec_check_permissions_modified(
 /// `standard_ExecutorStart` (execMain.c).
 pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgResult<()> {
     assert!(qd.exec.is_none(), "ExecutorStart: query already started");
-    // WS-P node-census entry hook (wave-2 flip machinery, lanev2/census.rs):
-    // when PGRUST_LANE_V2_NODE_CENSUS is armed, ride WS-C's EngineEvent
-    // capture (attribution-only; emission-gate law in executils) so the
-    // ExecutorEnd census can join plan nodes to their engine verdicts.
-    // Disarmed cost: one memoized-bool load + branch (default OFF; flagged
-    // for the select1 instruction-pair CI cluster gate in notes/se-ws-p-flip.md).
-    // Before the skeleton probe on purpose: the flag participates in the
-    // skeleton's eflags match key like every other entry flag.
-    if crate::lanev2::census_armed() {
-        eflags |= ::types_slot::EXEC_FLAG_ENGINE_REPORT;
-    }
     #[cfg(debug_assertions)]
     if let Some(s) = &qd.snapshot {
         if snapmgr::ActiveSnapshotSet() {
@@ -747,17 +744,6 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         }
     }
     let pstmt = qd.plannedstmt();
-
-    // M5 unified admission router, query-start decision (docs/design/
-    // m5-planner.md §2): under pgrust.parallel_engine=runtime resolve the
-    // engine once — no pool degrades to legacy with a loud-once LOG line
-    // (M5-0); the routing decision is counted per query (M5-1): a legacy
-    // parallel plan (Gather machinery) executes on the legacy engine
-    // byte-untouched (the runtime arm shapes are disjoint from Gather plans
-    // by construction until M5-3's suppression), a serial-shaped plan
-    // routes to the arm offers at their sites. One TLS read + cmp on the
-    // legacy default (measured +8 instr/q on select1).
-    crate::lanev2::router_query_start(pstmt.parallelModeNeeded);
 
     if (guc_tables::vars::XactReadOnly.read() || xact::IsInParallelMode())
         && eflags & EXEC_FLAG_EXPLAIN_ONLY == 0
@@ -856,6 +842,12 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         // SAFETY: the registered params live in the portal context, which
         // outlives this executor state (PortalDrop frees the handle after
         // PortalCleanup's ExecutorEnd).
+        // [sqe-cursors] PL provenance (C: params->paramFetch != NULL):
+        // a hooked list is a PL's variable environment (plpgsql passes
+        // its whole datum table), not protocol bind values — the sqe
+        // bind-params gate reads this bit (SPI posture, P6-4).
+        es.es_param_list_hooked =
+            !params.is_null() && types_portal::params::is_fetch_hooked(params);
         es.es_param_list_info = if params.is_null() {
             None
         } else {
@@ -937,9 +929,6 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
             data.estate.es_jit_instr = jc.instr;
             r
         };
-        // se-delegtax SH-F: the row-mode LEAF fast-admit byte — computed
-        // once here (all inputs per-execution static; see the refresh doc).
-        crate::lanev2::refresh_lane_leaf_fast(&mut data.estate);
         r
     })?;
     qd.tup_desc = Some(tup_desc);
@@ -1130,6 +1119,9 @@ pub fn standard_executor_run<'m>(
         ::instrument::instr_start_node(t);
     }
     let tup_desc = qd.tup_desc.clone();
+    // Copied BEFORE `exec` borrows qd (sqe C8: the statement memo's #512
+    // identity rides the plancache handle into the dispatch slot).
+    let cplan = qd.cplan;
     let exec = qd.exec.as_mut().expect("ExecutorRun before ExecutorStart");
     let nprocessed = exec.with_mut_mcx(|_mcx, data| {
         debug_assert!(data.estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0);
@@ -1148,7 +1140,9 @@ pub fn standard_executor_run<'m>(
                 count,
                 direction,
                 use_parallel_mode,
+                tup_desc.clone(),
                 dest,
+                cplan,
             )?;
         }
         data.estate.es_total_processed += data.estate.es_processed;
@@ -1164,6 +1158,7 @@ pub fn standard_executor_run<'m>(
 }
 
 /// `ExecutePlan` (execMain.c): THE per-tuple loop.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_plan<'m, 'mcx>(
     data: &mut ExecData<'mcx>,
     operation: CmdType,
@@ -1171,7 +1166,9 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     number_tuples: u64,
     direction: ScanDirection,
     use_parallel_mode: bool,
+    result_desc: Option<std::rc::Rc<::types_tuple::TupleDescData<'static>>>,
     dest: &mut DestReceiver<'m>,
+    cplan: ::types_portal::CachedPlanHandle,
 ) -> PgResult<()> {
     let ExecData { estate, planstate } = data;
     let planstate = planstate
@@ -1197,21 +1194,9 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // budgeted-run suspension SETTLES at the end of this function (the park
     // walker below the loop); a parked pipeline repossesses at the next
     // entry (the resume walk right here).
-    estate.es_cursor_run_budget = crate::lanev2::cursor_run_budget_install(
-        operation == CmdType::CMD_SELECT,
-        ::types_scan::sdir::ScanDirectionIsForward(direction),
-        number_tuples,
-        use_parallel_mode,
-        estate.es_top_eflags,
-    );
-    // inc-1b re-entry (lane-cursors.md §2 "repossess on resume"): one bool
-    // load per run knob-OFF/never-parked (the flag is set only by a knob-ON
-    // budgeted settle). Restages every parked scan's suspended page batch
-    // before the first pull touches staged state.
-    if estate.es_lane_cursor_parked {
-        estate.es_lane_cursor_parked = false;
-        crate::lanev2::cursor_park_resume(planstate, estate)?;
-    }
+    // p72 D-5: the lane cursor-budget installer deleted with the body; the
+    // None overwrite keeps the no-stale-budget law across estate reuse.
+    estate.es_cursor_run_budget = None;
     // --- end WS-AI wave-9 -------------------------------------------------------
     // --- WS-AJ wave-9 sub-region (SPI Stage-A seam, se/spi-stage-a; lane-spi.md
     // §1/§3) -----------------------------------------------------------------------
@@ -1235,14 +1220,9 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // argument set (one `mydest` enum match + the direction compare) plus
     // the callee's count/select/dest register tests; the knob cell loads
     // only for count-limited SPI-dest SELECTs.
-    estate.es_spi_run_budget = crate::lanev2::spi_run_budget_install(
-        operation == CmdType::CMD_SELECT,
-        dest.mydest() == ::types_dest::CommandDest::Spi,
-        ::types_scan::sdir::ScanDirectionIsForward(direction),
-        number_tuples,
-        use_parallel_mode,
-        estate.es_top_eflags,
-    );
+    // p72 D-5: the lane SPI-budget installer deleted with the body; the
+    // None overwrite keeps the no-stale-budget law across estate reuse.
+    estate.es_spi_run_budget = None;
     // --- end WS-AJ wave-9 -------------------------------------------------------
     // === wave-10 shared-file marker (cursors inc-2 contract §8; sub-regions CA, CB, CC) ===
     // --- WS-CA wave-10 sub-region (reserved) ------------------------------------
@@ -1265,7 +1245,6 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // enters this function (standard_executor_run gates), so the backward
     // test is the whole check.
     if ::types_scan::sdir::ScanDirectionIsBackward(direction) {
-        crate::lanev2::run_seam_backward_evidence();
         return Err(Box::new(
             PgError::error(
                 "backward scan is not supported: the executor's backward drive was \
@@ -1306,44 +1285,55 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // seat; the quantum-yield span when the experiment is armed) — held
     // across the serial loop below when the statement-task hook answers
     // Inline; released at frame exit on every path (RAII).
-    let mut _stmt_inline_seat: Option<crate::lanev2::StmtInlineRun> = None;
-    if operation == CmdType::CMD_SELECT && send_tuples && !use_parallel_mode {
-        if crate::lanev2::try_passthrough_funnel(estate, planstate, number_tuples, dest)? {
-            return Ok(());
+    // === sqe P2-1 dispatch slot (production-plan §P2-1; R1 doctrine) ===
+    // Ahead of every incumbent face: one relaxed posture load, then the
+    // already-opened-relations AM walk (heap statements exit on first
+    // mismatch — the OLTP-invisibility budget). A columnar SELECT NEVER
+    // falls through: the sqe engine answers it or the statement fails
+    // with a typed, censused ERROR (no row-engine fallback — the lanev4
+    // Amendment 7 doctrine as R1 law).
+    if operation == CmdType::CMD_SELECT
+        && send_tuples
+        && crate::sqeshell::stmt::slot_active()
+    {
+        if let Some(relname) = crate::sqeshell::seam::find_columnar(estate) {
+            return crate::sqeshell::seam::run_columnar(
+                estate,
+                number_tuples,
+                use_parallel_mode,
+                result_desc,
+                dest,
+                relname,
+                cplan,
+            );
         }
-        // GL-STMTTASK-1 (serial statement as a dop-1 pool task; kill knob
-        // PGRUST_STMT_TASK, default OFF): the armed simple-protocol
-        // statement's top-level run executes on a pool worker and streams
-        // its rows back through the row funnel; this thread drains to
-        // `dest` (startup/shutdown stay the caller's). Fail-closed: any
-        // ineligibility (or no serving channel) returns Incumbent and the
-        // serial per-tuple loop below runs byte-identically. Placed AFTER
-        // the passthrough funnel deliberately: shapes inside the funnel's
-        // proven band keep the stronger engine. Knob-OFF cost here is one
-        // thread-local read (the armed flag OFF can never set).
-        //
-        // GL-STMTTASK-2 change 3 (inline-execute): the Inline verdict
-        // hands back a borrowed pool seat — THIS thread runs the ordinary
-        // serial loop below (literally the incumbent code, so parity and
-        // cancel identity are structural), holding the seat for the span
-        // of the run (governed accounting: one fewer pool step can run
-        // while the session thread executes).
-        match crate::lanev2::try_stmt_task(estate, planstate, number_tuples, dest)? {
-            crate::lanev2::StmtTaskVerdict::Handled => return Ok(()),
-            crate::lanev2::StmtTaskVerdict::Inline(run) => {
-                _stmt_inline_seat = Some(run);
+        // === heap-on-sqe v1 arm (heap-face.md; RULING 2026-08-18: R1
+        // applies to heap). Behind pgrust.sqe_heap (default OFF — one TLS
+        // read on the steady state; the slot predicate above is computed
+        // once for both arms — the law-10 budget). A recognized heap
+        // analytic shape is sqe's: it serves or ERRORs typed/censused;
+        // unrecognized shapes fall through to the incumbent engines
+        // below, censused, until their rung lands.
+        // [sqe-heap-cursors] a live estate spool resumes regardless of
+        // the GUC's current value — the retained answer is a fixed fact.
+        if ::guc_tables::backing::pgrust_sqe_heap() || estate.es_sqe_spool.is_some() {
+            if let Some(r) = crate::sqeshell::heap::maybe_run_heap(
+                estate,
+                planstate,
+                number_tuples,
+                use_parallel_mode,
+                result_desc.clone(),
+                dest,
+            ) {
+                return r;
             }
-            crate::lanev2::StmtTaskVerdict::Incumbent => {}
         }
     }
-    let mut cursor_capture_sidecar: Option<::types_portal::TuplestoreHandle> = None;
-    let cursor_fill_engaged =
-        if estate.es_cursor_run_budget.is_some() && send_tuples && estate.es_junkFilter.is_none() {
-            cursor_capture_sidecar = dest.tuplestore_capture_sidecar();
-            crate::lanev2::cursor_store_batch_fill(planstate, estate, dest, cursor_capture_sidecar)?
-        } else {
-            false
-        };
+    // === end sqe P2-1 dispatch slot =====================================
+    // p72 D-5: the lane batch store fill deleted with the body; every run
+    // takes the per-tuple loop (the disarmed-tip path, byte-identically).
+    let cursor_capture_sidecar: Option<::types_portal::TuplestoreHandle> = None;
+    let cursor_fill_engaged = false;
     // --- end WS-CB wave-10 ----------------------------------------------------------
     // --- WS-CC wave-10 sub-region (reserved) ------------------------------------
     // --- end WS-CC wave-10 --------------------------------------------------------
@@ -1443,11 +1433,6 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // and the walker independently refuses under es_epq_active (the budget
     // belongs to the outer run — the inc-1a §5 design note, pinned in
     // units).
-    if estate.es_cursor_run_budget.is_some() {
-        if crate::lanev2::cursor_run_park(planstate, estate)? {
-            estate.es_lane_cursor_parked = true;
-        }
-    }
     // --- end WS-AI wave-9.5 -----------------------------------------------------
     // --- WS-AJ wave-9.5 (SPI Stage-A): the settle point. A budgeted
     // (tcount-limited SPI-dest) run that stops here retires lane-staged
@@ -1468,9 +1453,6 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // / non-SPI runs read one None and skip (per-run cost only, never
     // per-tuple). EPQ law shared with the WS-AI walker (the walk refuses
     // under es_epq_active).
-    if estate.es_spi_run_budget.is_some() && crate::lanev2::spi_run_settle(planstate, estate)? {
-        estate.es_lane_cursor_parked = true;
-    }
     // --- end WS-AJ wave-9.5 -----------------------------------------------------
     if estate.es_top_eflags & EXEC_FLAG_BACKWARD == 0 {
         exec_shutdown_node(planstate, estate)?;
@@ -1547,23 +1529,6 @@ fn exec_postprocess_plan(estate: &mut EStateData<'_>) -> PgResult<()> {
     Ok(())
 }
 
-/// WS-P armed-path body of the ExecutorEnd census hook, outlined
-/// `#[cold]`/`#[inline(never)]` (se2-cost-fix): `standard_executor_end` is
-/// `#[inline]` into two callers, and keeping this walk (plus its `with_mut`
-/// closure) inline there perturbed the DISARMED per-query codegen the
-/// select1/prepared knob-OFF pair letters pin. Never reached at default
-/// config (`census_armed()` gates the call).
-#[cold]
-#[inline(never)]
-fn census_record_at_end(qd: &mut QueryDescData) {
-    let pstmt = qd.plannedstmt();
-    if let Some(exec) = qd.exec.as_mut() {
-        exec.with_mut(|data| {
-            crate::lanev2::census_record(pstmt, &data.estate, data.planstate.as_ref());
-        });
-    }
-}
-
 /// `standard_ExecutorEnd` (execMain.c); dropping the bundle is
 /// `FreeExecutorState` (MemoryContextDelete of es_query_cxt).
 // inline: the second caller (executor_finish_and_park's refusal arm) must not
@@ -1581,17 +1546,6 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
                 );
             }
         });
-    }
-    // WS-P node-census exit hook (lanev2/census.rs): with the census armed,
-    // walk the plan tree and append one TSV row per plan node, joined to the
-    // execution's EngineEvents. Before the skeleton park AND before teardown
-    // (both need the estate + planstate alive); best-effort, never a query
-    // error. Disarmed cost: one memoized-byte load + branch — the armed body
-    // is `#[cold]`-outlined (se2-cost-fix): standard_executor_end inlines
-    // into two callers, and carrying the census walk inline here cost the
-    // DISARMED select1/prepared pair codegen (the +42/q history above).
-    if crate::lanev2::census_armed() {
-        census_record_at_end(qd);
     }
     // Executor-skeleton park (v2 gates mirror the reuse gates in
     // standard_executor_start; everything per-run — scan descriptors,

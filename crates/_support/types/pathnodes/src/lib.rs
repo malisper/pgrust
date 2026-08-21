@@ -1406,6 +1406,13 @@ pub const AMFLAG_PGRCOLUMNAR: u32 = 1 << 1;
 /// (m5_suppress CbPlainAggFold keying) must treat a CLEAR bit as NOT
 /// answerable (v<=6 parts, preserved-RG mixtures, footer-less rels).
 pub const AMFLAG_PGRCOLUMNAR_ZEROCNT: u32 = 1 << 2;
+/// pgrust-only (M4-S4; the origin/lanev3 pgrc2-costing sibling bit,
+/// dc3c67c56214): the rel's AM is pgrcolumnar2 — the lanev4 engine.
+/// Plan-time consumers key on it for the v4 posture: NO planner partial
+/// paths (and therefore no Gather) are generated over these rels —
+/// parallelism is the sqe statement-grain pool's over the claim plane
+/// (v2-76 / PC-2.2 "no PG Gather hosting"; the ES-4.4 DOP election).
+pub const AMFLAG_PGRCOLUMNAR2: u32 = 1 << 3;
 
 #[derive(Clone, Debug)]
 pub struct RelOptInfo<'mcx> {

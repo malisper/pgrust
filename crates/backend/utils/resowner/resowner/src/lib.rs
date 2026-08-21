@@ -234,6 +234,14 @@ pub fn session_mem_teardown() {
     });
 }
 
+// memgrowth-discriminator (suspect-A census): the owner arena is a raw-Rust
+// slab of 1024-byte slots — its Vec backing is plain global-allocator memory,
+// invisible to the mcx context ledger. (slots len, slots capacity, free-list
+// len); resident slab bytes = capacity × 1024.
+pub fn arena_census() -> (usize, usize, usize) {
+    with_arena(|a| (a.slots.len(), a.slots.capacity(), a.free.len()))
+}
+
 fn with_arena<R>(f: impl FnOnce(&mut Arena) -> R) -> R {
     // Guard module Drop: ENTERED must clear on panic unwind or every later
     // call — including abort cleanup — re-panics and the backend spins (the

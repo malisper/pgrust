@@ -181,3 +181,34 @@ fn reinitialize_clamps_launch_count_only() {
 
     DestroyParallelContext(id).unwrap();
 }
+
+/// Unwind-policy escalation (RULED 2026-08-18): the exit-committed
+/// predicate must cover ALL THREE fatal payloads — FATAL's ProcExitThread,
+/// PANIC's PanicExitThread, and crash-injected KilledBySignal. Omitting
+/// KilledBySignal made every containment layer that guards with this
+/// predicate demote a SIGKILL-injected death into a recoverable ERROR,
+/// silently defeating the crash-test cascade (main_loop.rs is the
+/// reference boundary). Generic panics stay containable.
+#[test]
+fn exit_unwind_predicate_covers_all_three_fatal_payloads() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let payload_of = |f: &(dyn Fn() + Sync)| {
+        catch_unwind(AssertUnwindSafe(f)).unwrap_err()
+    };
+    let fatal: Vec<Box<dyn std::any::Any + Send>> = vec![
+        Box::new(ipc::ProcExitThread { code: 1 }),
+        Box::new(types_error::PanicExitThread),
+        Box::new(ipc::KilledBySignal { signo: 9 }),
+    ];
+    for p in &fatal {
+        assert!(
+            standing::is_exit_unwind(&**p),
+            "exit-committed payload must rethrow through containment"
+        );
+    }
+    let generic = payload_of(&|| panic!("generic"));
+    assert!(
+        !standing::is_exit_unwind(&*generic),
+        "generic panics stay containable (class-4 demote-to-ERROR)"
+    );
+}

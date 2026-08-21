@@ -1,0 +1,123 @@
+# sqe — the stencil query engine (production port of the PoC engine from
+# the pgrcbench harness; see docs/design/sqe/production-plan.md §P1-1 and
+# docs/design/sqe/port-study/). Consumes the P1-0 pgrcolumnar2 format
+# crates; no vendored copies.
+#
+# Feature `rig`: the bench-grain identity rig (SQL front end, RON plans,
+# the naive scalar oracle, the driver binary). The engine proper carries
+# zero included workload data and reads no environment variables.
+
+[package]
+name = "sqe"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sqe"
+path = "src/lib.rs"
+
+[dependencies]
+# [heap rung 3] entry_ref on the byte-keyed grouped arm (one hash+probe
+# per row; std HashMap has no borrowed-key entry) — version pinned to the
+# workspace lock.
+hashbrown = { version = "0.14.5", default-features = false }
+pgrc2_format = { path = "../../access/pgrcolumnar2/pgrc2_format" }
+pgrc2_codec = { path = "../../access/pgrcolumnar2/pgrc2_codec" }
+pgrc2_read = { path = "../../access/pgrcolumnar2/pgrc2_read" }
+# ENGINE dependency since [psma-consume]: `pgrc2_meta::psma` IS the §8.2
+# index function + probe law (one law, never re-implemented) — the
+# PsmaFace consults the sealer's own functions.
+pgrc2_meta = { path = "../../access/pgrcolumnar2/pgrc2_meta" }
+ron = { version = "0.8", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+# rig-only: the PORTED regexp_replace catalog function + its runtime
+# (the oracle's REGEXP_REPLACE differential — never engine code).
+adt_regexp = { path = "../../utils/adt/regexp", optional = true }
+# ENGINE dependency since [packednum]: `fixed_scale_fit` IS the
+# PackedNumeric face's word-key law (one law, never re-implemented), and
+# the vendored crate also carries the rig render seam's aggregate
+# finishers (variance/stddev closed form + numeric_out). The server path
+# finishes through the same crate in execmain.
+adt_numeric = { path = "../../utils/adt/numeric" }
+regex_core = { path = "../../regex/regex_core", optional = true }
+postgres_seams = { path = "../../tcop/postgres_seams", optional = true }
+mcx = { path = "../../../_support/mcx", optional = true }
+mbutils = { path = "../../utils/mb/mbutils", optional = true }
+wchar = { path = "../../../common/wchar", optional = true }
+types_core = { path = "../../../_support/types/types_core", optional = true }
+types_error = { path = "../../../_support/types/types_error", optional = true }
+# rig-only: the PRODUCTION allocator. The §9 comparator is production-
+# engine-bare; the reference arm must carry the server's allocator policy
+# (mimalloc purge/retention) or the tax cell measures the ALLOCATORS, not
+# the seam — the q32-residual conviction (2026-08-18): shrink-law-dropped
+# scatter arenas are retained by the system allocator but purged by
+# mimalloc, so a system-malloc rig under-prices every fresh execution.
+mimalloc = { version = "0.1", optional = true }
+
+# tpchfloor-only: the P4-2a TPC-H floor study needs the real writer to
+# seal generated TPC-H tables into pgrc2 banks (never engine code).
+pgrc2_write = { path = "../../access/pgrcolumnar2/pgrc2_write", optional = true }
+
+[dev-dependencies]
+pgrc2_write = { path = "../../access/pgrcolumnar2/pgrc2_write" }
+# Self dev-dependency: integration tests (tests/*.rs) link the lib WITHOUT
+# cfg(test), so the std-backed spill store (spill.rs std_store, test/rig
+# only by design) would be invisible to them. `teststore` re-exposes just
+# that arm for the crate's own test builds; server builds never see it.
+sqe = { path = ".", features = ["teststore"] }
+
+[features]
+# `oracle`: structural verification of fingerprint-keyed cache hits
+# (ruling Q4, docs/design/sqe/election-inputs-law.md RULINGS 2026-08-18):
+# production keeps hash-as-identity; oracle/CI builds store the canonical
+# STRUCTURAL key next to every fingerprint-keyed cache entry and compare
+# it on every hit — an unequal structure under an equal fingerprint is a
+# fingerprint collision or an encoder omission and panics loudly. Zero
+# code and zero bytes in production builds (cfg-gated fields + compares;
+# size parity const-asserted in engine.rs / kernels_f6.rs).
+oracle = []
+
+# `teststore`: the std-backed spill store (unlinked OS temp files) for the
+# crate's OWN integration tests — the same arm cfg(test)/`rig` compile; the
+# server never enables it (its spill files must ride fd/pgsql_tmp for
+# temp_file_limit parity). Enabled only via the self dev-dependency above.
+teststore = []
+rig = [
+    "oracle",
+    "dep:ron",
+    "dep:serde",
+    "dep:adt_regexp",
+    "dep:regex_core",
+    "dep:postgres_seams",
+    "dep:mcx",
+    "dep:mbutils",
+    "dep:wchar",
+    "dep:types_core",
+    "dep:types_error",
+    "dep:mimalloc",
+]
+
+# P4-2a TPC-H floor study (docs/design/sqe/tpch-floor-study.md): data
+# generator + bank ingest + handwritten Q3/Q9/Q18 floors + independent
+# oracle. Bench-grain study code, never engine code.
+tpchfloor = ["dep:pgrc2_write"]
+
+[[bin]]
+name = "sqe_rig"
+path = "src/bin/sqe_rig.rs"
+required-features = ["rig"]
+
+[[bin]]
+name = "sqe_bankgen"
+path = "src/bin/sqe_bankgen.rs"
+required-features = ["rig", "tpchfloor"]
+
+[[bin]]
+name = "sqe_tpch_floor"
+path = "src/bin/sqe_tpch_floor.rs"
+required-features = ["tpchfloor"]
+
+[[test]]
+name = "tpch_floor_identity"
+required-features = ["tpchfloor"]

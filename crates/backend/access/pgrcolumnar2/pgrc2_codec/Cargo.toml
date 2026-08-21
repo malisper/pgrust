@@ -1,0 +1,31 @@
+[package]
+name = "pgrc2_codec"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrc2_codec"
+path = "src/lib.rs"
+
+[dependencies]
+pgrc2_format = { path = "../pgrc2_format" }
+alp = { path = "../../../../_support/alp" }
+adt_numeric = { path = "../../../utils/adt/numeric" }
+adt_jsonb_shred = { path = "../../../utils/adt/jsonb_shred" }
+pgsync = { path = "../../../../_support/pgsync" }
+
+# zstd links C (zstd-sys); no wasm32 build — the exact declaration the v1
+# pgrcolumnar crate carries. Taken per O-CMP-2(a) (ruled 2026-08-10): the
+# EXISTING workspace dep, one crate over, rather than a hand-port. The wasm
+# arm refuses the wrapper typed (WrapperUnsupported) at both call sites —
+# parity-honest degradation, never a silent wrong answer.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+zstd = "0.13"
+
+[dev-dependencies]
+adt_jsonb_shred = { path = "../../../utils/adt/jsonb_shred", features = ["testgen"] }
+adt_jsonb = { path = "../../../utils/adt/jsonb" }
+mcx = { path = "../../../../_support/mcx" }
+mbutils = { path = "../../../utils/mb/mbutils" }
+wchar = { path = "../../../../common/wchar" }

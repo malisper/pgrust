@@ -374,7 +374,7 @@ pub fn get_relation_info<'mcx>(
         // kill spelling stands the walk down with the probe — knob
         // coherence). Served from the session part cache like its
         // siblings (one cached-Part vec clone per pgrcolumnar plancat).
-        let stitch_gndv = if is_pgrcolumnar && crate::m5_suppress::topn_nonint_enabled() {
+        let stitch_gndv = if is_pgrcolumnar && topn_nonint_enabled() {
             match ::tableam::pgrcolumnar_footer_stitch_gndv(&relation)? {
                 Some(v) => {
                     let mut pv: PgVec<'_, u64> = PgVec::new_in(run.mcx);
@@ -412,6 +412,50 @@ pub fn get_relation_info<'mcx>(
             r.pgrcolumnar_col_bytes = col_bytes;
             r.pgrcolumnar_col_ndv = col_ndv;
             r.pgrcolumnar_stitch_gndv = stitch_gndv;
+        } else if tableam_vocab::is_pgrcolumnar2_am_oid(relation.rd_rel.relam) {
+            // M4-S4 (the origin/lanev3 dc3c67c56214 sibling-bit arm, v4
+            // half): mark the lanev4 engine's rels so allpaths suppresses
+            // planner partial paths — the sqe engine pool owns parallelism over
+            // the claim plane (v2-76/PC-2.2; ES-4.4 DOP election), never
+            // PG Gather. AMFLAG_HAS_TID_RANGE is kept exactly as before
+            // this branch existed (pgrc2 rels always took the else arm):
+            // dropping it would move TID-range plan shapes, which is not
+            // this wiring's to change (the v3 arm's recorded posture).
+            r.amflags |= types_pathnodes::AMFLAG_PGRCOLUMNAR2;
+            r.amflags |= AMFLAG_HAS_TID_RANGE;
+            // M5a (the S-2 planner wiring RE-LANDED — v2-10/v2-11/v3-21;
+            // the M4-S5 revert's re-home): the v4 AM's exact-at-seal
+            // footer facts feed the SAME colfraction-costing and
+            // footer-NDV consumer faces the v3 arm feeds
+            // (costsize::pgrcolumnar_scan_col_fraction /
+            // selfuncs::add_unique_group_var), under the same GUCs — one
+            // consumer face, two producer AMs. The S5 landing measured
+            // this consult at +3ms/plan (1m) and +22ms/plan (10m) — the
+            // per-CONNECTION cold deep fold (zstd meta-section walks ×
+            // 105 columns × parts) — and reverted it. The fold now lives
+            // in `pgrc2_am::factcache` at PROCESS grain, keyed by
+            // (gen, publisher_fxid, schema fingerprint): a cold session's
+            // consult is one manifest resolve + a nanosecond cache probe,
+            // and the meta band's 1ms cells hold (the M5a no-regression
+            // cell re-runs the S5 taxed-take measurement expecting ~0).
+            if ::costsize::gucs::pgrcolumnar_colfrac_cost() {
+                if let Some(v) = ::tableam::pgrc2_footer_col_bytes(&relation)? {
+                    let mut pv: PgVec<'_, u64> = PgVec::new_in(run.mcx);
+                    for b in v {
+                        pv.push(b);
+                    }
+                    r.pgrcolumnar_col_bytes = pv;
+                }
+            }
+            if ::costsize::gucs::pgrcolumnar_footer_ndv_est() {
+                if let Some(v) = ::tableam::pgrc2_footer_ndv(&relation)? {
+                    let mut pv: PgVec<'_, u64> = PgVec::new_in(run.mcx);
+                    for b in v {
+                        pv.push(b);
+                    }
+                    r.pgrcolumnar_col_ndv = pv;
+                }
+            }
         } else {
             // Heap AM always provides scan_bitmap/scan_tid_range.
             r.amflags |= AMFLAG_HAS_TID_RANGE;
@@ -1655,4 +1699,48 @@ fn collate_sorts_bytewise(coll: Oid) -> bool {
         return false;
     }
     matches!(::pg_locale::pg_newlocale_from_collation(coll), Ok(l) if l.collate_is_c)
+}
+
+/// SE-TOPNNI (gap:topn-nonint-keys car, tier 2): bounded top-N whose ORDER
+/// BY keys are NON-integer — date/timestamp Vars (the sink's
+/// I4/I8 CmpOp aliases: plain int compares per date.c/timestamp.c) and/or
+/// stitched deterministic-default-collation text/varchar Vars (the DictCode
+/// key class, docs/design/dict-code-flow.md) — the census's bounded-top-N
+/// over datetime/text sort keys with wide (star-tlist) payloads, qualed
+/// and unqualed. The runtime sort SINK already owns every piece (KeyWidth
+/// I4/I8 widening for the datetime family, v7 part-global byte-rank codes
+/// for text, multi-key wide heaps, winner-only late materialization for
+/// the star tlist, COLSTAGE staged accept + GCUT band predicate); only
+/// this probe refuses the shapes. Smoke (2M rows, dop4, 2026-07-21):
+/// qualed star-tlist / narrow-tlist / text-key / mixed-key analogs of the
+/// census shapes engage and win 2.3–6.7x vs forced legacy, byte parity OK.
+///
+/// DEFAULT ON since the GL-TOPNNI-1 flip (scratchpad/night/
+/// GL-TOPNNI-1-letter.md, dist witnessed ladder 2026-07-21 @ 8cf38a8c7:
+/// 10M dop{4,8,16} all six keyed shapes suppressed-and-winning vs
+/// best(serial, forced legacy), worst cell exact parity; 100M dop{4,16}
+/// census-family wins everywhere). `PGRUST_LANE_V2_TOPN_NONINT=0|off` is
+/// the kill, restoring the keep-Gather posture byte-for-byte (the
+/// flipped-kill idiom — only the exact kill spellings disarm). Named
+/// residual carried from the letter: the UNQUALED star-tlist shape at
+/// 100M-class scale forgoes a <=1.23x serial-walk win while beating the
+/// legacy Gather it displaces 10-30x — cost-route step-2 arbitration /
+/// band-predicate early-exit term owns it. Suppresses via the knob-path
+/// finish — NOT a BOOTSTRAP_MATRIX class (probe_key stays "-"; drift
+/// guards untouched).
+/// (RELOCATED here from m5_suppress.rs at p72 R-1: this module's gndv
+/// stitch arm is the surviving consumer; m5_suppress deletes at D-4. The
+/// kill-spelling helper is an OWN COPY — m5_suppress's dies with it.)
+pub(crate) fn topn_nonint_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        topn_nonint_kill_spelling_on(std::env::var("PGRUST_LANE_V2_TOPN_NONINT").as_deref().ok())
+    })
+}
+
+/// The flipped default-ON kill spelling (t36 flips2, the flipped-kill
+/// idiom): OFF iff exactly `0` or `off`; unset and every other spelling
+/// stay ON. (Own copy of m5_suppress's `tier2_car_kill_spelling_on`.)
+fn topn_nonint_kill_spelling_on(v: Option<&str>) -> bool {
+    !matches!(v, Some("0") | Some("off"))
 }

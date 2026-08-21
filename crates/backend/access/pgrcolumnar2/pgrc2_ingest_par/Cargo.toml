@@ -1,0 +1,27 @@
+[package]
+name = "pgrc2_ingest_par"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrc2_ingest_par"
+path = "src/lib.rs"
+
+# The rtpool BINDING for pgrcolumnar2 parallel ingest (chunk M3-I). It sits
+# ABOVE both the writer and the runtime: `pgrc2_write` cannot depend on
+# `runtime` (pgrc2_am → pgrc2_write is inside the table-AM cone since #473,
+# and runtime's cone reaches tableam — the edge would be a cycle), so the
+# engine lives there and the StreamSource/TaskSet driver lives here. The
+# COPY surface reaches this crate from above (executor altitude), never from
+# pgrc2_am directly.
+[dependencies]
+pgrc2_write = { path = "../pgrc2_write" }
+pgrc2_format = { path = "../pgrc2_format" }
+runtime = { path = "../../../executor/runtime" }
+
+[dev-dependencies]
+libc = "0.2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

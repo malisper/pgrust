@@ -791,3 +791,55 @@ fn revalidate_restores_search_path_when_environment_probe_errors() {
 
     DropCachedPlan(h);
 }
+// Invalidation-driven replan while a plan is still pinned (the parked portal
+// shell / TLS executor skeleton posture): the displaced CachedPlanQuery arena
+// must not leak — it parks on the source as pending and is reclaimed when the
+// last plan that could reference it releases.
+#[test]
+fn replan_under_pin_defers_then_reclaims_old_query_arena() {
+    install();
+    push_snapshot();
+    let h = make_saved_source(false);
+    let pending = |h| with_cache(|pc| source_mut(pc, h).pending_query_ctxs.len());
+
+    // p1 = the generic plan, still refcounted across the invalidation (the
+    // parked-shell pin). The sinval flush invalidates source and plan.
+    let p1 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    PlanCacheSysCallback(Datum::from_oid(InvalidOid), NAMESPACEOID, 0);
+    assert!(!CachedPlanIsValid(h));
+
+    // Revalidation replans under the pin: the old arena defers as pending
+    // instead of freeing under p1 (pre-fix it silently leaked here).
+    let p2 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_ne!(p1, p2);
+    assert_eq!(pending(h), 1, "displaced arena parks as pending under the pin");
+
+    // Releasing the new plan first must NOT drain: p1 (older generation) can
+    // still reference the displaced arena.
+    ReleaseCachedPlan(p2);
+    assert_eq!(pending(h), 1, "old-generation pin still holds the arena");
+
+    // The pin's release is the drain site: no live plan of the source has a
+    // generation at-or-below the entry's barrier anymore.
+    ReleaseCachedPlan(p1);
+    assert_eq!(pending(h), 0, "last old-generation release reclaims the arena");
+
+    DropCachedPlan(h);
+}
+
+// The unpinned replan keeps its eager shape: nothing defers, nothing leaks.
+#[test]
+fn replan_without_pin_reclaims_old_query_arena_eagerly() {
+    install();
+    push_snapshot();
+    let h = make_saved_source(false);
+    let pending = |h| with_cache(|pc| source_mut(pc, h).pending_query_ctxs.len());
+
+    let p1 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    ReleaseCachedPlan(p1);
+    PlanCacheSysCallback(Datum::from_oid(InvalidOid), NAMESPACEOID, 0);
+    let p2 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(pending(h), 0, "no pin: the old arena frees at the replan tail");
+    ReleaseCachedPlan(p2);
+    DropCachedPlan(h);
+}

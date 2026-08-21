@@ -2809,7 +2809,13 @@ fn add_unique_group_var<'mcx>(
     if isdefault {
         if let Some(rel) = vardata.rel {
             let r = run.root.rel(rel);
-            if r.amflags & types_pathnodes::AMFLAG_PGRCOLUMNAR != 0 && r.tuples > 0.0 {
+            // M5a: pgrcolumnar2 rels feed the same footer-NDV face
+            // (plancat's S-2 consult fills pgrcolumnar_col_ndv from the
+            // cross-part NdvRegisters HLL union — the same whole-stream
+            // sketch class as the v1 footer count).
+            let columnar =
+                types_pathnodes::AMFLAG_PGRCOLUMNAR | types_pathnodes::AMFLAG_PGRCOLUMNAR2;
+            if r.amflags & columnar != 0 && r.tuples > 0.0 {
                 // Prefer the footer's ingest-time per-column NDV (whole-stream
                 // HLL — the same count a footer-backed ANALYZE harvests into
                 // stadistinct; plancat stashes it on the rel). Only a plain

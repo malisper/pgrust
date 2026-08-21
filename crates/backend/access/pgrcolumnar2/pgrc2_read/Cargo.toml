@@ -1,0 +1,33 @@
+# pgrc2_read — the pgrcolumnar2 reader (chunk M3-F).
+#
+# Dependency cone is deliberately tiny: the frozen format crate, the pgsync
+# world-switching sync layer, and the vfs I/O choke (the sanctioned file
+# surface — no raw std::fs / libc fs calls, so no determinism-ledger rows).
+# Keeping pgstat/catcache-reaching deps OUT of this cone is what keeps the
+# crate loom-buildable (the lx_agg/lx_join loom wall lesson).
+
+[package]
+name = "pgrc2_read"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrc2_read"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+pgrc2_batch = { path = "../pgrc2_batch" }
+pgrc2_format = { path = "../pgrc2_format" }
+pgsync = { path = "../../../../_support/pgsync" }
+vfs = { path = "../../../storage/file/vfs" }
+
+# tests/loom.rs model builders (the pgsync pattern: the loom dependency for
+# production sync lives in pgsync; this row exists solely for the crate's
+# own loom models).
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

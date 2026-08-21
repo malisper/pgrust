@@ -127,6 +127,17 @@ struct CachedPlanSource {
     num_custom_plans: i64,
     source_ctx: *mut MemoryContext,
     query_ctx: *mut MemoryContext,
+    // Replan-displaced query arenas a live plan may still reference (the
+    // utility arm of build_stmt_list borrows q.utilityStmt straight from the
+    // query arena; only non-utility statements pass the copy_query_in
+    // boundary). Each entry is stamped with the source generation current at
+    // displacement: a plan can reference the arena it was built from — the
+    // one displaced at the first replan AFTER its build — so an entry with
+    // barrier B is referenceable exactly by live plans of this source with
+    // generation <= B (later builds worked from a newer arena). Entries are
+    // drained by drain_pending_arenas at plan release and at replan; the
+    // whole list frees with the source.
+    pending_query_ctxs: Vec<(i32, *mut MemoryContext)>,
 }
 
 struct CachedPlan {
@@ -165,8 +176,11 @@ struct PlanCache {
 }
 
 thread_local! {
-    static CACHE: RefCell<PlanCache> = const {
-        RefCell::new(PlanCache {
+    // tls-dtor: ManuallyDrop — no dtor is registered, so late ReleaseCachedPlan
+    // calls from other TLS dtors (plpgsql SimpleExpr) can never hit a destroyed
+    // key; every peer session cache (relcache, catcache, typcache) does this.
+    static CACHE: RefCell<core::mem::ManuallyDrop<PlanCache>> = const {
+        RefCell::new(core::mem::ManuallyDrop::new(PlanCache {
             sources: Vec::new(),
             source_free: Vec::new(),
             plans: Vec::new(),
@@ -174,7 +188,7 @@ thread_local! {
             saved_plan_list: Vec::new(),
             handle_gen: 0,
             torn_down: false,
-        })
+        }))
     };
 }
 
@@ -232,11 +246,45 @@ fn reclaim_ctx(ctx: *mut MemoryContext) {
     drop(unsafe { Box::from_raw(ctx) });
 }
 
+// Pending-arena drain (see pending_query_ctxs): frees every replan-displaced
+// query arena no remaining live plan of `h` can reference — entry barrier B
+// is safe to reclaim once every live plan of the source has generation > B.
+// A stale/absent source slot returns nothing (the tombstone paths free the
+// list wholesale). Caller reclaims the returned arenas outside the borrow.
+fn drain_pending_arenas(
+    pc: &mut PlanCache,
+    h: CachedPlanSourceHandle,
+) -> Vec<*mut MemoryContext> {
+    let min_gen =
+        pc.plans.iter().flatten().filter(|p| p.source == h).map(|p| p.generation).min();
+    let (idx, generation) = decode(h.0);
+    let Some(src) = pc.sources.get_mut(idx).and_then(Option::as_mut) else {
+        return Vec::new();
+    };
+    if src.handle_gen != generation {
+        return Vec::new();
+    }
+    let mut freed = Vec::new();
+    src.pending_query_ctxs.retain(|&(barrier, ctx)| match min_gen {
+        Some(m) if barrier >= m => true,
+        _ => {
+            freed.push(ctx);
+            false
+        }
+    });
+    freed
+}
+
 pub fn init_seams() {
     plancache_portal_seams::init_plan_cache::set(InitPlanCache);
     plancache_portal_seams::release_cached_plan::set(ReleaseCachedPlan);
     plancache_portal_seams::incr_cached_plan::set(IncrCachedPlan);
     plancache_portal_seams::is_source_generic_plan::set(CachedPlanIsSourceGeneric);
+    // The statement-plane memo's identity supply (the lanev4 A1 #512 seam).
+    // The two engine_plan_* slots run the OTHER direction (installed by the
+    // executor's statement plane, called from DropCachedPlan/ResetPlanCache
+    // below).
+    plancache_portal_seams::plan_identity::set(CachedPlanIdentity);
     // C: plancache.c owns `int plan_cache_mode = PLAN_CACHE_MODE_AUTO`.
     thread_local! {
         static PLAN_CACHE_MODE: core::cell::Cell<i32> =
@@ -270,6 +318,7 @@ fn ReleaseAllCachedPlansAtExit(_code: i32, _arg: usize) {
         }
         for slot in pc.sources.iter_mut() {
             if let Some(src) = slot.take() {
+                ctxs.extend(src.pending_query_ctxs.into_iter().map(|(_, c)| c));
                 ctxs.push(src.query_ctx);
                 ctxs.push(src.source_ctx);
             }
@@ -409,6 +458,7 @@ fn create_cached_plan_flags(
             num_custom_plans: 0,
             source_ctx,
             query_ctx,
+            pending_query_ctxs: Vec::new(),
         };
         let idx = match pc.source_free.pop() {
             Some(i) => {
@@ -505,6 +555,12 @@ pub fn DropCachedPlan(h: CachedPlanSourceHandle) {
     if plancache_portal_seams::discard_parked_portal::is_installed() {
         plancache_portal_seams::discard_parked_portal::call(types_portal::PlanSourceHandle(h.0));
     }
+    // The statement-plane memo's eager #511 drop face: release every
+    // memoized artifact of this plansource. Outside the registry borrow,
+    // like the portal discard above (callbacks-never-call-out law).
+    if plancache_portal_seams::engine_plan_dropped::is_installed() {
+        plancache_portal_seams::engine_plan_dropped::call(types_portal::PlanSourceHandle(h.0));
+    }
     with_cache(|pc| {
         let src = source_mut(pc, h);
         if src.is_saved {
@@ -523,9 +579,12 @@ pub fn DropCachedPlan(h: CachedPlanSourceHandle) {
         let (idx, _) = decode(h.0);
         let src = pc.sources[idx].take().expect("checked by source_mut");
         pc.source_free.push(idx as u32);
-        Some((src.source_ctx, src.query_ctx))
+        Some((src.source_ctx, src.query_ctx, src.pending_query_ctxs))
     });
-    if let Some((source_ctx, query_ctx)) = ctxs {
+    if let Some((source_ctx, query_ctx, pending)) = ctxs {
+        for (_, ctx) in pending {
+            reclaim_ctx(ctx);
+        }
         reclaim_ctx(query_ctx);
         reclaim_ctx(source_ctx);
     }
@@ -579,7 +638,10 @@ pub fn ReleaseCachedPlan(cplan: CachedPlanHandle) {
             let plan = pc.plans[idx].take().expect("checked by plan_mut");
             pc.plan_free.push(idx as u32);
             let mut ctxs = vec![plan.plan_ctx];
-            // Last survivor of a dead source reclaims the tombstone.
+            // Last survivor of a dead source reclaims the tombstone; on a
+            // LIVE source this release may have raised the surviving minimum
+            // generation, so drain the replan-displaced pending arenas it
+            // proves unreferenced.
             let (sidx, sgen) = decode(plan.source.0);
             let src_dead = pc.sources.get(sidx).and_then(Option::as_ref).is_some_and(|s| {
                 s.handle_gen == sgen && s.dead
@@ -587,8 +649,11 @@ pub fn ReleaseCachedPlan(cplan: CachedPlanHandle) {
             if src_dead && !pc.plans.iter().flatten().any(|p| p.source == plan.source) {
                 let src = pc.sources[sidx].take().expect("checked above");
                 pc.source_free.push(sidx as u32);
+                ctxs.extend(src.pending_query_ctxs.into_iter().map(|(_, c)| c));
                 ctxs.push(src.query_ctx);
                 ctxs.push(src.source_ctx);
+            } else if !src_dead {
+                ctxs.extend(drain_pending_arenas(pc, plan.source));
             }
             ctxs
         } else {
@@ -976,9 +1041,31 @@ fn RevalidateCachedQuery(
         src.is_valid = true;
     });
     // Custom plans share query-arena subnodes (see `dead`): the old arena is
-    // reclaimed only when no live plan can still reference it.
-    if with_cache(|pc| !pc.plans.iter().flatten().any(|p| p.source == h)) {
-        reclaim_ctx(old_qctx);
+    // reclaimed only when no live plan can still reference it. That is the
+    // COMMON case here, not the rare one — parked portal shells (portalmem)
+    // and the executor's TLS skeleton pin the displaced generic plan across
+    // executions — so an arena that cannot be reclaimed now parks on the
+    // source as pending and is drained at the last plan's release (or on the
+    // next unpinned revalidation). Before the pending list, every
+    // invalidation-driven replan under a pin leaked the old arena for good.
+    let reclaim = with_cache(|pc| {
+        // Every live plan of h predates this replan's builds (BuildCachedPlan
+        // has not run for the new list yet), so any of them may reference
+        // old_qctx: park it stamped with the pre-replan generation. The drain
+        // then frees whatever older entries the same sweep proves dead.
+        let pinned = pc.plans.iter().flatten().any(|p| p.source == h);
+        if pinned {
+            let src = source_mut(pc, h);
+            src.pending_query_ctxs.push((src.generation, old_qctx));
+        }
+        let mut ctxs = drain_pending_arenas(pc, h);
+        if !pinned {
+            ctxs.push(old_qctx);
+        }
+        ctxs
+    });
+    for ctx in reclaim {
+        reclaim_ctx(ctx);
     }
     Ok(())
 }
@@ -1705,6 +1792,31 @@ pub fn CachedPlanGeneration(cplan: CachedPlanHandle) -> i32 {
     with_plan(cplan, |plan| plan.generation)
 }
 
+/// The statement-plane memo's identity supply (the lanev4 A1 #512 seam,
+/// ported for the sqe statement memo): the positional identity of a running
+/// CachedPlan in one registry borrow —
+/// `(plansource handle id, generation at build, is-current-generic-plan)`.
+/// BuildCachedPlan bumps the source generation on EVERY replan, so
+/// `(handle, generation)` is monotone per source and every meaning-changing
+/// event (relcache/PROCOID/TYPEOID callbacks, search_path, RLS — the full
+/// C-parity invalidation set) lands as a memo miss by construction.
+/// Caller must hold a refcount on `cplan` (the running portal does).
+pub fn CachedPlanIdentity(cplan: CachedPlanHandle) -> (u64, i64, bool) {
+    with_cache(|pc| {
+        let (source, generation) = {
+            let plan = plan_mut(pc, cplan);
+            (plan.source, plan.generation as i64)
+        };
+        let (idx, gen) = decode(source.0);
+        let generic = pc
+            .sources
+            .get(idx)
+            .and_then(Option::as_ref)
+            .is_some_and(|s| s.handle_gen == gen && s.gplan == Some(cplan));
+        (source.0, generation, generic)
+    })
+}
+
 fn invalidate_source_entry(src: &mut CachedPlanSource) -> Option<CachedPlanHandle> {
     src.is_valid = false;
     src.gplan
@@ -1828,6 +1940,12 @@ pub fn ResetPlanCache() {
             }
         }
     });
+    // The statement-plane memo's sys-reset face (#511): drop the whole memo
+    // plane on the ResetPlanCache event class. Outside the registry borrow
+    // (callbacks-never-call-out law).
+    if plancache_portal_seams::engine_plan_cache_reset::is_installed() {
+        plancache_portal_seams::engine_plan_cache_reset::call();
+    }
 }
 
 /// D3.0 census tooling: live plancache registry counts for this backend.

@@ -19,6 +19,7 @@ use crate::{loc, switches};
 const PROGNAME: &str = "postgres";
 
 pub fn PostgresSingleUserMain(argv: &[String], username: &str) -> ! {
+    // unwind-ok: log-then-die
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> core::convert::Infallible {
         let err = match single_user_main_inner(argv, username) {

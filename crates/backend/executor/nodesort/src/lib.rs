@@ -72,7 +72,6 @@ pub struct SortState<'mcx> {
     // randomAccess for every chain host this increment; only
     // `lanev2::try_own_sort` consults/stores this. Init-stable like the
     // chain memo (same child refuse-sets), so never cleared.
-    lane_ra_fusible: Option<bool>,
 }
 
 /// `ExecInitSort` minus child linkage: the caller (execProcnode's T_Sort arm)
@@ -105,7 +104,6 @@ pub fn exec_init_sort<'mcx>(
         refsort_refused: false,
         refsort_desc: None,
         runtime_full: None,
-        lane_ra_fusible: None,
     })
 }
 
@@ -314,22 +312,6 @@ pub fn sort_lane_begin<'mcx>(
     Ok(())
 }
 
-// --- WS-AD wave-8: sort-breaker randomAccess admission seam --------------
-
-/// Memoized bare-hook randomAccess verdict (`None` until the first
-/// `sort_lane_ra_fusible_set`). See the field doc: the chain-shared memo
-/// keeps refusing randomAccess; this side memo is the bare sort hook's
-/// alone.
-#[inline(always)]
-pub fn sort_lane_ra_fusible(node: &SortState<'_>) -> Option<bool> {
-    node.lane_ra_fusible
-}
-
-/// Store the bare-hook randomAccess verdict (once; init-stable inputs).
-pub fn sort_lane_ra_fusible_set(node: &mut SortState<'_>, v: bool) {
-    debug_assert!(node.lane_ra_fusible.is_none() || node.lane_ra_fusible == Some(v));
-    node.lane_ra_fusible = Some(v);
-}
 
 /// Delegation probe (WS-AD acceptance ladder 2): true iff the node's
 /// read-back face is the row-path `Tuplesort` itself — a finished sort
@@ -1026,8 +1008,7 @@ pub fn sort_result_type(node: &SortState<'_>) -> Rc<TupleDescData<'static>> {
 // Exempt: released in exec_end_sort.
 mcx::forget_safe_struct!(
     SortState<'_> { plan, ps_ResultTupleSlot, randomAccess, bounded, bound,
-        sort_Done, bounded_Done, bound_Done, datumSort, refsort, refsort_refused,
-        lane_ra_fusible;
+        sort_Done, bounded_Done, bound_Done, datumSort, refsort, refsort_refused;
         ps_ResultTupleDesc, tuplesortstate, refsort_out, refsort_desc,
         runtime_full },
 );

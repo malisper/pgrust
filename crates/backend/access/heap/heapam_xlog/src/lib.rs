@@ -1179,9 +1179,18 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
     if let Err(e) = write_res {
         return file_err("write to", e);
     }
-    // fsync all previously written data.
+    // fsync all previously written data. C rewriteheap.c:1133:
+    // data_sync_elevel(ERROR) — PANIC at default data_sync_retry=off; the
+    // other file_err sites (create/truncate/write) stay plain ERROR as in C.
     if let Err(e) = file.sync_all() {
-        return file_err("fsync", e);
+        return elog::ereport(fd::data_sync_elevel(types_error::ERROR))
+            .errcode_for_file_access()
+            .errmsg(format!("could not fsync file \"{}\": {e}", path.display()))
+            .finish(types_error::ErrorLocation::new(
+                "src/backend/access/heap/rewriteheap.c",
+                1133,
+                "heap_xlog_logical_rewrite",
+            ));
     }
     Ok(())
 }

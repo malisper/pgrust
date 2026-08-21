@@ -1,0 +1,22 @@
+[package]
+name = "write_governor"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "write_governor"
+path = "src/lib.rs"
+
+[dependencies]
+# All kernel interaction routes through the sanctioned Vfs choke (the
+# determinism-lint law); under --cfg pgrust_sim the governor self-disarms
+# (see resolve()), so the sim harness never sees governor-injected ops.
+vfs = { path = "../vfs" }
+elog = { path = "../../../utils/error/elog" }
+# THE single lock library (three worlds); native = verbatim std re-exports.
+pgsync = { path = "../../../../_support/pgsync" }
+libc = "0.2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

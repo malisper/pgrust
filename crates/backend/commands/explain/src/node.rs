@@ -1464,40 +1464,10 @@ pub fn ExplainNode<'mcx>(
         }
     }
 
-    // EA-on-morsels refusal transparency (docs/design/ea-morsels.md §6): the
-    // runtime admission walk's verdict for a node that did not engage.
-    // Display-gated on pgrust.explain_runtime_verdicts (default OFF): C
-    // prints nothing here, and default EXPLAIN output must stay C-parity
-    // (covdiff-fuzzer E1-A — the refusal lines leaked into vanilla EXPLAIN
-    // ANALYZE whenever the admission walk recorded a verdict).
-    if es.analyze
-        && !es.qd.is_null()
-        && guc_tables::backing::pgrust_explain_runtime_verdicts()
-    {
-        if let Some(refs) =
-            execmain_seams::query_desc_runtime_ea_refusals::call(es.qd, plan.plan_node_id)
-        {
-            if es.format == EXPLAIN_FORMAT_TEXT {
-                crate::format::ExplainIndentText(es);
-                append!(es, "runtime: refused (");
-                for (i, (arm, reason)) in refs.iter().enumerate() {
-                    if i > 0 {
-                        append!(es, "; ");
-                    }
-                    append!(es, "{arm}: {reason}");
-                }
-                append!(es, ")\n");
-            } else {
-                for (arm, reason) in &refs {
-                    crate::format::ExplainPropertyText(
-                        "Runtime Refused",
-                        &format!("{arm}: {reason}"),
-                        es,
-                    );
-                }
-            }
-        }
-    }
+    // (P7-2 D-8: the EA-on-morsels refusal display — the sole reader of the
+    // tombstoned pgrust.explain_runtime_verdicts GUC — is deleted; the
+    // runtime admission walk that recorded verdicts died with the lane body
+    // in D-5, so the seam always returned None here.)
 
     // EA-on-morsels pipeline blocks (docs/design/ea-morsels.md §4): the
     // engaged runtime pipeline reports at measured granularity — the full
@@ -1675,48 +1645,67 @@ pub fn ExplainNode<'mcx>(
             .as_ref()
             .and_then(|ps| ps.first())
             .map(|p| (p.arm, p.root_node_id == plan.plan_node_id));
-        let (engine_txt, detail): (&str, String) = if let Some((arm, is_root)) = runtime {
+        let attribution: Option<(&str, String)> = if let Some((arm, is_root)) = runtime {
             let d = if is_root {
                 format!("{arm} arm")
             } else {
                 format!("member of {arm} pipeline")
             };
-            ("runtime", d)
+            Some(("runtime", d))
         } else {
             let ev = execmain_seams::query_desc_engine_events::call(es.qd, plan.plan_node_id)
                 .and_then(|v| v.first().copied());
             match ev {
-                Some((EngineKindWire::Lane, class, _)) => ("lane", class.to_string()),
+                Some((EngineKindWire::Lane, class, _)) => Some(("lane", class.to_string())),
                 Some((EngineKindWire::FusedArm, class, _)) => {
-                    ("spine/fused-arm", class.to_string())
+                    Some(("spine/fused-arm", class.to_string()))
                 }
-                Some((EngineKindWire::Runtime, class, _)) => ("runtime", class.to_string()),
+                Some((EngineKindWire::Runtime, class, _)) => {
+                    Some(("runtime", class.to_string()))
+                }
+                // sqe (P2-1): class = engaged|refused; detail = the stencil
+                // family / the refusal variant key.
+                Some((EngineKindWire::Sqe, class, d)) if !d.is_empty() => {
+                    Some(("sqe", format!("{class}: {d}")))
+                }
+                Some((EngineKindWire::Sqe, class, _)) => Some(("sqe", class.to_string())),
                 // "instrumented" = RefuseReason::Instrumented.name()
                 // (lanev2/stats.rs): the fused serial pipelines record their
                 // observed refusal in inc-1; only this reason means "the
                 // production verdict was not evaluated", hence the suffix.
-                Some((EngineKindWire::Spine, class, "instrumented")) => (
+                Some((EngineKindWire::Spine, class, "instrumented")) => Some((
                     "spine",
                     format!("{class}: refused instrumented; production engine may differ"),
-                ),
+                )),
                 Some((EngineKindWire::Spine, class, d)) if !d.is_empty() => {
-                    ("spine", format!("{class}: {d}"))
+                    Some(("spine", format!("{class}: {d}")))
                 }
-                Some((EngineKindWire::Spine, class, _)) => ("spine", class.to_string()),
-                None => ("spine", String::new()),
+                Some((EngineKindWire::Spine, class, _)) => {
+                    Some(("spine", class.to_string()))
+                }
+                // Plan-only ENGINE preview (non-ANALYZE): an event-less node
+                // carries no witnessed verdict — spine-by-default is an
+                // execution truth (the capture chokepoints never ran), so
+                // print nothing rather than an unwitnessed claim. The sqe
+                // records above ARE plan-time truthful (statement_verdict is
+                // the production recognizer) and always print.
+                None if !es.analyze => None,
+                None => Some(("spine", String::new())),
             }
         };
-        if es.format == EXPLAIN_FORMAT_TEXT {
-            crate::format::ExplainIndentText(es);
-            if detail.is_empty() {
-                append!(es, "Engine: {engine_txt}\n");
+        if let Some((engine_txt, detail)) = attribution {
+            if es.format == EXPLAIN_FORMAT_TEXT {
+                crate::format::ExplainIndentText(es);
+                if detail.is_empty() {
+                    append!(es, "Engine: {engine_txt}\n");
+                } else {
+                    append!(es, "Engine: {engine_txt} ({detail})\n");
+                }
             } else {
-                append!(es, "Engine: {engine_txt} ({detail})\n");
-            }
-        } else {
-            crate::format::ExplainPropertyText("Engine", engine_txt, es);
-            if !detail.is_empty() {
-                crate::format::ExplainPropertyText("Engine Detail", &detail, es);
+                crate::format::ExplainPropertyText("Engine", engine_txt, es);
+                if !detail.is_empty() {
+                    crate::format::ExplainPropertyText("Engine Detail", &detail, es);
+                }
             }
         }
     }

@@ -30,6 +30,25 @@ pub fn backend_context_forest() -> Vec<TreeStats> {
     })
 }
 
+// memgrowth-discriminator (suspect-A census): raw-Rust slot-registry census
+// hook. The slot registries (execmain querydesc ENTRIES, pquery stmt_list,
+// queryenvironment/tuplestore holds, the resowner arena) are thread-local
+// Vec slabs on the global allocator — bytes neither the context ledger nor
+// accounted_contexts can see. This crate sits below those crates, so the
+// formatter is installed from seams_init (which depends on all of them);
+// the census runs on WHICHEVER thread calls it, so the log-memory-contexts
+// interrupt path reports the TARGET backend's registries.
+static SLOT_CENSUS: std::sync::OnceLock<fn() -> String> = std::sync::OnceLock::new();
+
+pub fn set_slot_census(f: fn() -> String) {
+    let _ = SLOT_CENSUS.set(f);
+}
+
+/// This thread's slot-registry census line (None until seams_init installs).
+pub fn slot_census_line() -> Option<String> {
+    SLOT_CENSUS.get().map(|f| f())
+}
+
 #[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
     // pgrust is Rust: report where in OUR source this was raised.
@@ -70,6 +89,13 @@ fn process_log_memory_context_interrupt() -> PgResult<()> {
             "Grand total: {grand_total} bytes; {grand_used} used"
         ))
         .finish(loc("ProcessLogMemoryContextInterrupt"))?;
+    // memgrowth-discriminator: this runs ON the signalled backend thread, so
+    // the line reports that backend's thread-local slot registries.
+    if let Some(line) = slot_census_line() {
+        ereport(LOG_SERVER_ONLY)
+            .errmsg(line)
+            .finish(loc("ProcessLogMemoryContextInterrupt"))?;
+    }
     Ok(())
 }
 
@@ -188,6 +214,7 @@ pub fn run_session_teardown() {
         let Some((i, f)) = next else { return };
         // Absent-state tolerance is each cleanup's contract; the guard
         // keeps one bad cleanup from aborting the server.
+        // unwind-ok: log-then-die
         if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
             let msg = e
                 .downcast_ref::<String>()

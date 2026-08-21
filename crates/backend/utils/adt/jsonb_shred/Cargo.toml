@@ -1,0 +1,25 @@
+[package]
+name = "adt_jsonb_shred"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_jsonb_shred"
+path = "src/lib.rs"
+
+[features]
+# Deterministic document generators (src/testgen.rs) for dependents'
+# integration tests — the C1 writer round-trip suites. Never a prod feature.
+testgen = []
+
+[dependencies]
+adt_jsonb = { path = "../jsonb" }
+adt_numeric = { path = "../numeric" }
+adt_uuid = { path = "../uuid" }
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+
+[dev-dependencies]
+mbutils = { path = "../../mb/mbutils" }
+wchar = { path = "../../../../common/wchar" }

@@ -940,6 +940,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
     // A panic must not skip this cleanup: the qd/params reference the LEADER's
     // arena, and anything left registered would be torn down at thread-exit
     // time, racing the leader freeing that arena after it reaps the worker.
+    // unwind-ok: log-then-die
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut run));
     let result = match result {
         Ok(r) => r,
@@ -947,6 +948,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
             ::nodeagg::merge::clear_thread_registry();
             querydesc::release_query_desc_seam(qd);
             types_portal::params::free(params);
+            // unwind-ok: log-then-die
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _ = receiver.shutdown();
             }));

@@ -602,6 +602,7 @@ fn _SPI_pquery(
     };
 
     let eflags = if fire_triggers { 0 } else { EXEC_FLAG_SKIP_TRIGGERS };
+    let _p8 = execmain::p8census::spi_scope();
     execmain_seams::executor_start::call(qd, eflags)?;
     execmain_seams::executor_run::call(qd, ForwardScanDirection, tcount, dest)?;
     with_current(|c| c.processed = execmain_seams::query_desc_es_processed::call(qd));

@@ -77,12 +77,18 @@ fn table_counts_match_compiled_backend_shape() {
     //   Bool +1 shared_catalog_cache (-> 138) = 469.
     // connection-scaling wave 4 (floor work, same doc):
     //   Bool +1 idle_passivate_stack (-> 139) = 470.
-    assert_eq!(ConfigureNamesBool.len(), 139);
-    assert_eq!(ConfigureNamesInt.len(), 176);
+    // heap-on-sqe v1 (pgrust-only, heap-face.md): Bool +1
+    //   pgrust.sqe_heap (-> 140) = 471 — the heap-face safety switch,
+    //   default off.
+    // sqe→main merge (pgrust-only, the sqe campaign lands): Int +1
+    //   pgrust.sqe_threads (-> 177) = 472 — the engine worker width
+    //   (0 = auto), formerly the PGRUST_SQE_THREADS env spelling.
+    assert_eq!(ConfigureNamesBool.len(), 140);
+    assert_eq!(ConfigureNamesInt.len(), 177);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 79);
     assert_eq!(ConfigureNamesEnum.len(), 48);
-    assert_eq!(all_settings().count(), 470);
+    assert_eq!(all_settings().count(), 472);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
@@ -317,23 +323,6 @@ fn setting_names_are_unique() {
     let before = names.len();
     names.dedup();
     assert_eq!(before, names.len());
-}
-
-#[test]
-fn m5_probe_requires_a_live_pool() {
-    // t34-config review, defect 3: with every GUC at its default
-    // (parallel_engine=runtime, pgrust.runtime=on, lane_executor=on) but NO
-    // pool spawned — exactly a unit-test process — the M5-3 suppression
-    // probe must stay inert: a suppressed Gather with no pool to pick the
-    // plan up is silent serial execution.
-    assert!(crate::runtime_pool::parallel_engine_is_runtime());
-    assert!(crate::backing::pgrust_runtime());
-    assert!(!crate::runtime_pool::runtime_pool_live());
-    assert!(!crate::parallel_engine::m5_gather_suppression_active());
-    // Once the postmaster's rtpool start publishes liveness, the probe arms
-    // (process-lifetime flag: production never unsets it, so no restore).
-    crate::runtime_pool::set_runtime_pool_live();
-    assert!(crate::parallel_engine::m5_gather_suppression_active());
 }
 
 #[test]

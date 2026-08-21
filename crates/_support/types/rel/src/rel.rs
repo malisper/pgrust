@@ -296,13 +296,23 @@ impl core::fmt::Debug for Relation<'_> {
 impl Drop for Relation<'_> {
     fn drop(&mut self) {
         if let Some(closer) = self.closer.take() {
-            // C's abort-path close has no error surface. If this Drop runs
-            // during an unwind and the closer panics (e.g. an unported seam),
-            // a second panic would abort the backend — swallow it.
             let id = self.data.rd_id;
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if std::thread::panicking() {
+                // C's abort-path close has no error surface. This Drop is
+                // running during an unwind: if the closer panics too, a
+                // second panic would abort the whole postmaster — swallow
+                // it; the ORIGINAL payload keeps propagating (shm_mq's
+                // detach-on-drop discipline).
+                // unwind-ok: log-then-die
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = closer(id, NoLock);
+                }));
+            } else {
+                // Normal drop path: no containment — a closer panic (incl.
+                // an ereport(PANIC)'s PanicExitThread) must propagate to
+                // the statement/thread boundary, not vanish silently.
                 let _ = closer(id, NoLock);
-            }));
+            }
         }
     }
 }

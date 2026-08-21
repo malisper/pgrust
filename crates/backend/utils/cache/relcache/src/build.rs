@@ -44,9 +44,19 @@ pub(crate) fn RelationInitTableAccessMethod(relkind: u8, relam: Oid) -> PgResult
     }
     // pgrcolumnar is identified by pg_am.amname, not amhandler: the closed-AM
     // engine never invokes handlers (docs/design/pgrcolumnar-impl.md §7.1).
-    if syscache_seams::pg_am_amname::call(relam)?.as_deref() == Some("pgrcolumnar") {
-        tableam_vocab::register_pgrcolumnar_table_am(relam);
-        return Ok(());
+    match syscache_seams::pg_am_amname::call(relam)?.as_deref() {
+        Some("pgrcolumnar") => {
+            tableam_vocab::register_pgrcolumnar_table_am(relam);
+            return Ok(());
+        }
+        // The pgrcolumnar2 sibling AM (lanev3 M3-H; O-M3-2: sibling name,
+        // one DDL-minted pg_am row during coexistence): same amname-probe
+        // registration, sibling registry.
+        Some("pgrcolumnar2") => {
+            tableam_vocab::register_pgrcolumnar2_table_am(relam);
+            return Ok(());
+        }
+        _ => {}
     }
     match syscache_seams::pg_am_amhandler::call(relam)? {
         Some(F_HEAP_TABLEAM_HANDLER) => {

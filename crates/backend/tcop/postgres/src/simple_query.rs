@@ -278,6 +278,14 @@ fn memctx_dump() -> PgResult<()> {
     let (nsrc, nplan, nsaved) = plancache::PlanCacheCensus();
     say(format!("memctx: plancache sources={nsrc} plans={nplan} saved={nsaved}"))?;
 
+    // memgrowth-discriminator (suspect-A census): THIS backend thread's raw-
+    // Rust slot registries (querydesc/stmt_list/queryenv/tuplestore/resowner)
+    // — Vec slabs on the global allocator, invisible to the context forest
+    // above. Same formatter the log-memory-contexts interrupt dump appends.
+    if let Some(line) = mcxt_stats::slot_census_line() {
+        say(format!("memctx: {line}"))?;
+    }
+
     // D3.2: the process-global L2 (counted once per process, not per backend).
     let l2 = ::l2cache::stats();
     say(format!(

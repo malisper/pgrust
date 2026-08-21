@@ -97,6 +97,16 @@ pub fn free(h: StmtListHandle) {
     });
 }
 
+// memgrowth-discriminator (suspect-A census): registry Vec len/capacity and
+// free-list len — raw-Rust slab bytes the context ledger cannot see.
+pub fn slot_census() -> (usize, usize, usize) {
+    let (len, cap) = ENTRIES.with(|e| {
+        let e = e.borrow();
+        (e.len(), e.capacity())
+    });
+    (len, cap, FREE.with(|f| f.borrow().len()))
+}
+
 pub fn reset_all() {
     ENTRIES.with(|e| e.borrow_mut().clear());
     FREE.with(|f| f.borrow_mut().clear());

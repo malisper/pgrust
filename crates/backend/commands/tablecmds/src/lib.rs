@@ -47,7 +47,8 @@ use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
-    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
+    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+    ERRCODE_WARNING_DEPRECATED_FEATURE, ERROR, WARNING,
 };
 
 use commands_tablespace::{GLOBALTABLESPACE_OID, TableSpaceRelationId};
@@ -757,6 +758,22 @@ pub fn DefineRelation<'mcx>(
         && access_method_id != 2
         && syscache_seams::pg_am_amname::call(access_method_id)?.as_deref() == Some("pgrcolumnar")
     {
+        // Deprecation posture of record (ADJUDICATION-20260818.md §3, Michael
+        // 2026-08-19): the v1 endgame is MIGRATE to pgrcolumnar2; new v1 tables
+        // warn per the house deprecation style (01P01, cf. the md5-password
+        // worked example in libpq/crypt). A WARNING, not a refusal — existing
+        // v1 batteries keep running until the migration drain completes.
+        elog_seams::ereport::call(
+            PgError::new(WARNING, "creating a table with the deprecated pgrcolumnar access method")
+                .with_sqlstate(ERRCODE_WARNING_DEPRECATED_FEATURE)
+                .with_detail(
+                    "pgrcolumnar (v1) is deprecated; its endgame is migration to pgrcolumnar2.",
+                )
+                .with_hint(
+                    "Use pgrcolumnar2 for new tables; migrate existing tables with \
+                     scripts/pgrust-migrate-v1.sh (ALTER TABLE ... SET ACCESS METHOD pgrcolumnar2).",
+                ),
+        )?;
         for i in 0..descriptor.natts as usize {
             let att = descriptor.attr(i);
             if att.attisdropped {

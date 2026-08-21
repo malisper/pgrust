@@ -1405,6 +1405,32 @@ fn check_valid_result_rel<'mcx>(
             .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
         ));
     }
+    // pgrcolumnar2 trickle-DML gate (lanev3 M3-H one-block copy
+    // @ dc3c67c56214:1233-1248; ruling O-M3-1a: COPY + SELECT only until
+    // the M5 DML system; restored on lanev4 per the M5e scout's F-1 —
+    // without it a trickle INSERT buffers in the WriterRegistry, the
+    // statement-end flush in mt_source_exhausted tests the v1 registry
+    // only so the row is never published, and the registry's unconditional
+    // eoxact purge silently abandons the acked row): INSERT/UPDATE/DELETE/
+    // MERGE via ModifyTable refuse TYPED here, before any AM call — bulk
+    // ingest (COPY FROM, CTAS, matview refresh) never passes through this
+    // node. The refusal constructor is the #1034 skeleton's ready face,
+    // message shape frozen to the v3 gate's wording.
+    if rel.rd_rel.relkind == RELKIND_RELATION
+        && tableam_vocab::is_pgrcolumnar2_am_oid(rel.rd_rel.relam)
+    {
+        use ::pgrc2_am::dml::{trickle_unsupported, TrickleOp};
+        return Err(match operation {
+            CmdType::CMD_INSERT => trickle_unsupported(TrickleOp::Insert),
+            CmdType::CMD_UPDATE => trickle_unsupported(TrickleOp::Update),
+            CmdType::CMD_DELETE => trickle_unsupported(TrickleOp::Delete),
+            CmdType::CMD_MERGE => trickle_unsupported(TrickleOp::Merge),
+            // Unreachable by construction (createplan is the sole writer of
+            // ModifyTable.operation, I/U/D/MERGE only) — the v3 gate's
+            // catch-all arm, kept verbatim.
+            _ => ::pgrc2_am::unsupported("this DML operation"),
+        });
+    }
     if operation == CmdType::CMD_MERGE {
         let mal = node
             .mergeActionLists
@@ -1545,8 +1571,8 @@ pub fn mt_begin<'mcx>(
 /// runs BEFORE the child pull — the per-tuple context may hold by-ref datums
 /// the PREVIOUS row's processing produced, and the reset must not run after
 /// the next child row is fetched (the fetched slot's datums could live
-/// there). In the lane hosting the placement is structural: `MtChildSource::
-/// next_row` (lanev2/dml.rs) calls this before pulling, never `accept`.
+/// there). (The lane hosting that also drove this seam, lanev2/dml.rs, was
+/// deleted at p72 D-2.)
 #[inline(always)] // per-row seam — see mt_begin's se2-cost-fix note
 pub fn mt_row_prologue<'mcx>(mt: &mut ModifyTableState<'mcx>, estate: &mut EStateData<'mcx>) {
     estate.reset_per_tuple_expr_context();
@@ -1589,10 +1615,9 @@ pub fn mt_resume<'mcx>(
 /// One `exec_modify_table` call's worth of the ModifyTable loop, composed
 /// from the wave-2 WS-N seams (contract §3.7): per row, `mt_row_prologue` →
 /// the `mt_pending`/`mt_resume` deferred-MERGE arm → child pull →
-/// `mt_accept_row`; on child exhaustion, `mt_source_exhausted`. BOTH engines
-/// drive this exact function — `exec_modify_table` (the Volcano arm) above,
-/// and the lane host's `MtChildSource` delegation (lanev2/dml.rs) — so the
-/// statement stream is identical by construction.
+/// `mt_accept_row`; on child exhaustion, `mt_source_exhausted`. (The lane
+/// host's `MtChildSource` delegation over these same seams, lanev2/dml.rs,
+/// was deleted at p72 D-2; `exec_modify_table` above is the one driver.)
 #[inline(always)] // loop composition — see mt_begin's se2-cost-fix note
 pub fn mt_step<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
@@ -2059,87 +2084,8 @@ pub fn mt_source_exhausted<'mcx>(
     Ok(())
 }
 
-/// Lane-admission shape probe (lanev2/dml.rs, behind `PGRUST_LANE_V2_DML`;
-/// wave-2 WS-N inc-1 authored it as `mt_lane_insert_refusal`, wave-3 WS-T
-/// inc-3a renamed + WIDENED it per docs/design/lane-dml-epq.md §6, wave-5
-/// WS-W widened the ON CONFLICT arm per the wave-5 contract §8.3):
-/// `None` = a shape the DML lane hosts — a single-result-relation
-/// plain-table mutation with no triggers, no partition routing / inherited
-/// root, and at most trivial (no OLD/NEW alias) RETURNING, where the
-/// operation is INSERT always, UPDATE/DELETE only when the caller passes
-/// `admit_ud` (the nested `PGRUST_LANE_V2_DML_UD` stretch knob, read by
-/// the lane AFTER the host knob — never here), and INSERT .. ON CONFLICT
-/// (DO NOTHING and DO UPDATE, the ladder-named OC arms — the four oc_*
-/// seams above compose the whole ceremony inside `exec_insert`, which
-/// both engines share) only when the caller passes `admit_oc` (the nested
-/// `PGRUST_LANE_V2_DML_OC` knob, same read discipline).
-/// `Some(detail)` = the `DmlShape` refusal with its mechanism-attribution
-/// detail string (integration contract §1: attribution rides the detail
-/// string, never a second class). MERGE stays refused EVEN under both
-/// nested knobs (blocked on the C-side trace pin); partition routing and
-/// triggers have no scheduled increment; the structural gates below are
-/// operation-agnostic, so a UD- or OC-admitted shape passes exactly the
-/// inc-1 INSERT gates (in particular `target-not-plain-table` keeps the
-/// VIEW/ir-trigger arms of `mt_accept_row` out of the admitted set, and
-/// `partition-routing` keeps the leaf-arbiter/leaf-on-conflict legs of the
-/// oc_* seams out of the OC-admitted set).
-///
-/// Lives here (not in the lane) because the verdict reads private node
-/// state; it is a read-only probe — calling it changes nothing, so a refusal
-/// falls through to the unchanged Volcano arm byte-safely. The admitted set
-/// widens in later increments (docs/design/lane-dml-epq.md ladder); every
-/// widening deletes (or knob-gates) a `Some` arm here and re-justifies its
-/// allowlist row together.
-pub fn mt_lane_shape_refusal(
-    mt: &ModifyTableState<'_>,
-    admit_ud: bool,
-    admit_oc: bool,
-) -> Option<&'static str> {
-    match mt.operation {
-        CmdType::CMD_INSERT => {}
-        CmdType::CMD_UPDATE if admit_ud => {}
-        CmdType::CMD_DELETE if admit_ud => {}
-        CmdType::CMD_UPDATE => return Some("update"),
-        CmdType::CMD_DELETE => return Some("delete"),
-        CmdType::CMD_MERGE => return Some("merge"),
-        _ => return Some("unknown-operation"),
-    }
-    if mt.plan.onConflictAction
-        != types_nodes::primnodes::OnConflictAction::ONCONFLICT_NONE as u32
-        && !admit_oc
-    {
-        return Some("on-conflict");
-    }
-    // rootRelation > 0 = partitioned or inherited target: INSERT routes
-    // through the root (`root` is Some); >1 result rels never happens for
-    // INSERT but is refused defensively with the same detail.
-    if mt.root.is_some() || mt.rels.len() != 1 {
-        return Some("partition-routing");
-    }
-    let rel = &mt.rels[0];
-    // Views (INSTEAD OF triggers / auto-updatable), foreign tables,
-    // matviews, partitioned roots reached without `root`: not plain heaps.
-    if rel.relkind != RELKIND_RELATION {
-        return Some("target-not-plain-table");
-    }
-    // ANY triggers on the target: refused since inc-1. (The wave-7 WS-AA
-    // trigger-INSERT chain carve-out that briefly widened this arm — the
-    // `admit_row_triggers` parameter fed by the `PGRUST_LANESTITCH_ROWCHAIN`
-    // knob, default OFF at every tip — was DELETED at RB-R1/SE18 with the
-    // stitched chain: the refusal is unconditional again, byte-identical to
-    // every default-config tip since inc-1.)
-    if rel.trigdesc.is_some() {
-        return Some("triggers");
-    }
-    // RETURNING is admitted (contract §6-WS-N(1)); the OLD/NEW-alias form
-    // (RETURNING OLD.*, NEW.*) is the non-trivial carve-out this increment.
-    if let Some(st) = rel.project_returning.as_deref() {
-        if st.has_old() || st.has_new() {
-            return Some("returning-old-new");
-        }
-    }
-    None
-}
+// (The lane-admission shape probe `mt_lane_shape_refusal` — sole caller
+// lanev2/dml.rs — was DELETED at p72 D-2 with the DML hosting island.)
 
 // ExecGetAllUpdatedCols (execUtils.c): perminfo updatedCols unioned with the
 // ExecInitGenerated(CMD_UPDATE) extraUpdatedCols leg — generated columns whose
@@ -6554,6 +6500,24 @@ fn exec_insert<'mcx>(
                         .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
                     ));
                 }
+                // pgrcolumnar2 trickle-DML gate, ROUTED leg ([sqe-generic-b]
+                // partition-truth fix): C's ExecInitPartitionInfo runs
+                // CheckValidResultRel(leaf, CMD_INSERT) on every routed
+                // leaf; the direct-result-rel gate lives in
+                // check_valid_result_rel (the F-1 silent-loss chain), but
+                // this routed leg never called it — a routed INSERT into a
+                // pgrcolumnar2 partition was ACKED (INSERT 0 N), buffered
+                // into heap storage the engine's banks never see, and every
+                // later SELECT silently answered without those rows (the
+                // wrong-answer class R1 exists to kill). Refuse typed HERE,
+                // before any AM call, wording frozen to the v3 gate's.
+                if lrel.rd_rel.relkind == RELKIND_RELATION
+                    && tableam_vocab::is_pgrcolumnar2_am_oid(lrel.rd_rel.relam)
+                {
+                    return Err(::pgrc2_am::dml::trickle_unsupported(
+                        ::pgrc2_am::dml::TrickleOp::Insert,
+                    ));
+                }
                 if mt.plan.onConflictAction
                     == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32
                 {
@@ -6998,10 +6962,9 @@ fn exec_insert<'mcx>(
 // composition in `exec_insert` replays the original control flow exactly:
 // `Done` = the former `return`, `Retry`/spec-conflict = the former
 // `continue`, pre_ok fall-through = the former loop `break`. No seam is
-// lane-aware: BOTH engines (the Volcano arm and the knob-gated DML lane
-// host, lanev2/dml.rs) reach these through the SAME `mt_accept_row` →
-// `exec_insert` chain, so the statement stream is identical by
-// construction.
+// lane-aware: everything reaches these through the SAME `mt_accept_row` →
+// `exec_insert` chain. (The knob-gated DML lane host that also drove them,
+// lanev2/dml.rs, was deleted at p72 D-2.)
 // =============================================================================
 
 /// OC seam 1/4 — arbiter index selection (C ExecInitPartitionInfo's
@@ -8733,344 +8696,9 @@ mcx::forget_safe_struct!(
         index_eval_cx },
 );
 
-// =============================================================================
-// ===== WAVE-9 APPEND REGION (WS-AG fusion D1a) — do not edit above ==========
-//
-// The rowmode-endgame §2.2 accept-seam decomposition (wave-9 contract §1
-// rung 2): the chain-admitted trigger-INSERT shape's `mt_accept_row` →
-// `exec_insert` composition, re-exposed as five separately callable seams
-// so the stitched row chain (lanev2/dml.rs) can drive the §2.2 targets —
-// `br_row_triggers` / `table_tuple_insert`+`ExecInsertIndexTuples` /
-// `ar_insert_triggers` / `exec_process_returning` — as individual protocol
-// calls with the statement-shape checks hoisted to admission (the
-// work-removal channel: the per-row drive stops re-deciding view/partition/
-// leaf/ON-CONFLICT arms that are structurally dead for the admitted shape).
-//
-// SHAPE PRECONDITION (every seam): `mt_rowchain_shape_mask` returned Some —
-// CMD_INSERT, ONCONFLICT_NONE, single plain-heap result relation (rels[0],
-// cur == 0, root None, RELKIND_RELATION), no tableoid dispatch column
-// (result_oid_attno == 0), RETURNING absent or trivial. The chain host
-// re-probes per drive and falls to the DmlInsertOp portable host on ANY
-// mismatch (fail closed, never a wrong specialization); the seams
-// debug-assert the load-bearing facts.
-//
-// BYTE-IDENTITY ARGUMENT, per target (each statement below is
-// `mt_accept_row`'s / `exec_insert`'s own, in its original order, with
-// branches DEAD-for-the-shape removed — dead-branch elision changes no
-// executed statement and no error site):
-// * `mt_ins_stage`   ≡ mt_accept_row's EvalPlanQualSetSlot mirror (the
-//   epq_origslot/epq_subs stores) + the CMD_INSERT arm's projection-init +
-//   exec_get_insert_new_tuple statements. The multi-rel tableoid dispatch
-//   block is dead (result_oid_attno == 0, debug-pinned).
-// * `mt_ins_br_triggers` ≡ exec_insert's BR block: the IDENTICAL
-//   `br_row_triggers(.., TRIGGER_TYPE_INSERT, TRIGGER_EVENT_INSERT, None,
-//   Some(slot), None)` call (leaf = None: the shape routes nothing).
-//   false = suppression ≡ exec_insert's `return Ok(None)`.
-// * `mt_ins_write`   ≡ exec_insert's statements from the (dead) routing
-//   blocks through the physical write: last_insert_leaf/remapped resets,
-//   the generated-columns + materialize + ExecOpenIndices block, the RLS
-//   WCO_RLS_INSERT_CHECK block, the constraints + relispartition-check
-//   block, then `table_tuple_insert` + `ExecInsertIndexTuples` (the
-//   onconflict == 0 arm verbatim; the speculative vlock loop is dead by
-//   ONCONFLICT_NONE). Returns the recheck_indexes the AR epilogue consumes.
-// * `mt_ins_epilogue` ≡ exec_insert's tail: `ar_insert_triggers` (leaf =
-//   None), the post-insert WCO_VIEW_CHECK arm, and the canSetTag
-//   es_processed bump.
-// * `mt_ins_returning` ≡ mt_accept_row's CMD_INSERT RETURNING block for
-//   ONCONFLICT_NONE: oc_old_slot is None by shape (debug-pinned), so cmd =
-//   CMD_INSERT and the OC materialize/clear leg is dead; the call is the
-//   IDENTICAL `exec_process_returning(.., CMD_INSERT, None, Some(rslot),
-//   plan_slot)`.
-// Error identity: every erroring statement above IS the node's own helper
-// (the two-regime error law's effectful half) — its PgError unwind is
-// byte-identical by construction, at the same position in the per-row
-// statement stream.
-// =============================================================================
-
-/// Chain-shape mask bit: the target has BEFORE ROW INSERT triggers (the
-/// chain program carries the `mt_ins_br_triggers` protocol step).
-pub const MT_ROWCHAIN_BR: u8 = 1 << 0;
-/// Chain-shape mask bit: the target projects (trivial) RETURNING (the
-/// chain program carries the `mt_ins_returning` protocol step).
-pub const MT_ROWCHAIN_RET: u8 = 1 << 1;
-/// The closed set of chain shape variants (compile-once per mask).
-pub const MT_ROWCHAIN_MASKS: usize = 4;
-
-/// The per-statement chain-shape mask (wave-9 WS-AG rung 2): Some(mask) =
-/// this ADMITTED statement is the decomposed trigger-INSERT chain shape and
-/// the `mt_ins_*` seams' specializations hold; None = drive the DmlInsertOp
-/// portable host instead (fail closed). Reads private node state, so it
-/// lives here like `mt_lane_shape_refusal`; read-only — refusal falls
-/// through byte-safely. The structural facts are already guaranteed by the
-/// admission verdict (`mt_lane_shape_refusal` with the rowchain arm); they
-/// are re-checked here defensively because the seams SPECIALIZE on them.
-pub fn mt_rowchain_shape_mask(mt: &ModifyTableState<'_>) -> Option<u8> {
-    if mt.operation != CmdType::CMD_INSERT
-        || mt.plan.onConflictAction
-            != types_nodes::primnodes::OnConflictAction::ONCONFLICT_NONE as u32
-        || mt.root.is_some()
-        || mt.rels.len() != 1
-        || mt.cur != 0
-        || mt.result_oid_attno != 0
-    {
-        return None;
-    }
-    let r = &mt.rels[0];
-    if r.relkind != RELKIND_RELATION {
-        return None;
-    }
-    // The chain family is the trigger-bearing shape (mt_rowchain_shape's
-    // own gate — trigger-less INSERTs stay on their existing hosts).
-    let td = r.trigdesc.as_ref()?;
-    let mut mask = 0u8;
-    if td.trig_insert_before_row {
-        mask |= MT_ROWCHAIN_BR;
-    }
-    if let Some(st) = r.project_returning.as_deref() {
-        if st.has_old() || st.has_new() {
-            // Admission refuses returning-old-new; defensive re-check.
-            return None;
-        }
-        mask |= MT_ROWCHAIN_RET;
-    }
-    Some(mask)
-}
-
-/// Chain seam 1/5 — stage one source row for the insert (mt_accept_row's
-/// pre-dispatch bookkeeping + the CMD_INSERT arm's projection staging).
-/// Returns the slot the write path consumes.
-#[inline]
-pub fn mt_ins_stage<'mcx>(
-    mt: &mut ModifyTableState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    plan_slot: ExecSlotId,
-) -> PgResult<ExecSlotId> {
-    // C EvalPlanQualSetSlot mirror — mt_accept_row's head, verbatim.
-    mt.epq_origslot = Some(plan_slot);
-    if let Some(subs) = mt.epq_subs.as_mut() {
-        subs.origslot = Some(plan_slot);
-    }
-    // The multi-rel tableoid dispatch is dead for the chain shape.
-    debug_assert_eq!(mt.result_oid_attno, 0, "chain shape has no tableoid dispatch");
-    debug_assert_eq!(mt.cur, 0, "chain shape is single-result-relation");
-    // The CMD_INSERT arm's head, verbatim.
-    if !mt.rel().ri_projectNewInfoValid {
-        exec_init_insert_projection(mt, estate)?;
-    }
-    exec_get_insert_new_tuple(mt, estate, plan_slot)
-}
-
-/// Chain seam 2/5 — the §2.2 `br_row_triggers` target: exec_insert's BR
-/// block for the unrouted plain-heap shape. `true` = proceed; `false` = the
-/// trigger suppressed the row (≡ exec_insert's `return Ok(None)`; the chain
-/// skips back to the loop top — es_processed and the RETURNING stream see
-/// nothing, exactly the Volcano suppression).
-#[inline]
-pub fn mt_ins_br_triggers<'mcx>(
-    mt: &mut ModifyTableState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    slot_id: ExecSlotId,
-) -> PgResult<bool> {
-    debug_assert!(
-        mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_insert_before_row),
-        "BR seam driven without BR-row triggers (mask drift)"
-    );
-    // C ExecInsert opens the target's indexes before the BR trigger block
-    // (mirrors exec_insert; mt_ins_write's open is then a no-op).
-    open_target_indexes(mt, estate, false)?;
-    br_row_triggers(
-        mt,
-        estate,
-        types_trigger::TRIGGER_TYPE_INSERT,
-        types_trigger::TRIGGER_EVENT_INSERT,
-        None,
-        Some(slot_id),
-        None,
-    )
-}
-
-/// Chain seam 3/5 — the §2.2 write target (`table_tuple_insert` +
-/// `ExecInsertIndexTuples`) plus exec_insert's pre-write statements for the
-/// unrouted ONCONFLICT_NONE shape, in exec_insert's own order. Returns the
-/// recheck-index list `mt_ins_epilogue` consumes.
-#[inline]
-pub fn mt_ins_write<'mcx>(
-    mt: &mut ModifyTableState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    slot_id: ExecSlotId,
-) -> PgResult<mcx::PgVec<'mcx, Oid>> {
-    let mcx = estate.es_query_cxt;
-    let output_cid = estate.es_output_cid;
-    let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
-
-    // exec_insert's routing out-params, reset exactly as the unrouted path
-    // leaves them (exec_process_returning `take`s last_insert_remapped).
-    mt.last_insert_leaf = None;
-    mt.last_insert_remapped = None;
-
-    // Stored generated columns + materialize + index open (exec_insert's
-    // middle block; the routed/remapped arms are dead for the shape).
-    {
-        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let ModifyTableState { rels, cur, .. } = &mut *mt;
-        let r = &mut rels[*cur];
-        let rel = es_relations[(r.rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        let slot = &mut es_tupleTable[slot_id.0 as usize];
-
-        slot.base_mut().tts_tableOid = rel.rd_id;
-        if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
-            exec_compute_stored_generated(mcx, &mut r.generated_exprs, rel, slot)?;
-        }
-        exectuples::exec_materialize_slot(slot, mcx)?;
-        slot.base_mut().tts_tableOid = rel.rd_id;
-
-        if rel.rd_rel.relhasindex && r.indexes.is_none() {
-            // onconflict == 0 by shape: speculative = false.
-            r.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
-        }
-    }
-
-    // RLS WITH CHECK OPTIONS (exec_insert's WCO block; operation is
-    // CMD_INSERT by shape, so the kind is WCO_RLS_INSERT_CHECK).
-    {
-        let ecxt = mt.node_ecxt;
-        let ModifyTableState { rels, cur, .. } = &mut *mt;
-        let wcos = &mut rels[*cur].wco_exprs;
-        if !wcos.is_empty() {
-            exec_with_check_options(estate, ecxt, wcos, WCOKind::WCO_RLS_INSERT_CHECK, slot_id)?;
-        }
-    }
-
-    // Constraints + the direct-partition check (exec_insert's constraints
-    // block; err_root_rel is None — the unrouted arm).
-    {
-        let target_rte = estate.es_range_table[(mt.rel().rti - 1) as usize];
-        let perminfos = estate.es_rteperminfos;
-        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let ModifyTableState { rels, cur, .. } = &mut *mt;
-        let r = &mut rels[*cur];
-        let rel = es_relations[(r.rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        let slot = &mut es_tupleTable[slot_id.0 as usize];
-        let mod_cols = {
-            let rte = target_rte;
-            let mut cols = types_nodes::Bitmapset::empty();
-            if rte.perminfoindex > 0 {
-                if let Some(pis) = perminfos {
-                    let pi = pis
-                        .nth(rte.perminfoindex as usize - 1)
-                        .as_rte_permission_info()
-                        .expect("permInfos cell");
-                    cols = pi.insertedCols.union(&pi.updatedCols, mcx)?;
-                }
-            }
-            cols
-        };
-        exec_constraints(
-            mcx,
-            &mut r.check_exprs,
-            &mut r.virtual_nn_exprs,
-            rel,
-            slot,
-            None,
-            Some(&mod_cols),
-        )?;
-        // Direct INSERT into a partition leaf checks the partition
-        // constraint (leaf_idx.is_none() arm of exec_insert's condition).
-        if rel.rd_rel.relispartition {
-            if !execpartition::exec_partition_check(mcx, &mut r.partition_check, rel, slot)? {
-                return Err(execpartition::partition_constraint_violation(
-                    mcx,
-                    rel,
-                    slot,
-                    Some(&mod_cols),
-                    None,
-                ));
-            }
-        }
-    }
-
-    // The physical write: exec_insert's onconflict == 0 arm, verbatim.
-    {
-        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let ModifyTableState { rels, cur, index_eval_cx, .. } = &mut *mt;
-        let r = &mut rels[*cur];
-        let rel = es_relations[(r.rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        let slot = &mut es_tupleTable[slot_id.0 as usize];
-
-        tableam::table_tuple_insert(mcx, rel, slot, output_cid, 0, None)?;
-
-        if let Some(indexes) = r.indexes.as_mut() {
-            if indexes.num_indices() > 0 {
-                recheck_indexes = execindexing::ExecInsertIndexTuples(
-                    mcx,
-                    index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
-                    indexes,
-                    rel,
-                    slot,
-                    false,
-                    None,
-                    &[],
-                    false,
-                )?;
-            }
-        }
-    }
-    Ok(recheck_indexes)
-}
-
-/// Chain seam 4/5 — the §2.2 `ar_insert_triggers` target plus exec_insert's
-/// tail (post-insert view CHECK OPTIONs, the canSetTag es_processed bump).
-#[inline]
-pub fn mt_ins_epilogue<'mcx>(
-    mt: &mut ModifyTableState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    slot_id: ExecSlotId,
-    recheck_indexes: &[Oid],
-) -> PgResult<()> {
-    ar_insert_triggers(mt, estate, slot_id, recheck_indexes, None)?;
-    if !mt.rel().wco_exprs.is_empty() {
-        let mcx = estate.es_query_cxt;
-        let ecxt = mt.node_ecxt;
-        let r = &mut mt.rels[mt.cur];
-        let rti = r.rti;
-        exec_view_check_options(
-            mcx,
-            estate,
-            ecxt,
-            &mut r.wco_exprs,
-            slot_id,
-            WcoRel::Rti { rti, root_rti: None },
-        )?;
-    }
-    if mt.canSetTag {
-        estate.es_processed += 1;
-    }
-    Ok(())
-}
-
-/// Chain seam 5/5 — the §2.2 `exec_process_returning` target:
-/// mt_accept_row's CMD_INSERT RETURNING block for ONCONFLICT_NONE.
-#[inline]
-pub fn mt_ins_returning<'mcx>(
-    mt: &mut ModifyTableState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    result_slot: ExecSlotId,
-    plan_slot: ExecSlotId,
-) -> PgResult<ExecSlotId> {
-    // ONCONFLICT_NONE never stages an OC old slot, so the `oc_old_slot
-    // .take()` in mt_accept_row reads None (cmd = CMD_INSERT, the OC
-    // materialize/clear leg dead) — debug-pinned.
-    debug_assert!(mt.oc_old_slot.is_none(), "OC old slot in an ONCONFLICT_NONE chain");
-    debug_assert!(mt.rel().project_returning.is_some(), "RETURNING seam without a projection");
-    exec_process_returning(mt, estate, CmdType::CMD_INSERT, None, Some(result_slot), plan_slot)
-}
-// --- end WS-AG (wave-9) -------------------------------------------------------
+// (The WAVE-9 WS-AG fusion-D1a append region — mt_rowchain_shape_mask +
+// the five mt_ins_* chain seams, sole driver the stitched row chain in
+// lanev2/dml.rs — was DELETED at p72 D-2 with the DML hosting island.)
 
 // CheckValidResultRel's non-table relkind arms (execMain.c:1086-1089 and the
 // default arm): clean catchable WRONG_OBJECT_TYPE errors, not aborts.
@@ -9109,6 +8737,15 @@ mod check_valid_result_rel_tests {
     }
 
     fn relation_of_kind<'m>(mcx: ::mcx::Mcx<'m>, name: &str, relkind: u8) -> Relation<'m> {
+        relation_of_kind_am(mcx, name, relkind, 0)
+    }
+
+    fn relation_of_kind_am<'m>(
+        mcx: ::mcx::Mcx<'m>,
+        name: &str,
+        relkind: u8,
+        relam: types_core::Oid,
+    ) -> Relation<'m> {
         let mut relname = NameData::default();
         relname.namestrcpy(name);
         let rd_rel = FormData_pg_class {
@@ -9116,7 +8753,7 @@ mod check_valid_result_rel_tests {
             relnamespace: 2200,
             reltype: 0,
             relowner: 10,
-            relam: 0,
+            relam,
             relfilenode: 70001,
             reltablespace: 0,
             relpages: 0,
@@ -9208,6 +8845,71 @@ mod check_valid_result_rel_tests {
         let e = check(cx.mcx(), "idx1", types_rel::RELKIND_INDEX).unwrap_err();
         assert_eq!(e.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
         assert_eq!(e.message(), "cannot change relation \"idx1\"");
+    }
+
+    // The v3 M3-H trickle-DML gate (lanev3 @ dc3c67c56214 nodemodifytable
+    // lines 1233-1248; ruling O-M3-1a: COPY + SELECT only until the M5 DML
+    // system), restored on lanev4 per the M5e scout's F-1 finding:
+    // INSERT/UPDATE/DELETE/MERGE on a pgrcolumnar2 result relation must
+    // refuse TYPED (0A000) HERE, before any AM call.
+    //
+    // Born-RED witness of the silent-loss chain this test pins shut: with
+    // the gate absent, check_valid_result_rel returns Ok for CMD_INSERT and
+    // the statement proceeds into the AM — table_tuple_insert buffers the
+    // row in the per-(fxid,cid) WriterRegistry, the statement-end flush
+    // (mt_source_exhausted) tests is_pgrcolumnar_am_oid (the v1 registry)
+    // only so table_finish_bulk_insert never publishes it, and the
+    // registry's unconditional eoxact purge abandons it: the acked INSERT
+    // silently loses its row.
+    #[test]
+    fn pgrcolumnar2_result_rel_refuses_trickle_dml_typed() {
+        const PGRC2_TEST_AM_OID: types_core::Oid = 77102;
+        tableam_vocab::register_pgrcolumnar2_table_am(PGRC2_TEST_AM_OID);
+        // Pass-through replica-identity seam, so a MISSING gate is
+        // witnessed as a crisp Ok(()) (the statement proceeding into the
+        // AM), not as an uninstalled-seam panic. With the gate present the
+        // seam is never consulted for a pgrcolumnar2 result relation.
+        if !execreplication_seams::check_cmd_replica_identity::is_installed() {
+            execreplication_seams::check_cmd_replica_identity::set(|_mcx, _rel, _cmd| Ok(()));
+        }
+        let cx = ::mcx::MemoryContext::new("cvrr pgrc2 test");
+        let mcx = cx.mcx();
+        for (op, msg) in [
+            (
+                CmdType::CMD_INSERT,
+                "pgrcolumnar2 does not support INSERT (bulk-load with COPY; \
+                 trickle DML arrives with the M5 delta store)",
+            ),
+            (CmdType::CMD_UPDATE, "pgrcolumnar2 does not support UPDATE"),
+            (CmdType::CMD_DELETE, "pgrcolumnar2 does not support DELETE"),
+            (CmdType::CMD_MERGE, "pgrcolumnar2 does not support MERGE"),
+        ] {
+            let node: &ModifyTable<'_> = ::mcx::alloc_leak_in(
+                mcx,
+                ModifyTable { operation: op, ..Default::default() },
+            )
+            .unwrap();
+            let rel = relation_of_kind_am(mcx, "cstore1", RELKIND_RELATION, PGRC2_TEST_AM_OID);
+            let e = check_valid_result_rel(mcx, &rel, node, None, None).expect_err(
+                "trickle DML into a pgrcolumnar2 table must refuse typed — an Ok here \
+                 IS the F-1 silent-loss bug (the row buffers in the WriterRegistry, \
+                 the v1-only statement-end flush never publishes it, and the eoxact \
+                 purge abandons it)",
+            );
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+            assert_eq!(e.message(), msg);
+        }
+        // The gate is pgrcolumnar2-scoped: a plain-relation result rel of
+        // the same shape (relam 0, the module's standing test double) still
+        // passes the check.
+        let node: &ModifyTable<'_> = ::mcx::alloc_leak_in(
+            mcx,
+            ModifyTable { operation: CmdType::CMD_INSERT, ..Default::default() },
+        )
+        .unwrap();
+        let rel = relation_of_kind(mcx, "plain1", RELKIND_RELATION);
+        check_valid_result_rel(mcx, &rel, node, None, None)
+            .expect("a non-pgrcolumnar2 result relation is unaffected by the gate");
     }
 
     // A provider without an FdwModifyRoutine (file_fdw): C's

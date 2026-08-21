@@ -16,8 +16,13 @@ struct Entry {
 }
 
 thread_local! {
-    static ENTRIES: RefCell<Vec<Option<Entry>>> = const { RefCell::new(Vec::new()) };
-    static FREE: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    // tls-dtor: ManuallyDrop — Tuplestore::drop closes BufFiles (FileClose ->
+    // FD.with), which aborts inside TLS teardown; leaked stores match C's
+    // FATAL-exit leak and the fd belts close the VFDs.
+    static ENTRIES: RefCell<core::mem::ManuallyDrop<Vec<Option<Entry>>>> =
+        const { RefCell::new(core::mem::ManuallyDrop::new(Vec::new())) };
+    static FREE: RefCell<core::mem::ManuallyDrop<Vec<u32>>> =
+        const { RefCell::new(core::mem::ManuallyDrop::new(Vec::new())) };
     static GENERATION: Cell<u32> = const { Cell::new(0) };
 }
 
@@ -48,6 +53,16 @@ pub fn register(store: Tuplestore) -> TuplestoreHandle {
         }),
     };
     encode(idx, generation)
+}
+
+// memgrowth-discriminator (suspect-A census): registry Vec len/capacity and
+// free-list len — raw-Rust slab bytes the context ledger cannot see.
+pub fn slot_census() -> (usize, usize, usize) {
+    let (len, cap) = ENTRIES.with(|e| {
+        let e = e.borrow();
+        (e.len(), e.capacity())
+    });
+    (len, cap, FREE.with(|f| f.borrow().len()))
 }
 
 pub fn with_store<R>(h: TuplestoreHandle, f: impl FnOnce(&mut Tuplestore) -> R) -> R {

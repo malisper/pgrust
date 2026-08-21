@@ -50,3 +50,6 @@ fts-only-findings*.jsonl
 fts-*findings-manifest.txt
 wire-diff-out/
 .claude/worktrees/
+.tpchconv/
+.tpch22/
+scripts/sqe/matrix/selftest-work/

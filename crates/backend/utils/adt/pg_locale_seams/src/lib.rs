@@ -18,6 +18,31 @@ seam_core::seam!(
     pub fn collation_is_deterministic(collid: Oid) -> PgResult<bool>
 );
 
+// C: pg_newlocale_from_collation(collid)->collate_is_c — memcmp order IS
+// the collation order. M4-S8 consumer: pgrc2_am schema classification
+// resolves a DEFAULT-collated column on a C-locale database to its honest
+// C class (the engine-cut substrate finding: DEFAULT-under-C classified
+// OtherDeterministic made dict/FSST election structurally unreachable on
+// every engine cut). The pg_locale installer answers FALSE (never an
+// error) when the database default locale is not yet stamped, so callers
+// keep their conservative class — the #598 fail-closed direction.
+seam_core::seam!(
+    pub fn collation_collate_is_c(collid: Oid) -> PgResult<bool>
+);
+
+// C: pg_newlocale_from_collation(collid)->ctype_is_c — character
+// CLASSIFICATION is the C locale's (regex character classes, case
+// mapping). Consumer: the lx4 seam's expression-computed group-key
+// admission (the q28 REGEXP_REPLACE class) pins the collation to the C
+// strategy so the per-row evaluation face is thread-safe on pool helper
+// threads (a non-C strategy resolves locale state through backend-thread
+// caches). The installer answers FALSE (never an error) when the
+// database default locale is not yet stamped — callers keep their
+// conservative class, the collate_is_c precedent.
+seam_core::seam!(
+    pub fn collation_ctype_is_c(collid: Oid) -> PgResult<bool>
+);
+
 seam_core::seam!(
     // pg_perm_setlocale(category, locale) (pg_locale.c); category is the POSIX
     // LC_* value; Ok(None) is C's NULL return (setlocale failure).

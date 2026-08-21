@@ -19,6 +19,7 @@ lsyscache = { path = "../../cache/lsyscache" }
 fmgr_core = { path = "../../fmgr/fmgr_core" }
 funcapi = { path = "../../fmgr/funcapi" }
 arrayfuncs = { path = "../arrayfuncs" }
+adt_float = { path = "../float" }
 adt_timestamp = { path = "../adt_timestamp" }
 adt_datetime = { path = "../adt_datetime" }
 init_small = { path = "../../init/init_small" }

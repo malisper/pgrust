@@ -8,7 +8,13 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 stack_depth_core = { path = "../../utils/misc/stack_depth_core" }
+# [heap rung 3] inline pglz decompression on the heap text byte lanes
+# (pure function — worker-legal; out-of-line TOAST stays a typed refusal)
+pglz = { path = "../../../common/pglz" }
+# [heap b1] detoast-at-fill behind PGRUST_SQE_HEAP_DETOAST (leader-only)
+detoast = { path = "../../access/common/detoast" }
 pgsync = { path = "../../../_support/pgsync" }
 pg_clock = { path = "../../../port/pg_clock" }
 # slease v2 sweeper (GL-SLEASE-2) + GL-STMTTASK-2 quantum-yield sweeper:
@@ -70,9 +76,6 @@ nodebitmapindexscan = { path = "../nodebitmapindexscan" }
 nodebitmapheapscan = { path = "../nodebitmapheapscan" }
 tidbitmap = { path = "../../nodes/tidbitmap" }
 nodeagg = { path = "../nodeagg" }
-lanefold = { path = "../lanefold" }
-laneexec = { path = "../laneexec" }
-lanestitch = { path = "../lanestitch" }
 nodematerial = { path = "../nodematerial" }
 nodememoize = { path = "../nodememoize" }
 nodesort = { path = "../nodesort" }
@@ -118,6 +121,30 @@ bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 # disposition install. Already an indirect dep through parallel.
 procsignal = { path = "../../storage/ipc/procsignal" }
 nodelockrows = { path = "../nodelockrows" }
+# sqe P2-1 shell: the dispatch slot's engine + AM bridge + numeric renders.
+sqe = { path = "../sqe" }
+# [P6-1 spill] the fd/pgsql_tmp spill substrate behind the sqe grouped
+# spill arm's store seam (sqeshell/spillstore.rs).
+sqe_spill = { path = "../sqe_spill" }
+# sqe mb-LIKE lane: the seam's `_`-grain law is keyed on the database
+# encoding (UTF-8 serves character-grain; others refuse typed).
+mbutils = { path = "../../utils/mb/mbutils" }
+wchar = { path = "../../../common/wchar" }
+pgrc2_am = { path = "../../access/pgrcolumnar2/pgrc2_am" }
+# sqe P4-5a values-scan leaf: seal VALUES rows into an in-memory pgrc2
+# bank (real writer over MemVfs, real reader over MemPartIo) so the join
+# build machinery composes unchanged over a Values side.
+pgrc2_write = { path = "../../access/pgrcolumnar2/pgrc2_write" }
+pgrc2_read = { path = "../../access/pgrcolumnar2/pgrc2_read" }
+pgrc2_format = { path = "../../access/pgrcolumnar2/pgrc2_format" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+adt_numeric = { path = "../../utils/adt/numeric" }
+adt_jsonb = { path = "../../utils/adt/jsonb" }
+# P2-1 pool fd/resowner arming (also dev-deps below for the test harness).
+fd = { path = "../../storage/file/fd" }
+resowner = { path = "../../utils/resowner/resowner" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 pgstat = { path = "../../utils/activity/pgstat" }
 tableam = { path = "../../access/table/tableam" }
@@ -128,9 +155,15 @@ heapam = { path = "../../access/heap/heapam" }
 # SEAM-WIRING (SE10-GATES item 1): relam_is_pgrcolumnar for the §4.1
 # CURRENT-OF eligibility probe's AM narrowing (execcurrent.rs).
 reloptions = { path = "../../access/common/reloptions" }
+orderedsetaggs = { path = "../../utils/adt/orderedsetaggs" }
+
 [dev-dependencies]
-adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 adt_numeric = { path = "../../utils/adt/numeric" }
+# P2-1 pool fd/resowner arming (also dev-deps below for the test harness).
+fd = { path = "../../storage/file/fd" }
+resowner = { path = "../../utils/resowner/resowner" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
 spi_seams = { path = "../spi_seams" }
 parallel = { path = "../../access/transam/parallel" }
 bgworker = { path = "../../postmaster/bgworker" }
@@ -198,10 +231,6 @@ commit_ts_seams = { path = "../../access/transam/commit_ts_seams" }
 syncrep_seams = { path = "../../replication/syncrep_seams" }
 backend_progress_seams = { path = "../../utils/activity/backend_progress_seams" }
 pmchild_seams = { path = "../../postmaster/pmchild_seams" }
-fd = { path = "../../storage/file/fd" }
-resowner = { path = "../../utils/resowner/resowner" }
-resowner_seams = { path = "../../utils/resowner/resowner_seams" }
-types_resowner = { path = "../../../_support/types/types_resowner" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 pgstat_seams = { path = "../../utils/activity/pgstat_seams" }

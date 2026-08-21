@@ -242,13 +242,16 @@ pub fn initialize_guc_options_from_environment() -> PgResult<()> {
     if let Ok(env) = std::env::var("PGCLIENTENCODING") {
         crate::SetConfigOption("client_encoding", Some(&env), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
     }
-    // pgrust-only: the lane-v2 boot env var sets pgrust.lane_executor's
-    // startup default (the CI-harness / kill-switch path; the GUC value
-    // governs from there — SET/SET LOCAL/RESET land on this as the reset
-    // value, like C's PGDATESTYLE precedent above).
-    if let Ok(env) = std::env::var("PGRUST_LANE_V2") {
-        let v = if matches!(env.as_str(), "0" | "off") { "off" } else { "on" };
-        crate::SetConfigOption("pgrust.lane_executor", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
+    // pgrust-only, P7-2 D-8 tombstone: PGRUST_LANE_V2 no longer seeds
+    // pgrust.lane_executor (itself a tombstoned no-effect GUC — the lane-v2
+    // executor is removed). The env var is accepted and ignored for one
+    // release per the tombstone law (docs/design/sqe/p72-deletion-plan.md
+    // §1.3), then this arm goes too.
+    if std::env::var("PGRUST_LANE_V2").is_ok() {
+        eprintln!(
+            "pgrust: PGRUST_LANE_V2 is a lanev2 tombstone and has no effect \
+             (the lane-v2 executor was removed, P7-2); accepted and ignored"
+        );
     }
     // pgrust-only: pgrust.condition_cache's startup default, same contract
     // as PGRUST_LANE_V2 above (the harness arm switch; the boot default
@@ -274,6 +277,21 @@ pub fn initialize_guc_options_from_environment() -> PgResult<()> {
     if let Ok(env) = std::env::var("PGRUST_RUNTIME_VACUUM_POOL") {
         let v = if matches!(env.trim(), "0" | "off") { "off" } else { "on" };
         crate::SetConfigOption("pgrust.runtime_vacuum_pool", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
+    }
+    // pgrust-only (env-to-guc train): pgrust.sqe_threads' startup default
+    // (the sqe server engine's worker width; 0 = auto). The seam formerly
+    // read this env directly with a 1..=512 filter — the seed keeps that
+    // contract (out-of-range values are ignored, the GUC default governs)
+    // and admits 0 for the auto spelling.
+    if let Ok(env) = std::env::var("PGRUST_SQE_THREADS") {
+        if env.trim().parse::<u32>().is_ok_and(|n| n <= 512) {
+            crate::SetConfigOption(
+                "pgrust.sqe_threads",
+                Some(env.trim()),
+                PGC_POSTMASTER,
+                PGC_S_ENV_VAR,
+            )?;
+        }
     }
     // pgrust-only (env-to-guc train): pgrust.mem_autotune's startup default
     // (the boot-time machine-scaled memory/parallel auto-tune gate). Accepts

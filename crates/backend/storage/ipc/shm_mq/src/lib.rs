@@ -687,6 +687,7 @@ impl Drop for ShmMqHandle {
         // detach here would double-panic and abort the whole postmaster
         // (C's on_dsm_detach never aborts the cluster for one worker).
         if std::thread::panicking() {
+            // unwind-ok: log-then-die
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.detach()));
         } else {
             self.detach();

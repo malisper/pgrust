@@ -1,0 +1,43 @@
+# sqe_lanestitch — Tier B of the sqe engine: the runtime stitcher for
+# Step-IR programs (docs/design/sqe/step-ir.md; production-plan.md §3).
+# Curated port of the lanestitch lineage (R5). The interpreter is the CI
+# parity oracle ONLY: it compiles solely under the `oracle` feature, which
+# no production crate enables — no interpreter symbol is reachable from
+# any execution path (R2). Erroring bodies refuse-and-replay: the driver
+# owns the replay, whose production target is the AOT error-kernel path.
+
+[package]
+name = "sqe_lanestitch"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sqe_lanestitch"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+jit_deform = { path = "../../../../_support/jit_deform" }
+types_error = { path = "../../../../_support/types/types_error", optional = true }
+
+[dev-dependencies]
+sqe = { path = ".." }
+
+[features]
+# CI-only: compiles the reference interpreter (the executable Step-IR
+# specification) for the parity suites. Never enabled by an engine or
+# server crate.
+oracle = ["dep:types_error"]
+
+[[test]]
+name = "parity"
+required-features = ["oracle"]
+
+[[test]]
+name = "tier_a_parity"
+required-features = ["oracle"]
+
+[[test]]
+name = "cache"
+required-features = ["oracle"]

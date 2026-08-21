@@ -909,12 +909,21 @@ impl runtime::TaskSetWork for VacScanShared {
             // Already aborting: the claim drains without work.
             return;
         }
+        // unwind-ok: worker-containment
         let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(worker, range)));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(e)) => self.fail(e),
-            Err(_panic) => {
-                self.fail(PgError::new(ERROR, "vacuum scan worker panicked in a morsel").into())
+            Err(unwind) => {
+                self.fail(PgError::new(ERROR, "vacuum scan worker panicked in a morsel").into());
+                // Exit-committed unwinds (FATAL's proc_exit / PANIC /
+                // crash-injected SIGKILL) rethrow to the driver — a dying
+                // thread must not claim the next morsel, and WAL runs
+                // beneath this body (the fsync law: a demoted PANIC is
+                // "retry and trust").
+                if parallel::standing::is_exit_unwind(&*unwind) {
+                    std::panic::resume_unwind(unwind);
+                }
             }
         }
     }
@@ -1138,6 +1147,7 @@ fn vacuum_scan_worker_main(pshared: &parallel::ParallelShared) -> PgResult<()> {
     let Some(private) = pshared.private() else { return Ok(()) };
     let Ok(shared) = private.downcast::<VacScanShared>() else { return Ok(()) };
 
+    // unwind-ok: worker-containment
     let r = catch_unwind(AssertUnwindSafe(|| worker_drive(&shared)));
     let outcome = match r {
         Ok(o) => o,
@@ -1306,6 +1316,7 @@ fn vacuum_scan_pool_driver(shared: &parallel::ParallelShared) {
         spins += 1;
     }
     let entered = std::cell::Cell::new(false);
+    // unwind-ok: worker-containment
     let r = catch_unwind(AssertUnwindSafe(|| {
         parallel::with_query_task_binding(&target, || {
             entered.set(true);

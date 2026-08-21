@@ -179,6 +179,9 @@ pub enum EngineKindWire {
     FusedArm = 2,
     /// Morsel-runtime arm engaged (pipeline identity via RuntimeEaPipeline).
     Runtime = 3,
+    /// sqe stencil engine owns the node (P2-1 dispatch; detail carries the
+    /// stencil family on "engaged", the refusal variant key on "refused").
+    Sqe = 4,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

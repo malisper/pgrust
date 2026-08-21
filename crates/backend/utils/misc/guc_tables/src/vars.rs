@@ -329,6 +329,11 @@ pub static pgrust_explain_runtime_verdicts: GucBoolVar =
 // is consulted ONLY under engine=runtime (never by the per-arm bench GUCs).
 pub static pgrust_parallel_engine: GucEnumVar = GucSlot::new("pgrust_parallel_engine");
 pub static pgrust_runtime_dop: GucIntVar = GucSlot::new("pgrust_runtime_dop");
+// pgrust-only: pgrust.sqe_heap (no C symbol) — heap-on-sqe v1 gate.
+pub static pgrust_sqe_heap: GucBoolVar = GucSlot::new("pgrust_sqe_heap");
+// pgrust-only: pgrust.sqe_threads (no C symbol) — the sqe server engine's
+// worker width (SqeConfig.threads). 0 = auto (available cores).
+pub static pgrust_sqe_threads: GucIntVar = GucSlot::new("pgrust_sqe_threads");
 // pgrust-only: pgrust.version_string_style (dl-verstring ruling 2026-08-06,
 // no C symbol) — selects which identity leads in version()'s banner
 // (consts::VERSION_STRING_*). Default postgres_first so first-number parsers

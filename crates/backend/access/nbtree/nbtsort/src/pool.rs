@@ -300,13 +300,23 @@ impl runtime::TaskSetWork for BtBuildPool {
             return;
         }
         let t0 = claim_timing_enabled().then(pg_clock::MonoStamp::now);
+        // unwind-ok: worker-containment
         let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(range)));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(e)) => self.fail(e),
-            Err(_panic) => self.fail(
-                PgError::new(ERROR, "parallel index build worker panicked in a morsel").into(),
-            ),
+            Err(unwind) => {
+                self.fail(
+                    PgError::new(ERROR, "parallel index build worker panicked in a morsel")
+                        .into(),
+                );
+                // Exit-committed unwinds rethrow to the driver (a dying
+                // thread must not claim the next morsel; index build syncs
+                // beneath — the fsync law).
+                if parallel::standing::is_exit_unwind(&*unwind) {
+                    std::panic::resume_unwind(unwind);
+                }
+            }
         }
         if let Some(t0) = t0 {
             eprintln!("btbuild-pool: claim_us={}", t0.elapsed_ns() / 1000);
@@ -451,6 +461,7 @@ fn btbuild_pool_driver(shared: &parallel::ParallelShared) {
     }
     let target = Arc::clone(&bp.target);
     let entered = std::cell::Cell::new(false);
+    // unwind-ok: worker-containment
     let r = catch_unwind(AssertUnwindSafe(|| {
         parallel::with_query_task_binding(&target, || {
             entered.set(true);

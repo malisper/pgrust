@@ -76,14 +76,6 @@ pub struct ExplainState<'mcx> {
     pub rtable_names: PgVec<'mcx, Option<&'mcx str>>,
     pub hide_workers: bool,
     pub workers_state: Option<WorkersState<'mcx>>,
-    /// pgrust-only (runtime-cost-model design §5 step 2): the m5 cost-shadow
-    /// sample of the planning that produced this plan, printed as one
-    /// "M5 Cost Route" line. Filled ONLY by standard_ExplainOneQuery (fresh
-    /// plan — the prepared-statement path deliberately never fills it: a
-    /// cached plan's sample belongs to whoever planned it) and ONLY while
-    /// `PGRUST_M5_COST_EXPLAIN` is armed; None keeps EXPLAIN output
-    /// byte-identical to today.
-    pub m5_cost_route: Option<planner::m5_suppress::cost_shadow::ExplainSample>,
     /// C's void*-per-extension slot array, indexed by GetExplainExtensionId.
     pub extension_state: PgVec<'mcx, Option<&'mcx (dyn core::any::Any + 'static)>>,
     /// plan_ids already displayed (C printed_subplans).
@@ -117,7 +109,6 @@ pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
         rtable_names: PgVec::new_in(mcx),
         hide_workers: false,
         workers_state: None,
-        m5_cost_route: None,
         extension_state: PgVec::new_in(mcx),
         deparse_cxt: None,
     })
@@ -342,13 +333,13 @@ pub fn ParseExplainOptionList<'mcx>(
     if es.serialize != EXPLAIN_SERIALIZE_NONE && !es.analyze {
         return Err(requires_analyze("SERIALIZE").into());
     }
-    // Increment-1 scope (integration contract, WS-C amendment 1): the
-    // ENGINE attribution is observed at the executor's admission
-    // chokepoints, which need a real execution; the side-effect-free static
-    // preview is a ledgered inc-2 item.
-    if es.engine && !es.analyze {
-        return Err(requires_analyze("ENGINE").into());
-    }
+    // ENGINE without ANALYZE is the inc-2 plan-time preview (the inc-1
+    // requires-ANALYZE gate is retired): the sqe statement verdict is a
+    // plan-time recognition (EXPLAIN-vs-exec cause consistency law), so
+    // ExplainOnePlan records real attribution with no execution; per-node
+    // lines print only WITNESSED records on the plan-only path (an
+    // event-less node stays silent there — the spine-by-default claim is
+    // an execution truth, node.rs).
     if es.generic && es.analyze {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)

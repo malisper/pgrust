@@ -134,8 +134,9 @@ fn seek_failed() -> Box<PgError> {
 // fresh construction).
 mod ts_pool {
     thread_local! {
-        static SLOT: core::cell::RefCell<Option<super::Tuplestore>> =
-            const { core::cell::RefCell::new(None) };
+        // tls-dtor: ManuallyDrop — a parked store's drop reaches FD.with.
+        static SLOT: core::cell::RefCell<core::mem::ManuallyDrop<Option<super::Tuplestore>>> =
+            const { core::cell::RefCell::new(core::mem::ManuallyDrop::new(None)) };
     }
 
     pub(crate) fn take() -> Option<super::Tuplestore> {
@@ -146,7 +147,7 @@ mod ts_pool {
         SLOT.with(|s| {
             let mut slot = s.borrow_mut();
             if slot.is_none() {
-                *slot = Some(ts);
+                **slot = Some(ts);
             }
         });
     }

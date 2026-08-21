@@ -373,9 +373,13 @@ pub(crate) fn XLogFileCopy(
     }
 
     if fd::pg_fsync(f) != 0 {
-        return ereport(ERROR)
+        // C xlog.c:3510: data_sync_elevel(ERROR) — PANIC at default
+        // data_sync_retry=off (post-fsyncgate: never retry a failed fsync).
+        let en = fd::get_errno();
+        return ereport(fd::data_sync_elevel(ERROR))
+            .with_saved_errno(en)
             .errcode_for_file_access()
-            .errmsg(format!("could not fsync file \"{tmppath}\""))
+            .errmsg(format!("could not fsync file \"{tmppath}\": %m"))
             .finish(loc("XLogFileCopy"));
     }
     if fd::CloseTransientFile(f) != 0 {

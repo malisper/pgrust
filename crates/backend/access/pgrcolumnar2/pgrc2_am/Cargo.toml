@@ -1,0 +1,59 @@
+# pgrc2_am — the pgrcolumnar2 table-AM glue (chunk M3-H).
+#
+# Dependency posture: the three frozen pgrc2 crates (format/write/read) plus
+# the backend glue surface the OLD pgrcolumnar AM already proved out
+# (tableam_vocab / exectuples / relpath / inval / snapmgr / transam_seams /
+# xact_seams), and `xact` for callback registration (the tableam-crate
+# precedent, hosted here so the session-envelope state and its hooks live in
+# ONE crate). All file I/O routes through `vfs::` / `wvfs::WriteVfs` — zero
+# determinism-ledger rows owed by this crate.
+
+[package]
+name = "pgrc2_am"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrc2_am"
+path = "src/lib.rs"
+
+[dependencies]
+pgrc2_codec = { path = "../pgrc2_codec" }
+pgrc2_format = { path = "../pgrc2_format" }
+pgrc2_meta = { path = "../pgrc2_meta" }
+pgrc2_scan = { path = "../pgrc2_scan" }
+pgrc2_read = { path = "../pgrc2_read" }
+pgrc2_write = { path = "../pgrc2_write" }
+pgsync = { path = "../../../../_support/pgsync" }
+libc = "0.2"
+vfs = { path = "../../../storage/file/vfs" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+tableam_vocab = { path = "../../table/tableam_vocab" }
+exectuples = { path = "../../../executor/exectuples" }
+relpath = { path = "../../../../common/relpath" }
+elog = { path = "../../../utils/error/elog" }
+mbutils = { path = "../../../utils/mb/mbutils" }
+wchar = { path = "../../../../common/wchar" }
+xact = { path = "../../transam/xact" }
+xact_seams = { path = "../../transam/xact_seams" }
+transam_seams = { path = "../../transam/transam_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+snapmgr = { path = "../../../utils/time/snapmgr" }
+inval = { path = "../../../utils/cache/inval" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+# M4-S8 (the engine-cut substrate finding): DEFAULT-collation resolution
+# through the engine's own locale answer — a seam crate, fail-closed when
+# uninstalled (library worlds keep the conservative class).
+pg_locale_seams = { path = "../../../utils/adt/pg_locale_seams" }
+
+# process_global!'s loom arm expands here (the pgrc2_read precedent).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

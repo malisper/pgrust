@@ -28,6 +28,7 @@ use crate::switches;
 const PROGNAME: &str = "postgres";
 
 pub fn PostgresStdioWireMain(argv: &[String], username: &str) -> ! {
+    // unwind-ok: log-then-die
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> core::convert::Infallible {
             let err = match stdio_wire_main_inner(argv, username) {

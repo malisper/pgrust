@@ -5,6 +5,7 @@ pub mod aggregates;
 pub mod arith;
 pub mod builtins;
 pub mod fixed;
+pub mod fixed_scale;
 pub mod io;
 pub mod keypack;
 pub mod math;
@@ -33,6 +34,10 @@ pub use arith::{
 };
 pub use fixed::{
     add_abs_fixed, add_var_fixed, mul_var_fixed, sub_abs_fixed, sub_var_fixed, FixedVar,
+};
+pub use fixed_scale::{
+    fixed_scale_elect, fixed_scale_fit, fixed_scale_unpack, FixedScaleChunk, FixedScaleRefusal,
+    FIXED_SCALE_MANT_ABS_MAX,
 };
 pub use io::{get_str_from_var, numeric_in, numeric_out_into, numeric_recv, numeric_send};
 pub use keypack::{numeric_key_pack, numeric_key_unpack, NumericKeyForm, NUMERIC_KEY_EXP_MAX};

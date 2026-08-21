@@ -9,6 +9,7 @@ bufmgr = { path = "../../../storage/buffer/bufmgr" }
 bulkwrite = { path = "../../../storage/smgr/bulkwrite" }
 catalog = { path = "../../../catalog/catalog" }
 elog = { path = "../../../utils/error/elog" }
+fd = { path = "../../../storage/file/fd" }
 init_small = { path = "../../../utils/init/init_small" }
 procarray = { path = "../../../storage/ipc/procarray" }
 rewriteheap_seams = { path = "../rewriteheap_seams" }
