@@ -21,6 +21,7 @@ elog = { path = "../../../utils/error/elog" }
 crc32c = { path = "../../../../port/crc32c" }
 controldata_utils = { path = "../../../../common/controldata_utils" }
 fd = { path = "../../../storage/file/fd" }
+vfs = { path = "../../../storage/file/vfs" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
 waiter = { path = "../../../storage/ipc/waiter" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }

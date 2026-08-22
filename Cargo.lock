@@ -19160,6 +19160,7 @@ dependencies = [
  "types_storage",
  "varsup",
  "varsup_seams",
+ "vfs",
  "waiter",
  "waitevent_seams",
  "walreceiverfuncs_seams",

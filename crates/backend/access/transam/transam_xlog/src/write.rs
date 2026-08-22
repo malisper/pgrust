@@ -1,5 +1,8 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+
+use vfs::VfsFd;
 
 use elog::ereport;
 use lwlock::{LWLockAcquire, LWLockAcquireOrWait, LWLockConditionalAcquire, LWLockRelease, LW_EXCLUSIVE, LW_SHARED};
@@ -21,7 +24,17 @@ fn loc(func: &'static str) -> ErrorLocation {
 thread_local! {
     // (Write, Flush) — private copy of the shared log write/flush results.
     pub(crate) static LOGWRT_RESULT: Cell<(XLogRecPtr, XLogRecPtr)> = const { Cell::new((0, 0)) };
-    static OPEN_LOG_FILE: Cell<i32> = const { Cell::new(-1) };
+    // C's per-backend `openLogFile`. The C process model never closes this
+    // fd before backend exit — process death reclaims it (xlog.c has no
+    // at-exit close). Backends here are THREADS, so the holder itself is the
+    // close guard: VfsFd's Drop runs on every thread-death path (clean
+    // proc_exit unwind, FATAL, quickdie's exit_thread_raw, TLS teardown) and
+    // releases through the vfs that minted the fd (finding F1b). Only this
+    // thread's own descriptor is involved — walwriter/checkpointer keep
+    // theirs until THEIR thread ends, matching C's per-process scope.
+    // (Without the guard, every DML backend leaked its WAL segment fd:
+    // Thermite server-soak finding, ~1 host fd per connection.)
+    static OPEN_LOG_FILE: RefCell<Option<VfsFd>> = const { RefCell::new(None) };
     static OPEN_LOG_SEG_NO: Cell<XLogSegNo> = const { Cell::new(0) };
     static OPEN_LOG_TLI: Cell<TimeLineID> = const { Cell::new(0) };
     pub(crate) static LOCAL_MIN_RECOVERY_POINT: Cell<XLogRecPtr> = const { Cell::new(0) };
@@ -31,6 +44,27 @@ thread_local! {
     // XLogWrite / XLogBackgroundFlush tails. Per-backend like C's global (set and
     // read within one flushing backend).
     static WAKE_WAL_SENDERS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Raw-fd view of C's `openLogFile` (-1 = no open WAL segment). Ownership
+/// stays with the OPEN_LOG_FILE guard; callers must not close this fd
+/// directly — deliberate closes go through [`XLogFileClose`].
+fn open_log_file() -> i32 {
+    OPEN_LOG_FILE.with(|c| c.borrow().as_ref().map_or(-1, |g| g.as_raw_fd()))
+}
+
+/// C's `openLogFile = fd` after XLogFileInit/XLogFileOpen.
+fn set_open_log_file(raw: i32) {
+    debug_assert!(raw >= 0);
+    // SAFETY: `raw` was just minted by BasicOpenFile (vfs::open) on this
+    // thread and is exclusively owned by the guard from here on; the guard
+    // is TLS-bound, honoring VfsFd's thread-affinity contract.
+    let guard = unsafe { VfsFd::from_raw(raw) };
+    let prev = OPEN_LOG_FILE.with(|c| c.borrow_mut().replace(guard));
+    // The write paths always XLogFileClose() before opening the next
+    // segment; if that invariant ever broke, dropping `prev` still closes
+    // the orphaned descriptor rather than leaking it.
+    debug_assert!(prev.is_none(), "WAL segment fd replaced while still open");
 }
 
 // WalSndWakeupRequest() (walsender.h).
@@ -71,8 +105,8 @@ pub(crate) fn set_logwrt_result(write: XLogRecPtr, flush: XLogRecPtr) {
 // assign_wal_sync_method (xlog.c): a changed sync method invalidates the
 // open-flag/fsync posture of the open segment; close it (fsync first).
 pub(crate) fn assign_wal_sync_method(new_val: i32, _extra: Option<&guc_tables::GucHookExtra>) {
-    if wal_sync_method() != new_val && OPEN_LOG_FILE.get() >= 0 {
-        if fd::pg_fsync(OPEN_LOG_FILE.get()) != 0 {
+    if wal_sync_method() != new_val && open_log_file() >= 0 {
+        if fd::pg_fsync(open_log_file()) != 0 {
             panic!(
                 "could not fsync file \"{}\"",
                 XLogFileName(OPEN_LOG_TLI.get(), OPEN_LOG_SEG_NO.get(), wal_segment_size())
@@ -418,16 +452,17 @@ pub fn XLogFileOpen(segno: XLogSegNo, tli: TimeLineID) -> PgResult<i32> {
 }
 
 fn XLogFileClose() -> PgResult<()> {
-    let f = OPEN_LOG_FILE.get();
-    debug_assert!(f >= 0);
-    // fd tracked by OPEN_LOG_FILE.
+    // Deliberate close: disarm the guard (into_raw) and release through
+    // pg_close, exactly the VfsFd contract.
+    let guard = OPEN_LOG_FILE.with(|c| c.borrow_mut().take());
+    debug_assert!(guard.is_some());
+    let f = guard.map_or(-1, VfsFd::into_raw);
     if fd::pg_close(f) != 0 {
         let fname = XLogFileName(OPEN_LOG_TLI.get(), OPEN_LOG_SEG_NO.get(), wal_segment_size());
         return ereport(PANIC)
             .errmsg(format!("could not close file \"{fname}\""))
             .finish(loc("XLogFileClose"));
     }
-    OPEN_LOG_FILE.set(-1);
     fd::ReleaseExternalFD();
     Ok(())
 }
@@ -488,18 +523,18 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
         let wal_segsz = wal_segment_size();
         if !XLByteInPrevSeg(lw_write, OPEN_LOG_SEG_NO.get(), wal_segsz) {
             debug_assert_eq!(npages, 0);
-            if OPEN_LOG_FILE.get() >= 0 {
+            if open_log_file() >= 0 {
                 XLogFileClose()?;
             }
             OPEN_LOG_SEG_NO.set(XLByteToPrevSeg(lw_write, wal_segsz));
             OPEN_LOG_TLI.set(tli);
-            OPEN_LOG_FILE.set(XLogFileInit(OPEN_LOG_SEG_NO.get(), tli)?);
+            set_open_log_file(XLogFileInit(OPEN_LOG_SEG_NO.get(), tli)?);
             fd::ReserveExternalFD()?;
         }
-        if OPEN_LOG_FILE.get() < 0 {
+        if open_log_file() < 0 {
             OPEN_LOG_SEG_NO.set(XLByteToPrevSeg(lw_write, wal_segsz));
             OPEN_LOG_TLI.set(tli);
-            OPEN_LOG_FILE.set(XLogFileOpen(OPEN_LOG_SEG_NO.get(), tli)?);
+            set_open_log_file(XLogFileOpen(OPEN_LOG_SEG_NO.get(), tli)?);
             fd::ReserveExternalFD()?;
         }
 
@@ -525,7 +560,7 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
                 // shim chain down to the same libc::pwrite (zero-cost gate:
                 // /asm-diff FileWriteV-class letters).
                 let written = fd::pg_pwrite(
-                    OPEN_LOG_FILE.get(),
+                    open_log_file(),
                     unsafe { std::slice::from_raw_parts(from.cast::<u8>(), nleft) },
                     startoffset as i64,
                 );
@@ -558,7 +593,7 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
             npages = 0;
 
             if finishing_seg {
-                issue_xlog_fsync(OPEN_LOG_FILE.get(), OPEN_LOG_SEG_NO.get(), tli)?;
+                issue_xlog_fsync(open_log_file(), OPEN_LOG_SEG_NO.get(), tli)?;
                 WalSndWakeupRequest();
                 LOGWRT_RESULT.set((lw_write, lw_write));
 
@@ -603,18 +638,18 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
         let method = wal_sync_method();
         if method != WAL_SYNC_METHOD_OPEN && method != WAL_SYNC_METHOD_OPEN_DSYNC {
             let wal_segsz = wal_segment_size();
-            if OPEN_LOG_FILE.get() >= 0
+            if open_log_file() >= 0
                 && !XLByteInPrevSeg(lw_write, OPEN_LOG_SEG_NO.get(), wal_segsz)
             {
                 XLogFileClose()?;
             }
-            if OPEN_LOG_FILE.get() < 0 {
+            if open_log_file() < 0 {
                 OPEN_LOG_SEG_NO.set(XLByteToPrevSeg(lw_write, wal_segsz));
                 OPEN_LOG_TLI.set(tli);
-                OPEN_LOG_FILE.set(XLogFileOpen(OPEN_LOG_SEG_NO.get(), tli)?);
+                set_open_log_file(XLogFileOpen(OPEN_LOG_SEG_NO.get(), tli)?);
                 fd::ReserveExternalFD()?;
             }
-            issue_xlog_fsync(OPEN_LOG_FILE.get(), OPEN_LOG_SEG_NO.get(), tli)?;
+            issue_xlog_fsync(open_log_file(), OPEN_LOG_SEG_NO.get(), tli)?;
         }
         // C signals the walsender wakeup OUTSIDE the sync-method guard
         // (xlog.c:2553): with wal_sync_method=open/open_dsync the flush
@@ -1046,7 +1081,7 @@ pub fn XLogBackgroundFlush(pacing: &mut WalFlushPacing) -> PgResult<bool> {
         // completer raced its link — the fence pair makes one side win,
         // and this cycle is the guaranteed winner's backstop).
         crate::flushpipe::complete_up_to(LOGWRT_RESULT.get().1);
-        if OPEN_LOG_FILE.get() >= 0
+        if open_log_file() >= 0
             && !XLByteInPrevSeg(LOGWRT_RESULT.get().0, OPEN_LOG_SEG_NO.get(), wal_segment_size())
         {
             XLogFileClose()?;
@@ -1129,7 +1164,7 @@ pub fn GetFlushRecPtr(insert_tli: Option<&mut TimeLineID>) -> XLogRecPtr {
 }
 
 pub(crate) fn open_log_file_close_if_open() -> PgResult<()> {
-    if OPEN_LOG_FILE.get() >= 0 {
+    if open_log_file() >= 0 {
         XLogFileClose()?;
     }
     Ok(())
