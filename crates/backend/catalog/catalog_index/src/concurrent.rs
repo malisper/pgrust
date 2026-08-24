@@ -100,8 +100,9 @@ pub fn index_set_state_flags<'mcx>(
     let pg_index = table::table_open(mcx, INDEX_RELATION_ID, RowExclusiveLock)?;
     let key = [oid_scankey(1, indexId)];
     let mut scan = genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &key)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for index {indexId}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::index_lookup_failed(indexId));
+    };
     let desc = pg_index.descr();
     let natts = desc.natts as usize;
     let get = |attnum: i32| getattr_null(tup, attnum, desc).0.as_bool();
@@ -175,8 +176,9 @@ pub fn index_concurrently_create_copy<'mcx>(
         let key = [oid_scankey(1, oldIndexId)];
         let mut scan =
             genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &key)?;
-        let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for index {oldIndexId}"));
+        let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(crate::index_lookup_failed(oldIndexId));
+        };
         let (d, isnull) = getattr_null(tup, Anum_pg_index_indclass, pg_index.descr());
         debug_assert!(!isnull);
         // SAFETY: not-null plain-storage oidvector column of a live scan tuple;
@@ -197,8 +199,9 @@ pub fn index_concurrently_create_copy<'mcx>(
         let key = [oid_scankey(1, oldIndexId)];
         let mut scan =
             genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
-        let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {oldIndexId}"));
+        let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(crate::relation_lookup_failed(oldIndexId));
+        };
         let (d, isnull) = getattr_null(tup, Anum_pg_class_reloptions as i32, pg_class.descr());
         if !isnull {
             let p = d.as_usize() as *const u8;

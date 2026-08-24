@@ -328,3 +328,16 @@ fn pseudotype_aliases_delegate_to_multirange_out() {
     assert_eq!(by_oid(4227).func as usize, crate::builtins::fc_multirange_out as usize);
     assert_eq!(by_oid(4227).name, "anycompatiblemultirange_out");
 }
+
+// range_agg_finalfn's pg_range probe is a pgrust seam artifact (C reads the
+// multirange OID off the faked finalfn fn_expr rettype), but a miss must
+// still behave like C's standard RANGETYPE miss report,
+// elog(ERROR, "cache lookup failed for range type %u") (typcache.c:1012):
+// catchable XX000, never a backend abort.
+#[test]
+fn range_type_cache_lookup_failure_is_a_catchable_xx000() {
+    let e = crate::builtins::range_type_lookup_failed(INT4RANGE);
+    assert_eq!(e.message(), format!("cache lookup failed for range type {INT4RANGE}"));
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.level(), ::types_error::ERROR);
+}

@@ -121,7 +121,7 @@ fn base_type_row<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<BaseTypeRow> {
         core::slice::from_ref(&key),
     )?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {typeoid}"));
+        .ok_or_else(|| cache_lookup_failed("type", typeoid))?;
     let descr = rel.descr();
     let mut isnull = false;
     // SAFETY (each): fixed NOT NULL pg_type columns of the declared types.
@@ -1348,7 +1348,7 @@ pub fn AlterEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterEnumStmt<'mcx>) -> PgResult<O
 
 fn checkEnumOwner(type_oid: Oid) -> PgResult<()> {
     let typtype = syscache_seams::pg_type_typtype::call(type_oid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {type_oid}"));
+        .ok_or_else(|| cache_lookup_failed("type", type_oid))?;
     if typtype != TYPTYPE_ENUM {
         return Err(not_an_enum(type_oid)?);
     }
@@ -1550,6 +1550,32 @@ fn invalid_base_type<'mcx>(
             .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
             .with_cursor_position(pos),
     ))
+}
+
+// Every one of these is `elog(ERROR, "cache lookup failed for <object> %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for type %u") -- a catchable XX000,
+    // not a backend abort.  These probes used to panic!(), killing the process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed("type", 16384);
+        assert_eq!(e.message(), "cache lookup failed for type 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
+    }
 }
 
 #[cfg(test)]

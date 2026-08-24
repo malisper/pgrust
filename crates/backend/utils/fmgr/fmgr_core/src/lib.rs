@@ -474,6 +474,31 @@ pub fn has_registered_c_lang_handler(prosrc: &str) -> bool {
     registered_c_lang_fn(prosrc).is_some()
 }
 
+// fmgr.c:428 elog(ERROR, "cache lookup failed for language %u", language).
+// elog's default SQLSTATE at ERROR is XX000 (ERRCODE_INTERNAL_ERROR), so no
+// explicit sqlstate; the error is catchable and never aborts the backend.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn language_lookup_failed(language: Oid) -> alloc::boxed::Box<::types_error::PgError> {
+    alloc::boxed::Box::new(::types_error::PgError::error(alloc::format!(
+        "cache lookup failed for language {language}"
+    )))
+}
+
+// fmgr.c:663 elog(ERROR, "cache lookup failed for function %u") inside
+// fmgr_security_definer -- same catchable XX000.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn function_lookup_failed(
+    function_id: Oid,
+) -> alloc::boxed::Box<::types_error::PgError> {
+    alloc::boxed::Box::new(::types_error::PgError::error(alloc::format!(
+        "cache lookup failed for function {function_id}"
+    )))
+}
+
 #[cold]
 #[inline(never)]
 fn fmgr_info_pg_proc(
@@ -564,8 +589,11 @@ fn fmgr_info_pg_proc(
             // fmgr_info_other_lang: adopt the language call handler's entry
             // point (the handler is a C-language function; dispatch by its
             // prosrc name).
+            // fmgr.c:426-428 elog(ERROR, "cache lookup failed for language
+            // %u", language) -- catchable, SQLSTATE XX000 (elog's default at
+            // ERROR); it unwinds the transaction, never the backend.
             let Some(langrow) = syscache_seams::lookup_pg_language_fmgr::call(lang)? else {
-                panic!("fmgr: cache lookup failed for language {lang} (function {function_id})");
+                return Err(language_lookup_failed(lang));
             };
             let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
             let hsrc =
@@ -634,8 +662,11 @@ pub fn fmgr_security_definer(
         let mut inner = FmgrInfo::unresolved();
         fmgr_info_into_security(flinfo.fn_oid, &mut inner, true)?;
         inner.fn_expr = flinfo.fn_expr;
+        // fmgr.c:661-664 elog(ERROR, "cache lookup failed for function %u",
+        // fcinfo->flinfo->fn_oid) inside fmgr_security_definer -- catchable
+        // XX000, not an abort.
         let row = syscache_seams::lookup_pg_proc_secdef::call(flinfo.fn_oid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for function {}", flinfo.fn_oid));
+            .ok_or_else(|| function_lookup_failed(flinfo.fn_oid))?;
         let userid = if row.prosecdef { row.proowner } else { InvalidOid };
         flinfo.fn_extra = Some(::fmgr::FnExtra::new(SecurityDefinerCache {
             flinfo: inner,

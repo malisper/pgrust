@@ -506,7 +506,7 @@ pub fn RenameRelationInternal<'mcx>(
         &[key],
     )?;
     let reltup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {myrelid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("relation", myrelid))?;
     // C: SearchSysCacheLockedCopy1 (tablecmds.c:4297) / UnlockTuple (:4326).
     // The lock precedes every content read that feeds the replacement image,
     // so a concurrent inplace writer's relfrozenxid/relminmxid advance is

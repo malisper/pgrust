@@ -1197,7 +1197,7 @@ fn set_relation_has_triggers<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
         core::slice::from_ref(&key),
     )?;
     let reltup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("relation", relid))?;
     let td = relrel.descr();
     let mut isnull = false;
     // SAFETY: pg_class row under its own descriptor; relhastriggers declared.

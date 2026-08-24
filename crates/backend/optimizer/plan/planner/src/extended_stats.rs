@@ -61,8 +61,11 @@ pub fn get_relation_statistics<'mcx>(
     let mut statlist: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
     let varno = run.root.rel(rel).relid as i32;
     for &statoid in statoids.iter() {
-        let form = syscache_seams::statext_form::call(mcx, statoid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for statistics object {statoid}"));
+        // plancat.c:1524 elog(ERROR, "cache lookup failed for statistics
+        // object %u") -- catchable XX000, not a backend abort.
+        let Some(form) = syscache_seams::statext_form::call(mcx, statoid)? else {
+            return Err(crate::cache_lookup_failed("statistics object", statoid));
+        };
         let keys = attnums_from_members(run, &form.keys);
         // eval_const_expressions + varno fixup so the trees compare equal()
         // to similarly-processed qual clauses (opfuncids match via the

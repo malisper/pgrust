@@ -199,8 +199,12 @@ fn gisttranslatecmptype(cmptype: CompareType, opfamily: Oid) -> PgResult<Strateg
 }
 
 pub fn amvalidate(opclassoid: Oid) -> PgResult<bool> {
-    let shape = syscache_seams::lookup_pg_opclass_shape::call(opclassoid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for operator class {opclassoid}"));
+    // C amapi.c:183-185 elog(ERROR) — catchable XX000, not an abort. SQL
+    // amvalidate(oid) is fmgr-registered (pg_proc 338), so any user-supplied
+    // non-opclass OID (e.g. an opfamily OID) reaches this miss.
+    let Some(shape) = syscache_seams::lookup_pg_opclass_shape::call(opclassoid)? else {
+        return Err(opclass_lookup_failed(opclassoid));
+    };
     let kind = GetIndexAmRoutineByAmId(shape.opcmethod, false)?.expect("noerror=false");
     match kind {
         IndexAmKind::Btree => nbt_validate::btvalidate(opclassoid),
@@ -410,6 +414,16 @@ fn unported_handler(amhandler: Oid) -> ! {
 fn am_lookup_failed(amoid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!(
         "cache lookup failed for access method {amoid}"
+    )))
+}
+
+// amapi.c:185 elog(ERROR, "cache lookup failed for operator class %u").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn opclass_lookup_failed(opclassoid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for operator class {opclassoid}"
     )))
 }
 

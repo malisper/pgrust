@@ -23,7 +23,7 @@ use types_nodes::rawnodes::{IndexElem, IndexStmt, SortByDir, SortByNulls};
 use types_rel::{InplaceUpdateTupleLock, Relation, ShareLock, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
-use crate::GetDefaultOpClass;
+use crate::{cache_lookup_failed, GetDefaultOpClass};
 
 const NamespaceRelationId: Oid = 2615;
 const RELPERSISTENCE_TEMP: i8 = b't' as i8;
@@ -177,7 +177,7 @@ pub fn CheckIndexCompatible<'mcx>(
 
     let Some(tup) = SearchSysCache1(INDEXRELID, SysCacheKey::Value(Datum::from_oid(old_id)))?
     else {
-        panic!("cache lookup failed for index {old_id}");
+        return Err(cache_lookup_failed("index", old_id));
     };
     let notnull = |anum: i32| -> PgResult<Datum> {
         let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, anum)?;
@@ -1442,7 +1442,7 @@ fn update_relispartition<'mcx>(mcx: Mcx<'mcx>, relationId: Oid, newval: bool) ->
         &keys,
     )?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relationId}"));
+        .ok_or_else(|| cache_lookup_failed("relation", relationId))?;
     // C: SearchSysCacheLockedCopy1 (indexcmds.c:4582) / UnlockTuple (:4589).
     // Ahead of the relispartition read below, which is C's Assert input.
     let otid = tup.t_self;
@@ -1483,7 +1483,7 @@ fn set_pg_index_invalid<'mcx>(mcx: Mcx<'mcx>, indexRelationId: Oid) -> PgResult<
     let mut scan =
         genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for index {indexRelationId}"));
+        .ok_or_else(|| cache_lookup_failed("index", indexRelationId))?;
     let desc = pg_index.descr();
     let natts = desc.natts as usize;
     let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;

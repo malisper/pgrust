@@ -575,3 +575,19 @@ fn not_ported_name_predicate() {
         break;
     }
 }
+
+// fmgr.c:428 and fmgr.c:663 both report their syscache misses with
+// elog(ERROR, "cache lookup failed for ..."), a catchable XX000 that unwinds
+// the transaction.  pgrust panicked at both, aborting the backend.
+#[test]
+fn fmgr_cache_lookup_failures_are_catchable_xx000() {
+    let e = language_lookup_failed(13);
+    assert_eq!(e.message(), "cache lookup failed for language 13");
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.level(), ::types_error::ERROR);
+
+    let e = function_lookup_failed(999999);
+    assert_eq!(e.message(), "cache lookup failed for function 999999");
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.level(), ::types_error::ERROR);
+}

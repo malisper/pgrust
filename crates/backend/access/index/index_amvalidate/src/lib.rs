@@ -115,9 +115,23 @@ pub fn check_amoptsproc_signature(funcid: Oid) -> PgResult<bool> {
     check_amproc_signature(funcid, VOIDOID, true, 1, 1, &[INTERNALOID])
 }
 
+// amvalidate.c:214 `elog(ERROR, "cache lookup failed for operator %u", opno)`
+// on the OPEROID miss in check_amop_signature (C marks it "shouldn't happen")
+// -- elog's default SQLSTATE is XX000 and the error is catchable, never a
+// backend abort.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn operator_lookup_failed(opno: Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for operator {opno}"
+    )))
+}
+
 pub fn check_amop_signature(opno: Oid, restype: Oid, lefttype: Oid, righttype: Oid) -> PgResult<bool> {
-    let shape = syscache_seams::lookup_pg_operator_shape::call(opno)?
-        .unwrap_or_else(|| panic!("cache lookup failed for operator {opno}"));
+    let Some(shape) = syscache_seams::lookup_pg_operator_shape::call(opno)? else {
+        return Err(operator_lookup_failed(opno));
+    };
     Ok(shape.oprresult == restype
         && shape.oprleft == lefttype
         && shape.oprright == righttype
@@ -138,4 +152,21 @@ pub fn opclass_for_family_datatype(amoid: Oid, opfamilyoid: Oid, datatypeoid: Oi
 
 pub fn opfamily_can_sort_type(opfamilyoid: Oid, datatypeoid: Oid) -> PgResult<bool> {
     Ok(opclass_for_family_datatype(BTREE_AM_OID, opfamilyoid, datatypeoid)? != InvalidOid)
+}
+
+// Each AM validator opens with SearchSysCache1(CLAOID) and
+// `elog(ERROR, "cache lookup failed for operator class %u", opclassoid)` on a
+// miss (nbtvalidate.c:61, hashvalidate.c:60, gistvalidate.c:52,
+// ginvalidate.c:51, spgvalidate.c:63, brin_validate.c:58, blvalidate.c:50) —
+// a catchable XX000, never a backend abort. Reached only through
+// amapi::amvalidate, which now raises the same error first, so this is the
+// can't-happen backstop rather than the SQL-facing arm; it stays an error so
+// the whole family is abort-free.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub fn opclass_lookup_failed(opclassoid: Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for operator class {opclassoid}"
+    )))
 }

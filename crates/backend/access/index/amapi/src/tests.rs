@@ -170,8 +170,28 @@ fn translate_out_of_range_needs_the_am_row() {
     assert_eq!(e.message, "could not translate compare type 6 for index AM 403");
 }
 
+// CLAOID always misses: the fixture models a database whose pg_opclass has no
+// row for the probed OID (what `SELECT amvalidate(<an opfamily oid>)` sees).
+fn boot_opclass_miss_seam() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_opclass_shape::set(|_| Ok(None));
+    });
+}
+
+// C amapi.c:185 elog(ERROR) — a catchable XX000, not a backend abort.
+// SQL amvalidate(oid) is fmgr-registered (pg_proc 338), so `SELECT
+// amvalidate(0)` — or the fuzzer's `SELECT amvalidate(oid) FROM pg_opfamily`,
+// which hands amvalidate an opfamily OID — must not kill the backend.
 #[test]
-fn amvalidate_is_loud() {
-    let r = std::panic::catch_unwind(|| amvalidate(403));
-    assert!(r.is_err());
+fn amvalidate_cache_miss_is_pgerror_not_panic() {
+    boot_opclass_miss_seam();
+
+    let e = amvalidate(403).unwrap_err();
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.message, "cache lookup failed for operator class 403");
+
+    let e = amvalidate(InvalidOid).unwrap_err();
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.message, "cache lookup failed for operator class 0");
 }

@@ -11,7 +11,9 @@ use mcx::Mcx;
 use pg_database_seams::PgDatabaseForm;
 use types_core::catalog::DATABASE_RELATION_ID;
 use types_core::{InvalidOid, Oid};
-use types_error::{ErrorLocation, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, PANIC, WARNING};
+use types_error::{
+    ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, PANIC, WARNING,
+};
 use types_storage::lock::{AccessExclusiveLock, LOCKMODE};
 use types_storage::storage::ProcSignalBarrierType;
 use xlogreader_seams::XLogReaderState;
@@ -41,6 +43,17 @@ pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
     // #[track_caller] resolves to the call site, not this helper.
     let site = core::panic::Location::caller();
     ErrorLocation::new(site.file(), site.line() as i32, funcname)
+}
+
+// Every one of these is `elog(ERROR, "cache lookup failed for <object> %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
 }
 
 const ANUM_PG_DATABASE_DATNAME: i32 = 2;
@@ -556,5 +569,21 @@ mod tests {
         ok[0..4].copy_from_slice(&12345u32.to_ne_bytes());
         ok[4..8].copy_from_slice(&2i32.to_ne_bytes());
         assert_eq!(dbase_drop_ntablespaces(&ok).unwrap(), 2);
+    }
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for database %u") -- a catchable
+    // XX000, not a backend abort.  These probes used to panic!(), killing the
+    // process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed("database", 16384);
+        assert_eq!(e.message(), "cache lookup failed for database 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
     }
 }

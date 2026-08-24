@@ -30,12 +30,14 @@ pub fn brinvalidate(opclassoid: Oid) -> PgResult<bool> {
     let mcx = ctx.mcx();
     let mut result = true;
 
-    let shape = syscache_seams::lookup_pg_opclass_shape::call(opclassoid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for operator class {opclassoid}"));
+    let Some(shape) = syscache_seams::lookup_pg_opclass_shape::call(opclassoid)? else {
+        return Err(index_amvalidate::opclass_lookup_failed(opclassoid));
+    };
     let opfamilyoid = shape.opcfamily;
     let opcintype = shape.opcintype;
-    let opclassname_data = syscache_seams::pg_opclass_opcname::call(opclassoid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for operator class {opclassoid}"));
+    let Some(opclassname_data) = syscache_seams::pg_opclass_opcname::call(opclassoid)? else {
+        return Err(index_amvalidate::opclass_lookup_failed(opclassoid));
+    };
     let opclassname =
         core::str::from_utf8(opclassname_data.name_str()).unwrap_or("").to_string();
 

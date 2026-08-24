@@ -110,8 +110,9 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
             None,
             &[key],
         )?;
-        let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+        let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(crate::relation_lookup_failed(relid));
+        };
         let mut isnull = false;
         // SAFETY: relispartition (28) is a fixed NOT NULL pg_class column.
         let relispartition =
@@ -332,9 +333,9 @@ pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber)
     ];
     let mut scan =
         genam::systable_beginscan(mcx, &attr_rel, AttributeRelidNumIndexId, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
-        panic!("cache lookup failed for attribute {attnum} of relation {relid}")
-    });
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::attribute_lookup_failed(attnum, relid));
+    };
 
     let natts = attr_rel.descr().natts as usize;
     let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -388,8 +389,9 @@ pub fn DeleteRelationTuple<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
     let key = oid_scankey(Anum_pg_class_oid, relid);
     let mut scan =
         genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::relation_lookup_failed(relid));
+    };
     let tid = tup.t_self;
     catalog_indexing::CatalogTupleDelete(&pg_class, &tid)?;
     genam::systable_endscan(mcx, scan)?;
@@ -410,7 +412,7 @@ fn delete_foreign_table_tuple<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
         core::slice::from_ref(&key),
     )?;
     let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
-        panic!("cache lookup failed for foreign table {relid}");
+        return Err(crate::foreign_table_lookup_failed(relid));
     };
     let tid = tup.t_self;
     catalog_indexing::CatalogTupleDelete(&ftrel, &tid)?;

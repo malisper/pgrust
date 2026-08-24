@@ -548,3 +548,276 @@ fn float_fields_are_shortest_decimal() {
         out.as_str()
     );
 }
+
+// ---- ALTER ... [NO] DEPENDS ON EXTENSION (AlterObjectDependsStmt) ----
+// Expected strings captured from PostgreSQL 18.4 `debug_print_parse=on,
+// debug_pretty_print=off` (nodeToStringWithLocations), with every location
+// rewritten to -1 for nodeToString's write_location_fields=false.
+
+fn depends_stmt<'m>(
+    mcx: mcx::Mcx<'m>,
+    objectType: types_nodes::parsenodes::ObjectType,
+    relation: Option<&'m types_nodes::primnodes::RangeVar<'m>>,
+    object: Option<Node<'m>>,
+    remove: bool,
+) -> Node<'m> {
+    Node::mk(
+        mcx,
+        types_nodes::parsenodes::AlterObjectDependsStmt {
+            objectType,
+            relation,
+            object,
+            extname: Some(Node::mk_string(mcx, "plpgsql").unwrap()),
+            remove,
+        },
+    )
+    .unwrap()
+}
+
+fn range_var<'m>(
+    mcx: mcx::Mcx<'m>,
+    schemaname: Option<&'m str>,
+    relname: &'m str,
+) -> &'m types_nodes::primnodes::RangeVar<'m> {
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::RangeVar {
+            catalogname: None,
+            schemaname,
+            relname: Some(relname),
+            inh: true,
+            relpersistence: b'p',
+            alias: None,
+            location: 26,
+        },
+    )
+    .unwrap()
+    .as_variant::<types_nodes::primnodes::RangeVar>()
+    .unwrap()
+}
+
+// ALTER TRIGGER q3dep_tg ON public.q3dep_t NO DEPENDS ON EXTENSION plpgsql;
+#[test]
+fn alter_object_depends_trigger_matches_c_format() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let names = NodeList::make1(mcx, Node::mk_string(mcx, "q3dep_tg").unwrap()).unwrap();
+    let n = depends_stmt(
+        mcx,
+        types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER,
+        Some(range_var(mcx, Some("public"), "q3dep_t")),
+        Some(Node::mk_list(mcx, names).unwrap()),
+        true,
+    );
+    assert_eq!(
+        nodeToString(mcx, n).unwrap().as_str(),
+        "{ALTEROBJECTDEPENDSSTMT :objectType 44 :relation {RANGEVAR :catalogname <> \
+         :schemaname public :relname q3dep_t :inh true :relpersistence p :alias <> \
+         :location -1} :object (\"q3dep_tg\") :extname \"plpgsql\" :remove true}"
+    );
+}
+
+// ALTER INDEX q3dep_i DEPENDS ON EXTENSION plpgsql;
+#[test]
+fn alter_object_depends_index_matches_c_format() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let n = depends_stmt(
+        mcx,
+        types_nodes::parsenodes::ObjectType::OBJECT_INDEX,
+        Some(range_var(mcx, None, "q3dep_i")),
+        None,
+        false,
+    );
+    assert_eq!(
+        nodeToString(mcx, n).unwrap().as_str(),
+        "{ALTEROBJECTDEPENDSSTMT :objectType 20 :relation {RANGEVAR :catalogname <> \
+         :schemaname <> :relname q3dep_i :inh true :relpersistence p :alias <> \
+         :location -1} :object <> :extname \"plpgsql\" :remove false}"
+    );
+}
+
+// ALTER ROUTINE q3dep_nosuch DEPENDS ON EXTENSION plpgsql; (bare ColId form)
+#[test]
+fn alter_object_depends_args_unspecified_matches_c_format() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let objname = NodeList::make1(mcx, Node::mk_string(mcx, "q3dep_nosuch").unwrap()).unwrap();
+    let owa = Node::mk(
+        mcx,
+        types_nodes::parsenodes::ObjectWithArgs {
+            objname,
+            objargs: types_nodes::list::OptNodeList::nil(),
+            objfuncargs: NodeList::nil(),
+            args_unspecified: true,
+        },
+    )
+    .unwrap();
+    let n = depends_stmt(
+        mcx,
+        types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE,
+        None,
+        Some(owa),
+        false,
+    );
+    assert_eq!(
+        nodeToString(mcx, n).unwrap().as_str(),
+        "{ALTEROBJECTDEPENDSSTMT :objectType 34 :relation <> :object {OBJECTWITHARGS \
+         :objname (\"q3dep_nosuch\") :objargs <> :objfuncargs <> :args_unspecified true} \
+         :extname \"plpgsql\" :remove false}"
+    );
+}
+
+fn func_param<'m>(mcx: mcx::Mcx<'m>, argType: Node<'m>) -> Node<'m> {
+    Node::mk(
+        mcx,
+        types_nodes::parsenodes::FunctionParameter {
+            name: None,
+            argType: Some(argType),
+            mode: types_nodes::parsenodes::FunctionParameterMode::FUNC_PARAM_DEFAULT,
+            defexpr: None,
+            location: 23,
+        },
+    )
+    .unwrap()
+}
+
+// ALTER FUNCTION q3dep_f(numeric(10,2), varchar[]) DEPENDS ON EXTENSION plpgsql;
+// Exercises OBJECTWITHARGS/TYPENAME/FUNCTIONPARAMETER/A_CONST together:
+// numeric carries typmods (two A_CONST Integers), varchar[] an arrayBounds
+// IntList-shaped List of one Integer -1.
+#[test]
+fn alter_object_depends_function_matches_c_format() {
+    use types_nodes::rawnodes::{A_Const, TypeName, ValUnion};
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let qual_name = |n: &'static str| {
+        let mut l = NodeList::nil();
+        l.lappend(mcx, Node::mk_string(mcx, "pg_catalog").unwrap()).unwrap();
+        l.lappend(mcx, Node::mk_string(mcx, n).unwrap()).unwrap();
+        l
+    };
+    let a_const_int = |v: i32| {
+        Node::mk(
+            mcx,
+            A_Const {
+                val: Some(ValUnion::Integer(types_nodes::Integer { ival: v })),
+                location: 31,
+            },
+        )
+        .unwrap()
+    };
+    let numeric = || {
+        let mut typmods = NodeList::nil();
+        typmods.lappend(mcx, a_const_int(10)).unwrap();
+        typmods.lappend(mcx, a_const_int(2)).unwrap();
+        Node::mk(
+            mcx,
+            TypeName {
+                names: qual_name("numeric"),
+                typeOid: 0,
+                setof: false,
+                pct_type: false,
+                typmods,
+                typemod: -1,
+                arrayBounds: NodeList::nil(),
+                location: 23,
+            },
+        )
+        .unwrap()
+    };
+    let varchar_arr = || {
+        let bounds =
+            NodeList::make1(mcx, Node::mk(mcx, types_nodes::Integer { ival: -1 }).unwrap())
+                .unwrap();
+        Node::mk(
+            mcx,
+            TypeName {
+                names: qual_name("varchar"),
+                typeOid: 0,
+                setof: false,
+                pct_type: false,
+                typmods: NodeList::nil(),
+                typemod: -1,
+                arrayBounds: bounds,
+                location: 38,
+            },
+        )
+        .unwrap()
+    };
+    let mut objargs = types_nodes::list::OptNodeList::nil();
+    objargs.lappend(mcx, Some(numeric())).unwrap();
+    objargs.lappend(mcx, Some(varchar_arr())).unwrap();
+    let mut objfuncargs = NodeList::nil();
+    objfuncargs.lappend(mcx, func_param(mcx, numeric())).unwrap();
+    objfuncargs.lappend(mcx, func_param(mcx, varchar_arr())).unwrap();
+
+    let owa = Node::mk(
+        mcx,
+        types_nodes::parsenodes::ObjectWithArgs {
+            objname: NodeList::make1(mcx, Node::mk_string(mcx, "q3dep_f").unwrap()).unwrap(),
+            objargs,
+            objfuncargs,
+            args_unspecified: false,
+        },
+    )
+    .unwrap();
+    let n = depends_stmt(
+        mcx,
+        types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION,
+        None,
+        Some(owa),
+        false,
+    );
+
+    const NUMERIC: &str = "{TYPENAME :names (\"pg_catalog\" \"numeric\") :typeOid 0 \
+        :setof false :pct_type false :typmods ({A_CONST :val 10 :location -1} \
+        {A_CONST :val 2 :location -1}) :typemod -1 :arrayBounds <> :location -1}";
+    const VARCHAR: &str = "{TYPENAME :names (\"pg_catalog\" \"varchar\") :typeOid 0 \
+        :setof false :pct_type false :typmods <> :typemod -1 :arrayBounds (-1) \
+        :location -1}";
+    let expected = format!(
+        "{{ALTEROBJECTDEPENDSSTMT :objectType 19 :relation <> :object {{OBJECTWITHARGS \
+         :objname (\"q3dep_f\") :objargs ({NUMERIC} {VARCHAR}) :objfuncargs \
+         ({{FUNCTIONPARAMETER :name <> :argType {NUMERIC} :mode 100 :defexpr <> \
+         :location -1}} {{FUNCTIONPARAMETER :name <> :argType {VARCHAR} :mode 100 \
+         :defexpr <> :location -1}}) :args_unspecified false}} :extname \"plpgsql\" \
+         :remove false}}"
+    );
+    assert_eq!(nodeToString(mcx, n).unwrap().as_str(), expected);
+}
+
+// _outA_Const's isnull arm writes " NULL" with no :val, and a BitString val
+// goes through outToken unquoted (C `{A_CONST :val b101 :location N}`).
+#[test]
+fn a_const_null_and_bitstring_match_c_format() {
+    use types_nodes::rawnodes::{A_Const, ValUnion};
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let null_const = Node::mk(mcx, A_Const { val: None, location: 38 }).unwrap();
+    assert_eq!(nodeToString(mcx, null_const).unwrap().as_str(), "{A_CONST NULL :location -1}");
+
+    let bits = Node::mk(
+        mcx,
+        A_Const {
+            val: Some(ValUnion::BitString(types_nodes::BitString { bsval: "b101" })),
+            location: 61,
+        },
+    )
+    .unwrap();
+    assert_eq!(nodeToString(mcx, bits).unwrap().as_str(), "{A_CONST :val b101 :location -1}");
+
+    let spaced = Node::mk(
+        mcx,
+        A_Const {
+            val: Some(ValUnion::String(types_nodes::String { sval: "x y" })),
+            location: 5,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        nodeToString(mcx, spaced).unwrap().as_str(),
+        "{A_CONST :val \"x\\ y\" :location -1}"
+    );
+}

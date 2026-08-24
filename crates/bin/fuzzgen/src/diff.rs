@@ -104,16 +104,18 @@ const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
 
 /// Column-type-oid equivalence for A-vs-B rowsets. Builtin OIDs (below
 /// FirstNormalObjectId) must match exactly. User-range OIDs are NOT
-/// comparable by value: pgrust backfills a constant number of builtin
-/// pg_type rows per database, shifting every subsequent user-type OID
-/// allocation by a constant (observed +9), so the invariant is one
-/// CONSISTENT per-resultset offset — every user-range column pair must
-/// carry the same B−A delta, and user-range must pair with user-range.
+/// comparable by value: user-object OIDs come off each cluster's shared
+/// allocator, and on independently-evolving clusters (crashes, voided
+/// batches, concurrent DDL over a 24h soak) the per-type deltas diverge
+/// arbitrarily (round-7 FP-3: observed [37725,37726,37726] vs
+/// [37661,37667,37667]). The earlier consistent-per-resultset-delta
+/// invariant only held on freshly-initdb'd clusters, so user-range pairs
+/// with user-range unconditionally; user-range against builtin is still
+/// a real descriptor divergence.
 fn col_oids_equivalent(oa: &[u32], ob: &[u32]) -> bool {
     if oa.len() != ob.len() {
         return false;
     }
-    let mut delta: Option<i64> = None;
     for (&a, &b) in oa.iter().zip(ob) {
         match (a >= FIRST_NORMAL_OBJECT_ID, b >= FIRST_NORMAL_OBJECT_ID) {
             (false, false) => {
@@ -121,14 +123,7 @@ fn col_oids_equivalent(oa: &[u32], ob: &[u32]) -> bool {
                     return false;
                 }
             }
-            (true, true) => {
-                let d = i64::from(b) - i64::from(a);
-                match delta {
-                    None => delta = Some(d),
-                    Some(prev) if prev == d => {}
-                    Some(_) => return false,
-                }
-            }
+            (true, true) => {}
             _ => return false,
         }
     }
@@ -499,6 +494,41 @@ fn is_no_libxml_error(message: &str) -> bool {
     message == "unsupported XML feature"
 }
 
+/// Shared-catalog DDL: the only statement surface where two CONCURRENT
+/// driver instances (each in its own private per-batch database) still
+/// race each other — pg_authid / pg_database / pg_shdescription rows are
+/// cluster-global. Scope is deliberately tight; database-local DDL never
+/// qualifies.
+pub fn is_shared_catalog_stmt(sql: &str) -> bool {
+    let head = sql.trim_start();
+    for kw in [
+        "ALTER USER ",
+        "ALTER ROLE ",
+        "ALTER GROUP ",
+        "ALTER DATABASE ",
+        "ALTER TABLESPACE ",
+        "COMMENT ON DATABASE ",
+        "COMMENT ON ROLE ",
+        "COMMENT ON TABLESPACE ",
+    ] {
+        if head.len() >= kw.len() && head[..kw.len()].eq_ignore_ascii_case(kw) {
+            return true;
+        }
+    }
+    false
+}
+
+/// C's simple_heap_update / CatalogTupleUpdate concurrency error
+/// (ERRCODE_INTERNAL_ERROR, heapam.c "tuple concurrently updated" /
+/// "tuple concurrently deleted"): both engines raise it verbatim when two
+/// sessions race an update to the same catalog row, so on shared-catalog
+/// DDL under concurrent drivers it is timing, not conformance. Any other
+/// XX000 stays panic-class and escalates.
+fn is_tuple_concurrency_error(sqlstate: &str, message: &str) -> bool {
+    sqlstate == "XX000"
+        && (message == "tuple concurrently updated" || message == "tuple concurrently deleted")
+}
+
 fn int_cell(c: &Option<String>) -> bool {
     matches!(c, Some(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
 }
@@ -743,6 +773,341 @@ fn normalize_explain_rows(rows: &[Vec<Option<String>>]) -> Vec<Vec<Option<String
         .collect()
 }
 
+/// FP-2 (round-7): deparse text embeds user-object OIDs as literals —
+/// `pg_get_partition_constraintdef` renders
+/// `satisfies_hash_partition('48594'::oid, ...)`, and user-range OIDs are
+/// arbitrary across two independently-evolving clusters. Normalize every
+/// `'<digits>'::oid` token whose value is >= FirstNormalObjectId to
+/// `'<oid>'::oid`; builtin OID literals stay compared exactly. Returns
+/// None when nothing changed (so the caller can skip the re-compare).
+pub fn normalize_oid_literal_cell(s: &str) -> Option<String> {
+    const SUFFIX: &str = "'::oid";
+    if !s.contains(SUFFIX) {
+        return None;
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let mut changed = false;
+    while let Some(pos) = rest.find(SUFFIX) {
+        // Walk back over the digits to the opening quote.
+        let head = &rest[..pos];
+        let digits_start = head
+            .rfind(|c: char| !c.is_ascii_digit())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let digits = &head[digits_start..];
+        let is_user_oid = digits_start > 0
+            && head[..digits_start].ends_with('\'')
+            && !digits.is_empty()
+            && digits.parse::<u64>().is_ok_and(|v| v >= u64::from(FIRST_NORMAL_OBJECT_ID));
+        if is_user_oid {
+            out.push_str(&head[..digits_start]);
+            out.push_str("<oid>");
+            changed = true;
+        } else {
+            out.push_str(head);
+        }
+        out.push_str(SUFFIX);
+        rest = &rest[pos + SUFFIX.len()..];
+    }
+    out.push_str(rest);
+    changed.then_some(out)
+}
+
+/// Round-8: TOAST relation names embed the owning table's OID
+/// (`pg_toast.pg_toast_48594`, index `pg_toast_48594_index`) — the same
+/// user-object-OID-drift family as the round-7 FP classes, surfacing
+/// through reltoastrelid joins, pg_class scans, and deparse output.
+/// Normalize `pg_toast_<digits>` to `pg_toast_<oid>` when the digits are
+/// a user-range OID; catalog toast tables (`pg_toast_2619`, ...) carry
+/// stable builtin relids and still compare exactly. Returns None when
+/// nothing changed.
+pub fn normalize_toast_name_cell(s: &str) -> Option<String> {
+    const PREFIX: &str = "pg_toast_";
+    if !s.contains(PREFIX) {
+        return None;
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let mut changed = false;
+    while let Some(pos) = rest.find(PREFIX) {
+        let after = &rest[pos + PREFIX.len()..];
+        let dig_end = after
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after.len());
+        let digits = &after[..dig_end];
+        // Word boundary on the left: `x_pg_toast_9` is not a toast name.
+        let left_ok = {
+            let head = &rest[..pos];
+            head.is_empty()
+                || !head
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        };
+        out.push_str(&rest[..pos + PREFIX.len()]);
+        if left_ok
+            && !digits.is_empty()
+            && digits
+                .parse::<u64>()
+                .is_ok_and(|v| v >= u64::from(FIRST_NORMAL_OBJECT_ID))
+        {
+            out.push_str("<oid>");
+            changed = true;
+        } else {
+            out.push_str(digits);
+        }
+        rest = &after[dig_end..];
+    }
+    out.push_str(rest);
+    changed.then_some(out)
+}
+
+fn normalize_toast_name_rows(rows: &[Vec<Option<String>>]) -> Vec<Vec<Option<String>>> {
+    rows.iter()
+        .map(|r| {
+            r.iter()
+                .map(|c| {
+                    c.as_ref()
+                        .map(|s| normalize_toast_name_cell(s).unwrap_or_else(|| s.clone()))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn normalize_oid_literal_rows(rows: &[Vec<Option<String>>]) -> Vec<Vec<Option<String>>> {
+    rows.iter()
+        .map(|r| {
+            r.iter()
+                .map(|c| {
+                    c.as_ref()
+                        .map(|s| normalize_oid_literal_cell(s).unwrap_or_else(|| s.clone()))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------
+// FP-5 (round-7): binary-mode cells for non-decoded types compare as raw
+// `\x` hex, but record_send embeds each column's type OID and array_send
+// embeds the element type OID — user-range values differ across clusters,
+// so every composite/array-of-UDT binary image diverges at those bytes.
+// The maskers below structurally parse the two container wire formats and
+// replace embedded user-range OIDs with FirstNormalObjectId; parsing must
+// consume the image EXACTLY (every length walk lands on the end) or the
+// cell is left untouched. Nested containers are not recursed into (the
+// sampled hits are all top-level; a nested divergence stays a finding).
+// ---------------------------------------------------------------------
+
+fn be_i32(b: &[u8], at: usize) -> Option<i32> {
+    Some(i32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn mask_user_oid(b: &mut [u8], at: usize) -> bool {
+    let oid = u32::from_be_bytes(b[at..at + 4].try_into().unwrap());
+    if oid >= FIRST_NORMAL_OBJECT_ID {
+        b[at..at + 4].copy_from_slice(&FIRST_NORMAL_OBJECT_ID.to_be_bytes());
+        true
+    } else {
+        false
+    }
+}
+
+/// array_send image: ndim(i32) flags(i32) elemtype(u32), per-dim
+/// (dim,lbound), then per-element len(i32)+data (-1 = NULL). Masks the
+/// elemtype when user-range; returns whether anything changed.
+fn mask_array_image(b: &mut [u8]) -> Option<bool> {
+    let ndim = be_i32(b, 0)?;
+    if !(0..=6).contains(&ndim) {
+        return None;
+    }
+    let flags = be_i32(b, 4)?;
+    if flags != 0 && flags != 1 {
+        return None;
+    }
+    let mut at = 12usize;
+    let mut nitems: u64 = 1;
+    for _ in 0..ndim {
+        let dim = be_i32(b, at)?;
+        be_i32(b, at + 4)?; // lbound: any value is wire-legal
+        if dim < 0 {
+            return None;
+        }
+        nitems = nitems.checked_mul(dim as u64)?;
+        at += 8;
+    }
+    if ndim == 0 {
+        nitems = 0;
+    }
+    for _ in 0..nitems {
+        let len = be_i32(b, at)?;
+        at += 4;
+        if len >= 0 {
+            at = at.checked_add(len as usize)?;
+            if at > b.len() {
+                return None;
+            }
+        } else if len != -1 {
+            return None;
+        }
+    }
+    if at != b.len() {
+        return None;
+    }
+    Some(mask_user_oid(b, 8))
+}
+
+/// record_send image: ncols(i32), then per column typoid(u32) len(i32)
+/// data (-1 = NULL). Masks every user-range column typoid.
+fn mask_record_image(b: &mut [u8]) -> Option<bool> {
+    let ncols = be_i32(b, 0)?;
+    // MaxTupleAttributeNumber is 1664.
+    if !(0..=1664).contains(&ncols) {
+        return None;
+    }
+    let mut at = 4usize;
+    let mut oid_offsets = Vec::new();
+    for _ in 0..ncols {
+        be_i32(b, at)?; // typoid readable
+        oid_offsets.push(at);
+        let len = be_i32(b, at + 4)?;
+        at += 8;
+        if len >= 0 {
+            at = at.checked_add(len as usize)?;
+            if at > b.len() {
+                return None;
+            }
+        } else if len != -1 {
+            return None;
+        }
+    }
+    if at != b.len() {
+        return None;
+    }
+    let mut changed = false;
+    for off in oid_offsets {
+        changed |= mask_user_oid(b, off);
+    }
+    Some(changed)
+}
+
+fn parse_hex_cell(s: &str) -> Option<Vec<u8>> {
+    let hex = s.strip_prefix("\\x")?;
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let bytes = hex.as_bytes();
+    for pair in bytes.chunks_exact(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push((hi * 16 + lo) as u8);
+    }
+    Some(out)
+}
+
+fn hex_cell(b: &[u8]) -> String {
+    let mut s = String::with_capacity(2 + 2 * b.len());
+    s.push_str("\\x");
+    for byte in b {
+        s.push_str(&format!("{byte:02x}"));
+    }
+    s
+}
+
+/// Mask embedded user-range type OIDs in one `\x`-hex binary cell when it
+/// structurally parses as an array or record image. None = not a container
+/// image / nothing user-range to mask.
+pub fn normalize_binary_udt_cell(s: &str) -> Option<String> {
+    let mut b = parse_hex_cell(s)?;
+    let changed = mask_record_image(&mut b).or_else(|| {
+        b = parse_hex_cell(s).unwrap();
+        mask_array_image(&mut b)
+    })?;
+    changed.then(|| hex_cell(&b))
+}
+
+fn normalize_binary_udt_rows(rows: &[Vec<Option<String>>]) -> Vec<Vec<Option<String>>> {
+    rows.iter()
+        .map(|r| {
+            r.iter()
+                .map(|c| {
+                    c.as_ref()
+                        .map(|s| normalize_binary_udt_cell(s).unwrap_or_else(|| s.clone()))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------
+// FP-6 (round-7): C's memcmp-convention comparators (`btint4cmp`,
+// `uuid_cmp`, ...) return arbitrary magnitude; SQL semantics only consume
+// the sign, so a `SELECT uuid_cmp(...)` differential compares an
+// unspecified value. When the statement's select list calls a *cmp
+// builtin directly and every int4 cell agrees in SIGN, the magnitude
+// difference is the known-benign residual (ruled `cmp-magnitude`).
+// ORDER BY / index paths are unaffected — they consume the sign only by
+// construction.
+// ---------------------------------------------------------------------
+
+/// Does the statement call a `*cmp` builtin directly? Word-boundary scan
+/// for an identifier ending in `cmp` immediately followed by `(`.
+pub fn calls_cmp_builtin(sql: &str) -> bool {
+    let b = sql.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let word = &sql[start..i];
+            let mut j = i;
+            while j < b.len() && b[j] == b' ' {
+                j += 1;
+            }
+            if word.len() > 3
+                && word.to_ascii_lowercase().ends_with("cmp")
+                && j < b.len()
+                && b[j] == b'('
+            {
+                return true;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Map int4 cells to their sign ("-"/"0"/"+"); other columns unchanged.
+fn normalize_int4_sign_rows(
+    rows: &[Vec<Option<String>>],
+    col_oids: &[u32],
+) -> Vec<Vec<Option<String>>> {
+    rows.iter()
+        .map(|r| {
+            r.iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    if col_oids.get(i) != Some(&23) {
+                        return c.clone();
+                    }
+                    c.as_ref().map(|s| match s.parse::<i64>() {
+                        Ok(v) if v < 0 => "-".to_string(),
+                        Ok(0) => "0".to_string(),
+                        Ok(_) => "+".to_string(),
+                        Err(_) => s.clone(),
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Short shape name for mixed-outcome diagnostics.
 fn outcome_shape(o: &StmtOutcome) -> String {
     match o {
@@ -856,6 +1221,13 @@ pub fn classify(input: &DiffInput) -> Classified {
                          feature; B (libxml build) errored {sb} ({mb})"
                     ),
                 }
+            } else if is_shared_catalog_stmt(sql)
+                && (is_tuple_concurrency_error(sa, ma) || is_tuple_concurrency_error(sb, mb))
+            {
+                Classified {
+                    class: DiffClass::Ruled("shared-catalog-tcu".to_string()),
+                    detail: format!("SQLSTATE {sa} ({ma}) vs {sb} ({mb})"),
+                }
             } else {
                 Classified {
                     class: DiffClass::ErrorDiff,
@@ -864,6 +1236,12 @@ pub fn classify(input: &DiffInput) -> Classified {
             }
         }
         (Error { sqlstate, message }, _) => {
+            if is_shared_catalog_stmt(sql) && is_tuple_concurrency_error(sqlstate, message) {
+                return Classified {
+                    class: DiffClass::Ruled("shared-catalog-tcu".to_string()),
+                    detail: format!("A errored {sqlstate} ({message}); B succeeded"),
+                };
+            }
             if is_no_libxml_error(message) {
                 Classified {
                     class: DiffClass::Ruled("xml-config".to_string()),
@@ -878,10 +1256,30 @@ pub fn classify(input: &DiffInput) -> Classified {
                 }
             }
         }
-        (_, Error { sqlstate, message }) => Classified {
-            class: DiffClass::ErrorDiff,
-            detail: format!("A succeeded; B errored {sqlstate} ({message})"),
-        },
+        (_, Error { sqlstate, message }) => {
+            if is_shared_catalog_stmt(sql) && is_tuple_concurrency_error(sqlstate, message) {
+                return Classified {
+                    class: DiffClass::Ruled("shared-catalog-tcu".to_string()),
+                    detail: format!("A succeeded; B errored {sqlstate} ({message})"),
+                };
+            }
+            // FP-4 (round-7): Antithesis thread-pauses the instrumented
+            // SUT only — the in-container C oracle is not symmetrically
+            // faulted, so pgrust's parallel-worker bring-up can time out
+            // where A sails through. Exact-signature scope; a B-only
+            // 55000 with any OTHER message still escalates. Worker-
+            // acquisition liveness is owned by the liveness campaign.
+            if sqlstate == "55000" && message == "parallel worker failed to initialize" {
+                return Classified {
+                    class: DiffClass::Ruled("parallel-worker-init".to_string()),
+                    detail: format!("A succeeded; B errored {sqlstate} ({message})"),
+                };
+            }
+            Classified {
+                class: DiffClass::ErrorDiff,
+                detail: format!("A succeeded; B errored {sqlstate} ({message})"),
+            }
+        }
         (CopyOut { bytes: ba, tag: ta }, CopyOut { bytes: bb, tag: tb }) => {
             if ba == bb {
                 if ta == tb {
@@ -990,6 +1388,63 @@ pub fn classify(input: &DiffInput) -> Classified {
                     })
                 }
             };
+            // Round-7 OID/comparator fallbacks, tried in order after the
+            // EXPLAIN/GUC masks: each normalizes BOTH sides identically
+            // and only fires when the whole remaining diff disappears.
+            let recmp = |na: &[Vec<Option<String>>], nb: &[Vec<Option<String>>]| {
+                let c = if ordered {
+                    cmp_rows_ordered(na, nb, &modes, ulp_tol)
+                } else {
+                    cmp_rows_multiset(na, nb, &modes, ulp_tol)
+                };
+                !matches!(c, RowsetCmp::Diff(_))
+            };
+            let structural_fallbacks = |d: &str| -> Option<Classified> {
+                // FP-2: user-range OID literals inside deparse text.
+                if recmp(&normalize_oid_literal_rows(ra), &normalize_oid_literal_rows(rb)) {
+                    return Some(Classified {
+                        class: DiffClass::Ruled("oid-literal".to_string()),
+                        detail: format!(
+                            "equal after masking user-range '<n>'::oid literals: {d}"
+                        ),
+                    });
+                }
+                // Round-8: TOAST relation names embedding the owning
+                // table's user-range OID.
+                if recmp(&normalize_toast_name_rows(ra), &normalize_toast_name_rows(rb)) {
+                    return Some(Classified {
+                        class: DiffClass::Ruled("toast-name".to_string()),
+                        detail: format!(
+                            "equal after masking user-range pg_toast_<n> relation names: {d}"
+                        ),
+                    });
+                }
+                // FP-5: embedded type OIDs in binary container images.
+                if recmp(&normalize_binary_udt_rows(ra), &normalize_binary_udt_rows(rb)) {
+                    return Some(Classified {
+                        class: DiffClass::Ruled("binary-udt-oid".to_string()),
+                        detail: format!(
+                            "equal after masking embedded user-range type oids \
+                             in binary container images: {d}"
+                        ),
+                    });
+                }
+                // FP-6: *cmp() builtin magnitude with matching sign.
+                if calls_cmp_builtin(sql)
+                    && recmp(
+                        &normalize_int4_sign_rows(ra, oa),
+                        &normalize_int4_sign_rows(rb, ob),
+                    )
+                {
+                    return Some(Classified {
+                        class: DiffClass::Ruled("cmp-magnitude".to_string()),
+                        detail: format!(
+                            "int4 *cmp() results equal in sign, magnitude differs: {d}"
+                        ),
+                    });
+                }
+                None
+            };
             if ordered {
                 match cmp_rows_ordered(ra, rb, &modes, ulp_tol) {
                     RowsetCmp::Equal => {
@@ -1011,6 +1466,9 @@ pub fn classify(input: &DiffInput) -> Classified {
                             return c;
                         }
                         if let Some(c) = guc_inventory_candidate(sql, ra, rb) {
+                            return c;
+                        }
+                        if let Some(c) = structural_fallbacks(&d) {
                             return c;
                         }
                         match cmp_rows_multiset(ra, rb, &modes, ulp_tol) {
@@ -1055,6 +1513,9 @@ pub fn classify(input: &DiffInput) -> Classified {
                             return c;
                         }
                         if let Some(c) = guc_inventory_candidate(sql, ra, rb) {
+                            return c;
+                        }
+                        if let Some(c) = structural_fallbacks(&d) {
                             return c;
                         }
                         Classified { class: DiffClass::RowsetDiff, detail: d }
@@ -1427,9 +1888,9 @@ mod tests {
 
     #[test]
     fn user_range_oids_match_under_one_consistent_offset() {
-        // pgrust's builtin-row backfill shifts user OID allocation by a
-        // constant (observed +9); a consistent per-resultset offset is a
-        // match, builtin columns still compare exactly.
+        // User-range descriptor OIDs are cluster-local allocator state; a
+        // consistent per-resultset offset is a match, builtin columns
+        // still compare exactly.
         let a = rowset(vec![23, 16385, 16401], rows(&[&[Some("1"), Some("x"), Some("y")]]));
         let b = rowset(vec![23, 16394, 16410], rows(&[&[Some("1"), Some("x"), Some("y")]]));
         let c = classify_sql("SELECT a, b, c FROM t;", &a, &b);
@@ -1437,11 +1898,14 @@ mod tests {
     }
 
     #[test]
-    fn user_range_oids_with_inconsistent_offsets_are_rowset_diff() {
+    fn user_range_oids_with_inconsistent_offsets_still_match() {
+        // Round-7 FP-3: after hours of independent allocation (crashes,
+        // voided batches, concurrent DDL) per-type deltas diverge; user-
+        // range pairs with user-range unconditionally.
         let a = rowset(vec![16385, 16401], rows(&[&[Some("x"), Some("y")]]));
         let b = rowset(vec![16394, 16411], rows(&[&[Some("x"), Some("y")]]));
         let c = classify_sql("SELECT b, c FROM t;", &a, &b);
-        assert_eq!(c.class, DiffClass::RowsetDiff);
+        assert_eq!(c.class, DiffClass::Match);
     }
 
     #[test]
@@ -1667,6 +2131,195 @@ mod tests {
             classify_sql("SELECT c FROM t;", &a, &b).class,
             DiffClass::RowsetDiff
         );
+    }
+
+    /// Round-7 FP-2: user-range `'<n>'::oid` literals in deparse text are
+    /// masked; builtin OID literals and any other text diff still flag.
+    #[test]
+    fn oid_literal_diff_is_ruled_candidate() {
+        let sql = "select pg_get_partition_constraintdef(oid) from pg_class ;";
+        let a = rowset(
+            vec![25],
+            rows(&[&[Some("satisfies_hash_partition('48594'::oid, 8, 5, k)")]]),
+        );
+        let b = rowset(
+            vec![25],
+            rows(&[&[Some("satisfies_hash_partition('37725'::oid, 8, 5, k)")]]),
+        );
+        let c = classify_sql(sql, &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("oid-literal".to_string()));
+        // Builtin OID literal: stays a finding.
+        let a = rowset(vec![25], rows(&[&[Some("f('23'::oid)")]]));
+        let b = rowset(vec![25], rows(&[&[Some("f('25'::oid)")]]));
+        assert_eq!(classify_sql(sql, &a, &b).class, DiffClass::RowsetDiff);
+        // Text differing beyond the oid literal: stays a finding.
+        let a = rowset(vec![25], rows(&[&[Some("f('48594'::oid, 8)")]]));
+        let b = rowset(vec![25], rows(&[&[Some("f('37725'::oid, 9)")]]));
+        assert_eq!(classify_sql(sql, &a, &b).class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn oid_literal_cell_normalization() {
+        assert_eq!(
+            normalize_oid_literal_cell("satisfies_hash_partition('48594'::oid, 8)").as_deref(),
+            Some("satisfies_hash_partition('<oid>'::oid, 8)")
+        );
+        // Builtin value: unchanged (None).
+        assert_eq!(normalize_oid_literal_cell("x('123'::oid)"), None);
+        // Not a quoted literal: unchanged.
+        assert_eq!(normalize_oid_literal_cell("48594'::oid"), None);
+        assert_eq!(normalize_oid_literal_cell("no oid here"), None);
+    }
+
+    /// Round-7 FP-5: embedded user-range type OIDs in record/array binary
+    /// images are masked; any other byte diff stays a finding.
+    #[test]
+    fn binary_udt_oid_diff_is_ruled_candidate() {
+        // record_send image, 2 text-ish columns, differing only in the
+        // (user-range) column type oids: ncols=2, per col typoid/len/data.
+        let rec = |typoid: u32| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&2i32.to_be_bytes());
+            for data in [b"ab".as_slice(), b"ok".as_slice()] {
+                b.extend_from_slice(&typoid.to_be_bytes());
+                b.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                b.extend_from_slice(data);
+            }
+            let mut s = String::from("\\x");
+            for byte in &b {
+                s.push_str(&format!("{byte:02x}"));
+            }
+            s
+        };
+        let sql = "select row('ab','ok')::fz_udt_c_0 ;";
+        let a = rowset(vec![16389], rows(&[&[Some(&rec(16401))]]));
+        let b = rowset(vec![16410], rows(&[&[Some(&rec(37725))]]));
+        let c = classify_sql(sql, &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("binary-udt-oid".to_string()), "{}", c.detail);
+        // array_send image of 2 int-ish elements: only elemtype differs.
+        let arr = |elemtype: u32| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&1i32.to_be_bytes()); // ndim
+            b.extend_from_slice(&0i32.to_be_bytes()); // flags
+            b.extend_from_slice(&elemtype.to_be_bytes());
+            b.extend_from_slice(&2i32.to_be_bytes()); // dim
+            b.extend_from_slice(&1i32.to_be_bytes()); // lbound
+            for v in [5i32, 5i32] {
+                b.extend_from_slice(&4i32.to_be_bytes());
+                b.extend_from_slice(&v.to_be_bytes());
+            }
+            let mut s = String::from("\\x");
+            for byte in &b {
+                s.push_str(&format!("{byte:02x}"));
+            }
+            s
+        };
+        let a = rowset(vec![16390], rows(&[&[Some(&arr(16400))]]));
+        let b = rowset(vec![16411], rows(&[&[Some(&arr(37700))]]));
+        let c = classify_sql("select array[5,5]::fz_udt_d_0[] ;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("binary-udt-oid".to_string()), "{}", c.detail);
+        // A DATA byte differing alongside the oid: stays a finding.
+        let mut bad = rec(37725);
+        let fixed = bad.len() - 1;
+        bad.replace_range(fixed.., "f");
+        let a = rowset(vec![16389], rows(&[&[Some(&rec(16401))]]));
+        let b = rowset(vec![16410], rows(&[&[Some(&bad)]]));
+        assert_eq!(classify_sql(sql, &a, &b).class, DiffClass::RowsetDiff);
+        // Builtin element type: images with different builtin oids are a
+        // real finding (nothing user-range to mask).
+        let a = rowset(vec![1007], rows(&[&[Some(&arr(23))]]));
+        let b = rowset(vec![1007], rows(&[&[Some(&arr(20))]]));
+        assert_eq!(
+            classify_sql("select x from t ;", &a, &b).class,
+            DiffClass::RowsetDiff
+        );
+    }
+
+    /// Round-7 FP-6: direct *cmp() call, int4 results equal in sign only.
+    #[test]
+    fn cmp_magnitude_diff_is_ruled_candidate() {
+        let sql = "select uuid_cmp(a, b) from t ;";
+        let a = rowset(vec![23], rows(&[&[Some("-238")]]));
+        let b = rowset(vec![23], rows(&[&[Some("-1")]]));
+        let c = classify_sql(sql, &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("cmp-magnitude".to_string()));
+        // Sign flip: stays a finding.
+        let b2 = rowset(vec![23], rows(&[&[Some("238")]]));
+        assert_eq!(classify_sql(sql, &a, &b2).class, DiffClass::RowsetDiff);
+        // No *cmp call in the statement: stays a finding.
+        let c = classify_sql("select a - b from t ;", &a, &b);
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+        // Non-int4 column: exact compare stands even with a *cmp call.
+        let a8 = rowset(vec![20], rows(&[&[Some("-238")]]));
+        let b8 = rowset(vec![20], rows(&[&[Some("-1")]]));
+        assert_eq!(classify_sql(sql, &a8, &b8).class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn calls_cmp_builtin_scans_words() {
+        assert!(calls_cmp_builtin("select uuid_cmp(a,b);"));
+        assert!(calls_cmp_builtin("select btint4cmp (1, 2);"));
+        assert!(!calls_cmp_builtin("select cmp(1,2);")); // too short
+        assert!(!calls_cmp_builtin("select uuid_cmp;")); // no call
+        assert!(!calls_cmp_builtin("select compare(a,b);"));
+    }
+
+    /// Round-7 FP-4: B-only 55000 with the exact worker-init message is a
+    /// ruled candidate; other messages and A-side errors escalate.
+    #[test]
+    fn parallel_worker_init_is_ruled_candidate() {
+        let ok = rowset(vec![23], rows(&[&[Some("1")]]));
+        let err = |m: &str| StmtOutcome::Error {
+            sqlstate: "55000".to_string(),
+            message: m.to_string(),
+        };
+        let c = classify_sql("select count(*) from big ;", &ok,
+                             &err("parallel worker failed to initialize"));
+        assert_eq!(c.class, DiffClass::Ruled("parallel-worker-init".to_string()));
+        // Different 55000 message: finding.
+        let c = classify_sql("select 1 ;", &ok, &err("object not in prerequisite state"));
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+        // A-side worker-init error (the UNfaulted oracle failing): finding.
+        let c = classify_sql("select 1 ;", &err("parallel worker failed to initialize"), &ok);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// Round-8: user-range pg_toast_<n> names mask; builtin catalog toast
+    /// names and any other text diff still flag.
+    #[test]
+    fn toast_name_diff_is_ruled_candidate() {
+        let sql = "select relname from pg_class where relkind = 't' ;";
+        let a = rowset(vec![19], rows(&[&[Some("pg_toast_48594")]]));
+        let b = rowset(vec![19], rows(&[&[Some("pg_toast_37725")]]));
+        let c = classify_sql(sql, &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("toast-name".to_string()));
+        // Schema-qualified and _index forms mask too.
+        let a = rowset(vec![25], rows(&[&[Some("pg_toast.pg_toast_48594_index")]]));
+        let b = rowset(vec![25], rows(&[&[Some("pg_toast.pg_toast_37725_index")]]));
+        let c = classify_sql(sql, &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("toast-name".to_string()));
+        // Builtin catalog toast relids stay compared exactly.
+        let a = rowset(vec![19], rows(&[&[Some("pg_toast_2619")]]));
+        let b = rowset(vec![19], rows(&[&[Some("pg_toast_2620")]]));
+        assert_eq!(classify_sql(sql, &a, &b).class, DiffClass::RowsetDiff);
+        // A diff beyond the toast name stays a finding.
+        let a = rowset(vec![25], rows(&[&[Some("pg_toast_48594 ok")]]));
+        let b = rowset(vec![25], rows(&[&[Some("pg_toast_37725 no")]]));
+        assert_eq!(classify_sql(sql, &a, &b).class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn toast_name_cell_normalization() {
+        assert_eq!(
+            normalize_toast_name_cell("pg_toast.pg_toast_48594_index").as_deref(),
+            Some("pg_toast.pg_toast_<oid>_index")
+        );
+        // Builtin relid: unchanged (None).
+        assert_eq!(normalize_toast_name_cell("pg_toast_2619"), None);
+        // No digits / not a toast name / mid-word: unchanged.
+        assert_eq!(normalize_toast_name_cell("pg_toast_x"), None);
+        assert_eq!(normalize_toast_name_cell("not_pg_toast_48594"), None);
+        assert_eq!(normalize_toast_name_cell("plain text"), None);
     }
 
     #[test]

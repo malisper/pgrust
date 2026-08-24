@@ -296,6 +296,21 @@ pub fn fc_multirange_intersect(
     mr_result(fcinfo, &img)
 }
 
+// C takes the multirange OID off the faked finalfn fn_expr rettype
+// (multirangetypes.c:1397) and never probes pg_range in this frame, so the
+// miss has no C counterpart of its own; the standard report for a RANGETYPE
+// miss is `elog(ERROR, "cache lookup failed for range type %u")`
+// (typcache.c:1012).  elog's default SQLSTATE at ERROR is XX000, so no
+// with_sqlstate here -- and it is catchable, never a backend abort.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn range_type_lookup_failed(rngtypid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for range type {rngtypid}"
+    )))
+}
+
 #[track_caller]
 #[cold]
 fn non_aggregate_context(what: &str) -> Box<PgError> {
@@ -390,8 +405,12 @@ pub fn fc_range_agg_finalfn(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     let flinfo = flinfo.expect("range_agg_finalfn: NULL flinfo");
     // C reads the rettype off the faked finalfn fn_expr; the collected
     // element type's pg_range row names the same concrete multirange.
+    // C takes the multirange OID off the faked finalfn fn_expr rettype and
+    // never probes pg_range here, so this miss has no C frame of its own; the
+    // standard report for a RANGETYPE miss is `elog(ERROR, "cache lookup
+    // failed for range type %u")` (typcache.c:1012), a catchable XX000.
     let mltrngtypid = syscache_seams::lookup_pg_range_shape::call(st.element_type)?
-        .unwrap_or_else(|| panic!("cache lookup failed for range type {}", st.element_type))
+        .ok_or_else(|| range_type_lookup_failed(st.element_type))?
         .rngmultitypid;
     let mcx = fcinfo.result_mcx();
     let mi = cached_multirange_info(flinfo, mltrngtypid)?;

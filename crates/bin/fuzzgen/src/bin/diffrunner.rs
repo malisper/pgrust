@@ -585,17 +585,27 @@ fn run() -> Result<ExitCode, String> {
                 let stream = session
                     .stmts
                     .iter()
-                    .map(|s| StreamStmt {
-                        stmt_index: s.stmt_index,
-                        sql: s.sql.clone(),
-                        soft_float_cols: s.soft_float_cols.clone(),
-                        // Opt-in H1 mask: gramwalk derives raw EXPLAIN
-                        // ANALYZE straight from the grammar and cannot
-                        // carry the explain module's TIMING OFF hygiene.
-                        mask_explain_timing: s
-                            .productions
-                            .iter()
-                            .any(|p| p == "module:gramwalk"),
+                    .map(|s| {
+                        let is_gramwalk =
+                            s.productions.iter().any(|p| p == "module:gramwalk");
+                        StreamStmt {
+                            stmt_index: s.stmt_index,
+                            // FP-1: gramwalk's database-DDL name operands are
+                            // rebased into the batch-unique scratch-db
+                            // namespace so concurrent driver instances and
+                            // crash residue can never interfere through the
+                            // cluster-global database namespace.
+                            sql: if is_gramwalk {
+                                fuzzgen::gramwalk::rebase_database_names(&s.sql, &args.db)
+                            } else {
+                                s.sql.clone()
+                            },
+                            soft_float_cols: s.soft_float_cols.clone(),
+                            // Opt-in H1 mask: gramwalk derives raw EXPLAIN
+                            // ANALYZE straight from the grammar and cannot
+                            // carry the explain module's TIMING OFF hygiene.
+                            mask_explain_timing: is_gramwalk,
+                        }
                     })
                     .collect();
                 (stream, session.ddl_windows)

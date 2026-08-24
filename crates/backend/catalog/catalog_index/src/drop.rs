@@ -20,7 +20,7 @@ pub fn IndexGetRelation<'mcx>(mcx: Mcx<'mcx>, indexId: Oid, missing_ok: bool) ->
     let result = match genam::systable_getnext(mcx, &mut scan)? {
         Some(tup) => getattr(tup, Anum_pg_index_indrelid, rel.descr()).as_oid(),
         None if missing_ok => InvalidOid,
-        None => panic!("cache lookup failed for index {indexId}"),
+        None => return Err(crate::index_lookup_failed(indexId)),
     };
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_rel::AccessShareLock)?;
@@ -112,8 +112,9 @@ pub fn index_drop<'mcx>(
         let key = oid_scankey(Anum_pg_index_indexrelid, indexId);
         let mut scan =
             genam::systable_beginscan(mcx, &indexRelation, IndexRelidIndexId, true, None, &[key])?;
-        let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for index {indexId}"));
+        let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(crate::index_lookup_failed(indexId));
+        };
         let mut isnull = false;
         // SAFETY: indexprs under pg_index's descriptor; null test only.
         unsafe {

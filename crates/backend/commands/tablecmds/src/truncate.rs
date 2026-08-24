@@ -302,6 +302,15 @@ pub fn ExecuteTruncateGuts<'mcx>(
     Ok(())
 }
 
+// elog(ERROR, "cache lookup failed for relation %u") in
+// RangeVarCallbackForTruncate (tablecmds.c): elog's default SQLSTATE is XX000.
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(relOid: Oid) -> Box<PgError> {
+    let msg = format!("cache lookup failed for relation {relOid}");
+    Box::new(PgError::error(msg))
+}
+
 fn RangeVarCallbackForTruncate<'mcx>(mcx: Mcx<'mcx>, relOid: Oid) -> PgResult<()> {
     if relOid == InvalidOid {
         return Ok(());
@@ -310,8 +319,14 @@ fn RangeVarCallbackForTruncate<'mcx>(mcx: Mcx<'mcx>, relOid: Oid) -> PgResult<()
     let key = [oid_key(1, relOid)];
     let mut scan =
         genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relOid}"));
+    // C's SearchSysCache1(RELOID) here runs *before* RangeVarGetRelidExtended
+    // takes the AccessExclusiveLock (namespace.c invokes the callback ahead of
+    // LockRelationOid), so a concurrent DROP TABLE that commits between the
+    // name lookup and this probe genuinely reaches C's "should not happen"
+    // elog(ERROR) -- a catchable XX000, not an abort.
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(cache_lookup_failed(relOid));
+    };
     let desc = pg_class.descr();
     let get = |attnum: i32| {
         let mut isnull = false;
@@ -396,4 +411,22 @@ fn truncate_check_activity(rel: &Relation<'_>) -> PgResult<()> {
         ));
     }
     catalog_heap::CheckTableNotInUse(rel, "TRUNCATE")
+}
+
+#[cfg(test)]
+mod panic_hygiene_tests {
+    use super::*;
+
+    // RangeVarGetRelidExtended runs the callback before it takes the
+    // AccessExclusiveLock, so a DROP TABLE committing in that window makes the
+    // pg_class probe come up empty.  C reports it with
+    // elog(ERROR, "cache lookup failed for relation %u") -- catchable XX000.
+    // pgrust used to panic!() here, aborting the backend (found by fuzzing).
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for relation 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
+    }
 }

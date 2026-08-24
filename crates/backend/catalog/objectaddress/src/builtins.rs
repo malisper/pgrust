@@ -311,9 +311,15 @@ fn fc_pg_identify_object(
     let objidentity = description::getObjectIdentity(mcx, &address, true)?;
 
     if OidIsValid(schema_oid) && objidentity.is_some() {
-        let nspname = lsyscache::misc::get_namespace_name(mcx, schema_oid)?
-            .map(|n| n.as_str().to_string())
-            .unwrap_or_else(|| panic!("cache lookup failed for namespace {schema_oid}"));
+        // C pg_identify_object (objectaddress.c) feeds get_namespace_name's
+        // result straight to quote_identifier and would deref NULL here -- the
+        // row was just read under AccessShareLock, so it is a can't-happen.
+        // pgrust panicked; report the house cache-lookup XX000 instead, so the
+        // worst case is a catchable error rather than a backend abort.
+        let Some(nspname) = lsyscache::misc::get_namespace_name(mcx, schema_oid)? else {
+            return Err(description::cache_lookup_failed("namespace", schema_oid));
+        };
+        let nspname = nspname.as_str().to_string();
         values[1] = text_datum(mcx, &format_type::quote_identifier(&nspname))?;
         nulls[1] = false;
     }

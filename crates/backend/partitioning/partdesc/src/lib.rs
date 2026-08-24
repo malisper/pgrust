@@ -9,7 +9,7 @@ use std::rc::Rc;
 use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
 use types_core::{InvalidOid, InvalidTransactionId, Oid, TransactionId};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_nodes::rawnodes::PartitionBoundSpec;
 use types_nodes::NodeList;
 use types_rel::{Relation, RELKIND_PARTITIONED_TABLE};
@@ -143,6 +143,27 @@ unsafe fn detoast_text_to_str<'mcx>(mcx: ::mcx::Mcx<'mcx>, p: *const u8) -> &'mc
     core::str::from_utf8(s).expect("non-UTF-8 relpartbound")
 }
 
+// partdesc.c:279 elog(ERROR, "missing relpartbound for relation %u") -- the
+// terminal report once the syscache probe, the direct pg_class scan and the
+// single retry have all failed to produce a bound.  elog's default SQLSTATE
+// is XX000 and it unwinds the transaction; it never aborts the backend.
+#[cold]
+#[inline(never)]
+fn missing_relpartbound(inhrelid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "missing relpartbound for relation {inhrelid}"
+    )))
+}
+
+// partdesc.c:281 elog(ERROR, "invalid relpartbound for relation %u").
+#[cold]
+#[inline(never)]
+fn invalid_relpartbound(inhrelid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "invalid relpartbound for relation {inhrelid}"
+    )))
+}
+
 #[inline(never)]
 fn RelationBuildPartitionDesc(
     rel: &Relation<'_>,
@@ -178,21 +199,34 @@ fn RelationBuildPartitionDesc(
     let mut boundspecs: Vec<&PartitionBoundSpec<'_>> = Vec::with_capacity(nparts);
 
     for &inhrelid in inhoids.iter() {
-        let tuple = cache_syscache::SearchSysCache1(
+        // C partdesc.c:187-276 treats a RELOID miss (and a NULL relpartbound)
+        // as "the syscache is behind a concurrent ATTACH/DETACH CONCURRENTLY":
+        // it re-reads pg_class directly and retries the whole loop once.  The
+        // terminal outcome once the retry still finds nothing is
+        // `elog(ERROR, "missing relpartbound for relation %u", inhrelid)`
+        // (partdesc.c:279) -- a catchable XX000, never a backend abort.  We
+        // do not yet implement the direct-scan retry (see below), but the
+        // failure mode must at minimum be that catchable error rather than a
+        // panic that kills the backend.
+        let Some(tuple) = cache_syscache::SearchSysCache1(
             RELOID,
             cache_syscache::SysCacheKey::Value(Datum::from_oid(inhrelid)),
         )?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {inhrelid}"));
+        else {
+            return Err(missing_relpartbound(inhrelid));
+        };
         let (datum, isnull) =
             cache_syscache::SysCacheGetAttr(RELOID, &tuple, Anum_pg_class_relpartbound)?;
         if isnull {
-            panic!("missing relpartbound for relation {inhrelid}");
+            cache_syscache::ReleaseSysCache(tuple);
+            return Err(missing_relpartbound(inhrelid));
         }
         let node = readfuncs::stringToNode(smcx, text_to_str(smcx, datum))?;
         cache_syscache::ReleaseSysCache(tuple);
-        let spec = node
-            .as_variant::<PartitionBoundSpec>()
-            .unwrap_or_else(|| panic!("invalid relpartbound for relation {inhrelid}"));
+        // partdesc.c:281 elog(ERROR, "invalid relpartbound for relation %u").
+        let Some(spec) = node.as_variant::<PartitionBoundSpec>() else {
+            return Err(invalid_relpartbound(inhrelid));
+        };
         boundspecs.push(spec);
         oids.push(inhrelid);
         is_leaf.push(lsyscache::get_rel_relkind(inhrelid)? != RELKIND_PARTITIONED_TABLE as i8);

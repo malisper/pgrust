@@ -1095,8 +1095,8 @@ fn ATPrepAddInherit(rel: &Relation<'_>) -> PgResult<()> {
 // pg_class.reloftype probe; C reads rd_rel->reloftype (the trimmed
 // FormData_pg_class here does not carry it).
 pub(crate) fn rel_reloftype(relid: Oid) -> PgResult<Oid> {
-    Ok(syscache_seams::pg_class_reloftype::call(relid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}")))
+    syscache_seams::pg_class_reloftype::call(relid)?
+        .ok_or_else(|| crate::cache_lookup_failed("relation", relid))
 }
 
 #[cold]
@@ -2396,7 +2396,7 @@ fn ATExecAddColumn<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &pgclass, catalog::ClassOidIndexId, true, None, &[key])?;
     let reltup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {myrelid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("relation", myrelid))?;
     let cdesc = pgclass.descr();
     let mut isnull = false;
     // SAFETY: fixed NOT NULL pg_class column under pg_class's descriptor.
@@ -3957,7 +3957,7 @@ fn pg_index_shape_full<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for index {indexoid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("index", indexoid))?;
     let desc = pg_index.descr();
     let mut isnull = false;
     let mut get = |attnum: usize| {
@@ -4848,7 +4848,7 @@ fn ATExecSetOptions<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &attrel, AttributeRelidNumIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for attribute {attnum} of relation {}", rel.rd_id));
+        .ok_or_else(|| crate::cache_lookup_failed_attribute(attnum, rel.rd_id))?;
     let desc = attrel.descr();
     let mut isnull = false;
     // SAFETY: attoptions under pg_attribute's descriptor; null-checked.
@@ -5962,7 +5962,7 @@ fn RememberStatisticsForRebuilding<'mcx>(
         return Ok(());
     }
     let defstring = ruleutils::pg_get_statisticsobj_worker(mcx, stxoid, false, false)?
-        .unwrap_or_else(|| panic!("cache lookup failed for statistics object {stxoid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("statistics object", stxoid))?;
     tab.changed_statistics.push((stxoid, defstring));
     Ok(())
 }
@@ -6093,7 +6093,7 @@ fn constraint_rebuild_shape(mcx: Mcx<'_>, conoid: Oid) -> PgResult<(Oid, Oid, Oi
     let mut scan =
         genam::systable_beginscan(mcx, &con_rel, ConstraintOidIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {conoid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("constraint", conoid))?;
     let desc = con_rel.descr();
     let get = |anum: AttrNumber| {
         let mut isnull = false;
@@ -6400,7 +6400,7 @@ fn TryReuseForeignKey<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &con_rel, ConstraintOidIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {old_id}"));
+        .ok_or_else(|| crate::cache_lookup_failed("constraint", old_id))?;
     let arrays = pg_constraint::DeconstructFkConstraintRow(mcx, tup, con_rel.descr())?;
     let list =
         types_nodes::list::OidList::from_slice(mcx, &arrays.pf_eq_oprs[..arrays.numfks])?;
@@ -6491,7 +6491,7 @@ fn fetch_missing_element<'mcx>(
         &keys,
     )?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for attribute {attnum} of relation {relid}"));
+        .ok_or_else(|| crate::cache_lookup_failed_attribute(attnum, relid))?;
     let desc = attrrel.descr();
     let mut isnull = false;
     // SAFETY: attmissingval under pg_attribute's descriptor.
@@ -6576,7 +6576,7 @@ fn update_pg_attribute_nullable<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &attrel, AttributeRelidNumIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for attribute {attnum} of relation {relid}"));
+        .ok_or_else(|| crate::cache_lookup_failed_attribute(attnum, relid))?;
     let desc = attrel.descr();
     let natts = desc.natts as usize;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -6660,7 +6660,7 @@ fn set_pg_class_bool<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
     let reltup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {}", rel.rd_id));
+        .ok_or_else(|| crate::cache_lookup_failed("relation", rel.rd_id))?;
     let natts = pg_class.descr().natts as usize;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
     let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -6708,7 +6708,7 @@ pub(crate) fn pg_class_read_attr(mcx: Mcx<'_>, relid: Oid, attnum: usize) -> PgR
     let mut scan =
         genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("relation", relid))?;
     let mut isnull = false;
     // SAFETY: fixed NOT NULL pg_class columns under pg_class's descriptor.
     let d = unsafe { types_tuple::heap_getattr(tup, attnum as i32, pg_class.descr(), &mut isnull) };
@@ -6729,7 +6729,7 @@ fn set_pg_class_datum<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
     let reltup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("relation", relid))?;
     let natts = pg_class.descr().natts as usize;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
     let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -6777,7 +6777,7 @@ fn relation_mark_replica_identity<'mcx>(
         let mut scan =
             genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &key)?;
         let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for index {this_index}"));
+            .ok_or_else(|| crate::cache_lookup_failed("index", this_index))?;
         let mut isnull = false;
         // SAFETY: indisreplident is a fixed NOT NULL pg_index column.
         let isreplident = unsafe {
@@ -7544,7 +7544,7 @@ fn SetRelationTableSpace<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {reloid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("relation", reloid))?;
     // C: SearchSysCacheLockedCopy1 (tablecmds.c:3765) / UnlockTuple (:3777).
     // Taken before the content read that feeds the replacement image.
     let otid = tup.t_self;

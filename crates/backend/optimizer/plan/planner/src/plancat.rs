@@ -1154,8 +1154,13 @@ pub fn function_selectivity<'mcx>(
     sjinfo: Option<&types_pathnodes::SpecialJoinInfo<'mcx>>,
 ) -> PgResult<f64> {
     use crate::like_support::PatternType;
-    let shape = syscache_seams::pg_proc_cost_shape::call(funcid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
+    // DIVERGENCE (documented): C's function_selectivity reaches pg_proc via
+    // get_func_support, which returns InvalidOid on a miss without erroring.
+    // pgrust has no such lane here, so a vanished row raises elog's catchable
+    // XX000 instead of aborting the backend.
+    let Some(shape) = syscache_seams::pg_proc_cost_shape::call(funcid)? else {
+        return Err(crate::cache_lookup_failed("function", funcid));
+    };
     let ptype = match shape.prosupport {
         0 => return Ok(0.3333333),
         1023 => PatternType::Like,
@@ -1203,8 +1208,11 @@ pub fn function_selectivity<'mcx>(
 // node, so the support request carries node=None (in-core cost-support
 // functions all tolerate that and fall back to procost).
 pub fn add_function_cost(funcid: Oid, cost: &mut types_pathnodes::QualCost) -> PgResult<()> {
-    let shape = syscache_seams::pg_proc_cost_shape::call(funcid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
+    // plancat.c:2133 elog(ERROR, "cache lookup failed for function %u") --
+    // catchable XX000, not a backend abort.
+    let Some(shape) = syscache_seams::pg_proc_cost_shape::call(funcid)? else {
+        return Err(crate::cache_lookup_failed("function", funcid));
+    };
     if shape.prosupport != 0 {
         let mut req = types_nodes::supportnodes::SupportRequestCost::new(funcid, None);
         let addr = core::ptr::from_mut(&mut req) as usize;
@@ -1223,8 +1231,11 @@ pub fn add_function_cost(funcid: Oid, cost: &mut types_pathnodes::QualCost) -> P
 // get_function_rows (plancat.c); root is not threaded (support functions on
 // this lane read only Const args).
 pub fn get_function_rows(funcid: Oid, node: Option<types_nodes::Node<'_>>) -> PgResult<f64> {
-    let shape = syscache_seams::pg_proc_cost_shape::call(funcid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
+    // plancat.c:2194 elog(ERROR, "cache lookup failed for function %u") --
+    // catchable XX000, not a backend abort.
+    let Some(shape) = syscache_seams::pg_proc_cost_shape::call(funcid)? else {
+        return Err(crate::cache_lookup_failed("function", funcid));
+    };
     if shape.prosupport != 0 {
         let mut req = types_nodes::supportnodes::SupportRequestRows::new(funcid, node);
         let addr = core::ptr::from_mut(&mut req) as usize;

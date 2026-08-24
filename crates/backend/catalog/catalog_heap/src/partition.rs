@@ -134,8 +134,9 @@ pub fn StorePartitionBound<'mcx>(
         None,
         &keys,
     )?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {}", rel.rd_id));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::relation_lookup_failed(rel.rd_id));
+    };
     let desc = class_rel.descr();
 
     let bound_str = outfuncs::nodeToString(mcx, bound)?;
@@ -185,8 +186,9 @@ pub fn RemovePartitionKeyByRelId<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<(
     let keys = [crate::drop::oid_scankey(1, relid)];
     let mut scan =
         genam::systable_beginscan(mcx, &rel, PartitionedRelidIndexId, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for partition key of relation {relid}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::partition_key_lookup_failed(relid));
+    };
     let tid = tup.t_self;
     catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
     genam::systable_endscan(mcx, scan)?;
@@ -208,8 +210,9 @@ pub fn update_default_partition_oid<'mcx>(
         None,
         &keys,
     )?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for partition key of relation {parent_id}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::partition_key_lookup_failed(parent_id));
+    };
     let desc = part_table.descr();
     let natts = desc.natts as usize;
     let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;

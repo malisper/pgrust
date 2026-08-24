@@ -389,6 +389,80 @@ pub fn gen_gramwalk_module(g: &mut Gen) -> Vec<StmtKind> {
     vec![StmtKind::Raw(walk_statement(g))]
 }
 
+/// Round-7 FP-1: gramwalk derives database DDL over the whole grammar
+/// (`alter database v0`, `create database q7`, ...) whose name operands
+/// land in the CLUSTER-GLOBAL namespace — shared across the 3 concurrent
+/// driver instances and across batches. Crash residue from a fault on one
+/// side (a db legitimately left invalid mid-DROP) then FATALs a later
+/// batch's `ALTER DATABASE` on that side only, and short names race
+/// concurrent `CREATE DATABASE` into 42P04-vs-23505 splits (FP-7).
+///
+/// Rewrite every database-name operand — the identifier after the
+/// `DATABASE` keyword (skipping IF [NOT] EXISTS) and the `RENAME TO`
+/// target of an ALTER DATABASE — into the batch-unique namespace
+/// `{tag}_{name}`, where `tag` is the batch's private scratch-db name.
+/// The mapping is injective per batch, so within-batch create/alter/drop
+/// coherence is preserved, and the statement TEXT is identical on both
+/// sides, so differential parity is untouched. Statements that touched
+/// protected databases (template1, postgres) become matched
+/// does-not-exist errors instead of cluster vandalism — a bonus, not the
+/// goal. Applied by the runner to gramwalk statements only; every other
+/// module draws from fixture/suite-tagged namespaces already.
+pub fn rebase_database_names(sql: &str, tag: &str) -> String {
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let b = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len() + tag.len() + 1);
+    let mut i = 0usize;
+    // 0 = idle; 1 = expect db name (after DATABASE / RENAME TO); words
+    // still to skip first ("if"/"not"/"exists") are handled inline.
+    let mut expect_name = false;
+    let mut saw_database = false;
+    let mut prev_word = String::new();
+    while i < b.len() {
+        if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            let start = i;
+            while i < b.len() && is_word(b[i]) {
+                i += 1;
+            }
+            let word = &sql[start..i];
+            let lower = word.to_ascii_lowercase();
+            if expect_name {
+                if matches!(lower.as_str(), "if" | "not" | "exists") {
+                    out.push_str(word);
+                    prev_word = lower;
+                    continue;
+                }
+                expect_name = false;
+                let mut rebased = format!("{tag}_{lower}");
+                rebased.truncate(63);
+                out.push_str(&rebased);
+                prev_word = lower;
+                continue;
+            }
+            match lower.as_str() {
+                "database" => {
+                    saw_database = true;
+                    expect_name = true;
+                }
+                "to" if prev_word == "rename" && saw_database => expect_name = true,
+                _ => {}
+            }
+            out.push_str(word);
+            prev_word = lower;
+        } else {
+            // Any non-word, non-space char (';', ',', operators) ends a
+            // pending name expectation: `DATABASE ;` has no operand.
+            if b[i] != b' ' {
+                expect_name = false;
+            }
+            let c = sql[i..].chars().next().unwrap();
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +543,56 @@ mod tests {
             "only {ok}/{} generated statements parse",
             stmts.len()
         );
+    }
+
+    /// FP-1: database-name operands land in the batch-unique namespace;
+    /// everything else in the statement is untouched.
+    #[test]
+    fn rebase_database_names_rewrites_operands_only() {
+        let t = "fuzz_gw_71_3";
+        assert_eq!(
+            rebase_database_names("alter database v0 ;", t),
+            "alter database fuzz_gw_71_3_v0 ;"
+        );
+        assert_eq!(
+            rebase_database_names("create database q7 ;", t),
+            "create database fuzz_gw_71_3_q7 ;"
+        );
+        assert_eq!(
+            rebase_database_names("drop database if exists zz ;", t),
+            "drop database if exists fuzz_gw_71_3_zz ;"
+        );
+        // RENAME TO target of an ALTER DATABASE is rebased too.
+        assert_eq!(
+            rebase_database_names("alter database v0 rename to zz ;", t),
+            "alter database fuzz_gw_71_3_v0 rename to fuzz_gw_71_3_zz ;"
+        );
+        // TEMPLATE source and unrelated identifiers are untouched.
+        assert_eq!(
+            rebase_database_names("create database v0 template template0 ;", t),
+            "create database fuzz_gw_71_3_v0 template template0 ;"
+        );
+        // Protected names get rebased into the private namespace (matched
+        // does-not-exist errors instead of cluster vandalism).
+        assert_eq!(
+            rebase_database_names("alter database template1 refresh collation version ;", t),
+            "alter database fuzz_gw_71_3_template1 refresh collation version ;"
+        );
+        // No operand (derivation closed early): nothing to rewrite.
+        assert_eq!(rebase_database_names("drop database ;", t), "drop database ;");
+        // Non-database statements never change.
+        let s = "select k_int from fz_scalar order by 1 ;";
+        assert_eq!(rebase_database_names(s, t), s.to_string());
+        // RENAME TO outside a database statement never changes.
+        let s = "alter table fz_scalar rename to zz ;";
+        assert_eq!(rebase_database_names(s, t), s.to_string());
+        // 63-byte identifier bound holds.
+        let long = rebase_database_names(
+            "create database abcdefghijklmnopqrstuvwxyz0123456789 ;",
+            "fuzz_gramwalk_1234567_99",
+        );
+        let name = long.split_whitespace().nth(2).unwrap();
+        assert!(name.len() <= 63, "{name}");
     }
 
     /// Textual stream invariants the rig relies on (single line, terminated,

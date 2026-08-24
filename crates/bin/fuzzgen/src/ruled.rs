@@ -49,6 +49,48 @@ pub enum RuledPattern {
     /// reason). Row-count / count(*) shape only — a wrong GUC *value*
     /// never produces this candidate and stays a finding.
     GucInventory,
+    /// Text cells equal after masking `'<digits>'::oid` literals whose
+    /// value is >= FirstNormalObjectId (round-7 FP-2): deparse functions
+    /// (`pg_get_partition_constraintdef` → `satisfies_hash_partition`,
+    /// `pg_get_expr` on partbound) embed user-object OIDs as literals,
+    /// and user-range OIDs are arbitrary across two independently-
+    /// evolving clusters. Builtin OID literals still compare exactly.
+    OidLiteral,
+    /// Text cells equal after masking user-range `pg_toast_<digits>`
+    /// relation names (round-8): TOAST relations are named after the
+    /// owning table's OID, so any surface printing them (reltoastrelid
+    /// joins, pg_class scans, deparse) diverges across independently-
+    /// evolving clusters. Catalog toast tables (builtin relids) still
+    /// compare exactly.
+    ToastName,
+    /// Binary-mode (`*_send`) hex cells equal after masking embedded
+    /// user-range type OIDs in the array/record wire images (round-7
+    /// FP-5): `record_send` embeds each column's type OID, `array_send`
+    /// the element type OID. Structural parse must consume the image
+    /// exactly; every other byte still compares exactly.
+    BinaryUdtOid,
+    /// int4 results of a direct `*cmp()` builtin call equal in sign but
+    /// not magnitude (round-7 FP-6): C's memcmp-convention comparators
+    /// return arbitrary magnitude and SQL semantics only consume the
+    /// sign. Emitted only when the statement calls a *cmp builtin and
+    /// the sign-normalized rowsets agree.
+    CmpMagnitude,
+    /// A succeeded while B (the fault-injected SUT) errored exactly
+    /// 55000 "parallel worker failed to initialize" (round-7 FP-4):
+    /// Antithesis thread-pauses only the instrumented side, so worker
+    /// bring-up can time out on B where the unfaulted in-container
+    /// oracle sails through. Worker-acquisition liveness is owned (and
+    /// passing) in the liveness campaign's parallel canary. Any other
+    /// B-only 55000 message still escalates.
+    ParallelWorkerInit,
+    /// One side raised C's catalog-row concurrency error XX000 "tuple
+    /// concurrently updated/deleted" (simple_heap_update) on SHARED-catalog
+    /// DDL (ALTER ROLE/DATABASE/TABLESPACE, shared COMMENT). Both engines
+    /// raise it verbatim under a cross-session race, and shared catalogs
+    /// are the one surface concurrent driver instances still share after
+    /// the private-per-batch-DB split — timing, not conformance. Emitted
+    /// only for that exact message; every other XX000 stays panic-class.
+    SharedCatalogTcu,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +157,59 @@ pub fn default_table() -> Vec<RuledEntry> {
             pattern: RuledPattern::GucInventory,
         },
         RuledEntry {
+            id: "shared-catalog-tcu",
+            ruling: "shared-catalog concurrency ruling (2026-08-21 soak): \
+                     XX000 'tuple concurrently updated/deleted' on shared-\
+                     catalog DDL is C's own simple_heap_update race behavior \
+                     under concurrent driver instances; single-session replay \
+                     cannot reproduce it. Exact-message scope — any other \
+                     XX000 escalates as panic-class",
+            pattern: RuledPattern::SharedCatalogTcu,
+        },
+        RuledEntry {
+            id: "oid-literal",
+            ruling: "round-7 OID ruling: user-object OIDs (>= 16384) are not \
+                     comparable across two independently-evolving clusters; \
+                     deparse text embedding them ('<n>'::oid literals) is \
+                     masked, all other text compares exactly",
+            pattern: RuledPattern::OidLiteral,
+        },
+        RuledEntry {
+            id: "toast-name",
+            ruling: "round-8 OID ruling: TOAST relation names embed the \
+                     owning table's user-range OID (pg_toast_<n>), which is \
+                     cluster-local allocator state — same family as the \
+                     round-7 oid-literal ruling; builtin catalog toast \
+                     names still compare exactly",
+            pattern: RuledPattern::ToastName,
+        },
+        RuledEntry {
+            id: "binary-udt-oid",
+            ruling: "round-7 OID ruling: embedded user-range type oids in \
+                     record_send/array_send binary images are cluster-local \
+                     allocator state; masked structurally, every other byte \
+                     of the image still compares exactly",
+            pattern: RuledPattern::BinaryUdtOid,
+        },
+        RuledEntry {
+            id: "cmp-magnitude",
+            ruling: "round-7 cmp-magnitude ruling: C's memcmp-convention \
+                     *cmp() comparators return arbitrary magnitude, sign \
+                     always matches, and SQL semantics consume only the \
+                     sign; scope is direct *cmp() select-list calls with \
+                     sign-equal int4 results",
+            pattern: RuledPattern::CmpMagnitude,
+        },
+        RuledEntry {
+            id: "parallel-worker-init",
+            ruling: "round-7 asymmetric-fault ruling: thread-pause faults \
+                     hit only the instrumented SUT, so B-only 55000 \
+                     'parallel worker failed to initialize' is injected \
+                     scheduling, not conformance; exact-message scope, \
+                     liveness owned by the parallel canary campaign",
+            pattern: RuledPattern::ParallelWorkerInit,
+        },
+        RuledEntry {
             id: "tie-ordering",
             ruling: "docs/conformance/tie-ordering.md: tie order under underdetermined ORDER BY",
             pattern: RuledPattern::TieOrder,
@@ -142,10 +237,28 @@ fn matches(entry: &RuledEntry, candidate: &str, sql: &str) -> bool {
         RuledPattern::GucInventory => {
             candidate == "guc-inventory" && crate::diff::is_guc_inventory_stmt(sql)
         }
+        // Emitted only when the oid-literal normalization itself made the
+        // rowsets equal; no reliable SQL-text refinement exists (deparse
+        // output reaches SELECTs through many catalog functions).
+        RuledPattern::OidLiteral => candidate == "oid-literal",
+        // Emitted only when the toast-name normalization itself made the
+        // rowsets equal; toast names reach text through many surfaces.
+        RuledPattern::ToastName => candidate == "toast-name",
+        // Emitted only when the structural image parse + mask made the
+        // cells equal — the parse IS the refinement.
+        RuledPattern::BinaryUdtOid => candidate == "binary-udt-oid",
+        RuledPattern::CmpMagnitude => {
+            candidate == "cmp-magnitude" && crate::diff::calls_cmp_builtin(sql)
+        }
+        // Emitted only on the exact A-success/B-55000 message signature.
+        RuledPattern::ParallelWorkerInit => candidate == "parallel-worker-init",
         // The candidate is emitted only on the A-side NO_XML_SUPPORT
         // message signature; there is no reliable SQL-text refinement
         // (xml reaches casts, xmlserialize, table functions, ...).
         RuledPattern::XmlConfig => candidate == "xml-config",
+        RuledPattern::SharedCatalogTcu => {
+            candidate == "shared-catalog-tcu" && crate::diff::is_shared_catalog_stmt(sql)
+        }
     }
 }
 
@@ -265,5 +378,63 @@ mod tests {
         let raw = Classified { class: DiffClass::Match, detail: String::new() };
         let out = apply_ruled(&default_table(), "SELECT 1;", raw.clone());
         assert_eq!(out.class, raw.class);
+    }
+
+    #[test]
+    fn round7_oid_and_fault_candidates_resolve() {
+        let out = apply_ruled(
+            &default_table(),
+            "select pg_get_partition_constraintdef(oid) from pg_class ;",
+            candidate("oid-literal"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("oid-literal".to_string()));
+        let out = apply_ruled(
+            &default_table(),
+            "select row('a','b')::fz_udt_c_0 ;",
+            candidate("binary-udt-oid"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("binary-udt-oid".to_string()));
+        let out = apply_ruled(
+            &default_table(),
+            "select count(*) from big ;",
+            candidate("parallel-worker-init"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("parallel-worker-init".to_string()));
+        let out = apply_ruled(
+            &default_table(),
+            "select relname from pg_class where relkind = 't' ;",
+            candidate("toast-name"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("toast-name".to_string()));
+    }
+
+    #[test]
+    fn cmp_magnitude_resolves_only_with_cmp_call() {
+        let out = apply_ruled(
+            &default_table(),
+            "select uuid_cmp(a, b) from t ;",
+            candidate("cmp-magnitude"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("cmp-magnitude".to_string()));
+        // No *cmp call in the SQL: the candidate escalates.
+        let out = apply_ruled(&default_table(), "select a from t ;", candidate("cmp-magnitude"));
+        assert_eq!(out.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn shared_catalog_tcu_resolves_on_shared_ddl_only() {
+        let out = apply_ruled(
+            &default_table(),
+            "alter user current_user encrypted password 'x' ;",
+            candidate("shared-catalog-tcu"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("shared-catalog-tcu".to_string()));
+        // Database-local DDL never matches: the candidate escalates.
+        let out = apply_ruled(
+            &default_table(),
+            "ALTER TABLE t ADD COLUMN c int4;",
+            candidate("shared-catalog-tcu"),
+        );
+        assert_eq!(out.class, DiffClass::RowsetDiff);
     }
 }

@@ -259,3 +259,23 @@ fn datum_image_eq_forged_varlena_length_is_rejected() {
     // avail bounds both datums to their real 8-byte buffers.
     let _ = datum_image_eq(da, db, false, -1, buf.len(), good.len());
 }
+
+// Every syscache miss in C's ri_triggers.c is reported with
+// elog(ERROR, "cache lookup failed for <what> %u") -- catchable, SQLSTATE
+// XX000 (elog's default at ERROR), transaction-scoped.  pgrust used to
+// panic! at all seven of these probes, which aborts the whole backend.
+#[test]
+fn ri_cache_lookup_failures_are_catchable_xx000() {
+    for (what, oid, expected) in [
+        ("constraint", 16384u32, "cache lookup failed for constraint 16384"),
+        ("type", 23, "cache lookup failed for type 23"),
+        ("namespace", 2200, "cache lookup failed for namespace 2200"),
+        ("operator", 96, "cache lookup failed for operator 96"),
+        ("collation", 100, "cache lookup failed for collation 100"),
+    ] {
+        let e = cache_lookup_failed(what, oid);
+        assert_eq!(e.message(), expected);
+        assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
+    }
+}

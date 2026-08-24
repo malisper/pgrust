@@ -814,11 +814,17 @@ pub fn getObjectIdentityParts<'mcx>(
             } else {
                 "public".to_string()
             };
-            let srvname = crate::description::foreign_object_name(
+            // objectaddress.c:5680 elog(ERROR, "cache lookup failed for
+            // user mapping ...") lane: a catchable XX000, not an abort.
+            let Some(srvname) = crate::description::foreign_object_name(
                 cache_syscache::cacheinfo::FOREIGNSERVEROID,
                 serverid,
             )?
-            .unwrap_or_else(|| panic!("cache lookup failed for foreign server {serverid}"));
+            else {
+                return Err(lookup_err(format!(
+                    "cache lookup failed for foreign server {serverid}"
+                )));
+            };
             Ok(Some(ObjectIdentity {
                 identity: format!("{} on server {srvname}", quote_identifier(&usename)),
                 objname: vec![usename],
@@ -1030,9 +1036,11 @@ pub fn getObjectIdentityParts<'mcx>(
             let trflang = cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 3)?.as_oid();
             cache_syscache::ReleaseSysCache(tup);
             let transform_type = format_type::format_type_be_qualified(trftype)?;
-            let transform_lang =
+            let Some(transform_lang) =
                 syscache_name_att(cache_syscache::cacheinfo::LANGOID, trflang, 2)?
-                    .unwrap_or_else(|| panic!("cache lookup failed for language {trflang}"));
+            else {
+                return Err(lookup_err(format!("cache lookup failed for language {trflang}")));
+            };
             Ok(Some(ObjectIdentity {
                 identity: format!("for {transform_type} language {transform_lang}"),
                 objname: vec![transform_type],
@@ -1251,10 +1259,10 @@ fn getProcedureTypeDescription(oid: Oid, missing_ok: bool) -> PgResult<String> {
 
 fn namespace_name_or_temp<'mcx>(mcx: Mcx<'mcx>, nspid: Oid) -> PgResult<String> {
     // C tolerates a concurrently dropped namespace (NULL qualifier); loud here.
-    Ok(lsyscache::misc::get_namespace_name_or_temp(mcx, nspid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for namespace {nspid}"))
-        .as_str()
-        .to_owned())
+    let Some(nspname) = lsyscache::misc::get_namespace_name_or_temp(mcx, nspid)? else {
+        return Err(lookup_err(format!("cache lookup failed for namespace {nspid}")));
+    };
+    Ok(nspname.as_str().to_owned())
 }
 
 fn getRelationIdentity<'mcx>(

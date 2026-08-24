@@ -148,6 +148,14 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
+// pg_type.c:783 elog(ERROR, "cache lookup failed for type %u") -- catchable,
+// SQLSTATE XX000 (elog's default for ERROR), never a backend abort.
+#[cold]
+#[inline(never)]
+fn type_lookup_failed(typeOid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for type {typeOid}")))
+}
+
 fn validate_shape(p: &TypeCreateParams<'_>) -> PgResult<()> {
     let (size, align) = (p.internalSize, p.alignment as u8 as char);
     if !(size > 0 || size == -1 || size == -2) {
@@ -272,8 +280,9 @@ pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<Ob
         key.sk_argument = Datum::from_oid(old_oid);
         let mut scan =
             genam::systable_beginscan(mcx, &pg_type_desc, TypeOidIndexId, true, None, &[key])?;
-        let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for type {old_oid}"));
+        let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(type_lookup_failed(old_oid));
+        };
         let desc = pg_type_desc.descr();
         let mut isnull = false;
         // SAFETY (both): fixed NOT NULL pg_type columns under its descriptor.
@@ -658,8 +667,9 @@ pub fn RenameTypeInternal<'mcx>(
     key.sk_argument = Datum::from_oid(typeOid);
     let mut scan =
         genam::systable_beginscan(mcx, &pg_type_rel, TypeOidIndexId, true, None, &[key])?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {typeOid}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(type_lookup_failed(typeOid));
+    };
     let desc = pg_type_rel.descr();
     let mut isnull = false;
     // SAFETY: fixed NOT NULL pg_type column under its descriptor.
@@ -709,8 +719,9 @@ pub fn RemoveTypeById<'mcx>(mcx: Mcx<'mcx>, typeOid: Oid) -> PgResult<()> {
         .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
     key.sk_argument = Datum::from_oid(typeOid);
     let mut scan = genam::systable_beginscan(mcx, &relation, TypeOidIndexId, true, None, &[key])?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {typeOid}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(type_lookup_failed(typeOid));
+    };
     let tid = tup.t_self;
     let mut isnull = false;
     // SAFETY: typtype is a fixed NOT NULL pg_type column.
@@ -759,6 +770,17 @@ pub fn moveArrayTypeName<'mcx>(
 #[cfg(test)]
 mod pg_upgrade_oid_tests {
     use super::*;
+
+    // C reports this miss with elog(ERROR, "cache lookup failed for %s"),
+    // a catchable error carrying elog's default SQLSTATE for ERROR, XX000.
+    // pgrust used to panic!(), which aborts the backend.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = type_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for type 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 
     #[test]
     fn next_oid_overrides_set_take_once() {

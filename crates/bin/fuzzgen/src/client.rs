@@ -96,6 +96,12 @@ pub struct Client<S: Read + Write = TcpStream> {
     /// Latest RowDescription: per-column (type oid, format code), so
     /// DataRow decoding knows how to render each cell.
     desc: Vec<(u32, i16)>,
+    /// Latest ErrorResponse (SQLSTATE, primary message). A FATAL closes
+    /// the connection before ReadyForQuery, so the error result itself
+    /// is discarded — this copy lets the ConnLost detail name WHY the
+    /// session died (round-7 FP-1: triage and the invalid-database
+    /// residue ruling both need the FATAL message on the wire record).
+    last_error: Option<(String, String)>,
 }
 
 fn be_i32(b: &[u8]) -> i32 {
@@ -275,7 +281,7 @@ impl Client<TcpStream> {
         let stream = TcpStream::connect((host, port))
             .map_err(|e| ConnLost(format!("connect {host}:{port}: {e}")))?;
         let _ = stream.set_nodelay(true);
-        let mut c = Client { stream, buf: Vec::new(), pos: 0, dead: None, desc: Vec::new() };
+        let mut c = Client { stream, buf: Vec::new(), pos: 0, dead: None, desc: Vec::new(), last_error: None };
 
         let mut body = Vec::new();
         body.extend_from_slice(&(3u32 << 16).to_be_bytes());
@@ -323,7 +329,7 @@ impl<S: Read + Write> Client<S> {
     /// Wrap an already-authenticated transport (tests: canned byte streams).
     #[cfg(test)]
     fn from_stream(stream: S) -> Client<S> {
-        Client { stream, buf: Vec::new(), pos: 0, dead: None, desc: Vec::new() }
+        Client { stream, buf: Vec::new(), pos: 0, dead: None, desc: Vec::new(), last_error: None }
     }
 
     /// Simple query: send one 'Q', collect every resultset through
@@ -350,6 +356,9 @@ impl<S: Read + Write> Client<S> {
         if let Some(d) = &self.dead {
             return Err(ConnLost(d.clone()));
         }
+        // Per-exchange: only an error from THIS statement may annotate a
+        // subsequent connection death.
+        self.last_error = None;
         let mut qbody = sql.as_bytes().to_vec();
         qbody.push(0);
         self.send(&msg(b'Q', &qbody))?;
@@ -379,8 +388,10 @@ impl<S: Read + Write> Client<S> {
                     results.push(std::mem::replace(&mut cur, RawResult::new()));
                 }
                 b'E' => {
+                    let e = parse_error(&body);
+                    self.last_error = Some(e.clone());
                     let mut r = RawResult::new();
-                    r.error = Some(parse_error(&body));
+                    r.error = Some(e);
                     results.push(r);
                     cur = RawResult::new();
                 }
@@ -445,6 +456,7 @@ impl<S: Read + Write> Client<S> {
         if let Some(d) = &self.dead {
             return Err(ConnLost(d.clone()));
         }
+        self.last_error = None;
         let mut batch = parse_msg(sql);
         batch.extend_from_slice(&bind_msg(params, result_binary));
         batch.extend_from_slice(&describe_portal_msg());
@@ -493,8 +505,10 @@ impl<S: Read + Write> Client<S> {
                     }
                 }
                 b'E' => {
+                    let e = parse_error(&body);
+                    self.last_error = Some(e.clone());
                     if cur.error.is_none() {
-                        cur.error = Some(parse_error(&body));
+                        cur.error = Some(e);
                     }
                     if !synced {
                         self.send(&msg(b'S', &[]))?;
@@ -531,6 +545,19 @@ impl<S: Read + Write> Client<S> {
     }
 
     fn poison(&mut self, e: String) -> ConnLost {
+        // A FATAL ErrorResponse closes the connection before ReadyForQuery,
+        // so the death surfaces here as an EOF/read failure and the error
+        // result is never returned. Stamp the last server error onto the
+        // detail so classification and triage see WHY the session died
+        // (round-7 FP-1 invalid-database residue ruling matches on it).
+        let e = match &self.last_error {
+            Some((state, message))
+                if e.starts_with("server closed") || e.starts_with("could not read") =>
+            {
+                format!("{e} after server error {state}: {message}")
+            }
+            _ => e,
+        };
         self.dead = Some(e.clone());
         ConnLost(e)
     }

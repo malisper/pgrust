@@ -17,6 +17,7 @@ use types_rel::{
 };
 use types_trigger::TRIGGER_FIRES_ON_ORIGIN;
 
+use crate::cache_lookup_failed;
 use crate::catalog::{
     name_arg, relkind_not_supported_detail, scan_key, CreateTriggerFiringOn,
     TRIGGER_OID_INDEX_ID, TRIGGER_RELATION_ID, TRIGGER_RELID_NAME_INDEX_ID,
@@ -84,7 +85,7 @@ pub fn get_trigger_oid<'mcx>(
         None => {
             if !missing_ok {
                 let relname = lsyscache::get_rel_name(mcx, relid)?
-                    .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+                    .ok_or_else(|| cache_lookup_failed("relation", relid))?;
                 return Err(err(
                     format!(
                         "trigger \"{trigname}\" for table \"{}\" does not exist",
@@ -251,7 +252,7 @@ pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()>
     if tgparentid != InvalidOid {
         let parent_relid = pg_inherits::get_partition_parent(mcx, targetrel.rd_id, false)?;
         let parent_name = lsyscache::get_rel_name(mcx, parent_relid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {parent_relid}"));
+            .ok_or_else(|| cache_lookup_failed("relation", parent_relid))?;
         return Err(Box::new(
             (*err(
                 format!(

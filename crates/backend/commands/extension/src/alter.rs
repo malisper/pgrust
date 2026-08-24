@@ -5,7 +5,7 @@ use elog::ereport;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid, EXTENSION_RELATION_ID};
 use types_error::{
-    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_OBJECT, ERROR, NOTICE,
 };
 use types_nodes::parsenodes::DefElem;
@@ -310,6 +310,19 @@ const Anum_pg_depend_refclassid: i32 = 4;
 const Anum_pg_depend_refobjid: i32 = 5;
 const Anum_pg_depend_deptype: i32 = 7;
 
+// Every one of these is `elog(ERROR, "cache lookup failed for extension %u",
+// oid)` in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for extension {oid}"
+    )))
+}
+
 // AlterExtensionNamespace (extension.c): ALTER EXTENSION name SET SCHEMA.
 // Moves every directly-dependent member object into the new schema, then
 // adjusts pg_extension.extnamespace and the extension's own pg_depend row.
@@ -443,7 +456,7 @@ pub fn AlterExtensionNamespace<'mcx>(
             && classid == EXTENSION_RELATION_ID
         {
             let depextname = crate::get_extension_name(mcx, objid)?
-                .unwrap_or_else(|| panic!("cache lookup failed for extension {objid}"));
+                .ok_or_else(|| cache_lookup_failed(objid))?;
             let dcontrol = read_extension_control_file(depextname.as_str())?;
             if dcontrol.no_relocate.iter().any(|n| n == extension_name) {
                 return Err(ereport(ERROR)
@@ -534,4 +547,20 @@ pub fn AlterExtensionNamespace<'mcx>(
     // InvokeObjectPostAlterHook: object-access hooks are elided repo-wide.
 
     Ok(ObjectAddress::set(EXTENSION_RELATION_ID, extension_oid))
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::cache_lookup_failed;
+
+    // C: elog(ERROR, "cache lookup failed for extension %u") -- a catchable
+    // XX000, not a backend abort.  This probe used to panic!(), killing the
+    // process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for extension 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 }

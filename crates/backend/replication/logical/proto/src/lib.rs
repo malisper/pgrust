@@ -562,8 +562,15 @@ pub fn logicalrep_write_typ(out: &mut Vec<u8>, xid: TransactionId, typoid: Oid) 
         send_int32(out, xid);
     }
 
-    let shape = syscache_seams::pg_type_domain_shape::call(basetypoid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {basetypoid}"));
+    // proto.c:735-737 elog(ERROR, "cache lookup failed for type %u", basetypoid)
+    // -- catchable, SQLSTATE XX000 (elog's default); never a backend abort.
+    let shape = match syscache_seams::pg_type_domain_shape::call(basetypoid)? {
+        Some(shape) => shape,
+        None => {
+            elog(ERROR, format!("cache lookup failed for type {basetypoid}"))?;
+            unreachable!();
+        }
+    };
 
     send_int32(out, typoid);
     logicalrep_write_namespace(out, shape.typnamespace)?;
@@ -809,8 +816,15 @@ fn logicalrep_write_namespace(out: &mut Vec<u8>, nspid: Oid) -> PgResult<()> {
         send_byte(out, 0);
     } else {
         let ctx = mcx::MemoryContext::new("logicalrep_write_namespace");
-        let nspname = lsyscache::get_namespace_name(ctx.mcx(), nspid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for namespace {nspid}"));
+        // proto.c:1033-1037: `if (nspname == NULL) elog(ERROR, "cache lookup
+        // failed for namespace %u", nspid)` -- catchable XX000, not an abort.
+        let nspname = match lsyscache::get_namespace_name(ctx.mcx(), nspid)? {
+            Some(nspname) => nspname,
+            None => {
+                elog(ERROR, format!("cache lookup failed for namespace {nspid}"))?;
+                unreachable!();
+            }
+        };
         send_string(out, nspname.as_str());
     }
     Ok(())

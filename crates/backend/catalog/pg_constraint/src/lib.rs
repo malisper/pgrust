@@ -523,8 +523,9 @@ pub fn SetConstraintValidated<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<()>
     let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
     let mut scan =
         genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(constraint_lookup_failed(con_id));
+    };
     let desc = con_rel.descr();
     let natts = desc.natts as usize;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_from_elem_in(mcx, Datum::null(), natts);
@@ -546,8 +547,9 @@ pub fn constraint_conbin<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<mcx::PgS
     let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
     let mut scan =
         genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(constraint_lookup_failed(con_id));
+    };
     let mut isnull = false;
     // SAFETY: varlena column under pg_constraint's descriptor; image live
     // through the open scan.
@@ -574,8 +576,9 @@ pub fn RenameConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid, newname: &str) ->
     let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
     let mut scan =
         genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(constraint_lookup_failed(con_id));
+    };
     let desc = con_rel.descr();
     let mut isnull = false;
     // SAFETY (each): fixed NOT NULL pg_constraint columns under its descriptor.
@@ -823,8 +826,9 @@ pub fn RemoveConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<()> {
     let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
     let mut scan =
         genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(constraint_lookup_failed(con_id));
+    };
     let desc = con_rel.descr();
     let mut isnull = false;
     // SAFETY (each): fixed NOT NULL pg_constraint columns under its descriptor.
@@ -865,8 +869,9 @@ fn rel_name_for_error<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> {
     let keys = [eq_key(1, F_OIDEQ, Datum::from_oid(relid))];
     let mut scan =
         genam::systable_beginscan(mcx, &pgrel, catalog::ClassOidIndexId, true, None, &keys)?;
-    let reltup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+    let Some(reltup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(relation_lookup_failed(relid));
+    };
     let mut isnull = false;
     // SAFETY: relname is a fixed NOT NULL NameData column under pg_class's descriptor.
     let d = unsafe {
@@ -887,8 +892,9 @@ fn decrement_relchecks<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
     let keys = [eq_key(1, F_OIDEQ, Datum::from_oid(relid))];
     let mut scan =
         genam::systable_beginscan(mcx, &pgrel, catalog::ClassOidIndexId, true, None, &keys)?;
-    let reltup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+    let Some(reltup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(relation_lookup_failed(relid));
+    };
     let desc = pgrel.descr();
     let mut isnull = false;
     // SAFETY: fixed NOT NULL pg_class column under pg_class's descriptor.
@@ -1168,6 +1174,28 @@ pub fn get_relation_constraint_oid<'mcx>(
     Ok(found)
 }
 
+// pg_constraint.c raises every one of these misses with
+// `elog(ERROR, "cache lookup failed for ... %u", oid)` (:925, :956, :1016,
+// :1141, :1689) — catchable, SQLSTATE XX000 via elog's default for ERROR,
+// never a backend abort.
+#[cold]
+#[inline(never)]
+fn constraint_lookup_failed(con_id: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for constraint {con_id}")))
+}
+
+#[cold]
+#[inline(never)]
+fn relation_lookup_failed(relid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for relation {relid}")))
+}
+
+#[cold]
+#[inline(never)]
+fn opclass_lookup_failed(opclass: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for opclass {opclass}")))
+}
+
 #[cold]
 #[inline(never)]
 fn constraint_does_not_exist<'mcx>(
@@ -1323,8 +1351,9 @@ pub fn get_constraint_deferrability<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResu
     let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
     let mut scan =
         genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(constraint_lookup_failed(con_id));
+    };
     let deferrable = getattr(&con_rel, tup, Anum_pg_constraint_condeferrable).0.as_bool();
     let deferred = getattr(&con_rel, tup, Anum_pg_constraint_condeferred).0.as_bool();
     genam::systable_endscan(mcx, scan)?;
@@ -1393,8 +1422,9 @@ pub fn ConstraintSetParentConstraint<'mcx>(
     let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(child_constr_id))];
     let mut scan =
         genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {child_constr_id}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(constraint_lookup_failed(child_constr_id));
+    };
     let desc = con_rel.descr();
     let mut isnull = false;
     // SAFETY: conparentid is a fixed NOT NULL pg_constraint column.
@@ -1483,8 +1513,9 @@ pub fn update_constraint_fields<'mcx>(
     let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
     let mut scan =
         genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(constraint_lookup_failed(con_id));
+    };
     let desc = con_rel.descr();
     let natts = desc.natts as usize;
     let mut values: PgVec<'_, Datum> = mcx::vec_from_elem_in(mcx, Datum::null(), natts);
@@ -1733,8 +1764,10 @@ fn operator_from_compare_type(
     cmptype: lsyscache::CompareType,
 ) -> PgResult<(Oid, u16)> {
     let amid = lsyscache::get_opclass_method(opclass)?;
-    let (opfamily, opcintype) = lsyscache::get_opclass_opfamily_and_input_type(opclass)?
-        .unwrap_or_else(|| panic!("cache lookup failed for opclass {opclass}"));
+    let Some((opfamily, opcintype)) = lsyscache::get_opclass_opfamily_and_input_type(opclass)?
+    else {
+        return Err(opclass_lookup_failed(opclass));
+    };
     let cannot_identify = |opcintype: Oid| -> PgResult<Box<PgError>> {
         let what = match cmptype {
             lsyscache::COMPARE_EQ => "an equality",
@@ -1764,8 +1797,9 @@ fn operator_from_compare_type(
 // FindFKPeriodOpers (pg_constraint.c): (containedby, agged containedby,
 // intersect) operators for the PERIOD part of a temporal foreign key.
 pub fn FindFKPeriodOpers(opclass: Oid) -> PgResult<(Oid, Oid, Oid)> {
-    let (_, opcintype) = lsyscache::get_opclass_opfamily_and_input_type(opclass)?
-        .unwrap_or_else(|| panic!("cache lookup failed for opclass {opclass}"));
+    let Some((_, opcintype)) = lsyscache::get_opclass_opfamily_and_input_type(opclass)? else {
+        return Err(opclass_lookup_failed(opclass));
+    };
     if opcintype != types_core::ANYRANGEOID && opcintype != types_core::ANYMULTIRANGEOID {
         return Err(Box::new(
             PgError::error("invalid type for PERIOD part of foreign key".to_string())
@@ -1791,6 +1825,23 @@ pub fn FindFKPeriodOpers(opclass: Oid) -> PgResult<(Oid, Oid, Oid)> {
 mod tests {
     use super::pk_subset_of_grouping_columns;
     use mcx::MemoryContext;
+
+    // C pg_constraint.c reports each of these misses with
+    // elog(ERROR, "cache lookup failed for ... %u") — catchable XX000 at level
+    // ERROR.  pgrust used to panic!(), aborting the backend.
+    #[test]
+    fn cache_lookup_failures_are_catchable_xx000() {
+        for (e, want) in [
+            (super::constraint_lookup_failed(16384), "cache lookup failed for constraint 16384"),
+            (super::relation_lookup_failed(16385), "cache lookup failed for relation 16385"),
+            (super::opclass_lookup_failed(16386), "cache lookup failed for opclass 16386"),
+        ] {
+            assert_eq!(e.message(), want);
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.level(), types_error::ERROR);
+        }
+    }
+
     use types_core::catalog::INT4OID;
     use types_core::InvalidOid;
     use types_nodes::Node;

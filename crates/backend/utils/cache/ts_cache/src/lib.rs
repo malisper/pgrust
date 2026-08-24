@@ -584,15 +584,21 @@ fn check_default_text_search_config(
 
     let cfg = syscache_seams::lookup_pg_ts_config_shape::call(cfg_id)?
         .ok_or_else(|| cache_lookup_failed("configuration", cfg_id))?;
-    let nspname = lsyscache::misc::get_namespace_name(mcx, cfg.cfgnamespace)?
-        .unwrap_or_else(|| panic!("cache lookup failed for namespace {}", cfg.cfgnamespace));
+    let nspname = lsyscache::misc::get_namespace_name(mcx, cfg.cfgnamespace)?;
     let name_str = core::str::from_utf8(cfg.cfgname.name_str()).unwrap_or("");
     // quote_qualified_identifier (format_type's variant honors the GUC).
-    let qualified = format!(
-        "{}.{}",
-        format_type::quote_identifier(nspname.as_str()),
-        format_type::quote_identifier(name_str),
-    );
+    // C ts_cache.c:665 hands get_namespace_name's result straight to
+    // quote_qualified_identifier, which simply omits the qualifier when the
+    // pointer is NULL (ruleutils.c) -- there is no error and certainly no
+    // abort, so a vanished schema yields the bare configuration name.
+    let qualified = match &nspname {
+        Some(nspname) => format!(
+            "{}.{}",
+            format_type::quote_identifier(nspname.as_str()),
+            format_type::quote_identifier(name_str),
+        ),
+        None => format_type::quote_identifier(name_str).to_string(),
+    };
     *newval = Some(qualified);
     Ok(true)
 }

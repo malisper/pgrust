@@ -62,3 +62,16 @@ fn phasenum_truncates_like_pg_getarg_int32() {
     let phasenum = 0x1_0000_0001i64 as i32 as i64;
     assert_eq!(phasenum, 1);
 }
+
+// C amutils.c never re-probes pg_index inside test_indoption -- it reads
+// indoption off the tuple indexam_property already holds -- and reports an
+// INDEXRELID miss with elog(ERROR, "cache lookup failed for index %u")
+// (ruleutils.c:1310), a catchable XX000.  pgrust panicked, which aborts the
+// backend; this pins the catchable form.
+#[test]
+fn index_cache_lookup_failure_is_a_catchable_xx000() {
+    let e = index_lookup_failed(16384);
+    assert_eq!(e.message(), "cache lookup failed for index 16384");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.level(), types_error::ERROR);
+}

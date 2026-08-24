@@ -2,7 +2,7 @@
 // copy_table_data + the indisclustered maintenance. VACUUM FULL enters via
 // cluster_seams::cluster_rel. Toasted tables rewrite with value-OID
 // preservation and swap toast by content (C's rd_toastoid protocol).
-use crate::{finish_heap_swap, make_new_heap, oid_key};
+use crate::{cache_lookup_failed, finish_heap_swap, make_new_heap, oid_key};
 
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid, INDEX_RELATION_ID};
@@ -326,7 +326,7 @@ pub fn mark_index_clustered<'mcx>(
         let mut scan =
             genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &key)?;
         let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for index {this_index}"));
+            .ok_or_else(|| cache_lookup_failed("index", this_index))?;
         let get_bool = |anum: usize| {
             let mut isnull = false;
             // SAFETY: fixed NOT NULL pg_index bool columns under its descriptor.
@@ -550,7 +550,7 @@ fn copy_table_data<'mcx>(
             &key,
         )?;
         let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {}", new_heap.rd_id));
+            .ok_or_else(|| cache_lookup_failed("relation", new_heap.rd_id))?;
         let natts = desc.natts as usize;
         let mut values: mcx::PgVec<'_, datum::Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
         let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;

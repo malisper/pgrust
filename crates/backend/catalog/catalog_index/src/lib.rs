@@ -67,6 +67,34 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(types_error::ERROR, msg).with_sqlstate(sqlstate))
 }
 
+// index.c reports every syscache miss below with
+// `elog(ERROR, "cache lookup failed for <noun> %u", oid)` (:168, :377, :433,
+// :466, :1348, :1367, :2087, :2370, :3168, :3544, :3623, :3888) -- a catchable
+// error whose SQLSTATE is elog's ERROR default, XX000.  Never a backend abort.
+#[cold]
+#[inline(never)]
+pub(crate) fn index_lookup_failed(indexId: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for index {indexId}")))
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn relation_lookup_failed(relid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for relation {relid}")))
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn type_lookup_failed(typid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for type {typid}")))
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn opclass_lookup_failed(opclass: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for opclass {opclass}")))
+}
+
 // Set-once, consume-once binary-upgrade overrides (index.c globals).
 macro_rules! next_oid_override {
     ($cell:ident, $setter:ident, $take:ident) => {
@@ -183,8 +211,9 @@ fn relationHasPrimaryKey<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult
         let key = oid_scankey(1, indexoid);
         let mut scan =
             genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
-        let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for index {indexoid}"));
+        let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(crate::index_lookup_failed(indexoid));
+        };
         let isprimary = getattr(tup, Anum_pg_index_indisprimary, pg_index.descr()).as_bool();
         genam::systable_endscan(mcx, scan)?;
         pg_index.close(types_rel::AccessShareLock)?;
@@ -259,8 +288,9 @@ fn ConstructTupleDescriptor<'mcx>(
                     types_error::ERRCODE_INVALID_TABLE_DEFINITION,
                 ));
             }
-            let shape = syscache_seams::lookup_pg_type_shape::call(keyType)?
-                .unwrap_or_else(|| panic!("cache lookup failed for type {keyType}"));
+            let Some(shape) = syscache_seams::lookup_pg_type_shape::call(keyType)? else {
+                return Err(crate::type_lookup_failed(keyType));
+            };
             let to = indexTupDesc.attr_mut(i);
             to.attnum = (i + 1) as i16;
             to.attislocal = true;
@@ -295,8 +325,9 @@ fn ConstructTupleDescriptor<'mcx>(
             }
         }
         if keyType != InvalidOid && keyType != indexTupDesc.attr(i).atttypid {
-            let shape = syscache_seams::lookup_pg_type_shape::call(keyType)?
-                .unwrap_or_else(|| panic!("cache lookup failed for type {keyType}"));
+            let Some(shape) = syscache_seams::lookup_pg_type_shape::call(keyType)? else {
+                return Err(crate::type_lookup_failed(keyType));
+            };
             let to = indexTupDesc.attr_mut(i);
             to.atttypid = keyType;
             to.atttypmod = -1;
@@ -317,8 +348,9 @@ fn lookup_opclass_keytype<'mcx>(mcx: Mcx<'mcx>, opclass: Oid) -> PgResult<(Oid, 
     let rel = table::table_open(mcx, catalog::OperatorClassRelationId, types_rel::AccessShareLock)?;
     let key = oid_scankey(1, opclass);
     let mut scan = genam::systable_beginscan(mcx, &rel, OpclassOidIndexId, true, None, &[key])?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for opclass {opclass}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::opclass_lookup_failed(opclass));
+    };
     let opckeytype = getattr(tup, Anum_pg_opclass_opckeytype, rel.descr()).as_oid();
     let opcintype = getattr(tup, Anum_pg_opclass_opcintype, rel.descr()).as_oid();
     genam::systable_endscan(mcx, scan)?;
@@ -1060,8 +1092,9 @@ pub fn index_constraint_create<'mcx>(
         let key = oid_scankey(1, indexRelationId);
         let mut scan =
             genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
-        let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for index {indexRelationId}"));
+        let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(crate::index_lookup_failed(indexRelationId));
+        };
         let desc = pg_index.descr();
         let isprimary = getattr(tup, Anum_pg_index_indisprimary, desc).as_bool();
         let isimmediate = getattr(tup, Anum_pg_index_indimmediate, desc).as_bool();
@@ -1246,8 +1279,9 @@ fn set_indcheckxmin<'mcx>(mcx: Mcx<'mcx>, indexId: Oid) -> PgResult<()> {
     let pg_index = table::table_open(mcx, INDEX_RELATION_ID, RowExclusiveLock)?;
     let key = oid_scankey(1, indexId);
     let mut scan = genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for index {indexId}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::index_lookup_failed(indexId));
+    };
     let desc = pg_index.descr();
     let natts = desc.natts as usize;
     let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -1505,6 +1539,23 @@ mod reindex;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // index.c raises each of these misses with
+    // elog(ERROR, "cache lookup failed for ... %u") -- catchable, level ERROR,
+    // SQLSTATE XX000.  pgrust used to panic!(), which aborts the backend.
+    #[test]
+    fn cache_lookup_failures_are_catchable_xx000() {
+        for (e, want) in [
+            (index_lookup_failed(16384), "cache lookup failed for index 16384"),
+            (relation_lookup_failed(16385), "cache lookup failed for relation 16385"),
+            (type_lookup_failed(16386), "cache lookup failed for type 16386"),
+            (opclass_lookup_failed(16387), "cache lookup failed for opclass 16387"),
+        ] {
+            assert_eq!(e.message(), want);
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.level(), types_error::ERROR);
+        }
+    }
 
     // index.h constr_flags bits; INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS rides
     // index_create -> index_constraint_create unfenced (the constraint lane

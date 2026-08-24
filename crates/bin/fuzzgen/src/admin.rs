@@ -552,6 +552,20 @@ fn gen_control(g: &mut Gen) -> Vec<StmtKind> {
 
 fn gen_summ(g: &mut Gen) -> Vec<StmtKind> {
     g.fire("admin:summ");
+    // Rate limit (2026-08-21 soak ENOSPC): every firing costs a forced WAL
+    // segment switch, and back-to-back brackets keep restarting the
+    // summarizer so its LSN pin never advances — KeepLogSeg then blocks WAL
+    // removal while fuzz DML keeps writing, and pg_wal fills (checkpointer
+    // PANIC, C-parity). Full bracket on ~1-in-8 firings; the rest run
+    // only the read-only summary probes, which cost nothing and pin nothing.
+    // Drawn from the generator stream (seed-deterministic in plain builds,
+    // SDK-steerable in antithesis ones).
+    if !g.rng.chance(1, 8) {
+        return vec![
+            StmtKind::Raw("SELECT count(*) >= 0 FROM pg_available_wal_summaries() a;".to_string()),
+            StmtKind::Raw("SELECT count(*) >= 0 FROM pg_ls_summariesdir() a;".to_string()),
+        ];
+    }
     let mut out = vec![
         StmtKind::Raw("ALTER SYSTEM SET summarize_wal = on;".to_string()),
         StmtKind::Raw("SELECT pg_reload_conf();".to_string()),

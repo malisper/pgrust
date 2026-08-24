@@ -143,7 +143,7 @@ pub fn AlterRelationNamespaceInternal<'mcx>(
 
     if !already_done && old_nsp_oid != new_nsp_oid {
         let relname = lsyscache::get_rel_name(mcx, rel_oid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {rel_oid}"));
+            .ok_or_else(|| crate::cache_lookup_failed("relation", rel_oid))?;
         if lsyscache::get_relname_relid(&relname, new_nsp_oid)? != InvalidOid {
             let nspname = lsyscache::get_namespace_name(mcx, new_nsp_oid)?
                 .map(|s| s.as_str().to_string())
@@ -170,7 +170,7 @@ pub fn AlterRelationNamespaceInternal<'mcx>(
             &[key],
         )?;
         let classtup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {rel_oid}"));
+            .ok_or_else(|| crate::cache_lookup_failed("relation", rel_oid))?;
         // C: SearchSysCacheLockedCopy1 (tablecmds.c:19065) / UnlockTuple
         // (:19099, and :19113 on the already-in-that-schema early exit).
         let otid = classtup.t_self;

@@ -245,6 +245,18 @@ fn ri_trig_kind(tgfoid: Oid) -> Option<(&'static str, i32)> {
     })
 }
 
+// C reports every syscache miss in ri_triggers.c with
+// `elog(ERROR, "cache lookup failed for <what> %u", oid)` -- catchable, and
+// elog's default SQLSTATE at ERROR is already XX000
+// (ERRCODE_INTERNAL_ERROR), so this deliberately carries no with_sqlstate.
+// It is never a backend abort in C, so it must not be a panic! here.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
 #[cold]
 #[inline(never)]
 fn protocol_err(funcname: &str, msg: &str) -> Box<PgError> {
@@ -1321,8 +1333,9 @@ fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
     const Anum_conffeqop: i32 = 25;
     const Anum_confdelsetcols: i32 = 26;
 
+    // ri_triggers.c:2295-2297 elog(ERROR, "cache lookup failed for constraint %u").
     let tup = SearchSysCache1(CONSTROID, SysCacheKey::Value(Datum::from_oid(constraint_oid)))?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {constraint_oid}"));
+        .ok_or_else(|| cache_lookup_failed("constraint", constraint_oid))?;
     let req = |attno: i32| -> PgResult<Datum> {
         let (d, isnull) = SysCacheGetAttr(CONSTROID, &tup, attno)?;
         assert!(!isnull, "unexpected null pg_constraint attr {attno}");
@@ -1890,8 +1903,9 @@ fn datum_output_text<'mcx>(mcx: Mcx<'mcx>, typid: Oid, d: Datum) -> PgResult<Str
 fn get_ri_constraint_root(mut constr_oid: Oid) -> PgResult<Oid> {
     use cache_syscache::{SearchSysCache1, SysCacheGetAttr, SysCacheKey, CONSTROID};
     loop {
+        // ri_triggers.c:2373-2375 elog(ERROR, "cache lookup failed for constraint %u").
         let tup = SearchSysCache1(CONSTROID, SysCacheKey::Value(Datum::from_oid(constr_oid)))?
-            .unwrap_or_else(|| panic!("cache lookup failed for constraint {constr_oid}"));
+            .ok_or_else(|| cache_lookup_failed("constraint", constr_oid))?;
         let (d, isnull) = SysCacheGetAttr(CONSTROID, &tup, 12)?;
         assert!(!isnull, "null conparentid");
         let parent = d.as_oid();
@@ -2088,11 +2102,16 @@ fn ri_GenerateQual(
 
 // add_cast_to (ruleutils.c): "::nspname.typname".
 fn add_cast_to(buf: &mut PgString<'_>, typid: Oid) -> PgResult<()> {
+    // ruleutils.c:13519-13521 elog(ERROR, "cache lookup failed for type %u").
     let (typname, typnamespace) = syscache_seams::pg_type_name_namespace::call(typid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {typid}"));
+        .ok_or_else(|| cache_lookup_failed("type", typid))?;
     let scratch = mcx::MemoryContext::new("ri-cast-nsp");
+    // C's add_cast_to uses get_namespace_name_or_temp and quote_identifier,
+    // which would dereference a NULL name; pgrust raises the standard
+    // catchable "cache lookup failed for namespace %u" (ruleutils.c:13559)
+    // rather than aborting the backend.
     let nsp = lsyscache::get_namespace_name(scratch.mcx(), typnamespace)?
-        .unwrap_or_else(|| panic!("cache lookup failed for namespace {typnamespace}"));
+        .ok_or_else(|| cache_lookup_failed("namespace", typnamespace))?;
     let tn = String::from_utf8_lossy(typname.name_str()).into_owned();
     use core::fmt::Write;
     write!(buf, "::{}.{}", quote_one_name(nsp.as_str()), quote_one_name(&tn))
@@ -2103,12 +2122,15 @@ fn add_cast_to(buf: &mut PgString<'_>, typid: Oid) -> PgResult<()> {
 fn syscache_shape_for_operator(opoid: Oid) -> PgResult<(Oid, Oid, String, String)> {
     let (left, right) = lsyscache::operator::op_input_types(opoid)?;
     let scratch = mcx::MemoryContext::new("ri-opname");
+    // C ri_GenerateQual receives the operator name from its caller and never
+    // probes pg_operator here; the standard report for an OPEROID miss is
+    // `elog(ERROR, "cache lookup failed for operator %u")` (ruleutils.c:13408).
     let name = lsyscache::operator::get_opname(scratch.mcx(), opoid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for operator {opoid}"));
+        .ok_or_else(|| cache_lookup_failed("operator", opoid))?;
     let opshape = syscache_seams::lookup_pg_operator_shape::call(opoid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for operator {opoid}"));
+        .ok_or_else(|| cache_lookup_failed("operator", opoid))?;
     let nsp = lsyscache::get_namespace_name(scratch.mcx(), opshape.oprnamespace)?
-        .unwrap_or_else(|| panic!("cache lookup failed for namespace {}", opshape.oprnamespace));
+        .ok_or_else(|| cache_lookup_failed("namespace", opshape.oprnamespace))?;
     Ok((left, right, name.as_str().to_string(), nsp.as_str().to_string()))
 }
 
@@ -2123,8 +2145,9 @@ fn ri_GenerateQualCollation(
     if collation == InvalidOid {
         return Ok(());
     }
+    // ri_triggers.c:2106-2108 elog(ERROR, "cache lookup failed for collation %u").
     let shape = syscache_seams::lookup_pg_collation_shape::call(collation)?
-        .unwrap_or_else(|| panic!("cache lookup failed for collation {collation}"));
+        .ok_or_else(|| cache_lookup_failed("collation", collation))?;
     let collname =
         core::str::from_utf8(shape.collname.name_str()).expect("collname UTF-8");
     let nsp = lsyscache::get_namespace_name(mcx, shape.collnamespace)?
@@ -2153,8 +2176,12 @@ fn quote_one_name(name: &str) -> String {
 }
 
 fn quote_relation_name<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<String> {
+    // C quoteRelationName (ri_triggers.c:2053) hands get_namespace_name's
+    // result to quoteOneName unchecked, which would deref a NULL name; pgrust
+    // raises the standard catchable "cache lookup failed for namespace %u"
+    // instead of aborting the backend.
     let nsp = lsyscache::get_namespace_name(mcx, rel.rd_rel.relnamespace)?
-        .unwrap_or_else(|| panic!("cache lookup failed for namespace {}", rel.rd_rel.relnamespace));
+        .ok_or_else(|| cache_lookup_failed("namespace", rel.rd_rel.relnamespace))?;
     Ok(format!("{}.{}", quote_one_name(nsp.as_str()), quote_one_name(rel.name())))
 }
 

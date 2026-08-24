@@ -877,8 +877,13 @@ fn pg_get_indexdef_worker_extended(
                 if is_constraint {
                     buf.push_str(" USING INDEX");
                 }
+                // C pg_get_indexdef_worker interpolates
+                // quote_identifier(get_tablespace_name(tblspc)) unchecked, so
+                // a dropped tablespace would deref NULL there; pgrust raises
+                // the standard catchable "cache lookup failed for tablespace
+                // %u" (XX000) instead of aborting the backend.
                 let spcname = get_tablespace_name(tblspc)?
-                    .unwrap_or_else(|| panic!("cache lookup failed for tablespace {tblspc}"));
+                    .ok_or_else(|| cache_lookup_failed("tablespace", tblspc))?;
                 buf.push_str(&format!(" TABLESPACE {}", quote_identifier(&spcname)));
             }
         }
@@ -1160,8 +1165,10 @@ fn pg_get_constraintdef_worker_full(
                 // re-add path needs it to recreate exact catalog state.
                 let tblspc = lsyscache::get_rel_tablespace(conindid)?;
                 if tblspc != InvalidOid {
+                    // Same unchecked get_tablespace_name in C's constraintdef
+                    // path; catchable XX000 here rather than a backend abort.
                     let spcname = get_tablespace_name(tblspc)?
-                        .unwrap_or_else(|| panic!("cache lookup failed for tablespace {tblspc}"));
+                        .ok_or_else(|| cache_lookup_failed("tablespace", tblspc))?;
                     buf.push_str(&format!(
                         " USING INDEX TABLESPACE {}",
                         quote_identifier(&spcname)

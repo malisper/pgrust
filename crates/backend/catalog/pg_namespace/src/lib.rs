@@ -81,6 +81,18 @@ pub fn NamespaceCreate<'mcx>(
     Ok(nspoid)
 }
 
+// The schema-deletion probe's miss: C runs it through DropObjectById
+// (dependency.c:1206), `elog(ERROR, "cache lookup failed for %s %u",
+// get_object_class_descr(NamespaceRelationId), oid)` -- catchable, SQLSTATE
+// XX000 (elog's default for ERROR), never a backend abort.  DIVERGENCE: C's
+// class_descr for pg_namespace is "schema" (objectaddress.c ObjectProperty),
+// this keeps pgrust's existing "namespace" wording.
+#[cold]
+#[inline(never)]
+fn namespace_lookup_failed(schemaOid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for namespace {schemaOid}")))
+}
+
 // RemoveSchemaById (schemacmds.c), hosted here: schemacmds reaches
 // catalog_dependency (cycle).
 pub fn RemoveSchemaById<'mcx>(mcx: Mcx<'mcx>, schemaOid: Oid) -> PgResult<()> {
@@ -100,8 +112,9 @@ pub fn RemoveSchemaById<'mcx>(mcx: Mcx<'mcx>, schemaOid: Oid) -> PgResult<()> {
         None,
         core::slice::from_ref(&key),
     )?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for namespace {schemaOid}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(namespace_lookup_failed(schemaOid));
+    };
     let tid = tup.t_self;
     catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
     genam::systable_endscan(mcx, scan)?;

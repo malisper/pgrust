@@ -7,6 +7,7 @@ use types_error::{PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UN
 use types_nodes::{FdwKind, FdwRoutine, NodeTag};
 
 use crate::options::{text_body, untransform_options, varlena_image, OptionPair};
+use crate::{cache_lookup_failed, cache_lookup_failed_attribute};
 
 use cache_syscache::cacheinfo::{
     FOREIGNDATAWRAPPERNAME, FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID,
@@ -132,7 +133,7 @@ pub fn get_foreign_server_oid(servername: &str, missing_ok: bool) -> PgResult<Oi
 pub fn GetForeignDataWrapper<'mcx>(mcx: Mcx<'mcx>, fdwid: Oid) -> PgResult<ForeignDataWrapper<'mcx>> {
     let Some(tp) = SearchSysCache1(FOREIGNDATAWRAPPEROID, SysCacheKey::Value(Datum::from_oid(fdwid)))?
     else {
-        panic!("cache lookup failed for foreign-data wrapper {fdwid}");
+        return Err(cache_lookup_failed("foreign-data wrapper", fdwid));
     };
     let fdw = ForeignDataWrapper {
         fdwid,
@@ -193,7 +194,7 @@ pub fn GetForeignDataWrapperByName<'mcx>(
 pub fn GetForeignServer<'mcx>(mcx: Mcx<'mcx>, serverid: Oid) -> PgResult<ForeignServer<'mcx>> {
     let Some(tp) = SearchSysCache1(FOREIGNSERVEROID, SysCacheKey::Value(Datum::from_oid(serverid)))?
     else {
-        panic!("cache lookup failed for foreign server {serverid}");
+        return Err(cache_lookup_failed("foreign server", serverid));
     };
     let server = ForeignServer {
         serverid,
@@ -217,7 +218,7 @@ pub fn GetForeignServer<'mcx>(mcx: Mcx<'mcx>, serverid: Oid) -> PgResult<Foreign
 pub fn GetForeignTable<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<ForeignTable<'mcx>> {
     let Some(tp) = SearchSysCache1(FOREIGNTABLEREL, SysCacheKey::Value(Datum::from_oid(relid)))?
     else {
-        panic!("cache lookup failed for foreign table {relid}");
+        return Err(cache_lookup_failed("foreign table", relid));
     };
     let ft = ForeignTable {
         relid,
@@ -246,7 +247,7 @@ pub fn GetForeignColumnOptions<'mcx>(
         SysCacheKey::Value(Datum::from_i16(attnum)),
     )?
     else {
-        panic!("cache lookup failed for attribute {attnum} of relation {relid}");
+        return Err(cache_lookup_failed_attribute(attnum, relid));
     };
     let options = untransform_options(
         mcx,
@@ -313,7 +314,7 @@ pub fn get_user_mapping_oid(userid: Oid, serverid: Oid) -> PgResult<Oid> {
 pub fn GetForeignServerIdByRelId(relid: Oid) -> PgResult<Oid> {
     let Some(tp) = SearchSysCache1(FOREIGNTABLEREL, SysCacheKey::Value(Datum::from_oid(relid)))?
     else {
-        panic!("cache lookup failed for foreign table {relid}");
+        return Err(cache_lookup_failed("foreign table", relid));
     };
     let serverid =
         SysCacheGetAttrNotNull(FOREIGNTABLEREL, &tp, Anum_pg_foreign_table_ftserver)?.as_oid();
@@ -349,7 +350,7 @@ pub fn GetFdwRoutine(fdwhandler: Oid) -> PgResult<FdwKind> {
 pub fn GetFdwRoutineByServerId<'mcx>(mcx: Mcx<'mcx>, serverid: Oid) -> PgResult<FdwKind> {
     let Some(tp) = SearchSysCache1(FOREIGNSERVEROID, SysCacheKey::Value(Datum::from_oid(serverid)))?
     else {
-        panic!("cache lookup failed for foreign server {serverid}");
+        return Err(cache_lookup_failed("foreign server", serverid));
     };
     let fdwid = SysCacheGetAttrNotNull(FOREIGNSERVEROID, &tp, Anum_pg_foreign_server_srvfdw)?.as_oid();
     ReleaseSysCache(tp);

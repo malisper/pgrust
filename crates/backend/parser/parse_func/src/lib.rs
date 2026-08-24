@@ -383,10 +383,11 @@ pub fn ParseFuncOrColumn<'mcx>(
             Ok(retval)
         }
         FuncDetail::Aggregate { funcid, rettype, retset, declared_arg_types, vatype, nvargs } => {
-            let aggshape = syscache_seams::lookup_pg_aggregate_shape::call(funcid)?
-                .unwrap_or_else(|| {
-                    panic!("cache lookup failed for aggregate {funcid} (parse_func.c)")
-                });
+            // C parse_func.c:369 elog(ERROR, "cache lookup failed for
+            // aggregate %u") -- catchable XX000, not a backend abort.
+            let Some(aggshape) = syscache_seams::lookup_pg_aggregate_shape::call(funcid)? else {
+                return Err(cache_lookup_failed_aggregate(funcid));
+            };
             let aggkind = aggshape.aggkind;
             let cat_direct_args = aggshape.aggnumdirectargs as i64;
             let mut fargs = fargs;
@@ -879,6 +880,24 @@ fn unify_hypothetical_args<'mcx>(
     } else {
         Ok(fargs)
     }
+}
+
+// parse_func.c:369 elog(ERROR, "cache lookup failed for aggregate %u") --
+// elog's default SQLSTATE is XX000 (ERRCODE_INTERNAL_ERROR) and the error is
+// catchable; it must never abort the backend.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed_aggregate(funcid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for aggregate {funcid}")))
+}
+
+// parse_func.c:1681 elog(ERROR, "cache lookup failed for function %u").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed_function(funcid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for function {funcid}")))
 }
 
 #[cold]
@@ -1459,8 +1478,11 @@ fn func_get_detail<'mcx>(
     let funcid = best.oid;
     let declared_arg_types = mcx::slice_in(mcx, best.args.as_slice())?;
 
-    let shape = syscache_seams::lookup_pg_proc_shape::call(funcid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid} (parse_func.c)"));
+    // C parse_func.c:1681 elog(ERROR, "cache lookup failed for function %u")
+    // -- catchable XX000, not a backend abort.
+    let Some(shape) = syscache_seams::lookup_pg_proc_shape::call(funcid)? else {
+        return Err(cache_lookup_failed_function(funcid));
+    };
     if OidIsValid(shape.provariadic)
         && shape.prokind != PROKIND_FUNCTION
         && shape.prokind != PROKIND_PROCEDURE
@@ -1483,8 +1505,12 @@ fn func_get_detail<'mcx>(
                 shape.prokind
             );
         }
-        let src = syscache_seams::pg_proc_proargdefaults::call(mcx, funcid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for function {funcid} (parse_func.c)"))
+        // Same PROCOID row C already holds here; a miss is parse_func.c:1681's
+        // catchable elog(ERROR), not an abort.
+        let Some(src) = syscache_seams::pg_proc_proargdefaults::call(mcx, funcid)? else {
+            return Err(cache_lookup_failed_function(funcid));
+        };
+        let src = src
             .unwrap_or_else(|| {
                 panic!("not enough default arguments (proargdefaults null for {funcid})")
             });

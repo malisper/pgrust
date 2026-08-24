@@ -25,7 +25,7 @@ use ::types_core::xact::{
 };
 use ::types_core::{BlockNumber, InvalidOid, MultiXactId, Oid};
 use ::types_error::{
-    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_TABLE, ERROR, WARNING,
 };
 use ::types_nodes::parsenodes::VacuumStmt;
@@ -576,7 +576,7 @@ pub fn expand_vacuum_rel<'mcx>(
         return Ok(());
     }
     let class_shape = syscache_seams::lookup_pg_class_by_relid::call(relid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+        .ok_or_else(|| cache_lookup_failed(relid))?;
 
     if vacuum_is_permitted_for_relation(relid, relname, class_shape.relisshared, options)? {
         vacrels.push(ExpandedVacRel { oid: relid, relname: Some(relname), va_cols: &vrel.va_cols });
@@ -1706,6 +1706,35 @@ fn loc(routine: &'static str) -> ::types_error::ErrorLocation {
     // pgrust is Rust: report OUR source site (call site via track_caller).
     let site = core::panic::Location::caller();
     ::types_error::ErrorLocation::new(site.file(), site.line() as i32, routine)
+}
+
+// Every one of these is `elog(ERROR, "cache lookup failed for relation %u",
+// oid)` in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for relation {oid}"
+    )))
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::cache_lookup_failed;
+
+    // C: elog(ERROR, "cache lookup failed for relation %u") -- a catchable
+    // XX000, not a backend abort.  This probe used to panic!(), killing the
+    // process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for relation 16384");
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ::types_error::ERROR);
+    }
 }
 
 #[cfg(test)]

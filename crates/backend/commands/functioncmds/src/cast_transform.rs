@@ -18,7 +18,7 @@ use types_nodes::primnodes::CoercionContext;
 use types_nodes::rawnodes::TypeName;
 use types_rel::RowExclusiveLock;
 
-use crate::err;
+use crate::{cache_lookup_failed, err};
 use pg_proc::ObjectAddress;
 
 const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
@@ -154,7 +154,7 @@ pub fn CreateCast<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateCastStmt<'mcx>) -> PgResult
         funcid = parse_func::LookupFuncWithArgs(ObjectType::OBJECT_FUNCTION, owa, false)?;
 
         let shape = syscache_seams::lookup_pg_proc_shape::call(funcid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
+            .ok_or_else(|| cache_lookup_failed("function", funcid))?;
         let (prorettype, proargtypes) = lsyscache::get_func_signature(mcx, funcid)?;
         nargs = shape.pronargs;
         if !(1..=3).contains(&nargs) {
@@ -308,7 +308,7 @@ fn transform_func_lookup<'mcx>(
     }
 
     let shape = syscache_seams::lookup_pg_proc_shape::call(funcid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
+        .ok_or_else(|| cache_lookup_failed("function", funcid))?;
     let (rettype, args) = lsyscache::get_func_signature(mcx, funcid)?;
     let _ = rettype;
     let argtype0 = if args.is_empty() { InvalidOid } else { args[0] };

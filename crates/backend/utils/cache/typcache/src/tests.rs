@@ -870,3 +870,14 @@ fn domain_over_composite_copies_base_field_properties() {
     assert_eq!(e.flags_raw() & TCFLAGS_HAVE_FIELD_HASHING, 0);
     assert_eq!(e.flags_raw() & TCFLAGS_HAVE_FIELD_EXTENDED_HASHING, 0);
 }
+
+// typcache.c:1122-1124 elog(ERROR, "cache lookup failed for type %u") in
+// load_domaintype_info's TYPEOID walk -- catchable XX000, transaction-scoped.
+// pgrust panicked, which aborts the backend.
+#[test]
+fn domain_type_cache_lookup_failure_is_a_catchable_xx000() {
+    let e = crate::domain::type_lookup_failed(DOMAIN_OID);
+    assert_eq!(e.message(), format!("cache lookup failed for type {DOMAIN_OID}"));
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.level(), types_error::ERROR);
+}

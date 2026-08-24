@@ -38,10 +38,21 @@ fn xml_name(ident: &[u8], fully_escaped: bool, escape_period: bool) -> PgResult<
     Ok(String::from_utf8(v).unwrap_or_else(|_| panic!("non-UTF-8 XML name")))
 }
 
+// C reports the cache misses on this path with
+// `elog(ERROR, "cache lookup failed for <what> %u", oid)` (xml.c:3533 for the
+// RELOID probe in map_sql_table_to_xmlschema) -- catchable, and elog's
+// default SQLSTATE at ERROR is already XX000 (ERRCODE_INTERNAL_ERROR), so no
+// explicit errcode belongs here.  It is never a backend abort.
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(what: &str, oid: Oid) -> Box<types_error::PgError> {
+    types_error::PgError::error(format!("cache lookup failed for {what} {oid}")).into()
+}
+
 fn rel_name(relid: Oid) -> PgResult<String> {
     with_scratch(|mcx, _| {
         Ok(lsyscache::relation::get_rel_name(mcx, relid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {}", relid))
+            .ok_or_else(|| cache_lookup_failed("relation", relid))?
             .as_str()
             .to_owned())
     })
@@ -59,10 +70,14 @@ fn rel_name_opt(relid: Oid) -> PgResult<Option<String>> {
     })
 }
 
+// C xml.c passes get_namespace_name's result straight into
+// map_sql_identifier_to_xml_name / map_multipart_sql_identifier_to_xml_name
+// (xml.c:3188, :3541, :3839), which would deref a NULL name.  pgrust raises
+// the standard catchable namespace cache-lookup error instead of aborting.
 fn namespace_name(nspid: Oid) -> PgResult<String> {
     with_scratch(|mcx, _| {
         Ok(lsyscache::misc::get_namespace_name(mcx, nspid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for namespace {}", nspid))
+            .ok_or_else(|| cache_lookup_failed("namespace", nspid))?
             .as_str()
             .to_owned())
     })
@@ -831,8 +846,10 @@ fn map_sql_type_to_xml_name(typeoid: Oid, typmod: i32) -> PgResult<String> {
         DATEOID => result.push_str("DATE"),
         XMLOID => result.push_str("XML"),
         _ => {
+            // xml.c:3831-3833 elog(ERROR, "cache lookup failed for type %u",
+            // typeoid) in map_sql_type_to_xml_name -- catchable XX000.
             let (typname, typnamespace) = syscache_seams::pg_type_name_namespace::call(typeoid)?
-                .unwrap_or_else(|| panic!("cache lookup failed for type {}", typeoid));
+                .ok_or_else(|| cache_lookup_failed("type", typeoid))?;
             let typtype = lsyscache::typ::get_typtype(typeoid)?;
             let name = core::str::from_utf8(typname.name_str())
                 .unwrap_or_else(|_| panic!("non-UTF-8 pg_type.typname"))

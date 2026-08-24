@@ -18,7 +18,7 @@ use types_storage::lock::{AccessExclusiveLock, RowExclusiveLock};
 use types_storage::storage::ProcSignalBarrierType;
 use types_tuple::NameData;
 
-use crate::{errdetail_busy_db, get_db_info, loc};
+use crate::{cache_lookup_failed, errdetail_busy_db, get_db_info, loc};
 
 const SubscriptionRelationId: Oid = 6100;
 const Anum_pg_subscription_subdbid: i32 = 2;
@@ -345,7 +345,7 @@ fn dropdb_guts(
     let mut scan =
         genam::systable_beginscan(mcx, &pgdbrel, DatabaseNameIndexId, true, None, &[key])?;
     let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
-        panic!("cache lookup failed for database {db_id}");
+        return Err(cache_lookup_failed("database", db_id));
     };
     catalog_indexing::CatalogTupleDelete(&pgdbrel, &tup.t_self)?;
     genam::systable_endscan(mcx, scan)?;

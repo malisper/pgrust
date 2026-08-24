@@ -487,8 +487,18 @@ impl CompState {
         )?
         .as_i16();
         cache_syscache::ReleaseSysCache(atttup);
+        // C holds the pg_attribute tuple SearchSysCacheAttName just returned,
+        // so this re-probe is a seam artifact; the C frame's own miss arm is
+        // `elog(ERROR, "cache lookup failed for type %u")` (pl_comp.c:1637),
+        // i.e. a catchable XX000, never an abort.  Keep the standard
+        // attribute-lookup wording and the same catchable level.
         let shape = syscache_seams::lookup_pg_attribute_shape::call(class_oid, attnum)?
-            .unwrap_or_else(|| panic!("cache lookup failed for attribute {attnum} of relation {class_oid}"));
+            .ok_or_else(|| {
+                comp_err(
+                    types_error::ERRCODE_INTERNAL_ERROR,
+                    format!("cache lookup failed for attribute {attnum} of relation {class_oid}"),
+                )
+            })?;
         Self::build_datatype(shape.atttypid, shape.atttypmod, shape.attcollation)
     }
 }

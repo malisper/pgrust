@@ -22,8 +22,8 @@ use types_rel::{
 use pg_type::TypeOidIndexId;
 
 use crate::{
-    domainAddCheckConstraint, domainAddNotNullConstraint, type_name_to_string,
-    TYPTYPE_COMPOSITE, TYPTYPE_MULTIRANGE, TYPTYPE_RANGE,
+    cache_lookup_failed, domainAddCheckConstraint, domainAddNotNullConstraint,
+    type_name_to_string, TYPTYPE_COMPOSITE, TYPTYPE_MULTIRANGE, TYPTYPE_RANGE,
 };
 use pg_type::TYPTYPE_DOMAIN;
 
@@ -124,7 +124,7 @@ fn fetch_type_row<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<TypeRow> {
     let keys = [oid_key(pg_type::Anum_pg_type_oid, typeoid)];
     let mut scan = genam::systable_beginscan(mcx, &rel, TypeOidIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {typeoid}"));
+        .ok_or_else(|| cache_lookup_failed("type", typeoid))?;
     let desc = rel.descr();
     let get = |attno: AttrNumber, isnull: &mut bool| {
         // SAFETY: pg_type columns of the declared types under its descriptor.
@@ -199,7 +199,7 @@ fn update_type_row<'mcx>(
     let keys = [oid_key(pg_type::Anum_pg_type_oid, typeoid)];
     let mut scan = genam::systable_beginscan(mcx, &rel, TypeOidIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {typeoid}"));
+        .ok_or_else(|| cache_lookup_failed("type", typeoid))?;
     let desc = rel.descr();
     let n = desc.natts as usize;
     let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, n)?;
@@ -223,7 +223,7 @@ fn cache_inval_type_tuple<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<()> {
     let keys = [oid_key(pg_type::Anum_pg_type_oid, typeoid)];
     let mut scan = genam::systable_beginscan(mcx, &rel, TypeOidIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {typeoid}"));
+        .ok_or_else(|| cache_lookup_failed("type", typeoid))?;
     inval::invalidate::CacheInvalidateHeapTuple(&rel, tup, None)?;
     genam::systable_endscan(mcx, scan)?;
     rel.close(RowExclusiveLock)
@@ -1056,7 +1056,7 @@ pub fn AlterTypeOwnerInternal<'mcx>(
         let keys = [oid_key(pg_type::Anum_pg_type_oid, type_oid)];
         let mut scan = genam::systable_beginscan(mcx, &rel, TypeOidIndexId, true, None, &keys)?;
         let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for type {type_oid}"));
+            .ok_or_else(|| cache_lookup_failed("type", type_oid))?;
         let desc = rel.descr();
         let n = desc.natts as usize;
         let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, n)?;

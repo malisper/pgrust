@@ -370,8 +370,9 @@ fn SetRelationTableSpacePgClass<'mcx>(
     let key = [oid_scankey(1, rel.rd_id)];
     let mut scan =
         genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {}", rel.rd_id));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::relation_lookup_failed(rel.rd_id));
+    };
     // C: SearchSysCacheLockedCopy1 (tablecmds.c:3765) / UnlockTuple (:3777) --
     // reindex_index reaches SetRelationTableSpace through index.c:3774, so this
     // second copy of the function needs the same tuple lock as the first.
@@ -414,8 +415,9 @@ fn reindex_index_flags_fixup<'mcx>(
     let key = [oid_scankey(1, indexId)];
     let mut scan =
         genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &key)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for index {indexId}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::index_lookup_failed(indexId));
+    };
     let desc = pg_index.descr();
     let get_bool = |attnum: i32| {
         let mut isnull = false;

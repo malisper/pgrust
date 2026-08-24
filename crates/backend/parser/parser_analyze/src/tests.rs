@@ -3129,3 +3129,14 @@ fn select_current_timestamp_end_to_end() {
     assert_eq!(out.r#type, types_core::catalog::TIMESTAMPTZOID);
     assert_eq!(out.typmod, -1);
 }
+
+// C analyze.c:3291 reports a vanished PROCOID row for a CALL target with
+// elog(ERROR, "cache lookup failed for function %u") -- catchable, XX000.
+// pgrust used to panic!(), aborting the backend.
+#[test]
+fn call_stmt_cache_lookup_failure_is_catchable_xx000() {
+    let e = crate::cache_lookup_failed_function(16384);
+    assert_eq!(e.message(), "cache lookup failed for function 16384");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.level(), types_error::ERROR);
+}

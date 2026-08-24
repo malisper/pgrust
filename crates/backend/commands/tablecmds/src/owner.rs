@@ -173,7 +173,7 @@ pub(crate) fn ATExecChangeOwner<'mcx>(
                 &keys,
             )?;
             let tup = genam::systable_getnext(mcx, &mut scan)?
-                .unwrap_or_else(|| panic!("cache lookup failed for relation {relation_oid}"));
+                .ok_or_else(|| crate::cache_lookup_failed("relation", relation_oid))?;
             let desc = class_rel.descr();
             let natts = desc.natts as usize;
             let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;

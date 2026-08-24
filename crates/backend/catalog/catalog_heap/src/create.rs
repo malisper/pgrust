@@ -961,9 +961,9 @@ pub fn RelationClearMissing<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
         ];
         let mut scan =
             genam::systable_beginscan(mcx, &attrrel, 2659, true, None, &keys)?;
-        let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
-            panic!("cache lookup failed for attribute {attnum} of relation {relid}")
-        });
+        let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(crate::attribute_lookup_failed(attnum as AttrNumber, relid));
+        };
         let desc = attrrel.descr();
         let n = desc.natts as usize;
         let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, n)?;
@@ -1007,9 +1007,9 @@ pub fn StoreAttrMissingVal<'mcx>(
         None,
         &keys,
     )?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
-        panic!("cache lookup failed for attribute {attnum} of relation {}", rel.rd_id)
-    });
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::attribute_lookup_failed(attnum, rel.rd_id));
+    };
     let desc = attrrel.descr();
     let get = |anum: i32| {
         let mut isnull = false;
@@ -1067,7 +1067,7 @@ pub fn SetAttrMissing<'mcx>(
     let attrrel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
     let attnum = syscache_seams::lookup_pg_attribute_attnum_by_name::call(relid, attname)?;
     if attnum == 0 {
-        panic!("cache lookup failed for attribute {attname} of relation {relid}");
+        return Err(crate::attribute_name_lookup_failed(attname, relid));
     }
     let keys = [
         crate::drop::oid_scankey(1, relid),
@@ -1081,9 +1081,9 @@ pub fn SetAttrMissing<'mcx>(
         None,
         &keys,
     )?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
-        panic!("cache lookup failed for attribute {attname} of relation {relid}")
-    });
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::attribute_name_lookup_failed(attname, relid));
+    };
     let desc = attrrel.descr();
     let get = |anum: i32| {
         let mut isnull = false;

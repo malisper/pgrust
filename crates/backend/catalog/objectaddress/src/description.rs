@@ -23,6 +23,21 @@ use types_rel::{AccessShareLock, RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, 
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::NameData;
 
+// Every syscache/catalog miss inside getObjectDescription and
+// getObjectIdentityParts is reported by C with
+// `elog(ERROR, "cache lookup failed for <noun> %u", oid)` (objectaddress.c
+// :2875, :2896, :3022, :3052, :3091, :3175, :3185, :3218, :3459, :3682,
+// :3698, :3740, :3883, :3900, :3921, :4017, :4115, :4190, :4197, :4698,
+// :4762, :4798, and the identity twins at :4975-:6066).  elog's default
+// SQLSTATE for ERROR is XX000, and the error is catchable -- these are
+// reachable from plain SQL (`SELECT pg_describe_object(...)`,
+// `pg_identify_object(...)`), so pgrust must not abort the backend.
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(noun: &str, oid: Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!("cache lookup failed for {noun} {oid}")))
+}
+
 fn oid_key(attno: AttrNumber, oid: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno;
@@ -66,12 +81,13 @@ fn quote_qualified(nspname: Option<&str>, name: &str) -> String {
 fn getRelationDescription(relid: Oid, missing_ok: bool) -> PgResult<Option<String>> {
     let Some(relname) = syscache_seams::pg_class_relname::call(relid)? else {
         if !missing_ok {
-            panic!("cache lookup failed for relation {relid}");
+            return Err(cache_lookup_failed("relation", relid));
         }
         return Ok(None);
     };
-    let shape = syscache_seams::lookup_pg_class_ls_shape::call(relid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+    let Some(shape) = syscache_seams::lookup_pg_class_ls_shape::call(relid)? else {
+        return Err(cache_lookup_failed("relation", relid));
+    };
     let nspname = if catalog_namespace::RelationIsVisible(relid)? {
         None
     } else {
@@ -98,10 +114,12 @@ fn format_procedure(mcx: Mcx<'_>, procid: Oid, force_qualify: bool) -> PgResult<
     let Some(proname) = syscache_seams::pg_proc_proname::call(procid)? else {
         return Ok(None);
     };
-    let shape = syscache_seams::lookup_pg_proc_shape::call(procid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {procid}"));
-    let (_, argtypes) = syscache_seams::lookup_pg_proc_signature::call(mcx, procid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {procid}"));
+    let Some(shape) = syscache_seams::lookup_pg_proc_shape::call(procid)? else {
+        return Err(cache_lookup_failed("function", procid));
+    };
+    let Some((_, argtypes)) = syscache_seams::lookup_pg_proc_signature::call(mcx, procid)? else {
+        return Err(cache_lookup_failed("function", procid));
+    };
     let nspname = if !force_qualify && catalog_namespace::FunctionIsVisible(procid)? {
         None
     } else {
@@ -173,7 +191,7 @@ pub fn getObjectDescription(
             // FORMAT_PROC_INVALID_AS_NULL.
             let Some(proname) = format_procedure(mcx, object.objectId, false)? else {
                 if !missing_ok {
-                    panic!("cache lookup failed for function {}", object.objectId);
+                    return Err(cache_lookup_failed("function", object.objectId));
                 }
                 return Ok(None);
             };
@@ -183,7 +201,7 @@ pub fn getObjectDescription(
             // FORMAT_TYPE_INVALID_AS_NULL.
             if syscache_seams::pg_type_name_namespace::call(object.objectId)?.is_none() {
                 if !missing_ok {
-                    panic!("cache lookup failed for type {}", object.objectId);
+                    return Err(cache_lookup_failed("type", object.objectId));
                 }
                 return Ok(None);
             }
@@ -213,7 +231,7 @@ pub fn getObjectDescription(
                 syscache_seams::lookup_pg_constraint_desc_shape::call(object.objectId)?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for constraint {}", object.objectId);
+                    return Err(cache_lookup_failed("constraint", object.objectId));
                 }
                 return Ok(None);
             };
@@ -280,7 +298,7 @@ pub fn getObjectDescription(
         NAMESPACE_RELATION_ID => {
             let Some(nspname) = get_namespace_name(object.objectId)? else {
                 if !missing_ok {
-                    panic!("cache lookup failed for namespace {}", object.objectId);
+                    return Err(cache_lookup_failed("namespace", object.objectId));
                 }
                 return Ok(None);
             };
@@ -293,7 +311,7 @@ pub fn getObjectDescription(
         DATABASE_RELATION_ID => {
             let Some(datname) = dbcommands_seams::get_database_name::call(object.objectId)? else {
                 if !missing_ok {
-                    panic!("cache lookup failed for database {}", object.objectId);
+                    return Err(cache_lookup_failed("database", object.objectId));
                 }
                 return Ok(None);
             };
@@ -302,7 +320,7 @@ pub fn getObjectDescription(
         EXTENSION_RELATION_ID => {
             let Some(extname) = extension::get_extension_name(mcx, object.objectId)? else {
                 if !missing_ok {
-                    panic!("cache lookup failed for extension {}", object.objectId);
+                    return Err(cache_lookup_failed("extension", object.objectId));
                 }
                 return Ok(None);
             };
@@ -312,7 +330,7 @@ pub fn getObjectDescription(
             // FORMAT_OPERATOR_INVALID_AS_NULL.
             if syscache_seams::pg_operator_oprname::call(object.objectId)?.is_none() {
                 if !missing_ok {
-                    panic!("cache lookup failed for operator {}", object.objectId);
+                    return Err(cache_lookup_failed("operator", object.objectId));
                 }
                 return Ok(None);
             }
@@ -375,7 +393,7 @@ pub fn getObjectDescription(
             )?;
             let Some((conname, connamespace)) = row else {
                 if !missing_ok {
-                    panic!("cache lookup failed for conversion {}", object.objectId);
+                    return Err(cache_lookup_failed("conversion", object.objectId));
                 }
                 return Ok(None);
             };
@@ -401,7 +419,7 @@ pub fn getObjectDescription(
             )?;
             let Some(lanname) = row else {
                 if !missing_ok {
-                    panic!("cache lookup failed for language {}", object.objectId);
+                    return Err(cache_lookup_failed("language", object.objectId));
                 }
                 return Ok(None);
             };
@@ -414,7 +432,7 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for opclass {}", object.objectId);
+                    return Err(cache_lookup_failed("opclass", object.objectId));
                 }
                 return Ok(None);
             };
@@ -438,7 +456,7 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for opfamily {}", object.objectId);
+                    return Err(cache_lookup_failed("opfamily", object.objectId));
                 }
                 return Ok(None);
             };
@@ -476,7 +494,7 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for publication table {}", object.objectId);
+                    return Err(cache_lookup_failed("publication table", object.objectId));
                 }
                 return Ok(None);
             };
@@ -513,7 +531,7 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for foreign-data wrapper {}", object.objectId);
+                    return Err(cache_lookup_failed("foreign-data wrapper", object.objectId));
                 }
                 return Ok(None);
             };
@@ -526,7 +544,7 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for foreign server {}", object.objectId);
+                    return Err(cache_lookup_failed("foreign server", object.objectId));
                 }
                 return Ok(None);
             };
@@ -539,7 +557,7 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for user mapping {}", object.objectId);
+                    return Err(cache_lookup_failed("user mapping", object.objectId));
                 }
                 return Ok(None);
             };
@@ -564,11 +582,13 @@ pub fn getObjectDescription(
                     .as_str()
                     .to_string()
             };
-            let srvname = foreign_object_name(
+            let Some(srvname) = foreign_object_name(
                 cache_syscache::cacheinfo::FOREIGNSERVEROID,
                 serverid,
             )?
-            .unwrap_or_else(|| panic!("cache lookup failed for foreign server {serverid}"));
+            else {
+                return Err(cache_lookup_failed("foreign server", serverid));
+            };
             Ok(Some(format!("user mapping for {usename} on server {srvname}")))
         }
         crate::LargeObjectRelationId => {
@@ -585,7 +605,7 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for access method {}", object.objectId);
+                    return Err(cache_lookup_failed("access method", object.objectId));
                 }
                 return Ok(None);
             };
@@ -679,8 +699,9 @@ pub fn getObjectDescription(
                 format_type::FORMAT_TYPE_ALLOW_INVALID,
             )?
             .expect("ALLOW_INVALID never yields NULL");
-            let procname = format_procedure(mcx, amproc, false)?
-                .unwrap_or_else(|| panic!("cache lookup failed for function {amproc}"));
+            let Some(procname) = format_procedure(mcx, amproc, false)? else {
+                return Err(cache_lookup_failed("function", amproc));
+            };
             Ok(Some(format!(
                 "function {procnum} ({lt}, {rt}) of {opfam}: {procname}"
             )))
@@ -713,7 +734,7 @@ pub fn getObjectDescription(
             let Some(tblspc) = commands_tablespace::get_tablespace_name(mcx, object.objectId)?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for tablespace {}", object.objectId);
+                    return Err(cache_lookup_failed("tablespace", object.objectId));
                 }
                 return Ok(None);
             };
@@ -774,7 +795,7 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for event trigger {}", object.objectId);
+                    return Err(cache_lookup_failed("event trigger", object.objectId));
                 }
                 return Ok(None);
             };
@@ -791,7 +812,7 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("cache lookup failed for parameter ACL {}", object.objectId);
+                    return Err(cache_lookup_failed("parameter ACL", object.objectId));
                 }
                 return Ok(None);
             };
@@ -816,8 +837,9 @@ pub fn getObjectDescription(
             let trftype = cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 2)?.as_oid();
             let trflang = cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 3)?.as_oid();
             cache_syscache::ReleaseSysCache(tup);
-            let langname = crate::identity::language_name(trflang)?
-                .unwrap_or_else(|| panic!("cache lookup failed for language {trflang}"));
+            let Some(langname) = crate::identity::language_name(trflang)? else {
+                return Err(cache_lookup_failed("language", trflang));
+            };
             Ok(Some(format!(
                 "transform for {} language {langname}",
                 format_type::format_type_be(trftype)?
@@ -909,7 +931,7 @@ pub(crate) fn getPublicationSchemaInfo(
     )?
     else {
         if !missing_ok {
-            panic!("cache lookup failed for publication schema {psoid}");
+            return Err(cache_lookup_failed("publication schema", psoid));
         }
         return Ok(None);
     };
@@ -922,7 +944,7 @@ pub(crate) fn getPublicationSchemaInfo(
     };
     let Some(nspname) = get_namespace_name(pnnspid)? else {
         if !missing_ok {
-            panic!("cache lookup failed for schema {pnnspid}");
+            return Err(cache_lookup_failed("schema", pnnspid));
         }
         return Ok(None);
     };
@@ -971,7 +993,7 @@ pub(crate) fn am_name(amoid: Oid) -> PgResult<String> {
         cache_syscache::SysCacheKey::Value(Datum::from_oid(amoid)),
     )?
     else {
-        panic!("cache lookup failed for access method {amoid}");
+        return Err(cache_lookup_failed("access method", amoid));
     };
     let name = name_from_datum(cache_syscache::SysCacheGetAttrNotNull(cacheid, &tup, 2)?);
     cache_syscache::ReleaseSysCache(tup);
@@ -994,14 +1016,16 @@ pub fn getObjectIdentity(
 fn getRelationIdentity(relid: Oid, missing_ok: bool) -> PgResult<Option<String>> {
     let Some(relname) = syscache_seams::pg_class_relname::call(relid)? else {
         if !missing_ok {
-            panic!("cache lookup failed for relation {relid}");
+            return Err(cache_lookup_failed("relation", relid));
         }
         return Ok(None);
     };
-    let shape = syscache_seams::lookup_pg_class_ls_shape::call(relid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
-    let nspname = get_namespace_name(shape.relnamespace)?
-        .unwrap_or_else(|| panic!("cache lookup failed for namespace {}", shape.relnamespace));
+    let Some(shape) = syscache_seams::lookup_pg_class_ls_shape::call(relid)? else {
+        return Err(cache_lookup_failed("relation", relid));
+    };
+    let Some(nspname) = get_namespace_name(shape.relnamespace)? else {
+        return Err(cache_lookup_failed("namespace", shape.relnamespace));
+    };
     Ok(Some(quote_qualified(Some(&nspname), name_str(&relname))))
 }
 
@@ -1029,7 +1053,7 @@ fn named_nsp_class_description<'mcx>(
     })?;
     let Some((name, nsp)) = row else {
         if !missing_ok {
-            panic!("cache lookup failed for {noun} {}", object.objectId);
+            return Err(cache_lookup_failed(noun, object.objectId));
         }
         return Ok(None);
     };

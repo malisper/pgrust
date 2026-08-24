@@ -363,6 +363,16 @@ fn index_row(index_oid: Oid) -> PgResult<Option<IndexRow>> {
     }))
 }
 
+// elog(ERROR, "cache lookup failed for index %u") -- elog's default SQLSTATE
+// at ERROR is XX000 (ERRCODE_INTERNAL_ERROR), so no with_sqlstate here.
+#[cold]
+#[inline(never)]
+fn index_lookup_failed(index_oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for index {index_oid}"
+    )))
+}
+
 fn test_indoption(
     index_oid: Oid,
     attno: i32,
@@ -373,8 +383,12 @@ fn test_indoption(
     if !guard {
         return Ok(Some(false));
     }
+    // C amutils.c:131 reads indoption off the pg_index tuple indexam_property
+    // already holds, so it has no second lookup to fail; the standard report
+    // for an INDEXRELID miss is `elog(ERROR, "cache lookup failed for index
+    // %u")` (ruleutils.c:1310), a catchable XX000.  Never a backend abort.
     let val = syscache_seams::pg_index_indoption_element::call(index_oid, attno - 1)?
-        .unwrap_or_else(|| panic!("cache lookup failed for index {index_oid}"));
+        .ok_or_else(|| index_lookup_failed(index_oid))?;
     Ok(Some((val & mask) == expect))
 }
 

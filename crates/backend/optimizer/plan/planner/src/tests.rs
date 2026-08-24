@@ -8150,3 +8150,26 @@ mod add_path_param_pathkeys_masking {
         assert!(!ok, "parameterized candidate's pathkeys must not save it in precheck");
     }
 }
+
+// prepagg.c:152, plancat.c:1524/2133/2194 all report a vanished catalog row
+// with elog(ERROR, "cache lookup failed for <kind> %u") -- a catchable error
+// whose default SQLSTATE is XX000 (ERRCODE_INTERNAL_ERROR).  Every one of
+// these was a panic!() in pgrust, i.e. a backend abort.
+#[test]
+fn planner_cache_lookup_failures_are_catchable_xx000() {
+    for (kind, oid, want) in [
+        ("aggregate", 2100u32, "cache lookup failed for aggregate 2100"),
+        ("function", 0u32, "cache lookup failed for function 0"),
+        ("type", 16384u32, "cache lookup failed for type 16384"),
+        (
+            "statistics object",
+            16385u32,
+            "cache lookup failed for statistics object 16385",
+        ),
+    ] {
+        let e = crate::cache_lookup_failed(kind, oid);
+        assert_eq!(e.message(), want);
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
+}

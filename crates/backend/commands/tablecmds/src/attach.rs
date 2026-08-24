@@ -1701,7 +1701,7 @@ fn DetachPartitionFinalize<'mcx>(
             &keys,
         )?;
         let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {}", part_rel.rd_id));
+            .ok_or_else(|| crate::cache_lookup_failed("relation", part_rel.rd_id))?;
         let desc = class_rel.descr();
         let (ispart, _) = getattr(tup, desc, Anum_pg_class_relispartition);
         debug_assert!(ispart.as_bool());
@@ -2079,7 +2079,7 @@ fn validate_partitioned_index<'mcx>(
         let mut scan =
             genam::systable_beginscan(mcx, &idx_rel, IndexRelidIndexId, true, None, &keys)?;
         let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for index {}", parted_idx.rd_id));
+            .ok_or_else(|| crate::cache_lookup_failed("index", parted_idx.rd_id))?;
         let desc = idx_rel.descr();
         let natts = desc.natts as usize;
         let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;

@@ -61,8 +61,12 @@ fn qualified_name_list<'mcx>(
     nspoid: ::types_core::Oid,
     name: &::types_tuple::NameData,
 ) -> PgResult<NodeList<'mcx>> {
-    let nsp = lsyscache::get_namespace_name(mcx, nspoid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for namespace {nspoid}"));
+    // C's get_namespace_name returns NULL here without erroring; pgrust has no
+    // NULL-name lane, so a vanished pg_namespace row raises elog's catchable
+    // XX000 instead of aborting the backend.
+    let Some(nsp) = lsyscache::get_namespace_name(mcx, nspoid)? else {
+        return Err(crate::cache_lookup_failed("namespace", nspoid));
+    };
     let name = core::str::from_utf8(name.name_str()).expect("name");
     let mut list = NodeList::make1(mcx, Node::mk_string(mcx, str_in(mcx, nsp.as_str())?)?)?;
     list.lappend(mcx, Node::mk_string(mcx, str_in(mcx, name)?)?)?;
@@ -79,8 +83,11 @@ pub(crate) fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
 // CREATE SEQUENCE options; 64-bit values become Float per gram.y.
 fn sequence_options<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<NodeList<'mcx>> {
     use types_nodes::parsenodes::{DefElem, DefElemAction};
-    let form = syscache_seams::lookup_pg_sequence_form::call(relid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for sequence {relid}"));
+    // sequence.c:1715 elog(ERROR, "cache lookup failed for sequence %u") --
+    // catchable XX000, not a backend abort.
+    let Some(form) = syscache_seams::lookup_pg_sequence_form::call(relid)? else {
+        return Err(crate::cache_lookup_failed("sequence", relid));
+    };
     let mut options = NodeList::nil();
     let int_opt = |v: i64| -> PgResult<Node<'mcx>> {
         Node::mk_float(mcx, str_in(mcx, &v.to_string())?)
@@ -590,14 +597,21 @@ pub fn generateClonedIndexStmt<'mcx>(
     // clone like the builtins.
     let amname: &'mcx str = {
         let relam = source_idx.rd_rel.relam;
-        let name = syscache_seams::pg_am_amname::call(relam)?
-            .unwrap_or_else(|| panic!("cache lookup failed for access method {relam}"));
+        // parse_utilcmd.c:1744 elog(ERROR, "cache lookup failed for access
+        // method %u") -- catchable XX000.
+        let Some(name) = syscache_seams::pg_am_amname::call(relam)? else {
+            return Err(crate::cache_lookup_failed("access method", relam));
+        };
         str_in(mcx, &name)?
     };
     let table_space = if source_idx.rd_rel.reltablespace != InvalidOid {
         let spc = source_idx.rd_rel.reltablespace;
-        let name = tablespace_seams::get_tablespace_name::call(mcx, spc)?
-            .unwrap_or_else(|| panic!("cache lookup failed for tablespace {spc}"));
+        // C's get_tablespace_name returns NULL silently (parse_utilcmd.c:1762);
+        // pgrust has no NULL-tablespace lane, so raise the catchable XX000
+        // rather than aborting.
+        let Some(name) = tablespace_seams::get_tablespace_name::call(mcx, spc)? else {
+            return Err(crate::cache_lookup_failed("tablespace", spc));
+        };
         Some(str_in(
             mcx,
             std::str::from_utf8(name.name_str()).expect("tablespace name is utf8"),
@@ -643,11 +657,13 @@ pub fn generateClonedIndexStmt<'mcx>(
                 )?;
                 let mut names = NodeList::nil();
                 for &operid in ops.iter() {
-                    let (oprname, oprnamespace) =
+                    // parse_utilcmd.c:1844 elog(ERROR, "cache lookup failed
+                    // for operator %u") -- catchable XX000.
+                    let Some((oprname, oprnamespace)) =
                         syscache_seams::pg_operator_oprnamensp::call(operid)?
-                            .unwrap_or_else(|| {
-                                panic!("cache lookup failed for operator {operid}")
-                            });
+                    else {
+                        return Err(crate::cache_lookup_failed("operator", operid));
+                    };
                     let namelist = qualified_name_list(mcx, oprnamespace, &oprname)?;
                     names.lappend(mcx, Node::mk_list(mcx, namelist)?)?;
                 }
@@ -699,19 +715,26 @@ pub fn generateClonedIndexStmt<'mcx>(
         // get_collation (parse_utilcmd.c:2173): NIL when default for the
         // datatype, else always schema-qualified.
         let collation = if indcollation != InvalidOid && indcollation != typcollation {
-            let row = syscache_seams::lookup_pg_collation_locale_row::call(mcx, indcollation)?
-                .unwrap_or_else(|| panic!("cache lookup failed for collation {indcollation}"));
+            // parse_utilcmd.c:2202 elog(ERROR, "cache lookup failed for
+            // collation %u") -- catchable XX000.
+            let Some(row) =
+                syscache_seams::lookup_pg_collation_locale_row::call(mcx, indcollation)?
+            else {
+                return Err(crate::cache_lookup_failed("collation", indcollation));
+            };
             qualified_name_list(mcx, row.collnamespace, &row.collname)?
         } else {
             NodeList::nil()
         };
         // get_opclass (parse_utilcmd.c:2207): NIL when default for the
         // datatype, else always schema-qualified.
-        let (opcname, opcnamespace, opcmethod) =
+        // parse_utilcmd.c:2229 elog(ERROR, "cache lookup failed for opclass
+        // %u") -- catchable XX000.
+        let Some((opcname, opcnamespace, opcmethod)) =
             syscache_seams::pg_opclass_name_namespace_method::call(indclass[keyno])?
-                .unwrap_or_else(|| {
-                    panic!("cache lookup failed for opclass {}", indclass[keyno])
-                });
+        else {
+            return Err(crate::cache_lookup_failed("opclass", indclass[keyno]));
+        };
         let opclass = if indclass[keyno]
             != indexcmds_seams::get_default_opclass::call(keycoltype, opcmethod)?
         {
@@ -901,8 +924,11 @@ fn index_reloptions_defelems<'mcx>(mcx: Mcx<'mcx>, index_id: Oid) -> PgResult<No
         None,
         core::slice::from_ref(&key),
     )?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {index_id}"));
+    // parse_utilcmd.c:1733 elog(ERROR, "cache lookup failed for relation %u")
+    // -- catchable XX000; abort-time release reclaims the scan and the lock.
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::cache_lookup_failed("relation", index_id));
+    };
     let mut isnull = false;
     // SAFETY: nullable text[] under pg_class's descriptor; decoded (strings
     // copied into mcx) before the scan ends.
@@ -935,8 +961,10 @@ fn read_indclass<'mcx>(mcx: Mcx<'mcx>, index_id: Oid, nkeys: usize) -> PgResult<
         None,
         core::slice::from_ref(&key),
     )?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for index {index_id}"));
+    // The INDEXRELID row C already holds; a miss is a catchable XX000.
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::cache_lookup_failed("index", index_id));
+    };
     let mut isnull = false;
     // SAFETY: NOT NULL plain-storage oidvector under pg_index's descriptor.
     let d = unsafe {
@@ -1061,8 +1089,11 @@ fn generateClonedExtStatsStmt<'mcx>(
         None,
         core::slice::from_ref(&key),
     )?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for statistics object {source_statsid}"));
+    // parse_utilcmd.c:2081 elog(ERROR, "cache lookup failed for statistics
+    // object %u") -- catchable XX000.
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::cache_lookup_failed("statistics object", source_statsid));
+    };
     let desc = rel.descr();
 
     let mut isnull = false;

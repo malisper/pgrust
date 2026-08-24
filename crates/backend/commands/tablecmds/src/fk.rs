@@ -398,7 +398,7 @@ fn at_add_foreign_key_constraint<'mcx>(
 
         let amid = lsyscache::get_opclass_method(opclasses[i])?;
         let (opfamily, opcintype) = lsyscache::get_opclass_opfamily_and_input_type(opclasses[i])?
-            .unwrap_or_else(|| panic!("cache lookup failed for opclass {}", opclasses[i]));
+            .ok_or_else(|| crate::cache_lookup_failed("opclass", opclasses[i]))?;
 
         // For a period FK the translation can fail if a non-matching
         // exclusion constraint was selected earlier (C keeps the check here).
@@ -496,9 +496,9 @@ fn at_add_foreign_key_constraint<'mcx>(
                     .expect("fk_attrs String")
                     .sval;
                 let fkcollname = lsyscache::get_collation_name(mcx, fkcoll)?
-                    .unwrap_or_else(|| panic!("cache lookup failed for collation {fkcoll}"));
+                    .ok_or_else(|| crate::cache_lookup_failed("collation", fkcoll))?;
                 let pkcollname = lsyscache::get_collation_name(mcx, pkcoll)?
-                    .unwrap_or_else(|| panic!("cache lookup failed for collation {pkcoll}"));
+                    .ok_or_else(|| crate::cache_lookup_failed("collation", pkcoll))?;
                 let e = err(
                     format!("foreign key constraint \"{conname}\" cannot be implemented"),
                     types_error::ERRCODE_COLLATION_MISMATCH,
@@ -766,7 +766,7 @@ fn add_fk_recurse_referencing<'mcx>(
         if let Some(wqueue) = wqueue {
             if !old_check_ok && !fkconstraint.skip_validation && fkconstraint.is_enforced {
                 let name = lsyscache::get_constraint_name(mcx, parent_constr)?
-                    .unwrap_or_else(|| panic!("cache lookup failed for constraint {parent_constr}"));
+                    .ok_or_else(|| crate::cache_lookup_failed("constraint", parent_constr))?;
                 let tabidx = crate::alter::ATGetQueueEntry(mcx, wqueue, rel);
                 wqueue[tabidx].fk_checks.push(FkValidateItem {
                     conname: str_in(mcx, name.as_str())?,
@@ -1052,7 +1052,7 @@ fn fetch_pg_index_fk_shape(indexoid: Oid) -> PgResult<PgIndexFkShape> {
     const Anum_indpred: i32 = 21;
 
     let tup = SearchSysCache1(INDEXRELID, SysCacheKey::Value(Datum::from_oid(indexoid)))?
-        .unwrap_or_else(|| panic!("cache lookup failed for index {indexoid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("index", indexoid))?;
     let get = |attno: i32| -> PgResult<(Datum, bool)> { SysCacheGetAttr(INDEXRELID, &tup, attno) };
     let req = |attno: i32| -> PgResult<Datum> {
         let (d, isnull) = get(attno)?;
@@ -1676,7 +1676,7 @@ pub(crate) fn read_fk_constraint<'mcx>(
         &keys,
     )?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for constraint {conoid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("constraint", conoid))?;
     let desc = con_rel.descr();
     let form = decode_fk_constraint_form(tup, desc);
     let arrays = pg_constraint::DeconstructFkConstraintRow(mcx, tup, desc)?;
@@ -2365,7 +2365,7 @@ fn clone_fk_referencing<'mcx>(
         // on ATTACH/DETACH.
         if fk.confrelid == part_rel.rd_id {
             let name = lsyscache::get_constraint_name(mcx, fk.conoid)?
-                .unwrap_or_else(|| panic!("cache lookup failed for constraint {}", fk.conoid));
+                .ok_or_else(|| crate::cache_lookup_failed("constraint", fk.conoid))?;
             return Err(err(
                 format!(
                     "cannot attach table \"{}\" as a partition because it is referenced by foreign key \"{}\"",

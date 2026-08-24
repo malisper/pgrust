@@ -173,3 +173,29 @@ fn multiple_default_opclasses(type_id: Oid) -> Box<PgError> {
             )),
     )
 }
+
+// Every one of these is `elog(ERROR, "cache lookup failed for <object> %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for index %u") -- a catchable XX000,
+    // not a backend abort.  These probes used to panic!(), killing the process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed("index", 16384);
+        assert_eq!(e.message(), "cache lookup failed for index 16384");
+        assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
+    }
+}

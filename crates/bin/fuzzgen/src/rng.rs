@@ -4,6 +4,14 @@
 
 pub struct Rng {
     s: [u64; 4],
+    /// Pure xoshiro stream even in `antithesis` builds. Decisions that MUST
+    /// be identical when re-derived independently — the xproto per-statement
+    /// protocol mode, computed separately on the A and B connections and
+    /// again by --replay/ddmin — cannot draw from the SDK entropy source:
+    /// each draw would be fresh randomness, so the two sides would plan
+    /// DIFFERENT modes for the same statement and manufacture phantom
+    /// text-vs-binary ROWSET_DIFFs (seen live in the 2026-08-21 soak).
+    pure: bool,
 }
 
 fn splitmix64(state: &mut u64) -> u64 {
@@ -24,11 +32,20 @@ impl Rng {
                 splitmix64(&mut sm),
                 splitmix64(&mut sm),
             ],
+            pure: false,
         }
     }
 
+    /// A stream that stays seed-deterministic in EVERY build, including
+    /// `antithesis` ones. Use for any decision that two independent
+    /// derivations must agree on (see the `pure` field).
+    pub fn new_pure(seed: u64) -> Rng {
+        let mut rng = Rng::new(seed);
+        rng.pure = true;
+        rng
+    }
+
     pub fn next_u64(&mut self) -> u64 {
-        #[cfg_attr(feature = "antithesis", allow(unused_variables))]
         let result = self.s[1]
             .wrapping_mul(5)
             .rotate_left(7)
@@ -49,7 +66,9 @@ impl Rng {
         // state above still advances so the feature changes no code shape;
         // --seed becomes provenance rather than the replay witness.
         #[cfg(feature = "antithesis")]
-        let result = antithesis_sdk::random::get_random();
+        if !self.pure {
+            return antithesis_sdk::random::get_random();
+        }
         result
     }
 

@@ -16,7 +16,7 @@ use types_core::{
     USER_MAPPING_RELATION_ID,
 };
 use types_error::{
-    PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR,
+    PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE, WARNING,
 };
 use types_nodes::list::NodeList;
@@ -815,7 +815,7 @@ fn user_mapping_ddl_aclcheck(umuserid: Oid, serverid: Oid, servername: &str) -> 
             SysCacheKey::Value(Datum::from_oid(serverid)),
         )?
         else {
-            panic!("cache lookup failed for foreign server {serverid}");
+            return Err(cache_lookup_failed("foreign server", serverid));
         };
         let owner =
             SysCacheGetAttrNotNull(FOREIGNSERVEROID, &tp, Anum_pg_foreign_server_srvowner)?
@@ -950,7 +950,7 @@ pub fn AlterUserMapping<'mcx>(
     user_mapping_ddl_aclcheck(use_id, srv.serverid, servername)?;
 
     let Some(tp) = user_mapping_lookup(use_id, srv.serverid)? else {
-        panic!("cache lookup failed for user mapping {um_id}");
+        return Err(cache_lookup_failed("user mapping", um_id));
     };
 
     let mut repl_val = [Datum::null(); Natts_pg_user_mapping];
@@ -1217,4 +1217,46 @@ pub fn init_seams() {
     foreigncmds_seams::pg_options_to_table::set(options::pg_options_to_table);
     pg_shdepend::alter_foreign_server_owner_oid::set(AlterForeignServerOwner_oid);
     pg_shdepend::alter_foreign_data_wrapper_owner_oid::set(AlterForeignDataWrapperOwner_oid);
+}
+
+// Every one of these is `elog(ERROR, "cache lookup failed for <object> %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
+// foreign.c:304 elog(ERROR, "cache lookup failed for attribute %d of relation %u").
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed_attribute(attnum: i16, relid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for attribute {attnum} of relation {relid}"
+    )))
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for foreign server %u") -- a
+    // catchable XX000, not a backend abort.  These probes used to panic!(),
+    // killing the process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed("foreign server", 16384);
+        assert_eq!(e.message(), "cache lookup failed for foreign server 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+
+        let e = cache_lookup_failed_attribute(3, 16384);
+        assert_eq!(e.message(), "cache lookup failed for attribute 3 of relation 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 }

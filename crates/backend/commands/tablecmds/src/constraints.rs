@@ -980,7 +980,7 @@ pub(crate) fn set_relation_num_checks<'mcx>(
         core::slice::from_ref(&key),
     )?;
     let reltup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {}", rel.rd_id));
+        .ok_or_else(|| crate::cache_lookup_failed("relation", rel.rd_id))?;
     let natts = relrel.descr().natts as usize;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
     let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;

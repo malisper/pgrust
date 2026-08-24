@@ -135,6 +135,14 @@ pub fn validOperatorName(name: &str) -> bool {
 }
 
 #[track_caller]
+// pg_operator.c:489 elog(ERROR, "cache lookup failed for operator %u") --
+// catchable, SQLSTATE XX000 (elog's default for ERROR), not a backend abort.
+#[cold]
+#[inline(never)]
+fn operator_lookup_failed(oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for operator {oid}")))
+}
+
 #[cold]
 fn invalid_operator_name(name: &str) -> Box<PgError> {
     err(ERRCODE_INVALID_NAME, format!("\"{name}\" is not a valid operator name"))
@@ -155,8 +163,9 @@ fn OperatorGet(
     if !OidIsValid(oid) {
         return Ok((InvalidOid, false));
     }
-    let shape = syscache_seams::lookup_pg_operator_shape::call(oid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for operator {oid}"));
+    let Some(shape) = syscache_seams::lookup_pg_operator_shape::call(oid)? else {
+        return Err(operator_lookup_failed(oid));
+    };
     Ok((oid, OidIsValid(shape.oprcode)))
 }
 
@@ -345,7 +354,7 @@ pub fn OperatorCreate(
         isUpdate = true;
         form.oid = operatorObjectId;
 
-        let oldtup = SearchSysCacheCopy(
+        let Some(oldtup) = SearchSysCacheCopy(
             mcx,
             OPEROID,
             SysCacheKey::Value(Datum::from_oid(operatorObjectId)),
@@ -353,7 +362,9 @@ pub fn OperatorCreate(
             SysCacheKey::UNUSED,
             SysCacheKey::UNUSED,
         )?
-        .unwrap_or_else(|| panic!("cache lookup failed for operator {operatorObjectId}"));
+        else {
+            return Err(operator_lookup_failed(operatorObjectId));
+        };
 
         let values = operator_values(&form);
         let nulls = [false; Natts_pg_operator];
@@ -690,6 +701,17 @@ pub fn makeOperatorDependencies(
 #[cfg(test)]
 mod tests {
     use super::validOperatorName;
+
+    // C reports this miss with elog(ERROR, "cache lookup failed for %s"),
+    // a catchable error carrying elog's default SQLSTATE for ERROR, XX000.
+    // pgrust used to panic!(), which aborts the backend.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = super::operator_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for operator 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 
     #[test]
     fn valid_operator_names() {

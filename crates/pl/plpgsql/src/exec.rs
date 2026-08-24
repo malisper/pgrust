@@ -3978,9 +3978,15 @@ impl<'a> Estate<'a> {
                 self.eval_ctx.mcx(),
                 funcexpr.funcid,
             )?
-            .unwrap_or_else(|| {
-                panic!("cache lookup failed for function {}", funcexpr.funcid)
-            });
+            // pl_exec.c:2324-2328 elog(ERROR, "cache lookup failed for
+            // function %u", funcexpr->funcid) -- catchable, SQLSTATE XX000
+            // (elog's default); it must not abort the backend.
+            .ok_or_else(|| {
+                exec_err(
+                    types_error::ERRCODE_INTERNAL_ERROR,
+                    format!("cache lookup failed for function {}", funcexpr.funcid),
+                )
+            })?;
 
             let mut varnos: Vec<Dno> = Vec::new();
             if let Some(argmodes) = &arrays.proargmodes {

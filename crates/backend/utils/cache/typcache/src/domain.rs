@@ -3,7 +3,7 @@ use std::rc::Rc;
 use lsyscache::TYPTYPE_DOMAIN;
 use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_nodes::Node;
 
 use crate::{
@@ -41,6 +41,19 @@ fn str_in(mcx: Mcx<'static>, s: &str) -> PgResult<&'static str> {
     Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
 }
 
+// typcache.c:1122-1124 elog(ERROR, "cache lookup failed for type %u", typeOid)
+// in load_domaintype_info's TYPEOID walk -- catchable, and elog's default
+// SQLSTATE at ERROR is already XX000, so no with_sqlstate belongs here.  C
+// never aborts the backend for this, so neither may we.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn type_lookup_failed(type_oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for type {type_oid}"
+    )))
+}
+
 pub(crate) fn load_domaintype_info(entry: &TypeCacheEntry) -> PgResult<()> {
     let mut type_oid = entry.type_id;
     let mut not_null = false;
@@ -48,8 +61,11 @@ pub(crate) fn load_domaintype_info(entry: &TypeCacheEntry) -> PgResult<()> {
     let mut constraints: Vec<DomainConstraintState> = Vec::new();
 
     loop {
+        // typcache.c:1122-1124 elog(ERROR, "cache lookup failed for type %u",
+        // typeOid) -- catchable, SQLSTATE XX000 (elog's default), not an
+        // abort.  Matches load_rangetype_info's arm in lib.rs.
         let Some(t) = syscache_seams::pg_type_domain_shape::call(type_oid)? else {
-            panic!("cache lookup failed for type {type_oid}");
+            return Err(type_lookup_failed(type_oid));
         };
         if t.typtype != TYPTYPE_DOMAIN {
             break;

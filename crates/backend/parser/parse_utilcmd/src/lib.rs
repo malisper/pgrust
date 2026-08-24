@@ -43,6 +43,34 @@ fn table_constraint_dispatch_error(contype: ConstrType) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg))
 }
 
+// C reports a vanished catalog row on these lanes with
+// `elog(ERROR, "cache lookup failed for <kind> %u", oid)`: a *catchable*
+// error whose default SQLSTATE is XX000 (ERRCODE_INTERNAL_ERROR), never a
+// backend abort.  pgrust used to panic!() at every one of these, which kills
+// the process instead of failing the statement.
+//
+// Note that a few of the callers below (get_namespace_name, get_rel_name,
+// get_tablespace_name) return NULL silently in C rather than elog'ing; pgrust
+// has no NULL-name lane for them, so they raise the same XX000 rather than
+// aborting.  Either way the backend survives.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(kind: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {kind} {oid}")))
+}
+
+// parse_relation.c:3446 shape: "cache lookup failed for attribute %d of
+// relation %u".
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed_attribute(attnum: i16, relid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for attribute {attnum} of relation {relid}"
+    )))
+}
+
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -130,7 +158,7 @@ fn typename_type_id_and_mod<'mcx>(
         let isdefined = match syscache_seams::pg_type_isdefined::call(tn.typeOid)? {
             Some(d) => d,
             // C LookupTypeNameExtended elogs on a vanished TYPEOID row.
-            None => panic!("cache lookup failed for type {}", tn.typeOid),
+            None => return Err(cache_lookup_failed("type", tn.typeOid)),
         };
         // C typenameTypeIdAndMod applies no typtype gate on the pre-resolved
         // lane (LIKE / OF type); column legality is CheckAttributeType's job.
@@ -156,7 +184,7 @@ fn typename_type_id_and_mod<'mcx>(
         }
         let isdefined = match syscache_seams::pg_type_isdefined::call(typoid)? {
             Some(d) => d,
-            None => panic!("cache lookup failed for type {typoid}"),
+            None => return Err(cache_lookup_failed("type", typoid)),
         };
         // C order: typenameTypeMod (inside LookupTypeNameExtended) before
         // typenameType's shell check.
@@ -310,7 +338,7 @@ pub fn typenameTypeId<'mcx>(
         let isdefined = match syscache_seams::pg_type_isdefined::call(tn.typeOid)? {
             Some(d) => d,
             // C LookupTypeNameExtended elogs on a vanished TYPEOID row.
-            None => panic!("cache lookup failed for type {}", tn.typeOid),
+            None => return Err(cache_lookup_failed("type", tn.typeOid)),
         };
         // C LookupTypeNameExtended validates typmod decoration even though
         // this caller discards the value, and does so BEFORE typenameType's
@@ -332,7 +360,7 @@ pub fn typenameTypeId<'mcx>(
         }
         let isdefined = match syscache_seams::pg_type_isdefined::call(typoid)? {
             Some(d) => d,
-            None => panic!("cache lookup failed for type {typoid}"),
+            None => return Err(cache_lookup_failed("type", typoid)),
         };
         // C order: typenameTypeMod (inside LookupTypeNameExtended) before
         // typenameType's shell check.
@@ -395,7 +423,7 @@ pub fn LookupTypeNameOidExtended<'mcx>(
             // unported, so raise the typenameType-shaped error cleanly.
             Some(false) => return Err(type_is_only_a_shell(&typeNameToString(tn)?)),
             // C LookupTypeNameExtended elogs on a vanished TYPEOID row.
-            None => panic!("cache lookup failed for type {}", tn.typeOid),
+            None => return Err(cache_lookup_failed("type", tn.typeOid)),
         }
         return Ok(tn.typeOid);
     }
@@ -415,7 +443,7 @@ pub fn LookupTypeNameOidExtended<'mcx>(
             Some(true) => {}
             // unported: same shell-type USE divergence as the lanes above.
             Some(false) => return Err(type_is_only_a_shell(&typeNameToString(tn)?)),
-            None => panic!("cache lookup failed for type {typoid}"),
+            None => return Err(cache_lookup_failed("type", typoid)),
         }
         return Ok(typoid);
     }
@@ -676,8 +704,9 @@ pub fn typenameTypeMod<'mcx>(
 
     // C fetched the TYPEOID tuple before typenameTypeMod ran; a vanished row
     // is LookupTypeNameExtended's "cache lookup failed" elog.
-    let io = syscache_seams::pg_type_io_shape::call(typoid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {typoid}"));
+    let Some(io) = syscache_seams::pg_type_io_shape::call(typoid)? else {
+        return Err(cache_lookup_failed("type", typoid));
+    };
     // Both messages render TypeNameToString in C (format_type_be for a
     // pre-resolved TypeName, plus the %TYPE / [] decorations).
     if !io.typisdefined {
@@ -1833,10 +1862,13 @@ pub fn transformCreateStmt<'mcx>(
         && adjusted_persistence != types_core::RELPERSISTENCE_TEMP;
     let relation = if qualify || adjusted_persistence != relation.relpersistence {
         let schemaname = if qualify {
-            Some(leak_str(
-                lsyscache::get_namespace_name(mcx, nspid)?
-                    .unwrap_or_else(|| panic!("cache lookup failed for namespace {nspid}")),
-            ))
+            // C parse_utilcmd.c:224 takes get_namespace_name's NULL silently;
+            // pgrust has no NULL-schemaname lane, so raise elog's catchable
+            // XX000 rather than aborting the backend.
+            let Some(nsp) = lsyscache::get_namespace_name(mcx, nspid)? else {
+                return Err(cache_lookup_failed("namespace", nspid));
+            };
+            Some(leak_str(nsp))
         } else {
             relation.schemaname
         };
@@ -2815,8 +2847,12 @@ fn pg_index_vectors<'mcx>(
     let key = catalog_oid_key(1, indexoid);
     let mut scan =
         genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for index {indexoid}"));
+    // C's INDEXRELID probe elog(ERROR)s on a miss -- catchable XX000.  Abort-
+    // time resource release reclaims the scan and the pg_index lock, exactly
+    // as it already does for the `?` on systable_getnext itself.
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(cache_lookup_failed("index", indexoid));
+    };
     let desc = pg_index.descr();
     let vector_image = |attnum: usize| {
         let mut isnull = false;
@@ -2864,8 +2900,9 @@ fn index_attoptions_set(mcx: Mcx<'_>, relid: Oid, attnum: i16) -> PgResult<bool>
         None,
         &[key1, key2],
     )?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for attribute {attnum} of relation {relid}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(cache_lookup_failed_attribute(attnum, relid));
+    };
     let mut isnull = false;
     // SAFETY: attoptions under pg_attribute's descriptor; null checked.
     let _ = unsafe {
@@ -2982,10 +3019,10 @@ pub(crate) fn generateSerialExtraStmts<'mcx>(
         Some(r) => r.rd_rel.relnamespace,
         None => RangeVarGetCreationNamespace(mcx, relation)?,
     };
-    let snamespace_default = leak_str(
-        lsyscache::get_namespace_name(mcx, snamespaceid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for namespace {snamespaceid}")),
-    );
+    let Some(snamespace_default) = lsyscache::get_namespace_name(mcx, snamespaceid)? else {
+        return Err(cache_lookup_failed("namespace", snamespaceid));
+    };
+    let snamespace_default = leak_str(snamespace_default);
     let relname = relation.relname.expect("RangeVar.relname");
     let colname = column_node
         .as_variant::<ColumnDef>()
@@ -3410,14 +3447,14 @@ pub fn transformAlterTableCmd<'mcx>(
             let seq_relid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attnum as i32, true)?;
             if seq_relid != InvalidOid {
                 let snamespaceid = lsyscache::get_rel_namespace(seq_relid)?;
-                let snamespace = leak_str(
-                    lsyscache::get_namespace_name(mcx, snamespaceid)?
-                        .unwrap_or_else(|| panic!("cache lookup failed for namespace {snamespaceid}")),
-                );
-                let sname = leak_str(
-                    lsyscache::get_rel_name(mcx, seq_relid)?
-                        .unwrap_or_else(|| panic!("cache lookup failed for relation {seq_relid}")),
-                );
+                let Some(snamespace) = lsyscache::get_namespace_name(mcx, snamespaceid)? else {
+                    return Err(cache_lookup_failed("namespace", snamespaceid));
+                };
+                let snamespace = leak_str(snamespace);
+                let Some(sname) = lsyscache::get_rel_name(mcx, seq_relid)? else {
+                    return Err(cache_lookup_failed("relation", seq_relid));
+                };
+                let sname = leak_str(sname);
                 let mut seq_rv = RangeVar::default();
                 seq_rv.schemaname = Some(snamespace);
                 seq_rv.relname = Some(sname);
@@ -3463,16 +3500,15 @@ pub fn transformAlterTableCmd<'mcx>(
                         .expect("TypeName");
                     let (type_oid, _) = typenameTypeIdAndMod(mcx, None, tn)?;
                     let snamespaceid = lsyscache::get_rel_namespace(seq_relid)?;
-                    let snamespace = leak_str(
-                        lsyscache::get_namespace_name(mcx, snamespaceid)?.unwrap_or_else(
-                            || panic!("cache lookup failed for namespace {snamespaceid}"),
-                        ),
-                    );
-                    let sname = leak_str(
-                        lsyscache::get_rel_name(mcx, seq_relid)?.unwrap_or_else(|| {
-                            panic!("cache lookup failed for relation {seq_relid}")
-                        }),
-                    );
+                    let Some(snamespace) = lsyscache::get_namespace_name(mcx, snamespaceid)?
+                    else {
+                        return Err(cache_lookup_failed("namespace", snamespaceid));
+                    };
+                    let snamespace = leak_str(snamespace);
+                    let Some(sname) = lsyscache::get_rel_name(mcx, seq_relid)? else {
+                        return Err(cache_lookup_failed("relation", seq_relid));
+                    };
+                    let sname = leak_str(sname);
                     let mut seq_rv = RangeVar::default();
                     seq_rv.schemaname = Some(snamespace);
                     seq_rv.relname = Some(sname);
@@ -3677,6 +3713,43 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // parse_type.c:209/584 (type), parse_utilcmd.c:1733/1744/1809/1844/2081/
+    // 2202/2229 and parse_relation.c:3446 all report a vanished catalog row
+    // with elog(ERROR, "cache lookup failed for <kind> %u"): a *catchable*
+    // error whose default SQLSTATE is XX000 (ERRCODE_INTERNAL_ERROR).  pgrust
+    // used to panic!() at each of these, aborting the whole backend instead of
+    // failing the statement.
+    #[test]
+    fn cache_lookup_failures_are_catchable_xx000() {
+        for (kind, oid, want) in [
+            ("type", 0u32, "cache lookup failed for type 0"),
+            ("namespace", 2200u32, "cache lookup failed for namespace 2200"),
+            ("relation", 16384u32, "cache lookup failed for relation 16384"),
+            ("index", 16385u32, "cache lookup failed for index 16385"),
+            ("sequence", 16386u32, "cache lookup failed for sequence 16386"),
+            ("access method", 403u32, "cache lookup failed for access method 403"),
+            ("tablespace", 1663u32, "cache lookup failed for tablespace 1663"),
+            ("operator", 96u32, "cache lookup failed for operator 96"),
+            ("collation", 100u32, "cache lookup failed for collation 100"),
+            ("opclass", 1978u32, "cache lookup failed for opclass 1978"),
+            (
+                "statistics object",
+                16387u32,
+                "cache lookup failed for statistics object 16387",
+            ),
+        ] {
+            let e = cache_lookup_failed(kind, oid);
+            assert_eq!(e.message(), want);
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.level(), ERROR);
+        }
+
+        let e = cache_lookup_failed_attribute(3, 16384);
+        assert_eq!(e.message(), "cache lookup failed for attribute 3 of relation 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
+    }
 
     fn ctx() -> &'static mcx::MemoryContext {
         Box::leak(Box::new(mcx::MemoryContext::new("utilcmd-test")))

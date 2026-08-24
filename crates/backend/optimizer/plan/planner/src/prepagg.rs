@@ -54,8 +54,12 @@ fn agg_args_support_sendreceive(aggref: &Aggref<'_>) -> PgResult<bool> {
         if argtype == RECORDOID {
             return Ok(false);
         }
-        let ts = syscache_seams::pg_type_io_shape::call(argtype)?
-            .unwrap_or_else(|| panic!("cache lookup failed for type {argtype}"));
+        // C's agg_args_support_sendreceive reads the TYPEOID row via
+        // get_type_io_data, whose miss is elog(ERROR, "cache lookup failed for
+        // type %u") -- catchable XX000, not an abort.
+        let Some(ts) = syscache_seams::pg_type_io_shape::call(argtype)? else {
+            return Err(crate::cache_lookup_failed("type", argtype));
+        };
         if !ts.typbyval && (ts.typsend == 0 || ts.typreceive == 0) {
             return Ok(false);
         }
@@ -334,10 +338,11 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
     let aggref = node.as_aggref().expect("Aggref");
     debug_assert!(aggref.agglevelsup == 0);
 
-    let shape = syscache_seams::lookup_pg_aggregate_shape::call(aggref.aggfnoid)?
-        .unwrap_or_else(|| {
-            panic!("cache lookup failed for aggregate {}", aggref.aggfnoid)
-        });
+    // prepagg.c:152 elog(ERROR, "cache lookup failed for aggregate %u") --
+    // catchable XX000, not a backend abort.
+    let Some(shape) = syscache_seams::lookup_pg_aggregate_shape::call(aggref.aggfnoid)? else {
+        return Err(crate::cache_lookup_failed("aggregate", aggref.aggfnoid));
+    };
 
     let aggtranstype = resolve_aggregate_transtype(
         mcx,
@@ -360,7 +365,9 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
 
     let (init_value, init_value_is_null) =
         match syscache_seams::pg_aggregate_agginitval::call(mcx, aggref.aggfnoid)? {
-            None => panic!("cache lookup failed for aggregate {}", aggref.aggfnoid),
+            // Same AGGFNOID row C already holds; a miss is prepagg.c:152's
+            // catchable elog(ERROR).
+            None => return Err(crate::cache_lookup_failed("aggregate", aggref.aggfnoid)),
             Some(None) => (datum::Datum::null(), true),
             Some(Some(text)) => (get_agg_init_val(mcx, &text, aggtranstype)?, false),
         };

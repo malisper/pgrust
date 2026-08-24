@@ -2175,8 +2175,14 @@ pub fn TerminateOtherDBBackends(databaseId: types_core::Oid) -> PgResult<()> {
     LWLockRelease(ProcArrayLock())?;
 
     if nprepared > 0 {
+        // C procarray.c:3858 interpolates get_database_name(databaseId)
+        // straight into errmsg("database \"%s\" is being used ..."), with no
+        // NULL check: a DATABASEOID miss makes pg's snprintf substitute
+        // "(null)" (port/snprintf.c:440) and the ereport still raises its
+        // normal catchable 55006.  pgrust panicked instead, which aborts the
+        // backend -- strictly worse and not what C does.
         let dbname = dbcommands_seams::get_database_name::call(databaseId)?
-            .unwrap_or_else(|| panic!("cache lookup failed for database {databaseId}"));
+            .unwrap_or_else(|| "(null)".to_string());
         return Err(elog::ereport(types_error::ERROR)
             .errcode(types_error::ERRCODE_OBJECT_IN_USE)
             .errmsg(format!(

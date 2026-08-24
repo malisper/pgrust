@@ -446,6 +446,20 @@ impl ParkLot {
         let (g2, _res) =
             self.cv.wait_timeout(g, timeout).unwrap_or_else(|e| e.into_inner());
         self.legacy_parked.fetch_sub(1, atomic::Ordering::SeqCst);
+        // Antithesis steering, wake edge. The ENTRY probe above can only
+        // witness an interrupt that was ALREADY pending when the parker
+        // arrived — a cancel that lands *while* the thread sits in the bounded
+        // wait is exactly the #1512 shape and is invisible from there. In run
+        // 140a0520b7308023a0ba4829c24ea6cb-59-13 the entry probe held 0 times
+        // across 237 evaluations, while `park`'s wake-edge sibling held 7
+        // times, so the wake edge is the sampling point that actually
+        // witnesses interrupt delivery. Distinct property id: assertion ids
+        // must be unique per callsite for cataloging.
+        #[cfg(feature = "antithesis")]
+        antithesis_sdk::assert_sometimes!(
+            antithesis_probe::interrupt_pending(),
+            "pgrust: interrupt observed leaving ParkLot timed wait"
+        );
         drop(g2);
     }
 

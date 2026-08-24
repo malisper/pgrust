@@ -75,6 +75,23 @@ use crate::run::PlannerRun;
 use crate::setrefs::set_plan_references;
 use crate::subquery::subquery_planner;
 
+// C reports a vanished catalog row on these planner lanes with
+// `elog(ERROR, "cache lookup failed for <kind> %u", oid)` -- a *catchable*
+// error whose default SQLSTATE is XX000 (ERRCODE_INTERNAL_ERROR), never a
+// backend abort.  pgrust used to panic!() at each of these, killing the
+// process instead of failing the statement.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(
+    kind: &str,
+    oid: types_core::Oid,
+) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for {kind} {oid}"
+    )))
+}
+
 const PROPARALLEL_UNSAFE: i8 = b'u' as i8;
 
 const PGJIT_PERFORM: i32 = 1 << 0;

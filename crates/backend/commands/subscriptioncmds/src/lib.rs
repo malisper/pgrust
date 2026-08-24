@@ -814,6 +814,20 @@ fn CheckAlterSubOption(
     Ok(())
 }
 
+// Every one of these is `elog(ERROR, "cache lookup failed for subscription oid
+// %u", oid)` in C (tablesync.c:1809, UpdateTwoPhaseState): a catchable error
+// whose SQLSTATE is elog's default XX000 / ERRCODE_INTERNAL_ERROR, never a
+// backend abort.  pgrust used to panic!() at this probe, which kills the
+// process instead.  The literal "oid" in the message is verbatim C.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for subscription oid {oid}"
+    )))
+}
+
 // UpdateTwoPhaseState (subscriptioncmds.c): note the changed two-phase state
 // of a subscription in pg_subscription.
 pub fn UpdateTwoPhaseState(mcx: Mcx<'_>, suboid: Oid, new_state: u8) -> PgResult<()> {
@@ -833,7 +847,7 @@ pub fn UpdateTwoPhaseState(mcx: Mcx<'_>, suboid: Oid, new_state: u8) -> PgResult
         SysCacheKey::UNUSED,
     )?
     else {
-        panic!("cache lookup failed for subscription oid {suboid}");
+        return Err(cache_lookup_failed(suboid));
     };
 
     let mut values = [Datum::null(); Natts_pg_subscription];
@@ -1577,4 +1591,20 @@ fn CheckSubscriptionRelkind(relkind: u8, nspname: &str, relname: &str) -> PgResu
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for subscription oid %u") -- a
+    // catchable XX000, not a backend abort.  This probe used to panic!(),
+    // killing the process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for subscription oid 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 }

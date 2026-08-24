@@ -28,7 +28,7 @@ use types_storage::storage::ProcSignalBarrierType;
 use types_tuple::{HeapTupleData, NameData};
 
 use crate::{
-    errdetail_busy_db, get_db_info, have_createdb_privilege, loc, name_key,
+    cache_lookup_failed, errdetail_busy_db, get_db_info, have_createdb_privilege, loc, name_key,
     GLOBALTABLESPACE_OID, TableSpaceRelationId, XLOG_DBASE_CREATE_FILE_COPY, XLOG_DBASE_DROP,
 };
 
@@ -115,7 +115,7 @@ pub fn RenameDatabase(mcx: Mcx<'_>, oldname: &str, newname: &str) -> PgResult<Oi
     let mut scan =
         genam::systable_beginscan(mcx, &rel, DatabaseNameIndexId, true, None, &[key])?;
     let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
-        panic!("cache lookup failed for database {db_id}");
+        return Err(cache_lookup_failed("database", db_id));
     };
     let otid = tup.t_self;
     lmgr::LockTuple(&rel, &otid, InplaceUpdateTupleLock)?;

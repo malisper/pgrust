@@ -66,6 +66,14 @@ fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
 }
 
+// pg_aggregate.c:252/:296/:341 elog(ERROR, "cache lookup failed for function
+// %u") -- catchable, SQLSTATE XX000 (elog's default for ERROR), not an abort.
+#[cold]
+#[inline(never)]
+fn function_lookup_failed(fnoid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for function {fnoid}")))
+}
+
 pub struct AggregateCreateArgs<'a, 'mcx> {
     pub agg_name: &'a str,
     pub agg_namespace: Oid,
@@ -227,7 +235,7 @@ pub fn AggregateCreate<'mcx>(
 
     let proc_shape = |fnoid: Oid| {
         syscache_seams::lookup_pg_proc_shape::call(fnoid)
-            .map(|s| s.unwrap_or_else(|| panic!("cache lookup failed for function {fnoid}")))
+            .and_then(|s| s.ok_or_else(|| function_lookup_failed(fnoid)))
     };
 
     // A strict transfn with NULL initval seeds the state from the first
@@ -757,8 +765,9 @@ fn lookup_agg_function<'mcx>(
     if !OidIsValid(fnOid) {
         return Err(not_found(input_types)?);
     }
-    let shape = syscache_seams::lookup_pg_proc_shape::call(fnOid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {fnOid}"));
+    let Some(shape) = syscache_seams::lookup_pg_proc_shape::call(fnOid)? else {
+        return Err(function_lookup_failed(fnOid));
+    };
     // Only a plain function yields FUNCDETAIL_NORMAL; any other prokind
     // errors as nonexistent, exactly like C's fdresult check.
     if shape.prokind != b'f' as i8 {
@@ -837,6 +846,17 @@ fn name_parts<'a, 'mcx>(names: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C reports this miss with elog(ERROR, "cache lookup failed for function
+    // %u") (pg_aggregate.c:252/:296/:341) -- catchable, level ERROR, SQLSTATE
+    // XX000.  pgrust used to panic!(), which aborts the backend.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = function_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for function 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 
     #[test]
     fn constants_match_pg_headers() {

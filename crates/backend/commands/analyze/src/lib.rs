@@ -1237,6 +1237,17 @@ fn examine_attribute<'mcx>(
     Ok(Some(stats))
 }
 
+// Every one of these is `elog(ERROR, "cache lookup failed for type %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for type {oid}")))
+}
+
 // examine_expression (extended_stats.c): VacAttrStats typed from the
 // expression tree; attstattarget comes from the statistics object.
 fn examine_expression<'mcx>(
@@ -1248,7 +1259,7 @@ fn examine_expression<'mcx>(
     let attcollid = nodes_core::node_funcs::expr_collation(expr);
     let typanalyze = syscache_seams::pg_type_typanalyze::call(atttypid)?;
     let ty = syscache_seams::lookup_pg_type_shape::call(atttypid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for type {atttypid}"));
+        .ok_or_else(|| cache_lookup_failed(atttypid))?;
 
     let mut stats = VacAttrStats {
         tupattnum: 0,
@@ -3320,5 +3331,20 @@ mod sample_positions_tests {
         }
         // Large-N shape: skips are long relative to RGs.
         check(&[(0, 65_536); 32].iter().enumerate().map(|(i, &(_, n))| (i as u32, n)).collect::<Vec<_>>().as_slice(), 100, 12);
+    }
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::cache_lookup_failed;
+
+    // C: elog(ERROR, "cache lookup failed for type %u") -- a catchable XX000,
+    // not a backend abort.  These probes used to panic!(), killing the process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for type 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
     }
 }

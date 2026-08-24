@@ -117,6 +117,27 @@ fn reject_temp_in_security_restricted(relpersistence: u8) -> PgResult<()> {
     Ok(())
 }
 
+// Every one of these is `elog(ERROR, "cache lookup failed for <object> %u", oid)`
+// in C (tablecmds.c and friends): a catchable error whose SQLSTATE is elog's
+// default XX000 / ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used
+// to panic!() at these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
+// tablecmds.c:7875 / :14193 elog(ERROR, "cache lookup failed for attribute %d of relation %u").
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed_attribute(attnum: AttrNumber, relid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for attribute {attnum} of relation {relid}"
+    )))
+}
+
 // makeObjectName/namestrcpy truncation: silent, multibyte-aware.
 pub(crate) fn truncate_name<'a, 'mcx>(mcx: Mcx<'mcx>, name: &'a str) -> PgResult<&'a str> {
     if name.len() < NAMEDATALEN as usize {
@@ -1286,6 +1307,29 @@ mod define_relation_error_tests {
         miscinit::SetUserIdAndSecContext(uid, ctx);
 
         assert!(reject_temp_in_security_restricted(types_core::RELPERSISTENCE_TEMP).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for relation %u") -- a catchable
+    // XX000, not a backend abort.  These probes used to panic!(), killing the
+    // process; the whole family now returns PgError.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed("relation", 16384);
+        assert_eq!(e.message(), "cache lookup failed for relation 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
+
+        let e = cache_lookup_failed_attribute(3, 16384);
+        assert_eq!(
+            e.message(),
+            "cache lookup failed for attribute 3 of relation 16384"
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 }
 

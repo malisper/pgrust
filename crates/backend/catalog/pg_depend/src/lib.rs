@@ -851,9 +851,23 @@ fn describe_object(mcx: Mcx<'_>, object: &ObjectAddress) -> PgResult<String> {
     .expect("missing_ok=false"))
 }
 
+// C reads the name with get_extension_name() (extension.c:210) and feeds the
+// result straight to errmsg %s, so a concurrently-dropped extension yields no
+// error of its own there.  pgrust panicked, aborting the backend; raise the
+// house cache-lookup XX000 instead so the worst case stays catchable.
+#[cold]
+#[inline(never)]
+fn extension_lookup_failed(ext_oid: Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for extension {ext_oid}"
+    )))
+}
+
 fn extension_name_or_lookup_fail(ext_oid: Oid) -> PgResult<String> {
-    Ok(extension_seams::get_extension_name::call(ext_oid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for extension {ext_oid}")))
+    let Some(name) = extension_seams::get_extension_name::call(ext_oid)? else {
+        return Err(extension_lookup_failed(ext_oid));
+    };
+    Ok(name)
 }
 
 pub fn checkMembershipInCurrentExtension(mcx: Mcx<'_>, object: &ObjectAddress) -> PgResult<()> {
@@ -1289,6 +1303,17 @@ mod tests {
     use super::*;
     use mcx::MemoryContext;
     use types_nodes::Node;
+
+    // C reports this miss with elog(ERROR, "cache lookup failed for %s"),
+    // a catchable error carrying elog's default SQLSTATE for ERROR, XX000.
+    // pgrust used to panic!(), which aborts the backend.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = extension_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for extension 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 
     const REGCONFIG: Oid = 3734;
     const REGDICTIONARY: Oid = 3769;

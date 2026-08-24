@@ -203,3 +203,16 @@ fn create_range_bounds_assigns_default_last() {
     assert_eq!(info.default_index, 1);
     assert_eq!(mapping, vec![0, 1]);
 }
+
+// partbounds.c:4315-4317 probes RELOID for each partition of the default
+// partition's parent and reports a miss with
+// elog(ERROR, "cache lookup failed for relation %u", inhrelid) -- catchable,
+// SQLSTATE XX000, transaction-scoped.  pgrust's read_boundspec_opt panicked
+// instead, taking the backend down.
+#[test]
+fn boundspec_cache_lookup_failure_is_a_catchable_xx000() {
+    let e = crate::qual::cache_lookup_failed(16384);
+    assert_eq!(e.message(), "cache lookup failed for relation 16384");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.level(), types_error::ERROR);
+}

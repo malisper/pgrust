@@ -391,3 +391,22 @@ fn deparse_too_many_arguments_is_ereport_54023() {
     assert_eq!(err.sqlstate(), ERRCODE_TOO_MANY_ARGUMENTS);
     assert_eq!(err.message(), "too many arguments");
 }
+
+// The tablespace probes in pg_get_indexdef_worker / pg_get_constraintdef and
+// the ON CONSTRAINT probe in get_insert_query_def used to panic!.  C reports
+// the constraint miss with elog(ERROR, "cache lookup failed for constraint
+// %u") (ruleutils.c:7115) and dereferences get_tablespace_name's result
+// unchecked; either way it never aborts the backend, so both are catchable
+// XX000 here.
+#[test]
+fn ruleutils_cache_lookup_failures_are_catchable_xx000() {
+    for (what, oid, expected) in [
+        ("tablespace", 1663u32, "cache lookup failed for tablespace 1663"),
+        ("constraint", 16384, "cache lookup failed for constraint 16384"),
+    ] {
+        let e = cache_lookup_failed(what, oid);
+        assert_eq!(e.message(), expected);
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
+}

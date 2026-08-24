@@ -25,7 +25,9 @@ use crate::deparse::{
     append_context_keyword, get_const_expr, get_rule_expr, get_variable, remove_trailing_spaces,
     DeparseContext, PRETTYINDENT_JOIN, PRETTYINDENT_STD, PRETTYINDENT_VAR,
 };
-use crate::{gap, generate_operator_name, generate_relation_name, quote_identifier};
+use crate::{
+    cache_lookup_failed, gap, generate_operator_name, generate_relation_name, quote_identifier,
+};
 
 const NAMEDATALEN: usize = 64;
 
@@ -1100,10 +1102,11 @@ fn get_insert_query_def<'mcx>(
                 ctx.varprefix = save_varprefix;
             }
         } else if confl.constraint != types_core::InvalidOid {
+            // ruleutils.c:7113-7116 elog(ERROR, "cache lookup failed for
+            // constraint %u", confl->constraint) -- catchable XX000 (elog's
+            // default at ERROR), never a backend abort.
             let constraint = lsyscache::get_constraint_name(ctx.mcx, confl.constraint)?
-                .unwrap_or_else(|| {
-                    panic!("cache lookup failed for constraint {}", confl.constraint)
-                });
+                .ok_or_else(|| cache_lookup_failed("constraint", confl.constraint))?;
             ctx.buf.push_str(&format!(
                 " ON CONSTRAINT {}",
                 quote_identifier(constraint.as_str())

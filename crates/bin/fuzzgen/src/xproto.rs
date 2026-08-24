@@ -496,7 +496,10 @@ pub fn plan_mode(xseed: u64, sql: &str) -> Mode {
             result_binary: true,
         });
     }
-    let mut rng = Rng::new(xseed ^ XPROTO_DOMAIN ^ fnv64(sql));
+    // new_pure: the mode MUST re-derive identically on the A and B
+    // connections and under --replay/ddmin (the determinism law above), so
+    // it can never draw from the SDK entropy source in antithesis builds.
+    let mut rng = Rng::new_pure(xseed ^ XPROTO_DOMAIN ^ fnv64(sql));
     if rng.chance(1, 2) {
         return Mode::Simple;
     }

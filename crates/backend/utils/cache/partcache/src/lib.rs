@@ -201,11 +201,14 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
         with_state(|st| st.callbacks_registered = true);
     }
 
+    // partcache.c:97-99 elog(ERROR, "cache lookup failed for partition key of
+    // relation %u") -- catchable, SQLSTATE XX000 (elog's default level
+    // mapping), never a backend abort.
     let tuple = cache_syscache::SearchSysCache1(
         PARTRELID,
         cache_syscache::SysCacheKey::Value(Datum::from_oid(relid)),
     )?
-    .unwrap_or_else(|| panic!("cache lookup failed for partition key of relation {relid}"));
+    .ok_or_else(|| partition_key_lookup_failed(relid))?;
 
     let mcx = with_state(|st| st.mcx);
     let (strategy, partnatts);
@@ -323,7 +326,8 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
             CLAOID,
             cache_syscache::SysCacheKey::Value(Datum::from_oid(partclass[i])),
         )?
-        .unwrap_or_else(|| panic!("cache lookup failed for opclass {}", partclass[i]));
+        // partcache.c:201-202 elog(ERROR, "cache lookup failed for opclass %u").
+        .ok_or_else(|| opclass_lookup_failed(partclass[i]))?;
         // pg_opclass: opcname attnum 3, opcfamily attnum 6, opcintype attnum 7.
         let opcname_d = cache_syscache::SysCacheGetAttrNotNull(CLAOID, &opclasstup, 3)?;
         // SAFETY: NAME attribute datum points at a NUL-terminated NameData.
@@ -373,6 +377,28 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
     let key = Rc::new(key);
     with_state(|st| st.keys.insert(relid, Rc::clone(&key)));
     Ok(key)
+}
+
+// partcache.c:97 elog(ERROR, "cache lookup failed for partition key of
+// relation %u").  elog's default SQLSTATE at ERROR is XX000
+// (ERRCODE_INTERNAL_ERROR), so no explicit with_sqlstate is wanted here.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn partition_key_lookup_failed(relid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for partition key of relation {relid}"
+    )))
+}
+
+// partcache.c:202 elog(ERROR, "cache lookup failed for opclass %u").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn opclass_lookup_failed(opclass: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for opclass {opclass}"
+    )))
 }
 
 #[track_caller]

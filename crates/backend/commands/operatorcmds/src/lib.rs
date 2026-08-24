@@ -37,6 +37,17 @@ fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
 }
 
+// Every one of these is `elog(ERROR, "cache lookup failed for <object> %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
 fn typename_type_id(mcx: Mcx<'_>, tn: &TypeName<'_>) -> PgResult<Oid> {
     parse_utilcmd::LookupTypeNameOid(mcx, tn)
 }
@@ -348,7 +359,7 @@ pub fn RemoveOperatorById(mcx: Mcx<'_>, operOid: Oid) -> PgResult<()> {
     let rel = table::table_open(mcx, OPERATOR_RELATION_ID, RowExclusiveLock)?;
 
     let fetch = || {
-        Ok::<_, Box<types_error::PgError>>(SearchSysCacheCopy(
+        SearchSysCacheCopy(
             mcx,
             OPEROID,
             SysCacheKey::Value(Datum::from_oid(operOid)),
@@ -356,7 +367,7 @@ pub fn RemoveOperatorById(mcx: Mcx<'_>, operOid: Oid) -> PgResult<()> {
             SysCacheKey::UNUSED,
             SysCacheKey::UNUSED,
         )?
-        .unwrap_or_else(|| panic!("cache lookup failed for operator {operOid}")))
+        .ok_or_else(|| cache_lookup_failed("operator", operOid))
     };
 
     let mut tup = fetch()?;
@@ -397,7 +408,7 @@ pub fn AlterOperator<'mcx>(
         SysCacheKey::UNUSED,
         SysCacheKey::UNUSED,
     )?
-    .unwrap_or_else(|| panic!("cache lookup failed for operator {oprId}"));
+    .ok_or_else(|| cache_lookup_failed("operator", oprId))?;
     let oprForm = form_of_tuple(&catalog, tup.as_tuple());
 
     let mut restrictionName: Option<&NodeList<'mcx>> = None;

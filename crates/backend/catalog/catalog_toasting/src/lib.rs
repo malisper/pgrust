@@ -30,6 +30,14 @@ fn unported(what: &str) -> ! {
     panic!("unported: toasting.c {what}")
 }
 
+// toasting.c:342/:362 elog(ERROR, "cache lookup failed for relation %u") --
+// catchable, SQLSTATE XX000 (elog's default for ERROR), not a backend abort.
+#[cold]
+#[inline(never)]
+fn relation_lookup_failed(relOid: types_core::Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!("cache lookup failed for relation {relOid}")))
+}
+
 pub fn NewRelationCreateToastTable<'mcx>(
     mcx: Mcx<'mcx>,
     relOid: Oid,
@@ -214,8 +222,9 @@ fn create_toast_table<'mcx>(
             None,
             core::slice::from_ref(&key),
         )?;
-        let reltup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {relOid}"));
+        let Some(reltup) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(relation_lookup_failed(relOid));
+        };
         let natts = class_rel.descr().natts as usize;
         let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
         let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;

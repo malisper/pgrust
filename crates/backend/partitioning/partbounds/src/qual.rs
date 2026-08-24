@@ -519,6 +519,18 @@ pub fn read_boundspec<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<&'mcx Partit
         .unwrap_or_else(|| panic!("missing relpartbound for relation {relid}")))
 }
 
+// partbounds.c:4317 `elog(ERROR, "cache lookup failed for relation %u")` on
+// the RELOID miss (get_qual_for_range's default-partition arm). elog's
+// default SQLSTATE is XX000 and the error is catchable -- C never aborts the
+// backend here, so neither may we.
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(relid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for relation {relid}"
+    )))
+}
+
 // NULL relpartbound is legal: index partitions carry relispartition without
 // a bound (C generate_partition_qual reads the attr with isnull).
 pub fn read_boundspec_opt<'mcx>(
@@ -529,7 +541,7 @@ pub fn read_boundspec_opt<'mcx>(
         RELOID,
         cache_syscache::SysCacheKey::Value(Datum::from_oid(relid)),
     )?
-    .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+    .ok_or_else(|| cache_lookup_failed(relid))?;
     let (d, isnull) =
         cache_syscache::SysCacheGetAttr(RELOID, &tuple, Anum_pg_class_relpartbound)?;
     if isnull {

@@ -535,6 +535,16 @@ fn findDependentObjects<'mcx>(
 }
 
 #[track_caller]
+// DropObjectById (dependency.c:1206) reports the catcache miss with
+// `elog(ERROR, "cache lookup failed for %s %u", get_object_class_descr(...),
+// oid)` -- catchable, SQLSTATE XX000 (elog's ERROR default), never an abort.
+// get_object_class_descr(EventTriggerRelationId) is "event trigger".
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(class_descr: &str, oid: types_core::Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {class_descr} {oid}")))
+}
+
 #[cold]
 #[inline(never)]
 fn cannot_drop_required(obj_desc: &str, other_desc: &str) -> Box<PgError> {
@@ -952,9 +962,9 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                 None,
                 &keys,
             )?;
-            let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
-                panic!("cache lookup failed for event trigger {}", object.objectId)
-            });
+            let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+                return Err(cache_lookup_failed("event trigger", object.objectId));
+            };
             let tid = tup.t_self;
             catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
             genam::systable_endscan(mcx, scan)?;
@@ -1216,4 +1226,18 @@ fn drop_row_by_oid<'mcx>(
     catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
     genam::systable_endscan(mcx, scan)?;
     rel.close(RowExclusiveLock)
+}
+
+#[cfg(test)]
+mod cache_lookup_tests {
+    // DropObjectById (dependency.c:1206) reports a catcache miss with
+    // elog(ERROR, "cache lookup failed for %s %u") -- catchable, level ERROR,
+    // SQLSTATE XX000.  pgrust used to panic!(), which aborts the backend.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = super::cache_lookup_failed("event trigger", 16384);
+        assert_eq!(e.message(), "cache lookup failed for event trigger 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 }

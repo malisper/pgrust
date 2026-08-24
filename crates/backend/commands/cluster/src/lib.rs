@@ -14,7 +14,7 @@ pub use command::{
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_rel::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE, RELKIND_INDEX, RELKIND_TOASTVALUE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
@@ -122,7 +122,7 @@ fn pg_class_reloptions_image<'mcx>(
         &[key],
     )?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+        .ok_or_else(|| cache_lookup_failed("relation", relid))?;
     let mut isnull = false;
     // SAFETY: reloptions is a pg_class column under its descriptor.
     let d = unsafe { types_tuple::heap_getattr(tup, Anum_pg_class_reloptions, desc, &mut isnull) };
@@ -206,7 +206,7 @@ pub fn finish_heap_swap<'mcx>(
             &[key],
         )?;
         let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {old_heap_oid}"));
+            .ok_or_else(|| cache_lookup_failed("relation", old_heap_oid))?;
         let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
         let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
         let mut repl: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -332,7 +332,7 @@ fn swap_relation_files<'mcx>(
             &[key],
         )?;
         let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+            .ok_or_else(|| cache_lookup_failed("relation", relid))?;
         let get = |anum: usize| {
             let mut isnull = false;
             // SAFETY: fixed NOT NULL pg_class columns under its descriptor.
@@ -449,7 +449,7 @@ fn swap_relation_files<'mcx>(
             &[key],
         )?;
         let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+            .ok_or_else(|| cache_lookup_failed("relation", relid))?;
         let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
         let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
         let mut repl: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -616,7 +616,7 @@ fn set_relrewrite<'mcx>(mcx: Mcx<'mcx>, relid: Oid, relrewrite: Oid) -> PgResult
         &[key],
     )?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+        .ok_or_else(|| cache_lookup_failed("relation", relid))?;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
     let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
     let mut repl: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -631,4 +631,31 @@ fn set_relrewrite<'mcx>(mcx: Mcx<'mcx>, relid: Oid, relrewrite: Oid) -> PgResult
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel_relation, &otid, &mut newtup)?;
     rel_relation.close(RowExclusiveLock)
+}
+
+// Every one of these is `elog(ERROR, "cache lookup failed for <object> %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for relation %u") -- a catchable
+    // XX000, not a backend abort.  These probes used to panic!(), killing the
+    // process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed("relation", 16384);
+        assert_eq!(e.message(), "cache lookup failed for relation 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 }

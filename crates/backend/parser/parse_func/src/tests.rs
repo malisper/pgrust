@@ -860,3 +860,20 @@ fn expr_location_handles_tags_beyond_the_old_closed_set() {
     .unwrap();
     assert_eq!(crate::expr_location(na), 9);
 }
+
+// C parse_func.c:369 / :1681 report a vanished AGGFNOID / PROCOID row with
+// elog(ERROR, "cache lookup failed for ..."), a catchable error whose default
+// SQLSTATE is XX000 (ERRCODE_INTERNAL_ERROR).  pgrust used to panic!() there,
+// which aborts the whole backend instead of failing the statement.
+#[test]
+fn cache_lookup_failures_are_catchable_xx000() {
+    let e = crate::cache_lookup_failed_aggregate(2100);
+    assert_eq!(e.message(), "cache lookup failed for aggregate 2100");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.level(), types_error::ERROR);
+
+    let e = crate::cache_lookup_failed_function(InvalidOid);
+    assert_eq!(e.message(), "cache lookup failed for function 0");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.level(), types_error::ERROR);
+}

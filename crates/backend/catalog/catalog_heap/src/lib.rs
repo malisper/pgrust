@@ -22,6 +22,56 @@ use types_tuple::{
     FormData_pg_attribute, NameData, TYPALIGN_INT, TYPALIGN_SHORT, TYPSTORAGE_PLAIN,
 };
 
+// heap.c reports every one of these catalog-probe misses with
+// `elog(ERROR, "cache lookup failed for ...", ...)` (:1603, :1725, :1820,
+// :1874, :2015, :2067, :2129, :4070, :4107) -- a catchable error carrying
+// elog's default SQLSTATE for ERROR, XX000.  Never a backend abort.
+#[cold]
+#[inline(never)]
+pub(crate) fn relation_lookup_failed(relid: types_core::Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!("cache lookup failed for relation {relid}")))
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn attribute_lookup_failed(
+    attnum: AttrNumber,
+    relid: types_core::Oid,
+) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for attribute {attnum} of relation {relid}"
+    )))
+}
+
+// heap.c:2129 formats the column by *name* here (SetAttrMissing's
+// get_attnum/SearchSysCacheAttName path), not by attnum.
+#[cold]
+#[inline(never)]
+pub(crate) fn attribute_name_lookup_failed(
+    attname: &str,
+    relid: types_core::Oid,
+) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for attribute {attname} of relation {relid}"
+    )))
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn foreign_table_lookup_failed(relid: types_core::Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for foreign table {relid}"
+    )))
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn partition_key_lookup_failed(relid: types_core::Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for partition key of relation {relid}"
+    )))
+}
+
 const fn name(s: &str) -> NameData {
     let mut data = [0u8; NAMEDATALEN as usize];
     let b = s.as_bytes();
@@ -89,6 +139,34 @@ pub fn SystemAttributeByName(attname: &str) -> Option<&'static FormData_pg_attri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // heap.c reports each of these misses with
+    // elog(ERROR, "cache lookup failed for ...") -- catchable, level ERROR,
+    // SQLSTATE XX000.  pgrust used to panic!(), which aborts the backend.
+    #[test]
+    fn cache_lookup_failures_are_catchable_xx000() {
+        let cases: [(Box<types_error::PgError>, &str); 5] = [
+            (relation_lookup_failed(16384), "cache lookup failed for relation 16384"),
+            (
+                attribute_lookup_failed(3, 16384),
+                "cache lookup failed for attribute 3 of relation 16384",
+            ),
+            (
+                attribute_name_lookup_failed("c1", 16384),
+                "cache lookup failed for attribute c1 of relation 16384",
+            ),
+            (foreign_table_lookup_failed(16385), "cache lookup failed for foreign table 16385"),
+            (
+                partition_key_lookup_failed(16386),
+                "cache lookup failed for partition key of relation 16386",
+            ),
+        ];
+        for (e, want) in cases {
+            assert_eq!(e.message(), want);
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.level(), types_error::ERROR);
+        }
+    }
 
     #[test]
     fn sysatt_rows_match_sysattr_h_and_pg_type() {

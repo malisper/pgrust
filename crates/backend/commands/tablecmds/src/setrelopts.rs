@@ -69,7 +69,7 @@ fn update_one<'mcx>(
         &[key],
     )?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+        .ok_or_else(|| crate::cache_lookup_failed("relation", relid))?;
     // LOCKTAG_TUPLE at InplaceUpdateTupleLock, before any content read that
     // feeds the replacement image: the tuple bytes alias the pinned page, so
     // reading them after the lock is what makes a concurrent inplace writer's

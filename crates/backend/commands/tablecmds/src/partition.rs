@@ -331,7 +331,7 @@ pub fn SetRelationHasSubclass<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &class_rel, catalog::ClassOidIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for relation {relation_id}"));
+        .ok_or_else(|| crate::cache_lookup_failed("relation", relation_id))?;
     let desc = class_rel.descr();
     let mut isnull = false;
     // SAFETY: relhassubclass is a fixed NOT NULL pg_class column.

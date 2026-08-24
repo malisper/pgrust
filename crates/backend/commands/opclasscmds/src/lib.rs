@@ -71,6 +71,17 @@ fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
 }
 
+// Every one of these is `elog(ERROR, "cache lookup failed for <object> %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
 fn name_parts<'a, 'mcx>(names: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> &'a [&'mcx str] {
     let n = names.len().min(buf.len());
     for (i, slot) in buf.iter_mut().enumerate().take(n) {
@@ -81,7 +92,7 @@ fn name_parts<'a, 'mcx>(names: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> 
 
 fn get_am_name(amoid: Oid) -> PgResult<String> {
     let tup = SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(amoid)))?
-        .unwrap_or_else(|| panic!("cache lookup failed for access method {amoid}"));
+        .ok_or_else(|| cache_lookup_failed("access method", amoid))?;
     const ANUM_PG_AM_AMNAME: i32 = 2;
     let d = SysCacheGetAttrNotNull(AMOID, &tup, ANUM_PG_AM_AMNAME)?;
     // SAFETY: amname is the row's inline NameData column.
@@ -816,7 +827,7 @@ fn assignOperTypes(
     _typeoid: Oid,
 ) -> PgResult<()> {
     let opform = syscache_seams::lookup_pg_operator_shape::call(member.object)?
-        .unwrap_or_else(|| panic!("cache lookup failed for operator {}", member.object));
+        .ok_or_else(|| cache_lookup_failed("operator", member.object))?;
 
     // Opfamily operators must be binary.
     if opform.oprleft == InvalidOid || opform.oprright == InvalidOid {
@@ -1380,5 +1391,21 @@ mod tests {
         let e = am_not_index("heap");
         assert_eq!(e.sqlstate(), ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
         assert_eq!(e.message(), "access method \"heap\" is not of type INDEX");
+    }
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for access method %u") -- a catchable
+    // XX000, not a backend abort.  These probes used to panic!(), killing the
+    // process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed("access method", 16384);
+        assert_eq!(e.message(), "cache lookup failed for access method 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
     }
 }

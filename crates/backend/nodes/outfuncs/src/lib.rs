@@ -1,8 +1,10 @@
 //! outfuncs.c nodeToString for the node sets stored in pg_attrdef.adbin /
 //! pg_constraint.conbin (DEFAULT/CHECK corpus), pg_trigger.tgqual, and
-//! pg_rewrite.ev_action (view SELECT-rule Query trees). Every other node tag
-//! is a loud panic naming the C writer. Output is byte-compatible with C 18.3
-//! nodeToString (write_location_fields=false: every location renders as -1).
+//! pg_rewrite.ev_action (view SELECT-rule Query trees), plus the
+//! AlterObjectDependsStmt raw-statement tree (RANGEVAR/OBJECTWITHARGS/
+//! TYPENAME/FUNCTIONPARAMETER/A_CONST). Every other node tag is a loud panic
+//! naming the C writer. Output is byte-compatible with C 18.3 nodeToString
+//! (write_location_fields=false: every location renders as -1).
 
 #![allow(non_snake_case)]
 
@@ -14,16 +16,18 @@ use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
 use types_nodes::parsenodes::{
-    CommonTableExpr, Query, RTEKind, RTEPermissionInfo, RangeTblEntry,
-    SortGroupClause, TableSampleClause,
+    CommonTableExpr, FunctionParameter, ObjectWithArgs, Query, RTEKind, RTEPermissionInfo,
+    RangeTblEntry, SortGroupClause, TableSampleClause,
 };
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayCoerceExpr, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue,
     CoerceViaIO, Const, ConvertRowtypeExpr, FromExpr, FuncExpr, JoinExpr, NamedArgExpr, NullTest,
-    OpExpr, PlaceHolderVar, RangeTblRef, RelabelType, ScalarArrayOpExpr, SubLink, TableFunc, TargetEntry, Var,
-    XmlExpr,
+    OpExpr, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, ScalarArrayOpExpr, SubLink,
+    TableFunc, TargetEntry, Var, XmlExpr,
 };
-use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
+use types_nodes::rawnodes::{
+    A_Const, PartitionBoundSpec, PartitionRangeDatum, TypeName, ValUnion,
+};
 use types_nodes::{Boolean, Float, Integer, Node, NodeTag};
 
 pub fn nodeToString<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<PgString<'mcx>> {
@@ -715,6 +719,74 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_bool(out, w.cascaded);
             w!(out, "}}");
         }
+        NodeTag::T_AlterObjectDependsStmt => {
+            let a = node
+                .as_variant::<types_nodes::parsenodes::AlterObjectDependsStmt>()
+                .expect("AlterObjectDependsStmt");
+            w!(out, "{{ALTEROBJECTDEPENDSSTMT :objectType {} :relation ", a.objectType as u32);
+            out_opt_range_var(out, a.relation)?;
+            w!(out, " :object ");
+            out_opt_node(out, a.object)?;
+            w!(out, " :extname ");
+            out_opt_node(out, a.extname)?;
+            w!(out, " :remove ");
+            out_bool(out, a.remove);
+            w!(out, "}}");
+        }
+        NodeTag::T_RangeVar => {
+            out_range_var(out, node.as_variant::<RangeVar>().expect("RangeVar"))?
+        }
+        NodeTag::T_ObjectWithArgs => {
+            let o = node.as_variant::<ObjectWithArgs>().expect("ObjectWithArgs");
+            w!(out, "{{OBJECTWITHARGS :objname ");
+            out_list(out, &o.objname)?;
+            w!(out, " :objargs ");
+            out_opt_list(out, &o.objargs)?;
+            w!(out, " :objfuncargs ");
+            out_list(out, &o.objfuncargs)?;
+            w!(out, " :args_unspecified ");
+            out_bool(out, o.args_unspecified);
+            w!(out, "}}");
+        }
+        NodeTag::T_FunctionParameter => {
+            let p = node.as_variant::<FunctionParameter>().expect("FunctionParameter");
+            w!(out, "{{FUNCTIONPARAMETER :name ");
+            out_str(out, p.name);
+            w!(out, " :argType ");
+            out_opt_node(out, p.argType)?;
+            w!(out, " :mode {} :defexpr ", p.mode as u32);
+            out_opt_node(out, p.defexpr)?;
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_TypeName => {
+            let t = node.as_variant::<TypeName>().expect("TypeName");
+            w!(out, "{{TYPENAME :names ");
+            out_list(out, &t.names)?;
+            w!(out, " :typeOid {} :setof ", t.typeOid);
+            out_bool(out, t.setof);
+            w!(out, " :pct_type ");
+            out_bool(out, t.pct_type);
+            w!(out, " :typmods ");
+            out_list(out, &t.typmods)?;
+            w!(out, " :typemod {} :arrayBounds ", t.typemod);
+            out_list(out, &t.arrayBounds)?;
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_A_Const => {
+            let c = node.as_variant::<A_Const>().expect("A_Const");
+            w!(out, "{{A_CONST");
+            match &c.val {
+                None => w!(out, " NULL"),
+                Some(v) => {
+                    w!(out, " :val ");
+                    out_val_union(out, v);
+                }
+            }
+            w!(out, " :location -1}}");
+        }
+        NodeTag::T_BitString => {
+            out_token(out, node.as_bitstring().expect("BitString").bsval)
+        }
         other => panic!(
             "outNode (outfuncs.c): {other:?} write arm unported (DEFAULT/CHECK + view \
              SELECT-rule sets)"
@@ -1234,6 +1306,46 @@ fn out_opt_alias(out: &mut PgString<'_>, a: Option<&Alias<'_>>) -> PgResult<()> 
             Ok(())
         }
         Some(a) => out_alias(out, a),
+    }
+}
+
+fn out_range_var(out: &mut PgString<'_>, r: &RangeVar<'_>) -> PgResult<()> {
+    w!(out, "{{RANGEVAR :catalogname ");
+    out_str(out, r.catalogname);
+    w!(out, " :schemaname ");
+    out_str(out, r.schemaname);
+    w!(out, " :relname ");
+    out_str(out, r.relname);
+    w!(out, " :inh ");
+    out_bool(out, r.inh);
+    w!(out, " :relpersistence ");
+    out_char(out, r.relpersistence);
+    w!(out, " :alias ");
+    out_opt_alias(out, r.alias)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_opt_range_var(out: &mut PgString<'_>, r: Option<&RangeVar<'_>>) -> PgResult<()> {
+    match r {
+        None => {
+            w!(out, "<>");
+            Ok(())
+        }
+        Some(r) => out_range_var(out, r),
+    }
+}
+
+// A_Const.val is C's embedded ValUnion: outNode dispatches on the value
+// node's own tag, so this mirrors _outInteger/_outFloat/_outBoolean/
+// _outString/_outBitString rather than writing a wrapper.
+fn out_val_union(out: &mut PgString<'_>, v: &ValUnion<'_>) {
+    match v {
+        ValUnion::Integer(i) => w!(out, "{}", i.ival),
+        ValUnion::Float(f) => w!(out, "{}", f.fval),
+        ValUnion::Boolean(b) => out_bool(out, b.boolval),
+        ValUnion::String(s) => out_string_node(out, s.sval),
+        ValUnion::BitString(b) => out_token(out, b.bsval),
     }
 }
 

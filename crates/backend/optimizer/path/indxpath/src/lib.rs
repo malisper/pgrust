@@ -1340,6 +1340,17 @@ fn match_orclause_to_indexcol<'mcx>(
     }))
 }
 
+// `elog(ERROR, "cache lookup failed for <kind> %u", oid)`: elog's default
+// SQLSTATE is XX000 (ERRCODE_INTERNAL_ERROR) and the error is catchable.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(kind: &str, oid: types_core::Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for {kind} {oid}"
+    )))
+}
+
 // get_index_clause_from_support (indxpath.c): the in-core providers keep
 // their native closed-set dispatch; other prosupport functions get the
 // SupportRequestIndexCondition through fmgr, C's protocol — the returned
@@ -1354,8 +1365,14 @@ fn get_index_clause_from_support<'mcx>(
     index: &IndexOptInfo<'mcx>,
 ) -> PgResult<Option<IndexClause<'mcx>>> {
     use planner_seams::PatternType;
-    let shape = syscache_seams::pg_proc_cost_shape::call(funcid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
+    // DIVERGENCE (documented): C's get_index_clause_from_support reaches
+    // pg_proc via get_func_support (indxpath.c:3076), which returns InvalidOid
+    // on a miss without erroring.  pgrust has no such lane, so a vanished row
+    // raises elog's catchable XX000 -- never a backend abort, as the panic!()
+    // here used to be.
+    let Some(shape) = syscache_seams::pg_proc_cost_shape::call(funcid)? else {
+        return Err(cache_lookup_failed("function", funcid));
+    };
     if shape.prosupport == 0 {
         return Ok(None);
     }

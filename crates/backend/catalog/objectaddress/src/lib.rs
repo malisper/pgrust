@@ -1741,6 +1741,24 @@ fn aclcheck_error_type(aclerr: i32, type_oid: Oid) -> PgResult<()> {
 mod tests {
     use super::*;
 
+    // objectaddress.c reports every getObjectDescription /
+    // getObjectIdentityParts syscache miss with
+    // elog(ERROR, "cache lookup failed for <noun> %u") -- catchable, level
+    // ERROR, SQLSTATE XX000.  These are reachable from plain SQL via
+    // pg_describe_object()/pg_identify_object() with arbitrary OIDs, and
+    // pgrust used to panic!() at each of them, aborting the backend.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = crate::description::cache_lookup_failed("event trigger", 16384);
+        assert_eq!(e.message(), "cache lookup failed for event trigger 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+
+        let e = crate::description::cache_lookup_failed("foreign-data wrapper", 0);
+        assert_eq!(e.message(), "cache lookup failed for foreign-data wrapper 0");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
     const KNOWN_TYPE: Oid = 23;
 
     fn install_seams() {

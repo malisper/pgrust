@@ -46,6 +46,41 @@ pub(crate) fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> 
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
+// Every one of these is `elog(ERROR, "cache lookup failed for <object> %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for function %u") -- a catchable
+    // XX000, not a backend abort.  These probes used to panic!(), killing the
+    // process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed("function", 16384);
+        assert_eq!(e.message(), "cache lookup failed for function 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
+
+        // functioncmds.c:1345 renders the object kind with its own trailing
+        // "function".
+        let e = cache_lookup_failed("pg_aggregate tuple for function", 16384);
+        assert_eq!(
+            e.message(),
+            "cache lookup failed for pg_aggregate tuple for function 16384"
+        );
+    }
+}
+
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -1358,7 +1393,7 @@ pub fn AlterFunction<'mcx>(
         cache_syscache::SysCacheKey::UNUSED,
         cache_syscache::SysCacheKey::UNUSED,
     )?
-    .unwrap_or_else(|| panic!("cache lookup failed for function {funcOid}"));
+    .ok_or_else(|| cache_lookup_failed("function", funcOid))?;
     let t = tup.as_tuple();
     let desc = rel.descr();
     let getattr = |attnum: usize| -> (datum::Datum, bool) {
@@ -1592,7 +1627,7 @@ pub fn RemoveFunctionById<'mcx>(mcx: Mcx<'mcx>, funcOid: Oid) -> PgResult<()> {
     let mut scan =
         genam::systable_beginscan(mcx, &relation, pg_proc::ProcedureOidIndexId, true, None, &[key])?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {funcOid}"));
+        .ok_or_else(|| cache_lookup_failed("function", funcOid))?;
     let tid = tup.t_self;
     let mut isnull = false;
     // SAFETY: prokind is a fixed NOT NULL pg_proc column.
@@ -1630,9 +1665,10 @@ pub fn RemoveFunctionById<'mcx>(mcx: Mcx<'mcx>, funcOid: Oid) -> PgResult<()> {
             None,
             &[key],
         )?;
-        let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
-            panic!("cache lookup failed for pg_aggregate tuple for function {funcOid}")
-        });
+        // functioncmds.c:1345 elog(ERROR, "cache lookup failed for pg_aggregate
+        // tuple for function %u").
+        let tup = genam::systable_getnext(mcx, &mut scan)?
+            .ok_or_else(|| cache_lookup_failed("pg_aggregate tuple for function", funcOid))?;
         let tid = tup.t_self;
         catalog_indexing::CatalogTupleDelete(&aggrel, &tid)?;
         genam::systable_endscan(mcx, scan)?;

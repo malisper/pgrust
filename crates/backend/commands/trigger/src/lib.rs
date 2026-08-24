@@ -33,6 +33,38 @@ pub fn init_seams() {
     trigger_seams::my_trigger_depth::set(trigger_depth);
 }
 
+// Every one of these is `elog(ERROR, "cache lookup failed for <object> %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn cache_lookup_failed(
+    what: &str,
+    oid: types_core::Oid,
+) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for {what} {oid}"
+    )))
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::cache_lookup_failed;
+
+    // C: elog(ERROR, "cache lookup failed for relation %u") -- a catchable
+    // XX000, not a backend abort.  These probes used to panic!(), killing the
+    // process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed("relation", 16384);
+        assert_eq!(e.message(), "cache lookup failed for relation 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

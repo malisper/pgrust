@@ -899,7 +899,7 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
     let keys = [seqrelid_key(relid)];
     let mut scan = genam::systable_beginscan(mcx, &rel, SequenceRelidIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for sequence {relid}"));
+        .ok_or_else(|| cache_lookup_failed(relid))?;
     let otid = tup.t_self;
     let desc = rel.descr();
     let mut isnull = false;
@@ -1569,6 +1569,19 @@ pub fn DeleteSequenceTuple(mcx: Mcx<'_>, relid: Oid) -> PgResult<()> {
     rel.close(RowExclusiveLock)
 }
 
+// Every one of these is `elog(ERROR, "cache lookup failed for sequence %u",
+// oid)` in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for sequence {oid}"
+    )))
+}
+
 fn seqrelid_key(relid: Oid) -> types_scan::scankey::ScanKeyData {
     let mut key = types_scan::scankey::ScanKeyData::empty();
     key.sk_attno = 1;
@@ -1783,5 +1796,21 @@ mod tests {
             "improper relation name (too many dotted names): db.s.t.x"
         );
         assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+    }
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for sequence %u") -- a catchable
+    // XX000, not a backend abort.  This probe used to panic!(), killing the
+    // process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for sequence 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
     }
 }

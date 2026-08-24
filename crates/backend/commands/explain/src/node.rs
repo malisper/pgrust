@@ -6,7 +6,7 @@
 use core::fmt::Write;
 
 use mcx::{Mcx, PgString, PgVec};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::NodeList;
 use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
@@ -2768,6 +2768,17 @@ fn show_one_time_filter<'mcx>(
     Ok(())
 }
 
+// Every one of these is `elog(ERROR, "cache lookup failed for index %u", oid)`
+// in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(oid: types_core::Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for index {oid}")))
+}
+
 // ExplainIndexScanDetails (explain.c).
 fn ExplainIndexScanDetails(
     indexid: types_core::Oid,
@@ -2776,7 +2787,7 @@ fn ExplainIndexScanDetails(
 ) -> PgResult<()> {
     let mcx = es.str.allocator();
     let indexname = lsyscache::get_rel_name(mcx, indexid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for index {indexid}"));
+        .ok_or_else(|| cache_lookup_failed(indexid))?;
     if es.format == EXPLAIN_FORMAT_TEXT {
         if indexorderdir < 0 {
             append!(es, " Backward");
@@ -3364,4 +3375,19 @@ fn quote_identifier(ident: &str) -> std::borrow::Cow<'_, str> {
         return format_type::quote_identifier(ident);
     }
     std::borrow::Cow::Borrowed(ident)
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::cache_lookup_failed;
+
+    // C: elog(ERROR, "cache lookup failed for index %u") -- a catchable XX000,
+    // not a backend abort.  This probe used to panic!(), killing the process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for index 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 }

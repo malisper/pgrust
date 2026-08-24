@@ -230,6 +230,19 @@ fn modify_tuple<'mcx>(
     heaptuple::heap_modify_tuple(mcx, oldtup, td, &repl_values, &repl_isnull, &repl)
 }
 
+// Every one of these is `elog(ERROR, "cache lookup failed for namespace %u",
+// oid)` in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
+// these probes, which kills the process instead.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed(oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for namespace {oid}"
+    )))
+}
+
 // RenameSchema (schemacmds.c). C fetches the tuple via the NAMESPACENAME
 // syscache; the by-name oid probe + oid-index scan is this repo's catalog
 // idiom, with the same error surface.
@@ -239,7 +252,7 @@ pub fn RenameSchema<'mcx>(mcx: Mcx<'mcx>, oldname: &str, newname: &str) -> PgRes
     let td = rel.descr();
     let mut scan = begin_oid_scan(mcx, &rel, nsp_oid)?;
     let oldtup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("cache lookup failed for namespace {nsp_oid}"));
+        .ok_or_else(|| cache_lookup_failed(nsp_oid))?;
 
     if catalog_namespace::get_namespace_oid(newname, true)? != InvalidOid {
         return Err(Box::new(
@@ -354,4 +367,20 @@ fn AlterSchemaOwner_internal<'mcx>(
     catalog_indexing::CatalogTupleUpdate(mcx, rel, &otid, &mut newtup)?;
 
     pg_shdepend::changeDependencyOnOwner(mcx, NAMESPACE_RELATION_ID, nsp_oid, newOwnerId)
+}
+
+#[cfg(test)]
+mod cache_lookup_error_tests {
+    use super::*;
+
+    // C: elog(ERROR, "cache lookup failed for namespace %u") -- a catchable
+    // XX000, not a backend abort.  This probe used to panic!(), killing the
+    // process.
+    #[test]
+    fn cache_lookup_failure_is_a_catchable_xx000() {
+        let e = cache_lookup_failed(16384);
+        assert_eq!(e.message(), "cache lookup failed for namespace 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
+    }
 }

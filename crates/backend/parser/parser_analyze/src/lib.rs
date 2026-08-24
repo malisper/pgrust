@@ -427,8 +427,11 @@ fn transformCallStmt<'mcx>(
     let expanded =
         clauses::expand_function_arguments(mcx, &fexpr.args, true, funcresulttype, funcid)?;
 
-    let arrays = syscache_seams::pg_proc_result_arrays::call(mcx, funcid)?
-        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid} (analyze.c)"));
+    // C analyze.c:3291 elog(ERROR, "cache lookup failed for function %u") --
+    // a catchable error whose default SQLSTATE is XX000, never a backend abort.
+    let Some(arrays) = syscache_seams::pg_proc_result_arrays::call(mcx, funcid)? else {
+        return Err(cache_lookup_failed_function(funcid));
+    };
 
     let mut outargs = types_nodes::NodeList::nil();
     let inargs = match arrays.proargmodes {
@@ -2093,6 +2096,18 @@ pub(crate) fn transformUpdateTargetList<'mcx>(
     }
     assert!(orig_iter.next().is_none(), "UPDATE target count mismatch --- internal error");
     Ok(tlist)
+}
+
+// analyze.c:3291 elog(ERROR, "cache lookup failed for function %u"): elog's
+// default SQLSTATE is XX000 (ERRCODE_INTERNAL_ERROR) and the error is
+// catchable -- transformCallStmt must fail the statement, not the backend.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed_function(funcid: types_core::Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for function {funcid}"
+    )))
 }
 
 #[cold]
