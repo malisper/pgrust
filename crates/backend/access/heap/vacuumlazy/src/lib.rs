@@ -74,6 +74,19 @@ const REL_TRUNCATE_MINIMUM: BlockNumber = 1000;
 const REL_TRUNCATE_FRACTION: BlockNumber = 16;
 const BYPASS_THRESHOLD_PAGES: f64 = 0.02;
 
+/// The bypass threshold of lazy_vacuum (vacuumlazy.c): C computes
+/// `threshold = (double) vacrel->rel_pages * BYPASS_THRESHOLD_PAGES` into a
+/// `BlockNumber`, so the fractional part TRUNCATES before the
+/// `lpdead_item_pages < threshold` comparison. Comparing against the
+/// untruncated double instead (the pre-fix pgrust behavior) bypasses index
+/// vacuuming for the fractional band `floor(t) <= lpdead_item_pages < t`,
+/// leaving LP_DEAD stubs behind where C reaps them — a physical-layout
+/// divergence that cascades into FSM/placement differences (Antithesis RB-3).
+#[inline]
+fn bypass_threshold_pages(rel_pages: BlockNumber) -> BlockNumber {
+    (rel_pages as f64 * BYPASS_THRESHOLD_PAGES) as BlockNumber
+}
+
 /// Read-only inputs of the phase-I per-block bodies. One per scanning
 /// participant: the serial arm builds it from LVRelState, each morsel worker
 /// from its own opened relation + the generation's published cutoffs
@@ -1617,8 +1630,8 @@ fn lazy_vacuum(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
             vacrel.coverage_hole
                 || vacrel.folds.counters.lpdead_items == vacrel.dead_items_info.num_items as u64
         );
-        let threshold = vacrel.rel_pages as f64 * BYPASS_THRESHOLD_PAGES;
-        bypass = (vacrel.folds.counters.lpdead_item_pages as f64) < threshold
+        let threshold = bypass_threshold_pages(vacrel.rel_pages);
+        bypass = (vacrel.folds.counters.lpdead_item_pages as BlockNumber) < threshold
             && vacrel.dead_items.as_ref().unwrap().memory_usage() < 32 * 1024 * 1024;
     }
 

@@ -888,3 +888,27 @@ fn heap_vac_scan_next_block_flags_eager_page() {
     assert!(eager, "VERBOSE eagerly-scanned count is born here");
     vr.next_unskippable_vmbuffer.release();
 }
+
+/// C-parity of the index-vacuuming bypass threshold (Antithesis RB-3 root
+/// cause): C stores `rel_pages * BYPASS_THRESHOLD_PAGES` into an integer
+/// BlockNumber, truncating the fraction, so `lpdead_item_pages == floor(t)`
+/// must NOT bypass. Comparing against the untruncated double bypassed the
+/// `floor(t) <= pages < t` band, leaving LP_DEAD stubs C reaps — a physical
+/// layout divergence that snowballed into FSM/placement differences and the
+/// B-only `54000 index row size ... exceeds maximum` BRIN finding.
+#[test]
+fn bypass_threshold_truncates_like_c() {
+    // The RB-3 repro shape: 271 pages, 5 lpdead pages. C: 5 < trunc(5.42)=5
+    // is false -> index vacuuming runs. Any float compare says 5 < 5.42.
+    assert_eq!(bypass_threshold_pages(271), 5);
+    assert!(!((5 as BlockNumber) < bypass_threshold_pages(271)));
+    // One page fewer of lpdead items does bypass.
+    assert!((4 as BlockNumber) < bypass_threshold_pages(271));
+    // Exact multiples: 300 * 0.02 = 6.0; 5 bypasses, 6 does not.
+    assert_eq!(bypass_threshold_pages(300), 6);
+    assert!((5 as BlockNumber) < bypass_threshold_pages(300));
+    assert!(!((6 as BlockNumber) < bypass_threshold_pages(300)));
+    // Tiny relations: threshold truncates to 0 -> never bypass.
+    assert_eq!(bypass_threshold_pages(49), 0);
+    assert!(!((0 as BlockNumber) < bypass_threshold_pages(49)));
+}
