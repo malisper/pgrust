@@ -83,6 +83,34 @@ pub enum RuledPattern {
     /// passing) in the liveness campaign's parallel canary. Any other
     /// B-only 55000 message still escalates.
     ParallelWorkerInit,
+    /// Rowset/row-count diff on a statement referencing an instance-config
+    /// introspection view (round-9 FP-9): pg_hba_file_rules /
+    /// pg_ident_file_mappings / pg_file_settings / pg_shmem_allocations*
+    /// reflect the INSTANCE (config files on disk, shmem layout), not the
+    /// schema — the Antithesis cluster pair provably runs different
+    /// pg_hba.conf files (row count 6 vs 7, run b627b97f...-59-13). The
+    /// generators emit only existence shapes there; this class catches
+    /// gramwalk-derived references. Error outcomes still compare strictly.
+    InstanceConfig,
+    /// Rowset diff on a statement calling a backup-control function
+    /// (pg_backup_start/stop, pg_switch_wal, pg_create_restore_point):
+    /// their LSN/label results are cluster-local WAL positions (round-9
+    /// covdiff: raw `SELECT pg_backup_start('fz_q5_dup', true)` returned
+    /// A-only `0/16000028`). Generators project these; the class covers
+    /// grammar-derived raw calls.
+    InstanceLsn,
+    /// lz4 build-config divergence, mirror of XmlConfig (round-9
+    /// covdiff): an oracle configured --without-lz4 rejects every lz4
+    /// surface 0A000 "compression method lz4 not supported" while pgrust
+    /// is always lz4-capable and proceeds. Emitted only on that exact
+    /// A-side message with B not panicking (XX000 still escalates).
+    Lz4Config,
+    /// B-only 22P02 "invalid input syntax for type tid" where A
+    /// succeeded (round-9 covdiff, e.g. `SELECT '(0,)'::tid`): C 18.3's
+    /// tidin strtol tolerance accepts malformed forms; reported upstream
+    /// and fixed in later PostgreSQL versions — pgrust deliberately
+    /// implements the fixed strict behavior. Engine stays unchanged.
+    TidInputUpstream,
     /// One side raised C's catalog-row concurrency error XX000 "tuple
     /// concurrently updated/deleted" (simple_heap_update) on SHARED-catalog
     /// DDL (ALTER ROLE/DATABASE/TABLESPACE, shared COMMENT). Both engines
@@ -155,6 +183,48 @@ pub fn default_table() -> Vec<RuledEntry> {
                      docs/design/jit-parallel-defaults.md DIVERGENCE NOTICEs; \
                      row-count shape only, GUC values still compare strictly",
             pattern: RuledPattern::GucInventory,
+        },
+        RuledEntry {
+            id: "instance-config",
+            ruling: "round-9 FP-9 instance-config ruling: pg_hba_file_rules / \
+                     pg_ident_file_mappings / pg_file_settings / \
+                     pg_shmem_allocations reflect the instance (config \
+                     files, shmem layout), not the schema, and the two \
+                     clusters are provisioned independently — rowset \
+                     shape only, error outcomes still compare strictly \
+                     (notes/antithesis/round9-triage-2026-08-24.md)",
+            pattern: RuledPattern::InstanceConfig,
+        },
+        RuledEntry {
+            id: "instance-lsn",
+            ruling: "round-9 instance-LSN ruling: backup-control results \
+                     (pg_backup_start/stop LSNs, pg_switch_wal, \
+                     pg_create_restore_point) are cluster-local WAL \
+                     positions, never cross-cluster comparable; \
+                     generators project them, this entry covers \
+                     grammar-derived raw calls",
+            pattern: RuledPattern::InstanceLsn,
+        },
+        RuledEntry {
+            id: "lz4-config",
+            ruling: "round-9 lz4 build-config ruling (mirror of \
+                     xml-config): a --without-lz4 oracle rejects 0A000 \
+                     'compression method lz4 not supported' where pgrust \
+                     is always lz4-capable; statements the oracle rejects \
+                     this way carry no oracle signal — a pgrust panic \
+                     (XX000) on the same statement still escalates",
+            pattern: RuledPattern::Lz4Config,
+        },
+        RuledEntry {
+            id: "tid-input-upstream",
+            ruling: "round-9 tid-input ruling (project owner): C 18.3 \
+                     tidin accepts malformed forms like '(0,)' via strtol \
+                     tolerance; reported upstream and fixed in later \
+                     PostgreSQL versions — pgrust deliberately matches \
+                     the fixed strict behavior; exact-signature scope \
+                     (B-only 22P02 'invalid input syntax for type tid', \
+                     A succeeded)",
+            pattern: RuledPattern::TidInputUpstream,
         },
         RuledEntry {
             id: "shared-catalog-tcu",
@@ -259,6 +329,19 @@ fn matches(entry: &RuledEntry, candidate: &str, sql: &str) -> bool {
         RuledPattern::SharedCatalogTcu => {
             candidate == "shared-catalog-tcu" && crate::diff::is_shared_catalog_stmt(sql)
         }
+        RuledPattern::InstanceConfig => {
+            candidate == "instance-config" && crate::diff::is_instance_config_stmt(sql)
+        }
+        RuledPattern::InstanceLsn => {
+            candidate == "instance-lsn" && crate::diff::calls_backup_control(sql)
+        }
+        // Emitted only on the exact A-side no-lz4 0A000 message signature
+        // (build-config family; same emission-scoped rule as xml-config).
+        RuledPattern::Lz4Config => candidate == "lz4-config",
+        // Emitted only on the exact A-success/B-22P02-tid signature; tid
+        // input can be reached without the token "tid" in the SQL (COPY,
+        // insert into a tid column), so no text refinement is reliable.
+        RuledPattern::TidInputUpstream => candidate == "tid-input-upstream",
     }
 }
 
@@ -419,6 +502,62 @@ mod tests {
         // No *cmp call in the SQL: the candidate escalates.
         let out = apply_ruled(&default_table(), "select a from t ;", candidate("cmp-magnitude"));
         assert_eq!(out.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn instance_config_resolves_only_on_instance_view_statements() {
+        for sql in [
+            "SELECT rule_number FROM pg_hba_file_rules ORDER BY rule_number;",
+            "select count(*) from PG_IDENT_FILE_MAPPINGS ;",
+            "SELECT * FROM pg_file_settings;",
+            "SELECT name FROM pg_shmem_allocations;",
+            "SELECT name FROM pg_shmem_allocations_numa;",
+        ] {
+            let out = apply_ruled(&default_table(), sql, candidate("instance-config"));
+            assert_eq!(out.class, DiffClass::Ruled("instance-config".to_string()), "{sql}");
+            assert!(out.detail.contains("round-9"), "{sql}");
+        }
+        // Any other statement carrying the candidate escalates.
+        let out = apply_ruled(&default_table(), "SELECT * FROM t;", candidate("instance-config"));
+        assert_eq!(out.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn instance_lsn_resolves_only_on_backup_control_statements() {
+        let out = apply_ruled(
+            &default_table(),
+            "SELECT pg_backup_start('fz_q5_dup', true);",
+            candidate("instance-lsn"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("instance-lsn".to_string()));
+        let out = apply_ruled(
+            &default_table(),
+            "SELECT pg_switch_wal();",
+            candidate("instance-lsn"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("instance-lsn".to_string()));
+        let out = apply_ruled(&default_table(), "SELECT 1;", candidate("instance-lsn"));
+        assert_eq!(out.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn round9_signature_scoped_candidates_resolve() {
+        // Emission-scoped (like xml-config): the entry matches on any SQL.
+        let out = apply_ruled(
+            &default_table(),
+            "ALTER TABLE dd_w ALTER COLUMN b SET COMPRESSION lz4;",
+            candidate("lz4-config"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("lz4-config".to_string()));
+        let out = apply_ruled(&default_table(), "SELECT '(0,)'::tid;", candidate("tid-input-upstream"));
+        assert_eq!(out.class, DiffClass::Ruled("tid-input-upstream".to_string()));
+        assert!(out.detail.contains("upstream"));
+        // Without table entries both escalate — nothing silent.
+        assert_eq!(apply_ruled(&[], "x;", candidate("lz4-config")).class, DiffClass::RowsetDiff);
+        assert_eq!(
+            apply_ruled(&[], "x;", candidate("tid-input-upstream")).class,
+            DiffClass::RowsetDiff
+        );
     }
 
     #[test]

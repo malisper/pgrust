@@ -54,3 +54,4 @@ wire-diff-out/
 .tpch22/
 scripts/sqe/matrix/selftest-work/
 scripts/sqe/CI cluster/*/launch-scratch/
+__pycache__/

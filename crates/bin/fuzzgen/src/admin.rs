@@ -46,9 +46,11 @@
 //!     only and returns true (verified matched);
 //!   - `pg_control_*` compare only the layout/constant/primary-quiescent
 //!     columns (block sizes, versions, timeline 1, recovery zeros) — never
-//!     LSNs, times, or the system identifier; `pg_hba_file_rules` compares
-//!     everything except `file_name` (the datadir path) — both clusters
-//!     initdb from the same C reference so the rule set is identical;
+//!     LSNs, times, or the system identifier; `pg_hba_file_rules` /
+//!     `pg_ident_file_mappings` are INSTANCE-config views (round-9 FP-9:
+//!     the Antithesis cluster pair runs different pg_hba.conf files) and
+//!     compare only as existence shapes — file content never reaches the
+//!     compare surface;
 //!   - snapshot-import error paths (`SET TRANSACTION SNAPSHOT` with bogus /
 //!     absent identifiers, wrong isolation level, not-first-query) are
 //!     matched errors; the exported snapshot NAME is per-engine and only
@@ -406,8 +408,14 @@ fn gen_backup(g: &mut Gen) -> Vec<StmtKind> {
     ))];
     if g.rng.chance(1, 4) {
         // Double start inside the bracket: matched "already in progress".
+        // Projected anyway (round-9 covdiff): when the bracket's first
+        // start failed on one side (or a replay runs statements
+        // independently), this call SUCCEEDS and returns a raw
+        // instance-local LSN — which must never reach the compare
+        // surface. Error path unchanged; success path compares
+        // constant-true.
         out.push(StmtKind::Raw(
-            "SELECT pg_backup_start('fz_q5_dup', true);".to_string(),
+            "SELECT pg_backup_start('fz_q5_dup', true) IS NOT NULL;".to_string(),
         ));
     }
     out.push(StmtKind::Raw(
@@ -524,7 +532,8 @@ fn gen_sig(g: &mut Gen) -> Vec<StmtKind> {
 
 // ------------------------------------------------------------ family 10 ----
 // Control-file probes (pg_controldata.c) + hba/ident views (hbafuncs.c):
-// layout constants and the identical initdb'd rule set compared raw.
+// layout constants compared raw; the hba/ident views are instance config
+// (round-9 FP-9) and compare only as existence shapes.
 
 fn gen_control(g: &mut Gen) -> Vec<StmtKind> {
     g.fire("admin:control");
@@ -534,13 +543,19 @@ fn gen_control(g: &mut Gen) -> Vec<StmtKind> {
         2 => "SELECT timeline_id, prev_timeline_id, full_page_writes, checkpoint_lsn IS NOT NULL, redo_lsn IS NOT NULL, next_multixact_id, next_multi_offset, oldest_multi_xid FROM pg_control_checkpoint();".to_string(),
         3 => "SELECT min_recovery_end_lsn::text, min_recovery_end_timeline, backup_start_lsn::text, backup_end_lsn::text, end_of_backup_record_required FROM pg_control_recovery();".to_string(),
         4 => {
+            // Round-9 FP-9: pg_hba_file_rules content/row counts reflect
+            // the instance's config files, and the Antithesis cluster
+            // pair runs DIFFERENT pg_hba.conf files — existence shapes
+            // only (hbafuncs.c still executes; the compared value is
+            // constant-true on any instance).
             if g.rng.chance(1, 3) {
-                "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL;".to_string()
+                "SELECT count(*) >= 0 FROM pg_hba_file_rules;".to_string()
             } else {
-                "SELECT rule_number, line_number, type, database::text, user_name::text, address, netmask, auth_method, options::text, error FROM pg_hba_file_rules ORDER BY rule_number;".to_string()
+                "SELECT bool_and(rule_number IS NOT NULL) IS NOT FALSE FROM pg_hba_file_rules;"
+                    .to_string()
             }
         }
-        _ => "SELECT count(*) FROM pg_ident_file_mappings;".to_string(),
+        _ => "SELECT count(*) >= 0 FROM pg_ident_file_mappings;".to_string(),
     };
     raw(sql)
 }
@@ -650,6 +665,23 @@ mod tests {
                     || sql.contains("pg_ls_summariesdir")
                 {
                     assert!(sql.contains("count(*) >= 0"), "unprojected summary probe: {sql}");
+                }
+                // Round-9 FP-9: instance-config views only ever appear as
+                // existence shapes — file content must never reach the
+                // compare surface.
+                if sql.contains("pg_hba_file_rules") || sql.contains("pg_ident_file_mappings") {
+                    assert!(
+                        sql.contains("count(*) >= 0") || sql.contains("IS NOT FALSE"),
+                        "instance-config view content on compare surface: {sql}"
+                    );
+                }
+                // Round-9 covdiff: every pg_backup_start/stop call is
+                // projected — an instance-local LSN must never compare raw.
+                if sql.contains("pg_backup_start") {
+                    assert!(
+                        sql.contains("IS NOT NULL"),
+                        "raw backup-control LSN on compare surface: {sql}"
+                    );
                 }
             }
             // Brackets close within their group.

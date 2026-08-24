@@ -494,6 +494,50 @@ fn is_no_libxml_error(message: &str) -> bool {
     message == "unsupported XML feature"
 }
 
+/// The no-lz4 oracle's NOT-SUPPORTED primary message
+/// (toast_compression.c NO_LZ4_SUPPORT), verbatim and complete — same
+/// build-config family as is_no_libxml_error: an oracle configured
+/// --without-lz4 rejects every lz4 surface pgrust (always lz4-capable)
+/// executes natively, so the oracle offers no behavioural signal there.
+fn is_no_lz4_error(message: &str) -> bool {
+    message == "compression method lz4 not supported"
+}
+
+/// Instance-config introspection views (round-9 FP-9): these views
+/// reflect the INSTANCE — config files on disk (pg_hba_file_rules,
+/// pg_ident_file_mappings, pg_file_settings) or the shared-memory layout
+/// (pg_shmem_allocations family) — not the schema, so two independently
+/// provisioned clusters legitimately differ (the Antithesis pair runs
+/// different pg_hba.conf files: row count 6 vs 7 in run
+/// b627b97fb4ea57851b123676de30f2ab-59-13). The generators no longer
+/// project their content (existence shapes only); this predicate is the
+/// defensive net for gramwalk-derived references. Error outcomes on
+/// these statements still compare strictly.
+pub fn is_instance_config_stmt(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    [
+        "pg_hba_file_rules",
+        "pg_ident_file_mappings",
+        "pg_file_settings",
+        "pg_shmem_allocations",
+    ]
+    .iter()
+    .any(|v| lower.contains(v))
+}
+
+/// Backup-control functions whose results are cluster-local WAL
+/// positions / restore-point acks (round-9 covdiff): pg_backup_start
+/// returns the instance's current LSN, which is never cross-cluster
+/// comparable. The generators project these (`IS NOT NULL`); this
+/// predicate scopes the defensive `instance-lsn` ruled class for
+/// grammar-derived raw calls.
+pub fn calls_backup_control(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    ["pg_backup_start", "pg_backup_stop", "pg_switch_wal", "pg_create_restore_point"]
+        .iter()
+        .any(|f| lower.contains(f))
+}
+
 /// Shared-catalog DDL: the only statement surface where two CONCURRENT
 /// driver instances (each in its own private per-batch database) still
 /// race each other — pg_authid / pg_database / pg_shdescription rows are
@@ -1221,6 +1265,19 @@ pub fn classify(input: &DiffInput) -> Classified {
                          feature; B (libxml build) errored {sb} ({mb})"
                     ),
                 }
+            } else if is_no_lz4_error(ma) && sb != "XX000" {
+                // Round-9 covdiff lz4 build-config class, mirror of
+                // xml-config: an oracle built --without-lz4 rejects 0A000
+                // "compression method lz4 not supported" where pgrust
+                // (always lz4-capable) proceeds. A pgrust XX000 (caught
+                // panic) still escalates.
+                Classified {
+                    class: DiffClass::Ruled("lz4-config".to_string()),
+                    detail: format!(
+                        "A no-lz4 oracle rejected 0A000 compression method \
+                         lz4 not supported; B (lz4 build) errored {sb} ({mb})"
+                    ),
+                }
             } else if is_shared_catalog_stmt(sql)
                 && (is_tuple_concurrency_error(sa, ma) || is_tuple_concurrency_error(sb, mb))
             {
@@ -1240,6 +1297,17 @@ pub fn classify(input: &DiffInput) -> Classified {
                 return Classified {
                     class: DiffClass::Ruled("shared-catalog-tcu".to_string()),
                     detail: format!("A errored {sqlstate} ({message}); B succeeded"),
+                };
+            }
+            if is_no_lz4_error(message) {
+                // Round-9 covdiff lz4 build-config class (see the
+                // Error/Error arm above).
+                return Classified {
+                    class: DiffClass::Ruled("lz4-config".to_string()),
+                    detail: "A no-lz4 oracle rejected 0A000 compression \
+                             method lz4 not supported; B (lz4 build) \
+                             succeeded"
+                        .to_string(),
                 };
             }
             if is_no_libxml_error(message) {
@@ -1272,6 +1340,18 @@ pub fn classify(input: &DiffInput) -> Classified {
             if sqlstate == "55000" && message == "parallel worker failed to initialize" {
                 return Classified {
                     class: DiffClass::Ruled("parallel-worker-init".to_string()),
+                    detail: format!("A succeeded; B errored {sqlstate} ({message})"),
+                };
+            }
+            // Round-9 covdiff tid-input class: C 18.3's tidin parses via
+            // strtol and tolerates forms like '(0,)'; that laxity was
+            // REPORTED UPSTREAM and fixed in later PostgreSQL versions,
+            // and pgrust deliberately implements the fixed (strict)
+            // behavior. Exact-signature scope: A succeeded, B raised
+            // 22P02 naming type tid; any other 22P02 still escalates.
+            if sqlstate == "22P02" && message.contains("invalid input syntax for type tid") {
+                return Classified {
+                    class: DiffClass::Ruled("tid-input-upstream".to_string()),
                     detail: format!("A succeeded; B errored {sqlstate} ({message})"),
                 };
             }
@@ -1388,6 +1468,26 @@ pub fn classify(input: &DiffInput) -> Classified {
                     })
                 }
             };
+            // Round-9 instance-state candidates: rowset diffs on
+            // statements referencing instance-config views (FP-9) or
+            // calling backup-control functions are cluster-local state,
+            // never cross-cluster comparable. Emitted as Ruled candidates
+            // so the acceptance still resolves through the ruled table.
+            let instance_candidate = |d: &str| -> Option<Classified> {
+                if is_instance_config_stmt(sql) {
+                    return Some(Classified {
+                        class: DiffClass::Ruled("instance-config".to_string()),
+                        detail: format!("instance-config view rowset differs: {d}"),
+                    });
+                }
+                if calls_backup_control(sql) {
+                    return Some(Classified {
+                        class: DiffClass::Ruled("instance-lsn".to_string()),
+                        detail: format!("backup-control instance-LSN surface differs: {d}"),
+                    });
+                }
+                None
+            };
             // Round-7 OID/comparator fallbacks, tried in order after the
             // EXPLAIN/GUC masks: each normalizes BOTH sides identically
             // and only fires when the whole remaining diff disappears.
@@ -1468,6 +1568,9 @@ pub fn classify(input: &DiffInput) -> Classified {
                         if let Some(c) = guc_inventory_candidate(sql, ra, rb) {
                             return c;
                         }
+                        if let Some(c) = instance_candidate(&d) {
+                            return c;
+                        }
                         if let Some(c) = structural_fallbacks(&d) {
                             return c;
                         }
@@ -1513,6 +1616,9 @@ pub fn classify(input: &DiffInput) -> Classified {
                             return c;
                         }
                         if let Some(c) = guc_inventory_candidate(sql, ra, rb) {
+                            return c;
+                        }
+                        if let Some(c) = instance_candidate(&d) {
                             return c;
                         }
                         if let Some(c) = structural_fallbacks(&d) {
@@ -1600,6 +1706,116 @@ mod tests {
         };
         let c = classify_sql("select 1;", &a, &ok);
         assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// Round-9 covdiff: an oracle built --without-lz4 rejecting 0A000
+    /// "compression method lz4 not supported" is the lz4-config
+    /// candidate; a pgrust panic or any other 0A000 still escalates.
+    #[test]
+    fn no_lz4_oracle_rejection_is_lz4_config_candidate() {
+        let a = StmtOutcome::Error {
+            sqlstate: "0A000".to_string(),
+            message: "compression method lz4 not supported".to_string(),
+        };
+        let ok = StmtOutcome::Command { tag: "ALTER TABLE".to_string(), affected: None };
+        let sql = "ALTER TABLE dd_w ALTER COLUMN b SET COMPRESSION lz4;";
+        let c = classify_sql(sql, &a, &ok);
+        assert_eq!(c.class, DiffClass::Ruled("lz4-config".to_string()));
+        // Both-error variant with differing SQLSTATEs still absorbs.
+        let b = StmtOutcome::Error {
+            sqlstate: "42704".to_string(),
+            message: "column data type does not support compression".to_string(),
+        };
+        let c = classify_sql(sql, &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("lz4-config".to_string()));
+        // A pgrust caught panic is never absorbed.
+        let b = StmtOutcome::Error {
+            sqlstate: "XX000".to_string(),
+            message: "panicked at ...".to_string(),
+        };
+        let c = classify_sql(sql, &a, &b);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+        // Any other A-side 0A000 stays a finding when B succeeds.
+        let a = StmtOutcome::Error {
+            sqlstate: "0A000".to_string(),
+            message: "some other unsupported feature".to_string(),
+        };
+        let c = classify_sql(sql, &a, &ok);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// Round-9 covdiff: B-only 22P02 on tid input where A succeeded is
+    /// the tid-input-upstream candidate (pgrust matches the upstream
+    /// FIXED strict behavior); any other 22P02 still escalates.
+    #[test]
+    fn b_only_tid_input_error_is_upstream_candidate() {
+        let ok = rowset(vec![27], rows(&[&[Some("(0,0)")]]));
+        let b = StmtOutcome::Error {
+            sqlstate: "22P02".to_string(),
+            message: "invalid input syntax for type tid: \"(0,)\"".to_string(),
+        };
+        let c = classify_sql("SELECT '(0,)'::tid::text;", &ok, &b);
+        assert_eq!(c.class, DiffClass::Ruled("tid-input-upstream".to_string()));
+        // A different type's 22P02 escalates.
+        let b = StmtOutcome::Error {
+            sqlstate: "22P02".to_string(),
+            message: "invalid input syntax for type integer: \"x\"".to_string(),
+        };
+        let c = classify_sql("SELECT 'x'::int4;", &ok, &b);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+        // An A-only tid error is NOT the candidate (pgrust laxer than C
+        // would be a real conformance finding).
+        let a = StmtOutcome::Error {
+            sqlstate: "22P02".to_string(),
+            message: "invalid input syntax for type tid: \"(0,)\"".to_string(),
+        };
+        let c = classify_sql("SELECT '(0,)'::tid::text;", &a, &ok);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// Round-9 FP-9: any rowset/row-count diff on a statement referencing
+    /// an instance-config view is the instance-config candidate; the same
+    /// diff on any other statement stays a finding, and error outcomes on
+    /// instance-config statements still compare strictly.
+    #[test]
+    fn instance_config_view_diff_is_ruled_candidate() {
+        let a = rowset(
+            vec![25],
+            rows(&[&[Some("local")], &[Some("host")], &[Some("host")]]),
+        );
+        let b = rowset(vec![25], rows(&[&[Some("local")], &[Some("host")]]));
+        let c = classify_sql(
+            "SELECT type FROM pg_hba_file_rules ORDER BY rule_number;",
+            &a,
+            &b,
+        );
+        assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
+        let c = classify_sql("SELECT name FROM pg_file_settings;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
+        let c = classify_sql("SELECT name FROM pg_shmem_allocations;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
+        // Same shape elsewhere escalates.
+        let c = classify_sql("SELECT t FROM fz_rich;", &a, &b);
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+        // Error outcomes on instance-config statements are not absorbed.
+        let e = StmtOutcome::Error {
+            sqlstate: "42703".to_string(),
+            message: "column \"bogus\" does not exist".to_string(),
+        };
+        let c = classify_sql("SELECT bogus FROM pg_hba_file_rules;", &a, &e);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// Round-9: a rowset diff on a raw backup-control call is the
+    /// instance-lsn candidate; the same diff elsewhere escalates.
+    #[test]
+    fn backup_control_diff_is_instance_lsn_candidate() {
+        let a = rowset(vec![3220], rows(&[&[Some("0/16000028")]]));
+        let b = rowset(vec![3220], rows(&[&[Some("0/17000060")]]));
+        let c = classify_sql("SELECT pg_backup_start('fz_q5_dup', true);", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("instance-lsn".to_string()));
+        let c = classify_sql("SELECT '0/1'::pg_lsn;", &a, &b);
+        assert_eq!(c.class, DiffClass::RowsetDiff);
     }
 
     /// F4: SHOW ALL / pg_settings row-count divergence is a guc-inventory

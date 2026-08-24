@@ -99,8 +99,9 @@ const SHAPES: &[&str] = &[
     // 2,126 hollow lines): numutils safe-parse arms via
     // pg_input_is_valid/pg_input_error_info (error detail without
     // erroring), the SIMILAR TO escape machinery + regexp flag parsing,
-    // advisory locks feeding pg_lock_status, pg_stat_activity /
-    // pg_hba_file_rules deterministic projections, the amutils property
+    // advisory locks feeding pg_lock_status, pg_stat_activity
+    // deterministic projections / pg_hba_file_rules existence shapes
+    // (instance config, round-9 FP-9), the amutils property
     // matrix, inet/cidr abbreviated forms + operator tail,
     // format_type_extended typmods, oracle_compat trim/pad tail,
     // levenshtein cost variants, parse_ident, varbit typmod/shift edges,
@@ -2562,18 +2563,21 @@ fn gen_activity(g: &mut Gen) -> Vec<StmtKind> {
     raw(sql)
 }
 
-/// pg_hba_file_rules / pg_ident_file_mappings: both clusters run the
-/// identical C-initdb default files, so full-row projections (minus
-/// file_name/line_number paths) compare exactly.
+/// pg_hba_file_rules / pg_ident_file_mappings: INSTANCE-config views
+/// (round-9 FP-9). The old full-row/row-count projections assumed both
+/// clusters run identical C-initdb default files; the Antithesis pair
+/// provably does not (pg_hba.conf row count 6 vs 7, run
+/// b627b97f...-59-13), so file content must never reach the compare
+/// surface. Existence shapes keep hbafuncs.c executing on both sides
+/// while the compared value is constant-true on any instance; the
+/// diff-side `instance-config` ruled class backstops grammar-derived
+/// references.
 fn gen_hba(g: &mut Gen) -> Vec<StmtKind> {
     g.fire("adtm:hba");
     let sql = if g.rng.chance(1, 4) {
-        "SELECT count(*) FROM pg_ident_file_mappings;".to_string()
+        "SELECT count(*) >= 0 FROM pg_ident_file_mappings;".to_string()
     } else {
-        "SELECT type, database::text, user_name::text, address, netmask, \
-         auth_method, options::text, error FROM pg_hba_file_rules \
-         ORDER BY rule_number;"
-            .to_string()
+        "SELECT count(*) >= 0 FROM pg_hba_file_rules;".to_string()
     };
     raw(sql)
 }
@@ -3782,6 +3786,15 @@ mod tests {
                         || sql.contains("uuid_extract_version(")
                         || sql.contains("IS NOT NULL");
                     assert!(stable, "raw volatile uuid on compare surface: {sql}");
+                }
+                // Round-9 FP-9: instance-config views only ever appear as
+                // existence shapes — file content must never reach the
+                // compare surface.
+                if sql.contains("pg_hba_file_rules") || sql.contains("pg_ident_file_mappings") {
+                    assert!(
+                        sql.contains("count(*) >= 0"),
+                        "instance-config view content on compare surface: {sql}"
+                    );
                 }
                 // Role DDL touches fuzz roles / PUBLIC / the deliberate
                 // missing-role error only.
