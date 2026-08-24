@@ -159,7 +159,17 @@ pub fn init_seams() {
     // (compile options read C-source defaults), so only the reservation runs.
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: "plpgsql",
-        lookup: |_| None,
+        // The extension script (plpgsql--1.0.sql) declares the handlers as
+        // LANGUAGE C AS '$libdir/plpgsql'; fmgr_c_validator resolves them
+        // through this registry (C: load_external_function, dfmgr.c), so
+        // DROP/CREATE EXTENSION plpgsql — every pg_dump preamble — must find
+        // the native entry points here.
+        lookup: |symbol| match symbol {
+            "plpgsql_call_handler" => Some(plpgsql_call_handler as fmgr::PGFunction),
+            "plpgsql_inline_handler" => Some(plpgsql_inline_handler as fmgr::PGFunction),
+            "plpgsql_validator" => Some(plpgsql_validator as fmgr::PGFunction),
+            _ => None,
+        },
         pg_init: Some(|| {
             guc::MarkGUCPrefixReserved("plpgsql");
             Ok(())
@@ -1913,6 +1923,39 @@ fn plpgsql_exec_trigger(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The plpgsql extension script declares its handlers as
+    // `LANGUAGE C AS '$libdir/plpgsql'`; CREATE EXTENSION resolves them
+    // through dfmgr (fmgr_c_validator -> load_external_function). Pins that
+    // the registered library exposes all three entry points — before this,
+    // every pg_dump restore's `DROP/CREATE EXTENSION plpgsql` preamble failed
+    // with "could not find function \"plpgsql_call_handler\"".
+    #[test]
+    fn extension_handlers_resolve_through_dfmgr() {
+        init_seams();
+        for symbol in ["plpgsql_call_handler", "plpgsql_inline_handler", "plpgsql_validator"] {
+            let f = dfmgr::load_external_function("$libdir/plpgsql", symbol, true)
+                .unwrap_or_else(|e| panic!("{symbol}: {}", e.message()))
+                .expect("signal_not_found=true returned no function");
+            let expected: fmgr::PGFunction = match symbol {
+                "plpgsql_call_handler" => plpgsql_call_handler,
+                "plpgsql_inline_handler" => plpgsql_inline_handler,
+                _ => plpgsql_validator,
+            };
+            assert!(std::ptr::fn_addr_eq(f, expected), "{symbol} resolved to wrong entry point");
+        }
+        // Unknown symbols in the registered library keep C's lookup-miss error.
+        let err =
+            dfmgr::load_external_function("$libdir/plpgsql", "no_such_symbol", true).unwrap_err();
+        assert!(err
+            .message()
+            .contains("could not find function \"no_such_symbol\" in file \"$libdir/plpgsql\""));
+        // Unregistered libraries keep C's file-access error, unchanged.
+        let err =
+            dfmgr::load_external_function("$libdir/no_such_lib", "plpgsql_call_handler", true)
+                .unwrap_err();
+        assert!(err.message().contains("could not access file \"$libdir/no_such_lib\""));
+    }
 
     std::thread_local! {
         static CHECKED: core::cell::RefCell<Vec<(usize, bool, Oid)>> =
