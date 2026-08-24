@@ -202,7 +202,34 @@ impl Barrier {
                 b.waiters.push(handle);
             }
             drop(b);
-            route::park_wait()?;
+            if let Err(e) = route::park_wait() {
+                // A cancel/die interrupt raised inside the wait unwinds this
+                // arrival. C leaves `arrived` counted (CHECK_FOR_INTERRUPTS
+                // throws out of ConditionVariableSleep) and survives anyway:
+                // every participant is a separate process and the erroring
+                // gang dies with its DSM. In the thread model a phantom
+                // arrival is lethal — the erroring participant's later
+                // BarrierDetach observes arrived == participants and releases
+                // the phase while a still-attached participant has yet to
+                // arrive, so the released elected worker frees shared
+                // hash-join state (chunks, bucket arrays) under that live
+                // participant: a process-fatal use-after-free (Antithesis
+                // RB-5, wpool standby SIGSEGV after an injected worker
+                // error). Roll the arrival back under the lock so the
+                // barrier keeps the contract BarrierDetachImpl assumes: a
+                // detaching participant is never counted in `arrived`.
+                let mut b = self.lock();
+                if b.phase == start_phase {
+                    debug_assert!(b.arrived > 0);
+                    b.arrived -= 1;
+                }
+                // else: the phase already advanced — the release consumed our
+                // arrival and reset `arrived`; nothing to roll back.
+                if let Some(pos) = b.waiters.iter().position(|w| *w == handle) {
+                    b.waiters.swap_remove(pos);
+                }
+                return Err(e);
+            }
             b = self.lock();
         }
         if let Some(pos) = b.waiters.iter().position(|w| *w == handle) {
@@ -345,6 +372,62 @@ mod tests {
         // A sole participant arriving-and-detaching advances the phase.
         b.attach();
         assert!(b.arrive_and_detach());
+        assert_eq!(b.lock().phase, 1);
+    }
+
+    /// RB-5 (Antithesis b627b97fb4ea57851b123676de30f2ab-59-13): an arrival
+    /// unwound by an interrupt must be rolled back, or the participant's
+    /// error-path detach releases the phase while another attached
+    /// participant has yet to arrive (phantom-arrival over-release) — in the
+    /// thread model that lets an elected worker free shared hash-join state
+    /// under a live participant (SIGSEGV).
+    #[test]
+    fn interrupted_arrival_rolls_back() {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        fn test_cfi() -> ::types_error::PgResult<()> {
+            // ProcessInterrupts shape: consume the (thread-local) flag and
+            // raise; uninterrupted threads never reach here (route gates on
+            // InterruptPending()).
+            init_small::globals::SetInterruptPending(false);
+            Err(::types_error::PgError::new(::types_error::ERROR, "test interrupt").into())
+        }
+        INSTALL.call_once(|| postgres_seams::check_for_interrupts::set(test_cfi));
+
+        let b = std::sync::Arc::new(Barrier::new(0));
+        // Three attached participants: A (thread), B (this thread, will be
+        // interrupted), C (arrives last, from this thread after B detaches).
+        assert_eq!(b.attach(), 0);
+        assert_eq!(b.attach(), 0);
+        assert_eq!(b.attach(), 0);
+        let a = {
+            let b = std::sync::Arc::clone(&b);
+            std::thread::spawn(move || b.arrive_and_wait().unwrap())
+        };
+        // A has arrived and is parked.
+        while b.lock().arrived < 1 {
+            std::thread::yield_now();
+        }
+        // B arrives with a pending interrupt: the wait unwinds with the
+        // raised error and the arrival must be rolled back.
+        init_small::globals::SetInterruptPending(true);
+        assert!(b.arrive_and_wait().is_err());
+        assert_eq!(
+            b.lock().arrived,
+            1,
+            "interrupt-unwound arrival left a phantom arrived count"
+        );
+        // B's error cleanup detaches. With the phantom arrival this released
+        // the phase (arrived == participants) although C never arrived.
+        assert!(!b.detach());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            b.lock().phase,
+            0,
+            "phase advanced without attached participant C arriving"
+        );
+        // C arrives: NOW the phase advances and A is released.
+        assert!(b.arrive_and_wait().unwrap());
+        assert!(!a.join().unwrap());
         assert_eq!(b.lock().phase, 1);
     }
 
