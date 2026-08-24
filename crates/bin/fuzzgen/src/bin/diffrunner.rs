@@ -595,10 +595,21 @@ fn run() -> Result<ExitCode, String> {
                             // namespace so concurrent driver instances and
                             // crash residue can never interfere through the
                             // cluster-global database namespace.
-                            sql: if is_gramwalk {
-                                fuzzgen::gramwalk::rebase_database_names(&s.sql, &args.db)
-                            } else {
-                                s.sql.clone()
+                            // RB-9 (round-9): tablespace names are the same
+                            // cluster-global hazard — ddldeep's fixed
+                            // dd_ts/dd_ts2 leaked across batches as B-only
+                            // 42710/55000 — but fixed-name decks exist in
+                            // several modules, so the tablespace rebase
+                            // applies to the WHOLE stream (pg_* built-ins
+                            // and quoted material excepted); helper_diffrun
+                            // reclaims {db}_* tablespaces at batch cleanup.
+                            sql: {
+                                let sql = if is_gramwalk {
+                                    fuzzgen::gramwalk::rebase_database_names(&s.sql, &args.db)
+                                } else {
+                                    s.sql.clone()
+                                };
+                                fuzzgen::gramwalk::rebase_tablespace_names(&sql, &args.db)
                             },
                             soft_float_cols: s.soft_float_cols.clone(),
                             // Opt-in H1 mask: gramwalk derives raw EXPLAIN

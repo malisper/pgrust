@@ -3677,8 +3677,16 @@ fn gen_xrec(g: &mut Gen) -> Vec<StmtKind> {
     ])
 }
 
-/// pg_stat_get_progress_info over every command kind (all empty here —
-/// the per-command dispatch and the empty-result arms are the lines).
+/// pg_stat_get_progress_info over every command kind — the per-command
+/// dispatch and the empty-result arms are the lines. Existence shape
+/// only (round-9 FP-9b, same treatment as gen_hba): the views report
+/// LIVE instance state, so a CONCURRENT driver's in-flight command
+/// appears on one cluster only — a raw `SELECT count(*) FROM
+/// pg_stat_progress_analyze` returned A=[0] with an unmatched B row in
+/// run b627b97f...-59-13. `count(*) >= 0` keeps the dispatch executing
+/// on both sides while the compared value is constant-true on any
+/// instance; the diff-side `instance-config` ruled class backstops
+/// grammar-derived references.
 fn gen_progress(g: &mut Gen) -> Vec<StmtKind> {
     g.fire("adtm:progress");
     let v = *g.rng.pick(&[
@@ -3686,7 +3694,7 @@ fn gen_progress(g: &mut Gen) -> Vec<StmtKind> {
         "pg_stat_progress_cluster", "pg_stat_progress_create_index",
         "pg_stat_progress_basebackup", "pg_stat_progress_copy",
     ]);
-    raw(format!("SELECT count(*) FROM {v};"))
+    raw(format!("SELECT count(*) >= 0 FROM {v};"))
 }
 
 /// Single-quote escape for literal material.

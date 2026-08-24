@@ -509,10 +509,17 @@ fn is_no_lz4_error(message: &str) -> bool {
 /// (pg_shmem_allocations family) — not the schema, so two independently
 /// provisioned clusters legitimately differ (the Antithesis pair runs
 /// different pg_hba.conf files: row count 6 vs 7 in run
-/// b627b97fb4ea57851b123676de30f2ab-59-13). The generators no longer
-/// project their content (existence shapes only); this predicate is the
-/// defensive net for gramwalk-derived references. Error outcomes on
-/// these statements still compare strictly.
+/// b627b97fb4ea57851b123676de30f2ab-59-13).
+///
+/// Round-9 FP-9b extends the family to live-state views: the
+/// pg_stat_progress_* views and pg_stat_activity report OTHER sessions'
+/// in-flight commands, so a concurrent driver's ANALYZE on one cluster
+/// legitimately appears on that side only (`SELECT count(*) FROM
+/// pg_stat_progress_analyze` returned A=[0] with an unmatched B row,
+/// same run). The generators no longer project any of this content
+/// (existence shapes only); this predicate is the defensive net for
+/// gramwalk-derived references. Error outcomes on these statements
+/// still compare strictly.
 pub fn is_instance_config_stmt(sql: &str) -> bool {
     let lower = sql.to_ascii_lowercase();
     [
@@ -520,6 +527,9 @@ pub fn is_instance_config_stmt(sql: &str) -> bool {
         "pg_ident_file_mappings",
         "pg_file_settings",
         "pg_shmem_allocations",
+        // FP-9b: whole pg_stat_progress_* family by prefix.
+        "pg_stat_progress_",
+        "pg_stat_activity",
     ]
     .iter()
     .any(|v| lower.contains(v))
@@ -1793,6 +1803,19 @@ mod tests {
         let c = classify_sql("SELECT name FROM pg_file_settings;", &a, &b);
         assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
         let c = classify_sql("SELECT name FROM pg_shmem_allocations;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
+        // FP-9b: pg_stat_progress_* (prefix) and pg_stat_activity are
+        // live INSTANCE state — a concurrent session's command shows up
+        // on one side only.
+        let c = classify_sql("SELECT count(*) FROM pg_stat_progress_analyze;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
+        let c = classify_sql(
+            "SELECT relid FROM pg_stat_progress_create_index;",
+            &a,
+            &b,
+        );
+        assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
+        let c = classify_sql("SELECT state FROM pg_stat_activity;", &a, &b);
         assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
         // Same shape elsewhere escalates.
         let c = classify_sql("SELECT t FROM fz_rich;", &a, &b);

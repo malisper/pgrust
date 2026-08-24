@@ -88,8 +88,11 @@ pub enum RuledPattern {
     /// pg_ident_file_mappings / pg_file_settings / pg_shmem_allocations*
     /// reflect the INSTANCE (config files on disk, shmem layout), not the
     /// schema — the Antithesis cluster pair provably runs different
-    /// pg_hba.conf files (row count 6 vs 7, run b627b97f...-59-13). The
-    /// generators emit only existence shapes there; this class catches
+    /// pg_hba.conf files (row count 6 vs 7, run b627b97f...-59-13).
+    /// FP-9b widens the family to live-state views (pg_stat_progress_*
+    /// by prefix, pg_stat_activity): concurrent sessions' in-flight
+    /// commands legitimately appear on one cluster only. The generators
+    /// emit only existence shapes there; this class catches
     /// gramwalk-derived references. Error outcomes still compare strictly.
     InstanceConfig,
     /// Rowset diff on a statement calling a backup-control function
@@ -186,12 +189,15 @@ pub fn default_table() -> Vec<RuledEntry> {
         },
         RuledEntry {
             id: "instance-config",
-            ruling: "round-9 FP-9 instance-config ruling: pg_hba_file_rules / \
-                     pg_ident_file_mappings / pg_file_settings / \
-                     pg_shmem_allocations reflect the instance (config \
-                     files, shmem layout), not the schema, and the two \
-                     clusters are provisioned independently — rowset \
-                     shape only, error outcomes still compare strictly \
+            ruling: "round-9 FP-9/FP-9b instance-config ruling: \
+                     pg_hba_file_rules / pg_ident_file_mappings / \
+                     pg_file_settings / pg_shmem_allocations reflect the \
+                     instance (config files, shmem layout), not the \
+                     schema, and the two clusters are provisioned \
+                     independently; pg_stat_progress_* / pg_stat_activity \
+                     are live instance state (concurrent sessions' \
+                     commands appear on one side only) — rowset shape \
+                     only, error outcomes still compare strictly \
                      (notes/antithesis/round9-triage-2026-08-24.md)",
             pattern: RuledPattern::InstanceConfig,
         },
@@ -512,6 +518,10 @@ mod tests {
             "SELECT * FROM pg_file_settings;",
             "SELECT name FROM pg_shmem_allocations;",
             "SELECT name FROM pg_shmem_allocations_numa;",
+            // FP-9b live-state family.
+            "SELECT count(*) FROM pg_stat_progress_analyze;",
+            "select phase from PG_STAT_PROGRESS_VACUUM ;",
+            "SELECT state FROM pg_stat_activity;",
         ] {
             let out = apply_ruled(&default_table(), sql, candidate("instance-config"));
             assert_eq!(out.class, DiffClass::Ruled("instance-config".to_string()), "{sql}");

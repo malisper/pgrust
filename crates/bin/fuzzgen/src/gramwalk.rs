@@ -463,6 +463,150 @@ pub fn rebase_database_names(sql: &str, tag: &str) -> String {
     out
 }
 
+/// Round-9 RB-9: tablespace names are CLUSTER-GLOBAL exactly like
+/// database names (FP-1), but several stream modules create them under
+/// fixed names (ddldeep's dd_ts/dd_ts2, vacuum's fz_vac_ts<n>) and
+/// gramwalk derives raw tablespace DDL from the grammar. Concurrent
+/// driver instances race each other's CREATE/RENAME/DROP, and crash
+/// residue from a batch killed mid-group surfaces on ONE side only as
+/// 42710 `tablespace "dd_ts2" already exists` on a later batch's
+/// RENAME, then 55000 on its DROP (run b627b97f...-59-13, seeds
+/// 1368837889297096578 / 1425779072044192746). Tablespace DIRECTORIES
+/// cannot collide: every in-stream CREATE TABLESPACE is an in-place
+/// tablespace (LOCATION '' under allow_in_place_tablespaces) living
+/// inside each side's own datadir — only the shared NAME namespace
+/// needs rebasing.
+///
+/// Rewrite every tablespace-name operand into the batch-unique
+/// namespace `{tag}_{name}` (tag = the batch's private scratch-db name,
+/// as for databases): the identifier after the TABLESPACE keyword
+/// (CREATE/ALTER/DROP TABLESPACE, the TABLESPACE clause of CREATE
+/// TABLE/INDEX/DATABASE, SET TABLESPACE, ALL IN TABLESPACE, REINDEX
+/// (TABLESPACE ...)), the RENAME TO target of an ALTER TABLESPACE, and
+/// the value list of SET default_tablespace / temp_tablespaces.
+/// Built-in `pg_*` tablespaces (pg_default, pg_global) and quoted
+/// material stay untouched. The mapping is injective per batch, so
+/// within-batch create/alter/drop coherence is preserved, and the
+/// statement TEXT is identical on both sides, so differential parity is
+/// untouched. Applied by the runner to the WHOLE statement stream;
+/// helper_diffrun reclaims `{tag}_*` tablespaces at batch cleanup.
+pub fn rebase_tablespace_names(sql: &str, tag: &str) -> String {
+    #[derive(PartialEq)]
+    enum Mode {
+        Idle,
+        /// Expect one tablespace name (after TABLESPACE / RENAME TO).
+        Name,
+        /// Expect a name list (after SET default_tablespace /
+        /// temp_tablespaces) until the statement ends.
+        List,
+    }
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let b = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len() + tag.len() + 1);
+    let mut i = 0usize;
+    let mut mode = Mode::Idle;
+    let mut saw_tablespace = false;
+    let mut prev_word = String::new();
+    while i < b.len() {
+        // Quoted material is opaque — never rebase inside '...'/"...".
+        if b[i] == b'\'' || b[i] == b'"' {
+            let q = b[i];
+            out.push(q as char);
+            i += 1;
+            while i < b.len() {
+                if b[i] == q {
+                    if i + 1 < b.len() && b[i + 1] == q {
+                        out.push_str(&sql[i..i + 2]); // doubled quote
+                        i += 2;
+                        continue;
+                    }
+                    out.push(q as char);
+                    i += 1;
+                    break;
+                }
+                let c = sql[i..].chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
+            }
+            if mode == Mode::Name {
+                mode = Mode::Idle;
+            }
+            continue;
+        }
+        if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            let start = i;
+            while i < b.len() && is_word(b[i]) {
+                i += 1;
+            }
+            let word = &sql[start..i];
+            let lower = word.to_ascii_lowercase();
+            match mode {
+                Mode::Name => {
+                    if matches!(lower.as_str(), "if" | "not" | "exists") {
+                        out.push_str(word);
+                        prev_word = lower;
+                        continue;
+                    }
+                    mode = Mode::Idle;
+                    if lower.starts_with("pg_") {
+                        out.push_str(word);
+                    } else {
+                        let mut rebased = format!("{tag}_{lower}");
+                        rebased.truncate(63);
+                        out.push_str(&rebased);
+                    }
+                    prev_word = lower;
+                    continue;
+                }
+                Mode::List => {
+                    // `SET x TO val` / `SET x TO DEFAULT` keywords and
+                    // built-ins pass through; other bare identifiers
+                    // are tablespace names.
+                    if matches!(lower.as_str(), "to" | "default") || lower.starts_with("pg_") {
+                        out.push_str(word);
+                    } else {
+                        let mut rebased = format!("{tag}_{lower}");
+                        rebased.truncate(63);
+                        out.push_str(&rebased);
+                    }
+                    prev_word = lower;
+                    continue;
+                }
+                Mode::Idle => {
+                    match lower.as_str() {
+                        "tablespace" => {
+                            saw_tablespace = true;
+                            mode = Mode::Name;
+                        }
+                        "to" if prev_word == "rename" && saw_tablespace => mode = Mode::Name,
+                        "default_tablespace" | "temp_tablespaces"
+                            if matches!(prev_word.as_str(), "set" | "local" | "session") =>
+                        {
+                            mode = Mode::List;
+                        }
+                        _ => {}
+                    }
+                    out.push_str(word);
+                    prev_word = lower;
+                }
+            }
+        } else {
+            match mode {
+                // `TABLESPACE ;` has no operand; any non-space
+                // punctuation ends a single-name expectation.
+                Mode::Name if b[i] != b' ' => mode = Mode::Idle,
+                // The list survives '=' and ',' separators only.
+                Mode::List if !matches!(b[i], b' ' | b'=' | b',') => mode = Mode::Idle,
+                _ => {}
+            }
+            let c = sql[i..].chars().next().unwrap();
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,6 +733,89 @@ mod tests {
         // 63-byte identifier bound holds.
         let long = rebase_database_names(
             "create database abcdefghijklmnopqrstuvwxyz0123456789 ;",
+            "fuzz_gramwalk_1234567_99",
+        );
+        let name = long.split_whitespace().nth(2).unwrap();
+        assert!(name.len() <= 63, "{name}");
+    }
+
+    /// RB-9: tablespace-name operands land in the batch-unique
+    /// namespace across every stream shape that names one; built-ins,
+    /// quoted material, and everything else stay untouched.
+    #[test]
+    fn rebase_tablespace_names_rewrites_operands_only() {
+        let t = "fuzz_dd_71_3";
+        // ddldeep TBLSPC deck shapes.
+        assert_eq!(
+            rebase_tablespace_names("CREATE TABLESPACE dd_ts LOCATION '';", t),
+            "CREATE TABLESPACE fuzz_dd_71_3_dd_ts LOCATION '';"
+        );
+        assert_eq!(
+            rebase_tablespace_names(
+                "CREATE TABLE dd_tsp (a int, b text) TABLESPACE dd_ts;",
+                t
+            ),
+            "CREATE TABLE dd_tsp (a int, b text) TABLESPACE fuzz_dd_71_3_dd_ts;"
+        );
+        assert_eq!(
+            rebase_tablespace_names(
+                "ALTER TABLE ALL IN TABLESPACE dd_ts SET TABLESPACE pg_default;",
+                t
+            ),
+            "ALTER TABLE ALL IN TABLESPACE fuzz_dd_71_3_dd_ts SET TABLESPACE pg_default;"
+        );
+        // RENAME TO target of an ALTER TABLESPACE is rebased too.
+        assert_eq!(
+            rebase_tablespace_names("ALTER TABLESPACE dd_ts RENAME TO dd_ts2;", t),
+            "ALTER TABLESPACE fuzz_dd_71_3_dd_ts RENAME TO fuzz_dd_71_3_dd_ts2;"
+        );
+        assert_eq!(
+            rebase_tablespace_names("COMMENT ON TABLESPACE dd_ts2 IS 'q8 ts';", t),
+            "COMMENT ON TABLESPACE fuzz_dd_71_3_dd_ts2 IS 'q8 ts';"
+        );
+        assert_eq!(
+            rebase_tablespace_names("DROP TABLESPACE IF EXISTS dd_ts2;", t),
+            "DROP TABLESPACE IF EXISTS fuzz_dd_71_3_dd_ts2;"
+        );
+        // default_tablespace / temp_tablespaces value lists.
+        assert_eq!(
+            rebase_tablespace_names("SET default_tablespace = dd_ts2;", t),
+            "SET default_tablespace = fuzz_dd_71_3_dd_ts2;"
+        );
+        assert_eq!(
+            rebase_tablespace_names("SET temp_tablespaces = dd_ts, dd_ts2;", t),
+            "SET temp_tablespaces = fuzz_dd_71_3_dd_ts, fuzz_dd_71_3_dd_ts2;"
+        );
+        let s = "SET default_tablespace TO DEFAULT;";
+        assert_eq!(rebase_tablespace_names(s, t), s.to_string());
+        let s = "RESET default_tablespace;";
+        assert_eq!(rebase_tablespace_names(s, t), s.to_string());
+        // vacuum REINDEX arm (parenthesized option) stays coherent with
+        // its CREATE/DROP.
+        assert_eq!(
+            rebase_tablespace_names(
+                "REINDEX (TABLESPACE fz_vac_ts1, CONCURRENTLY, VERBOSE) INDEX fz_vac_ti1;",
+                t
+            ),
+            "REINDEX (TABLESPACE fuzz_dd_71_3_fz_vac_ts1, CONCURRENTLY, VERBOSE) INDEX fz_vac_ti1;"
+        );
+        // Built-in pg_* tablespaces never move.
+        let s = "ALTER INDEX dd_tsp_a SET TABLESPACE pg_default;";
+        assert_eq!(rebase_tablespace_names(s, t), s.to_string());
+        let s = "REINDEX (TABLESPACE pg_global) TABLE ea3_plain;";
+        assert_eq!(rebase_tablespace_names(s, t), s.to_string());
+        // Quoted material is opaque; unrelated statements never change.
+        let s = "SELECT 'tablespace dd_ts stays', \"dd_ts\" FROM fz_rich;";
+        assert_eq!(rebase_tablespace_names(s, t), s.to_string());
+        let s = "SET allow_in_place_tablespaces = on;";
+        assert_eq!(rebase_tablespace_names(s, t), s.to_string());
+        let s = "ALTER TABLE fz_scalar RENAME TO zz;";
+        assert_eq!(rebase_tablespace_names(s, t), s.to_string());
+        // No operand: nothing to rewrite.
+        assert_eq!(rebase_tablespace_names("DROP TABLESPACE ;", t), "DROP TABLESPACE ;");
+        // 63-byte identifier bound holds.
+        let long = rebase_tablespace_names(
+            "DROP TABLESPACE abcdefghijklmnopqrstuvwxyz0123456789 ;",
             "fuzz_gramwalk_1234567_99",
         );
         let name = long.split_whitespace().nth(2).unwrap();
