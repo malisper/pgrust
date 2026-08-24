@@ -471,6 +471,87 @@ pub fn is_explain_stmt(sql: &str) -> bool {
     head.len() >= 7 && head[..7].eq_ignore_ascii_case("EXPLAIN")
 }
 
+/// EXPLAIN of DECLARE ... SCROLL CURSOR detection (round-9 RB-10 gate).
+/// Looks for a SCROLL option token (not preceded by NO) between DECLARE
+/// and the cursor's FOR. Deliberately loose — a cursor merely NAMED
+/// "scroll" can gate the candidate in, but the ruling only fires when
+/// the diff is exactly C's top-level Materialize wrap, which only a real
+/// SCROLL cursor plan produces.
+pub fn is_scroll_declare_explain_stmt(sql: &str) -> bool {
+    if !is_explain_stmt(sql) {
+        return false;
+    }
+    let lower = sql.to_ascii_lowercase();
+    let mut toks = lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty());
+    // Skip to DECLARE.
+    if !toks.any(|t| t == "declare") {
+        return false;
+    }
+    let mut prev = "";
+    for t in toks {
+        if t == "for" {
+            // Options end at CURSOR ... FOR; never scan the query body.
+            return false;
+        }
+        if t == "scroll" && prev != "no" {
+            return true;
+        }
+        prev = t;
+    }
+    false
+}
+
+/// Strip a top-level Materialize wrap from EXPLAIN TEXT rows (one line
+/// per single-cell row): drop the "Materialize ..." header row and its
+/// 2-space-indented attribute rows (Output/Storage), then de-indent the
+/// remaining plan-tree rows by the 6-column "  ->  " marker width.
+/// Margin-level summary rows (Planning/Execution Time, Planning:,
+/// "  Buffers:" etc.) pass through untouched. Returns None when the
+/// rows do not have that exact shape.
+fn strip_top_materialize_rows(
+    rows: &[Vec<Option<String>>],
+) -> Option<Vec<Vec<Option<String>>>> {
+    let cell = |r: &Vec<Option<String>>| -> Option<String> {
+        if r.len() != 1 {
+            return None;
+        }
+        r[0].clone()
+    };
+    let first = cell(rows.first()?)?;
+    if !first.starts_with("Materialize") {
+        return None;
+    }
+    // Skip the wrap's attribute rows up to the child marker.
+    let mut i = 1;
+    loop {
+        let s = cell(rows.get(i)?)?;
+        if s.starts_with("  ->  ") {
+            break;
+        }
+        if !s.starts_with("  ") {
+            // Summary line before any child: not the expected shape.
+            return None;
+        }
+        i += 1;
+    }
+    let mut out = Vec::with_capacity(rows.len() - i);
+    let mut in_tree = true;
+    for r in &rows[i..] {
+        let s = cell(r)?;
+        if in_tree && (s.starts_with("      ") || s.starts_with("  ->  ")) {
+            out.push(vec![Some(s[6..].to_string())]);
+        } else {
+            // First margin-level row ends the de-indented plan tree;
+            // everything after (summary sections) passes through.
+            in_tree = false;
+            out.push(vec![Some(s)]);
+        }
+    }
+    Some(out)
+}
+
 /// SHOW ALL / pg_settings GUC-inventory statement detection (F4).
 /// pgrust deliberately ships a different GUC inventory than C — extra
 /// `pgrust.*` rows (docs/design/env-to-guc.md DIVERGENCE NOTICE) and
@@ -1498,6 +1579,48 @@ pub fn classify(input: &DiffInput) -> Classified {
                 }
                 None
             };
+            // Round-9 RB-10: EXPLAIN of DECLARE ... SCROLL CURSOR. C's
+            // planner wraps a SCROLL cursor's plan in Materialize when
+            // !ExecSupportsBackwardScan (planner.c:444-451); pgrust
+            // deliberately deleted that wrap — every backward cursor read
+            // is served by the portal tuplestore (ratified strategy
+            // divergence, notes/se-wave10-integration.md §5 item 2,
+            // 2026-07-17). The candidate fires only when stripping a
+            // top-level Materialize wrap from the A side makes the plans
+            // equal under the same masks the lane already applies; any
+            // other structural difference still escalates.
+            let scroll_materialize_only = |d: &str| -> Option<Classified> {
+                if !is_scroll_declare_explain_stmt(sql) {
+                    return None;
+                }
+                let stripped = strip_top_materialize_rows(ra)?;
+                let na = normalize_explain_rows(&stripped);
+                let nb = normalize_explain_rows(rb);
+                let (na, nb) = if mask_explain_timing {
+                    (
+                        normalize_explain_timing_rows(&na),
+                        normalize_explain_timing_rows(&nb),
+                    )
+                } else {
+                    (na, nb)
+                };
+                let norm = if ordered {
+                    cmp_rows_ordered(&na, &nb, &modes, ulp_tol)
+                } else {
+                    cmp_rows_multiset(&na, &nb, &modes, ulp_tol)
+                };
+                if matches!(norm, RowsetCmp::Diff(_)) {
+                    None
+                } else {
+                    Some(Classified {
+                        class: DiffClass::Ruled("scroll-materialize".to_string()),
+                        detail: format!(
+                            "equal after stripping C's top-level Materialize \
+                             SCROLL wrap: {d}"
+                        ),
+                    })
+                }
+            };
             // Round-7 OID/comparator fallbacks, tried in order after the
             // EXPLAIN/GUC masks: each normalizes BOTH sides identically
             // and only fires when the whole remaining diff disappears.
@@ -1575,6 +1698,9 @@ pub fn classify(input: &DiffInput) -> Classified {
                         if let Some(c) = explain_timing_only(&d) {
                             return c;
                         }
+                        if let Some(c) = scroll_materialize_only(&d) {
+                            return c;
+                        }
                         if let Some(c) = guc_inventory_candidate(sql, ra, rb) {
                             return c;
                         }
@@ -1623,6 +1749,9 @@ pub fn classify(input: &DiffInput) -> Classified {
                             return c;
                         }
                         if let Some(c) = explain_timing_only(&d) {
+                            return c;
+                        }
+                        if let Some(c) = scroll_materialize_only(&d) {
                             return c;
                         }
                         if let Some(c) = guc_inventory_candidate(sql, ra, rb) {
@@ -1882,6 +2011,115 @@ mod tests {
         let b = rowset(vec![25], rows(&[&[Some("x")], &[Some("y")]]));
         let c = classify_sql("select t from tbl ;", &a, &b);
         assert_eq!(c.class, DiffClass::RowsetDiff);
+    }
+
+    /// Round-9 RB-10: EXPLAIN DECLARE ... SCROLL rules out only when the
+    /// whole diff is C's top-level Materialize wrap; non-SCROLL DECLAREs
+    /// and any residual plan difference stay findings.
+    #[test]
+    fn explain_declare_scroll_materialize_wrap() {
+        let scroll_sql =
+            "explain verbose declare xmlforest scroll asensitive scroll binary \
+             cursor for select ;";
+        // Seed 3435819938407035103 shape: C wraps, pgrust does not.
+        let a = rowset(
+            vec![25],
+            rows(&[
+                &[Some("Materialize  (cost=0.00..0.01 rows=1 width=0)")],
+                &[Some("  ->  Result  (cost=0.00..0.01 rows=1 width=0)")],
+            ]),
+        );
+        let b = rowset(
+            vec![25],
+            rows(&[&[Some("Result  (cost=0.00..0.01 rows=1 width=0)")]]),
+        );
+        let c = classify_sql(scroll_sql, &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("scroll-materialize".to_string()));
+        // Same rowsets on a NON-scroll DECLARE: finding.
+        let c = classify_sql(
+            "explain declare c no scroll cursor for select ;",
+            &a,
+            &b,
+        );
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+        // VERBOSE attribute rows: wrap's Output row drops, child rows
+        // de-indent, margin summary rows pass through untouched.
+        let a = rowset(
+            vec![25],
+            rows(&[
+                &[Some("Materialize (actual time=0.001..0.001 rows=1.00 loops=1)")],
+                &[Some("  Output: 1")],
+                &[Some("  ->  Result (actual time=0.000..0.000 rows=1.00 loops=1)")],
+                &[Some("        Output: 1")],
+                &[Some("Planning Time: 0.030 ms")],
+                &[Some("Execution Time: 0.003 ms")],
+            ]),
+        );
+        let b = rowset(
+            vec![25],
+            rows(&[
+                &[Some("Result (actual time=0.002..0.005 rows=1.00 loops=1)")],
+                &[Some("  Output: 1")],
+                &[Some("Planning Time: 0.051 ms")],
+                &[Some("Execution Time: 0.009 ms")],
+            ]),
+        );
+        let scroll_analyze_sql =
+            "explain analyse verbose declare close binary insensitive scroll \
+             insensitive cursor for select 1 ;";
+        // Wall-clock digits differ -> needs the timing opt-in (gramwalk).
+        let c = classify(&DiffInput {
+            sql: scroll_analyze_sql,
+            a: &a,
+            b: &b,
+            ulp_tol: 4,
+            soft_cols: &[],
+            mask_explain_timing: true,
+        });
+        assert_eq!(c.class, DiffClass::Ruled("scroll-materialize".to_string()));
+        // Residual structural diff under the wrap still escalates.
+        let b2 = rowset(
+            vec![25],
+            rows(&[
+                &[Some("Result (actual time=0.002..0.005 rows=1.00 loops=1)")],
+                &[Some("  Output: 2")],
+                &[Some("Planning Time: 0.051 ms")],
+                &[Some("Execution Time: 0.009 ms")],
+            ]),
+        );
+        let c = classify(&DiffInput {
+            sql: scroll_analyze_sql,
+            a: &a,
+            b: &b2,
+            ulp_tol: 4,
+            soft_cols: &[],
+            mask_explain_timing: true,
+        });
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn scroll_declare_gate_detection() {
+        assert!(is_scroll_declare_explain_stmt(
+            "explain verbose declare xmlforest scroll asensitive scroll binary cursor for select ;"
+        ));
+        assert!(is_scroll_declare_explain_stmt(
+            "EXPLAIN (COSTS OFF) DECLARE c SCROLL CURSOR FOR SELECT 1;"
+        ));
+        // NO SCROLL is not SCROLL.
+        assert!(!is_scroll_declare_explain_stmt(
+            "explain declare c no scroll cursor for select ;"
+        ));
+        // "scroll" in the query body is not an option.
+        assert!(!is_scroll_declare_explain_stmt(
+            "explain declare c cursor for select * from scroll ;"
+        ));
+        // Not a DECLARE at all.
+        assert!(!is_scroll_declare_explain_stmt("explain select 1 ;"));
+        // Not an EXPLAIN at all.
+        assert!(!is_scroll_declare_explain_stmt(
+            "declare c scroll cursor for select 1 ;"
+        ));
     }
 
     /// H1: "actual time=" digits rule out only under the opt-in flag, and

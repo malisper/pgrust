@@ -2872,6 +2872,111 @@ mod join {
         assert!((hj.join.plan.total_cost - 18050.0).abs() < 1e-9, "{}", hj.join.plan.total_cost);
     }
 
+    // Round-9 RB-12: an INNER hash join with a NON-hashable residual qual
+    // (Join Filter). C's final_cost_hashjoin charges the per-tuple CPU term
+    // over approx_tuple_count(hashclauses) — the tuples that pass the hash
+    // quals BEFORE the Join Filter — never over the joinrel row estimate.
+    // Live PG 18.3 over the same fixture (100-page/10000-row tables,
+    // relpages/reltuples pinned, no pg_statistic, mergejoin off):
+    //   Hash Join  (cost=325.00..19300.00 rows=166667 width=16)
+    //     Hash Cond: (jt3.a = jt4.a)
+    //     Join Filter: (jt3.pad < jt4.pad)
+    // The deleted plain-inner shortcut (hashjointuples = path.rows) priced
+    // this at 15133.33 (166667 instead of 500000 tuples charged) and
+    // flipped join-order choices against C.
+    #[test]
+    fn inner_hash_join_with_join_filter_charges_prefilter_tuples() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mut q = join_query_rels(mcx, JT3, JT4);
+        // AND a non-hashable residual: jt3.pad < jt4.pad (int4lt).
+        let eq = {
+            let l = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+            let r = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::OpExpr {
+                    opno: INT4EQ_OP,
+                    opfuncid: INT4EQ_PROC,
+                    opresulttype: 16,
+                    opretset: false,
+                    opcollid: 0,
+                    inputcollid: 0,
+                    args: NodeList::make2(mcx, l, r).unwrap(),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        };
+        let lt = {
+            let l = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+            let r = Node::mk_var(mcx, 2, 2, 23, -1, 0, 0).unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::OpExpr {
+                    opno: INT4_LT_OP,
+                    opfuncid: 66,
+                    opresulttype: 16,
+                    opretset: false,
+                    opcollid: 0,
+                    inputcollid: 0,
+                    args: NodeList::make2(mcx, l, r).unwrap(),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        };
+        let quals = Node::mk(
+            mcx,
+            types_nodes::primnodes::BoolExpr {
+                boolop: types_nodes::primnodes::BoolExprType::AND_EXPR,
+                args: NodeList::make2(mcx, eq, lt).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        // Query.jointree is a shared ref: rebuild the FromExpr wholesale.
+        let rtr1 = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+        let rtr2 = Node::mk_range_tbl_ref(mcx, 2).unwrap();
+        q.jointree = Some(alloc_leak_in(
+            mcx,
+            FromExpr {
+                fromlist: NodeList::make2(mcx, rtr1, rtr2).unwrap(),
+                quals: Some(quals),
+            },
+        )
+        .unwrap());
+        crate::gucs::set_enable_mergejoin(false);
+        let stmt = planner(
+            mcx,
+            leak_q(mcx, q),
+            "SELECT * FROM jt3, jt4 WHERE jt3.a = jt4.a AND jt3.pad < jt4.pad",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+        crate::gucs::set_enable_mergejoin(true);
+        let stmt = stmt.unwrap();
+
+        let hj = stmt
+            .planTree
+            .unwrap()
+            .as_hash_join()
+            .expect("HashJoin root (hash beats nestloop on large inputs)");
+        assert_eq!(hj.join.jointype, types_nodes::JoinType::JOIN_INNER);
+        // Equijoin rides the hashclauses; the < residual is the joinqual.
+        assert_eq!(hj.hashclauses.len(), 1);
+        assert_eq!(hj.join.joinqual.len(), 1);
+        let jq = hj.join.joinqual.nth(0).as_op_expr().expect("Join Filter OpExpr");
+        assert_eq!(jq.opno, INT4_LT_OP);
+        assert!((hj.join.plan.plan_rows - 166667.0).abs() < 1.0, "{}", hj.join.plan.plan_rows);
+        assert!((hj.join.plan.startup_cost - 325.0).abs() < 1e-9, "{}", hj.join.plan.startup_cost);
+        assert!((hj.join.plan.total_cost - 19300.0).abs() < 1e-9, "{}", hj.join.plan.total_cost);
+    }
+
     // Mergejoin lane: with nestloop and hashjoin disabled the explicit-sort
     // merge path (sort_inner_and_outer) wins. Costs are C's formulas over the
     // fixture stats (1-page tables, reltuples 1 and 2, no pg_statistic):

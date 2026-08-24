@@ -114,6 +114,15 @@ pub enum RuledPattern {
     /// and fixed in later PostgreSQL versions — pgrust deliberately
     /// implements the fixed strict behavior. Engine stays unchanged.
     TidInputUpstream,
+    /// EXPLAIN of DECLARE ... SCROLL CURSOR equal after stripping C's
+    /// top-level Materialize wrap (round-9 RB-10): C's planner wraps a
+    /// SCROLL cursor plan in Materialize when the plan cannot scan
+    /// backwards (planner.c:444-451); pgrust deliberately deleted the
+    /// wrap because every backward cursor read is served by the portal
+    /// tuplestore (ratified strategy divergence, Michael 2026-07-17,
+    /// notes/se-wave10-integration.md §5 item 2). Any other structural
+    /// plan difference still escalates.
+    ScrollMaterialize,
     /// One side raised C's catalog-row concurrency error XX000 "tuple
     /// concurrently updated/deleted" (simple_heap_update) on SHARED-catalog
     /// DDL (ALTER ROLE/DATABASE/TABLESPACE, shared COMMENT). Both engines
@@ -286,6 +295,20 @@ pub fn default_table() -> Vec<RuledEntry> {
             pattern: RuledPattern::ParallelWorkerInit,
         },
         RuledEntry {
+            id: "scroll-materialize",
+            ruling: "SCROLL-Materialize ruling (round-9 RB-10): pgrust \
+                     deliberately omits C's planner Materialize wrap for \
+                     SCROLL cursors — backward reads are served by the \
+                     portal tuplestore (ratified strategy divergence, \
+                     Michael 2026-07-17, notes/se-wave10-integration.md \
+                     §5 item 2); EXPLAIN DECLARE ... SCROLL therefore \
+                     shows the wrap only on the C side. Scope: the diff \
+                     must vanish once the top-level Materialize wrap is \
+                     stripped from A; any other plan-shape difference \
+                     still escalates",
+            pattern: RuledPattern::ScrollMaterialize,
+        },
+        RuledEntry {
             id: "tie-ordering",
             ruling: "docs/conformance/tie-ordering.md: tie order under underdetermined ORDER BY",
             pattern: RuledPattern::TieOrder,
@@ -348,6 +371,10 @@ fn matches(entry: &RuledEntry, candidate: &str, sql: &str) -> bool {
         // input can be reached without the token "tid" in the SQL (COPY,
         // insert into a tid column), so no text refinement is reliable.
         RuledPattern::TidInputUpstream => candidate == "tid-input-upstream",
+        RuledPattern::ScrollMaterialize => {
+            candidate == "scroll-materialize"
+                && crate::diff::is_scroll_declare_explain_stmt(sql)
+        }
     }
 }
 

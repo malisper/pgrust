@@ -3546,11 +3546,6 @@ pub fn final_cost_hashjoin(
         run.root.path(inner_path),
         types_pathnodes::PathNode::UniquePath(_)
     );
-    let outer_is_unique_path = matches!(
-        run.root.path(outer_path),
-        types_pathnodes::PathNode::UniquePath(_)
-    );
-
     let numbuckets = workspace.numbuckets;
     let numbatches = workspace.numbatches;
     let mut startup_cost = workspace.startup_cost;
@@ -3678,20 +3673,16 @@ pub fn final_cost_hashjoin(
             * crate::clamp_row_est(inner_path_rows * innerbucketsize)
             * 0.5;
 
-        // approx_tuple_count divergence (plain inner arm): the joinrel size
-        // estimate already applies the (equijoin) hashclause selectivity, so
-        // reuse it for the CPU term. Outer joins and unique-ified inputs
-        // can't reuse it (null-extension clamp / semijoin row estimate), so
-        // take C's approx_tuple_count directly.
-        hashjointuples = if path.jpath.jointype == JOIN_INNER
-            && !inner_is_unique_path
-            && !outer_is_unique_path
-            && path.jpath.path.parallel_workers == 0
-        {
-            path.jpath.path.rows
-        } else {
-            approx_tuple_count(run, outer_path, inner_path, &hcls)?
-        };
+        // C-parity (costsize.c final_cost_hashjoin): hashjointuples is
+        // ALWAYS approx_tuple_count over the hashclauses only. The former
+        // plain-inner shortcut reused path.rows here, but the joinrel size
+        // also applies the selectivity of NON-hash join restrictions
+        // (Join Filter otherquals), under-charging the per-tuple CPU term
+        // whenever such quals exist and flipping join-order choices
+        // against C (round-9 RB-12: C picks (t0⋈t2)⟕t1 at 90.05 while the
+        // shortcut priced (t0⟕t1)⋈t2 with a CASE Join Filter at 88.45
+        // instead of C's 95.73 for the identical shape).
+        hashjointuples = approx_tuple_count(run, outer_path, inner_path, &hcls)?;
     }
 
     startup_cost += qp_startup;
