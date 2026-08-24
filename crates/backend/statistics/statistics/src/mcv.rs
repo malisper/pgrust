@@ -504,6 +504,22 @@ pub fn statext_mcv_deserialize<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<MC
         if typbyval && !matches!(typlen, 1 | 2 | 4 | 8) {
             return Err(PgError::error(format!("unsupported byval length: {typlen}")).into());
         }
+        // Per-dimension typlen/typbyval sanity, matching what
+        // statext_mcv_serialize can ever emit (mcv.c). A by-ref dimension
+        // is fixed-length (typlen > 0), varlena (-1) or cstring (-2); C's
+        // statext_mcv_deserialize only has value-reading branches for those
+        // three cases. Any other typlen is a crafted/corrupt blob: it would
+        // otherwise leave the dimension's value array unread (matching no
+        // branch below) yet still pass the offset check when nbytes is 0,
+        // and hand the consumption site a datum whose representation does
+        // not match the column-type operator that later reads it. Reject it
+        // as corruption. This never rejects a valid blob, because the
+        // serializer always stores one of these typlen values.
+        if !typbyval && !(typlen > 0 || typlen == -1 || typlen == -2) {
+            return Err(
+                PgError::error(format!("invalid MCV typlen ({typlen}) in MCVList")).into()
+            );
+        }
         info.push(DimInfo {
             nvalues: nvalues as usize,
             nbytes: nbytes as usize,
@@ -684,6 +700,41 @@ mod tests {
         let mut b = blob(1, 0);
         b[8..12].copy_from_slice(&2u32.to_ne_bytes());
         assert!(statext_mcv_deserialize(cx.mcx(), &b).is_err());
+    }
+
+    #[test]
+    fn deserialize_invalid_typlen_returns_err() {
+        // A by-ref dimension (typbyval = false) must declare typlen > 0, -1
+        // or -2 -- the only cases statext_mcv_serialize emits and C's
+        // statext_mcv_deserialize handles. This crafted blob declares
+        // typlen = 0 with nvalues/nbytes = 0 and its sole item NULL in the
+        // dimension, so it is otherwise structurally consistent (all size and
+        // offset checks pass) and used to deserialize cleanly. It must now be
+        // rejected as corruption, since such a representation would confuse
+        // the column-type operator that later consumes the datum.
+        let cx = mcx::MemoryContext::new("test");
+        let mut b = Vec::new();
+        b.extend_from_slice(&STATS_MCV_MAGIC.to_ne_bytes()); // magic
+        b.extend_from_slice(&STATS_MCV_TYPE_BASIC.to_ne_bytes()); // type
+        b.extend_from_slice(&1u32.to_ne_bytes()); // nitems
+        b.extend_from_slice(&1i16.to_ne_bytes()); // ndimensions
+        b.extend_from_slice(&25u32.to_ne_bytes()); // types[0] (text)
+        // DimensionInfo: nvalues=0, nbytes=0, nbytes_aligned=0, typlen=0, typbyval=false
+        b.extend_from_slice(&0i32.to_ne_bytes()); // nvalues
+        b.extend_from_slice(&0i32.to_ne_bytes()); // nbytes
+        b.extend_from_slice(&0i32.to_ne_bytes()); // nbytes_aligned
+        b.extend_from_slice(&0i32.to_ne_bytes()); // typlen (invalid for by-ref)
+        b.push(0); // typbyval = false
+        b.extend_from_slice(&[0u8; 3]); // padding
+        // single item, NULL in the only dimension
+        b.push(1); // isnull[0] = true
+        b.extend_from_slice(&0.5f64.to_ne_bytes()); // frequency
+        b.extend_from_slice(&0.25f64.to_ne_bytes()); // base_frequency
+        b.extend_from_slice(&0u16.to_ne_bytes()); // index (ignored: NULL)
+        statext_mcv_deserialize(cx.mcx(), &b).err().unwrap();
+
+        // The well-formed by-value blob still deserializes without error.
+        statext_mcv_deserialize(cx.mcx(), &blob(1, 0)).unwrap();
     }
 
     #[test]

@@ -206,13 +206,15 @@ pub fn CheckpointerShmemResetAfterCrash() {
     cp.ckpt_done.store(0, Relaxed);
     cp.ckpt_failed.store(0, Relaxed);
     cp.ckpt_flags.store(0, Relaxed);
-    cp.num_requests.set(0);
+    // SAFETY: crash-cycle reset; every child dead, postmaster thread exclusive
+    unsafe { cp.num_requests.set(0) };
     let zero = CheckpointerRequest {
         req_type: SyncRequestType::SYNC_REQUEST,
         ftag: FileTag::default(),
     };
+    // SAFETY: crash-cycle reset; every child dead, postmaster thread exclusive
     for r in cp.requests {
-        r.set(zero);
+        unsafe { r.set(zero) };
     }
     if condition_variable_seams::checkpointer_cvs_reset_after_crash::is_installed() {
         condition_variable_seams::checkpointer_cvs_reset_after_crash::call();
@@ -767,18 +769,24 @@ pub fn ForwardSyncRequest(ftag: FileTag, req_type: SyncRequestType) -> PgResult<
     let cp = shmem();
     LWLockAcquire(checkpointer_comm_lock(), LW_EXCLUSIVE, g::MyProcNumber())?;
 
+    // SAFETY: serialized by CheckpointerCommLock
     if cp.checkpointer_pid.load(Relaxed) == 0
-        || (cp.num_requests.get() >= cp.max_requests && !CompactCheckpointerRequestQueue()?)
+        || (unsafe { cp.num_requests.get() } >= cp.max_requests
+            && !CompactCheckpointerRequestQueue()?)
     {
         LWLockRelease(checkpointer_comm_lock())?;
         return Ok(false);
     }
 
-    let idx = cp.num_requests.get();
-    cp.num_requests.set(idx + 1);
-    cp.requests[idx as usize].set(CheckpointerRequest { req_type, ftag });
+    // SAFETY: serialized by CheckpointerCommLock
+    let idx = unsafe { cp.num_requests.get() };
+    // SAFETY: serialized by CheckpointerCommLock
+    unsafe { cp.num_requests.set(idx + 1) };
+    // SAFETY: serialized by CheckpointerCommLock
+    unsafe { cp.requests[idx as usize].set(CheckpointerRequest { req_type, ftag }) };
 
-    let too_full = cp.num_requests.get() >= cp.max_requests / 2;
+    // SAFETY: serialized by CheckpointerCommLock
+    let too_full = unsafe { cp.num_requests.get() } >= cp.max_requests / 2;
 
     LWLockRelease(checkpointer_comm_lock())?;
 
@@ -798,7 +806,8 @@ fn CompactCheckpointerRequestQueue() -> PgResult<bool> {
     }
 
     let cp = shmem();
-    let num_requests = cp.num_requests.get();
+    // SAFETY: serialized by CheckpointerCommLock
+    let num_requests = unsafe { cp.num_requests.get() };
     let n = num_requests.max(0) as usize;
 
     let scratch = mcx::MemoryContext::new("CompactCheckpointerRequestQueue");
@@ -813,7 +822,8 @@ fn CompactCheckpointerRequestQueue() -> PgResult<bool> {
     let mut num_skipped = 0;
 
     for i in 0..num_requests {
-        if let Some(prev) = htab.insert(cp.requests[i as usize].get(), i) {
+        // SAFETY: serialized by CheckpointerCommLock
+        if let Some(prev) = htab.insert(unsafe { cp.requests[i as usize].get() }, i) {
             skip_slot[prev as usize] = true;
             num_skipped += 1;
         }
@@ -828,7 +838,8 @@ fn CompactCheckpointerRequestQueue() -> PgResult<bool> {
         if skip_slot[i as usize] {
             continue;
         }
-        cp.requests[preserve_count as usize].set(cp.requests[i as usize].get());
+        // SAFETY: serialized by CheckpointerCommLock
+        unsafe { cp.requests[preserve_count as usize].set(cp.requests[i as usize].get()) };
         preserve_count += 1;
     }
     ereport(DEBUG1)
@@ -836,7 +847,8 @@ fn CompactCheckpointerRequestQueue() -> PgResult<bool> {
             "compacted fsync request queue from {num_requests} entries to {preserve_count} entries"
         ))
         .finish(loc("CompactCheckpointerRequestQueue"))?;
-    cp.num_requests.set(preserve_count);
+    // SAFETY: serialized by CheckpointerCommLock
+    unsafe { cp.num_requests.set(preserve_count) };
     Ok(true)
 }
 
@@ -848,7 +860,8 @@ pub fn AbsorbSyncRequests() -> PgResult<()> {
     let cp = shmem();
     LWLockAcquire(checkpointer_comm_lock(), LW_EXCLUSIVE, g::MyProcNumber())?;
 
-    let n = cp.num_requests.get();
+    // SAFETY: serialized by CheckpointerCommLock
+    let n = unsafe { cp.num_requests.get() };
     ABSORB_SCRATCH.with(|cell| -> PgResult<()> {
         let mut slot = cell.borrow_mut();
         let buf = slot.get_or_insert_with(|| {
@@ -876,10 +889,12 @@ pub fn AbsorbSyncRequests() -> PgResult<()> {
         let alloc = *buf.allocator();
         buf.try_reserve(n_reqs)
             .map_err(|_| alloc.oom(n_reqs * core::mem::size_of::<CheckpointerRequest>()))?;
-        buf.extend((0..n).map(|i| cp.requests[i as usize].get()));
+        // SAFETY: serialized by CheckpointerCommLock
+        buf.extend((0..n).map(|i| unsafe { cp.requests[i as usize].get() }));
 
         g::StartCriticalSection();
-        cp.num_requests.set(0);
+        // SAFETY: serialized by CheckpointerCommLock
+        unsafe { cp.num_requests.set(0) };
         // Once the shared queue is cleared, `buf` holds the only copy of the
         // drained requests: C PANICs on any failure past this point ("the
         // system cannot run safely if we are unable to fsync what we have

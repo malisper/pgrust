@@ -269,8 +269,25 @@ std::thread_local! {
     > = const { core::cell::RefCell::new(core::mem::ManuallyDrop::new(None)) };
 }
 
+// Refresh the per-thread shim flinfo carrier with the FmgrInfo resolved at
+// *this* sort setup, unconditionally overwriting any entry a prior sort left
+// for the same oid. C fmgr_info_cxt's the comparator afresh into ssup_cxt at
+// every PrepareSortSupportComparisonShim (sortsupport.c:76), so a pg_proc
+// change since the last sort — SECURITY DEFINER/proconfig/language wrapping —
+// takes effect; without this the backend-lifetime carrier would serve the
+// stale resolution across the change. Called from the Shim-producing arms of
+// comparator_for_* (the FinishSortSupportFunction-equivalent setup points).
+fn install_shim_flinfo(fn_oid: Oid, flinfo: ::types_fmgr::FmgrInfo) {
+    // Same normal-execution assignment shim_cmp performs: the replaced Option
+    // (if any) drops here, not at thread exit — that final drop is what the
+    // ManuallyDrop wrapper on SHIM_FLINFO suppresses.
+    SHIM_FLINFO.with(|c| **c.borrow_mut() = Some((fn_oid, flinfo)));
+}
+
 // TLS carrier = C's ssup_cxt-lived flinfo (record_cmp memoizes in fn_extra);
-// out of line so apply_cmp_in's fast arms don't pay for it.
+// out of line so apply_cmp_in's fast arms don't pay for it. Setup (re)seeds it
+// via install_shim_flinfo; this lazy fill covers the multi-key mismatch case
+// (one slot, several shim oids in a sort), always resolving fresh.
 #[inline(never)]
 fn shim_cmp(shim: ShimCmp, x: Datum, y: Datum, collation: Oid, mcx: Mcx<'_>) -> i32 {
     let call = SHIM_FLINFO.with(|c| {
@@ -606,10 +623,10 @@ pub fn comparator_for_opfamily(
                 SortComparator::Bool
             } else {
                 let flinfo = ::fmgr_seams::fmgr_info::call(sort_function)?;
-                SortComparator::Shim(ShimCmp {
-                    fn_addr: flinfo.fn_addr,
-                    fn_oid: sort_function,
-                })
+                let fn_addr = flinfo.fn_addr;
+                // Fresh per-setup resolution, as C fmgr_info_cxt's per shim.
+                install_shim_flinfo(sort_function, flinfo);
+                SortComparator::Shim(ShimCmp { fn_addr, fn_oid: sort_function })
             }
         }
         // Invariant tripwire: the constant set at ssup.rs:10-33 is complete
@@ -646,10 +663,10 @@ pub fn comparator_for_gist_index_col(opfamily: Oid, opcintype: Oid) -> PgResult<
         F_GIST_POINT_SORTSUPPORT => Ok(SortComparator::GistPointZorder),
         F_RANGE_SORTSUPPORT => {
             let flinfo = ::fmgr_seams::fmgr_info::call(F_RANGE_CMP)?;
-            Ok(SortComparator::Shim(ShimCmp {
-                fn_addr: flinfo.fn_addr,
-                fn_oid: F_RANGE_CMP,
-            }))
+            let fn_addr = flinfo.fn_addr;
+            // Fresh per-setup resolution, as C fmgr_info_cxt's per shim.
+            install_shim_flinfo(F_RANGE_CMP, flinfo);
+            Ok(SortComparator::Shim(ShimCmp { fn_addr, fn_oid: F_RANGE_CMP }))
         }
         // C: PrepareSortSupportFromGistIndexRel's elog(ERROR) (sortsupport.c).
         0 => Err(Box::new(PgError::error(format!(
@@ -758,10 +775,10 @@ pub fn comparator_for_index_col(
                 SortComparator::Bool
             } else {
                 let flinfo = ::fmgr_seams::fmgr_info::call(sort_function)?;
-                SortComparator::Shim(ShimCmp {
-                    fn_addr: flinfo.fn_addr,
-                    fn_oid: sort_function,
-                })
+                let fn_addr = flinfo.fn_addr;
+                // Fresh per-setup resolution, as C fmgr_info_cxt's per shim.
+                install_shim_flinfo(sort_function, flinfo);
+                SortComparator::Shim(ShimCmp { fn_addr, fn_oid: sort_function })
             }
         }
         // Invariant tripwire: the constant set at ssup.rs:10-33 is complete

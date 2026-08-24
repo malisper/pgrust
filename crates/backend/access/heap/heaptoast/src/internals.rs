@@ -1,8 +1,8 @@
 use ::datum::Datum;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::{InvalidOid, Oid};
-use ::types_error::{PgError, PgResult};
-use ::types_rel::{Relation, RelationData};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+use ::types_rel::{Relation, RelationData, RELKIND_TOASTVALUE};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_scan::sdir::ForwardScanDirection;
 use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
@@ -21,6 +21,50 @@ pub(crate) const F_OIDEQ: Oid = 184;
 pub(crate) const F_INT4EQ: Oid = 65;
 pub(crate) const F_INT4LE: Oid = 149;
 pub(crate) const F_INT4GE: Oid = 150;
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn not_a_toast_relation(relid: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "TOAST pointer references relation {relid}, which is not a TOAST relation"
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+/// Open the relation named by a TOAST pointer's `va_toastrelid`, rejecting any
+/// relation that is not a genuine TOAST value relation.
+///
+/// C's `toast_fetch_datum` / `toast_delete_datum` call
+/// `table_open(toast_pointer.va_toastrelid, lock)` directly with no validation:
+/// a legitimate on-disk toast pointer is written by the system when a column is
+/// toasted and therefore always names the owning table's `reltoastrelid`, which
+/// is a `RELKIND_TOASTVALUE` relation. C trusts that invariant because no input
+/// path can mint an external on-disk datum.
+///
+/// Under this project's threat model an attacker who can plant a forged on-disk
+/// pointer in a heap page can set `va_toastrelid` to an arbitrary relation OID,
+/// turning a chunk fetch or delete into a cross-relation read/delete primitive
+/// (`table_open`'s only guard, `validate_relation_kind`, rejects just indexes
+/// and composite types, so an ordinary table or a foreign `pg_toast_*` relation
+/// passes). Enforcing C's implicit invariant here — the opened relation must be
+/// a TOAST relation — rejects that forgery before any chunk is scanned or
+/// deleted, and leaves every legitimate detoast/delete (whose `va_toastrelid`
+/// always names a `RELKIND_TOASTVALUE` relation) unchanged.
+pub(crate) fn open_toast_relation<'mcx>(
+    mcx: Mcx<'mcx>,
+    va_toastrelid: Oid,
+    lock: LOCKMODE,
+) -> PgResult<Relation<'mcx>> {
+    let toastrel = table::table_open(mcx, va_toastrelid, lock)?;
+    if toastrel.rd_rel.relkind != RELKIND_TOASTVALUE {
+        table::table_close(toastrel, lock)?;
+        return Err(not_a_toast_relation(va_toastrelid));
+    }
+    Ok(toastrel)
+}
 
 #[track_caller]
 #[cold]
@@ -285,7 +329,7 @@ pub fn toast_delete_datum<'mcx>(
     }
     let toast_pointer = VarattExternal::from_image(value)?;
 
-    let toastrel = table::table_open(mcx, toast_pointer.va_toastrelid, RowExclusiveLock)?;
+    let toastrel = open_toast_relation(mcx, toast_pointer.va_toastrelid, RowExclusiveLock)?;
     let (toastidxs, valid_index) = toast_open_indexes(mcx, &toastrel, RowExclusiveLock)?;
 
     let toastkey = [valueid_scan_key(toast_pointer.va_valueid)];

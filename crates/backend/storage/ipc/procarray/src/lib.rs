@@ -258,8 +258,10 @@ pub fn ProcArrayInstallImportedXmin(
     // Find the PGPROC entry of the source transaction. (This could use
     // GetPGProcByNumber(), unless it's a prepared xact.  But this isn't
     // performance critical.)
-    for index in 0..arrayP.numProcs.get() as usize {
-        let pgprocno = arrayP.pgprocnos[index].get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
         let proc = &hdr.allProcs[pgprocno as usize];
         let status_flags = hdr.statusFlags[index].load(Relaxed);
 
@@ -436,16 +438,21 @@ pub fn ProcArrayShmemResetAfterCrash() {
         array.maxProcs as usize,
         ProcGlobal().allProcs.len() - NUM_AUXILIARY_PROCS as usize
     );
-    array.numProcs.set(0);
-    array.replication_slot_xmin.set(InvalidTransactionId);
-    array.replication_slot_catalog_xmin.set(InvalidTransactionId);
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { array.numProcs.set(0) };
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { array.replication_slot_xmin.set(InvalidTransactionId) };
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { array.replication_slot_catalog_xmin.set(InvalidTransactionId) };
     for slot in array.pgprocnos.iter() {
-        slot.set(-1);
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        unsafe { slot.set(-1) };
     }
     array.numKnownAssignedXids.store(0, Relaxed);
     array.tailKnownAssignedXids.store(0, Relaxed);
     array.headKnownAssignedXids.store(0, Relaxed);
-    array.lastOverflowedXid.set(InvalidTransactionId);
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { array.lastOverflowedXid.set(InvalidTransactionId) };
     for v in array.knownAssignedXidsValid.iter() {
         v.store(false, Relaxed);
     }
@@ -460,8 +467,10 @@ pub fn ProcArraySetReplicationSlotXmin(
     if !already_locked {
         LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
     }
-    arrayP.replication_slot_xmin.set(xmin);
-    arrayP.replication_slot_catalog_xmin.set(catalog_xmin);
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { arrayP.replication_slot_xmin.set(xmin) };
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { arrayP.replication_slot_catalog_xmin.set(catalog_xmin) };
     if !already_locked {
         LWLockRelease(ProcArrayLock())?;
     }
@@ -471,8 +480,10 @@ pub fn ProcArraySetReplicationSlotXmin(
 pub fn ProcArrayGetReplicationSlotXmin() -> PgResult<(TransactionId, TransactionId)> {
     let arrayP = procArray();
     LWLockAcquire(ProcArrayLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
-    let xmin = arrayP.replication_slot_xmin.get();
-    let catalog_xmin = arrayP.replication_slot_catalog_xmin.get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let xmin = unsafe { arrayP.replication_slot_xmin.get() };
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let catalog_xmin = unsafe { arrayP.replication_slot_catalog_xmin.get() };
     LWLockRelease(ProcArrayLock())?;
     Ok((xmin, catalog_xmin))
 }
@@ -487,12 +498,14 @@ pub fn GetOldestSafeDecodingTransactionId(catalog_only: bool) -> PgResult<Transa
     LWLockAcquire(XidGenLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
     let mut oldest_safe_xid = FullTransactionId::from_u64(tv.nextXid.load(Relaxed)).xid();
 
-    let slot_xmin = arrayP.replication_slot_xmin.get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let slot_xmin = unsafe { arrayP.replication_slot_xmin.get() };
     if TransactionIdIsValid(slot_xmin) && TransactionIdPrecedes(slot_xmin, oldest_safe_xid) {
         oldest_safe_xid = slot_xmin;
     }
 
-    let slot_catalog_xmin = arrayP.replication_slot_catalog_xmin.get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let slot_catalog_xmin = unsafe { arrayP.replication_slot_catalog_xmin.get() };
     if catalog_only
         && TransactionIdIsValid(slot_catalog_xmin)
         && TransactionIdPrecedes(slot_catalog_xmin, oldest_safe_xid)
@@ -501,7 +514,8 @@ pub fn GetOldestSafeDecodingTransactionId(catalog_only: bool) -> PgResult<Transa
     }
 
     if !recovery_in_progress {
-        let num_procs = arrayP.numProcs.get() as usize;
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let num_procs = unsafe { arrayP.numProcs.get() } as usize;
         for pgxactoff in 0..num_procs {
             // Fetch xid just once - see GetNewTransactionId.
             let xid = hdr.xids[pgxactoff].read();
@@ -534,7 +548,8 @@ pub fn ProcArrayAdd(procno: ProcNumber) -> PgResult<()> {
     LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, procno)?;
     LWLockAcquire(XidGenLock(), LW_EXCLUSIVE, procno)?;
 
-    let num_procs = arrayP.numProcs.get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let num_procs = unsafe { arrayP.numProcs.get() };
     if num_procs >= arrayP.maxProcs {
         LWLockRelease(XidGenLock())?;
         LWLockRelease(ProcArrayLock())?;
@@ -546,7 +561,8 @@ pub fn ProcArrayAdd(procno: ProcNumber) -> PgResult<()> {
 
     let mut index = 0usize;
     while index < num_procs as usize {
-        let this_procno = arrayP.pgprocnos[index].get();
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let this_procno = unsafe { arrayP.pgprocnos[index].get() };
         debug_assert!(this_procno >= 0);
         debug_assert_eq!(
             hdr.allProcs[this_procno as usize].pgxactoff.load(Relaxed),
@@ -559,22 +575,28 @@ pub fn ProcArrayAdd(procno: ProcNumber) -> PgResult<()> {
     }
 
     for i in (index..num_procs as usize).rev() {
-        arrayP.pgprocnos[i + 1].set(arrayP.pgprocnos[i].get());
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        unsafe { arrayP.pgprocnos[i + 1].set(arrayP.pgprocnos[i].get()) };
         hdr.xids[i + 1].value.store(hdr.xids[i].read(), Relaxed);
-        hdr.subxidStates[i + 1].set(hdr.subxidStates[i].get());
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        unsafe { hdr.subxidStates[i + 1].set(hdr.subxidStates[i].get()) };
         hdr.statusFlags[i + 1].store(hdr.statusFlags[i].load(Relaxed), Relaxed);
     }
 
-    arrayP.pgprocnos[index].set(procno);
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { arrayP.pgprocnos[index].set(procno) };
     proc.pgxactoff.store(index as i32, Relaxed);
     hdr.xids[index].value.store(proc.xid.read(), Relaxed);
-    hdr.subxidStates[index].set(proc.subxidStatus.get());
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { hdr.subxidStates[index].set(proc.subxidStatus.get()) };
     hdr.statusFlags[index].store(proc.statusFlags.load(Relaxed), Relaxed);
 
-    arrayP.numProcs.set(num_procs + 1);
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { arrayP.numProcs.set(num_procs + 1) };
 
     for i in index + 1..(num_procs + 1) as usize {
-        let p = arrayP.pgprocnos[i].get();
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let p = unsafe { arrayP.pgprocnos[i].get() };
         hdr.allProcs[p as usize].pgxactoff.store(i as i32, Relaxed);
     }
 
@@ -593,9 +615,11 @@ pub fn ProcArrayRemove(procno: ProcNumber, latestXid: TransactionId) -> PgResult
     LWLockAcquire(XidGenLock(), LW_EXCLUSIVE, my_procno)?;
 
     let myoff = proc.pgxactoff.load(Relaxed) as usize;
-    let num_procs = arrayP.numProcs.get() as usize;
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let num_procs = unsafe { arrayP.numProcs.get() } as usize;
     debug_assert!(myoff < num_procs);
-    debug_assert_eq!(arrayP.pgprocnos[myoff].get(), procno);
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    debug_assert_eq!(unsafe { arrayP.pgprocnos[myoff].get() }, procno);
 
     if TransactionIdIsValid(latestXid) {
         debug_assert!(TransactionIdIsValid(hdr.xids[myoff].read()));
@@ -604,7 +628,8 @@ pub fn ProcArrayRemove(procno: ProcNumber, latestXid: TransactionId) -> PgResult
         tv.xactCompletionCount
             .store(tv.xactCompletionCount.load(Relaxed) + 1, Relaxed);
         hdr.xids[myoff].value.store(InvalidTransactionId, Relaxed);
-        hdr.subxidStates[myoff].set(Default::default());
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        unsafe { hdr.subxidStates[myoff].set(Default::default()) };
     } else {
         debug_assert!(!TransactionIdIsValid(hdr.xids[myoff].read()));
     }
@@ -612,16 +637,21 @@ pub fn ProcArrayRemove(procno: ProcNumber, latestXid: TransactionId) -> PgResult
     hdr.statusFlags[myoff].store(0, Relaxed);
 
     for i in myoff..num_procs - 1 {
-        arrayP.pgprocnos[i].set(arrayP.pgprocnos[i + 1].get());
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        unsafe { arrayP.pgprocnos[i].set(arrayP.pgprocnos[i + 1].get()) };
         hdr.xids[i].value.store(hdr.xids[i + 1].read(), Relaxed);
-        hdr.subxidStates[i].set(hdr.subxidStates[i + 1].get());
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        unsafe { hdr.subxidStates[i].set(hdr.subxidStates[i + 1].get()) };
         hdr.statusFlags[i].store(hdr.statusFlags[i + 1].load(Relaxed), Relaxed);
     }
-    arrayP.pgprocnos[num_procs - 1].set(-1);
-    arrayP.numProcs.set(num_procs as i32 - 1);
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { arrayP.pgprocnos[num_procs - 1].set(-1) };
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    unsafe { arrayP.numProcs.set(num_procs as i32 - 1) };
 
     for i in myoff..num_procs - 1 {
-        let p = arrayP.pgprocnos[i].get();
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let p = unsafe { arrayP.pgprocnos[i].get() };
         hdr.allProcs[p as usize].pgxactoff.store(i as i32, Relaxed);
     }
 
@@ -641,7 +671,8 @@ pub fn ProcNumberGetTransactionIds(
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno).expect("ProcArrayLock");
     let result = if proc.pid.load(Relaxed) != 0 {
-        let substate = proc.subxidStatus.get();
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let substate = unsafe { proc.subxidStatus.get() };
         (
             proc.xid.read(),
             proc.xmin.read(),
@@ -665,8 +696,10 @@ pub fn BackendPidGetProc(pid: i32) -> Option<&'static PGPROC> {
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno).expect("ProcArrayLock");
     let mut result = None;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let proc = &hdr.allProcs[unsafe { arrayP.pgprocnos[index].get() } as usize];
         if proc.pid.load(Relaxed) == pid {
             result = Some(proc);
             break;
@@ -688,9 +721,11 @@ pub fn BackendXidGetPid(xid: TransactionId) -> i32 {
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno).expect("ProcArrayLock");
     let mut result = 0;
-    for index in 0..arrayP.numProcs.get() as usize {
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
         if hdr.xids[index].read() == xid {
-            let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+            // SAFETY: [PAL] serialized by ProcArrayLock
+            let proc = &hdr.allProcs[unsafe { arrayP.pgprocnos[index].get() } as usize];
             result = proc.pid.load(Relaxed);
             break;
         }
@@ -712,8 +747,10 @@ pub fn ProcArrayEndTransaction(procno: ProcNumber, latestXid: TransactionId) -> 
         }
     } else {
         debug_assert!(!TransactionIdIsValid(proc.xid.read()));
-        debug_assert_eq!(proc.subxidStatus.get().count, 0);
-        debug_assert!(!proc.subxidStatus.get().overflowed);
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        debug_assert_eq!(unsafe { proc.subxidStatus.get() }.count, 0);
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        debug_assert!(!unsafe { proc.subxidStatus.get() }.overflowed);
 
         proc.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
         proc.xmin.value.store(InvalidTransactionId, Relaxed);
@@ -752,11 +789,15 @@ fn ProcArrayEndTransactionInternal(proc: &PGPROC, latestXid: TransactionId) {
         hdr.statusFlags[pgxactoff].store(flags, Relaxed);
     }
 
-    let subxid_status = proc.subxidStatus.get();
-    debug_assert_eq!(hdr.subxidStates[pgxactoff].get(), subxid_status);
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let subxid_status = unsafe { proc.subxidStatus.get() };
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    debug_assert_eq!(unsafe { hdr.subxidStates[pgxactoff].get() }, subxid_status);
     if subxid_status.count > 0 || subxid_status.overflowed {
-        hdr.subxidStates[pgxactoff].set(Default::default());
-        proc.subxidStatus.set(Default::default());
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        unsafe { hdr.subxidStates[pgxactoff].set(Default::default()) };
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        unsafe { proc.subxidStatus.set(Default::default()) };
     }
 
     MaintainLatestCompletedXid(latestXid);
@@ -790,11 +831,15 @@ pub fn ProcArrayClearTransaction() -> PgResult<()> {
     tv.xactCompletionCount
         .store(tv.xactCompletionCount.load(Relaxed) + 1, Relaxed);
 
-    let subxid_status = proc.subxidStatus.get();
-    debug_assert_eq!(hdr.subxidStates[pgxactoff].get(), subxid_status);
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let subxid_status = unsafe { proc.subxidStatus.get() };
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    debug_assert_eq!(unsafe { hdr.subxidStates[pgxactoff].get() }, subxid_status);
     if subxid_status.count > 0 || subxid_status.overflowed {
-        hdr.subxidStates[pgxactoff].set(Default::default());
-        proc.subxidStatus.set(Default::default());
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        unsafe { hdr.subxidStates[pgxactoff].set(Default::default()) };
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        unsafe { proc.subxidStatus.set(Default::default()) };
     }
 
     LWLockRelease(ProcArrayLock())?;
@@ -896,7 +941,8 @@ pub fn XidCacheRemoveRunningXids(
     let mysubxidstat = &hdr.subxidStates[pgxactoff];
 
     let remove_one = |anxid: TransactionId| -> bool {
-        let mut status = proc.subxidStatus.get();
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let mut status = unsafe { proc.subxidStatus.get() };
         let count = status.count as usize;
         for j in (0..count).rev() {
             // SAFETY: own PGPROC subxid slot; owner-only writes serialized by
@@ -921,14 +967,16 @@ pub fn XidCacheRemoveRunningXids(
     // A miss without overflow can happen on repeated invocation during a
     // failed AbortSubTransaction — WARNING, as in C.
     for &anxid in xids.iter().rev() {
-        if !remove_one(anxid) && !proc.subxidStatus.get().overflowed {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        if !remove_one(anxid) && !unsafe { proc.subxidStatus.get() }.overflowed {
             let _ = elog::elog(
                 types_error::WARNING,
                 format!("did not find subXID {anxid} in MyProc"),
             );
         }
     }
-    if !remove_one(xid) && !proc.subxidStatus.get().overflowed {
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    if !remove_one(xid) && !unsafe { proc.subxidStatus.get() }.overflowed {
         let _ = elog::elog(
             types_error::WARNING,
             format!("did not find subXID {xid} in MyProc"),
@@ -1166,7 +1214,8 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
     let mut xip_demand = 0usize;
 
     if !snapshot.takenDuringRecovery {
-        let num_procs = arrayP.numProcs.get() as usize;
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let num_procs = unsafe { arrayP.numProcs.get() } as usize;
         xip_demand = num_procs;
         if num_procs > snapshot.xip.capacity() {
             // Cold (D3.5): xip demand exceeds capacity — grow unlocked, rebuild.
@@ -1207,7 +1256,8 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
             count += 1;
 
             if !suboverflowed {
-                let substate = hdr.subxidStates[pgxactoff].get();
+                // SAFETY: [PAL] serialized by ProcArrayLock
+                let substate = unsafe { hdr.subxidStates[pgxactoff].get() };
                 if substate.overflowed {
                     suboverflowed = true;
                 } else {
@@ -1226,7 +1276,8 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
                             )?;
                             continue 'build;
                         }
-                        let pgprocno = arrayP.pgprocnos[pgxactoff].get();
+                        // SAFETY: [PAL] serialized by ProcArrayLock
+                        let pgprocno = unsafe { arrayP.pgprocnos[pgxactoff].get() };
                         let proc = &hdr.allProcs[pgprocno as usize];
 
                         fence(Ordering::Acquire); // pairs with GetNewTransactionId
@@ -1267,13 +1318,16 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
             xmax,
         );
 
-        if TransactionIdPrecedesOrEquals(xmin, arrayP.lastOverflowedXid.get()) {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        if TransactionIdPrecedesOrEquals(xmin, unsafe { arrayP.lastOverflowedXid.get() }) {
             suboverflowed = true;
         }
     }
 
-    let replication_slot_xmin = arrayP.replication_slot_xmin.get();
-    let replication_slot_catalog_xmin = arrayP.replication_slot_catalog_xmin.get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let replication_slot_xmin = unsafe { arrayP.replication_slot_xmin.get() };
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let replication_slot_catalog_xmin = unsafe { arrayP.replication_slot_catalog_xmin.get() };
 
     if !TransactionIdIsValid(my_proc.xmin.read()) {
         my_proc.xmin.value.store(xmin, Relaxed);
@@ -1459,7 +1513,8 @@ fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
             return Ok(true);
         }
 
-        let num_procs = arrayP.numProcs.get() as usize;
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let num_procs = unsafe { arrayP.numProcs.get() } as usize;
         for pgxactoff in 0..num_procs {
             if pgxactoff as i32 == mypgxactoff {
                 continue;
@@ -1478,10 +1533,12 @@ fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
                 continue;
             }
 
-            let substate = hdr.subxidStates[pgxactoff].get();
+            // SAFETY: [PAL] serialized by ProcArrayLock
+            let substate = unsafe { hdr.subxidStates[pgxactoff].get() };
             let pxids = substate.count as usize;
             fence(Ordering::Acquire); // pairs with GetNewTransactionId
-            let pgprocno = arrayP.pgprocnos[pgxactoff].get();
+            // SAFETY: [PAL] serialized by ProcArrayLock
+            let pgprocno = unsafe { arrayP.pgprocnos[pgxactoff].get() };
             let proc = &hdr.allProcs[pgprocno as usize];
             for j in (0..pxids).rev() {
                 // SAFETY: owner-only appends; count fetched before the fence.
@@ -1503,7 +1560,8 @@ fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
                 LWLockRelease(ProcArrayLock())?;
                 return Ok(true);
             }
-            if TransactionIdPrecedesOrEquals(xid, arrayP.lastOverflowedXid.get()) {
+            // SAFETY: [PAL] serialized by ProcArrayLock
+            if TransactionIdPrecedesOrEquals(xid, unsafe { arrayP.lastOverflowedXid.get() }) {
                 known_assigned::KnownAssignedXidsGet(|_, kxid| xids.push(kxid), xid);
             }
         }
@@ -1579,11 +1637,15 @@ fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
         },
     };
 
-    let slot_xmin = arrayP.replication_slot_xmin.get();
-    let slot_catalog_xmin = arrayP.replication_slot_catalog_xmin.get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let slot_xmin = unsafe { arrayP.replication_slot_xmin.get() };
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    let slot_catalog_xmin = unsafe { arrayP.replication_slot_catalog_xmin.get() };
 
-    for index in 0..arrayP.numProcs.get() as usize {
-        let pgprocno = arrayP.pgprocnos[index].get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
         let proc = &hdr.allProcs[pgprocno as usize];
         let status_flags = hdr.statusFlags[index].load(Relaxed);
         let xid = hdr.xids[index].read();
@@ -1801,7 +1863,8 @@ pub fn GetOldestActiveTransactionId() -> PgResult<TransactionId> {
     LWLockRelease(XidGenLock())?;
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
-    for index in 0..arrayP.numProcs.get() as usize {
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
         let xid = hdr.xids[index].read();
         if !TransactionIdIsNormal(xid) {
             continue;
@@ -1830,8 +1893,10 @@ pub fn HaveVirtualXIDsDelayingChkpt(delay_type: i32) -> bool {
     LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)
         .expect("ProcArrayLock for HaveVirtualXIDsDelayingChkpt");
     let mut result = false;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let pgprocno = arrayP.pgprocnos[index].get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
         let proc = &hdr.allProcs[pgprocno as usize];
         if proc.delayChkptFlags.load(Relaxed) & delay_type != 0
             && proc.vxid.lxid.load(Relaxed) != InvalidLocalTransactionId
@@ -1858,8 +1923,10 @@ pub fn GetCurrentVirtualXIDs<'mcx>(
     let mut vxids: PgVec<'mcx, types_core::VirtualTransactionId> = PgVec::new_in(mcx);
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let pgprocno = arrayP.pgprocnos[index].get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
         let proc = &hdr.allProcs[pgprocno as usize];
 
         if pgprocno == my_procno {
@@ -1916,8 +1983,10 @@ pub fn MinimumActiveBackends(min: i32) -> bool {
     let my_procno = MyProc();
     let mut count = 0;
 
-    for index in 0..arrayP.numProcs.get() as usize {
-        let pgprocno = arrayP.pgprocnos[index].get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
         if pgprocno == -1 {
             continue; // do not count deleted entries
         }
@@ -1931,7 +2000,8 @@ pub fn MinimumActiveBackends(min: i32) -> bool {
         if proc.pid.load(Relaxed) == 0 {
             continue; // do not count prepared xacts
         }
-        if !proc.waitLock.get().is_null() {
+        // SAFETY: [PART] serialized by the lock partition lock
+        if !unsafe { proc.waitLock.get() }.is_null() {
             continue; // do not count if blocked on a lock
         }
         count += 1;
@@ -1949,8 +2019,10 @@ pub fn CountDBConnections(databaseid: types_core::Oid) -> PgResult<i32> {
     let mut count = 0;
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, MyProc().expect("no MyProc"))?;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let pgprocno = arrayP.pgprocnos[index].get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
         let proc = &hdr.allProcs[pgprocno as usize];
         if proc.pid.load(Relaxed) == 0 {
             continue;
@@ -1978,8 +2050,10 @@ pub fn CountUserBackends(roleid: types_core::Oid) -> PgResult<i32> {
     let mut count = 0;
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, MyProc().expect("no MyProc"))?;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let pgprocno = arrayP.pgprocnos[index].get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
         let proc = &hdr.allProcs[pgprocno as usize];
         if proc.pid.load(Relaxed) == 0 {
             continue; // do not count prepared xacts
@@ -2025,8 +2099,10 @@ pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32
         let mut found = false;
 
         LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
-        for index in 0..arrayP.numProcs.get() as usize {
-            let pgprocno = arrayP.pgprocnos[index].get();
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+            // SAFETY: [PAL] serialized by ProcArrayLock
+            let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
             let proc = &hdr.allProcs[pgprocno as usize];
             let status_flags = hdr.statusFlags[index].load(Relaxed);
             if proc.databaseId.load(Relaxed) != databaseid {
@@ -2078,8 +2154,10 @@ pub fn TerminateOtherDBBackends(databaseId: types_core::Oid) -> PgResult<()> {
     let mut nprepared: u64 = 0;
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let pgprocno = arrayP.pgprocnos[index].get();
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
         let proc = &hdr.allProcs[pgprocno as usize];
         if proc.databaseId.load(Relaxed) != databaseId {
             continue;
@@ -2247,8 +2325,10 @@ pub fn GetConflictingVirtualXIDs(
     let mut vxids = Vec::with_capacity(arrayP.maxProcs as usize);
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let proc = &hdr.allProcs[unsafe { arrayP.pgprocnos[index].get() } as usize];
 
         // Exclude prepared transactions.
         if proc.pid.load(Relaxed) == 0 {
@@ -2293,8 +2373,10 @@ pub fn SignalVirtualTransaction(
     let mut pid = 0;
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let proc = &hdr.allProcs[unsafe { arrayP.pgprocnos[index].get() } as usize];
         let procvxid = proc_vxid(proc);
 
         if procvxid.procNumber == vxid.procNumber
@@ -2321,8 +2403,10 @@ pub fn CountDBBackends(databaseid: types_core::Oid) -> PgResult<i32> {
     let mut count = 0;
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let proc = &hdr.allProcs[unsafe { arrayP.pgprocnos[index].get() } as usize];
         // Do not count prepared xacts.
         if proc.pid.load(Relaxed) == 0 {
             continue;
@@ -2345,8 +2429,10 @@ pub fn CancelDBBackends(
     let hdr = ProcGlobal();
 
     LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let proc = &hdr.allProcs[unsafe { arrayP.pgprocnos[index].get() } as usize];
         if databaseid == types_core::InvalidOid || proc.databaseId.load(Relaxed) == databaseid {
             let procvxid = proc_vxid(proc);
             proc.recoveryConflictPending.store(conflictPending, Relaxed);

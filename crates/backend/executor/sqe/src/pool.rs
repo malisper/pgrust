@@ -68,13 +68,26 @@ impl Drop for PoolScope {
 /// The published pool, DRIVER threads only: pool workers get None (a
 /// worker-side fan-out must fall back to scoped spawns, never re-enter
 /// the pool it runs on).
-pub fn scoped<'a>() -> Option<&'a Pool> {
+///
+/// Closure-scoped accessor: the `&Pool` handed to `f` carries a fresh,
+/// higher-ranked lifetime (`for<'a> FnOnce(Option<&'a Pool>) -> R`) that
+/// the return type `R` cannot name, so the borrow provably cannot escape
+/// the call. This makes the guard protocol a type-system fact: safe code
+/// can neither store the reference past the `PoolScope` guard nor consume
+/// a dangling publication left by a forgotten guard — there is no owned
+/// `&Pool` to hold. The previous `scoped<'a>() -> Option<&'a Pool>` let
+/// the caller pick `'a` (even `'static`) for a reference conjured from a
+/// raw TLS pointer, which safe code could hold past the pool's drop.
+pub fn with_scoped<R>(f: impl FnOnce(Option<&Pool>) -> R) -> R {
     if IN_WORKER.with(|w| w.get()) {
-        return None;
+        return f(None);
     }
     // SAFETY: set from a live borrow by PoolScope::enter; the guard
     // clears it before that borrow ends, and TLS never crosses threads.
-    unsafe { CUR_POOL.with(|c| c.get()).as_ref() }
+    // The reference is confined to `f`'s invocation (it cannot outlive
+    // this call), so it can never be observed after the guard restores.
+    let pool = unsafe { CUR_POOL.with(|c| c.get()).as_ref() };
+    f(pool)
 }
 
 struct Shared {
@@ -173,6 +186,20 @@ pub struct Pool {
     shared: Arc<Shared>,
     threads: usize,
     handles: Vec<std::thread::JoinHandle<()>>,
+    // Generation lock (finding-117): the single `State` slot
+    // (seq/job/done/tickets/panicked) has room for exactly ONE live
+    // generation, and the lifetime erasure in `run*`/`run_feed` is only
+    // sound while each driver outlives its own workers. Concurrent
+    // drivers sharing the slot would clobber each other's generation
+    // (a second `run` resetting `done`/`job`/`seq` lets the first driver
+    // return before its workers quiesce -> its stack-erased job outlives
+    // into the next generation -> stack UAF). This mutex serializes a
+    // FULL generation (publish -> workers execute -> all engaged workers
+    // quiesced -> generation retired) so a driver's erased job is
+    // provably dead before the next generation starts and before that
+    // driver returns. Held for the whole synchronous `run*`; carried by
+    // the `FeedGen` guard for the async leader-fed `run_feed`.
+    run_lock: Mutex<()>,
 }
 
 /// A live leader-fed generation (see [`Pool::run_feed`]). Dropping joins;
@@ -182,6 +209,13 @@ pub struct FeedGen<'p> {
     pool: &'p Pool,
     engaged: usize,
     joined: bool,
+    // The pool's generation lock (finding-117), held for the whole live
+    // generation: acquired in `run_feed` before publishing and released
+    // in `join_inner` only after the generation is retired (and before
+    // any re-raise, so a worker panic never poisons the run lock). While
+    // this guard is alive no other driver can start a generation on the
+    // pool, so this driver's stack-erased job cannot alias another's.
+    _gen: Option<std::sync::MutexGuard<'p, ()>>,
 }
 
 impl FeedGen<'_> {
@@ -201,6 +235,12 @@ impl FeedGen<'_> {
         st.job = None;
         let p = st.panicked.take();
         drop(st);
+        // Generation retired: every engaged worker has reported done and
+        // the erased job Arc is dropped, so this driver's stack-borrowed
+        // job is provably dead. Release the run lock now — before any
+        // re-raise — so the next driver may start its generation and a
+        // re-raised worker panic never poisons the run lock.
+        self._gen = None;
         if let Some(p) = p {
             if reraise {
                 std::panic::resume_unwind(p);
@@ -287,6 +327,7 @@ impl Pool {
             shared,
             threads,
             handles,
+            run_lock: Mutex::new(()),
         }
     }
 
@@ -307,6 +348,11 @@ impl Pool {
         F: Fn(usize) + Send + Sync + 'a,
     {
         let width = width.min(self.threads).max(1);
+        // Generation lock (finding-117): held from before publish until the
+        // FeedGen retires this generation, so no other driver can observe
+        // or clobber this generation's shared state slot. Acquired BEFORE
+        // the state mutex — the single lock order across all run paths.
+        let gen = self.run_lock.lock().unwrap();
         let job: Arc<dyn Fn(usize) + Send + Sync + 'a> = Arc::new(job);
         // SAFETY: lifetime erasure as in `run` — the guard's join blocks
         // until every engaged worker reports done, and callers bind the
@@ -326,7 +372,7 @@ impl Pool {
             }
         }
         drop(st);
-        FeedGen { pool: self, engaged: width, joined: false }
+        FeedGen { pool: self, engaged: width, joined: false, _gen: Some(gen) }
     }
 
     /// Parallel teardown (the hot-shape lesson: the wall can hide in untimed
@@ -409,6 +455,16 @@ impl Pool {
         FF: Fn(S) -> T + Sync,
     {
         let width = width.min(self.threads).max(1);
+        // Generation lock (finding-117): held for this whole synchronous
+        // generation (publish -> workers execute -> all engaged workers
+        // quiesced -> generation retired) so a concurrent driver can
+        // neither observe nor clobber this generation's shared state slot,
+        // and this driver's stack-erased job is provably dead before the
+        // lock is released. Acquired BEFORE the state mutex — the single
+        // lock order across all run paths. Explicitly dropped after the
+        // generation is retired and before any re-raise (below), so a
+        // re-raised worker panic never poisons the run lock.
+        let gen = self.run_lock.lock().unwrap();
         // Claim-depth guard [RULED 2026-08-18] applied AT the capped
         // participation width: full cap iff n >= 4·width, else
         // max(1, n/4) — the ticket count enforces both bounds (workers
@@ -473,6 +529,12 @@ impl Pool {
             st.job = None; // drop the erased Arc before locals go away
             st.panicked.take()
         };
+        // Generation retired (job Arc dropped, all engaged workers done):
+        // this driver's stack-erased job is provably dead, so releasing the
+        // run lock here is safe. Released before the re-raise below so a
+        // worker panic never poisons the run lock; `slots`/`states` below
+        // are this driver's own locals, untouched by any other generation.
+        drop(gen);
         if let Some(p) = panicked {
             let canceled =
                 p.is::<crate::cancel::Canceled>() && crate::cancel::fired_of(&cancel);
@@ -562,6 +624,27 @@ mod tests {
         let ch = part_claim_chunks(&deep, 96);
         assert_eq!(ch.len(), 400);
         assert!(ch.iter().enumerate().all(|(pi, &c)| c == (pi, pi * 8, (pi + 1) * 8)));
+    }
+
+    /// The closure-scoped pool accessor: the publication is visible only
+    /// inside a live `PoolScope` and only through the closure, and the
+    /// guard's drop restores the previous (here: absent) publication. The
+    /// `&Pool` cannot escape `with_scoped` — a caller trying to return it
+    /// (`with_scoped(|p| p.unwrap())`) fails to compile, since `R` cannot
+    /// name the reference's higher-ranked lifetime — so a held-past-guard
+    /// or forgotten-guard dangling reference is not expressible in safe
+    /// code (the finding-280 soundness fix).
+    #[test]
+    fn with_scoped_borrow_is_closure_bound() {
+        // Driver thread outside any scope: no published pool.
+        assert!(with_scoped(|p| p.is_none()));
+        let pool = Pool::new(2);
+        {
+            let _g = PoolScope::enter(&pool);
+            assert_eq!(with_scoped(|p| p.map(|p| p.threads())), Some(2));
+        }
+        // Guard dropped: publication restored to absent.
+        assert!(with_scoped(|p| p.is_none()));
     }
 
     /// Width independence at the engagement seam: the same claims fold

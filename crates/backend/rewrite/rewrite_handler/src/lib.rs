@@ -1998,6 +1998,26 @@ fn rewriteTargetView<'mcx>(
 
     let viewquery = get_view_query(mcx, view)?;
 
+    // setRuleCheckAsUser (relcache.c RelationBuildRuleLock): C's get_view_query
+    // returns the relcache rule tree, whose RTEPermissionInfos were already
+    // stamped at load with the view owner (or InvalidOid for security_invoker
+    // views). The text cache re-reads a fresh tree with checkAsUser = 0, so we
+    // must stamp it here before any of the view query's perminfos — including
+    // those of sublink/subquery RTEs, not just the top base RTE — get folded
+    // into the outer parsetree. Otherwise injected sublink subqueries would be
+    // permission-checked and RLS-filtered as the invoker instead of the owner.
+    let check_as_user = if view
+        .rd_options
+        .as_ref()
+        .and_then(|o| o.view())
+        .is_some_and(|v| v.security_invoker)
+    {
+        InvalidOid
+    } else {
+        view.rd_rel.relowner
+    };
+    set_rule_check_as_user(viewquery, check_as_user)?;
+
     let view_result_relation = parsetree.resultRelation;
     let view_rte_node = parsetree.rtable.nth(view_result_relation as usize - 1);
     let view_perminfo_node =
@@ -2171,16 +2191,8 @@ fn rewriteTargetView<'mcx>(
     }
     .expect("RangeTblEntry")?;
     {
-        let check_as_user = if view
-            .rd_options
-            .as_ref()
-            .and_then(|o| o.view())
-            .is_some_and(|v| v.security_invoker)
-        {
-            InvalidOid
-        } else {
-            view.rd_rel.relowner
-        };
+        // check_as_user was computed above (view owner, or InvalidOid for
+        // security_invoker views) and already stamped across the view query.
         let selected = base_perminfo.selectedCols.clone_in(mcx)?;
         let inserted =
             adjust_view_column_set(mcx, &view_perminfo.insertedCols, view_targetlist)?;
@@ -2915,39 +2927,55 @@ pub fn AcquireRewriteLocks<'mcx>(
                 unsafe { node.with_mut::<RangeTblEntry, _>(|r| r.relkind = relkind) };
             }
             RTEKind::RTE_JOIN => {
-                // C rebuilds joinaliasvars with dropped-column Vars replaced
-                // by NULL cells; NodeList has no NULL cell, so the (initdb-
-                // impossible for system views) dropped hit is a loud panic
-                // and the no-drop path leaves the list shared, unrebuilt.
+                // C (rewriteHandler.c) scans joinaliasvars and replaces the
+                // entry for any dropped input column with a NULL list cell.
+                // NodeList cells are non-null, so this port marks a dropped
+                // column with a null Const sentinel instead (makeNullConst);
+                // flatten_join_alias_vars, expandRTE and
+                // get_rte_attribute_is_dropped treat a null Const here exactly
+                // as C treats a NULL cell.
                 let rte = rte_of(node);
+                let mut newaliasvars = NodeList::nil();
                 let mut curinputvarno: i32 = 0;
                 let mut curinputrte: Option<&RangeTblEntry<'mcx>> = None;
                 for aliasitem in &rte.joinaliasvars {
+                    let mut item = aliasitem;
                     let aliasvar = nodes_core::strip_implicit_coercions(aliasitem);
-                    let Some(v) = aliasvar.as_var() else { continue };
-                    debug_assert_eq!(v.varlevelsup, 0);
-                    if v.varno != curinputvarno {
-                        curinputvarno = v.varno;
-                        if curinputvarno >= rt_index {
-                            return Err(internal_error(&format!(
-                                "unexpected varno {curinputvarno} in JOIN RTE {rt_index}"
-                            )));
+                    if let Some(v) = aliasvar.as_var() {
+                        debug_assert_eq!(v.varlevelsup, 0);
+                        if v.varno != curinputvarno {
+                            curinputvarno = v.varno;
+                            if curinputvarno >= rt_index {
+                                return Err(internal_error(&format!(
+                                    "unexpected varno {curinputvarno} in JOIN RTE {rt_index}"
+                                )));
+                            }
+                            curinputrte =
+                                Some(rte_of(parsetree.rtable.nth(curinputvarno as usize - 1)));
                         }
-                        curinputrte =
-                            Some(rte_of(parsetree.rtable.nth(curinputvarno as usize - 1)));
+                        if get_rte_attribute_is_dropped(
+                            mcx,
+                            curinputrte.expect("input RTE resolved"),
+                            v.varattno,
+                        )? {
+                            // C: aliasitem = NULL. Port: a null Const sentinel
+                            // (the claimed type doesn't matter, cf. makeNullConst).
+                            item = types_nodes::Node::mk_const(
+                                mcx,
+                                types_core::catalog::INT4OID,
+                                -1,
+                                InvalidOid,
+                                4,
+                                datum::Datum::null(),
+                                true,
+                                true,
+                            )?;
+                        }
                     }
-                    if get_rte_attribute_is_dropped(
-                        mcx,
-                        curinputrte.expect("input RTE resolved"),
-                        v.varattno,
-                    )? {
-                        panic!(
-                            "AcquireRewriteLocks (rewriteHandler.c): joinaliasvars entry \
-                             references a dropped column; the NULL-cell replacement has \
-                             no NodeList representation"
-                        );
-                    }
+                    newaliasvars.lappend(mcx, item)?;
                 }
+                // SAFETY: exclusive, single-threaded tree fixup (as RTE_RELATION).
+                unsafe { node.with_mut::<RangeTblEntry, _>(|r| r.joinaliasvars = newaliasvars) };
             }
             RTEKind::RTE_SUBQUERY => {
                 let pushed_down = forUpdatePushedDown
@@ -3041,9 +3069,11 @@ fn get_rte_attribute_is_dropped<'mcx>(
             if attnum <= 0 || attnum as usize > rte.joinaliasvars.len() {
                 return Err(internal_error(&format!("invalid varattno {attnum}")));
             }
-            // C signals dropped via a NULL joinaliasvars cell; NodeList cells
-            // are non-null, so nothing here can be dropped.
-            Ok(false)
+            // C: a dropped join column is a NULL joinaliasvars cell. This port
+            // marks it with a null Const sentinel (AcquireRewriteLocks), so a
+            // dropped column is a null Const at that position.
+            let aliasvar = rte.joinaliasvars.nth(attnum as usize - 1);
+            Ok(matches!(aliasvar.as_const(), Some(c) if c.constisnull))
         }
         RTEKind::RTE_FUNCTION => {
             let mut atts_done: i16 = 0;

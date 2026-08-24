@@ -7721,7 +7721,7 @@ fn exec_leaf_conflict_update<'mcx>(
     let mut tmfd = TM_FailureData::default();
     let mut lockmode = LockTupleMode::LockTupleExclusive;
     let mut update_indexes = TU_UpdateIndexes::TU_None;
-    let result = {
+    {
         let ModifyTableState {
             router, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_partition_check,
             rels, root, cur, ..
@@ -7730,15 +7730,11 @@ fn exec_leaf_conflict_update<'mcx>(
         let rel = router.as_ref().expect("routed").leaf_rel(idx);
         let EStateData {
             es_tupleTable,
-            es_snapshot,
             es_relations,
             es_range_table,
             es_rteperminfos,
-            es_crosscheck_snapshot,
             ..
         } = &mut *estate;
-        let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
-        let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
         let slot = &mut es_tupleTable[proj_id.0 as usize];
 
         slot.base_mut().tts_tableOid = rel.rd_id;
@@ -7772,6 +7768,30 @@ fn exec_leaf_conflict_update<'mcx>(
             err_root_rel,
             Some(&mod_cols),
         )?;
+    }
+
+    // C ExecUpdateAct: UPDATE RLS WITH CHECK quals over the NEW row, evaluated
+    // on the routed leaf's translated WCO list (ExecInitPartitionInfo) before
+    // table_tuple_update — the same WCO_RLS_UPDATE_CHECK enforcement the
+    // non-partitioned path (exec_update) already applies.
+    if mt.leaf_wco[idx].as_ref().is_some_and(|w| !w.is_empty()) {
+        let ecxt = mt.node_ecxt;
+        let wcos = mt.leaf_wco[idx].as_mut().expect("checked");
+        exec_with_check_options(estate, ecxt, wcos, WCOKind::WCO_RLS_UPDATE_CHECK, proj_id)?;
+    }
+
+    let result = {
+        let ModifyTableState { router, .. } = &mut *mt;
+        let rel = router.as_ref().expect("routed").leaf_rel(idx);
+        let EStateData {
+            es_tupleTable,
+            es_snapshot,
+            es_crosscheck_snapshot,
+            ..
+        } = &mut *estate;
+        let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+        let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
+        let slot = &mut es_tupleTable[proj_id.0 as usize];
 
         tableam::table_tuple_update(
             mcx,
@@ -7860,6 +7880,26 @@ fn exec_leaf_conflict_update<'mcx>(
             conv.as_ref(),
             conv.as_ref(),
             Some(&leaf_cols),
+        )?;
+    }
+
+    // Parent-view CHECK OPTIONs are checked after updating (the qual must see
+    // the actual row, post defaults/triggers); a routed leaf checks its
+    // translated list over the leaf-format tuple (C ExecUpdateEpilogue's
+    // WCO_VIEW_CHECK leg on the leaf ResultRelInfo).
+    if mt.leaf_wco[idx].as_ref().is_some_and(|w| !w.is_empty()) {
+        let mcx = estate.es_query_cxt;
+        let target_rti = mt.rel().rti;
+        let ecxt = mt.node_ecxt;
+        let ModifyTableState { router, leaf_wco, .. } = &mut *mt;
+        let rel = router.as_ref().expect("routed").leaf_rel(idx);
+        exec_view_check_options(
+            mcx,
+            estate,
+            ecxt,
+            leaf_wco[idx].as_mut().expect("checked"),
+            proj_id,
+            WcoRel::Leaf { rel, root_rti: target_rti },
         )?;
     }
 
@@ -8825,7 +8865,7 @@ mod check_valid_result_rel_tests {
     #[test]
     fn sequence_result_rel_is_clean_error() {
         let cx = ::mcx::MemoryContext::new("cvrr test");
-        let e = check(cx.mcx(), "seq1", types_rel::RELKIND_SEQUENCE).unwrap_err();
+        let e = check(cx.mcx(), "seq1", types_rel::RELKIND_SEQUENCE).err().unwrap();
         assert_eq!(e.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
         assert_eq!(e.message(), "cannot change sequence \"seq1\"");
     }
@@ -8833,7 +8873,7 @@ mod check_valid_result_rel_tests {
     #[test]
     fn toast_result_rel_is_clean_error() {
         let cx = ::mcx::MemoryContext::new("cvrr test");
-        let e = check(cx.mcx(), "pg_toast_1", types_rel::RELKIND_TOASTVALUE).unwrap_err();
+        let e = check(cx.mcx(), "pg_toast_1", types_rel::RELKIND_TOASTVALUE).err().unwrap();
         assert_eq!(e.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
         assert_eq!(e.message(), "cannot change TOAST relation \"pg_toast_1\"");
     }
@@ -8842,7 +8882,7 @@ mod check_valid_result_rel_tests {
     #[test]
     fn other_relkind_result_rel_is_clean_error() {
         let cx = ::mcx::MemoryContext::new("cvrr test");
-        let e = check(cx.mcx(), "idx1", types_rel::RELKIND_INDEX).unwrap_err();
+        let e = check(cx.mcx(), "idx1", types_rel::RELKIND_INDEX).err().unwrap();
         assert_eq!(e.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
         assert_eq!(e.message(), "cannot change relation \"idx1\"");
     }
@@ -8890,7 +8930,7 @@ mod check_valid_result_rel_tests {
             )
             .unwrap();
             let rel = relation_of_kind_am(mcx, "cstore1", RELKIND_RELATION, PGRC2_TEST_AM_OID);
-            let e = check_valid_result_rel(mcx, &rel, node, None, None).expect_err(
+            let e = check_valid_result_rel(mcx, &rel, node, None, None).err().expect(
                 "trickle DML into a pgrcolumnar2 table must refuse typed — an Ok here \
                  IS the F-1 silent-loss bug (the row buffers in the WriterRegistry, \
                  the v1-only statement-end flush never publishes it, and the eoxact \
@@ -8936,7 +8976,7 @@ mod check_valid_result_rel_tests {
                 None,
                 Some(types_nodes::FdwKind::FileFdw),
             )
-            .unwrap_err();
+            .err().unwrap();
             assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
             assert_eq!(e.message(), msg);
         }

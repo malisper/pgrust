@@ -1,6 +1,6 @@
 use elog::{ereport, errno};
 use types_core::{TransactionId, XLogRecPtr};
-use types_error::{PgResult, ERRCODE_DATA_CORRUPTED, ERROR};
+use types_error::{PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_OUT_OF_MEMORY, ERROR};
 
 use crate::{loc, SnapBuild};
 
@@ -12,6 +12,14 @@ pub const SNAP_BUILD_ON_DISK_CONSTANT_SIZE: usize = 16;
 pub const SNAP_BUILD_ON_DISK_NOT_CHECKSUMMED_SIZE: usize = 8;
 pub const SIZEOF_SNAP_BUILD: usize = 128;
 pub const SNAP_BUILD_HEADER_SIZE: usize = SNAP_BUILD_ON_DISK_CONSTANT_SIZE + SIZEOF_SNAP_BUILD;
+
+// On-disk size of one serialized xid (sizeof(TransactionId)); the committed and
+// catchange arrays are packed as this many bytes per entry (see build_image).
+const SIZEOF_TRANSACTION_ID: usize = 4;
+// C's MaxAllocSize (1 GB - 1): the ceiling palloc enforces on a single
+// allocation, above which it raises a catchable "invalid memory alloc request
+// size" ERROR instead of returning.
+const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
 
 const OFF_MAGIC: usize = 0;
 const OFF_CHECKSUM: usize = 4;
@@ -296,6 +304,49 @@ fn restore_contents(fd: i32, dest: &mut [u8], path: &str) -> PgResult<()> {
     Ok(())
 }
 
+// Validate an xid-array count read verbatim off disk and return its byte size.
+//
+// `xcnt` is attacker-controllable: it comes from the committed/catchange count
+// fields of a <LSN>.snap file. C sizes the array with palloc(sizeof(TransactionId)
+// * xcnt), whose MaxAllocSize guard turns an oversized/corrupt count into a
+// catchable "invalid memory alloc request size" ERROR. Mirror that here with an
+// overflow-checked multiply bounded by MaxAllocSize, raising a catchable
+// ERRCODE_DATA_CORRUPTED *before* any allocation is attempted — so a crafted
+// count like 2^40 cannot overflow the multiply or drive a wild allocation that
+// aborts the process through handle_alloc_error.
+fn checked_xip_bytes(xcnt: usize, which: &str, path: &str) -> PgResult<usize> {
+    match xcnt.checked_mul(SIZEOF_TRANSACTION_ID) {
+        Some(sz) if sz <= MAX_ALLOC_SIZE => Ok(sz),
+        _ => {
+            ereport(ERROR)
+                .errcode(ERRCODE_DATA_CORRUPTED)
+                .errmsg(format!(
+                    "snapbuild state file \"{path}\" has invalid {which} xcnt: {xcnt}"
+                ))
+                .finish(loc("SnapBuildRestoreSnapshot"))?;
+            unreachable!("ERROR finish returned")
+        }
+    }
+}
+
+// Fallibly grow `buf` to `sz` zeroed bytes. `sz` has already cleared the
+// MaxAllocSize ceiling, so this is the C palloc's in-range path — but an
+// infallible reserve would abort via handle_alloc_error under real memory
+// pressure (thread-per-backend => cluster crash), so reserve fallibly and
+// degrade to a catchable ERRCODE_OUT_OF_MEMORY error instead.
+fn alloc_zeroed(buf: &mut Vec<u8>, sz: usize, path: &str) -> PgResult<()> {
+    if buf.try_reserve_exact(sz).is_err() {
+        return ereport(ERROR)
+            .errcode(ERRCODE_OUT_OF_MEMORY)
+            .errmsg(format!(
+                "out of memory while restoring snapbuild state file \"{path}\""
+            ))
+            .finish(loc("SnapBuildRestoreSnapshot"));
+    }
+    buf.resize(sz, 0);
+    Ok(())
+}
+
 pub fn restore_snapshot(lsn: XLogRecPtr, missing_ok: bool) -> PgResult<Option<SnapBuildOnDisk>> {
     let path = snapshot_path(lsn);
 
@@ -355,14 +406,40 @@ pub fn restore_snapshot(lsn: XLogRecPtr, missing_ok: bool) -> PgResult<Option<Sn
     let committed_xcnt = get_u64(&builder, OFF_COMMITTED_XCNT) as usize;
     let catchange_xcnt = get_u64(&builder, OFF_CATCHANGE_XCNT) as usize;
 
-    let mut committed_bytes = vec![0u8; committed_xcnt * 4];
+    // Bound both untrusted counts against MaxAllocSize (matching C's palloc
+    // guard) before allocating or reading anything.
+    let committed_sz = checked_xip_bytes(committed_xcnt, "committed", &path)?;
+    let catchange_sz = checked_xip_bytes(catchange_xcnt, "catchange", &path)?;
+
+    // Cross-check the counts against the file's own declared length: a legit
+    // file has length == header + committed bytes + catchange bytes (see
+    // build_image). This rejects counts that individually clear the ceiling but
+    // disagree with the header, again before any array allocation. checked_add
+    // guards against wraparound of the header + array-size sum.
+    if SNAP_BUILD_HEADER_SIZE
+        .checked_add(committed_sz)
+        .and_then(|n| n.checked_add(catchange_sz))
+        != Some(length as usize)
+    {
+        return ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "snapbuild state file \"{path}\" has inconsistent length: {length}"
+            ))
+            .finish(loc("SnapBuildRestoreSnapshot"))
+            .map(|_| None);
+    }
+
+    let mut committed_bytes = Vec::new();
     if committed_xcnt > 0 {
+        alloc_zeroed(&mut committed_bytes, committed_sz, &path)?;
         restore_contents(fd_, &mut committed_bytes, &path)?;
         crc = crc32c::pg_comp_crc32c(crc, &committed_bytes);
     }
 
-    let mut catchange_bytes = vec![0u8; catchange_xcnt * 4];
+    let mut catchange_bytes = Vec::new();
     if catchange_xcnt > 0 {
+        alloc_zeroed(&mut catchange_bytes, catchange_sz, &path)?;
         restore_contents(fd_, &mut catchange_bytes, &path)?;
         crc = crc32c::pg_comp_crc32c(crc, &catchange_bytes);
     }

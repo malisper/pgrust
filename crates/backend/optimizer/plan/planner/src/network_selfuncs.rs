@@ -39,6 +39,31 @@ fn inet_opr_codenum(operator: Oid) -> PgResult<i32> {
     }
 }
 
+// Bytes of inet payload before the address: `family` + `bits`, the two bytes
+// InetRef::from_payload dereferences. A declared varlena length must cover its
+// own header plus at least this much to describe a real inet.
+const INET_MIN_PAYLOAD: usize = 2;
+
+// Payload length of an inet varlena, derived from its self-declared total `len`
+// and `header` size, validated *before* the subtraction.
+//
+// A crafted pg_statistic MCV/histogram slot on an inet/cidr column can present a
+// varlena whose self-declared length is smaller than its own header; the bare
+// `len - header` would then wrap around `usize` and hand `from_raw_parts` an
+// unbounded slice (OOB read). C's DatumGetInetPP trusts a pinned tuple copy and
+// never sees a corrupt length, so we validate the untrusted length here — for
+// every varlena-header shape, not one branch — and refuse under-length values
+// the same way the toast/compressed guards below do, rather than producing a
+// wrapped length.
+#[inline]
+fn inet_payload_len(len: usize, header: usize) -> usize {
+    assert!(
+        len >= header + INET_MIN_PAYLOAD,
+        "corrupt inet varlena in statistics: declared length {len} < header {header} + {INET_MIN_PAYLOAD}",
+    );
+    len - header
+}
+
 // Stats/Const inet datums carry short or 4-byte varlena headers.
 pub(crate) fn inet_ref<'a>(d: Datum) -> InetRef<'a> {
     let p = d.as_usize() as *const u8;
@@ -48,11 +73,13 @@ pub(crate) fn inet_ref<'a>(d: Datum) -> InetRef<'a> {
         if b0 & 0x01 != 0 {
             assert_ne!(b0, 0x01, "toast pointer in inet selectivity");
             let len = ((b0 as usize) >> 1) & 0x7F;
-            InetRef::from_payload(core::slice::from_raw_parts(p.add(1), len - 1))
+            let payload = inet_payload_len(len, 1);
+            InetRef::from_payload(core::slice::from_raw_parts(p.add(1), payload))
         } else {
             assert_eq!(b0 & 0x03, 0, "compressed inet in selectivity");
             let len = adt_rangetypes::varsize_4b(p);
-            InetRef::from_payload(core::slice::from_raw_parts(p.add(4), len - 4))
+            let payload = inet_payload_len(len, 4);
+            InetRef::from_payload(core::slice::from_raw_parts(p.add(4), payload))
         }
     }
 }

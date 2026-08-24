@@ -165,7 +165,7 @@ fn path_budget_enforced_typed() {
         let mut ext = crate::ingest::NoExternalDetoast;
         w.append_row(&[RawDatum::Bytes(&img)], &mut ext, &mut env)
             .expect("append");
-        let err = w.finish(&mut env).unwrap_err();
+        let err = w.finish(&mut env).err().unwrap();
         assert_eq!(
             err,
             WriteError::Contract {
@@ -177,7 +177,7 @@ fn path_budget_enforced_typed() {
 
 #[test]
 fn path_table_encoding_golden() {
-    let bytes = encode_path_table(&["a", "bc"]);
+    let bytes = encode_path_table(&["a", "bc"]).expect("encode");
     assert_eq!(
         bytes,
         vec![2, 0, 0, 0, 1, 0, 0x61, 0, 2, 0, 0x62, 0x63],
@@ -187,4 +187,23 @@ fn path_table_encoding_golden() {
         decode_path_table(&bytes).expect("decode"),
         vec!["a".to_string(), "bc".to_string()]
     );
+}
+
+#[test]
+fn path_table_rejects_overlong_path_instead_of_truncating() {
+    // A path one byte past the u16 framing bound must be refused typed, not
+    // silently truncated (which would emit a len prefix disagreeing with the
+    // bytes actually written — an attacker-forgeable aliased path).
+    let long = "k".repeat((u16::MAX as usize) + 1);
+    let err = encode_path_table(&[long.as_str()]).err().unwrap();
+    assert_eq!(
+        err,
+        WriteError::Contract {
+            detail: "shred path length exceeds PathTable u16 framing"
+        }
+    );
+    // The largest still-framable path round-trips losslessly.
+    let max = "k".repeat(u16::MAX as usize);
+    let bytes = encode_path_table(&[max.as_str()]).expect("encode max");
+    assert_eq!(decode_path_table(&bytes).expect("decode"), vec![max]);
 }

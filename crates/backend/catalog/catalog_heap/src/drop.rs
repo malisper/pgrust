@@ -158,7 +158,11 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
     }
 
     if RELKIND_HAS_STORAGE(rel.rd_rel.relkind) {
-        catalog_storage::RelationDropStorage(&rel)?;
+        // Schedules the main-fork smgr unlink at commit (C's
+        // RelationDropStorage) AND, for a pgrcolumnar2 relation, the removal
+        // of its O-7 table directory — which RelationDropStorage alone never
+        // touches, leaking the dropped data on disk.
+        tableam::table_relation_drop_storage(&rel)?;
     }
 
     pgstat::relation::pgstat_drop_relation(relid, rel.rd_rel.relisshared);

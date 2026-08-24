@@ -55,7 +55,7 @@ fn become_backend(procno: ProcNumber, pid: i32) {
 }
 
 fn wakeup_len(cv: &ConditionVariable) -> usize {
-    let head = cv.wakeup.get();
+    let head = unsafe { cv.wakeup.get() };
     let mut n = 0;
     let mut cur = head.head;
     while cur != INVALID_PROC_NUMBER {

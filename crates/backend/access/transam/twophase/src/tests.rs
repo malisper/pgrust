@@ -120,7 +120,8 @@ fn header_and_record_codecs_roundtrip() {
     let rec = TwoPhaseRecordOnDisk { len: 20, rmid: 1, info: 0 };
     assert_eq!(TwoPhaseRecordOnDisk::from_bytes(&rec.to_bytes()), Some(rec));
 
-    let layout = BufferLayout::of(&hdr);
+    // A buffer at least as large as the computed layout validates cleanly.
+    let layout = BufferLayout::try_of(&hdr, hdr.total_len as usize).expect("valid layout");
     assert_eq!(layout.gid, 72);
     assert_eq!(layout.children, 80); // gidlen 6 maxaligned to 8
     assert_eq!(layout.commitrels, 96); // 3 subxacts = 12 -> 16
@@ -129,6 +130,66 @@ fn header_and_record_codecs_roundtrip() {
     assert_eq!(layout.abortstats, 152); // 1 stat = 16
     assert_eq!(layout.invalmsgs, 152); // 0 stats
     assert_eq!(layout.records, 216); // 4 msgs = 64
+}
+
+#[test]
+fn buffer_layout_rejects_hostile_headers() {
+    // Baseline: the segments end at `records`, so a buffer exactly that big is
+    // the smallest that validates; one byte short must be rejected.
+    let base = TwoPhaseFileHeader {
+        magic: TWOPHASE_MAGIC,
+        total_len: 0,
+        xid: 723,
+        database: 5,
+        prepared_at: 1,
+        owner: 10,
+        nsubxacts: 1,
+        ncommitrels: 0,
+        nabortrels: 0,
+        ncommitstats: 0,
+        nabortstats: 0,
+        ninvalmsgs: 0,
+        initfileinval: false,
+        gidlen: 6,
+        origin_lsn: 0,
+        origin_timestamp: 0,
+    };
+    let records = BufferLayout::try_of(&base, usize::MAX)
+        .expect("layout fits in an unbounded buffer")
+        .records;
+    assert!(BufferLayout::try_of(&base, records).is_some());
+    assert!(BufferLayout::try_of(&base, records - 1).is_none());
+
+    // gidlen larger than the buffer (the "72-byte body, gidlen=0xFFFF" case).
+    let mut h = base;
+    h.gidlen = 0xFFFF;
+    assert!(BufferLayout::try_of(&h, 72).is_none());
+
+    // gidlen beyond the fixed shared-memory gid slot is corruption.
+    let mut h = base;
+    h.gidlen = (crate::GIDSIZE + 1) as u16;
+    assert!(BufferLayout::try_of(&h, usize::MAX).is_none());
+
+    // Negative counts (e.g. nsubxacts = -1) must never sign-extend into a huge
+    // usize; every signed count field is rejected.
+    for set in [
+        |h: &mut TwoPhaseFileHeader| h.nsubxacts = -1,
+        |h: &mut TwoPhaseFileHeader| h.ncommitrels = -1,
+        |h: &mut TwoPhaseFileHeader| h.nabortrels = -1,
+        |h: &mut TwoPhaseFileHeader| h.ncommitstats = -1,
+        |h: &mut TwoPhaseFileHeader| h.nabortstats = -1,
+        |h: &mut TwoPhaseFileHeader| h.ninvalmsgs = i32::MIN,
+    ] {
+        let mut h = base;
+        set(&mut h);
+        assert!(BufferLayout::try_of(&h, usize::MAX).is_none());
+    }
+
+    // A huge positive count runs far past a realistically-sized buffer and is
+    // rejected rather than panicking (debug) or wrapping the offset (release).
+    let mut h = base;
+    h.nsubxacts = i32::MAX;
+    assert!(BufferLayout::try_of(&h, 4096).is_none());
 }
 
 #[test]
@@ -182,7 +243,7 @@ fn gxact_state_machine() {
     crate::state::lock_twophase_state(lwlock::LW_EXCLUSIVE);
     crate::core::remove_gxact(slot);
     crate::state::unlock_twophase_state();
-    assert_eq!(TwoPhaseState().num_prep_xacts.get(), 0);
+    assert_eq!(unsafe { TwoPhaseState().num_prep_xacts.get() }, 0);
 
     let slot = crate::MarkAsPreparing(801, "gid_vis", 222, 10, 5).expect("reserve");
     crate::core::mark_as_prepared(slot, false).expect("MarkAsPrepared");
@@ -212,13 +273,13 @@ fn gxact_state_machine() {
     assert_eq!(err.message(), "permission denied to finish prepared transaction");
 
     // Cleanup: drop the entry and its procarray membership.
-    procarray::ProcArrayRemove(TwoPhaseState().gxact(slot).pgprocno.get(), 801)
+    procarray::ProcArrayRemove(unsafe { TwoPhaseState().gxact(slot).pgprocno.get() }, 801)
         .expect("ProcArrayRemove");
     crate::state::lock_twophase_state(lwlock::LW_EXCLUSIVE);
-    TwoPhaseState()
+    unsafe { TwoPhaseState()
         .gxact(slot)
         .locking_backend
-        .set(types_core::INVALID_PROC_NUMBER);
+        .set(types_core::INVALID_PROC_NUMBER) };
     crate::core::remove_gxact(slot);
     crate::state::unlock_twophase_state();
 }
@@ -306,18 +367,52 @@ fn exit_hook_releases_gxact_locked_mid_prepare() {
     // never marked valid. (MarkAsPreparing registered the exit hook through
     // the real ipc crate; the seam-stubbed ProcKill-class registrations of
     // this substrate stay out of the drain.)
-    let n0 = TwoPhaseState().num_prep_xacts.get();
+    let n0 = unsafe { TwoPhaseState().num_prep_xacts.get() };
     let _slot = crate::MarkAsPreparing(901, "gid_exit_hook", 111, 10, 5).expect("reserve");
-    assert_eq!(TwoPhaseState().num_prep_xacts.get(), n0 + 1);
+    assert_eq!(unsafe { TwoPhaseState().num_prep_xacts.get() }, n0 + 1);
 
     // Abnormal thread death: proc_exit's drain runs the before_shmem_exit
     // stack (at_proc_exit_twophase -> AtAbort_Twophase).
     ipc::shmem_exit(1).unwrap();
 
     // The never-valid gxact was removed outright and the GID is reusable.
-    assert_eq!(TwoPhaseState().num_prep_xacts.get(), n0);
+    assert_eq!(unsafe { TwoPhaseState().num_prep_xacts.get() }, n0);
     let _slot2 = crate::MarkAsPreparing(902, "gid_exit_hook", 112, 10, 5)
         .expect("GID reusable after the exit-hook release");
     crate::AtAbort_Twophase();
-    assert_eq!(TwoPhaseState().num_prep_xacts.get(), n0);
+    assert_eq!(unsafe { TwoPhaseState().num_prep_xacts.get() }, n0);
+}
+
+// idx 61: process_records must reject an attacker-influenced record stream
+// (bad rmid, oversized len, or a truncated header) with a catchable
+// ERRCODE_DATA_CORRUPTED error rather than an out-of-bounds panic.
+#[test]
+fn process_records_rejects_malformed_stream() {
+    use crate::core::process_records;
+    use types_error::ERRCODE_DATA_CORRUPTED;
+
+    // All-None callback table: validation must fire before any dispatch.
+    let callbacks: [Option<twophase_rmgr::TwoPhaseCallback>; twophase_rmgr::NUM_TWOPHASE_RM] =
+        [None; twophase_rmgr::NUM_TWOPHASE_RM];
+
+    // (1) rmid past the callback table => corruption error, not an OOB index.
+    let rec = TwoPhaseRecordOnDisk { len: 0, rmid: 200, info: 0 };
+    let err = process_records(&rec.to_bytes(), 0, 42, &callbacks)
+        .expect_err("rmid 200 must be rejected");
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+    // (2) Oversized len => corruption error, not an OOB slice.
+    let rec = TwoPhaseRecordOnDisk { len: 0xFFFF_FFFF, rmid: 1, info: 0 };
+    let err = process_records(&rec.to_bytes(), 0, 42, &callbacks)
+        .expect_err("oversized len must be rejected");
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+    // (3) Truncated header (< 8 bytes) => corruption error, not a panic.
+    let err = process_records(&[0u8; 4], 0, 42, &callbacks)
+        .expect_err("truncated header must be rejected");
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+    // (4) A well-formed END sentinel still terminates cleanly.
+    let rec = TwoPhaseRecordOnDisk { len: 0, rmid: twophase_rmgr::TWOPHASE_RM_END_ID, info: 0 };
+    process_records(&rec.to_bytes(), 0, 42, &callbacks).expect("END sentinel terminates");
 }

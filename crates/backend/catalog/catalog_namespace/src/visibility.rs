@@ -43,8 +43,12 @@ fn name_of(d: Datum) -> NameData {
     unsafe { *(d.as_usize() as *const NameData) }
 }
 
-fn name_str(name: &NameData) -> &str {
-    core::str::from_utf8(name.name_str()).expect("catalog names are valid UTF-8")
+fn name_str(name: &NameData) -> String {
+    // SQL_ASCII catalog names may be non-UTF-8; match C's non-panicking
+    // behavior with a lossy copy. NOTE: for genuinely non-UTF-8 names this can
+    // change the name used in the visibility lookups below, which C performs as
+    // a byte-exact NameData comparison. See idx 150 report for the tradeoff.
+    String::from_utf8_lossy(name.name_str()).into_owned()
 }
 
 fn path_contains(nsp: Oid) -> bool {
@@ -84,7 +88,7 @@ pub fn RelationIsVisibleExt(relid: Oid) -> PgResult<Option<bool>> {
             visible = true;
             break;
         }
-        if OidIsValid(lsyscache::get_relname_relid(name_str(&relname), namespace_id)?) {
+        if OidIsValid(lsyscache::get_relname_relid(&name_str(&relname), namespace_id)?) {
             break;
         }
     }
@@ -117,7 +121,7 @@ pub fn TypeIsVisibleExt(typid: Oid) -> PgResult<Option<bool>> {
             break;
         }
         if OidIsValid(syscache_seams::lookup_pg_type_oid_by_name::call(
-            name_str(&typname),
+            &name_str(&typname),
             namespace_id,
         )?) {
             break;
@@ -157,7 +161,17 @@ pub fn FunctionIsVisibleExt(funcid: Oid) -> PgResult<Option<bool>> {
     // Visible iff FuncnameGetCandidates resolves the unqualified name +
     // signature to this exact proc.
     let clist =
-        FuncnameGetCandidates(scratch.mcx(), &[name_str(&proname)], pronargs, &[], false, false)?;
+        {
+            let proname_s = name_str(&proname);
+            FuncnameGetCandidates(
+                scratch.mcx(),
+                &[proname_s.as_str()],
+                pronargs,
+                &[],
+                false,
+                false,
+            )?
+        };
     let mut visible = false;
     for cand in clist.iter() {
         if cand.args.as_slice() == proargtypes.as_slice() {
@@ -191,7 +205,8 @@ pub fn OperatorIsVisibleExt(oprid: Oid) -> PgResult<Option<bool>> {
     }
     // In-path items can still be shadowed by an earlier same-name/same-args
     // operator; visible iff OpernameGetOprid resolves back to this one.
-    Ok(Some(OpernameGetOprid(&[name_str(&oprname)], oprleft, oprright)? == oprid))
+    let oprname_s = name_str(&oprname);
+    Ok(Some(OpernameGetOprid(&[oprname_s.as_str()], oprleft, oprright)? == oprid))
 }
 
 pub fn OpclassIsVisible(opcid: Oid) -> PgResult<bool> {
@@ -214,7 +229,7 @@ pub fn OpclassIsVisibleExt(opcid: Oid) -> PgResult<Option<bool>> {
     if opcnamespace != PG_CATALOG_NAMESPACE && !path_contains(opcnamespace) {
         return Ok(Some(false));
     }
-    Ok(Some(OpclassnameGetOpcid(opcmethod, name_str(&opcname))? == opcid))
+    Ok(Some(OpclassnameGetOpcid(opcmethod, &name_str(&opcname))? == opcid))
 }
 
 
@@ -254,7 +269,7 @@ pub fn StatisticsObjIsVisibleExt(stxid: Oid) -> PgResult<Option<bool>> {
             return Ok(Some(true));
         }
         if OidIsValid(syscache_seams::lookup_pg_statistic_ext_oid_by_name_nsp::call(
-            name_str(&stxname),
+            &name_str(&stxname),
             namespace_id,
         )?) {
             return Ok(Some(false));
@@ -285,7 +300,7 @@ pub fn OpfamilyIsVisibleExt(opfid: Oid) -> PgResult<Option<bool>> {
     if opfnamespace != PG_CATALOG_NAMESPACE && !path_contains(opfnamespace) {
         return Ok(Some(false));
     }
-    Ok(Some(OpfamilynameGetOpfid(opfmethod, name_str(&opfname))? == opfid))
+    Ok(Some(OpfamilynameGetOpfid(opfmethod, &name_str(&opfname))? == opfid))
 }
 
 const ANUM_PG_COLLATION_COLLNAME: i32 = 2;
@@ -342,7 +357,7 @@ pub fn CollationIsVisibleExt(collid: Oid) -> PgResult<Option<bool>> {
     if collnamespace != PG_CATALOG_NAMESPACE && !path_contains(collnamespace) {
         return Ok(Some(false));
     }
-    Ok(Some(CollationGetCollid(name_str(&collname))? == collid))
+    Ok(Some(CollationGetCollid(&name_str(&collname))? == collid))
 }
 
 pub fn ConversionIsVisible(conid: Oid) -> PgResult<bool> {
@@ -363,7 +378,7 @@ pub fn ConversionIsVisibleExt(conid: Oid) -> PgResult<Option<bool>> {
     if connamespace != PG_CATALOG_NAMESPACE && !path_contains(connamespace) {
         return Ok(Some(false));
     }
-    Ok(Some(ConversionGetConid(name_str(&conname))? == conid))
+    Ok(Some(ConversionGetConid(&name_str(&conname))? == conid))
 }
 
 pub fn TSParserIsVisible(prs_id: Oid) -> PgResult<bool> {
@@ -387,7 +402,7 @@ pub fn TSParserIsVisibleExt(prs_id: Oid) -> PgResult<Option<bool>> {
     }
     Ok(Some(named_visible_in_path(
         prsnamespace,
-        name_str(&prsname),
+        &name_str(&prsname),
         TSPARSERNAMENSP,
     )?))
 }
@@ -413,7 +428,7 @@ pub fn TSDictionaryIsVisibleExt(dict_id: Oid) -> PgResult<Option<bool>> {
     }
     Ok(Some(named_visible_in_path(
         dictnamespace,
-        name_str(&dictname),
+        &name_str(&dictname),
         cache_syscache::cacheinfo::TSDICTNAMENSP,
     )?))
 }
@@ -440,7 +455,7 @@ pub fn TSTemplateIsVisibleExt(tmpl_id: Oid) -> PgResult<Option<bool>> {
     }
     Ok(Some(named_visible_in_path(
         tmplnamespace,
-        name_str(&tmplname),
+        &name_str(&tmplname),
         TSTEMPLATENAMENSP,
     )?))
 }
@@ -466,7 +481,7 @@ pub fn TSConfigIsVisibleExt(cfgid: Oid) -> PgResult<Option<bool>> {
     }
     Ok(Some(named_visible_in_path(
         cfgnamespace,
-        name_str(&cfgname),
+        &name_str(&cfgname),
         cache_syscache::cacheinfo::TSCONFIGNAMENSP,
     )?))
 }

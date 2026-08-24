@@ -1,10 +1,10 @@
 use std::sync::atomic::Ordering::Relaxed;
 
-use types_error::{PgError, PgResult, PANIC};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, PANIC};
 use xlogreader_seams::XLogReaderState;
 
 use crate::control_file::{control_file, control_file_update};
-use crate::ctl::XLogCtl;
+use crate::ctl::{ControlFileLock, XLogCtl};
 use crate::*;
 
 fn main_data(record: &XLogReaderState) -> &[u8] {
@@ -12,6 +12,46 @@ fn main_data(record: &XLogReaderState) -> &[u8] {
     // SAFETY: main_data points into the reader's decode buffer, valid for the
     // redo callback's duration.
     unsafe { rec.main_data_bytes() }
+}
+
+/// Fetch the record's main data, validating it is at least `min_len` bytes
+/// before any fixed-offset parse. C's xlog_redo memcpy's `sizeof(struct)`
+/// bytes out of the (large) decode buffer without a length check, harmlessly
+/// over-reading for a short-but-nonzero payload; in Rust the equivalent slice
+/// indexing panics, and because xlog_redo runs on the startup/redo thread, a
+/// crafted WAL record with truncated main data would turn into a process-fatal
+/// panic and a persistent crash loop. Enforce the per-record minimum here and
+/// surface a violation as a catchable ERRCODE_DATA_CORRUPTED error instead.
+fn main_data_checked<'a>(
+    record: &'a XLogReaderState,
+    min_len: usize,
+    what: &str,
+) -> PgResult<&'a [u8]> {
+    require_main_data_len(main_data(record), min_len, what)
+}
+
+/// Pure length gate for `main_data_checked`: reject a main-data slice shorter
+/// than the record type's fixed-offset parse requires, as a catchable
+/// ERRCODE_DATA_CORRUPTED error rather than a slice-index panic.
+fn require_main_data_len<'a>(
+    data: &'a [u8],
+    min_len: usize,
+    what: &str,
+) -> PgResult<&'a [u8]> {
+    if data.len() < min_len {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "invalid {what} record: main data is {} bytes, expected at least {}",
+                    data.len(),
+                    min_len
+                ),
+            )
+            .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+        ));
+    }
+    Ok(data)
 }
 
 fn panic_err(msg: String) -> Box<PgError> {
@@ -45,7 +85,9 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
             // Believe the record exactly rather than max() against the
             // counter: max() breaks on OID wraparound, and no OID allocation
             // happens during replay anyway.
-            let next_oid = u32::from_ne_bytes(main_data(record)[..4].try_into().unwrap());
+            let next_oid = u32::from_ne_bytes(
+                main_data_checked(record, 4, "XLOG_NEXTOID")?[..4].try_into().unwrap(),
+            );
             let oid_gen_lock = lwlock::main_lock(varsup::OID_GEN_LOCK);
             lwlock::LWLockAcquire(
                 oid_gen_lock,
@@ -58,7 +100,11 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
             lwlock::LWLockRelease(oid_gen_lock)?;
         }
         XLOG_CHECKPOINT_SHUTDOWN => {
-            let check_point = CheckPoint::from_bytes(main_data(record));
+            let check_point = CheckPoint::from_bytes(main_data_checked(
+                record,
+                core::mem::size_of::<CheckPoint>(),
+                "shutdown checkpoint",
+            )?);
             procarray::TransamVariables().nextXid.store(check_point.nextXid.value, Relaxed);
             varsup::TransamVariables().nextOid.store(check_point.nextOid, Relaxed);
             varsup::TransamVariables().oidCount.store(0, Relaxed);
@@ -125,7 +171,17 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
                 procarray_seams::proc_array_apply_recovery_info::call(&running)?;
             }
 
+            // ControlFile->checkPointCopy always tracks the latest ckpt XID.
+            // Hold ControlFileLock across the mutation, matching C's xlog_redo
+            // (xlog.c:8386-8388), so the checkpointer's restartpoint updates
+            // cannot race this write to the shared control file.
+            lwlock::LWLockAcquire(
+                ControlFileLock(),
+                lwlock::LW_EXCLUSIVE,
+                init_small::globals::MyProcNumber(),
+            )?;
             control_file_update(|cf| cf.checkPointCopy.nextXid = check_point.nextXid);
+            lwlock::LWLockRelease(ControlFileLock())?;
             let ctl = XLogCtl();
             ctl.info_lck.with(|| ctl.ckptFullXid.store(check_point.nextXid.value, Relaxed));
 
@@ -142,7 +198,11 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
             // the recovery unit.
         }
         XLOG_CHECKPOINT_ONLINE => {
-            let check_point = CheckPoint::from_bytes(main_data(record));
+            let check_point = CheckPoint::from_bytes(main_data_checked(
+                record,
+                core::mem::size_of::<CheckPoint>(),
+                "online checkpoint",
+            )?);
             let tv = procarray::TransamVariables();
             let cur = tv.nextXid.load(Relaxed);
             if cur < check_point.nextXid.value {
@@ -163,7 +223,17 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
             if tv.oldestXid.load(Relaxed) < check_point.oldestXid {
                 tv.oldestXid.store(check_point.oldestXid, Relaxed);
             }
+            // ControlFile->checkPointCopy always tracks the latest ckpt XID.
+            // Hold ControlFileLock across the mutation, matching C's xlog_redo
+            // (xlog.c:8455-8457), so the checkpointer's restartpoint updates
+            // cannot race this write to the shared control file.
+            lwlock::LWLockAcquire(
+                ControlFileLock(),
+                lwlock::LW_EXCLUSIVE,
+                init_small::globals::MyProcNumber(),
+            )?;
             control_file_update(|cf| cf.checkPointCopy.nextXid = check_point.nextXid);
+            lwlock::LWLockRelease(ControlFileLock())?;
             let ctl = XLogCtl();
             ctl.info_lck.with(|| ctl.ckptFullXid.store(check_point.nextXid.value, Relaxed));
 
@@ -179,7 +249,7 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_OVERWRITE_CONTRECORD | XLOG_BACKUP_END | XLOG_RESTORE_POINT => {}
         XLOG_END_OF_RECOVERY => {
             // xl_end_of_recovery: TimestampTz end_time; TimeLineID this/prev; int wal_level.
-            let data = main_data(record);
+            let data = main_data_checked(record, 20, "end-of-recovery")?;
             let this_tli = u32::from_ne_bytes(data[8..12].try_into().unwrap());
             let (_, replay_tli) = xlogrecovery_seams::get_current_replay_rec_ptr::call();
             if this_tli != replay_tli {
@@ -211,7 +281,8 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
             }
         }
         XLOG_PARAMETER_CHANGE => {
-            let data = main_data(record);
+            // xl_parameter_change: six i32 fields (24 bytes) + two bool bytes.
+            let data = main_data_checked(record, 26, "parameter-change")?;
             let max_connections = i32::from_ne_bytes(data[0..4].try_into().unwrap());
             let max_worker_processes = i32::from_ne_bytes(data[4..8].try_into().unwrap());
             let max_wal_senders = i32::from_ne_bytes(data[8..12].try_into().unwrap());
@@ -249,35 +320,54 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
                 )?;
             }
 
-            control_file_update(|cf| {
-                cf.MaxConnections = max_connections;
-                cf.max_worker_processes = max_worker_processes;
-                cf.max_wal_senders = max_wal_senders;
-                cf.max_prepared_xacts = max_prepared_xacts;
-                cf.max_locks_per_xact = max_locks_per_xact;
-                cf.wal_level = new_wal_level;
-                cf.wal_log_hints = wal_log_hints;
-                cf.track_commit_timestamp = track_commit_timestamp;
-            });
-
-            if xlogrecovery_seams::in_archive_recovery::call() {
-                crate::write::LOCAL_MIN_RECOVERY_POINT.set(control_file().minRecoveryPoint);
-                crate::write::LOCAL_MIN_RECOVERY_POINT_TLI.set(control_file().minRecoveryPointTLI);
-            }
-            if crate::write::LOCAL_MIN_RECOVERY_POINT.get() != InvalidXLogRecPtr
-                && crate::write::LOCAL_MIN_RECOVERY_POINT.get() < lsn
-            {
-                let (_, replay_tli) = xlogrecovery_seams::get_current_replay_rec_ptr::call();
+            // Hold ControlFileLock across every pg_control mutation and the
+            // UpdateControlFile() flush, matching C's xlog_redo
+            // (xlog.c:8580-8616), so the checkpointer/bgwriter cannot race
+            // these writes (field updates and the minRecoveryPoint advance)
+            // against restartpoints. The closure guarantees the lock is
+            // released on every exit path, including the `?` early return out
+            // of UpdateControlFile(). CheckRequiredParameterValues() runs after
+            // release, as in C (xlog.c:8619).
+            lwlock::LWLockAcquire(
+                ControlFileLock(),
+                lwlock::LW_EXCLUSIVE,
+                init_small::globals::MyProcNumber(),
+            )?;
+            let update = (|| -> PgResult<()> {
                 control_file_update(|cf| {
-                    cf.minRecoveryPoint = lsn;
-                    cf.minRecoveryPointTLI = replay_tli;
+                    cf.MaxConnections = max_connections;
+                    cf.max_worker_processes = max_worker_processes;
+                    cf.max_wal_senders = max_wal_senders;
+                    cf.max_prepared_xacts = max_prepared_xacts;
+                    cf.max_locks_per_xact = max_locks_per_xact;
+                    cf.wal_level = new_wal_level;
+                    cf.wal_log_hints = wal_log_hints;
+                    cf.track_commit_timestamp = track_commit_timestamp;
                 });
-            }
-            UpdateControlFile()?;
+
+                if xlogrecovery_seams::in_archive_recovery::call() {
+                    crate::write::LOCAL_MIN_RECOVERY_POINT.set(control_file().minRecoveryPoint);
+                    crate::write::LOCAL_MIN_RECOVERY_POINT_TLI
+                        .set(control_file().minRecoveryPointTLI);
+                }
+                if crate::write::LOCAL_MIN_RECOVERY_POINT.get() != InvalidXLogRecPtr
+                    && crate::write::LOCAL_MIN_RECOVERY_POINT.get() < lsn
+                {
+                    let (_, replay_tli) = xlogrecovery_seams::get_current_replay_rec_ptr::call();
+                    control_file_update(|cf| {
+                        cf.minRecoveryPoint = lsn;
+                        cf.minRecoveryPointTLI = replay_tli;
+                    });
+                }
+                UpdateControlFile()
+            })();
+            let release = lwlock::LWLockRelease(ControlFileLock());
+            update?;
+            release?;
             control_file::CheckRequiredParameterValues()?;
         }
         XLOG_FPW_CHANGE => {
-            let fpw = main_data(record)[0] != 0;
+            let fpw = main_data_checked(record, 1, "FPW-change")?[0] != 0;
             if !fpw {
                 let ctl = XLogCtl();
                 ctl.info_lck.with(|| {
@@ -291,4 +381,37 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_main_data_len;
+    use types_error::ERRCODE_DATA_CORRUPTED;
+
+    #[test]
+    fn short_main_data_is_rejected_not_panicked() {
+        // A crafted checkpoint record with empty/truncated main data must
+        // surface as a catchable ERRCODE_DATA_CORRUPTED error, never a panic.
+        let need = core::mem::size_of::<crate::CheckPoint>();
+        for len in [0usize, 4, need - 1] {
+            let data = vec![0u8; len];
+            let err = require_main_data_len(&data, need, "online checkpoint")
+                .expect_err("short main data must be rejected");
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+    }
+
+    #[test]
+    fn sufficient_main_data_passes() {
+        let need = core::mem::size_of::<crate::CheckPoint>();
+        let data = vec![0u8; need];
+        let ok = require_main_data_len(&data, need, "online checkpoint")
+            .expect("full-length main data must be accepted");
+        assert_eq!(ok.len(), need);
+
+        // Extra trailing bytes (as legitimate records may carry, since C
+        // copies only sizeof(CheckPoint)) are still accepted.
+        let longer = vec![0u8; need + 8];
+        assert!(require_main_data_len(&longer, need, "online checkpoint").is_ok());
+    }
 }

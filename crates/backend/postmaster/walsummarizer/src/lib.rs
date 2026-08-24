@@ -36,7 +36,7 @@ use types_core::{
     INVALID_PROC_NUMBER,
 };
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR,
+    ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, DEBUG1, DEBUG2, ERROR, FATAL, WARNING,
 };
 use types_startup::StartupData;
@@ -923,6 +923,34 @@ fn SummarizeWAL(
     Ok(summary_end_lsn)
 }
 
+// The WAL record main-data payload is untrusted: XLogRecGetData returns a
+// slice exactly as long as the record's declared main-data length, and the
+// xlogreader validates only CRC and aggregate structural consistency, never a
+// per-resource-manager minimum payload size. C reads these payloads with a
+// fixed-size memcpy that silently over-reads adjacent memory on a short record;
+// the Rust fixed-offset slices would instead panic (a summarizer crash that the
+// postmaster escalates to a cluster-wide crash-restart loop). Validate the
+// available length before any fixed-offset read and surface a short or
+// inconsistent record as a catchable ERRCODE_DATA_CORRUPTED error, which the
+// summarizer's retry loop handles like any other ERROR.
+fn require_record_len(
+    data: &[u8],
+    needed: usize,
+    rec: &'static str,
+    funcname: &'static str,
+) -> PgResult<()> {
+    if data.len() < needed {
+        return ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "WAL record of type {rec} has main data of {} bytes, but at least {needed} bytes are required",
+                data.len()
+            ))
+            .finish(loc(funcname));
+    }
+    Ok(())
+}
+
 fn SummarizeDbaseRecord(
     xlogreader: &XLogReaderState<'_>,
     brtab: &mut blkreftable::BlockRefTable<'_>,
@@ -933,13 +961,19 @@ fn SummarizeDbaseRecord(
     // C sets a limit block of 0 for relfilenumber zero to mark every relation
     // in the DB OID/TS OID pair as recreated (see walsummarizer.c).
     if info == XLOG_DBASE_CREATE_FILE_COPY || info == XLOG_DBASE_CREATE_WAL_LOG {
+        // xl_dbase_create_*_rec: db_id (4), tablespace_id (4).
+        require_record_len(data, 8, "XLOG_DBASE_CREATE", "SummarizeDbaseRecord")?;
         let db_id = u32::from_ne_bytes(data[0..4].try_into().unwrap());
         let tablespace_id = u32::from_ne_bytes(data[4..8].try_into().unwrap());
         let rlocator = RelFileLocator { spcOid: tablespace_id, dbOid: db_id, relNumber: 0 };
         brtab.set_limit_block(rlocator, MAIN_FORKNUM, 0);
     } else if info == XLOG_DBASE_DROP {
+        // xl_dbase_drop_rec: db_id (4), ntablespaces (4), tablespace_ids[].
+        require_record_len(data, 8, "XLOG_DBASE_DROP", "SummarizeDbaseRecord")?;
         let db_id = u32::from_ne_bytes(data[0..4].try_into().unwrap());
         let ntablespaces = i32::from_ne_bytes(data[4..8].try_into().unwrap()).max(0) as usize;
+        // Do not trust the WAL-supplied count: the array must actually fit.
+        require_record_len(data, 8 + 4 * ntablespaces, "XLOG_DBASE_DROP", "SummarizeDbaseRecord")?;
         for i in 0..ntablespaces {
             let off = 8 + 4 * i;
             let spc = u32::from_ne_bytes(data[off..off + 4].try_into().unwrap());
@@ -959,6 +993,7 @@ fn SummarizeSmgrRecord(
 
     if info == XLOG_SMGR_CREATE {
         // xl_smgr_create: RelFileLocator (12), ForkNumber (4).
+        require_record_len(data, 16, "XLOG_SMGR_CREATE", "SummarizeSmgrRecord")?;
         let rlocator = rlocator_at(data, 0);
         let forknum = ForkNumber::from_i32(i32::from_ne_bytes(data[12..16].try_into().unwrap()))
             .expect("valid fork number in smgr-create record");
@@ -967,6 +1002,7 @@ fn SummarizeSmgrRecord(
         }
     } else if info == XLOG_SMGR_TRUNCATE {
         // xl_smgr_truncate: BlockNumber (4), RelFileLocator (12), int flags (4).
+        require_record_len(data, 20, "XLOG_SMGR_TRUNCATE", "SummarizeSmgrRecord")?;
         let blkno = u32::from_ne_bytes(data[0..4].try_into().unwrap());
         let rlocator = rlocator_at(data, 4);
         let flags = u32::from_ne_bytes(data[16..20].try_into().unwrap());
@@ -1028,15 +1064,25 @@ fn SummarizeXlogRecord(xlogreader: &XLogReaderState<'_>) -> PgResult<Option<bool
 
     let record_wal_level: i32;
     if info == XLOG_CHECKPOINT_REDO {
+        // Payload is wal_level (int) at the time the record was written.
+        require_record_len(data, 4, "XLOG_CHECKPOINT_REDO", "SummarizeXlogRecord")?;
         record_wal_level = i32::from_ne_bytes(data[0..4].try_into().unwrap());
     } else if info == XLOG_CHECKPOINT_SHUTDOWN {
+        require_record_len(
+            data,
+            controldata_utils::SIZEOF_CHECKPOINT,
+            "XLOG_CHECKPOINT_SHUTDOWN",
+            "SummarizeXlogRecord",
+        )?;
         let ckpt = controldata_utils::CheckPoint::from_bytes(data);
         record_wal_level = ckpt.wal_level;
     } else if info == XLOG_PARAMETER_CHANGE {
         // xl_parameter_change: wal_level is the sixth int.
+        require_record_len(data, 24, "XLOG_PARAMETER_CHANGE", "SummarizeXlogRecord")?;
         record_wal_level = i32::from_ne_bytes(data[20..24].try_into().unwrap());
     } else if info == XLOG_END_OF_RECOVERY {
         // xl_end_of_recovery: TimestampTz (8), TLI (4), PrevTLI (4), wal_level.
+        require_record_len(data, 20, "XLOG_END_OF_RECOVERY", "SummarizeXlogRecord")?;
         record_wal_level = i32::from_ne_bytes(data[16..20].try_into().unwrap());
     } else {
         return Ok(None);

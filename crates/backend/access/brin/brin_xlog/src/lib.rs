@@ -4,8 +4,8 @@
 #![allow(non_upper_case_globals)]
 
 use types_brin::*;
-use types_core::{Buffer, InvalidBuffer};
-use types_error::{PgError, PgResult};
+use types_core::{BlockNumber, Buffer, InvalidBuffer};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use types_storage::bufpage::{PageMut, SizeOfPageHeaderData};
 use types_tuple::itemptr::ItemPointerData;
 use xlogreader_seams::XLogReaderState;
@@ -48,6 +48,32 @@ fn panic_err(msg: String) -> Box<PgError> {
     Box::new(PgError::new(types_error::PANIC, msg))
 }
 
+/// Upper bound on a BRIN index's pages_per_range: the reloption's max (see
+/// reloptions.c, "pages_per_range" 1..131072). The minimum meaningful value
+/// is 1 — 0 is never valid.
+const BRIN_MAX_PAGES_PER_RANGE: BlockNumber = 131072;
+
+/// Validate a `pagesPerRange` decoded from a BRIN WAL record before it is used
+/// as a divisor in `HEAPBLK_TO_REVMAP_INDEX` (via `brinSetHeapBlockItemptr`).
+///
+/// C's BRIN code trusts the metapage-sourced `pagesPerRange` and never divides
+/// by a validated value, but here a corrupt record carrying
+/// `pagesPerRange == 0` would integer-divide-by-zero and panic the startup
+/// redo thread — a crash that recovery re-hits on every restart. Treat 0 (and
+/// out-of-supported-range) as data corruption and fail replay with a
+/// diagnosable, catchable error rather than a panic.
+fn validate_pages_per_range(pagesPerRange: BlockNumber) -> PgResult<()> {
+    if pagesPerRange == 0 || pagesPerRange > BRIN_MAX_PAGES_PER_RANGE {
+        return Err(Box::new(
+            PgError::error(format!(
+                "BRIN redo: invalid pagesPerRange {pagesPerRange} in WAL record"
+            ))
+            .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+        ));
+    }
+    Ok(())
+}
+
 // SAFETY contract shared by the redo arms: the buffer is pinned and
 // exclusively locked (XLogReadBufferForRedo protocol).
 unsafe fn page_mut<'p>(buffer: Buffer) -> PageMut<'p> {
@@ -61,7 +87,7 @@ fn unlock_release(buffer: Buffer) -> PgResult<()> {
 
 fn brin_xlog_createidx(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
-    let xlrec = decode_createidx(main_data(record));
+    let xlrec = decode_createidx(main_data(record))?;
 
     let buf = XLogInitBufferForRedo(record, 0)?;
     // SAFETY: pinned + exclusively locked (init-for-redo).
@@ -78,6 +104,10 @@ fn brin_xlog_insert_update(
     init_page: bool,
 ) -> PgResult<()> {
     let lsn = record.EndRecPtr;
+
+    // Reject a corrupt record before it reaches brinSetHeapBlockItemptr's
+    // divide-by-pagesPerRange (below), which would otherwise panic redo.
+    validate_pages_per_range(xlrec.pagesPerRange)?;
 
     let (action, buffer) = if init_page {
         let buffer = XLogInitBufferForRedo(record, 0)?;
@@ -130,13 +160,13 @@ fn brin_xlog_insert_update(
 }
 
 fn brin_xlog_insert(record: &XLogReaderState, init_page: bool) -> PgResult<()> {
-    let xlrec = decode_insert(main_data(record));
+    let xlrec = decode_insert(main_data(record))?;
     brin_xlog_insert_update(record, &xlrec, init_page)
 }
 
 fn brin_xlog_update(record: &XLogReaderState, init_page: bool) -> PgResult<()> {
     let lsn = record.EndRecPtr;
-    let xlrec = decode_update(main_data(record));
+    let xlrec = decode_update(main_data(record))?;
 
     let (action, buffer) = XLogReadBufferForRedo(record, 2)?;
     if action == BLK_NEEDS_REDO {
@@ -157,7 +187,7 @@ fn brin_xlog_update(record: &XLogReaderState, init_page: bool) -> PgResult<()> {
 
 fn brin_xlog_samepage_update(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
-    let offnum = decode_samepage_update(main_data(record));
+    let offnum = decode_samepage_update(main_data(record))?;
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
     // DST RED (sim-cfg only): the deliberately weakened redo — keep the OLD
@@ -192,7 +222,7 @@ fn brin_xlog_samepage_update(record: &XLogReaderState) -> PgResult<()> {
 
 fn brin_xlog_revmap_extend(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
-    let targetBlk = decode_revmap_extend(main_data(record));
+    let targetBlk = decode_revmap_extend(main_data(record))?;
 
     let (action, metabuf) = XLogReadBufferForRedo(record, 0)?;
     if action == BLK_NEEDS_REDO {
@@ -225,7 +255,11 @@ fn brin_xlog_revmap_extend(record: &XLogReaderState) -> PgResult<()> {
 
 fn brin_xlog_desummarize_page(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
-    let xlrec = decode_desummarize(main_data(record));
+    let xlrec = decode_desummarize(main_data(record))?;
+
+    // Reject a corrupt record before it reaches brinSetHeapBlockItemptr's
+    // divide-by-pagesPerRange (below), which would otherwise panic redo.
+    validate_pages_per_range(xlrec.pagesPerRange)?;
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
     if action == BLK_NEEDS_REDO {
@@ -299,6 +333,31 @@ pub fn brin_mask(pagedata: &mut [u8], _blkno: types_core::BlockNumber) -> PgResu
     let flags = BrinPageFlags(&pm.as_ref());
     BrinSetPageFlags(&mut pm, flags & !BRIN_EVACUATE_PAGE);
     Ok(())
+}
+
+#[cfg(test)]
+mod pages_per_range_tests {
+    use super::*;
+
+    #[test]
+    fn zero_pages_per_range_is_data_corruption_not_panic() {
+        let err = validate_pages_per_range(0).expect_err("pagesPerRange=0 must be rejected");
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    #[test]
+    fn out_of_range_pages_per_range_is_rejected() {
+        let err = validate_pages_per_range(BRIN_MAX_PAGES_PER_RANGE + 1)
+            .expect_err("pagesPerRange above the supported max must be rejected");
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    #[test]
+    fn valid_pages_per_range_is_accepted() {
+        validate_pages_per_range(1).unwrap();
+        validate_pages_per_range(128).unwrap();
+        validate_pages_per_range(BRIN_MAX_PAGES_PER_RANGE).unwrap();
+    }
 }
 
 #[cfg(test)]

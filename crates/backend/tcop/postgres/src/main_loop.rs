@@ -835,6 +835,16 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
                     e.message()
                 ))
                 .finish(loc(0, "postgres_main_inner"));
+            // The backfill runs inside an open transaction; a raised PgError
+            // that we contain here would otherwise leave that transaction open
+            // with its catalog lock still held, violating the invariant that an
+            // error unwinds to a clean transaction state (relied on by
+            // fmgr_security_definer, GUC nesting, and lock release). Route the
+            // contained failure through the same abort the main loop's
+            // error_recovery uses (xact::AbortCurrentTransaction, main_loop.rs
+            // line 281) so locks/resources are released and the session returns
+            // to a clean idle state. Contained: swallow any abort failure too.
+            let _ = xact::AbortCurrentTransaction();
         }
     }
 

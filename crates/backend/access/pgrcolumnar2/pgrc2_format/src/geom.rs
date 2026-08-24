@@ -150,13 +150,23 @@ impl GranuleGrain {
 }
 
 /// Granules in a part of `rows` rows (last may be short) — DEFAULT grain.
+///
+/// The true closed form is a `u64` (see [`granule_count_at`]); this
+/// convenience wrapper keeps its historical `u32` contract for the
+/// write/test callers that build legitimate, well-bounded parts. The
+/// hostile-input echo validation in `part.rs`/`manifest.rs` calls the
+/// `_at` forms directly against the untruncated `u64`, so narrowing here
+/// never widens the trust boundary.
 pub fn granule_count(rows: u64) -> u32 {
-    granule_count_at(rows, GranuleGrain::DEFAULT)
+    granule_count_at(rows, GranuleGrain::DEFAULT) as u32
 }
 
 /// Bands in a part of `rows` rows (last may be short) — DEFAULT grain.
+///
+/// See [`granule_count`] for why this convenience wrapper narrows to
+/// `u32` while the echo validation uses the untruncated [`band_count_at`].
 pub fn band_count(rows: u64) -> u32 {
-    band_count_at(rows, GranuleGrain::DEFAULT)
+    band_count_at(rows, GranuleGrain::DEFAULT) as u32
 }
 
 /// Rows in granule `g` of a `rows`-row part (0 for out-of-range granules) —
@@ -172,13 +182,24 @@ pub fn rows_in_band(rows: u64, band: u32) -> u32 {
 }
 
 /// Granules in a part of `rows` rows at `grain` (last may be short).
-pub fn granule_count_at(rows: u64, grain: GranuleGrain) -> u32 {
-    rows.div_ceil(grain.rows() as u64) as u32
+///
+/// Returns the TRUE `u64` closed form: truncating to `u32` here would let a
+/// hostile footer/manifest store the mod-2^32 residue of an inconsistent
+/// `(rows, granule_count)` pair and still pass the decode echo checks
+/// (idx 253). Callers that persist the count into a `u32` field narrow at
+/// the write side, after bounding by `MAX_GRANULES_PER_PART`.
+pub fn granule_count_at(rows: u64, grain: GranuleGrain) -> u64 {
+    rows.div_ceil(grain.rows() as u64)
 }
 
 /// Bands in a part of `rows` rows at `grain` (last may be short).
-pub fn band_count_at(rows: u64, grain: GranuleGrain) -> u32 {
-    rows.div_ceil(grain.band_rows() as u64) as u32
+///
+/// Returns the TRUE `u64` closed form for the same reason as
+/// [`granule_count_at`]: band_count is not covered by the
+/// `MAX_GRANULES_PER_PART` reject, so echo validation must compare against
+/// the untruncated value.
+pub fn band_count_at(rows: u64, grain: GranuleGrain) -> u64 {
+    rows.div_ceil(grain.band_rows() as u64)
 }
 
 /// Rows in granule `g` of a `rows`-row part at `grain` (0 out of range).

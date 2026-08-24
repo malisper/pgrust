@@ -124,6 +124,22 @@ fn build_row(
             continue;
         }
         if let Some(bytes) = cols.get(i).copied().flatten() {
+            // dblink pins the remote client_encoding to the local database
+            // encoding at connect (lib.rs), but honoring that is entirely up to
+            // the remote: a hostile/compromised server, an honest SQL_ASCII
+            // server, or a MITM on a non-TLS link can return text-format bytes
+            // that are invalid in the local encoding. C's dblink tolerates the
+            // resulting mojibake because it is byte-oriented, but this port has
+            // from_utf8_unchecked sinks (e.g. jsonpath_exec over stored jsonb)
+            // that rely on the engine invariant that stored strings are valid
+            // in the database encoding; feeding them invalid bytes is UB.
+            // Verify against the database encoding — as C's pg_client_to_server
+            // would when client_encoding == database encoding — before the type
+            // input function runs and the value can become a stored datum.
+            // SQL_ASCII accepts every byte, so valid behavior is preserved.
+            // This covers both the streaming TupleSink::row path and
+            // materialize_result, which funnel every remote column through here.
+            mbutils::pg_verifymbstr(bytes, false)?;
             let cstr = CString::new(bytes)
                 .map_err(|_| Box::new(PgError::error("remote value contains embedded NUL byte")))?;
             values[i] = types_fmgr::input_function_call(
@@ -251,12 +267,60 @@ pub(crate) fn materialize_command_status(
         tuplestore::Tuplestore::begin_heap(false, false, init_small::globals::work_mem());
     let d = types_fmgr::varlena_result(varlena::cstring_to_text(mcx, tag.as_bytes())?);
     store.putvalues(&tupdesc, &[d], &[false])?;
+    // C materializeResult: `rsinfo->setDesc = tupdesc` publishes the exact
+    // descriptor the rows were formed under — here a single TEXT "status"
+    // column. The executor's tupledesc_match check runs only when setDesc is
+    // set; leaving it None lets a FROM clause naming N != 1 columns deform this
+    // 1-column tuple under the N-column query descriptor (out-of-bounds read).
+    // Persist the descriptor in the per-query result context (as C does: it
+    // dies with that context, never freed explicitly) so the pointer stays
+    // valid after we return and the executor can validate it.
+    let desc = mcx::alloc_in(mcx, tupdesc)?;
+    let set_desc = core::ptr::NonNull::from(&*desc).cast::<core::ffi::c_void>();
+    core::mem::forget(desc);
     match fcinfo.rsinfo_mut() {
         Some(rsi) => {
             rsi.returnMode = SetFunctionReturnMode::Materialize;
             rsi.setResult = Some(Box::new(store));
+            rsi.setDesc = Some(set_desc);
         }
         None => return Err(Box::new(PgError::error("materialize mode required"))),
     }
     Ok(Datum::from_usize(0))
+}
+
+#[cfg(test)]
+mod tests {
+    // build_row now runs pg_verifymbstr against the local database encoding
+    // before handing remote text-format column bytes to the type input function
+    // (idx 84). build_row itself needs a live backend (mcx, fmgr, catalogs, an
+    // SRF), so guard the exact predicate it relies on: under a UTF-8 database,
+    // invalid multibyte sequences must produce a catchable error rather than
+    // flow through to from_utf8_unchecked sinks, while valid text passes.
+    // SQL_ASCII (byte-transparent) is left to mbutils' own coverage.
+    #[test]
+    fn remote_column_bytes_are_encoding_verified() {
+        use wchar::PG_UTF8;
+
+        // Valid UTF-8 (ASCII and a multibyte codepoint) is accepted.
+        assert!(mbutils::pg_verify_mbstr(PG_UTF8, b"hello", false).unwrap());
+        assert!(mbutils::pg_verify_mbstr(PG_UTF8, "ol\u{00e9}".as_bytes(), false).unwrap());
+
+        // A lone 0xFF and a truncated multibyte sequence are rejected with a
+        // catchable error instead of becoming a poisoned text datum.
+        let err = mbutils::pg_verify_mbstr(PG_UTF8, b"bad\xff", false)
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.sqlstate(),
+            types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
+        );
+        let err = mbutils::pg_verify_mbstr(PG_UTF8, b"bad\xe2\x82", false)
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.sqlstate(),
+            types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
+        );
+    }
 }

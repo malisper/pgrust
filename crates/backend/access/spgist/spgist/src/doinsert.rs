@@ -145,20 +145,24 @@ fn addLeafTuple(
 }
 
 fn checkSplitConditions(
+    index: &Relation<'_>,
     current: &SPPageDesc,
     n_to_split: &mut i32,
-) -> usize {
+) -> PgResult<usize> {
     if SpGistBlockIsRoot(current.blkno) {
         *n_to_split = BLCKSZ as i32;
-        return BLCKSZ;
+        return Ok(BLCKSZ);
     }
 
     let pm = page(current);
     let pr = pm.as_ref();
+    let mut guard = LeafChainGuard::new(pr.max_offset_number());
     let mut n = 0;
     let mut total_size = 0usize;
     let mut i = current.offnum;
     while i != InvalidOffsetNumber {
+        crate::check_for_interrupts()?;
+        guard.visit(i, index, current.blkno)?;
         let it = item_slice(&pr, i);
         let st = tuple_state(it);
         if st == SPGIST_LIVE {
@@ -172,7 +176,7 @@ fn checkSplitConditions(
         i = leaf_next_offset(it);
     }
     *n_to_split = n;
-    total_size
+    Ok(total_size)
 }
 
 fn moveLeafs<'m>(
@@ -197,8 +201,11 @@ fn moveLeafs<'m>(
     {
         let pm = page(current);
         let pr = pm.as_ref();
+        let mut guard = LeafChainGuard::new(pr.max_offset_number());
         let mut i = current.offnum;
         while i != InvalidOffsetNumber {
+            crate::check_for_interrupts()?;
+            guard.visit(i, index, current.blkno)?;
             let it = item_slice(&pr, i);
             let st = tuple_state(it);
             if st == SPGIST_LIVE {
@@ -439,7 +446,7 @@ fn doPickSplit<'m>(
                 let it = item_slice(&pr, i);
                 let st = tuple_state(it);
                 if st == SPGIST_LIVE {
-                    in_datums.push(if is_nulls { Datum::null() } else { leaf_datum(it, state) });
+                    in_datums.push(if is_nulls { Datum::null() } else { leaf_datum(it, state)? });
                     old_leaf_offs.push(i);
                     to_delete.push(i);
                     space_to_delete += leaf_size(it) + SIZEOF_ITEM_ID_DATA;
@@ -448,12 +455,15 @@ fn doPickSplit<'m>(
                 }
             }
         } else {
+            let mut guard = LeafChainGuard::new(max);
             let mut i = current.offnum;
             while i != InvalidOffsetNumber {
+                crate::check_for_interrupts()?;
+                guard.visit(i, index, current.blkno)?;
                 let it = item_slice(&pr, i);
                 let st = tuple_state(it);
                 if st == SPGIST_LIVE {
-                    in_datums.push(if is_nulls { Datum::null() } else { leaf_datum(it, state) });
+                    in_datums.push(if is_nulls { Datum::null() } else { leaf_datum(it, state)? });
                     old_leaf_offs.push(i);
                     to_delete.push(i);
                     debug_assert!(leaf_size(it) >= SGDTSIZE);
@@ -470,7 +480,7 @@ fn doPickSplit<'m>(
     }
 
     // the incoming tuple is always part of the picksplit input
-    in_datums.push(if is_nulls { Datum::null() } else { leaf_datum(new_leaf_tuple, state) });
+    in_datums.push(if is_nulls { Datum::null() } else { leaf_datum(new_leaf_tuple, state)? });
     let n_tuples = in_datums.len();
     let n_to_delete = to_delete.len();
 
@@ -1090,7 +1100,7 @@ fn addNode<'m>(
         mcx,
         state,
         hdr.prefixSize > 0,
-        inner_prefix_datum(inner, state),
+        inner_prefix_datum(inner, state)?,
         &nodes,
     )
 }
@@ -1592,7 +1602,7 @@ pub fn spgdoinsert<'m>(
                 break 'outer true;
             }
             let mut n_to_split = 0;
-            let size_to_split = checkSplitConditions(&current, &mut n_to_split);
+            let size_to_split = checkSplitConditions(index, &current, &mut n_to_split)?;
             if size_to_split < SPGIST_PAGE_CAPACITY / 2
                 && n_to_split < 64
                 && lt_size + SIZEOF_ITEM_ID_DATA + size_to_split <= SPGIST_PAGE_CAPACITY
@@ -1640,7 +1650,7 @@ pub fn spgdoinsert<'m>(
                     let hdr = SpGistInnerTupleHeader::decode(inner);
 
                     let mut labels_vec: Vec<Datum> = Vec::new();
-                    let has_labels = spgExtractNodeLabels(state, inner, &mut labels_vec);
+                    let has_labels = spgExtractNodeLabels(state, inner, &mut labels_vec)?;
                     // move labels into mcx so pointers stay valid after this block
                     let labels_ptr = if has_labels {
                         let mut lv: PgVec<'m, Datum> =
@@ -1660,7 +1670,7 @@ pub fn spgdoinsert<'m>(
                             level,
                             allTheSame: hdr.allTheSame,
                             hasPrefix: hdr.prefixSize > 0,
-                            prefixDatum: inner_prefix_datum(inner, state),
+                            prefixDatum: inner_prefix_datum(inner, state)?,
                             nNodes: hdr.nNodes as i32,
                             nodeLabels: labels_ptr,
                         },

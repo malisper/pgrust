@@ -6,12 +6,12 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 
 use crate::regex_consts::{DUPINF, REG_UEMPTYMATCH, REG_UIMPOSSIBLE};
-use crate::regex_error::{err_assert, err_etoobig, RegResult};
+use crate::regex_error::{check_interrupt, err_assert, err_etoobig, RegResult};
 use crate::regex_foundation::{maxcolor, pseudocolor};
 use crate::regguts::{
     chr, color, Arc, ArcId, Carc, Cnfa, ColorMap, Nfa, State, StateId, AHEAD, ARC_BOS, ARC_EOS,
     BEHIND, CANTMATCH, CNFA_NOPROGRESS, COLORLESS, EMPTY, HASCANTMATCH, HASLACONS, LACON, MATCHALL,
-    PLAIN, RAINBOW,
+    MAX_COLOR, PLAIN, RAINBOW,
 };
 
 use self::nfacolor::{colorchain, uncolorchain};
@@ -32,11 +32,6 @@ pub fn reg_max_compile_space() -> usize {
     500_000 * (core::mem::size_of::<State>() + 4 * core::mem::size_of::<Arc>())
 }
 
-
-
-#[inline]
-fn check_interrupt() {
-}
 
 
 #[inline]
@@ -120,7 +115,7 @@ pub fn freenfa(mut nfa: Nfa) {
 
 
 pub fn newstate<'mcx>(_mcx: Mcx<'mcx>, nfa: &mut Nfa) -> RegResult<StateId> {
-    check_interrupt();
+    check_interrupt()?;
 
     let s: StateId;
 
@@ -325,7 +320,7 @@ pub fn newarc<'mcx>(
     from: StateId,
     to: StateId,
 ) -> RegResult<()> {
-    check_interrupt();
+    check_interrupt()?;
 
     if nfa.st(from).nouts <= nfa.st(to).nins {
         let mut cur = nfa.st(from).outs;
@@ -667,7 +662,7 @@ pub fn moveins<'mcx>(
             freearc(nfa, cm, has_parent, a);
         }
     } else {
-        check_interrupt();
+        check_interrupt()?;
 
         sortins(mcx, nfa, old)?;
         sortins(mcx, nfa, new)?;
@@ -716,6 +711,10 @@ pub fn copyins<'mcx>(
 
     let mut cur = nfa.st(old).ins;
     while let Some(a) = cur {
+        // C regc_nfa.c:920 copyins INTERRUPT(nfa->v->re): pgrust routes every
+        // arc through createarc (which bypasses newarc's cancel check), so the
+        // check must live in this loop.
+        check_interrupt()?;
         let next = nfa.ar(a).inchain;
         let (t, co, from) = (nfa.ar(a).type_, nfa.ar(a).co, nfa.ar(a).from.unwrap());
         createarc(mcx, nfa, cm, has_parent, t, co, from, new)?;
@@ -747,7 +746,7 @@ pub fn moveouts<'mcx>(
             freearc(nfa, cm, has_parent, a);
         }
     } else {
-        check_interrupt();
+        check_interrupt()?;
 
         sortouts(mcx, nfa, old)?;
         sortouts(mcx, nfa, new)?;
@@ -796,6 +795,8 @@ pub fn copyouts<'mcx>(
 
     let mut cur = nfa.st(old).outs;
     while let Some(a) = cur {
+        // C regc_nfa.c:1205 copyouts INTERRUPT(nfa->v->re): see copyins.
+        check_interrupt()?;
         let next = nfa.ar(a).outchain;
         let (t, co, to) = (nfa.ar(a).type_, nfa.ar(a).co, nfa.ar(a).to.unwrap());
         createarc(mcx, nfa, cm, has_parent, t, co, new, to)?;
@@ -817,7 +818,7 @@ pub fn mergeins<'mcx>(
         return Ok(());
     }
 
-    check_interrupt();
+    check_interrupt()?;
 
     sortins(mcx, nfa, s)?;
     sort_arcids_by_key(nfa, &mut arcarray, sortins_key)?;
@@ -1936,8 +1937,10 @@ fn checkmatchall_recurse(
     if ::stack_depth::stack_is_too_deep() {
         return false;
     }
-
-    check_interrupt();
+    // NB: C's INTERRUPT here is omitted — this matchall analysis is memoized
+    // over the finite NFA state set (O(states), bounded), not a DoS vector, and
+    // the fn returns bool so cannot propagate REG_CANCEL. The unbounded loops
+    // (NFA construction, range(), DFA miss, cdissect) carry the checks.
 
     let mut haspath: Vec<bool> = Vec::new();
     if haspath.try_reserve_exact((DUPINF + 2) as usize).is_err() {
@@ -2606,8 +2609,17 @@ pub fn compact<'mcx>(mcx: Mcx<'mcx>, nfa: &Nfa, cm: &ColorMap, cnfa: &mut Cnfa) 
             } else if arc.type_ == LACON {
                 debug_assert!(s_no != cnfa.pre);
                 debug_assert!(arc.co >= 0);
+                // LACON arcs occupy the color space above the real colors
+                // ([ncolors, MAX_COLOR]); the executor tells them apart by
+                // co >= ncolors. Bound the sum before the i16 cast so a huge
+                // lookaround count can't wrap a LACON color back into the
+                // char-color range (C fails cleanly with REG_ETOOBIG here).
+                let laco = ncolors + arc.co as i32;
+                if laco > MAX_COLOR as i32 {
+                    return Err(err_etoobig());
+                }
                 arcs.push(Carc {
-                    co: (ncolors + arc.co as i32) as color,
+                    co: laco as color,
                     to: to_no,
                 });
                 cnfa.flags |= HASLACONS;

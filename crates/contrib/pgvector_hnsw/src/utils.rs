@@ -360,6 +360,27 @@ pub fn load_element_from_tuple(
     }
 }
 
+// Read an index block whose number came from an on-disk tuple. On-disk block
+// numbers (element blkno decoded from a neighbor TID, and the element's
+// neighbor_page) are untrusted: a crafted InvalidBlockNumber (0xFFFFFFFF)
+// aliases P_NEW, which bufmgr interprets as an extend request, so passing it to
+// ReadBuffer would silently extend the relation on a read path. Any block at or
+// beyond the fork's block count is likewise corruption. Reject both with a
+// catchable index-corruption error before touching the buffer manager.
+fn read_index_buffer_checked(index: &Relation<'_>, blkno: BlockNumber) -> PgResult<Buffer> {
+    let nblocks = bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)?;
+    if blkno == INVALID_BLOCK || blkno >= nblocks {
+        return Err(PgError::error(format!(
+            "hnsw index \"{}\" contains out-of-range block number {}",
+            index.name(),
+            blkno
+        ))
+        .with_sqlstate(types_error::ERRCODE_INDEX_CORRUPTED)
+        .into());
+    }
+    bufmgr::ReadBuffer(index, blkno)
+}
+
 // HnswLoadElementImpl. Returns Some(id) when the element was (re)loaded.
 #[allow(clippy::too_many_arguments)]
 pub fn load_element(
@@ -376,7 +397,7 @@ pub fn load_element(
         let e = pool.get(id);
         (e.blkno, e.offno)
     };
-    let buf = bufmgr::ReadBuffer(index, blkno)?;
+    let buf = read_index_buffer_checked(index, blkno)?;
     LockBuffer(buf, BUFFER_LOCK_SHARE)?;
     let page_bytes = buf_page_bytes(buf);
     // SAFETY: share lock held; PageRef borrows the locked page image.
@@ -432,7 +453,7 @@ pub fn load_neighbor_tids(
     lc: i32,
 ) -> PgResult<bool> {
     let e = pool.get(id);
-    let buf = bufmgr::ReadBuffer(index, e.neighbor_page)?;
+    let buf = read_index_buffer_checked(index, e.neighbor_page)?;
     LockBuffer(buf, BUFFER_LOCK_SHARE)?;
     let page_bytes = buf_page_bytes(buf);
     // SAFETY: share lock held.

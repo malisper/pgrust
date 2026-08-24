@@ -1,5 +1,7 @@
 use types_core::{Oid, TimestampTz, TransactionId, XLogRecPtr};
 
+use crate::state::GIDSIZE;
+
 pub const TWOPHASE_MAGIC: u32 = 0x57F94534;
 pub const MAX_ALLOC_SIZE: u32 = 0x3fffffff;
 
@@ -131,23 +133,64 @@ pub struct BufferLayout {
 }
 
 impl BufferLayout {
-    pub fn of(hdr: &TwoPhaseFileHeader) -> BufferLayout {
+    /// Compute the segment offsets from a header, validating every
+    /// attacker-influenced count against the actual buffer length.
+    ///
+    /// The header fields (`gidlen` and the six signed element counts) come
+    /// straight off disk or out of a WAL record replayed from a possibly
+    /// hostile primary. C computes the same offsets with raw pointer
+    /// arithmetic and relies on the CRC as its only guard; per the pgrust
+    /// threat model the CRC is attacker-computable and is not a boundary, and
+    /// unchecked arithmetic here would either panic (debug) or wrap into
+    /// arbitrary/overlapping offsets (release). So every count must be
+    /// non-negative, `gidlen` must fit the shared-memory gid slot, and the
+    /// fully accumulated layout must fit within `buf_len`, all with checked
+    /// arithmetic. Any violation returns `None`, which callers surface as a
+    /// catchable `ERRCODE_DATA_CORRUPTED` error instead of a panic.
+    pub fn try_of(hdr: &TwoPhaseFileHeader, buf_len: usize) -> Option<BufferLayout> {
+        // Advance `off` past a segment of `count` elements of `elt` bytes
+        // each (MAXALIGN-padded), rejecting negative counts, multiply/add
+        // overflow, and any segment that runs past the end of the buffer.
+        fn advance(off: usize, count: i32, elt: usize, buf_len: usize) -> Option<usize> {
+            if count < 0 {
+                return None;
+            }
+            let bytes = (count as usize).checked_mul(elt)?;
+            let next = off.checked_add(maxalign(bytes))?;
+            if next > buf_len {
+                return None;
+            }
+            Some(next)
+        }
+
         let mut off = maxalign(SIZEOF_TWOPHASE_FILE_HEADER);
+        if off > buf_len {
+            return None;
+        }
         let gid = off;
-        off += maxalign(hdr.gidlen as usize);
+        // A valid gid is NUL-terminated and shorter than GIDSIZE, so its
+        // stored length (including the NUL) never exceeds GIDSIZE; a larger
+        // value is corruption and would also overflow the fixed gid slot.
+        if hdr.gidlen as usize > GIDSIZE {
+            return None;
+        }
+        off = off.checked_add(maxalign(hdr.gidlen as usize))?;
+        if off > buf_len {
+            return None;
+        }
         let children = off;
-        off += maxalign(hdr.nsubxacts as usize * 4);
+        off = advance(off, hdr.nsubxacts, 4, buf_len)?;
         let commitrels = off;
-        off += maxalign(hdr.ncommitrels as usize * SIZEOF_REL_FILE_LOCATOR);
+        off = advance(off, hdr.ncommitrels, SIZEOF_REL_FILE_LOCATOR, buf_len)?;
         let abortrels = off;
-        off += maxalign(hdr.nabortrels as usize * SIZEOF_REL_FILE_LOCATOR);
+        off = advance(off, hdr.nabortrels, SIZEOF_REL_FILE_LOCATOR, buf_len)?;
         let commitstats = off;
-        off += maxalign(hdr.ncommitstats as usize * SIZEOF_XL_XACT_STATS_ITEM);
+        off = advance(off, hdr.ncommitstats, SIZEOF_XL_XACT_STATS_ITEM, buf_len)?;
         let abortstats = off;
-        off += maxalign(hdr.nabortstats as usize * SIZEOF_XL_XACT_STATS_ITEM);
+        off = advance(off, hdr.nabortstats, SIZEOF_XL_XACT_STATS_ITEM, buf_len)?;
         let invalmsgs = off;
-        off += maxalign(hdr.ninvalmsgs as usize * SIZEOF_SHARED_INVAL_MSG);
-        BufferLayout {
+        off = advance(off, hdr.ninvalmsgs, SIZEOF_SHARED_INVAL_MSG, buf_len)?;
+        Some(BufferLayout {
             gid,
             children,
             commitrels,
@@ -156,6 +199,6 @@ impl BufferLayout {
             abortstats,
             invalmsgs,
             records: off,
-        }
+        })
     }
 }

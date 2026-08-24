@@ -95,10 +95,17 @@ fn description_scan<'mcx>(
         // SAFETY: NOT NULL text column under the relation's own descriptor.
         let d = unsafe { types_tuple::heap_getattr(tup, desc_attno, rel.descr(), &mut isnull) };
         debug_assert!(!isnull);
-        // SAFETY: in-tuple varlena, live for this callback; from_ptr
-        // panics loudly on external/compressed images.
-        let payload =
-            unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) }.data();
+        // A long comment is TOASTed (compressed inline or out-of-line), so
+        // detoast before reading rather than assuming an inline image (C:
+        // PG_DETOAST_DATUM). The old PackedVarlena::from_ptr panicked loudly on
+        // external/compressed images, breaking obj_description/\d+ for >2KB
+        // comments.
+        let p = d.as_usize() as *const u8;
+        let total = arrayfuncs::foundation::varsize_any(p);
+        // SAFETY: a live varlena of `total` bytes in the scanned tuple.
+        let raw = unsafe { core::slice::from_raw_parts(p, total) };
+        let detoasted = detoast_seams::detoast_attr::call(mcx, raw)?;
+        let payload = &detoasted[datum::varlena::VARHDRSZ..];
         let mut image =
             mcx::vec_with_capacity_in(mcx, datum::varlena::VARHDRSZ + payload.len())?;
         image.resize(datum::varlena::VARHDRSZ, 0);

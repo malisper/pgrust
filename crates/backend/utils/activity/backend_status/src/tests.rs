@@ -104,17 +104,17 @@ fn bestart_lifecycle_reaches_undefined_state() {
     start_backend(0, 900001);
 
     let e = MyBEEntry().expect("beinit ran");
-    assert_eq!(e.st_procpid.get(), 900001);
-    assert_eq!(e.st_backendType.get(), BackendType::Backend);
-    assert_eq!(e.st_proc_start_timestamp.get(), 777);
-    assert_eq!(e.st_state.get(), BackendState::STATE_UNDEFINED);
-    assert_ne!(e.st_userid.get(), InvalidOid);
+    assert_eq!(unsafe { e.st_procpid.get() }, 900001);
+    assert_eq!(unsafe { e.st_backendType.get() }, BackendType::Backend);
+    assert_eq!(unsafe { e.st_proc_start_timestamp.get() }, 777);
+    assert_eq!(unsafe { e.st_state.get() }, BackendState::STATE_UNDEFINED);
+    assert_ne!(unsafe { e.st_userid.get() }, InvalidOid);
     assert_eq!(pgstat_get_backend_type_by_proc_number(0), BackendType::Backend);
 
     pgstat_beshutdown_hook(0, 0);
     assert!(MyBEEntry().is_none());
     let arr = backend_status_array();
-    assert_eq!(arr[0].st_procpid.get(), 0);
+    assert_eq!(unsafe { arr[0].st_procpid.get() }, 0);
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn report_activity_stores_and_resets_ids() {
         Some("SELECT 1"),
     );
     let e = MyBEEntry().unwrap();
-    assert_eq!(e.st_state.get(), BackendState::STATE_RUNNING);
+    assert_eq!(unsafe { e.st_state.get() }, BackendState::STATE_RUNNING);
     assert_eq!(pgstat_get_my_query_id(), 0);
     assert_eq!(pgstat_get_my_plan_id(), 0);
     assert_eq!(read_activity(e.slot), b"SELECT 1");
@@ -150,7 +150,7 @@ fn report_activity_stores_and_resets_ids() {
     assert_eq!(read_activity(e.slot).len(), 1023);
 
     backend_status_seams::pgstat_report_activity::call(BackendState::STATE_IDLE, None);
-    assert_eq!(e.st_state.get(), BackendState::STATE_IDLE);
+    assert_eq!(unsafe { e.st_state.get() }, BackendState::STATE_IDLE);
     pgstat_beshutdown_hook(0, 0);
 }
 
@@ -165,9 +165,9 @@ fn track_activities_off_reports_disabled_once() {
         Some("SELECT 2"),
     );
     let e = MyBEEntry().unwrap();
-    assert_eq!(e.st_state.get(), BackendState::STATE_DISABLED);
+    assert_eq!(unsafe { e.st_state.get() }, BackendState::STATE_DISABLED);
     assert_eq!(read_activity(e.slot), b"");
-    assert_eq!(e.st_query_id.get(), 0);
+    assert_eq!(unsafe { e.st_query_id.get() }, 0);
 
     backend_status_seams::pgstat_report_query_id::call(5, true);
     assert_eq!(pgstat_get_my_query_id(), 0);
@@ -185,7 +185,7 @@ fn appname_and_xact_timestamp_roundtrip() {
     assert_eq!(appname_of(e), "psql");
 
     backend_status_seams::pgstat_report_xact_timestamp::call(123456);
-    assert_eq!(e.st_xact_start_timestamp.get(), 123456);
+    assert_eq!(unsafe { e.st_xact_start_timestamp.get() }, 123456);
     pgstat_beshutdown_hook(0, 0);
 }
 
@@ -197,18 +197,18 @@ fn reset_after_crash_restores_boot_image() {
         BackendState::STATE_RUNNING,
         Some("CRASHING QUERY"),
     );
-    assert_eq!(MyBEEntry().unwrap().st_procpid.get(), 900006);
+    assert_eq!(unsafe { MyBEEntry().unwrap().st_procpid.get() }, 900006);
 
     BackendStatusShmemResetAfterCrash();
 
     for e in backend_status_array() {
         assert_eq!(e.st_changecount.load(Relaxed), 0);
-        assert_eq!(e.st_procpid.get(), 0);
-        assert_eq!(e.st_backendType.get(), BackendType::Invalid);
-        assert_eq!(e.st_state.get(), BackendState::STATE_UNDEFINED);
-        assert_eq!(e.st_databaseid.get(), InvalidOid);
-        assert_eq!(e.st_userid.get(), InvalidOid);
-        assert_eq!(e.st_query_id.get(), 0);
+        assert_eq!(unsafe { e.st_procpid.get() }, 0);
+        assert_eq!(unsafe { e.st_backendType.get() }, BackendType::Invalid);
+        assert_eq!(unsafe { e.st_state.get() }, BackendState::STATE_UNDEFINED);
+        assert_eq!(unsafe { e.st_databaseid.get() }, InvalidOid);
+        assert_eq!(unsafe { e.st_userid.get() }, InvalidOid);
+        assert_eq!(unsafe { e.st_query_id.get() }, 0);
         assert_eq!(read_activity(e.slot), b"");
     }
     MY_BE_ENTRY.set(None);

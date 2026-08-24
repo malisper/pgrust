@@ -19,7 +19,9 @@ use fd::{
 };
 use mcx::Mcx;
 use types_core::{InvalidTransactionId, InvalidXLogRecPtr, Oid, TransactionId, XLogRecPtr};
-use types_error::{PgResult, DEBUG1, ERRCODE_PROTOCOL_VIOLATION, ERROR};
+use types_error::{
+    PgResult, DEBUG1, ERRCODE_DATA_CORRUPTED, ERRCODE_PROTOCOL_VIOLATION, ERROR,
+};
 use types_rel::AccessExclusiveLock;
 use walreceiver::client::PgConn;
 
@@ -42,6 +44,22 @@ struct SubXactInfo {
     fileno: i32,
     offset: i64,
 }
+
+// C MaxAllocSize (memutils.h): palloc rejects (with a catchable ERROR) any
+// request larger than this, which is the only bound C places on counts/lengths
+// read back from the streaming spool files.
+const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
+
+// On-disk width of one SubXactInfo record as written by subxact_info_write:
+// xid (4) + fileno (4) + offset (8). Used to bound an untrusted subxact count
+// against the actual remaining file size before allocating.
+const DISK_SUBXACT_INFO_SIZE: i64 = 4 + 4 + 8;
+
+// Per-segment size of a fileset BufFile (buffile.c MAX_PHYSICAL_FILESIZE): every
+// segment but the last is exactly this many bytes, so a valid (fileno, offset)
+// pair has offset in [0, this] and fileno*this + offset within the file. Used to
+// bound the untrusted subxact fileno/offset before they reach segment indexing.
+const BUFFILE_SEGMENT_SIZE: i64 = 0x4000_0000;
 
 thread_local! {
     // C in_streamed_transaction / stream_xid.
@@ -412,6 +430,34 @@ fn stream_abort_internal(
     // Truncate the changes file at the subxact's start.
     let name = changes_filename(subid(), xid);
     let mut file = with_fileset(|fs| BufFileOpenFileSet(mcx, fs, &name, false))?;
+
+    // target.fileno/target.offset were deserialized verbatim by
+    // subxact_info_read from the untrusted .subxacts spool. truncate_fileset
+    // indexes files[fileno] and truncates at offset: a negative fileno wraps
+    // (fileno as usize) to a huge Vec index and panics the worker, and an
+    // out-of-range offset drives an OOB FileTruncate. C leaves these unchecked
+    // (relying on its own on-disk values); bound them to the changes file's
+    // actual extent with checked arithmetic before use, raising a catchable
+    // ERRCODE_DATA_CORRUPTED on violation.
+    let file_size = file.size()?;
+    let in_range = target.fileno >= 0
+        && target.offset >= 0
+        && target.offset <= BUFFILE_SEGMENT_SIZE
+        && i64::from(target.fileno)
+            .checked_mul(BUFFILE_SEGMENT_SIZE)
+            .and_then(|base| base.checked_add(target.offset))
+            .is_some_and(|pos| pos <= file_size);
+    if !in_range {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "invalid subxact fileno/offset ({}, {}) in streaming transaction's changes file \"{name}\"",
+                target.fileno, target.offset
+            ))
+            .finish(loc("stream_abort_internal"))?;
+        unreachable!("ERROR finish returned");
+    }
+
     file.truncate_fileset(target.fileno, target.offset)?;
     file.close()?;
 
@@ -605,8 +651,25 @@ pub(crate) fn apply_spooled_messages(
                     ))
                     .finish(loc("apply_spooled_messages"))?;
             }
+            // `len` is an untrusted on-disk field (same fileset-spool threat as
+            // subxact_info_read). C's repalloc(buffer, len) trips the
+            // MaxAllocSize check and raises a catchable ERROR on a hostile
+            // length; mirror that bound before growing the buffer, and reserve
+            // fallibly so an infallible allocation can't abort the process.
+            let len = len as usize;
+            if len > MAX_ALLOC_SIZE {
+                ereport(ERROR)
+                    .errcode(ERRCODE_DATA_CORRUPTED)
+                    .errmsg(format!(
+                        "incorrect length {len} in streaming transaction's changes file \"{name}\""
+                    ))
+                    .finish(loc("apply_spooled_messages"))?;
+                unreachable!("ERROR finish returned");
+            }
             buf.clear();
-            buf.resize(len as usize, 0);
+            buf.try_reserve(len)
+                .map_err(|_| mcx::oom_named("apply_spooled_messages", len))?;
+            buf.resize(len, 0);
             file.read_exact(&mut buf)?;
             Ok(Some(file.tell()))
         })?;
@@ -964,7 +1027,39 @@ fn subxact_info_read(mcx: Mcx<'static>, subid: Oid, xid: TransactionId) -> PgRes
     let mut nbuf = [0u8; 4];
     file.read_exact(&mut nbuf)?;
     let n = u32::from_ne_bytes(nbuf) as usize;
-    let mut subxacts = Vec::with_capacity(n);
+
+    // `n` is read verbatim from the .subxacts spool file, which lives in the
+    // subscriber's pgsql_tmp fileset and carries no integrity protection: it is
+    // whatever on-disk corruption or an attacker who can write the fileset put
+    // there. C bounds this only implicitly — palloc(nsubxacts_max *
+    // sizeof(SubXactInfo)) trips the MaxAllocSize check and raises a catchable
+    // "invalid memory alloc request size" ERROR. An infallible
+    // Vec::with_capacity(n) would instead abort the whole process
+    // (thread-per-backend => cluster crash) on a hostile count, so validate the
+    // count BEFORE allocating: it can describe no more records than remain in
+    // the file, and it must fit the MaxAllocSize class. Then reserve fallibly.
+    let file_size = file.size()?;
+    let remaining = file_size - nbuf.len() as i64; // the count was already read
+    let max_by_file = if remaining > 0 {
+        (remaining / DISK_SUBXACT_INFO_SIZE) as usize
+    } else {
+        0
+    };
+    let max_by_mem = MAX_ALLOC_SIZE / core::mem::size_of::<SubXactInfo>();
+    if n > max_by_file || n > max_by_mem {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "invalid subxact count {n} in streaming transaction's subxact file \"{name}\""
+            ))
+            .finish(loc("subxact_info_read"))?;
+        unreachable!("ERROR finish returned");
+    }
+
+    let mut subxacts: Vec<SubXactInfo> = Vec::new();
+    subxacts
+        .try_reserve(n)
+        .map_err(|_| mcx::oom_named("subxact_info_read", n * core::mem::size_of::<SubXactInfo>()))?;
     for _ in 0..n {
         let mut xidb = [0u8; 4];
         let mut fileb = [0u8; 4];

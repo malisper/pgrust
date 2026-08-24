@@ -1494,11 +1494,7 @@ pub fn exec_build_grouping_equal<'mcx>(
         let attno = key_col_idx[natt];
         let attnum = (attno - 1) as u16;
         let foid = eqfuncoids[natt];
-        let aclresult =
-            aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, foid, userid, ACL_EXECUTE)?;
-        if aclresult != ACLCHECK_OK {
-            return Err(permission_denied(mcx, foid)?);
-        }
+        check_execute_acl(mcx, foid, userid)?;
         let flinfo = fmgr_core::fmgr_info(foid)?;
         let frame = FuncFrame::new_in(mcx, flinfo, 2, collations[natt])?;
         let frame_ix = state.frames.len() as u32;
@@ -2957,21 +2953,9 @@ fn init_scalar_array_op<'mcx>(
     };
 
     let userid = miscinit_seams::get_user_id::call();
-    let aclresult =
-        aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, opfuncid, userid, ACL_EXECUTE)?;
-    if aclresult != ACLCHECK_OK {
-        return Err(permission_denied(mcx, opfuncid)?);
-    }
+    check_execute_acl(mcx, opfuncid, userid)?;
     if saop.hashfuncid != 0 {
-        let aclresult = aclchk_seams::object_aclcheck::call(
-            PROCEDURE_RELATION_ID,
-            saop.hashfuncid,
-            userid,
-            ACL_EXECUTE,
-        )?;
-        if aclresult != ACLCHECK_OK {
-            return Err(permission_denied(mcx, saop.hashfuncid)?);
-        }
+        check_execute_acl(mcx, saop.hashfuncid, userid)?;
     }
 
     let element_type = lsyscache::get_element_type(expr_type(arrayarg))?;
@@ -3275,8 +3259,8 @@ fn init_xml_expr<'mcx>(
         xexpr: NonNull::from(x).cast(),
         named_slots,
         arg_slots,
-        n_named: n_named as u16,
-        n_args: n_args as u16,
+        n_named,
+        n_args,
         resmcx: None,
     };
     let stp = alloc_state(mcx, st)?;
@@ -5357,11 +5341,7 @@ fn init_func<'mcx>(
     let nargs = args.len();
 
     let userid = miscinit_seams::get_user_id::call();
-    let aclresult =
-        aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, funcid, userid, ACL_EXECUTE)?;
-    if aclresult != ACLCHECK_OK {
-        return Err(permission_denied(mcx, funcid)?);
-    }
+    check_execute_acl(mcx, funcid, userid)?;
 
     if nargs > FUNC_MAX_ARGS {
         return Err(too_many_args(nargs));
@@ -5899,6 +5879,110 @@ impl Drop for EconomyWindow {
     fn drop(&mut self) {
         COMPILE_ECONOMY.with(|c| c.set(self.prev));
     }
+}
+
+// idx-112 (CWE-863): per-execution function EXECUTE-ACL recheck support.
+//
+// C rebuilds every ExprState at each ExecutorStart, so the compile-time gate
+// object_aclcheck(PROCEDURE, funcid, GetUserId(), ACL_EXECUTE) — run by
+// ExecInitFunc / init_fcache / the operator and grouping paths — effectively
+// re-runs on every execution of a cached plan. pgrust instead retains
+// ("parks") a fully compiled executor and reuses it across executions, which
+// would freeze those checks at compile time: a REVOKE EXECUTE or a SET ROLE
+// between executions of a parked prepared statement would go unchecked.
+//
+// To preserve C's invariant, execmain opens a recording window over InitPlan;
+// every funcid whose EXECUTE privilege is checked during compile is recorded
+// here. execmain stores the recorded set on the estate and, on every
+// parked-executor reuse (skeleton_rearm_exec), re-runs the same checks against
+// the CURRENT user id via `recheck_execute_acls`, matching C's per-execution
+// recheck. The window nests (SPI executors inside InitPlan) exactly like the
+// jit session, and resets on begin so an error-unwound prior window can never
+// contaminate the next statement.
+thread_local! {
+    static EXECUTE_ACL_SESSION: core::cell::RefCell<Option<ExecuteAclSession>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+struct ExecuteAclSession {
+    funcids: alloc::vec::Vec<Oid>,
+    prev: Option<Box<ExecuteAclSession>>,
+}
+
+/// Opens an EXECUTE-ACL recording window over InitPlan (nestable).
+pub fn execute_acl_session_begin() {
+    EXECUTE_ACL_SESSION.with(|s| {
+        let prev = s.borrow_mut().take().map(Box::new);
+        *s.borrow_mut() = Some(ExecuteAclSession {
+            funcids: alloc::vec::Vec::new(),
+            prev,
+        });
+    });
+}
+
+/// Closes the window, returning the deduplicated funcids whose EXECUTE ACL was
+/// checked while it was open (empty when no window was open).
+pub fn execute_acl_session_end() -> alloc::vec::Vec<Oid> {
+    EXECUTE_ACL_SESSION.with(|s| {
+        let cur = s.borrow_mut().take();
+        match cur {
+            Some(cur) => {
+                *s.borrow_mut() = cur.prev.map(|b| *b);
+                cur.funcids
+            }
+            None => alloc::vec::Vec::new(),
+        }
+    })
+}
+
+// Records a checked funcid into the active recording window (no-op outside a
+// window: EPQ / utility / SPI-without-park compiles).
+fn execute_acl_record(funcid: Oid) {
+    EXECUTE_ACL_SESSION.with(|s| {
+        if let Some(cur) = s.borrow_mut().as_mut() {
+            if !cur.funcids.contains(&funcid) {
+                cur.funcids.push(funcid);
+            }
+        }
+    });
+}
+
+/// C's per-call ExecInitFunc EXECUTE-ACL gate:
+/// object_aclcheck(PROCEDURE, funcid, GetUserId(), ACL_EXECUTE), erroring with
+/// C's text on denial. The checked funcid is recorded into the active
+/// recording window so a parked executor's reuse can replay the check
+/// (idx-112, CWE-863).
+fn check_execute_acl(mcx: Mcx<'_>, funcid: Oid, userid: Oid) -> PgResult<()> {
+    let aclresult =
+        aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, funcid, userid, ACL_EXECUTE)?;
+    if aclresult != ACLCHECK_OK {
+        return Err(permission_denied(mcx, funcid)?);
+    }
+    execute_acl_record(funcid);
+    Ok(())
+}
+
+/// Re-runs the recorded compile-time EXECUTE-ACL checks against the CURRENT
+/// user id. Called on every parked-executor reuse so a REVOKE EXECUTE or a
+/// SET ROLE between executions is honored exactly as C's per-execution
+/// ExecInitFunc recheck would honor it (idx-112, CWE-863).
+pub fn recheck_execute_acls(mcx: Mcx<'_>, funcids: &[Oid]) -> PgResult<()> {
+    if funcids.is_empty() {
+        return Ok(());
+    }
+    let userid = miscinit_seams::get_user_id::call();
+    for &funcid in funcids {
+        let aclresult = aclchk_seams::object_aclcheck::call(
+            PROCEDURE_RELATION_ID,
+            funcid,
+            userid,
+            ACL_EXECUTE,
+        )?;
+        if aclresult != ACLCHECK_OK {
+            return Err(permission_denied(mcx, funcid)?);
+        }
+    }
+    Ok(())
 }
 
 // The thin-ABI rewrite alone (fuse_program's no-pair arm): one cheap pass

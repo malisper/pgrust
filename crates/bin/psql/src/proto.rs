@@ -468,7 +468,18 @@ impl Conn {
                     rows.clear();
                 }
                 b'D' => match parse_data_row(&body) {
-                    Ok(r) => rows.push(r),
+                    Ok(r) => {
+                        // A DataRow's column count must equal the current
+                        // RowDescription's field count (libpq fe-protocol3.c:
+                        // "unexpected field count in D message"). A mismatch is
+                        // a protocol error, not something to render blindly.
+                        if r.len() != fields.len() {
+                            return Err(self.proto_error(
+                                "unexpected field count in \"D\" message".to_string(),
+                            ));
+                        }
+                        rows.push(r)
+                    }
                     Err(e) => return Err(self.proto_error(e)),
                 },
                 b'C' | b's' => {

@@ -36,7 +36,7 @@ use crate::fold::{f64_from_key, fold_max_bytes, fold_min_bytes};
 use crate::ir::{AggOp, CmpOp, PlanNode};
 use crate::kernels_f123::part_stats;
 use crate::scan::{open_cursor, GranValid, Scratch};
-use pgrc2_format::meta::KeyKind;
+use pgrc2_format::meta::{KeyKind, StatsRecord};
 
 /// Per-column facts folded across parts (stats plane or scan fallback).
 /// min/max are None until a NON-NULL row is seen — the empty-domain NULL
@@ -153,6 +153,56 @@ fn col_facts(ctx: &SqeCtx, attno: u32, want: ColWant) -> ColFacts {
     f
 }
 
+/// Is a §8.1 stats record trustworthy for ANSWER SUBSTITUTION (and for the
+/// sum's overflow-soundness assumption) over a part with `rows_in_part` rows
+/// (manifest §13.1 — the one data-plane fact we hold for free, without a data
+/// read)? A crafted or STALE record is otherwise consumed as ground truth for
+/// sum/count/min/max, so this is the two-witness null law (`nonnull` ↔ the
+/// data) applied at the answer seam: any record that fails a self- or
+/// data-consistency invariant is DECLINED, and the caller falls through to the
+/// decode pass that recomputes every fact from the data streams. Declining is
+/// always sound (the AD-1 demote pattern — a verdict can only lose speed).
+///
+/// LIMIT (why this is option-(b) hardening, not the full fix): these checks
+/// catch a record inconsistent with the part rows or with its own
+/// min/max/count, but a record that is internally consistent yet still lies
+/// about a value only it witnesses (e.g. a uniformly shifted sum with matching
+/// min/max) can only be caught by option (a) — a write-time data-tied
+/// aggregate digest on the record, verified here before use. `StatsRecord`
+/// carries no such token today (`pad: u32` is unused); adding one is a
+/// format + meta-builder + seal change (see the task report), out of this
+/// stencil's reach.
+fn stats_consistent(r: &StatsRecord, rows_in_part: u64) -> bool {
+    // COUNT / nonnull leg: non-null rows cannot exceed the part's rows, and
+    // the zero-valued subset cannot exceed the non-null set — otherwise the
+    // `nonnull - zero_count` nonzero count underflows into a huge wrong
+    // CountStar (the unchecked-subtraction vector below).
+    let nonnull = r.nonnull as u64;
+    if nonnull > rows_in_part || r.zero_count > nonnull {
+        return false;
+    }
+    if r.nonnull == 0 {
+        // Empty non-null set: every fold rides it, so sum and zero_count
+        // must both be the empty-fold identity (0). key_kind is free here
+        // (min/max are never emitted for a zero-nonnull part).
+        return r.sum_i128 == 0 && r.zero_count == 0;
+    }
+    // SUM / MIN / MAX ride the EXACT signed key domain: without exact bounds
+    // there is no cheap witness for the stored sum, so decline (SignedWord
+    // integer faces key Exact whenever computed — no hot-shape regression).
+    if r.key_kind != KeyKind::Exact.as_u8() || r.min_key > r.max_key {
+        return false;
+    }
+    // Overflow-soundness witness: the true sum of `nonnull` values each in
+    // [min_key, max_key] lies in [min_key·n, max_key·n]. A stored sum outside
+    // that window is inconsistent with its own min/max/count (the crafted-sum
+    // / overflow vector the planner's i128 admission assumed away). i128
+    // headroom: |key| < 2^63 and n < 2^32, so the products are < 2^95.
+    let n = nonnull as i128;
+    let (lo, hi) = ((r.min_key as i128) * n, (r.max_key as i128) * n);
+    r.sum_i128 >= lo && r.sum_i128 <= hi
+}
+
 /// One part's facts: stats fast path (signed word faces), decode
 /// fallback (signed-sum law; validity-aware; face word keys) otherwise.
 /// Σx² and bit facts are never in the stats records — wanting them
@@ -170,10 +220,11 @@ fn part_facts(
     } else {
         None // min_key/max_key/sum_i128 are signed-domain facts
     };
-    let stats_ok = match &rec {
-        Some(r) => !want.minmax || r.key_kind == KeyKind::Exact.as_u8(),
-        None => false,
-    };
+    // Answer substitution trusts the record ONLY when it is proven consistent
+    // with the part's data (§13.1 rows) and with itself; a crafted/stale
+    // record declines to the decode pass below (recompute from the data).
+    let rows_in_part = bank.manifest.parts[pi].rows;
+    let stats_ok = matches!(&rec, Some(r) if stats_consistent(r, rows_in_part));
     if stats_ok {
         let r = rec.unwrap();
         f.sum += r.sum_i128;

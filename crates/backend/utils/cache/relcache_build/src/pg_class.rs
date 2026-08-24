@@ -60,7 +60,7 @@ pub(crate) fn decode(
     relid: Oid,
 ) -> PgResult<ScannedPgClass> {
     let form = FormData_pg_class {
-        relname: name_from(req(td, tup, 2)?),
+        relname: name_from(tup, req(td, tup, 2)?),
         relnamespace: req(td, tup, 3)?.as_oid(),
         reltype: req(td, tup, 4)?.as_oid(),
         relowner: req(td, tup, 6)?.as_oid(),

@@ -256,11 +256,25 @@ pub fn dense_int_entrylen(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
         unsafe impl<T> Sync for SendPtr<T> {}
         let slp = SendPtr(sl.as_mut_ptr());
         let cnp = SendPtr(cn.as_mut_ptr());
-        let stp = SendPtr(states.as_mut_ptr());
-        let nstates = states.len();
+        // [aliasing law] Re-deriving `&mut CaPark` to a whole worker state
+        // inside each chunk (the former `&mut *stp.0.add(si)`) formed
+        // OVERLAPPING exclusive references: all 256 chunk-threads hold a
+        // &mut to the SAME state object at once, even though each writes
+        // only a disjoint [lo, hi) slice — the &mut spans the entire state,
+        // so exclusivity is violated (UB) regardless of the index ranges.
+        // Fix: take each state's dense-array data pointers ONCE here, in
+        // the single-threaded region (the only place a &mut to a whole
+        // state is formed). Each chunk then builds disjoint mutable slices
+        // into those arrays via raw pointers — no reference to a whole
+        // state is ever re-formed across threads (the split_at_mut law).
+        let state_ptrs: Vec<(SendPtr<u64>, SendPtr<u32>)> = states
+            .iter_mut()
+            .map(|st| (SendPtr(st.1.as_mut_ptr()), SendPtr(st.2.as_mut_ptr())))
+            .collect();
+        let nstates = state_ptrs.len();
         const CHUNKS: usize = 256;
         let chunk = dn.div_ceil(CHUNKS);
-        let (slp, cnp, stp) = (&slp, &cnp, &stp);
+        let (slp, cnp, state_ptrs) = (&slp, &cnp, &state_ptrs);
         pool.run(
             CHUNKS,
             |_| (),
@@ -270,18 +284,24 @@ pub fn dense_int_entrylen(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                     return;
                 }
                 let hi = ((c + 1) * chunk).min(dn);
-                // SAFETY: chunks own disjoint [lo, hi) ranges of the output
-                // arrays and every state's dense slices.
+                let span = hi - lo;
+                // SAFETY: chunks own disjoint [lo, hi) ranges. The output
+                // arrays and every state's dense arrays are addressed only
+                // within [lo, hi) through raw data pointers, so the mutable
+                // slices built here never overlap another chunk's slices,
+                // and no &mut to a whole state object is ever formed.
                 unsafe {
-                    let sl = std::slice::from_raw_parts_mut(slp.0.add(lo), hi - lo);
-                    let cn = std::slice::from_raw_parts_mut(cnp.0.add(lo), hi - lo);
+                    let sl = std::slice::from_raw_parts_mut(slp.0.add(lo), span);
+                    let cn = std::slice::from_raw_parts_mut(cnp.0.add(lo), span);
                     for si in 0..nstates {
-                        let st: &mut CaPark = &mut *stp.0.add(si);
-                        for i in lo..hi {
-                            sl[i - lo] += st.1[i];
-                            cn[i - lo] += st.2[i] as u64;
-                            st.1[i] = 0;
-                            st.2[i] = 0;
+                        let (stsl, stcn) = &state_ptrs[si];
+                        let stsl = std::slice::from_raw_parts_mut(stsl.0.add(lo), span);
+                        let stcn = std::slice::from_raw_parts_mut(stcn.0.add(lo), span);
+                        for j in 0..span {
+                            sl[j] += stsl[j];
+                            cn[j] += stcn[j] as u64;
+                            stsl[j] = 0;
+                            stcn[j] = 0;
                         }
                     }
                 }

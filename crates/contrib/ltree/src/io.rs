@@ -609,57 +609,117 @@ pub fn deparse_lquery(image: &[u8]) -> Result<Vec<u8>, PgError> {
         }
     }
     ::mcx::check_alloc_size(totallen).map_err(|e| *e)?;
-    let mut out = Vec::with_capacity(totallen);
+    // C pallocs exactly `totallen` and memcpy's the deparse text into it: for a
+    // well-formed image the estimate is a true upper bound on emission, so the
+    // buffer is never overrun. A wrap-serialized image (upstream bug 103a — a
+    // level whose real size exceeds the u16 stored `totallen`, reachable from a
+    // single SQL literal) desynchronizes the variant walk from the writer's
+    // layout, and `read_u16_lax`/`slice_lax` then yield far more bytes per level
+    // than the stored fields accounted for — emission grows ~quadratically in
+    // the level count, unbounded by the estimate. Emitting that into an
+    // infallible `std::Vec` grows it past the reserved capacity until
+    // `handle_alloc_error` aborts the whole (thread-per-backend) process. Cap
+    // the buffer at the checked estimate so an over-emitting image becomes a
+    // catchable per-query invalid-alloc error instead — no reallocation past the
+    // reserved capacity can ever occur, so no infallible growth, so no abort.
+    let mut out = CappedOut::with_cap(totallen);
     for (i, lvl) in q.levels().enumerate() {
         if i != 0 {
-            out.push(b'.');
+            out.push(b'.')?;
         }
         let numvar = lvl.numvar();
         if numvar > 0 {
             if lvl.flag() & LQL_NOT != 0 {
-                out.push(b'!');
+                out.push(b'!')?;
             }
             for (j, v) in lvl.variants().enumerate() {
                 if j != 0 {
-                    out.push(b'|');
+                    out.push(b'|')?;
                 }
-                out.extend_from_slice(v.name);
+                out.extend_from_slice(v.name)?;
                 if v.flag & LVAR_SUBLEXEME != 0 {
-                    out.push(b'%');
+                    out.push(b'%')?;
                 }
                 if v.flag & LVAR_INCASE != 0 {
-                    out.push(b'@');
+                    out.push(b'@')?;
                 }
                 if v.flag & LVAR_ANYEND != 0 {
-                    out.push(b'*');
+                    out.push(b'*')?;
                 }
             }
         } else {
-            out.push(b'*');
+            out.push(b'*')?;
         }
 
         if (lvl.flag() & LQL_COUNT != 0) || numvar == 0 {
             let low = lvl.low();
             let high = lvl.high();
             if low == high {
-                out.extend_from_slice(format!("{{{}}}", low).as_bytes());
+                out.extend_from_slice(format!("{{{}}}", low).as_bytes())?;
             } else if low == 0 {
                 if high == LTREE_MAX_LEVELS as u16 {
                     if numvar == 0 {
                     } else {
-                        out.extend_from_slice(b"{,}");
+                        out.extend_from_slice(b"{,}")?;
                     }
                 } else {
-                    out.extend_from_slice(format!("{{,{}}}", high).as_bytes());
+                    out.extend_from_slice(format!("{{,{}}}", high).as_bytes())?;
                 }
             } else if high == LTREE_MAX_LEVELS as u16 {
-                out.extend_from_slice(format!("{{{},}}", low).as_bytes());
+                out.extend_from_slice(format!("{{{},}}", low).as_bytes())?;
             } else {
-                out.extend_from_slice(format!("{{{},{}}}", low, high).as_bytes());
+                out.extend_from_slice(format!("{{{},{}}}", low, high).as_bytes())?;
             }
         }
     }
-    Ok(out)
+    Ok(out.into_vec())
+}
+
+/// A deparse output buffer capped at a precomputed, already-`check_alloc_size`d
+/// estimate. Capacity is reserved once up front and never grown, so every
+/// append stays within an allocation that already passed the MaxAllocSize
+/// guard: an image that would emit past the estimate raises the same catchable
+/// "invalid memory alloc request size" error the up-front check would, instead
+/// of driving an infallible `std::Vec` into `handle_alloc_error` (a process
+/// abort). This is the generic mechanism; `deparse_lquery` is one caller.
+struct CappedOut {
+    buf: Vec<u8>,
+    cap: usize,
+}
+
+impl CappedOut {
+    fn with_cap(cap: usize) -> Self {
+        CappedOut { buf: Vec::with_capacity(cap), cap }
+    }
+
+    #[inline]
+    fn reserve(&mut self, add: usize) -> Result<(), PgError> {
+        // `buf.len() <= cap` is an invariant (upheld because we return early
+        // here before any append that would break it), so the subtraction never
+        // underflows.
+        if add > self.cap - self.buf.len() {
+            return Err(*::mcx::check_alloc_size(::mcx::MAX_ALLOC_SIZE + 1).err().unwrap());
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn push(&mut self, b: u8) -> Result<(), PgError> {
+        self.reserve(1)?;
+        self.buf.push(b);
+        Ok(())
+    }
+
+    #[inline]
+    fn extend_from_slice(&mut self, s: &[u8]) -> Result<(), PgError> {
+        self.reserve(s.len())?;
+        self.buf.extend_from_slice(s);
+        Ok(())
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.buf
+    }
 }
 
 
@@ -1094,4 +1154,35 @@ pub fn deparse_ltxtquery(image: &[u8]) -> Result<Vec<u8>, PgError> {
     };
     inf.run(true)?;
     Ok(inf.out)
+}
+
+#[cfg(test)]
+mod deparse_lquery_alloc_tests {
+    use super::*;
+
+    // Note: end-to-end deparse_lquery tests (valid round-trip, wrap-serialized
+    // image) require the formatting_seams::str_tolower backend seam, which isn't
+    // installed in a unit-test context; those paths are exercised by the
+    // contrib regression suite. The CappedOut bound below is the security-
+    // relevant unit that needs no backend infra.
+
+    /// The capped buffer must reject an append that would exceed its reserved
+    /// capacity with the catchable invalid-alloc error, never grow past the
+    /// (already MaxAllocSize-checked) reservation. Growth past the reservation
+    /// is exactly what would drive an infallible `std::Vec` into
+    /// `handle_alloc_error` and abort the whole process.
+    #[test]
+    fn capped_output_raises_catchable_error_instead_of_growing() {
+        let mut out = CappedOut::with_cap(4);
+        out.extend_from_slice(b"abc").expect("within cap");
+        out.push(b'd').expect("fills cap exactly");
+        let e = out.push(b'e').err().unwrap();
+        assert_eq!(
+            e.message(),
+            format!("invalid memory alloc request size {}", ::mcx::MAX_ALLOC_SIZE + 1)
+        );
+        // A large single append past the remaining space is caught too.
+        let mut out = CappedOut::with_cap(4);
+        assert!(out.extend_from_slice(&[0u8; 5]).is_err());
+    }
 }

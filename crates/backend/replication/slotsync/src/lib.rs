@@ -175,7 +175,7 @@ fn update_local_synced_slot(
     let mut updated_xmin_or_lsn = false;
     let mut updated_config = false;
 
-    debug_assert!(slot.data.get().invalidated.0 == RS_INVAL_NONE);
+    debug_assert!(unsafe { slot.data.get() }.invalidated.0 == RS_INVAL_NONE);
 
     if let Some(f) = found_consistent_snapshot.as_deref_mut() {
         *f = false;
@@ -184,7 +184,7 @@ fn update_local_synced_slot(
         *f = false;
     }
 
-    let d = slot.data.get();
+    let d = unsafe { slot.data.get() };
 
     // Don't overwrite if we already have a newer catalog_xmin and restart_lsn.
     if remote_slot.restart_lsn < d.restart_lsn
@@ -222,11 +222,11 @@ fn update_local_synced_slot(
     {
         if snapbuild::snap_build_snapshot_exists(remote_slot.restart_lsn)? {
             slot.with_mutex(|| {
-                let mut d = slot.data.get();
+                let mut d = unsafe { slot.data.get() };
                 d.restart_lsn = remote_slot.restart_lsn;
                 d.confirmed_flush = remote_slot.confirmed_lsn;
                 d.catalog_xmin = remote_slot.catalog_xmin;
-                slot.data.set(d);
+                unsafe { slot.data.set(d) };
             });
             if let Some(f) = found_consistent_snapshot.as_deref_mut() {
                 *f = true;
@@ -239,7 +239,7 @@ fn update_local_synced_slot(
             }
 
             // Sanity check.
-            let confirmed = slot.data.get().confirmed_flush;
+            let confirmed = unsafe { slot.data.get() }.confirmed_flush;
             if confirmed != remote_slot.confirmed_lsn {
                 return ereport(ERROR)
                     .errmsg(format!(
@@ -258,7 +258,7 @@ fn update_local_synced_slot(
         updated_xmin_or_lsn = true;
     }
 
-    let d = slot.data.get();
+    let d = unsafe { slot.data.get() };
     if remote_dbid != d.database
         || remote_slot.two_phase != d.two_phase
         || remote_slot.failover != d.failover
@@ -268,17 +268,17 @@ fn update_local_synced_slot(
         let mut plugin_name = NameData::default();
         plugin_name.namestrcpy(&remote_slot.plugin);
         slot.with_mutex(|| {
-            let mut d = slot.data.get();
+            let mut d = unsafe { slot.data.get() };
             d.plugin = plugin_name;
             d.database = remote_dbid;
             d.two_phase = remote_slot.two_phase;
             d.two_phase_at = remote_slot.two_phase_at;
             d.failover = remote_slot.failover;
-            slot.data.set(d);
+            unsafe { slot.data.set(d) };
         });
         updated_config = true;
 
-        debug_assert!(slot.data.get().two_phase_at <= slot.data.get().confirmed_flush);
+        debug_assert!(unsafe { slot.data.get() }.two_phase_at <= unsafe { slot.data.get() }.confirmed_flush);
     }
 
     // Write the changed xmin to disk *before* the in-memory value advances.
@@ -289,7 +289,7 @@ fn update_local_synced_slot(
 
     if updated_xmin_or_lsn {
         slot.with_mutex(|| {
-            slot.effective_catalog_xmin.set(remote_slot.catalog_xmin);
+            unsafe { slot.effective_catalog_xmin.set(remote_slot.catalog_xmin) };
         });
         ReplicationSlotsComputeRequiredXmin(false)?;
         ReplicationSlotsComputeRequiredLSN()?;
@@ -328,7 +328,7 @@ fn get_local_synced_slots() -> Vec<&'static ReplicationSlot> {
     // C holds ReplicationSlotControlLock shared; the slot array is a static
     // and per-slot state is read under each slot's mutex below.
     for s in ReplicationSlotCtl() {
-        if s.in_use.get() && s.data.get().synced != 0 {
+        if unsafe { s.in_use.get() } && unsafe { s.data.get() }.synced != 0 {
             debug_assert!(SlotIsLogical(s));
             local_slots.push(s);
         }
@@ -337,7 +337,7 @@ fn get_local_synced_slots() -> Vec<&'static ReplicationSlot> {
 }
 
 fn local_sync_slot_required(local_slot: &ReplicationSlot, remote_slots: &[RemoteSlot]) -> bool {
-    let local_name = name_string(&local_slot.data.get().name);
+    let local_name = name_string(&unsafe { local_slot.data.get() }.name);
     let mut remote_exists = false;
     let mut locally_invalidated = false;
 
@@ -346,7 +346,7 @@ fn local_sync_slot_required(local_slot: &ReplicationSlot, remote_slots: &[Remote
             remote_exists = true;
             locally_invalidated = local_slot.with_mutex(|| {
                 remote_slot.invalidated == RS_INVAL_NONE
-                    && local_slot.data.get().invalidated.0 != RS_INVAL_NONE
+                    && unsafe { local_slot.data.get() }.invalidated.0 != RS_INVAL_NONE
             });
             break;
         }
@@ -361,17 +361,17 @@ fn drop_local_obsolete_slots(remote_slot_list: &[RemoteSlot]) -> PgResult<()> {
             continue;
         }
 
-        let dboid = local_slot.data.get().database;
+        let dboid = unsafe { local_slot.data.get() }.database;
 
         // Shared lock prevents a conflict with ReplicationSlotsDropDBSlots
         // during a concurrent drop-database.
         lmgr::LockSharedObject(DatabaseRelationId, dboid, 0, AccessShareLock)?;
 
         let synced_slot =
-            local_slot.with_mutex(|| local_slot.in_use.get() && local_slot.data.get().synced != 0);
+            local_slot.with_mutex(|| unsafe { local_slot.in_use.get() } && unsafe { local_slot.data.get() }.synced != 0);
 
         if synced_slot {
-            let name = name_string(&local_slot.data.get().name);
+            let name = name_string(&unsafe { local_slot.data.get() }.name);
             ReplicationSlotAcquire(&name, true, false)?;
             ReplicationSlotDropAcquired()?;
         }
@@ -382,7 +382,7 @@ fn drop_local_obsolete_slots(remote_slot_list: &[RemoteSlot]) -> PgResult<()> {
             LOG,
             format!(
                 "dropped replication slot \"{}\" of database with OID {}",
-                name_string(&local_slot.data.get().name),
+                name_string(&unsafe { local_slot.data.get() }.name),
                 dboid
             ),
         );
@@ -395,7 +395,7 @@ fn drop_local_obsolete_slots(remote_slot_list: &[RemoteSlot]) -> PgResult<()> {
 // ---------------------------------------------------------------------------
 fn reserve_wal_for_local_slot(restart_lsn: XLogRecPtr) -> PgResult<()> {
     let slot = MyReplicationSlot().expect("reserve_wal_for_local_slot without slot");
-    debug_assert!(slot.data.get().restart_lsn == InvalidXLogRecPtr);
+    debug_assert!(unsafe { slot.data.get() }.restart_lsn == InvalidXLogRecPtr);
 
     // C acquires ReplicationSlotAllocationLock exclusively to fence against
     // the checkpointer's minimum-LSN calculation.
@@ -411,14 +411,14 @@ fn reserve_wal_for_local_slot(restart_lsn: XLogRecPtr) -> PgResult<()> {
         }
 
         slot.with_mutex(|| {
-            let mut d = slot.data.get();
+            let mut d = unsafe { slot.data.get() };
             d.restart_lsn = restart_lsn.max(min_safe_lsn);
-            slot.data.set(d);
+            unsafe { slot.data.set(d) };
         });
 
         ReplicationSlotsComputeRequiredLSN()?;
 
-        let segno = slot.data.get().restart_lsn / transam_xlog::wal_segment_size() as u64;
+        let segno = unsafe { slot.data.get() }.restart_lsn / transam_xlog::wal_segment_size() as u64;
         let last_removed = ctl
             .info_lck
             .with(|| ctl.lastRemovedSegNo.load(std::sync::atomic::Ordering::Relaxed));
@@ -427,7 +427,7 @@ fn reserve_wal_for_local_slot(restart_lsn: XLogRecPtr) -> PgResult<()> {
                 ERROR,
                 format!(
                     "WAL required by replication slot {} has been removed concurrently",
-                    name_string(&slot.data.get().name)
+                    name_string(&unsafe { slot.data.get() }.name)
                 ),
             )?;
         }
@@ -468,7 +468,7 @@ fn update_and_persist_local_synced_slot(
             ))
             .errdetail(format!(
                 "Synchronization could lead to data loss, because the standby could not build a consistent snapshot to decode WALs at LSN {}.",
-                lsn_fmt(slot.data.get().restart_lsn)
+                lsn_fmt(unsafe { slot.data.get() }.restart_lsn)
             ))
             .finish(loc("update_and_persist_local_synced_slot"));
         return Ok(false);
@@ -515,7 +515,7 @@ fn synchronize_one_slot(remote_slot: &RemoteSlot, remote_dbid: Oid) -> PgResult<
     }
 
     if let Some(slot) = slot::SearchNamedReplicationSlot(&remote_slot.name, true)? {
-        let synced = slot.with_mutex(|| slot.data.get().synced != 0);
+        let synced = slot.with_mutex(|| unsafe { slot.data.get() }.synced != 0);
 
         // User-created slot with the same name: hard error.
         if !synced {
@@ -536,13 +536,13 @@ fn synchronize_one_slot(remote_slot: &RemoteSlot, remote_dbid: Oid) -> PgResult<
         let slot = MyReplicationSlot().expect("acquired");
 
         // Copy the invalidation cause from remote only if not locally set.
-        if slot.data.get().invalidated.0 == RS_INVAL_NONE
+        if unsafe { slot.data.get() }.invalidated.0 == RS_INVAL_NONE
             && remote_slot.invalidated != RS_INVAL_NONE
         {
             slot.with_mutex(|| {
-                let mut d = slot.data.get();
+                let mut d = unsafe { slot.data.get() };
                 d.invalidated = slot::ReplicationSlotInvalidationCause(remote_slot.invalidated);
-                slot.data.set(d);
+                unsafe { slot.data.set(d) };
             });
             ReplicationSlotMarkDirty();
             ReplicationSlotSave()?;
@@ -550,17 +550,17 @@ fn synchronize_one_slot(remote_slot: &RemoteSlot, remote_dbid: Oid) -> PgResult<
         }
 
         // Skip the sync of an invalidated slot.
-        if slot.data.get().invalidated.0 != RS_INVAL_NONE {
+        if unsafe { slot.data.get() }.invalidated.0 != RS_INVAL_NONE {
             ReplicationSlotRelease()?;
             return Ok(slot_updated);
         }
 
-        if slot.data.get().persistency == slot::RS_TEMPORARY {
+        if unsafe { slot.data.get() }.persistency == slot::RS_TEMPORARY {
             // Not yet sync-ready: attempt to make it so.
             slot_updated = update_and_persist_local_synced_slot(remote_slot, remote_dbid)?;
         } else {
             // Sanity check.
-            let confirmed = slot.data.get().confirmed_flush;
+            let confirmed = unsafe { slot.data.get() }.confirmed_flush;
             if remote_slot.confirmed_lsn < confirmed {
                 return ereport(ERROR)
                     .errmsg(format!(
@@ -599,10 +599,10 @@ fn synchronize_one_slot(remote_slot: &RemoteSlot, remote_dbid: Oid) -> PgResult<
         let mut plugin_name = NameData::default();
         plugin_name.namestrcpy(&remote_slot.plugin);
         slot.with_mutex(|| {
-            let mut d = slot.data.get();
+            let mut d = unsafe { slot.data.get() };
             d.database = remote_dbid;
             d.plugin = plugin_name;
-            slot.data.set(d);
+            unsafe { slot.data.set(d) };
         });
 
         reserve_wal_for_local_slot(remote_slot.restart_lsn)?;
@@ -611,10 +611,10 @@ fn synchronize_one_slot(remote_slot: &RemoteSlot, remote_dbid: Oid) -> PgResult<
             procarray::with_procarray_lock_exclusive(|| -> PgResult<TransactionId> {
                 let xmin_horizon = procarray::GetOldestSafeDecodingTransactionId(true)?;
                 slot.with_mutex(|| {
-                    slot.effective_catalog_xmin.set(xmin_horizon);
-                    let mut d = slot.data.get();
+                    unsafe { slot.effective_catalog_xmin.set(xmin_horizon) };
+                    let mut d = unsafe { slot.data.get() };
                     d.catalog_xmin = xmin_horizon;
-                    slot.data.set(d);
+                    unsafe { slot.data.set(d) };
                 });
                 ReplicationSlotsComputeRequiredXmin(true)?;
                 Ok(xmin_horizon)
@@ -1189,9 +1189,9 @@ fn update_synced_slots_inactive_since() {
 
     let mut now: i64 = 0;
     for s in ReplicationSlotCtl() {
-        if s.in_use.get() && s.data.get().synced != 0 {
+        if unsafe { s.in_use.get() } && unsafe { s.data.get() }.synced != 0 {
             debug_assert!(SlotIsLogical(s));
-            debug_assert!(s.active_pid.get() == 0);
+            debug_assert!(unsafe { s.active_pid.get() } == 0);
             if now == 0 {
                 now = timestamp_seams::get_current_timestamp::call();
             }

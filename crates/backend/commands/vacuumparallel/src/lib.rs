@@ -45,6 +45,14 @@ enum PvIndVacStatus {
     Initial,
     NeedBulkdelete,
     NeedCleanup,
+    /// pgrust-only intermediate (placed last so the C-mirrored discriminants
+    /// INITIAL=0/NEED_BULKDELETE=1/NEED_CLEANUP=2/COMPLETED=3 are preserved):
+    /// a process that atomically claimed the index for dispatch marks it
+    /// IN_PROGRESS under the slot lock so a racing worker/leader that reaches
+    /// the same index observes the claim and skips it. C guarantees single
+    /// dispatch via the atomic `idx` counter instead; the threaded port makes
+    /// the per-index status the claim.
+    InProgress,
     Completed,
 }
 
@@ -757,10 +765,17 @@ impl PvPoolPass {
                         }
                     }
                 }
-                _ => panic!(
-                    "unexpected parallel vacuum index status {status:?} for index \"{}\"",
-                    indrel.name()
-                ),
+                // Catchable error, matching C's process_one_index default:
+                // elog(ERROR, "unexpected parallel vacuum index status ...").
+                _ => {
+                    return Err(Box::new(PgError::new(
+                        ERROR,
+                        format!(
+                            "unexpected parallel vacuum index status {status:?} for index \"{}\"",
+                            indrel.name()
+                        ),
+                    )))
+                }
             }
         }
         // Step the in-flight sweep by one quantum (the begin ticket falls
@@ -1718,6 +1733,49 @@ fn parallel_vacuum_process_unsafe_indexes(
     result
 }
 
+/// Which parallel index phase a claim dispatches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PvIndexPhase {
+    Bulkdelete,
+    Cleanup,
+}
+
+/// The transition computed when a process tries to claim an index for
+/// dispatch. Pure (so the race semantics are unit-testable); the caller
+/// performs the IN_PROGRESS write under the slot lock, which is the
+/// compare-and-swap that guarantees a single dispatch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PvIndexClaim {
+    /// Winner: dispatch this phase (pre-state was NEED_BULKDELETE /
+    /// NEED_CLEANUP; the caller transitions the slot to IN_PROGRESS).
+    Dispatch(PvIndexPhase),
+    /// Loser of the race: another process is already processing
+    /// (IN_PROGRESS) or has finished (COMPLETED) this index — skip it, never
+    /// re-dispatch.
+    Skip,
+    /// Status never left INITIAL: a real bug. C raises a catchable
+    /// elog(ERROR, "unexpected parallel vacuum index status ...") here rather
+    /// than crashing, so the port must too.
+    Unexpected,
+}
+
+/// C guarantees exactly one process dispatches an index via the atomic `idx`
+/// counter; the threaded port makes the per-index status double as the claim.
+/// Reading the status and writing COMPLETED straddle the whole
+/// bulkdelete/cleanup call, so two claimants that both observed a NEED_*
+/// pre-state would each dispatch (and the second would hit the old panic).
+/// Atomically transitioning the expected pre-state to IN_PROGRESS under the
+/// slot lock closes that window: the loser observes IN_PROGRESS/COMPLETED and
+/// skips.
+fn pv_index_claim_transition(status: PvIndVacStatus) -> PvIndexClaim {
+    match status {
+        PvIndVacStatus::NeedBulkdelete => PvIndexClaim::Dispatch(PvIndexPhase::Bulkdelete),
+        PvIndVacStatus::NeedCleanup => PvIndexClaim::Dispatch(PvIndexPhase::Cleanup),
+        PvIndVacStatus::InProgress | PvIndVacStatus::Completed => PvIndexClaim::Skip,
+        PvIndVacStatus::Initial => PvIndexClaim::Unexpected,
+    }
+}
+
 fn parallel_vacuum_process_one_index(
     shared: &PvShared,
     mcx: Mcx<'_>,
@@ -1732,9 +1790,35 @@ fn parallel_vacuum_process_one_index(
     // leader, the unsafe-index loop, and the pool COARSE arm (the chunks arm
     // reports per-unit through unit_complete instead).
     let census_t0 = ptrace_enabled().then(|| (pg_clock::mono_ms(), pg_clock::MonoStamp::now()));
-    let (status, istat) = {
-        let s = shared.indstats[idx].lock().unwrap_or_else(|e| e.into_inner());
-        (s.status, if s.istat_updated { Some(s.istat) } else { None })
+    // Atomically claim the index under the slot lock (the compare-and-swap):
+    // read the status, and if it is still an expected NEED_* pre-state,
+    // transition it to IN_PROGRESS in the same critical section. A racing
+    // worker/leader that reaches this same index then observes the claim and
+    // skips it, so a Completed (or in-flight) index is never dispatched twice.
+    let (phase, istat) = {
+        let mut s = shared.indstats[idx].lock().unwrap_or_else(|e| e.into_inner());
+        match pv_index_claim_transition(s.status) {
+            PvIndexClaim::Dispatch(phase) => {
+                let istat = if s.istat_updated { Some(s.istat) } else { None };
+                s.status = PvIndVacStatus::InProgress;
+                (phase, istat)
+            }
+            // Loser of the race: the winner already dispatched this index.
+            PvIndexClaim::Skip => return Ok(()),
+            // Unexpected status: catchable error, matching C's
+            // elog(ERROR, "unexpected parallel vacuum index status %d ...").
+            PvIndexClaim::Unexpected => {
+                let status = s.status;
+                drop(s);
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    format!(
+                        "unexpected parallel vacuum index status {status:?} for index \"{}\"",
+                        indrel.name()
+                    ),
+                )));
+            }
+        }
     };
 
     let ivinfo = nbtree::IndexVacuumInfo {
@@ -1748,17 +1832,13 @@ fn parallel_vacuum_process_one_index(
         strategy: bstrategy.clone(),
     };
 
-    let istat_res: Option<IndexBulkDeleteResult> = match status {
-        PvIndVacStatus::NeedBulkdelete => {
+    let istat_res: Option<IndexBulkDeleteResult> = match phase {
+        PvIndexPhase::Bulkdelete => {
             let dead_items =
                 Arc::clone(&shared.dead_items.lock().unwrap_or_else(|e| e.into_inner()));
             Some(vac_bulkdel_one_index(mcx, &ivinfo, istat, &dead_items)?)
         }
-        PvIndVacStatus::NeedCleanup => vac_cleanup_one_index(mcx, &ivinfo, istat)?,
-        _ => panic!(
-            "unexpected parallel vacuum index status {status:?} for index \"{}\"",
-            indrel.name()
-        ),
+        PvIndexPhase::Cleanup => vac_cleanup_one_index(mcx, &ivinfo, istat)?,
     };
 
     {
@@ -1790,7 +1870,7 @@ fn parallel_vacuum_process_one_index(
             "leader"
         };
         ptrace(&format!(
-            "idx-one i={idx} name={} op={status:?} who={who} start_ms={start_ms} ms={}",
+            "idx-one i={idx} name={} op={phase:?} who={who} start_ms={start_ms} ms={}",
             indrel.name(),
             t0.elapsed_ns() / 1_000_000,
         ));
@@ -1937,6 +2017,38 @@ mod tests {
         assert!(pool_index_quantum() > 0, "quantum must be positive");
         assert_eq!(pool_index_quantum(), 256, "default quantum of record");
         assert!(pool_index_leader_enabled(), "leader participation default ON");
+    }
+
+    /// Atomic per-index claim prevents double-dispatch and matches C's
+    /// panic-vs-ERROR parity. A NEED_* pre-state is claimed for its phase;
+    /// once a claimant marks the index IN_PROGRESS or COMPLETED, a racing
+    /// worker/leader that reaches the same index skips it (never a second
+    /// dispatch, never the old panic); a status still at INITIAL is the
+    /// unexpected case C surfaces as a catchable elog(ERROR).
+    #[test]
+    fn index_claim_transition_prevents_redispatch() {
+        assert_eq!(
+            pv_index_claim_transition(PvIndVacStatus::NeedBulkdelete),
+            PvIndexClaim::Dispatch(PvIndexPhase::Bulkdelete)
+        );
+        assert_eq!(
+            pv_index_claim_transition(PvIndVacStatus::NeedCleanup),
+            PvIndexClaim::Dispatch(PvIndexPhase::Cleanup)
+        );
+        // The race losers: already claimed / already finished → skip.
+        assert_eq!(
+            pv_index_claim_transition(PvIndVacStatus::InProgress),
+            PvIndexClaim::Skip
+        );
+        assert_eq!(
+            pv_index_claim_transition(PvIndVacStatus::Completed),
+            PvIndexClaim::Skip
+        );
+        // Never transitioned out of INITIAL: unexpected → catchable ERROR.
+        assert_eq!(
+            pv_index_claim_transition(PvIndVacStatus::Initial),
+            PvIndexClaim::Unexpected
+        );
     }
 
     /// One-index-per-claim contract: every granule is its own hard boundary

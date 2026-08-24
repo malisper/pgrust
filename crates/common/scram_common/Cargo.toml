@@ -11,3 +11,4 @@ pg_sha2 = { path = "../sha2" }
 pg_hmac = { path = "../hmac" }
 pg_b64 = { path = "../base64" }
 postgres_seams = { path = "../../backend/tcop/postgres_seams" }
+secure_zero = { path = "../../_support/secure_zero" }

@@ -51,7 +51,7 @@ pub fn fc_pg_create_physical_replication_slot(
     crate::create_physical_replication_slot(&name, immediately_reserve, temporary, 0)?;
 
     let s = slot::MyReplicationSlot().unwrap();
-    let d = s.data.get();
+    let d = unsafe { s.data.get() };
 
     let mut values = [Datum::from_usize(0); 2];
     let mut nulls = [false; 2];
@@ -103,7 +103,7 @@ pub fn fc_pg_create_logical_replication_slot(
     }
 
     let s = slot::MyReplicationSlot().unwrap();
-    let d = s.data.get();
+    let d = unsafe { s.data.get() };
 
     let mut values = [Datum::from_usize(0); 2];
     let nulls = [false; 2];
@@ -154,12 +154,12 @@ pub fn fc_pg_get_replication_slots(
     )?;
     let scan: PgResult<()> = (|| {
         for s in slot::ReplicationSlotCtl() {
-            if !s.in_use.get() {
+            if !unsafe { s.in_use.get() } {
                 continue;
             }
 
             let (mut data, active_pid, inactive_since) =
-                s.with_mutex(|| (s.data.get(), s.active_pid.get(), s.inactive_since.get()));
+                s.with_mutex(|| (unsafe { s.data.get() }, unsafe { s.active_pid.get() }, unsafe { s.inactive_since.get() }));
 
             let mut values = [Datum::from_usize(0); PG_GET_REPLICATION_SLOTS_COLS];
             let mut nulls = [false; PG_GET_REPLICATION_SLOTS_COLS];
@@ -240,7 +240,7 @@ pub fn fc_pg_get_replication_slots(
                     let mut lost = true;
                     if data.restart_lsn != 0 {
                         let (pid, restart_lsn) =
-                            s.with_mutex(|| (s.active_pid.get(), s.data.get().restart_lsn));
+                            s.with_mutex(|| (unsafe { s.active_pid.get() }, unsafe { s.data.get() }.restart_lsn));
                         data.restart_lsn = restart_lsn;
                         if pid != 0 {
                             values[i] = text_datum(mcx, "unreserved")?;
@@ -373,7 +373,7 @@ pub fn fc_pg_replication_slot_advance(
 
     slot::ReplicationSlotAcquire(&slotname, true, true)?;
 
-    if slot::MyReplicationSlot().unwrap().data.get().restart_lsn == 0 {
+    if unsafe { slot::MyReplicationSlot().unwrap().data.get() }.restart_lsn == 0 {
         ereport(ERROR)
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg(format!("replication slot \"{slotname}\" cannot be advanced"))
@@ -382,7 +382,7 @@ pub fn fc_pg_replication_slot_advance(
         unreachable!("ereport(ERROR) returns Err");
     }
 
-    let d = slot::MyReplicationSlot().unwrap().data.get();
+    let d = unsafe { slot::MyReplicationSlot().unwrap().data.get() };
     let minlsn = if d.database != InvalidOid { d.confirmed_flush } else { d.restart_lsn };
     if moveto < minlsn {
         let (mh, ml) = lsn_pair(moveto);
@@ -402,7 +402,7 @@ pub fn fc_pg_replication_slot_advance(
         crate::pg_physical_replication_slot_advance(moveto)?
     };
 
-    let name = slot::MyReplicationSlot().unwrap().data.get().name;
+    let name = unsafe { slot::MyReplicationSlot().unwrap().data.get() }.name;
 
     slot::ReplicationSlotsComputeRequiredXmin(false)?;
     slot::ReplicationSlotsComputeRequiredLSN()?;
@@ -467,7 +467,7 @@ fn fc_copy_replication_slot(
     }
 
     let s = slot::MyReplicationSlot().unwrap();
-    let d = s.data.get();
+    let d = unsafe { s.data.get() };
 
     let mut values = [Datum::from_usize(0); 2];
     let mut nulls = [false; 2];

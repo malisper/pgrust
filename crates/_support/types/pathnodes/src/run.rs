@@ -359,6 +359,12 @@ impl<'mcx> PlannerRun<'mcx> {
         let parent = self.suspended_roots.pop().expect("pop_root_discard without push");
         self.root = parent.root;
         self.processed_tlist = parent.processed_tlist;
+        // The matching push (push_root/push_minmax_root) parked the parent
+        // level's active_windows alongside its root; a discard must restore it
+        // too, or suspended_roots and suspended_active_windows desynchronize
+        // and every later pop reads a neighboring level's window list.
+        self.active_windows =
+            self.suspended_active_windows.pop().expect("pop_root_discard without active-windows push");
     }
 
     fn scan_outer_params(
@@ -615,4 +621,54 @@ pub fn sortgrouplist_exprs<'mcx>(
         exprs.push((id, expr));
     }
     exprs
+}
+
+#[cfg(test)]
+mod discard_balance_tests {
+    use super::*;
+    use ::mcx::MemoryContext;
+
+    // pop_root_discard (the abandoned EXISTS-to-ANY twin path) must restore the
+    // parked active_windows exactly like every other pop, keeping
+    // suspended_roots and suspended_active_windows in lockstep. Before the fix
+    // the discard left an extra entry on suspended_active_windows, so the two
+    // stacks desynchronized and every later pop read a neighboring level's list.
+    #[test]
+    fn discard_keeps_stacks_balanced() {
+        let ctx = MemoryContext::new("discard-balance-test");
+        let mcx = ctx.mcx();
+        let mut run = PlannerRun::new(mcx);
+
+        // Balanced at rest.
+        assert_eq!(run.suspended_roots.len(), run.suspended_active_windows.len());
+
+        // A push parks both stacks (1:1 invariant).
+        run.push_root().expect("push_root");
+        assert_eq!(run.suspended_roots.len(), 1);
+        assert_eq!(run.suspended_active_windows.len(), 1);
+
+        // The discard must pop BOTH, leaving the stacks balanced and empty.
+        run.pop_root_discard();
+        assert_eq!(run.suspended_roots.len(), 0);
+        assert_eq!(
+            run.suspended_active_windows.len(),
+            0,
+            "pop_root_discard leaked a suspended_active_windows entry",
+        );
+
+        // A subsequent balanced push/pop must still restore the matching level:
+        // interleave a discard between two live levels and confirm the outer
+        // pop retrieves the correct (outer) subroot, not a shifted one.
+        run.push_root().expect("outer push_root");
+        let outer_level = run.root.query_level;
+        run.push_root().expect("twin push_root");
+        run.pop_root_discard(); // abandon the twin
+        run.push_root().expect("real child push_root");
+        let _ = run.pop_root_to_subroot(); // register the real child
+        // Back at the outer level; stacks balanced and level restored.
+        run.pop_root_discard();
+        assert_eq!(run.suspended_roots.len(), 0);
+        assert_eq!(run.suspended_active_windows.len(), 0);
+        let _ = outer_level;
+    }
 }

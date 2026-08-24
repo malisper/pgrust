@@ -5,8 +5,10 @@
 use ::bufmgr_seams as bm;
 use ::gin_vocab::*;
 use ::mcx::{Mcx, PgVec};
-use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, InvalidBuffer, OffsetNumber, BLCKSZ};
-use ::types_error::PgResult;
+use ::types_core::{
+    BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, InvalidBuffer, OffsetNumber, BLCKSZ,
+};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{PageRef, PageTemp};
 use ::types_tuple::itemptr::InvalidOffsetNumber;
@@ -20,6 +22,34 @@ use crate::{
 };
 
 pub(crate) const NO_PARENT: u32 = u32::MAX;
+
+/// Corruption raised when a GIN page-chain walk (rightlink / downlink) fails
+/// to make progress within the relation's block count. On a well-formed
+/// acyclic index no chain can be longer than the number of blocks, so
+/// exceeding that bound proves the on-disk structure contains a cycle. This
+/// converts what would otherwise be an uninterruptible infinite loop into a
+/// catchable ERRCODE_DATA_CORRUPTED error (C relies on the tree being acyclic
+/// by construction; a hostile on-disk image breaks that assumption).
+#[cold]
+#[inline(never)]
+fn corrupt_chain_cycle() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "corrupted GIN index: page-chain walk exceeded relation size (cyclic rightlink or downlink chain)"
+                .to_string(),
+        )
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+/// Upper bound on the number of steps any single page-chain walk may take:
+/// the relation's block count. A longer walk must be revisiting a block, i.e.
+/// the chain is cyclic. `+ 1` allows a full legitimate traversal of every
+/// block before the bound trips.
+fn chain_walk_limit(rel: &Relation<'_>) -> PgResult<u64> {
+    let nblocks = bm::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
+    Ok(nblocks as u64 + 1)
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Frame {
@@ -77,15 +107,15 @@ pub(crate) trait GinBt<'r> {
     fn is_build(&self) -> bool;
     fn full_scan(&self) -> bool;
 
-    fn find_child_page(&self, page: &PageRef<'_>, frame: &mut Frame) -> BlockNumber;
-    fn get_leftmost_child(&self, page: &PageRef<'_>) -> BlockNumber;
+    fn find_child_page(&self, page: &PageRef<'_>, frame: &mut Frame) -> PgResult<BlockNumber>;
+    fn get_leftmost_child(&self, page: &PageRef<'_>) -> PgResult<BlockNumber>;
     fn is_move_right(&self, page: &PageRef<'_>) -> bool;
     fn find_child_ptr(
         &self,
         page: &PageRef<'_>,
         blkno: BlockNumber,
         stored_off: OffsetNumber,
-    ) -> OffsetNumber;
+    ) -> PgResult<OffsetNumber>;
 
     fn begin_place_to_page(
         &mut self,
@@ -200,7 +230,13 @@ pub(crate) fn ginFindLeafPage<'s, 'r, T: GinBt<'r>>(
             ginFinishOldSplitAt(mcx, rel, btree, &mut stack, top, None, access)?;
         }
 
+        // Bound the rightlink walk: a crafted cyclic rightlink chain would
+        // otherwise spin here forever (all pages cached, no I/O interrupt
+        // point). See corrupt_chain_cycle.
+        let move_right_limit = chain_walk_limit(rel)?;
+        let mut move_right_steps: u64 = 0;
         loop {
+            check_for_interrupts()?;
             let buffer = stack.top().buffer;
             // SAFETY: pin + lock held.
             let page = unsafe { page_ref(buffer) };
@@ -213,6 +249,10 @@ pub(crate) fn ginFindLeafPage<'s, 'r, T: GinBt<'r>>(
             let rightlink = page_opaque(&page).rightlink;
             if rightlink == InvalidBlockNumber {
                 break;
+            }
+            move_right_steps += 1;
+            if move_right_steps > move_right_limit {
+                return Err(corrupt_chain_cycle());
             }
             let next = ginStepRight(buffer, rel, access)?;
             {
@@ -240,7 +280,7 @@ pub(crate) fn ginFindLeafPage<'s, 'r, T: GinBt<'r>>(
         let child = {
             let page = unsafe { page_ref(buffer) };
             let top = stack.top as usize;
-            btree.find_child_page(&page, &mut stack.frames[top])
+            btree.find_child_page(&page, &mut stack.frames[top])?
         };
         bm::lock_buffer::call(buffer, GIN_UNLOCK)?;
         debug_assert!(child != InvalidBlockNumber && stack.top().blkno != child);
@@ -285,7 +325,18 @@ fn ginFindParents<'r, T: GinBt<'r>>(
     let mut blkno = stack.frame(root_id).blkno;
     let mut buffer = stack.frame(root_id).buffer;
 
+    // Bound both the leftmost-descent restart loop and the inner rightlink
+    // walk: crafted downlink/rightlink cycles that never expose the target
+    // child would otherwise loop forever under exclusive lock coupling.
+    let walk_limit = chain_walk_limit(rel)?;
+    let mut descent_steps: u64 = 0;
+
     loop {
+        check_for_interrupts()?;
+        descent_steps += 1;
+        if descent_steps > walk_limit {
+            return Err(corrupt_chain_cycle());
+        }
         bm::lock_buffer::call(buffer, GIN_EXCLUSIVE)?;
         // SAFETY: pin + exclusive lock held.
         if GinPageIsLeaf(&page_opaque(&unsafe { page_ref(buffer) })) {
@@ -306,15 +357,21 @@ fn ginFindParents<'r, T: GinBt<'r>>(
         }
 
         // SAFETY: pin + exclusive lock held.
-        let leftmost = { btree.get_leftmost_child(&unsafe { page_ref(buffer) }) };
+        let leftmost = { btree.get_leftmost_child(&unsafe { page_ref(buffer) })? };
 
         let mut offset;
+        let mut rightlink_steps: u64 = 0;
         loop {
+            check_for_interrupts()?;
+            rightlink_steps += 1;
+            if rightlink_steps > walk_limit {
+                return Err(corrupt_chain_cycle());
+            }
             let target = stack.frame(at).blkno;
             // SAFETY: pin + exclusive lock held.
             offset = {
                 let page = unsafe { page_ref(buffer) };
-                btree.find_child_ptr(&page, target, InvalidOffsetNumber)
+                btree.find_child_ptr(&page, target, InvalidOffsetNumber)?
             };
             if offset != InvalidOffsetNumber {
                 break;
@@ -662,7 +719,7 @@ fn ginFinishSplitAt<'r, T: GinBt<'r>>(
             // SAFETY: pin + exclusive lock held.
             let off = {
                 let page = unsafe { page_ref(pbuf) };
-                btree.find_child_ptr(&page, target, stack.frame(parent).off)
+                btree.find_child_ptr(&page, target, stack.frame(parent).off)?
             };
             stack.frame_mut(parent).off = off;
             if off != InvalidOffsetNumber {
@@ -785,6 +842,20 @@ pub(crate) fn ginInsertValue<'r, T: GinBt<'r>>(
         ginFinishSplitAt(mcx, rel, btree, stack, top, true, buildStats)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A cyclic rightlink/downlink chain that overruns the relation's block
+    // count must surface as a catchable ERRCODE_DATA_CORRUPTED, not an
+    // uninterruptible infinite loop.
+    #[test]
+    fn chain_cycle_is_data_corrupted() {
+        let err = Result::<(), _>::Err(corrupt_chain_cycle()).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
 }
 
 

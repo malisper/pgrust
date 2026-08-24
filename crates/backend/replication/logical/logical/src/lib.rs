@@ -294,7 +294,7 @@ fn StartupDecodingContext(
 
     let mut callbacks = OutputPluginCallbacks::default();
     if !fast_forward {
-        let plugin = slot.data.get().plugin;
+        let plugin = unsafe { slot.data.get() }.plugin;
         LoadOutputPlugin(
             &mut callbacks,
             std::str::from_utf8(plugin.name_str()).expect("plugin name is utf8"),
@@ -309,7 +309,7 @@ fn StartupDecodingContext(
 
     let reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;
 
-    let slot_name_nd = slot.data.get().name;
+    let slot_name_nd = unsafe { slot.data.get() }.name;
     let slot_name = std::str::from_utf8(slot_name_nd.name_str())
         .expect("slot name is utf8")
         .to_string();
@@ -319,7 +319,7 @@ fn StartupDecodingContext(
         start_lsn,
         need_full_snapshot,
         in_create,
-        slot.data.get().two_phase_at,
+        unsafe { slot.data.get() }.two_phase_at,
     );
 
     // To support streaming, start/stop/abort/commit/change callbacks are
@@ -421,8 +421,8 @@ pub fn CreateInitDecodingContext(
         unreachable!();
     }
 
-    if slot.data.get().database != g::MyDatabaseId() {
-        let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();
+    if unsafe { slot.data.get() }.database != g::MyDatabaseId() {
+        let name = String::from_utf8_lossy(unsafe { slot.data.get() }.name.name_str()).into_owned();
         ereport(ERROR)
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg(format!(
@@ -443,18 +443,18 @@ pub fn CreateInitDecodingContext(
     }
 
     slot.with_mutex(|| {
-        let mut d = slot.data.get();
+        let mut d = unsafe { slot.data.get() };
         d.plugin.namestrcpy(plugin);
-        slot.data.set(d);
+        unsafe { slot.data.set(d) };
     });
 
     if restart_lsn == InvalidXLogRecPtr {
         ReplicationSlotReserveWal()?;
     } else {
         slot.with_mutex(|| {
-            let mut d = slot.data.get();
+            let mut d = unsafe { slot.data.get() };
             d.restart_lsn = restart_lsn;
-            slot.data.set(d);
+            unsafe { slot.data.set(d) };
         });
     }
 
@@ -466,12 +466,12 @@ pub fn CreateInitDecodingContext(
     let xmin_horizon = procarray::GetOldestSafeDecodingTransactionId(!need_full_snapshot)?;
 
     slot.with_mutex(|| {
-        slot.effective_catalog_xmin.set(xmin_horizon);
-        let mut d = slot.data.get();
+        unsafe { slot.effective_catalog_xmin.set(xmin_horizon) };
+        let mut d = unsafe { slot.data.get() };
         d.catalog_xmin = xmin_horizon;
-        slot.data.set(d);
+        unsafe { slot.data.set(d) };
         if need_full_snapshot {
-            slot.effective_xmin.set(xmin_horizon);
+            unsafe { slot.effective_xmin.set(xmin_horizon) };
         }
     });
 
@@ -499,7 +499,7 @@ pub fn CreateInitDecodingContext(
 
     let receive_rewrites = {
         let opc = ctx.opc();
-        opc.twophase &= slot.data.get().two_phase;
+        opc.twophase &= unsafe { slot.data.get() }.two_phase;
         opc.options.receive_rewrites
     };
     let mut ctx = ctx;
@@ -532,8 +532,8 @@ pub fn CreateDecodingContext(
         unreachable!();
     }
 
-    if slot.data.get().database != g::MyDatabaseId() && !fast_forward {
-        let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();
+    if unsafe { slot.data.get() }.database != g::MyDatabaseId() && !fast_forward {
+        let name = String::from_utf8_lossy(unsafe { slot.data.get() }.name.name_str()).into_owned();
         ereport(ERROR)
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg(format!(
@@ -547,10 +547,10 @@ pub fn CreateDecodingContext(
     // are for use after failover) — but the slot sync machinery itself may
     // advance their LSNs (update_local_synced_slot).
     if transam_xlog::RecoveryInProgress()
-        && slot.data.get().synced != 0
+        && unsafe { slot.data.get() }.synced != 0
         && !slot::syncing_replication_slots()
     {
-        let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();
+        let name = String::from_utf8_lossy(unsafe { slot.data.get() }.name.name_str()).into_owned();
         ereport(ERROR)
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg(format!(
@@ -562,20 +562,20 @@ pub fn CreateDecodingContext(
         unreachable!();
     }
 
-    debug_assert!(slot.data.get().invalidated == RS_INVAL_NONE);
-    debug_assert!(slot.data.get().restart_lsn != InvalidXLogRecPtr);
+    debug_assert!(unsafe { slot.data.get() }.invalidated == RS_INVAL_NONE);
+    debug_assert!(unsafe { slot.data.get() }.restart_lsn != InvalidXLogRecPtr);
 
     let mut start_lsn = start_lsn;
     if start_lsn == InvalidXLogRecPtr {
-        start_lsn = slot.data.get().confirmed_flush;
-    } else if start_lsn < slot.data.get().confirmed_flush {
+        start_lsn = unsafe { slot.data.get() }.confirmed_flush;
+    } else if start_lsn < unsafe { slot.data.get() }.confirmed_flush {
         let (sh, sl) = lsn_pair(start_lsn);
-        let (ch, cl) = lsn_pair(slot.data.get().confirmed_flush);
+        let (ch, cl) = lsn_pair(unsafe { slot.data.get() }.confirmed_flush);
         elog(
             LOG,
             format!("{sh:X}/{sl:X} has been already streamed, forwarding to {ch:X}/{cl:X}"),
         )?;
-        start_lsn = slot.data.get().confirmed_flush;
+        start_lsn = unsafe { slot.data.get() }.confirmed_flush;
     }
 
     let mut ctx = StartupDecodingContext(
@@ -594,18 +594,18 @@ pub fn CreateDecodingContext(
 
     let (receive_rewrites, mark_two_phase) = {
         let opc = ctx.opc();
-        opc.twophase &= slot.data.get().two_phase || opc.twophase_opt_given;
-        (opc.options.receive_rewrites, opc.twophase && !slot.data.get().two_phase)
+        opc.twophase &= unsafe { slot.data.get() }.two_phase || opc.twophase_opt_given;
+        (opc.options.receive_rewrites, opc.twophase && !unsafe { slot.data.get() }.two_phase)
     };
     let mut ctx = ctx;
     // Mark slot to allow two_phase decoding if not already marked
     // (logical.c:597).
     if mark_two_phase {
         slot.with_mutex(|| {
-            let mut d = slot.data.get();
+            let mut d = unsafe { slot.data.get() };
             d.two_phase = true;
             d.two_phase_at = start_lsn;
-            slot.data.set(d);
+            unsafe { slot.data.set(d) };
         });
         ReplicationSlotMarkDirty();
         ReplicationSlotSave()?;
@@ -613,9 +613,9 @@ pub fn CreateDecodingContext(
     }
     ctx.reorder.output_rewrites = receive_rewrites;
 
-    let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();
-    let (ch, cl) = lsn_pair(slot.data.get().confirmed_flush);
-    let (rh, rl) = lsn_pair(slot.data.get().restart_lsn);
+    let name = String::from_utf8_lossy(unsafe { slot.data.get() }.name.name_str()).into_owned();
+    let (ch, cl) = lsn_pair(unsafe { slot.data.get() }.confirmed_flush);
+    let (rh, rl) = lsn_pair(unsafe { slot.data.get() }.restart_lsn);
     ereport(LOG)
         .errmsg(format!("starting logical decoding for slot \"{name}\""))
         .errdetail(format!(
@@ -1115,21 +1115,21 @@ pub fn LogicalIncreaseXminForSlot(current_lsn: XLogRecPtr, xmin: TransactionId) 
 
     let mut updated_xmin = false;
     slot.with_mutex(|| {
-        if TransactionIdPrecedes(xmin, slot.data.get().catalog_xmin)
-            || xmin == slot.data.get().catalog_xmin
+        if TransactionIdPrecedes(xmin, unsafe { slot.data.get() }.catalog_xmin)
+            || xmin == unsafe { slot.data.get() }.catalog_xmin
         {
-        } else if current_lsn <= slot.data.get().confirmed_flush {
-            slot.candidate_catalog_xmin.set(xmin);
-            slot.candidate_xmin_lsn.set(current_lsn);
+        } else if current_lsn <= unsafe { slot.data.get() }.confirmed_flush {
+            unsafe { slot.candidate_catalog_xmin.set(xmin) };
+            unsafe { slot.candidate_xmin_lsn.set(current_lsn) };
             updated_xmin = true;
-        } else if slot.candidate_xmin_lsn.get() == InvalidXLogRecPtr {
-            slot.candidate_catalog_xmin.set(xmin);
-            slot.candidate_xmin_lsn.set(current_lsn);
+        } else if unsafe { slot.candidate_xmin_lsn.get() } == InvalidXLogRecPtr {
+            unsafe { slot.candidate_catalog_xmin.set(xmin) };
+            unsafe { slot.candidate_xmin_lsn.set(current_lsn) };
         }
     });
 
     if updated_xmin {
-        LogicalConfirmReceivedLocation(slot.data.get().confirmed_flush)?;
+        LogicalConfirmReceivedLocation(unsafe { slot.data.get() }.confirmed_flush)?;
     }
     Ok(())
 }
@@ -1144,19 +1144,19 @@ pub fn LogicalIncreaseRestartDecodingForSlot(
 
     let mut updated_lsn = false;
     slot.with_mutex(|| {
-        if restart_lsn <= slot.data.get().restart_lsn {
-        } else if current_lsn <= slot.data.get().confirmed_flush {
-            slot.candidate_restart_valid.set(current_lsn);
-            slot.candidate_restart_lsn.set(restart_lsn);
+        if restart_lsn <= unsafe { slot.data.get() }.restart_lsn {
+        } else if current_lsn <= unsafe { slot.data.get() }.confirmed_flush {
+            unsafe { slot.candidate_restart_valid.set(current_lsn) };
+            unsafe { slot.candidate_restart_lsn.set(restart_lsn) };
             updated_lsn = true;
-        } else if slot.candidate_restart_valid.get() == InvalidXLogRecPtr {
-            slot.candidate_restart_valid.set(current_lsn);
-            slot.candidate_restart_lsn.set(restart_lsn);
+        } else if unsafe { slot.candidate_restart_valid.get() } == InvalidXLogRecPtr {
+            unsafe { slot.candidate_restart_valid.set(current_lsn) };
+            unsafe { slot.candidate_restart_lsn.set(restart_lsn) };
         }
     });
 
     if updated_lsn {
-        LogicalConfirmReceivedLocation(slot.data.get().confirmed_flush)?;
+        LogicalConfirmReceivedLocation(unsafe { slot.data.get() }.confirmed_flush)?;
     }
     Ok(())
 }
@@ -1165,46 +1165,46 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
     debug_assert!(lsn != InvalidXLogRecPtr);
     let slot = MyReplicationSlot().expect("LogicalConfirmReceivedLocation requires a slot");
 
-    if slot.candidate_xmin_lsn.get() != InvalidXLogRecPtr
-        || slot.candidate_restart_valid.get() != InvalidXLogRecPtr
+    if unsafe { slot.candidate_xmin_lsn.get() } != InvalidXLogRecPtr
+        || unsafe { slot.candidate_restart_valid.get() } != InvalidXLogRecPtr
     {
         let mut updated_xmin = false;
         let mut updated_restart = false;
 
         // logical.c:1824: remember the old restart lsn (consumed by the
         // logical-replication-slot-advance-segment injection point below).
-        let old_restart_lsn = slot.data.get().restart_lsn;
+        let old_restart_lsn = unsafe { slot.data.get() }.restart_lsn;
 
         slot.with_mutex(|| {
-            if lsn > slot.data.get().confirmed_flush {
-                let mut d = slot.data.get();
+            if lsn > unsafe { slot.data.get() }.confirmed_flush {
+                let mut d = unsafe { slot.data.get() };
                 d.confirmed_flush = lsn;
-                slot.data.set(d);
+                unsafe { slot.data.set(d) };
             }
 
-            if slot.candidate_xmin_lsn.get() != InvalidXLogRecPtr
-                && slot.candidate_xmin_lsn.get() <= lsn
+            if unsafe { slot.candidate_xmin_lsn.get() } != InvalidXLogRecPtr
+                && unsafe { slot.candidate_xmin_lsn.get() } <= lsn
             {
-                let candidate = slot.candidate_catalog_xmin.get();
-                if TransactionIdIsValid(candidate) && slot.data.get().catalog_xmin != candidate {
-                    let mut d = slot.data.get();
+                let candidate = unsafe { slot.candidate_catalog_xmin.get() };
+                if TransactionIdIsValid(candidate) && unsafe { slot.data.get() }.catalog_xmin != candidate {
+                    let mut d = unsafe { slot.data.get() };
                     d.catalog_xmin = candidate;
-                    slot.data.set(d);
-                    slot.candidate_catalog_xmin.set(InvalidTransactionId);
-                    slot.candidate_xmin_lsn.set(InvalidXLogRecPtr);
+                    unsafe { slot.data.set(d) };
+                    unsafe { slot.candidate_catalog_xmin.set(InvalidTransactionId) };
+                    unsafe { slot.candidate_xmin_lsn.set(InvalidXLogRecPtr) };
                     updated_xmin = true;
                 }
             }
 
-            if slot.candidate_restart_valid.get() != InvalidXLogRecPtr
-                && slot.candidate_restart_valid.get() <= lsn
+            if unsafe { slot.candidate_restart_valid.get() } != InvalidXLogRecPtr
+                && unsafe { slot.candidate_restart_valid.get() } <= lsn
             {
-                debug_assert!(slot.candidate_restart_lsn.get() != InvalidXLogRecPtr);
-                let mut d = slot.data.get();
-                d.restart_lsn = slot.candidate_restart_lsn.get();
-                slot.data.set(d);
-                slot.candidate_restart_lsn.set(InvalidXLogRecPtr);
-                slot.candidate_restart_valid.set(InvalidXLogRecPtr);
+                debug_assert!(unsafe { slot.candidate_restart_lsn.get() } != InvalidXLogRecPtr);
+                let mut d = unsafe { slot.data.get() };
+                d.restart_lsn = unsafe { slot.candidate_restart_lsn.get() };
+                unsafe { slot.data.set(d) };
+                unsafe { slot.candidate_restart_lsn.set(InvalidXLogRecPtr) };
+                unsafe { slot.candidate_restart_valid.set(InvalidXLogRecPtr) };
                 updated_restart = true;
             }
         });
@@ -1215,7 +1215,7 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
             if injection_point::is_attached("logical-replication-slot-advance-segment") {
                 let segsz = transam_xlog::wal_segment_size();
                 let seg1 = transam_xlog::XLByteToSeg(old_restart_lsn, segsz);
-                let seg2 = transam_xlog::XLByteToSeg(slot.data.get().restart_lsn, segsz);
+                let seg2 = transam_xlog::XLByteToSeg(unsafe { slot.data.get() }.restart_lsn, segsz);
                 if seg1 != seg2 {
                     injection_point::injection_point(
                         "logical-replication-slot-advance-segment",
@@ -1228,18 +1228,18 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
 
         if updated_xmin {
             slot.with_mutex(|| {
-                slot.effective_catalog_xmin
-                    .set(slot.data.get().catalog_xmin);
+                unsafe { slot.effective_catalog_xmin
+                    .set(slot.data.get().catalog_xmin) };
             });
             ReplicationSlotsComputeRequiredXmin(false)?;
             ReplicationSlotsComputeRequiredLSN()?;
         }
     } else {
         slot.with_mutex(|| {
-            if lsn > slot.data.get().confirmed_flush {
-                let mut d = slot.data.get();
+            if lsn > unsafe { slot.data.get() }.confirmed_flush {
+                let mut d = unsafe { slot.data.get() };
                 d.confirmed_flush = lsn;
-                slot.data.set(d);
+                unsafe { slot.data.set(d) };
             }
         });
     }

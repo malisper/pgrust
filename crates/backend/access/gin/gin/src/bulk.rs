@@ -59,10 +59,38 @@ impl PartialEq for KeyRef {
 impl Eq for KeyRef {}
 impl core::hash::Hash for KeyRef {
     fn hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        // Salt every dedup hash with a per-process random seed. KeyRef keys on
+        // attacker-controlled key VALUE bytes and the map hasher is unkeyed
+        // FxHash; without a secret seed an attacker could precompute key byte
+        // images that all collide and drive the hash-dedup map quadratic during
+        // index build (finding 271). Seeding the hasher state per process (the
+        // seed comes from OS entropy, see dedup_hash_seed) makes those
+        // collisions impossible to construct offline. The salt only shifts
+        // bucket placement; Eq is byte comparison and the emitted entry order
+        // comes from the begin_scan sort, so dedup and dump order stay
+        // byte-identical to C.
+        h.write_u64(dedup_hash_seed());
         self.attnum.hash(h);
         self.category.hash(h);
         self.bytes().hash(h);
     }
+}
+
+/// Per-process random seed for the build accumulator's dedup hashing.
+///
+/// Drawn once from `std::collections::hash_map::RandomState`, which std seeds
+/// from OS entropy — the same DoS-resistant randomness source the pgrcolumnar
+/// dict build uses (writer.rs). Unlike ahash's `RandomState` under this build's
+/// feature set (getrandom/runtime-rng disabled), std's is unconditionally
+/// random per process.
+fn dedup_hash_seed() -> u64 {
+    use core::hash::{BuildHasher, Hasher};
+    static SEED: pgsync::OnceLock<u64> = pgsync::OnceLock::new();
+    *SEED.get_or_init(|| {
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    })
 }
 
 pub struct EntryAcc<'s> {

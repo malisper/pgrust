@@ -3,6 +3,13 @@ use crate::parser::{tparser_get, tparser_init};
 fn setup() {
     mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
     pg_locale::set_database_ctype_is_c(true);
+    // parser.rs's tokenizer loop now polls the check_for_interrupts seam (the
+    // DoS cancellation point); tests drive the parser off-thread with no
+    // interrupt machinery, so install the never-cancels no-op. The seam slot
+    // is process-global and set-once (a second `set` panics), while cargo runs
+    // these tests concurrently — so install exactly once under a Once.
+    static SEAM_INIT: std::sync::Once = std::sync::Once::new();
+    SEAM_INIT.call_once(|| ::postgres_seams::check_for_interrupts::set(|| Ok(())));
 }
 
 fn tokenize(input: &str) -> Vec<(i32, String)> {

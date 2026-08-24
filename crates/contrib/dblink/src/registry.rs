@@ -75,7 +75,9 @@ fn conn_key(name: &str, warn: bool) -> PgResult<String> {
     let mut buf: mcx::PgVec<'_, u8> = mcx::vec_with_capacity_in(scratch.mcx(), name.len())?;
     mcx::vec_append_bytes(&mut buf, name.as_bytes())?;
     parser_small1::truncate_identifier(&mut buf, warn, mbutils::GetDatabaseEncoding())?;
-    Ok(name[..buf.len()].to_string())
+    // `buf` already holds the byte-truncated name; slicing the &str `name` at
+    // buf.len() can land mid-UTF-8-char (SQL_ASCII clips per byte). Use buf.
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 // --- unnamed connection (pconn) ---

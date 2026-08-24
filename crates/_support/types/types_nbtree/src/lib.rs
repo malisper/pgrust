@@ -3,6 +3,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+extern crate alloc;
+
 pub mod dedup;
 pub mod genam;
 pub mod page;

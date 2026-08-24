@@ -26,6 +26,9 @@ pub(crate) fn handshake(
         let (t, mbody) = conn.read_message()?;
         match t {
             b'R' => {
+                if mbody.len() < 4 {
+                    return Err("received malformed authentication request from server".into());
+                }
                 let authtype = be_i32(&mbody[0..4]);
                 if matches!(authtype, 3 | 5 | 10) {
                     conn.used_password = true;
@@ -44,7 +47,11 @@ pub(crate) fn handshake(
                         let Some(pw) = password else {
                             return Err("fe_sendauth: no password supplied".into());
                         };
-                        let salt = &mbody[4..8];
+                        let Some(salt) = mbody.get(4..8) else {
+                            return Err(
+                                "received malformed MD5 authentication request from server".into(),
+                            );
+                        };
                         let stage1 = pg_md5::pg_md5_encrypt(pw.as_bytes(), user.as_bytes());
                         let hex = &stage1[3..];
                         let stage2 = pg_md5::pg_md5_encrypt(hex, salt);
@@ -176,7 +183,7 @@ fn scram_exchange(conn: &mut Conn, password: &str) -> Result<(), String> {
     if t == b'E' {
         return Err(error_text(&parse_diag(&mbody)));
     }
-    if t != b'R' || be_i32(&mbody[0..4]) != 11 {
+    if t != b'R' || mbody.len() < 4 || be_i32(&mbody[0..4]) != 11 {
         return Err("expected SASL continue message from server".into());
     }
     let server_first = String::from_utf8_lossy(&mbody[4..]).into_owned();
@@ -210,7 +217,7 @@ fn scram_exchange(conn: &mut Conn, password: &str) -> Result<(), String> {
     if t == b'E' {
         return Err(error_text(&parse_diag(&mbody)));
     }
-    if t != b'R' || be_i32(&mbody[0..4]) != 12 {
+    if t != b'R' || mbody.len() < 4 || be_i32(&mbody[0..4]) != 12 {
         return Err("expected SASL final message from server".into());
     }
     let server_final = String::from_utf8_lossy(&mbody[4..]).into_owned();

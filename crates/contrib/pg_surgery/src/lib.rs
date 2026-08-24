@@ -26,8 +26,8 @@ use types_storage::bufpage::{MaxHeapTuplesPerPage, PageMut, PageRef};
 use types_tuple::{
     HeapTupleHeaderData, InvalidOffsetNumber, ItemPointerCompare, ItemPointerData,
     ItemPointerGetBlockNumberNoCheck, ItemPointerGetOffsetNumberNoCheck, ItemPointerSet,
-    HEAP_HOT_UPDATED, HEAP_KEYS_UPDATED, HEAP_MOVED, HEAP_MOVED_OFF, HEAP_XACT_MASK,
-    HEAP_XMAX_INVALID, HEAP_XMIN_FROZEN,
+    SizeofHeapTupleHeader, HEAP_HOT_UPDATED, HEAP_KEYS_UPDATED, HEAP_MOVED, HEAP_MOVED_OFF,
+    HEAP_XACT_MASK, HEAP_XMAX_INVALID, HEAP_XMIN_FROZEN,
 };
 use visibilitymap::{VmBuffer, VISIBILITYMAP_VALID_BITS};
 
@@ -246,6 +246,22 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
             if !itemid.is_used() {
                 elog_seams::ereport::call(notice(format!(
                     "skipping tid ({blkno}, {offno}) for relation \"{}\" because it is marked unused",
+                    rel.name()
+                )))?;
+                continue;
+            }
+
+            // The freeze path materializes a &mut HeapTupleHeaderData from the
+            // item. C pg_surgery relies on live items being well-formed tuples;
+            // the port makes that explicit so a too-short item cannot cause an
+            // out-of-bounds header write past the page end into neighboring
+            // shared buffers. Only freeze forms a header (kill just edits the
+            // line pointer), so only freeze needs the guard.
+            if opt == ForceOption::Freeze
+                && (itemid.lp_len() as usize) < SizeofHeapTupleHeader
+            {
+                elog_seams::ereport::call(notice(format!(
+                    "skipping tid ({blkno}, {offno}) for relation \"{}\" because it is too short to be a normal tuple",
                     rel.name()
                 )))?;
                 continue;

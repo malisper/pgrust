@@ -37,6 +37,7 @@ detoast = { path = "../../../access/common/detoast" }
 parse_relation = { path = "../../../parser/parse_relation" }
 rewrite_manip = { path = "../../../rewrite/rewrite_manip" }
 guc = { path = "../../misc/guc" }
+guc_tables = { path = "../../misc/guc_tables" }
 types_guc = { path = "../../../../_support/types/types_guc" }
 types_scan = { path = "../../../../_support/types/types_scan" }
 types_trigger = { path = "../../../../_support/types/types_trigger" }

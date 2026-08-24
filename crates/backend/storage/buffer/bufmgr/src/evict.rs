@@ -133,12 +133,15 @@ pub fn EvictRelUnpinnedBuffers(rlocator: &RelFileLocator) -> PgResult<EvictCount
 
         postgres_seams::check_for_interrupts::call()?;
 
-        // C also prechecks &desc->tag without the header lock; that racy
-        // UnsafeCell read violates BufferDesc::tag()'s pin-or-header-lock
-        // contract here, so the state word is the only unlocked filter and
-        // the tag test happens under the lock below.
+        // Unlocked precheck, safe and saves cycles as in C: read the state
+        // word and a racy snapshot of the tag (no header lock). The racy
+        // snapshot tolerates a torn/stale read, matching bufmgr.c's unlocked
+        // `&desc->tag` precheck; the authoritative test is re-done under the
+        // lock below.
         let buf_state = desc.state.load(Ordering::Relaxed);
-        if buf_state & BM_VALID == 0 {
+        if buf_state & BM_VALID == 0
+            || !tag_matches_locator(&desc.tag_racy_snapshot(), rlocator)
+        {
             continue;
         }
 

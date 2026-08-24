@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use elog::{ereport, message_level_is_interesting};
-use types_core::Oid;
+use types_core::{Oid, BOOTSTRAP_SUPERUSERID};
 use types_error::{
     ErrorLevel, PgError, PgResult, SqlState, DEBUG3, ERRCODE_CANT_CHANGE_RUNTIME_PARAM,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
@@ -1997,4 +1997,100 @@ fn reset_one(var: &mut GucVariable) {
     let gen = var.gen_mut();
     gen.scontext = reset_scontext;
     gen.srole = reset_srole;
+}
+
+// Full fresh-backend reset for one variable: BOTH the live value and the reset
+// default return to the compiled boot_val (with its check-hook extra), the
+// stack is discarded, and all provenance except gen.source (left for the
+// caller's set_source, which keeps guc_nondef_list membership in step) returns
+// to bootstrap. Unlike reset_one (the RESET ALL body), this DISCARDS any
+// reset_val/reset_source a prior session's make_default bookkeeping stamped --
+// values sourced <= PGC_S_OVERRIDE (client startup options, ALTER
+// ROLE/DATABASE SET). That stamp is the mechanism by which a reused pooled
+// worker thread would otherwise carry one session's GUCs into another's task.
+fn reset_one_to_boot(var: &mut GucVariable) {
+    let (bootval, bootextra) = match boot_default_value(var, PGC_S_DEFAULT) {
+        Ok(v) => v,
+        // boot_val always passes its own check hook; on the impossible error
+        // path leave the variable untouched rather than corrupt it.
+        Err(_) => return,
+    };
+    if let Some(hook) = apply_value(
+        var,
+        bootval.clone(),
+        bootextra.clone(),
+        PGC_INTERNAL,
+        BOOTSTRAP_SUPERUSERID,
+    ) {
+        // reset_one fires assign hooks inline (not deferred); match that so the
+        // live backing reflects the boot value before the caller returns.
+        hook();
+    }
+    match (&mut *var, &bootval) {
+        (GucVariable::Bool(c), config_var_val::Boolval(v)) => {
+            c.reset_val = *v;
+            c.reset_extra = bootextra.clone();
+        }
+        (GucVariable::Int(c), config_var_val::Intval(v)) => {
+            c.reset_val = *v;
+            c.reset_extra = bootextra.clone();
+        }
+        (GucVariable::Real(c), config_var_val::Realval(v)) => {
+            c.reset_val = *v;
+            c.reset_extra = bootextra.clone();
+        }
+        (GucVariable::String(c), config_var_val::Stringval(v)) => {
+            c.reset_val = v.clone();
+            c.reset_extra = bootextra.clone();
+        }
+        (GucVariable::Enum(c), config_var_val::Enumval(v)) => {
+            c.reset_val = *v;
+            c.reset_extra = bootextra.clone();
+        }
+        _ => {}
+    }
+    let gen = var.gen_mut();
+    gen.reset_source = PGC_S_DEFAULT;
+    gen.reset_scontext = PGC_INTERNAL;
+    gen.reset_srole = BOOTSTRAP_SUPERUSERID;
+    gen.stack = None;
+}
+
+// Fresh-backend scrub of every session-settable (USERSET/SUSET) variable, for
+// a REUSED pooled/retained worker thread. Unlike reset_all_options (guc.c RESET
+// ALL, which by C parity PRESERVES values sourced <= PGC_S_OVERRIDE and never
+// rebuilds reset_val), this returns each variable to its boot default,
+// discarding both the live value AND the reset_val/reset_source stamps a PRIOR
+// session's client-startup or ALTER ROLE|DATABASE SET installed. A C parallel
+// worker is a fresh process, so such values can never survive into another
+// session's task; a reused pgrust thread must be scrubbed to the same baseline
+// before the new leader's GUC state is applied. The caller re-overlays the
+// postmaster config base (bind_base) to restore postgresql.conf-sourced values,
+// reproducing a freshly initialized backend store exactly.
+pub fn reset_session_options_to_boot(reg: &mut GucRegistry) {
+    use types_guc::GUC_NO_RESET_ALL;
+
+    let nondef = reg.nondef.clone();
+    for idx in nondef {
+        let gen = reg.vars[idx].gen();
+        if gen.context != PGC_SUSET && gen.context != PGC_USERSET {
+            continue;
+        }
+        if gen.flags & GUC_NO_RESET_ALL != 0 {
+            continue;
+        }
+        // reset_one_to_boot discards any transaction GUC stack; keep the
+        // registry's guc_stack_list membership in step so a later AtEOXact_GUC
+        // never pops an already-cleared entry. (At the pooled-worker claim site
+        // the targeted <= PGC_S_OVERRIDE values carry no stack, so this is
+        // normally a no-op, but the invariant must hold for every caller.)
+        let had_stack = reg.vars[idx].gen().stack.is_some();
+        reset_one_to_boot(&mut reg.vars[idx]);
+        if had_stack {
+            reg.stacked.retain(|&i| i != idx);
+        }
+        // set_source(PGC_S_DEFAULT) drops idx from guc_nondef_list.
+        reg.set_source(idx, PGC_S_DEFAULT);
+        reg.note_reportable(idx);
+    }
 }

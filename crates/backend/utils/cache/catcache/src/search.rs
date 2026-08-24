@@ -345,8 +345,11 @@ fn search_miss(cache_id: i32, hash_value: u32, keys: &[CatCKey<'_>; 4]) -> PgRes
             return Ok(install_l2(cache_id, hash_value, &ent));
         }
         match l2cache::acquire_gate(l2key, gen) {
-            // Another thread built it (or the bounded wait expired): re-check.
+            // Another thread built it: re-check.
             l2cache::GateOutcome::Waited => continue,
+            // The bounded wait expired (possible undetected deadlock): fall
+            // back to a private build instead of retrying forever.
+            l2cache::GateOutcome::TimedOut => return search_miss_scan(cache_id, hash_value, keys),
             l2cache::GateOutcome::Recursive => {
                 return search_miss_scan(cache_id, hash_value, keys)
             }

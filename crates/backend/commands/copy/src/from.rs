@@ -48,9 +48,17 @@ pub(crate) enum CopySrc<'mcx, 's> {
     // COPY_CALLBACK (copyfrom_internal.h): tablesync pulls bytes from the
     // publisher's COPY OUT stream. cb(buf, minread) fills up to buf.len()
     // bytes, at least minread unless the stream ends; 0 = EOF.
-    // Lifetime-erased to 'static (SAFETY at construction): CopyFromState is
-    // bounded by 's regardless, and a non-'static dyn's conservative dropck
-    // ("Drop may observe borrows") breaks parallel.rs's worker teardown.
+    //
+    // The trait object is lifetime-erased to 'static so that dropck does NOT
+    // extend the closure's captured borrows across CopyFromState's drop. This
+    // keeps parallel.rs's worker teardown (which drops a chunk-sourced
+    // CopyFromState<'mcx, 'a> and then moves `rel` into table_close on the same
+    // 'a) borrow-checkable. The erasure is a deliberate soundness/ergonomics
+    // trade: it means a callback whose captures own Drop types borrowing data
+    // shorter-lived than the returned CopyFromState would UAF in the box's drop
+    // glue. That obligation is pushed onto the caller — the ONLY constructor of
+    // this variant is the `unsafe fn BeginCopyFromCallback`, whose safety
+    // contract forbids exactly such captures. Do not add a safe constructor.
     Callback { cb: Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + 'static> },
     /// Parallel COPY worker: one segmentator-cut input chunk (whole rows,
     /// in-memory). EOF at the chunk's end.
@@ -163,7 +171,28 @@ pub fn BeginCopyFrom<'mcx: 's, 's>(
 // BeginCopyFrom's data_source_cb form (COPY_CALLBACK): tablesync feeds bytes
 // from the publisher's COPY OUT stream. cb(buf, minread) -> bytes written,
 // 0 at end of stream.
-pub fn BeginCopyFromCallback<'mcx: 's, 's>(
+///
+/// # Safety
+///
+/// The callback's captured state must outlive the returned `CopyFromState`'s
+/// drop. Concretely, the closure's by-value captures must EITHER have no drop
+/// glue (e.g. only shared/`Copy` references, integers), OR any `Drop`-carrying
+/// capture must reference only data that lives at least as long as the returned
+/// `CopyFromState`. This mirrors C's `data_source_cb`, which is stored in
+/// `CopyFromStateData` and may only touch state valid for that struct's
+/// lifetime (copyfrom.c `BeginCopyFrom`).
+///
+/// This precondition cannot be expressed in the type system here: the callback
+/// is lifetime-erased to `'static` inside `CopySrc::Callback` so that the
+/// parallel-COPY worker teardown (which drops a chunk-sourced `CopyFromState`
+/// and then reuses its borrow lifetime for `table_close`) stays
+/// borrow-checkable. Because that erasure discards dropck's guarantee that the
+/// captures outlive the box's drop glue, a caller passing `Drop`-owning
+/// captures that borrow shorter-lived data would trigger a use-after-free when
+/// `CopyFromState` is dropped. Uses of the callback (`next_copy_from`) remain
+/// lifetime-checked via the `'s` still carried by `CopyFromState<'mcx, 's>`;
+/// only the drop-time obligation is the caller's responsibility.
+pub unsafe fn BeginCopyFromCallback<'mcx: 's, 's>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     attnamelist: &NodeList<'_>,
@@ -349,10 +378,16 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
         CopySrc::Parquet(psrc)
     } else if let Some(cb) = data_source_cb.take() {
         progress_type = PROGRESS_COPY_TYPE_CALLBACK;
-        // SAFETY (dropck erasure only): CopyFromState<'mcx, 's> still carries
-        // 's, so the state (and this box) cannot outlive the closure's
-        // captures; erasing 's from the trait object relaxes nothing but
-        // dropck's conservative dyn-Drop borrow extension.
+        // SAFETY: erasing the caller-chosen 's to 'static drops dropck's
+        // dyn-Drop borrow-extension obligation on CopyFromState's drop. That is
+        // only sound because every path that reaches here does so through the
+        // `unsafe fn BeginCopyFromCallback` (or the internal serial callers
+        // that pass `None`), whose documented contract requires the callback's
+        // captures to either be free of Drop glue or to only reference data
+        // that outlives the returned CopyFromState. CopyFromState<'mcx, 's>
+        // still carries 's through `opts`/filename fields, so every *use* of
+        // the callback (next_copy_from) remains lifetime-checked; the erasure
+        // relaxes only the drop-time obligation, which the caller now owns.
         let cb: Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + 'static> =
             unsafe { core::mem::transmute(cb) };
         CopySrc::Callback { cb }

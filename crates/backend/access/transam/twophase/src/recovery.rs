@@ -8,7 +8,7 @@ use types_error::{ErrorLevel, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, LOG, WARN
 
 use crate::codec::{BufferLayout, TwoPhaseFileHeader};
 use crate::core::{
-    corrupt_guard, gxact_load_subxact_data, mark_as_preparing_guts, mark_as_prepared,
+    buffer_layout, corrupt_guard, gxact_load_subxact_data, mark_as_preparing_guts, mark_as_prepared,
     max_prepared_error, process_records, remove_gxact, xlog_read_twophase_data, PostPrepare_Twophase,
 };
 use crate::files;
@@ -50,7 +50,7 @@ pub(crate) fn prepare_redo_add_locked(
 ) -> PgResult<()> {
     debug_assert!(transam_xlog::RecoveryInProgress());
     let hdr = corrupt_guard(TwoPhaseFileHeader::from_bytes(buf), "PrepareRedoAdd")?;
-    let layout = BufferLayout::of(&hdr);
+    let layout = buffer_layout(&hdr, buf, "PrepareRedoAdd")?;
     let gid = decode_gid(buf, &layout, hdr.gidlen);
 
     // 2PC data that already reached disk was restored by restoreTwoPhaseData;
@@ -76,18 +76,18 @@ pub(crate) fn prepare_redo_add_locked(
         return Err(max_prepared_error("PrepareRedoAdd"));
     };
     let g = st.gxact(idx);
-    g.prepared_at.set(hdr.prepared_at);
-    g.prepare_start_lsn.set(start_lsn);
-    g.prepare_end_lsn.set(end_lsn);
-    g.xid.set(hdr.xid);
-    g.owner.set(hdr.owner);
-    g.locking_backend.set(INVALID_PROC_NUMBER);
-    g.valid.set(false);
-    g.ondisk.set(start_lsn == 0);
-    g.inredo.set(true);
-    let mut gidbuf = g.gid.get();
+    unsafe { g.prepared_at.set(hdr.prepared_at) };
+    unsafe { g.prepare_start_lsn.set(start_lsn) };
+    unsafe { g.prepare_end_lsn.set(end_lsn) };
+    unsafe { g.xid.set(hdr.xid) };
+    unsafe { g.owner.set(hdr.owner) };
+    unsafe { g.locking_backend.set(INVALID_PROC_NUMBER) };
+    unsafe { g.valid.set(false) };
+    unsafe { g.ondisk.set(start_lsn == 0) };
+    unsafe { g.inredo.set(true) };
+    let mut gidbuf = unsafe { g.gid.get() };
     gidbuf.set(&gid);
-    g.gid.set(gidbuf);
+    unsafe { g.gid.set(gidbuf) };
     st.push_active(idx);
 
     if origin_id != 0 {
@@ -100,10 +100,10 @@ pub(crate) fn prepare_redo_add_locked(
 pub(crate) fn prepare_redo_remove_locked(xid: TransactionId, give_warning: bool) -> PgResult<()> {
     let st = TwoPhaseState();
     let mut found = NO_GXACT;
-    for i in 0..st.num_prep_xacts.get() {
+    for i in 0..unsafe { st.num_prep_xacts.get() } {
         let idx = st.prep_xact(i);
-        if st.gxact(idx).xid.get() == xid {
-            debug_assert!(st.gxact(idx).inredo.get());
+        if unsafe { st.gxact(idx).xid.get() } == xid {
+            debug_assert!(unsafe { st.gxact(idx).inredo.get() });
             found = idx;
             break;
         }
@@ -111,7 +111,7 @@ pub(crate) fn prepare_redo_remove_locked(xid: TransactionId, give_warning: bool)
     if found == NO_GXACT {
         return Ok(());
     }
-    if st.gxact(found).ondisk.get() {
+    if unsafe { st.gxact(found).ondisk.get() } {
         files::remove_two_phase_file(xid, give_warning)?;
     }
     remove_gxact(found);
@@ -191,7 +191,7 @@ fn process_two_phase_buffer(
             .unwrap_err());
     }
 
-    let layout = BufferLayout::of(&hdr);
+    let layout = buffer_layout(&hdr, &buf, "ProcessTwoPhaseBuffer")?;
     let subxids = decode_children(&buf, &layout, hdr.nsubxacts as usize);
     for &subxid in &subxids {
         debug_assert!(TransactionIdFollows(subxid, xid));
@@ -248,15 +248,15 @@ fn prescan_prepared_transactions_impl() -> PgResult<(TransactionId, Vec<Transact
         // C's plain `i++` loop: a swap-removing ProcessTwoPhaseBuffer leaves
         // the entry moved into slot i unscanned this pass — reproduced.
         let mut i = 0;
-        while i < st.num_prep_xacts.get() {
+        while i < unsafe { st.num_prep_xacts.get() } {
             let idx = st.prep_xact(i);
             let g = st.gxact(idx);
-            debug_assert!(g.inredo.get());
-            let xid = g.xid.get();
+            debug_assert!(unsafe { g.inredo.get() });
+            let xid = unsafe { g.xid.get() };
             let buf = process_two_phase_buffer(
                 xid,
-                g.prepare_start_lsn.get(),
-                g.ondisk.get(),
+                unsafe { g.prepare_start_lsn.get() },
+                unsafe { g.ondisk.get() },
                 false,
                 true,
             )?;
@@ -286,23 +286,23 @@ pub fn TwoPhaseGetXidByVirtualXID(
 
     let st = TwoPhaseState();
     lock_twophase_state(lwlock::LW_SHARED);
-    for i in 0..st.num_prep_xacts.get() {
+    for i in 0..unsafe { st.num_prep_xacts.get() } {
         let g = st.gxact(st.prep_xact(i));
-        if !g.valid.get() {
+        if !unsafe { g.valid.get() } {
             continue;
         }
-        let proc = lmgr_proc::GetPGProcByNumber(g.pgprocno.get());
+        let proc = lmgr_proc::GetPGProcByNumber(unsafe { g.pgprocno.get() });
         // Startup process sets proc->vxid.procNumber to INVALID_PROC_NUMBER,
         // so redo-restored gxacts never match (C asserts !inredo on match).
         if proc.vxid.procNumber.load(Relaxed) == proc_number
             && proc.vxid.lxid.load(Relaxed) == lxid
         {
-            debug_assert!(!g.inredo.get());
+            debug_assert!(!unsafe { g.inredo.get() });
             if result != ::types_core::InvalidTransactionId {
                 have_more = true;
                 break;
             }
-            result = g.xid.get();
+            result = unsafe { g.xid.get() };
         }
     }
     unlock_twophase_state();
@@ -315,14 +315,14 @@ pub fn StandbyRecoverPreparedTransactions() -> PgResult<()> {
     let st = TwoPhaseState();
     let inner = (|| -> PgResult<()> {
         let mut i = 0;
-        while i < st.num_prep_xacts.get() {
+        while i < unsafe { st.num_prep_xacts.get() } {
             let idx = st.prep_xact(i);
             let g = st.gxact(idx);
-            debug_assert!(g.inredo.get());
+            debug_assert!(unsafe { g.inredo.get() });
             let _ = process_two_phase_buffer(
-                g.xid.get(),
-                g.prepare_start_lsn.get(),
-                g.ondisk.get(),
+                unsafe { g.xid.get() },
+                unsafe { g.prepare_start_lsn.get() },
+                unsafe { g.ondisk.get() },
                 true,
                 false,
             )?;
@@ -341,15 +341,15 @@ pub fn RecoverPreparedTransactions() -> PgResult<()> {
     lock_twophase_state(LW_EXCLUSIVE);
     let inner = (|| -> PgResult<()> {
         let mut i = 0;
-        while i < st.num_prep_xacts.get() {
+        while i < unsafe { st.num_prep_xacts.get() } {
             let idx = st.prep_xact(i);
             let g = st.gxact(idx);
-            let xid = g.xid.get();
+            let xid = unsafe { g.xid.get() };
 
             let Some(buf) = process_two_phase_buffer(
                 xid,
-                g.prepare_start_lsn.get(),
-                g.ondisk.get(),
+                unsafe { g.prepare_start_lsn.get() },
+                unsafe { g.ondisk.get() },
                 true,
                 false,
             )?
@@ -367,12 +367,12 @@ pub fn RecoverPreparedTransactions() -> PgResult<()> {
             let hdr =
                 corrupt_guard(TwoPhaseFileHeader::from_bytes(&buf), "RecoverPreparedTransactions")?;
             debug_assert_eq!(hdr.xid, xid);
-            let layout = BufferLayout::of(&hdr);
+            let layout = buffer_layout(&hdr, &buf, "RecoverPreparedTransactions")?;
             let gid = decode_gid(&buf, &layout, hdr.gidlen);
             let subxids = decode_children(&buf, &layout, hdr.nsubxacts as usize);
 
             mark_as_preparing_guts(idx, xid, &gid, hdr.prepared_at, hdr.owner, hdr.database);
-            g.inredo.set(false);
+            unsafe { g.inredo.set(false) };
 
             gxact_load_subxact_data(idx, &subxids);
             mark_as_prepared(idx, true)?;
@@ -413,17 +413,17 @@ pub fn CheckPointTwoPhase(redo_horizon: XLogRecPtr) -> PgResult<()> {
     let mut serialized_xacts = 0u32;
     lock_twophase_state(lwlock::LW_SHARED);
     let inner = (|| -> PgResult<()> {
-        for i in 0..st.num_prep_xacts.get() {
+        for i in 0..unsafe { st.num_prep_xacts.get() } {
             let g = st.gxact(st.prep_xact(i));
-            if (g.valid.get() || g.inredo.get())
-                && !g.ondisk.get()
-                && g.prepare_end_lsn.get() <= redo_horizon
+            if (unsafe { g.valid.get() } || unsafe { g.inredo.get() })
+                && !unsafe { g.ondisk.get() }
+                && unsafe { g.prepare_end_lsn.get() } <= redo_horizon
             {
-                let buf = xlog_read_twophase_data(g.prepare_start_lsn.get())?;
-                files::recreate_two_phase_file(g.xid.get(), &buf)?;
-                g.ondisk.set(true);
-                g.prepare_start_lsn.set(0);
-                g.prepare_end_lsn.set(0);
+                let buf = xlog_read_twophase_data(unsafe { g.prepare_start_lsn.get() })?;
+                files::recreate_two_phase_file(unsafe { g.xid.get() }, &buf)?;
+                unsafe { g.ondisk.set(true) };
+                unsafe { g.prepare_start_lsn.set(0) };
+                unsafe { g.prepare_end_lsn.set(0) };
                 serialized_xacts += 1;
             }
         }

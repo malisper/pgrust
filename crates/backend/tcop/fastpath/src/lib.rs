@@ -320,7 +320,16 @@ fn parse_fcall_arguments<'mcx>(
             let mut finfo = fmgr_seams::fmgr_info::call(typinput)?;
             let v = types_fmgr::input_function_call(&mut finfo, cstr, typioparam, -1, mcx)?;
             // C stores the value even for a NULL arg; isnull was set above.
-            fcinfo.args[i].value = v;
+            // The result may alias finfo's fn_extra scratch (fc_textin's
+            // OutBuf, fc_namein's InScratch, ...), which is freed when `finfo`
+            // drops at the end of this arm — long before the target function
+            // runs, since HandleFunctionRequest invokes only after every
+            // argument has been parsed. C is safe here because
+            // OidInputFunctionCall pallocs its result in the surrounding
+            // (message) context; mirror that by copying any by-ref datum into
+            // `mcx` before `finfo` dies (the copy_param_datum discipline of
+            // exec_bind_message).
+            fcinfo.args[i].value = retain_arg_datum(mcx, v, raw.is_none(), fip.argtypes[i])?;
         } else if aformat == 1 {
             let (typreceive, typioparam) =
                 lsyscache::typ::getTypeBinaryInputInfo(fip.argtypes[i])?;
@@ -329,7 +338,7 @@ fn parse_fcall_arguments<'mcx>(
                 None => {
                     let v =
                         types_fmgr::receive_function_call(&mut finfo, None, typioparam, -1, mcx)?;
-                    fcinfo.args[i].value = v;
+                    fcinfo.args[i].value = retain_arg_datum(mcx, v, true, fip.argtypes[i])?;
                 }
                 Some(raw) => {
                     let mut abuf = StringInfo::with_capacity_in(mcx, raw.len() + 1)?;
@@ -352,6 +361,12 @@ fn parse_fcall_arguments<'mcx>(
                             .into_error()
                             .into());
                     }
+                    // Every ported typreceive currently allocates its result in
+                    // the caller's memory context, but that is an unenforced
+                    // convention; copy here too so a future scratch-returning
+                    // typreceive cannot reintroduce the use-after-free (finfo's
+                    // scratch is freed when this arm ends, before invocation).
+                    let v = retain_arg_datum(mcx, v, false, fip.argtypes[i])?;
                     fcinfo.set_arg(i, v);
                 }
             }
@@ -377,4 +392,114 @@ fn client_to_server_cstring<'mcx>(mcx: Mcx<'mcx>, raw: &[u8]) -> PgResult<PgVec<
     v.try_reserve_exact(1).map_err(|_| mcx.oom(1))?;
     v.push(0);
     Ok(v)
+}
+
+/// Copy a by-ref input/receive-function result into `mcx` so it outlives the
+/// per-argument `FmgrInfo` whose `fn_extra` scratch may back it (fc_textin's
+/// OutBuf, fc_namein's InScratch, ...). By-value and NULL datums are returned
+/// unchanged. This is `datumCopy` scoped to fastpath arguments — the same
+/// discipline `exec_bind_message` uses via `copy_param_datum`, and the reason
+/// C's palloc'd input-function results survive the drop of the stack-local
+/// `FmgrInfo` used by `parse_fcall_arguments`.
+fn retain_arg_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: Datum,
+    is_null: bool,
+    argtype: Oid,
+) -> PgResult<Datum> {
+    if is_null {
+        return Ok(value);
+    }
+    let (typlen, typbyval) = lsyscache::typ::get_typlenbyval(argtype)?;
+    if typbyval {
+        return Ok(value);
+    }
+    datum_copy_in(mcx, value, typlen)
+}
+
+// datumCopy (datum.c) scoped to fastpath arguments — a mirror of
+// exec_bind_message's datum_copy_in (extended_query.rs). By-ref sources are
+// input/receive-function results (canonical 4B varlena today), but the -1 arm
+// is C's VARSIZE_ANY so a future short/toast source copies, never misreads.
+fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Datum> {
+    let p = value.as_usize() as *const u8;
+    if p.is_null() {
+        return Ok(Datum::null());
+    }
+    let size = match typlen {
+        -1 => {
+            // SAFETY: non-null by-ref varlena datum, readable for its
+            // header-declared (VARSIZE_ANY) size.
+            unsafe {
+                let b0 = *p;
+                if b0 == 0x01 {
+                    2 + match *p.add(1) {
+                        18 => 16,
+                        1 => 8,
+                        2 | 3 => panic!(
+                            "datum_copy_in: expanded-object flatten (EOH_flatten_into) unported"
+                        ),
+                        tag => panic!("datum_copy_in: unknown vartag {tag}"),
+                    }
+                } else if b0 & 0x01 != 0 {
+                    (b0 as usize >> 1) & 0x7F
+                } else {
+                    ::datum::VarlenaRef::from_ptr(p).varsize()
+                }
+            }
+        }
+        -2 => {
+            let mut n = 0usize;
+            // SAFETY: non-null NUL-terminated cstring datum.
+            while unsafe { *p.add(n) } != 0 {
+                n += 1;
+            }
+            n + 1
+        }
+        l => {
+            debug_assert!(l > 0);
+            l as usize
+        }
+    };
+    // SAFETY: `size` bytes readable per the arms above.
+    let src = unsafe { core::slice::from_raw_parts(p, size) };
+    let out = mcx::slice_in(mcx, src)?;
+    Ok(Datum::from_usize(out.leak().as_ptr() as usize))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcx::MemoryContext;
+
+    // A by-ref argument datum produced against a per-argument FmgrInfo scratch
+    // must survive after that scratch is freed. retain_arg_datum copies it into
+    // the surviving message context; the copy stays readable once the scratch
+    // context is dropped, and it is a distinct allocation from the source.
+    #[test]
+    fn retain_arg_datum_copies_byref_across_scratch_drop() {
+        let msg_ctx = MemoryContext::new("message");
+        let msg = msg_ctx.mcx();
+
+        let payload: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        let copied;
+        {
+            // Stand in for FmgrInfo fn_extra scratch: a fixed-length (typlen=8,
+            // typbyval=false) by-ref datum living only for this block.
+            let scratch_ctx = MemoryContext::new("fmgr-scratch");
+            let scratch = mcx::slice_in(scratch_ctx.mcx(), &payload).unwrap();
+            let d = Datum::from_usize(scratch.leak().as_ptr() as usize);
+
+            // datum_copy_in exercised directly (retain_arg_datum's syscache
+            // lookup needs a live catalog; the copy itself is the hazard fix).
+            // typlen = 8 stands in for a fixed-length by-ref argument type.
+            copied = datum_copy_in(msg, d, 8).unwrap();
+            assert_ne!(copied.as_usize(), d.as_usize(), "copy must be a fresh chunk");
+            // scratch_ctx drops here, freeing the source datum.
+        }
+
+        // SAFETY: `copied` lives in `msg`, which is still alive.
+        let got = unsafe { core::slice::from_raw_parts(copied.as_usize() as *const u8, 8) };
+        assert_eq!(got, &payload, "copied datum must retain its bytes");
+    }
 }

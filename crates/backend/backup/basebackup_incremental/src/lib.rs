@@ -25,10 +25,14 @@
 //!   (json_parse_manifest_incremental_*, MIN_CHUNK/MAX_CHUNK buffering so the
 //!   checksum line lands in the is_last call). pgrust's Stage-2
 //!   `parse_manifest` is whole-buffer only, so `AppendIncrementalManifestData`
-//!   accumulates verbatim (Q3 ruling: no cap, no spill — C-compatible
-//!   unbounded acceptance) and `FinalizeIncrementalManifest` runs one
+//!   accumulates verbatim and `FinalizeIncrementalManifest` runs one
 //!   whole-buffer parse. The checksum covers the same bytes and every error
-//!   string is unchanged, so the difference is not client-visible.
+//!   string is unchanged, so the difference is not client-visible. Because
+//!   the whole manifest is retained (no incremental parser to drain it), the
+//!   accumulation buffer is bounded to MAX_ALLOC_SIZE (1 GB - 1) with fallible
+//!   allocation — the same ceiling and catchable-ERROR behavior C's StringInfo
+//!   gives every buffer — so a replication client cannot stream an unbounded
+//!   run of CopyData packets to exhaust server memory or abort the process.
 //! - **brtab lifetime.** C stashes the merged block-reference table in
 //!   `ib->brtab` for GetFileBackupMethod. Here `PrepareForIncrementalBackup`
 //!   *returns* the `BlockRefTable`, tied to the caller's (command-lifetime)
@@ -45,7 +49,7 @@ use std::collections::HashMap;
 use blkreftable::{BlockRefTable, BlockRefTableReader};
 use elog::ereport;
 use manifest::checksum::PgChecksumType;
-use mcx::{Mcx, MemoryContext, PgVec};
+use mcx::{oom_named, Mcx, MemoryContext, PgVec, MAX_ALLOC_SIZE};
 use parse_manifest::{json_parse_manifest, JsonManifestParseContext};
 use timeline_seams::TimeLineHistoryEntry;
 use types_core::{
@@ -54,7 +58,7 @@ use types_core::{
 };
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
 use types_storage::RelFileLocator;
 use walsummarizer::{
@@ -108,7 +112,8 @@ pub struct IncrementalBackupInfo {
     system_identifier: u64,
 
     /// C: ib->buf — temporary buffer storing the manifest while parsing.
-    /// Grows unbounded, verbatim C behavior (Q3 ruling).
+    /// Bounded to MAX_ALLOC_SIZE with fallible growth in
+    /// AppendIncrementalManifestData (C: StringInfo's MaxAllocSize ceiling).
     buf: Vec<u8>,
     /// True once FinalizeIncrementalManifest has run (C: buf.data == NULL).
     finalized: bool,
@@ -138,14 +143,64 @@ pub fn CreateIncrementalBackupInfo(system_identifier: u64) -> IncrementalBackupI
     }
 }
 
+/// The MAX_ALLOC_SIZE admission check for the manifest accumulation buffer,
+/// split out so the bound is unit-testable without allocating ~1 GB. `len` is
+/// the bytes already buffered, `needed` the size of the incoming chunk;
+/// rejects when the total would exceed the ceiling C's StringInfo enforces.
+/// (`len` is kept <= MAX_ALLOC_SIZE by this very check, so `saturating_sub`
+/// never actually saturates — it is belt-and-suspenders.)
+fn check_manifest_capacity(len: usize, needed: usize) -> PgResult<()> {
+    if needed > MAX_ALLOC_SIZE.saturating_sub(len) {
+        return Err(elog::PgError::error(format!(
+            "backup manifest exceeds maximum allowed length ({MAX_ALLOC_SIZE} bytes)"
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .with_detail(format!(
+            "Cannot enlarge manifest buffer containing {len} bytes by {needed} more bytes."
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 impl IncrementalBackupInfo {
     /// C: AppendIncrementalManifestData — each chunk of manifest data
     /// received from the client is passed here. C interleaves incremental
-    /// parsing (MIN_CHUNK/MAX_CHUNK); we accumulate and parse in
+    /// parsing (MIN_CHUNK/MAX_CHUNK) so its staging StringInfo never holds
+    /// more than ~MAX_CHUNK at once; pgrust's Stage-2 `parse_manifest` is
+    /// whole-buffer only, so this accumulates verbatim and parses in
     /// FinalizeIncrementalManifest (see module comment).
-    pub fn AppendIncrementalManifestData(&mut self, data: &[u8]) {
+    ///
+    /// Because the whole manifest is retained here rather than streamed
+    /// through an incremental parser, the buffer is a single logical
+    /// allocation and is held to the same ceiling every C StringInfo
+    /// enforces — MAX_ALLOC_SIZE (1 GB - 1). A replication client that
+    /// streams an unbounded run of CopyData packets is rejected with a
+    /// catchable ERRCODE_PROGRAM_LIMIT_EXCEEDED, matching C's
+    /// enlargeStringInfo overflow ERROR, instead of driving the process
+    /// into an infallible-allocation abort. Growth uses `try_reserve`, so an
+    /// allocator failure short of the cap also surfaces as a per-command
+    /// out-of-memory ERROR (C: palloc failure is a catchable ERROR, not a
+    /// crash) rather than aborting the whole thread-per-backend server.
+    pub fn AppendIncrementalManifestData(&mut self, data: &[u8]) -> PgResult<()> {
         debug_assert!(!self.finalized, "append after FinalizeIncrementalManifest");
+
+        let len = self.buf.len();
+        let needed = data.len();
+
+        // C: enlargeStringInfo caps any single buffer at MaxAllocSize and
+        // raises ERRCODE_PROGRAM_LIMIT_EXCEEDED. Mirror that ceiling here so
+        // client-controlled accumulation cannot grow without bound.
+        check_manifest_capacity(len, needed)?;
+
+        // Fallible allocation: an allocator failure becomes a catchable
+        // per-command ERROR instead of handle_alloc_error aborting the
+        // process (C: palloc failure raises ERROR).
+        self.buf
+            .try_reserve(needed)
+            .map_err(|_| oom_named("incremental backup manifest", len + needed))?;
         self.buf.extend_from_slice(data);
+        Ok(())
     }
 
     /// C: FinalizeIncrementalManifest — parse the manifest (the whole text,

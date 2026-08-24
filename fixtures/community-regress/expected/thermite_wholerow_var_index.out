@@ -1,0 +1,14 @@
+-- Finding (thermite idx 284): a whole-row Var in an index predicate/expression
+-- panicked the relcache index-attr lane (pull_varattnos assert). DML on such a
+-- table must succeed with all columns treated as index-referenced.
+CREATE TABLE thermite_wr(a int);
+CREATE INDEX thermite_wri ON thermite_wr (a) WHERE thermite_wr IS NOT NULL;
+INSERT INTO thermite_wr VALUES (1);
+UPDATE thermite_wr SET a = 2;
+SELECT a FROM thermite_wr;
+ a 
+---
+ 2
+(1 row)
+
+DROP TABLE thermite_wr;

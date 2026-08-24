@@ -112,7 +112,8 @@ fn crash_reset_restores_boot_image() {
     cp.ckpt_done.store(2, Relaxed);
     cp.ckpt_failed.store(1, Relaxed);
     cp.ckpt_flags.store(CHECKPOINT_IMMEDIATE, Relaxed);
-    cp.num_requests.set(5);
+    // SAFETY: test-exclusive (TEST_LOCK held); serialized by CheckpointerCommLock
+    unsafe { cp.num_requests.set(5) };
     ReqShutdownXLOG();
 
     CheckpointerShmemResetAfterCrash();
@@ -123,7 +124,8 @@ fn crash_reset_restores_boot_image() {
     assert_eq!(cp.ckpt_done.load(Relaxed), 0);
     assert_eq!(cp.ckpt_failed.load(Relaxed), 0);
     assert_eq!(cp.ckpt_flags.load(Relaxed), 0);
-    assert_eq!(cp.num_requests.get(), 0);
+    // SAFETY: test-exclusive (TEST_LOCK held); serialized by CheckpointerCommLock
+    assert_eq!(unsafe { cp.num_requests.get() }, 0);
     assert!(!SHUTDOWN_XLOG_PENDING.load(Relaxed));
 }
 
@@ -148,12 +150,14 @@ fn absorb_oom_is_error_and_lock_release_recovers() {
 
     let prev_type = miscinit::GetMyBackendType();
     miscinit::SetMyBackendType(types_core::BackendType::Checkpointer);
-    cp.num_requests.set(4);
+    // SAFETY: test-exclusive (TEST_LOCK held); serialized by CheckpointerCommLock
+    unsafe { cp.num_requests.set(4) };
 
     ABSORB_SCRATCH_TEST_LIMIT.store(1, Relaxed);
     let res = AbsorbSyncRequests();
     ABSORB_SCRATCH_TEST_LIMIT.store(0, Relaxed);
-    cp.num_requests.set(0);
+    // SAFETY: test-exclusive (TEST_LOCK held); serialized by CheckpointerCommLock
+    unsafe { cp.num_requests.set(0) };
 
     let err = res.expect_err("capped absorb scratch must fail the reserve");
     assert_eq!(err.sqlstate, types_error::ERRCODE_OUT_OF_MEMORY);

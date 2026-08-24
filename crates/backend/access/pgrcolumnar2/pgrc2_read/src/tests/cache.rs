@@ -175,6 +175,37 @@ fn eviction_is_safe_for_inflight_holders() {
 }
 
 #[test]
+fn entry_count_cap_bounds_zero_resident_entries() {
+    // Regression: entries that are opened but never decoded have
+    // resident()==0, so the byte-budget janitor never reclaims them even
+    // though each pins a live kernel fd. A stream of such opens (e.g. a
+    // self-scan of an aborted publish, or a zero-row scan) must not grow the
+    // registry without bound: the entry-count cap reclaims LRU-unpinned
+    // entries regardless of resident bytes.
+    let b = small_part();
+    let reg = PartRegistry::new(u64::MAX); // byte budget can never bite
+    reg.set_max_entries(2);
+    assert_eq!(reg.resident_bytes(), 0, "no part decoded: zero resident");
+    // Open many distinct identities, dropping each pin so it is reclaimable.
+    for ino in 0..64u64 {
+        let pin = reg
+            .open_pinned(&PartExpect::none(), opener(&b, 7, 1000 + ino))
+            .expect("open");
+        drop(pin);
+        assert!(
+            reg.len() <= 2,
+            "entry count stays bounded by the cap ({} entries)",
+            reg.len()
+        );
+    }
+    assert_eq!(reg.resident_bytes(), 0, "still nothing decoded");
+    assert!(
+        reg.counters().evictions >= 62,
+        "the cap drove count-based eviction of zero-resident entries"
+    );
+}
+
+#[test]
 fn invalidate_and_clear() {
     let b = small_part();
     let reg = PartRegistry::new(u64::MAX);

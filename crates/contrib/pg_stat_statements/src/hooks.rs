@@ -151,7 +151,7 @@ pub(crate) fn pgss_planner_leave(
 /// `pgss_ExecutorStart`: arm queryDesc->totaltime for tracked statements.
 pub(crate) fn pgss_executor_start(h: QueryDescHandle) {
     execmain::with_qd(h, |qd| {
-        if pgss_enabled(nesting_level()) && qd.plannedstmt().queryId.get() != 0 {
+        if pgss_enabled(nesting_level()) && unsafe { qd.plannedstmt().queryId.get() } != 0 {
             // Fresh per execution: a rearmed parked portal reuses the
             // QueryDesc, so overwrite rather than C's if-NULL alloc.
             let mut instr = Box::new(Instrumentation::default());
@@ -185,7 +185,7 @@ pub(crate) fn pgss_executor_finish_leave(_h: QueryDescHandle) {
 pub(crate) fn pgss_executor_end(h: QueryDescHandle) {
     execmain::with_qd(h, |qd| {
         let pstmt = qd.plannedstmt();
-        let query_id = pstmt.queryId.get();
+        let query_id = unsafe { pstmt.queryId.get() };
         if query_id == 0 || qd.totaltime.is_none() || !pgss_enabled(nesting_level()) {
             return;
         }
@@ -223,10 +223,10 @@ pub(crate) fn pgss_executor_end(h: QueryDescHandle) {
 /// `pgss_ProcessUtility` (enter half): zero the pstmt queryId in place and
 /// open the timing frame.
 pub(crate) fn pgss_process_utility_enter(pstmt: &PlannedStmt<'_>) {
-    let saved_query_id = pstmt.queryId.get();
+    let saved_query_id = unsafe { pstmt.queryId.get() };
     let enabled = gucs::pgss_track_utility() && pgss_enabled(nesting_level());
     if enabled {
-        pstmt.queryId.set(0);
+        unsafe { pstmt.queryId.set(0) };
     }
     let tag = pstmt.utilityStmt.map(|u| u.node_tag());
     let exempt = matches!(tag, Some(NodeTag::T_ExecuteStmt) | Some(NodeTag::T_PrepareStmt));

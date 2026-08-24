@@ -71,14 +71,27 @@ pub fn fc_int2vectorout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     let mcx = fcinfo.result_mcx();
     let [a] = fcinfo.args_n::<1>();
     let p = a.value.as_usize() as *const u8;
-    // SAFETY: int2vector datums are never toasted (plain storage); header +
-    // dim1 i16 payload are readable in-tuple bytes.
-    let (hdr, values) = unsafe {
-        let hdr = core::ptr::read_unaligned(p.cast::<types_array::int2vector>());
+    // SAFETY: int2vector datums are never toasted (plain storage); the fixed
+    // header is readable in-tuple bytes.
+    let hdr = unsafe { core::ptr::read_unaligned(p.cast::<types_array::int2vector>()) };
+    // Structural check FIRST (as int2vectorout / C do): this is what makes the
+    // empty/invalid-array cast fail with "array is not a valid int2vector".
+    // Only once it passes is the header a genuine 1-D vector whose dim1 is a
+    // real field.
+    crate::check_valid_int2vector(hdr.ndim, hdr.dataoffset, hdr.elemtype)?;
+    // Then reject a crafted dim1 that claims more int2s than the datum's
+    // varlena size can hold, before forming the values slice (OOB read). A
+    // valid dim1==0 vector fits and passes. Routes to the SAME error as the
+    // structural check, not a new "corrupt ..." message.
+    // SAFETY: 4B-U plain-storage int2vector datum; header readable for VARSIZE.
+    let varsize = unsafe { ::datum::varlena::VarlenaRef::from_ptr(p) }.varsize();
+    if !types_array::vector_dim1_fits(varsize, hdr.dim1, core::mem::size_of::<i16>()) {
+        return Err(crate::not_valid_int2vector());
+    }
+    // SAFETY: dim1 is now bounded by VARSIZE; the values slice stays in-image.
+    let values = unsafe {
         let n = hdr.dim1.max(0) as usize;
-        let vals =
-            core::slice::from_raw_parts(p.add(crate::INT2VECTOR_HDRSZ).cast::<i16>(), n);
-        (hdr, vals)
+        core::slice::from_raw_parts(p.add(crate::INT2VECTOR_HDRSZ).cast::<i16>(), n)
     };
     let mut out = crate::int2vectorout(mcx, hdr.ndim, hdr.dataoffset, hdr.elemtype, values)?;
     out.push(0);

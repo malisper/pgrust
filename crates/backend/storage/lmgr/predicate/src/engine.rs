@@ -25,8 +25,8 @@ use types_core::{
     VirtualTransactionId,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OUT_OF_MEMORY,
-    ERRCODE_T_R_SERIALIZATION_FAILURE,
+    PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_OUT_OF_MEMORY, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use types_hash::hsearch::{
     HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_ENTER, HASH_ENTER_NULL, HASH_FIND, HASH_FIXED_SIZE,
@@ -2972,6 +2972,16 @@ fn recover_out_of_shared_memory() -> Box<PgError> {
     Box::new(PgError::error("out of shared memory").with_sqlstate(ERRCODE_OUT_OF_MEMORY))
 }
 
+// A structurally invalid two-phase predicate-lock statefile record. C only
+// Assert()s these invariants (debug-only); we enforce them in release builds so
+// a crafted / truncated / misordered 2PC record produces a catchable corruption
+// error instead of a null-pointer dereference or a slice-index panic.
+#[track_caller]
+#[cold]
+fn recover_corrupt_record(msg: &'static str) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_DATA_CORRUPTED))
+}
+
 // AtPrepare_PredicateLocks: write 2PC statefile records for the current
 // SERIALIZABLEXACT and each predicate lock it holds, so a post-crash recovery
 // can rebuild the SSI state. The in-memory sxact itself is NOT torn down here;
@@ -3096,11 +3106,15 @@ pub fn predicatelock_twophase_recover(
     recdata: &[u8],
 ) -> PgResult<()> {
     unsafe {
-        debug_assert_eq!(recdata.len(), SIZEOF_TWOPHASE_PREDICATE_RECORD);
+        // Structural validation, enforced in release builds. A crafted 2PC
+        // statefile can hand us a truncated or wrong-length record; reject it
+        // before slicing (a short slice would otherwise panic on the index).
+        if recdata.len() != SIZEOF_TWOPHASE_PREDICATE_RECORD {
+            return Err(recover_corrupt_record(
+                "invalid length of two-phase predicate-lock record",
+            ));
+        }
         let rtype = u32::from_ne_bytes(recdata[0..4].try_into().unwrap());
-        debug_assert!(
-            rtype == TWOPHASEPREDICATERECORD_XACT || rtype == TWOPHASEPREDICATERECORD_LOCK
-        );
         let procno = my_procno();
 
         if rtype == TWOPHASEPREDICATERECORD_XACT {
@@ -3183,7 +3197,7 @@ pub fn predicatelock_twophase_recover(
             }
 
             LWLockRelease(SerializableXactHashLock())?;
-        } else {
+        } else if rtype == TWOPHASEPREDICATERECORD_LOCK {
             // Per-lock record: recreate the PREDICATELOCK.
             let mut target = ZERO_TARGET_TAG;
             target.locktag_field1 = u32::from_ne_bytes(recdata[4..8].try_into().unwrap());
@@ -3202,12 +3216,30 @@ pub fn predicatelock_twophase_recover(
             )?;
             LWLockRelease(SerializableXactHashLock())?;
 
-            debug_assert!(!sp.is_null());
+            // A LOCK record must be preceded by the XACT record that registered
+            // its xid. A crafted / misordered statefile (LOCK without its XACT)
+            // leaves the lookup empty; error cleanly instead of dereferencing a
+            // null SERIALIZABLEXID. C only Assert()s this (debug-only).
+            if sp.is_null() {
+                return Err(recover_corrupt_record(
+                    "two-phase predicate-lock record references an unknown transaction",
+                ));
+            }
             let sxid = sp as *mut SERIALIZABLEXID;
             let sxact = (*sxid).myXact;
-            debug_assert!(sxact != InvalidSerializableXact);
+            if sxact == InvalidSerializableXact {
+                return Err(recover_corrupt_record(
+                    "two-phase predicate-lock record references an invalid transaction",
+                ));
+            }
 
             CreatePredicateLock(&target, targettaghash, sxact)?;
+        } else {
+            // Unexpected record type tag (neither XACT nor LOCK). C Assert()s
+            // this; enforce it in release builds as a corruption error.
+            return Err(recover_corrupt_record(
+                "invalid type of two-phase predicate-lock record",
+            ));
         }
         Ok(())
     }

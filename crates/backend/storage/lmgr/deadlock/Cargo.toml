@@ -12,6 +12,7 @@ path = "src/lib.rs"
 backend_status = { path = "../../../utils/activity/backend_status" }
 deadlock_seams = { path = "../deadlock_seams" }
 init_small = { path = "../../../utils/init/init_small" }
+twophase_config = { path = "../../../access/transam/twophase_config" }
 lmgr_proc = { path = "../lmgr_proc" }
 lmgr_seams = { path = "../lmgr_seams" }
 lock = { path = "../lock" }

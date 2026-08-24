@@ -232,6 +232,15 @@ fn skeleton_rearm_exec(qd: &mut QueryDescData, exec: &mut ExecutorHandle) -> PgR
     let snapshot = qd.snapshot.clone();
     let reused = exec.with_mut(|data| -> PgResult<bool> {
         let ExecData { estate, planstate } = data;
+        // P1b (idx-112, CWE-863): the retained executor's compiled expressions
+        // froze in their compile-time function EXECUTE-ACL decisions. C rebuilds
+        // every ExprState per ExecutorStart, so object_aclcheck(PROCEDURE, ...,
+        // ACL_EXECUTE) re-runs on each cached-plan execution — reuse must too,
+        // or a REVOKE EXECUTE / SET ROLE between EXECUTEs would go unchecked.
+        // Replay the recorded checks against the CURRENT user id before any
+        // reuse work; on denial this errors with C's text (permission denied).
+        let qcx = estate.es_query_cxt;
+        ::execexpr::recheck_execute_acls(qcx, &estate.es_execute_acl_funcs)?;
         if !estate.param_stable_restamp(new_params) {
             return Ok(false);
         }
@@ -241,6 +250,13 @@ fn skeleton_rearm_exec(qd: &mut QueryDescData, exec: &mut ExecutorHandle) -> PgR
         estate.es_processed = 0;
         estate.es_total_processed = 0;
         estate.es_finished = false;
+        // [sqe-cursors] es_sqe_spool holds the PRIOR execution's answer plane.
+        // Both rearm faces (TLS-skeleton reuse and portal-retention rearm)
+        // funnel through here, and the sqe dispatch faces resume off a live
+        // spool ahead of any snapshot/currency check — so a retained spool
+        // would serve the previous execution's rows. Invalidate it as part of
+        // the per-execution state reset; this execution rebuilds its own.
+        estate.es_sqe_spool = None;
         let ps = planstate.as_mut().expect("skeleton holds a plan state");
         skeleton_rebind_tree(ps, estate)?;
         crate::execami::exec_re_scan(ps, estate)?;
@@ -261,7 +277,7 @@ pub(crate) fn executor_rearm_seam(
     params: ParamListHandle,
 ) -> PgResult<bool> {
     let reused = querydesc::with_qd(h, |qd| {
-        backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId.get(), false);
+        backend_status_seams::pgstat_report_query_id::call(unsafe { qd.plannedstmt().queryId.get() }, false);
         // CreateQueryDesc parity: the QueryDesc owns a registration on its
         // snapshot for the life of this execution.
         qd.snapshot = snapmgr::RegisterSnapshot(snapshot.as_ref())?;
@@ -435,6 +451,13 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
         // The source text lives in the portal, freed before the skeleton
         // is reused; never hold it across the park.
         estate.es_sourceText = None;
+        // [sqe-cursors] the spool is this execution's answer plane, not the
+        // skeleton's. A dispatch face keys reuse off `es_sqe_spool.is_some()`
+        // (ahead of every snapshot/currency check), so carrying it across a
+        // park would let the next execution resume the PRIOR answer. Drop it
+        // here — the same release point owners_released() asserts at teardown —
+        // so a rearmed executor rebuilds its own spool.
+        estate.es_sqe_spool = None;
         Ok(Some(estate.es_top_eflags))
     })
 }
@@ -442,7 +465,7 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
 pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<()> {
     tap_executor_start::call_if(|f| f(h));
     querydesc::with_qd(h, |qd| {
-        backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId.get(), false);
+        backend_status_seams::pgstat_report_query_id::call(unsafe { qd.plannedstmt().queryId.get() }, false);
         standard_executor_start(qd, eflags)
     })
 }
@@ -919,6 +942,14 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         // the session collector onto the estate (C's es_jit JitContext).
         // Below the cost gate (jitFlags == 0) the window stays closed: the
         // select1/point compile path pays only this branch.
+        // idx-112 (CWE-863): record every funcid whose EXECUTE ACL is checked
+        // while InitPlan compiles this executor's expressions. C rebuilds all
+        // ExprStates per ExecutorStart, so those checks re-run on every cached-
+        // plan execution; pgrust parks and reuses the compiled executor, so the
+        // recorded set is stored on the estate and replayed against the current
+        // user id on every parked reuse (skeleton_rearm_exec). Opened around
+        // both InitPlan arms so the jit window nests inside it cleanly.
+        ::execexpr::execute_acl_session_begin();
         let r = if pstmt.jitFlags == 0 {
             init_plan(data, pstmt, operation, eflags)
         } else {
@@ -929,6 +960,10 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
             data.estate.es_jit_instr = jc.instr;
             r
         };
+        let acl_funcs = ::execexpr::execute_acl_session_end();
+        if r.is_ok() {
+            data.estate.es_execute_acl_funcs = acl_funcs;
+        }
         r
     })?;
     qd.tup_desc = Some(tup_desc);

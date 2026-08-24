@@ -164,7 +164,20 @@ pub(crate) fn payload_bounds(hdr: &StreamSectionHdr, section_len: usize) -> Form
             at: "payload region",
         });
     }
-    Ok((STREAM_SECTION_HDR_LEN as u32, end as u32))
+    // Width-safe narrowing (spec §6.4, idx-196): the section-relative table
+    // offsets are u32-typed fields, but an ASSEMBLED multi-extent byte-run
+    // region (`load_region`) sums per-extent lengths — each capped at
+    // u32::MAX, the SUM is not — so the `section_len` fallback can exceed
+    // 2^32. A bare `end as u32` would truncate to a value BELOW payload_start
+    // (an inverted window that panics `payload()` or underflows downstream
+    // pointer math). Reject any payload end that does not fit the returned
+    // u32 with a typed, catchable error; valid (<=4 GiB) regions are
+    // unaffected. `end >= STREAM_SECTION_HDR_LEN` is already proven, so the
+    // returned pair is ordered by construction.
+    let end = u32::try_from(end).map_err(|_| FormatError::Bounds {
+        at: "payload region exceeds u32",
+    })?;
+    Ok((STREAM_SECTION_HDR_LEN as u32, end))
 }
 
 // ---------------------------------------------------------------------------
@@ -744,6 +757,38 @@ impl<'b> StreamCursor<'b> {
     }
 }
 
+/// Hard ceiling on one extent's granule count, independent of any
+/// file-supplied footer (a corrupt footer could itself over-report). Kept
+/// well above any realistic part geometry; its role is only to stop a crafted
+/// 4-byte count from committing gigabytes before the payload-size witnesses
+/// (gcount-table bounds, validity `payload_len`) run.
+const MAX_EXTENT_GRANULES: u32 = 1 << 28;
+
+/// Validate a file-supplied per-extent granule count against an independent
+/// budget BEFORE it drives any allocation or count-driven loop (idx-198).
+///
+/// The class-level budget: an extent covers a SUBSET of the part's granules,
+/// so its `granule_count` can never exceed the part footer's `granule_count`
+/// (itself cross-checked against `rows`/`grain` at part open — the independent
+/// witness), and never the hard [`MAX_EXTENT_GRANULES`] cap. A 4-byte lie
+/// thus refuses catchably (`ERRCODE_DATA_CORRUPTED` via `FormatError::Corrupt`)
+/// here, instead of sizing a multi-gigabyte `Vec` or spinning a
+/// multi-billion-iteration loop. Returns the validated count as `usize` for
+/// direct use as an allocation/loop bound.
+fn checked_extent_granules(
+    part: &OpenPart,
+    rec: &pgrc2_format::part::ExtentRecord,
+) -> ReadResult<usize> {
+    if rec.granule_count > part.footer().granule_count
+        || rec.granule_count > MAX_EXTENT_GRANULES
+    {
+        return Err(ReadError::Format(FormatError::Corrupt {
+            at: "extent granule_count exceeds part budget",
+        }));
+    }
+    Ok(rec.granule_count as usize)
+}
+
 /// Load + validate one granule-organized extent: fault (CRC under the part's
 /// segment cache), header cross-witness against the stream entry, unwrap if
 /// wrapped, parse frame table, parse the gcount table (child streams), build
@@ -807,8 +852,12 @@ fn load_extent(
     let frame_table = hdr.frame_table(bytes.bytes())?;
     let (payload_start, payload_end) = payload_bounds(&hdr, bytes.len())?;
     let gcounts = if hdr.gcount_table_off != 0 {
+        // Class-level budget check BEFORE the table-bytes math or the
+        // allocation/loop (idx-198): a file-supplied count can never exceed
+        // the part footer / hard cap.
+        let ng = checked_extent_granules(part, rec)?;
         let off = hdr.gcount_table_off as usize;
-        let need = rec.granule_count as usize * 4;
+        let need = ng * 4;
         let end = off.checked_add(need).ok_or(ReadError::Format(FormatError::Bounds {
             at: "gcount table",
         }))?;
@@ -817,9 +866,14 @@ fn load_extent(
                 at: "gcount table",
             }));
         }
-        let mut v = Vec::with_capacity(rec.granule_count as usize);
+        let mut v: Vec<u32> = Vec::new();
+        v.try_reserve(ng).map_err(|_| {
+            ReadError::Format(FormatError::Corrupt {
+                at: "gcount table allocation",
+            })
+        })?;
         let mut sum: u64 = 0;
-        for i in 0..rec.granule_count as usize {
+        for i in 0..ng {
             let b = &bytes.bytes()[off + i * 4..off + i * 4 + 4];
             let c = u32::from_le_bytes(b.try_into().expect("len 4"));
             sum += c as u64;
@@ -835,11 +889,23 @@ fn load_extent(
         None
     };
     let vbyte_prefix = if is_validity {
+        // Class-level budget check BEFORE the allocation/loop (idx-198): the
+        // validity prefix is sized and built from the extent's file-supplied
+        // granule_count with no gcount-table byte witness to cap it (root
+        // streams have no gcount table), so a 4-byte lie would otherwise
+        // commit gigabytes / spin for billions of iterations before the
+        // `acc > payload_len` witness below ever runs.
+        let ng = checked_extent_granules(part, rec)?;
         let payload_len = (payload_end - payload_start) as usize;
-        let mut prefix = Vec::with_capacity(rec.granule_count as usize + 1);
+        let mut prefix: Vec<u32> = Vec::new();
+        prefix.try_reserve(ng + 1).map_err(|_| {
+            ReadError::Format(FormatError::Corrupt {
+                at: "validity prefix allocation",
+            })
+        })?;
         prefix.push(0u32);
         let mut acc: u64 = 0;
-        for i in 0..rec.granule_count {
+        for i in 0..ng as u32 {
             let vals = match &gcounts {
                 Some(gc) => gc[i as usize],
                 None => geom::rows_in_granule_at(part.rows(), part.grain(), rec.granule_start + i),
@@ -974,4 +1040,59 @@ pub(crate) fn load_region(
         payload_start,
         payload_end,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain_hdr() -> StreamSectionHdr {
+        // Closed-form/root stream with no tables: the `end = section_len`
+        // fallback arm of `payload_bounds` (idx-196 truncation path).
+        StreamSectionHdr {
+            magic: 0,
+            encoding: 0,
+            width: 0,
+            wrapper: 0,
+            frame_count: 0,
+            frame_table_off: 0,
+            gcount_table_off: 0,
+            uncompressed_len: 0,
+            value_count: 0,
+            reserved: 0,
+        }
+    }
+
+    #[test]
+    fn payload_bounds_ok_for_in_range_region() {
+        let hdr = plain_hdr();
+        let (start, end) = payload_bounds(&hdr, STREAM_SECTION_HDR_LEN + 100).expect("valid");
+        assert_eq!(start, STREAM_SECTION_HDR_LEN as u32);
+        assert_eq!(end, (STREAM_SECTION_HDR_LEN + 100) as u32);
+        assert!(start <= end, "returned window must be ordered");
+    }
+
+    #[test]
+    fn payload_bounds_rejects_over_u32_assembled_region() {
+        // An assembled multi-extent byte-run region of 2^32 + 16 bytes: the
+        // old `end as u32` truncated to 16 (< payload_start = 32), an
+        // inverted window. Must now surface a typed, catchable error rather
+        // than a truncated (32, 16) pair.
+        let hdr = plain_hdr();
+        let big = (u32::MAX as usize) + 1 + 16; // 2^32 + 16
+        let err = payload_bounds(&hdr, big).err().unwrap();
+        assert!(matches!(err, FormatError::Bounds { .. }));
+    }
+
+    #[test]
+    fn payload_bounds_never_inverts_across_u32_boundary() {
+        // Any accepted result is ordered; the boundary case (exactly u32::MAX
+        // total) either accepts an ordered pair or refuses — never inverts.
+        let hdr = plain_hdr();
+        match payload_bounds(&hdr, u32::MAX as usize) {
+            Ok((start, end)) => assert!(start <= end),
+            Err(FormatError::Bounds { .. }) => {}
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
 }

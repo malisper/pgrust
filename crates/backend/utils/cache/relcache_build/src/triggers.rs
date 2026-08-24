@@ -14,6 +14,7 @@ use types_trigger::{
 
 use crate::{getattr, req};
 use mcx::MemoryContext;
+use types_tuple::HeapTupleData;
 
 const TRIGGER_RELATION_ID: Oid = 2620;
 const TRIGGER_RELID_NAME_INDEX_ID: Oid = 2701;
@@ -43,11 +44,12 @@ fn trigger_type_matches(tgtype: i16, level: i16, timing: i16, event: i16) -> boo
         == level | timing | event
 }
 
-fn name_datum_str<'a>(d: datum::Datum) -> &'a str {
-    // SAFETY: a non-null pg_trigger name column is a 64-byte NameData image.
-    let bytes = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, 64) };
-    let len = bytes.iter().position(|&b| b == 0).unwrap_or(64);
-    core::str::from_utf8(&bytes[..len]).expect("non-UTF-8 name in pg_trigger")
+fn name_datum_str(tup: &HeapTupleData<'_>, d: datum::Datum) -> String {
+    // Bound the fixed NameData read by the containing tuple image via the shared
+    // helper (see crate::name_from). SQL_ASCII trigger names may be non-UTF-8;
+    // match C's opaque NameData bytes with a lossy copy instead of panicking.
+    let name = crate::name_from(tup, d);
+    String::from_utf8_lossy(name.name_str()).into_owned()
 }
 
 pub(crate) fn build_trigger_desc(
@@ -93,7 +95,8 @@ pub(crate) fn build_trigger_desc(
             if args_null {
                 return Err(corrupt(relid, "tgargs"));
             }
-            let bytes = varlena_bytes(args_d);
+            let args_image = detoast_image(mcx, args_d)?;
+            let bytes = &args_image[datum::varlena::VARHDRSZ..];
             let mut p = 0usize;
             for _ in 0..tgnargs {
                 let end = bytes[p..]
@@ -110,7 +113,8 @@ pub(crate) fn build_trigger_desc(
         let tgqual = if qual_null {
             None
         } else {
-            let bytes = varlena_bytes(qual_d);
+            let qual_image = detoast_image(mcx, qual_d)?;
+            let bytes = &qual_image[datum::varlena::VARHDRSZ..];
             Some(PgString::from_str_in(
                 core::str::from_utf8(bytes).expect("non-UTF-8 tgqual"),
                 mcx,
@@ -121,7 +125,7 @@ pub(crate) fn build_trigger_desc(
         triggers.push(Trigger {
             tgoid: req(td, tup, Anum_pg_trigger_oid)?.as_oid(),
             tgname: PgString::from_str_in(
-                name_datum_str(req(td, tup, Anum_pg_trigger_tgname)?),
+                &name_datum_str(tup, req(td, tup, Anum_pg_trigger_tgname)?),
                 mcx,
             )?,
             tgfoid: req(td, tup, Anum_pg_trigger_tgfoid)?.as_oid(),
@@ -142,12 +146,12 @@ pub(crate) fn build_trigger_desc(
             tgoldtable: if old_null {
                 None
             } else {
-                Some(PgString::from_str_in(name_datum_str(old_d), mcx)?)
+                Some(PgString::from_str_in(&name_datum_str(tup, old_d), mcx)?)
             },
             tgnewtable: if new_null {
                 None
             } else {
-                Some(PgString::from_str_in(name_datum_str(new_d), mcx)?)
+                Some(PgString::from_str_in(&name_datum_str(tup, new_d), mcx)?)
             },
         });
     }
@@ -223,22 +227,28 @@ pub(crate) fn build_trigger_desc(
     Ok(Some(desc))
 }
 
-fn varlena_bytes<'a>(d: datum::Datum) -> &'a [u8] {
+// Detoast a pg_trigger varlena (tgargs/tgqual) and return its payload. The
+// catalog writer TOASTs these for tuples over the toast threshold (compressed
+// inline or out-of-line), so a raw header read is not enough — parity with C's
+// DatumGetByteaPP/pg_detoast_datum. Returns the bytes after the varlena header.
+fn detoast_image<'mcx>(mcx: Mcx<'mcx>, d: datum::Datum) -> PgResult<PgVec<'mcx, u8>> {
     let p = d.as_usize() as *const u8;
-    // SAFETY: inline catalog varlena, 4-byte or 1-byte header per varatt
-    // rules; pg_trigger has a toast table, so external stays loud.
-    unsafe {
+    // SAFETY: non-null varlena attr datum; length is taken from its own header
+    // (short 1B, external 1B-tag, or long 4B) before slicing.
+    let raw = unsafe {
         let b0 = *p;
-        if b0 & 0x01 != 0 {
-            assert!(b0 != 0x01, "pg_trigger varlena is external toast — detoast lane");
-            let len = ((b0 >> 1) & 0x7F) as usize;
-            core::slice::from_raw_parts(p.add(1), len - 1)
+        let len = if b0 == 0x01 {
+            detoast::varsize_any(core::slice::from_raw_parts(p, 2))
+        } else if b0 & 0x01 != 0 {
+            ((b0 >> 1) & 0x7F) as usize
         } else {
-            let vl = core::ptr::read_unaligned(p as *const u32);
-            let len = (vl >> 2) as usize;
-            core::slice::from_raw_parts(p.add(4), len - 4)
-        }
-    }
+            (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize
+        };
+        core::slice::from_raw_parts(p, len)
+    };
+    // Fully-detoasted, decompressed image (with 4B varlena header); payload is
+    // image[VARHDRSZ..]. Parity with C's DatumGetByteaPP/pg_detoast_datum.
+    detoast::detoast_attr(mcx, raw)
 }
 
 #[track_caller]
@@ -249,26 +259,4 @@ fn corrupt(relid: Oid, field: &str) -> Box<PgError> {
         PgError::error(format!("{field} is null in trigger for relation {relid}"))
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
-}
-
-#[cfg(test)]
-mod varlena_bytes_tests {
-    use super::*;
-
-    #[test]
-    fn reads_short_and_4b_headers() {
-        let short: [u8; 4] = [(4u8 << 1) | 0x01, b'a', b'b', b'c'];
-        assert_eq!(varlena_bytes(datum::Datum::from_usize(short.as_ptr() as usize)), b"abc");
-        let mut long = ((4u32 + 3) << 2).to_ne_bytes().to_vec();
-        long.extend_from_slice(b"abc");
-        assert_eq!(varlena_bytes(datum::Datum::from_usize(long.as_ptr() as usize)), b"abc");
-    }
-
-    #[test]
-    #[should_panic(expected = "external toast")]
-    fn external_pointer_is_loud() {
-        let mut ext = vec![0x01u8, 18];
-        ext.extend_from_slice(&[0u8; 16]);
-        let _ = varlena_bytes(datum::Datum::from_usize(ext.as_ptr() as usize));
-    }
 }

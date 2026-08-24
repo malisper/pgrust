@@ -372,32 +372,21 @@ pub fn be_lo_export<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid, filename: &[u8]) -> PgRes
 
     let fnamebuf = to_fnamebuf(filename);
 
-    // C reduces the backend's normal 077 umask to 022 for the duration of the
-    // open so exported files aren't world-writable; restored via a guard so
-    // an early return still resets it.
-    struct UmaskGuard(#[allow(dead_code)] libc::mode_t);
-    impl Drop for UmaskGuard {
-        fn drop(&mut self) {
-            // SAFETY: process-wide umask restore, single-threaded backend.
-            // wasm32: no umask on WASI (files carry no mode bits) — no-op.
-            #[cfg(not(target_family = "wasm"))]
-            unsafe {
-                libc::umask(self.0);
-            }
-        }
-    }
-    // SAFETY: process-wide umask swap, single-threaded backend.
-    #[cfg(not(target_family = "wasm"))]
-    let oumask = unsafe { libc::umask(libc::S_IWGRP | libc::S_IWOTH) };
-    #[cfg(target_family = "wasm")]
-    let oumask = 0;
-    let _restore = UmaskGuard(oumask);
+    // C reduces the backend's normal 077 umask to 022 around the open so the
+    // exported file lands as 0644 (rw-r--r--) rather than world-writable, then
+    // restores it. umask is process-global and pgrust runs a thread per
+    // backend, so mutating it here would race with file creation on other
+    // threads (their opens would briefly see the wrong mask). Instead create
+    // the file with a narrow, umask-proof owner-only mode and fchmod it to the
+    // exact bits C's masked 0666 yields — identical resulting permissions with
+    // no shared-state mutation. See syslogger::logfile_open for the same idiom.
     let fd = fd::desc::OpenTransientFilePerm(
         &fnamebuf,
         libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
-        (libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IROTH) as u32,
+        // 0600: no umask can widen it, so the file is never momentarily
+        // group/other-accessible before the fchmod below.
+        (libc::S_IRUSR | libc::S_IWUSR) as u32,
     )?;
-    drop(_restore);
     if fd < 0 {
         return Err(ereport(ERROR)
             .with_saved_errno(elog::errno::current_errno())
@@ -405,6 +394,17 @@ pub fn be_lo_export<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid, filename: &[u8]) -> PgRes
             .errmsg(format!("could not create server file \"{fnamebuf}\": %m"))
             .into_error()
             .into());
+    }
+    // Set the exact permissions C produces (0666 & ~022 == 0644), independent
+    // of the process umask.
+    // SAFETY: fd is the descriptor just created above.
+    // wasm32: no mode bits on WASI files — no-op.
+    #[cfg(not(target_family = "wasm"))]
+    unsafe {
+        libc::fchmod(
+            fd,
+            libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IROTH,
+        );
     }
 
     let result = (|| -> PgResult<()> {
@@ -615,4 +615,51 @@ pub fn be_lo_put<'mcx>(mcx: Mcx<'mcx>, loOid: Oid, offset: int64, data: &[u8]) -
 pub fn init_seams() {
     be_fsstubs_seams::at_eoxact_large_object::set(AtEOXact_LargeObject);
     be_fsstubs_seams::at_eosubxact_large_object::set(AtEOSubXact_LargeObject);
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    // The lo_export permission bits C produces: 0666 & ~022.
+    const EXPORT_FILE_MODE: libc::mode_t =
+        libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IROTH;
+
+    // Guards against regressing to a process-global umask swap: creating the
+    // file narrow and fchmod'ing to the target mode must yield exactly 0644
+    // regardless of the ambient umask (i.e. without racing on shared state).
+    #[test]
+    fn fchmod_export_mode_is_umask_independent() {
+        assert_eq!(EXPORT_FILE_MODE, 0o644 as libc::mode_t);
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("pgrust_lo_export_test_{}", std::process::id()));
+        let cpath = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+
+        // A restrictive umask that, if applied to the open() mode, would strip
+        // the group/other read bits — proving fchmod is what fixes them.
+        let old_umask = unsafe { libc::umask(0o077) };
+
+        let fd = unsafe {
+            libc::open(
+                cpath.as_ptr(),
+                libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
+                (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
+            )
+        };
+        assert!(fd >= 0, "open failed: {}", std::io::Error::last_os_error());
+
+        let rc = unsafe { libc::fchmod(fd, EXPORT_FILE_MODE) };
+        assert_eq!(rc, 0, "fchmod failed: {}", std::io::Error::last_os_error());
+        unsafe { libc::close(fd) };
+        unsafe { libc::umask(old_umask) };
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            mode, 0o644,
+            "export file must be 0644 regardless of umask; got {mode:o}"
+        );
+    }
 }

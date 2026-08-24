@@ -905,6 +905,14 @@ pub struct PgStatisticSlotData<'mcx> {
 
 pub struct PgStatisticSlotImages<'mcx> {
     pub valuetype: Oid,
+    // stakind/staop of slot `pos` in the freshly-pinned tuple this image was
+    // read from. C's get_attstatsslot reads kind, staop and the arrays from one
+    // pinned statstuple; the lazy re-fetch here reads a *second* tuple, so these
+    // are carried back to re-validate against the kind/staop captured at bundle
+    // probe time (a concurrent ANALYZE swapping the row must not let the arrays
+    // be decoded under a stale kind/type).
+    pub stakind: i16,
+    pub staop: Oid,
     // Empty images mirror SQL NULL (decode to empty slices).
     pub values_image: PgVec<'mcx, u8>,
     pub numbers_image: PgVec<'mcx, u8>,
@@ -946,6 +954,10 @@ impl<'mcx> PgStatisticSlotData<'mcx> {
         let s = PgStatisticSlotData::lazy(kind, staop, stacoll, mcx, 0, 0, false, 0);
         let _ = s.images.set(PgStatisticSlotImages {
             valuetype,
+            // Eager decode: images came from the same tuple that yielded
+            // kind/staop, so re-validation in images() is trivially satisfied.
+            stakind: kind,
+            staop,
             values_image,
             numbers_image: PgVec::new_in(mcx),
         });
@@ -960,6 +972,25 @@ impl<'mcx> PgStatisticSlotData<'mcx> {
         }
         let (relid, attnum, inh, pos) = self.key;
         let img = lookup_pg_statistic_slot_images::call(self.mcx, relid, attnum, inh, pos)?;
+        // The kind/staop/stacoll for this slot were captured from a pinned
+        // tuple in lookup_pg_statistic_bundle, which was then released; this
+        // lazy array fetch re-pins a *fresh* tuple. A concurrent ANALYZE can
+        // swap the pg_statistic row between those two reads, so the arrays at
+        // `pos` might now belong to a different stakind/staop than the ones this
+        // slot was built with. C's get_attstatsslot never has this window (kind,
+        // staop and arrays all come from one pinned statstuple). If the slot
+        // changed under us, do NOT decode the arrays under the stale kind/type
+        // (that is the type-confusion / wild-deref path) — treat the slot as
+        // carrying no stats, exactly as if the matching kind were absent.
+        if img.stakind != self.kind || img.staop != self.staop {
+            return Ok(self.images.get_or_init(|| PgStatisticSlotImages {
+                valuetype: types_core::InvalidOid,
+                stakind: 0,
+                staop: types_core::InvalidOid,
+                values_image: PgVec::new_in(self.mcx),
+                numbers_image: PgVec::new_in(self.mcx),
+            }));
+        }
         Ok(self.images.get_or_init(|| img))
     }
 
@@ -1036,7 +1067,7 @@ pub struct PgStatisticBundle<'mcx> {
 // OnceCell contents are all mcx-backed), so forgetting them loses nothing
 // beyond the arena the planning cycle resets anyway.
 mcx::forget_safe_struct!(
-    PgStatisticSlotImages<'_> { valuetype, values_image, numbers_image },
+    PgStatisticSlotImages<'_> { valuetype, stakind, staop, values_image, numbers_image },
     PgStatisticSlotData<'_> { kind, staop, stacoll, mcx, key, images, values, numbers },
     PgStatisticBundle<'_> { stanullfrac, stawidth, stadistinct, slots },
 );

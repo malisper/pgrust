@@ -148,12 +148,20 @@ pub fn fc_pgrust_seal_template(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let name = text_arg0(fcinfo)?;
-    let datname = {
+    // Capture the CHECK-TIME identity: the role we owner-check, and the oid
+    // the name resolves to right now. Both travel to the janitor, which
+    // re-validates them before its superuser-privileged flip — without that,
+    // the flip re-resolves the name to whatever it points at LATER, so a
+    // caller could rename their owned database out of the name and a victim
+    // in, and the janitor would seal a database the caller never owned
+    // (the seal-path TOCTOU).
+    let caller_role = miscinit::GetUserId();
+    let (datname, expected_oid) = {
         let mcx = fcinfo.result_mcx();
         let Some(db) = pg_database::get_database_tuple_by_name(mcx, &name)? else {
             return Err(crate::seal::seal_target_missing_error(&name));
         };
-        if !aclchk::object_ownercheck(DATABASE_RELATION_ID, db.oid, miscinit::GetUserId())? {
+        if !aclchk::object_ownercheck(DATABASE_RELATION_ID, db.oid, caller_role)? {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
                 .errmsg(format!(
@@ -166,10 +174,11 @@ pub fn fc_pgrust_seal_template(
             return Err(crate::seal::already_template_error(&name));
         }
         // Resolved catalog datname (the owner_or_superuser_check rationale:
-        // the scan key truncates, the seal keys must not).
-        db.datname.as_str().to_owned()
+        // the scan key truncates, the seal keys must not) plus the owner-
+        // checked oid, the janitor's re-validation anchor.
+        (db.datname.as_str().to_owned(), db.oid)
     };
-    crate::seal::request_seal(&datname)?;
+    crate::seal::request_seal(&datname, expected_oid, caller_role)?;
     // RETURNS void (the fc_pg_sleep convention).
     Ok(Datum::null())
 }

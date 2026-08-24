@@ -14,6 +14,7 @@ pub const REG_BADBR: i32 = 10; /* invalid repetition count(s) */
 pub const REG_ERANGE: i32 = 11; /* invalid character range */
 pub const REG_ESPACE: i32 = 12; /* out of memory */
 pub const REG_BADRPT: i32 = 13; /* quantifier operand invalid */
+pub const REG_CANCEL: i32 = 14; /* operation cancelled (engine-internal cancel sentinel) */
 pub const REG_ASSERT: i32 = 15; /* "can't happen" -- you found a bug */
 pub const REG_INVARG: i32 = 16; /* invalid argument to regex function */
 pub const REG_MIXED: i32 = 17; /* character widths of regex and string differ */

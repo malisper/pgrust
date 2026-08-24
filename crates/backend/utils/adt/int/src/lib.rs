@@ -174,12 +174,17 @@ pub fn buildint2vector<'mcx>(mcx: Mcx<'mcx>, int2s: &[i16]) -> PgResult<PgVec<'m
     Ok(v)
 }
 
+#[cold]
+#[inline(never)]
+pub fn not_valid_int2vector() -> Box<PgError> {
+    Box::new(
+        PgError::error("array is not a valid int2vector").with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+    )
+}
+
 pub fn check_valid_int2vector(ndim: i32, dataoffset: i32, elemtype: Oid) -> PgResult<()> {
     if ndim != 1 || dataoffset != 0 || elemtype != INT2OID {
-        return Err(Box::new(
-            PgError::error("array is not a valid int2vector")
-                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
-        ));
+        return Err(not_valid_int2vector());
     }
     Ok(())
 }

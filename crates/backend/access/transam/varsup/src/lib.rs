@@ -255,22 +255,24 @@ pub fn GetNewTransactionId(isSubXact: bool) -> PgResult<FullTransactionId> {
     // (transam/README); a full PGPROC subxid cache overflows to pg_subtrans.
     let proc = my_proc();
     let pgxactoff = proc.pgxactoff.load(Relaxed) as usize;
+    // SAFETY (all subxidStates/subxidStatus get/set below): [PSL] PGPROC subxid
+    // cache + ProcGlobal subxid state serialized by XidGenLock (held by the caller).
     if !isSubXact {
-        debug_assert_eq!(ProcGlobal().subxidStates[pgxactoff].get().count, 0);
-        debug_assert!(!ProcGlobal().subxidStates[pgxactoff].get().overflowed);
-        debug_assert_eq!(proc.subxidStatus.get().count, 0);
-        debug_assert!(!proc.subxidStatus.get().overflowed);
+        debug_assert_eq!(unsafe { ProcGlobal().subxidStates[pgxactoff].get() }.count, 0);
+        debug_assert!(!unsafe { ProcGlobal().subxidStates[pgxactoff].get() }.overflowed);
+        debug_assert_eq!(unsafe { proc.subxidStatus.get() }.count, 0);
+        debug_assert!(!unsafe { proc.subxidStatus.get() }.overflowed);
 
         // LWLockRelease acts as barrier
         proc.xid.value.store(xid, Relaxed);
         ProcGlobal().xids[pgxactoff].value.store(xid, Relaxed);
     } else {
         let substat = &ProcGlobal().subxidStates[pgxactoff];
-        let mut my_status = proc.subxidStatus.get();
+        let mut my_status = unsafe { proc.subxidStatus.get() };
         let nxids = my_status.count as usize;
 
-        debug_assert_eq!(substat.get().count, my_status.count);
-        debug_assert_eq!(substat.get().overflowed, my_status.overflowed);
+        debug_assert_eq!(unsafe { substat.get() }.count, my_status.count);
+        debug_assert_eq!(unsafe { substat.get() }.overflowed, my_status.overflowed);
 
         if nxids < PGPROC_MAX_CACHED_SUBXIDS {
             // SAFETY: own PGPROC's subxid slot; writes serialized by
@@ -280,16 +282,16 @@ pub fn GetNewTransactionId(isSubXact: bool) -> PgResult<FullTransactionId> {
             }
             fence(Release);
             my_status.count = nxids as u8 + 1;
-            proc.subxidStatus.set(my_status);
-            let mut shared_status = substat.get();
+            unsafe { proc.subxidStatus.set(my_status) };
+            let mut shared_status = unsafe { substat.get() };
             shared_status.count = nxids as u8 + 1;
-            substat.set(shared_status);
+            unsafe { substat.set(shared_status) };
         } else {
             my_status.overflowed = true;
-            proc.subxidStatus.set(my_status);
-            let mut shared_status = substat.get();
+            unsafe { proc.subxidStatus.set(my_status) };
+            let mut shared_status = unsafe { substat.get() };
             shared_status.overflowed = true;
-            substat.set(shared_status);
+            unsafe { substat.set(shared_status) };
         }
     }
 
@@ -544,6 +546,7 @@ pub fn AssertTransactionIdInAllowableRange(_xid: TransactionId) {}
 pub fn init_seams() {
     varsup_seams::get_new_transaction_id::set(GetNewTransactionId);
     varsup_seams::read_next_transaction_id::set(ReadNextTransactionId);
+    varsup_seams::read_next_full_transaction_id::set(ReadNextFullTransactionId);
     varsup_seams::advance_next_full_transaction_id_past_xid::set(
         AdvanceNextFullTransactionIdPastXid,
     );

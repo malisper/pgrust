@@ -226,10 +226,16 @@ pub fn fc_bytea_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
 pub fn fc_textin(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of textin is a non-null cstring (strict fn).
     let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+    // C's textin -> cstring_to_text -> palloc(len + VARHDRSZ) rejects sizes above
+    // MaxAllocSize before any header is written. The result buffer here is a
+    // retained std::Vec scratch that bypasses mcx, so enforce the ceiling
+    // explicitly; otherwise set_varsize_4b's 30-bit field wraps for len >= 2^30.
+    let total = datum::varlena::VARHDRSZ + s.len();
+    mcx::check_alloc_size(total)?;
     let buf = out_scratch(flinfo, "textin");
     buf.clear();
-    buf.reserve(datum::varlena::VARHDRSZ + s.len());
-    buf.extend_from_slice(&datum::varlena::set_varsize_4b(datum::varlena::VARHDRSZ + s.len()));
+    buf.reserve(total);
+    buf.extend_from_slice(&datum::varlena::set_varsize_4b(total));
     buf.extend_from_slice(s);
     Ok(Datum::from_usize(buf.as_ptr() as usize))
 }

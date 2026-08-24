@@ -173,7 +173,11 @@ fn decrypt_data_packet(
         let want = md.finish();
         if want != plain[mdc_off + 2..mdc_off + 2 + MDC_DIGEST_LEN] {
             if !corrupt_prefix {
-                return Err("MDC mismatch".to_string());
+                // C mdc_finish/mdcbuf_finish return the generic
+                // PXE_PGP_CORRUPT_DATA ("Wrong key or corrupt data") on MDC
+                // mismatch. Using a distinct message here would reinstate the
+                // Mister-Zuccherato CFB quick-check oracle.
+                return Err(CORRUPT_DATA.to_string());
             }
             ctx.pending_bad_mdc = true;
             return Ok((inner, true));
@@ -200,16 +204,20 @@ fn finish_inner(ctx: &mut PgpContext, inner: Vec<u8>) -> Result<Vec<u8>, String>
         let decompressed = match algo {
             PGP_COMPR_NONE => body[1..].to_vec(),
             PGP_COMPR_ZIP => super::compress::inflate_raw(&body[1..])
-                .map_err(|_| "decompression failed".to_string())?,
+                .map_err(|_| CORRUPT_DATA.to_string())?,
             PGP_COMPR_ZLIB => super::compress::inflate_zlib(&body[1..])
-                .map_err(|_| "decompression failed".to_string())?,
+                .map_err(|_| CORRUPT_DATA.to_string())?,
             PGP_COMPR_BZIP2 => {
                 ctx.dbg("parse_compressed_data: bzip2 unsupported");
                 return Err(UNSUPPORTED_COMPR.to_string());
             }
             _ => {
                 ctx.dbg("parse_compressed_data: unknown compr type");
-                return Err(UNSUPPORTED_COMPR.to_string());
+                // C's parse_compressed_data default case returns the generic
+                // PXE_PGP_CORRUPT_DATA (not PXE_PGP_UNSUPPORTED_COMPR, which C
+                // reserves for the bzip2 flag path). Keep it generic so the
+                // quick-check outcome stays unobservable.
+                return Err(CORRUPT_DATA.to_string());
             }
         };
         return read_literal(ctx, &decompressed);

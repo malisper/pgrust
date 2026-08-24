@@ -591,6 +591,13 @@ fn fjav_mutate<'mcx>(
                 let mut fields = NodeList::nil();
                 let mut colnames = NodeList::nil();
                 for (av, cn) in rte.joinaliasvars.iter().zip(eref.colnames.iter()) {
+                    // C var.c: a dropped join column is a NULL joinaliasvars
+                    // cell (skipped here). This port marks it with a null Const
+                    // sentinel (AcquireRewriteLocks); ignore it exactly like
+                    // C's `if (newvar == NULL) continue;`.
+                    if matches!(av.as_const(), Some(c) if c.constisnull) {
+                        continue;
+                    }
                     let newvar = fjav_shift_copy(ctx, av, v.location)?;
                     fields.lappend(ctx.mcx, newvar)?;
                     colnames.lappend(ctx.mcx, cn)?;
@@ -609,6 +616,10 @@ fn fjav_mutate<'mcx>(
             }
             debug_assert!(v.varattno > 0);
             let aliasvar = rte.joinaliasvars.nth(v.varattno as usize - 1);
+            debug_assert!(
+                !matches!(aliasvar.as_const(), Some(c) if c.constisnull),
+                "flatten_join_alias_vars: reference to a dropped join column"
+            );
             let newvar = fjav_shift_copy(ctx, aliasvar, v.location)?;
             if ctx.possible_sublink && !ctx.inserted_sublink {
                 ctx.inserted_sublink = rewrite_manip::checkExprHasSubLink(newvar)?;
@@ -824,6 +835,19 @@ fn fjav_query_inplace<'mcx>(ctx: &mut FjavCtx<'_, 'mcx>, qnode: Node<'mcx>) -> P
     for rte_node in &q.rtable {
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
         match rte.rtekind {
+            types_nodes::parsenodes::RTEKind::RTE_RELATION => {
+                if let Some(ts) = rte.tablesample {
+                    if let Some(new) = fjav_mutate(ctx, ts)? {
+                        // SAFETY: exclusive copy from fjav_query_descend.
+                        unsafe {
+                            rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                                r.tablesample = Some(new)
+                            })
+                        }
+                        .expect("RangeTblEntry");
+                    }
+                }
+            }
             types_nodes::parsenodes::RTEKind::RTE_SUBQUERY => {
                 if let Some(sub) = rte.subquery {
                     if let Some(newsub) = fjav_query_descend(ctx, sub)? {
@@ -868,6 +892,20 @@ fn fjav_query_inplace<'mcx>(ctx: &mut FjavCtx<'_, 'mcx>, qnode: Node<'mcx>) -> P
                     unsafe {
                         rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
                             r.values_lists = l
+                        })
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            types_nodes::parsenodes::RTEKind::RTE_GROUP => {
+                // C range_table_mutator mutates groupexprs unless
+                // QTW_IGNORE_GROUPEXPRS is set; flatten_join_alias_vars does
+                // not set it (only QTW_IGNORE_JOINALIASES), so descend here.
+                if let Some(l) = fjav_list(ctx, &rte.groupexprs)? {
+                    // SAFETY: exclusive copy from fjav_query_descend.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.groupexprs = l
                         })
                     }
                     .expect("RangeTblEntry");

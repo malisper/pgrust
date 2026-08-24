@@ -70,7 +70,7 @@ fn finalize_builds_file_hash_and_wal_ranges_from_c_manifest() {
     // Feed in awkward chunk sizes — the accumulate-then-parse contract must
     // be split-point independent.
     for chunk in C_FIXTURE.chunks(7777) {
-        ib.AppendIncrementalManifestData(chunk);
+        ib.AppendIncrementalManifestData(chunk).unwrap();
     }
     ib.FinalizeIncrementalManifest().unwrap();
 
@@ -90,7 +90,7 @@ fn finalize_builds_file_hash_and_wal_ranges_from_c_manifest() {
 fn version_1_manifest_rejected_c_exact() {
     let m = with_checksum("{ \"PostgreSQL-Backup-Manifest-Version\": 1,\n\"Files\": [],\n");
     let mut ib = CreateIncrementalBackupInfo(C_FIXTURE_SYSID);
-    ib.AppendIncrementalManifestData(&m);
+    ib.AppendIncrementalManifestData(&m).unwrap();
     let msg = errmsg_of(ib.FinalizeIncrementalManifest());
     assert_eq!(msg, "backup manifest version 1 does not support incremental backup");
 }
@@ -98,7 +98,7 @@ fn version_1_manifest_rejected_c_exact() {
 #[test]
 fn system_identifier_mismatch_rejected_c_exact() {
     let mut ib = CreateIncrementalBackupInfo(31337);
-    ib.AppendIncrementalManifestData(C_FIXTURE);
+    ib.AppendIncrementalManifestData(C_FIXTURE).unwrap();
     let msg = errmsg_of(ib.FinalizeIncrementalManifest());
     assert_eq!(
         msg,
@@ -115,7 +115,7 @@ fn corrupt_checksum_rejected_via_stage2_parser() {
     let pos = m.windows(10).position(|w| w == b"PG_VERSION").unwrap();
     m[pos] = b'Q';
     let mut ib = CreateIncrementalBackupInfo(C_FIXTURE_SYSID);
-    ib.AppendIncrementalManifestData(&m);
+    ib.AppendIncrementalManifestData(&m).unwrap();
     assert_eq!(errmsg_of(ib.FinalizeIncrementalManifest()), "manifest checksum mismatch");
 }
 
@@ -133,10 +133,35 @@ fn duplicate_manifest_paths_first_entry_wins() {
     );
     let m = with_checksum(body);
     let mut ib = CreateIncrementalBackupInfo(C_FIXTURE_SYSID);
-    ib.AppendIncrementalManifestData(&m);
+    ib.AppendIncrementalManifestData(&m).unwrap();
     ib.FinalizeIncrementalManifest().unwrap();
     assert_eq!(ib.manifest_file_count(), 1);
     assert_eq!(ib.manifest_file_lookup(b"dup"), Some(11));
+}
+
+#[test]
+fn append_manifest_bounded_to_max_alloc_size() {
+    // A small chunk from empty is always accepted (the normal path).
+    check_manifest_capacity(0, 1 << 20).unwrap();
+
+    // The buffer may fill exactly up to the MAX_ALLOC_SIZE ceiling that C's
+    // StringInfo enforces on every buffer — total == MAX_ALLOC_SIZE is fine.
+    check_manifest_capacity(0, MAX_ALLOC_SIZE).unwrap();
+    check_manifest_capacity(MAX_ALLOC_SIZE - 10, 10).unwrap();
+
+    // One byte past the ceiling is rejected with a catchable, per-command
+    // ERROR (ERRCODE_PROGRAM_LIMIT_EXCEEDED) instead of an unbounded,
+    // infallible allocation that would exhaust memory / abort the process.
+    // This is the resource-exhaustion guard: a replication client streaming
+    // an endless run of CopyData packets cannot grow the buffer without limit.
+    let e = check_manifest_capacity(MAX_ALLOC_SIZE - 10, 11).err().unwrap();
+    assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert!(
+        e.message()
+            .contains("backup manifest exceeds maximum allowed length"),
+        "unexpected message: {}",
+        e.message()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +245,7 @@ fn prepare_rejects_final_range_ending_after_backup_start() {
     let history = [tle(1, 0, InvalidXLogRecPtr)];
     let ib = ib_with_ranges(&[BackupWalRange { tli: 1, start_lsn: 0x1000, end_lsn: 0x5000000 }]);
     let mut bs = backup_state(1, 0x3000000);
-    let err = ib.validate_wal_ranges(&history, &mut bs).unwrap_err();
+    let err = ib.validate_wal_ranges(&history, &mut bs).err().unwrap();
     assert_eq!(
         err.message(),
         "manifest requires WAL from final timeline 1 ending at 0/5000000, but this backup starts at 0/3000000"
@@ -288,7 +313,7 @@ fn coverage_incomplete_summaries_error_c_exact_with_detail() {
     // Covers up to 0x2800000, then a gap.
     let all = [ws(1, 0x2000028, 0x2800000), ws(1, 0x2900000, 0x3000000)];
     let err = collect_required_summaries(cx.mcx(), &history, &all, 1, 0x3000000, 1, 0x2000028)
-        .unwrap_err();
+        .err().unwrap();
     assert_eq!(
         err.message(),
         "WAL summaries are required on timeline 1 from 0/2000028 to 0/3000000, but the summaries for that timeline and LSN range are incomplete"

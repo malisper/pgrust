@@ -21,7 +21,7 @@ use types_core::{
     TransactionIdIsValid, TransactionIdPrecedes, BLCKSZ,
 };
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_INVALID_PARAMETER_VALUE,
+    ErrorLocation, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, PANIC,
 };
 use types_guc::{GucContext::PGC_POSTMASTER, GucSource};
@@ -552,6 +552,45 @@ fn WriteTruncateXlogRec(pageno: i64, oldestXid: TransactionId) -> PgResult<()> {
     Ok(())
 }
 
+// Main-data sizes commit_ts_redo reads from a record. C memcpy's these fixed
+// sizes from an oversized decode buffer (sizeof(pageno) / SizeOfCommitTsTruncate),
+// so it never notices a short record; the Rust reader hands back a slice whose
+// length is the attacker-controlled main_data_len, so we must gate on these.
+const SIZEOF_COMMIT_TS_ZEROPAGE: usize = 8; // int64 pageno
+const SIZEOF_COMMIT_TS_TRUNCATE: usize = 12; // int64 pageno + TransactionId oldestXid
+
+/// Validate a commit_ts redo record's main data: at least `need` bytes present
+/// and a non-negative leading int64 pageno, before the value reaches SLRU
+/// bank-lock math. C reads these fields with fixed-size memcpy / struct casts
+/// and computes `pageno % nbanks` without a sign check, so a crafted short /
+/// negative-pageno record is undefined behavior there. Here (startup redo
+/// thread) it must be a catchable ERRCODE_DATA_CORRUPTED rather than a
+/// slice/index panic. `need` must be >= 8 so the pageno read below is in bounds.
+fn commit_ts_redo_pageno(data: &[u8], need: usize, op: &str) -> PgResult<i64> {
+    debug_assert!(need >= 8);
+    if data.len() < need {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "{op} commit_ts record has {} bytes of main data, expected at least {need}",
+                data.len()
+            ))
+            .finish(ErrorLocation::new(file!(), line!() as i32, "commit_ts_redo"))?;
+        unreachable!("ERROR finish returned");
+    }
+
+    let pageno = i64::from_ne_bytes(data[..8].try_into().unwrap());
+    if pageno < 0 {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!("{op} commit_ts record has invalid page number {pageno}"))
+            .finish(ErrorLocation::new(file!(), line!() as i32, "commit_ts_redo"))?;
+        unreachable!("ERROR finish returned");
+    }
+
+    Ok(pageno)
+}
+
 pub fn commit_ts_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let ctl = CommitTsCtl();
     let decoded = record
@@ -565,8 +604,7 @@ pub fn commit_ts_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let data = unsafe { decoded.main_data_bytes() };
 
     if info == COMMIT_TS_ZEROPAGE {
-        let pageno =
-            i64::from_ne_bytes(data[..8].try_into().expect("short COMMIT_TS_ZEROPAGE record"));
+        let pageno = commit_ts_redo_pageno(data, SIZEOF_COMMIT_TS_ZEROPAGE, "COMMIT_TS_ZEROPAGE")?;
 
         let mut bank = LwGuard::acquire(SimpleLruGetBankLock(ctl, pageno), LW_EXCLUSIVE)?;
 
@@ -576,11 +614,8 @@ pub fn commit_ts_redo(record: &mut XLogReaderState) -> PgResult<()> {
 
         bank.release()
     } else if info == COMMIT_TS_TRUNCATE {
-        let pageno =
-            i64::from_ne_bytes(data[..8].try_into().expect("short COMMIT_TS_TRUNCATE record"));
-        let oldest_xid = TransactionId::from_ne_bytes(
-            data[8..12].try_into().expect("short COMMIT_TS_TRUNCATE record"),
-        );
+        let pageno = commit_ts_redo_pageno(data, SIZEOF_COMMIT_TS_TRUNCATE, "COMMIT_TS_TRUNCATE")?;
+        let oldest_xid = TransactionId::from_ne_bytes(data[8..12].try_into().unwrap());
 
         AdvanceOldestCommitTsXid(oldest_xid)?;
 

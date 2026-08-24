@@ -8,6 +8,9 @@ name = "logicalworker"
 path = "src/lib.rs"
 
 [dependencies]
+aclchk = { path = "../../../catalog/aclchk" }
+miscinit = { path = "../../../utils/init/miscinit" }
+rls = { path = "../../../utils/misc/rls" }
 lmgr = { path = "../../../storage/lmgr/lmgr" }
 datum = { path = "../../../../_support/types/datum" }
 elog = { path = "../../../utils/error/elog" }
@@ -48,6 +51,7 @@ logical_worker_seams = { path = "../../logical_worker_seams" }
 logicalproto = { path = "../proto" }
 logicalrelation = { path = "../relation" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
+mbutils = { path = "../../../utils/mb/mbutils" }
 latch = { path = "../../../storage/ipc/latch" }
 init_small = { path = "../../../utils/init/init_small" }
 types_storage = { path = "../../../../_support/types/types_storage" }
@@ -80,6 +84,7 @@ pgsync = { path = "../../../../_support/pgsync" }
 
 [dev-dependencies]
 adt_int = { path = "../../../utils/adt/int" }
+wchar = { path = "../../../../common/wchar" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

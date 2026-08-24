@@ -24,7 +24,7 @@ use types_core::{
     TransactionIdEquals, TransactionIdIsValid, TransactionIdPrecedes, XLogRecPtr, BLCKSZ,
     INVALID_PROC_NUMBER,
 };
-use types_error::{ErrorLocation, PgResult, PANIC};
+use types_error::{ErrorLocation, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, PANIC};
 use types_guc::{GucContext::PGC_POSTMASTER, GucSource};
 use types_storage::storage::{
     LWTRANCHE_XACT_BUFFER, LWTRANCHE_XACT_SLRU, PGPROC, PGPROC_MAX_CACHED_SUBXIDS,
@@ -235,10 +235,12 @@ fn my_proc_matches(xid: TransactionId, subxids: &[TransactionId]) -> bool {
     if !TransactionIdEquals(xid, proc.xid.read()) {
         return false;
     }
-    if subxids.len() != proc.subxidStatus.get().count as usize {
+    // SAFETY: [PSL] PGPROC subxid cache serialized by ProcArrayLock (held by the caller)
+    if subxids.len() != unsafe { proc.subxidStatus.get() }.count as usize {
         return false;
     }
-    subxids.is_empty() || subxids == &proc.subxids.get().xids[..subxids.len()]
+    // SAFETY: [PSL] PGPROC subxid cache serialized by ProcArrayLock (held by the caller)
+    subxids.is_empty() || subxids == &unsafe { proc.subxids.get() }.xids[..subxids.len()]
 }
 
 fn TransactionIdSetPageStatusInternal(
@@ -387,9 +389,11 @@ fn TransactionGroupUpdateXidStatus(
             prevpageno = thispageno;
         }
 
-        let subxid_count = nextproc.subxidStatus.get().count as usize;
+        // SAFETY: [PSL] PGPROC subxid cache serialized by the CLOG group-update protocol (proc pinned in the group list)
+        let subxid_count = unsafe { nextproc.subxidStatus.get() }.count as usize;
         debug_assert!(subxid_count <= THRESHOLD_SUBTRANS_CLOG_OPT);
-        let subxids = nextproc.subxids.get();
+        // SAFETY: [PSL] PGPROC subxid cache serialized by the CLOG group-update protocol (proc pinned in the group list)
+        let subxids = unsafe { nextproc.subxids.get() };
 
         TransactionIdSetPageStatusInternal(
             nextproc.clogGroupMemberXid.load(Relaxed),
@@ -687,6 +691,45 @@ fn WriteTruncateXlogRec(pageno: i64, oldestXact: TransactionId, oldestXactDb: Oi
     transam_xlog_seams::xlog_flush::call(recptr)
 }
 
+// Main-data sizes clog_redo reads from a record. C memcpy's these fixed sizes
+// from an oversized decode buffer (sizeof(pageno) / sizeof(xl_clog_truncate)),
+// so it never notices a short record; the Rust reader hands back a slice whose
+// length is the attacker-controlled main_data_len, so we must gate on these.
+const SIZEOF_CLOG_ZEROPAGE: usize = 8; // int64 pageno
+const SIZEOF_XL_CLOG_TRUNCATE: usize = 16; // int64 pageno + TransactionId oldestXact + Oid oldestXactDb
+
+/// Validate a clog redo record's main data: at least `need` bytes present and a
+/// non-negative leading int64 pageno, before the value reaches SLRU bank-lock
+/// math. C reads these fields with fixed-size memcpy and computes
+/// `pageno % nbanks` without a sign check, so a crafted short / negative-pageno
+/// record is undefined behavior there. Here (startup redo thread) it must be a
+/// catchable ERRCODE_DATA_CORRUPTED rather than a slice/index panic. `need`
+/// must be >= 8 so the pageno read below is always in bounds.
+fn clog_redo_pageno(data: &[u8], need: usize, op: &str) -> PgResult<i64> {
+    debug_assert!(need >= 8);
+    if data.len() < need {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "{op} clog record has {} bytes of main data, expected at least {need}",
+                data.len()
+            ))
+            .finish(ErrorLocation::new(file!(), line!() as i32, "clog_redo"))?;
+        unreachable!("ERROR finish returned");
+    }
+
+    let pageno = i64::from_ne_bytes(data[..8].try_into().unwrap());
+    if pageno < 0 {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!("{op} clog record has invalid page number {pageno}"))
+            .finish(ErrorLocation::new(file!(), line!() as i32, "clog_redo"))?;
+        unreachable!("ERROR finish returned");
+    }
+
+    Ok(pageno)
+}
+
 pub fn clog_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let ctl = XactCtl();
     let decoded = record
@@ -700,7 +743,7 @@ pub fn clog_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let data = unsafe { decoded.main_data_bytes() };
 
     if info == CLOG_ZEROPAGE {
-        let pageno = i64::from_ne_bytes(data[..8].try_into().expect("short CLOG_ZEROPAGE record"));
+        let pageno = clog_redo_pageno(data, SIZEOF_CLOG_ZEROPAGE, "CLOG_ZEROPAGE")?;
 
         let mut bank = LwGuard::acquire(SimpleLruGetBankLock(ctl, pageno), LW_EXCLUSIVE)?;
 
@@ -710,10 +753,8 @@ pub fn clog_redo(record: &mut XLogReaderState) -> PgResult<()> {
 
         bank.release()
     } else if info == CLOG_TRUNCATE {
-        let pageno = i64::from_ne_bytes(data[..8].try_into().expect("short CLOG_TRUNCATE record"));
-        let oldest_xact = TransactionId::from_ne_bytes(
-            data[8..12].try_into().expect("short CLOG_TRUNCATE record"),
-        );
+        let pageno = clog_redo_pageno(data, SIZEOF_XL_CLOG_TRUNCATE, "CLOG_TRUNCATE")?;
+        let oldest_xact = TransactionId::from_ne_bytes(data[8..12].try_into().unwrap());
 
         varsup_seams::advance_oldest_clog_xid::call(oldest_xact)?;
 

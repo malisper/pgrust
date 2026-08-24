@@ -178,6 +178,90 @@ impl Drop for GrantCtx {
     }
 }
 
+/// RAII for the pin-board settle (finalization protocol step 4; H-74).
+///
+/// A worker publishes its pin (step 1) BEFORE claiming/running a task and
+/// must settle it — paying any coordinator marker debt into the task set's
+/// `fin_counter` — on EVERY exit path. The settle is otherwise straight-line
+/// code after the task body, so an unwind escaping `run_task_admitted`
+/// (the exit-committed rethrow of a FATAL/proc_exit/panic that parallel
+/// vacuum, COPY and nbtsort deliberately resume through the runtime frames)
+/// would leave the entry PINNED forever: the coordinator's mark is never
+/// decremented, `last_out` never runs, the slot stays owned and the RG never
+/// completes — a permanent, process-global, cross-session wedge. This guard
+/// discharges the settle from `Drop`, so it runs on the unwind path too.
+///
+/// `disarm` is for the one path (`serve_bound`) that settles the pin itself
+/// before nesting an inner drive: the pin must be settled exactly once
+/// (`PinBoard`'s settle-without-publish contract), so the owning branch
+/// disarms this guard.
+struct PinSettleGuard<'a> {
+    sched: &'a Scheduler,
+    worker: usize,
+    armed: bool,
+}
+
+impl PinSettleGuard<'_> {
+    /// The pin is (or will be) settled by this path already — suppress the
+    /// Drop settle to preserve settle-exactly-once.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PinSettleGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.sched.settle(self.worker);
+        }
+    }
+}
+
+/// RAII for the per-task `active_workers` count (H-74).
+///
+/// The decrement that matches the join's `fetch_add` is a finalization
+/// input (claim-duration DOP scaling; the coordinator drains against it)
+/// and lives straight-line after the task body. An unwind through the
+/// morsel body would skip it, permanently inflating the set's live width.
+/// Discharging it from `Drop` pays it on the unwind path too.
+struct ActiveWorkerGuard<'a> {
+    ts: &'a TaskSetRt,
+}
+
+impl Drop for ActiveWorkerGuard<'_> {
+    fn drop(&mut self) {
+        self.ts.active_workers.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// RAII for the WS-B ledger `leave` accounting (H-74).
+///
+/// `try_join`'s counterpart is straight-line after the task body; an unwind
+/// would skip it and permanently leak the slot's width grant. On the normal
+/// path the owning frame disarms this guard and performs the end-aware
+/// leave/wake itself; on an unwind the guard pays the leave and
+/// conservatively wakes peers who may now fit. No-op when the ledger is off
+/// (the guard is only constructed under `ledger_on`).
+struct LedgerLeaveGuard<'a> {
+    sched: &'a Scheduler,
+    slot: usize,
+    armed: bool,
+}
+
+impl LedgerLeaveGuard<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for LedgerLeaveGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed && self.sched.ledger.leave(self.slot) > 0 {
+            self.sched.park.wake_all();
+        }
+    }
+}
+
 /// Blocking-section entry (§2.8 composition): donate the current task's
 /// width grant along with the execution permit — the standby absorbing the
 /// freed core must be joinable or a width-saturated slot deadlocks the
@@ -1802,13 +1886,14 @@ impl Scheduler {
 
         // Protocol step 1: publish-target-before-claim.
         self.pins.publish(local.worker, slot);
+        // Protocol step 4 (settle own pin; pay any marker debt) is discharged
+        // via RAII so it also runs when the task body unwinds through this
+        // frame — see PinSettleGuard (H-74).
+        let mut pin_guard =
+            PinSettleGuard { sched: self, worker: local.worker, armed: true };
 
         match self.resolve(local, slot) {
-            None => {
-                // Protocol step 4: settle own pin; pay any marker debt.
-                self.settle(local.worker);
-                Step::Retry
-            }
+            None => Step::Retry,
             // M2 inc-2 bindability gate: a bound-descriptor RG is never
             // task-claimed by a pool worker — one ENGAGEMENT is served
             // through the descriptor instead (bind → external-lane drive →
@@ -1820,6 +1905,9 @@ impl Scheduler {
             // on every marked pin — holding our pool-lane pin across the
             // serve would deadlock the drive against our own settle).
             Some(ts) if ts.rg.bound.is_some() => {
+                // serve_bound settles the pin itself, before nesting the
+                // inner drive (settle-exactly-once): disarm our guard.
+                pin_guard.disarm();
                 self.note_spin_claimed(local);
                 self.serve_bound(local, &ts)
             }
@@ -1836,10 +1924,9 @@ impl Scheduler {
                     local.session_token = 0;
                     crate::evict_session_residue_for_unbound_work();
                 }
-                let step = self.run_task_admitted(local, &ts);
-                // Protocol step 4: settle own pin; pay any marker debt.
-                self.settle(local.worker);
-                step
+                // pin_guard settles on scope exit (Drop), incl. an unwind
+                // out of run_task_admitted.
+                self.run_task_admitted(local, &ts)
             }
         }
     }
@@ -1955,7 +2042,18 @@ impl Scheduler {
         // (§2.8 composition): a task body that donates its execution permit
         // must donate its width grant with it (ledger_donate_current).
         let _grant = if ledger_on { Some(GrantCtx::set(self, ts.slot)) } else { None };
+        // RAII counterpart to try_join: pay `leave` even if the task body
+        // unwinds through run_task (H-74). Disarmed on the normal path, which
+        // performs the end-aware leave/wake below.
+        let mut leave_guard = if ledger_on {
+            Some(LedgerLeaveGuard { sched: self, slot: ts.slot, armed: true })
+        } else {
+            None
+        };
         let end = self.run_task(local, ts);
+        if let Some(g) = leave_guard.as_mut() {
+            g.disarm();
+        }
         if ledger_on {
             // WORKER-FREED RE-PICK: this worker re-picks on its own; the
             // hint covers PARKED peers when the slot turned joinable again.
@@ -2073,8 +2171,14 @@ impl Scheduler {
 
         // Protocol step 1: publish-target-before-claim.
         self.pins.publish(local.worker, slot);
+        // Protocol step 4 (settle own pin; pay any marker debt) is discharged
+        // via RAII so it also runs when the task body unwinds through this
+        // frame — an exit-committed rethrow (FATAL/proc_exit) or panic out of
+        // run_task_admitted would otherwise strand this pin forever (H-74).
+        let _pin_guard =
+            PinSettleGuard { sched: self, worker: local.worker, armed: true };
 
-        let step = match self.resolve(local, slot) {
+        match self.resolve(local, slot) {
             None => Step::Retry,
             Some(ts) if !Arc::ptr_eq(&ts.rg, rg) => {
                 // The slot rolled to a different RG between lookup and
@@ -2086,11 +2190,7 @@ impl Scheduler {
             // where cross-query narrowing between concurrent pinned gangs
             // becomes real (integration contract 1c ruling 4).
             Some(ts) => self.run_task_admitted(local, &ts),
-        };
-
-        // Protocol step 4: settle own pin; pay any marker debt.
-        self.settle(local.worker);
-        step
+        }
     }
 
     // ---- batched stats (see [`StatAcc`]) -----------------------------------
@@ -2244,6 +2344,12 @@ impl Scheduler {
         // input (tails192 #4) — identity at ≤32 by construction, so 16-core
         // pods and the mt16 vectors size exactly as before.
         let task_width = ts.active_workers.fetch_add(1, Ordering::SeqCst) + 1;
+        // RAII: the matching decrement is a finalization-protocol obligation.
+        // Discharge it from Drop so it is paid on EVERY exit path, including
+        // an unwind through the morsel body below (H-74). Nothing between here
+        // and the old decrement site reads `active_workers`, so the normal
+        // path is behavior-identical.
+        let _active = ActiveWorkerGuard { ts: &**ts };
         // Per-task observability counts, folded into the slot's StatAcc
         // after the task (declared here so both match arms share the fold).
         let mut t_morsels = 0u64;
@@ -2468,7 +2574,8 @@ impl Scheduler {
             }
         };
 
-        ts.active_workers.fetch_sub(1, Ordering::SeqCst);
+        // `active_workers` is decremented by `_active` (ActiveWorkerGuard) on
+        // scope exit — see the join above (H-74).
         // Batched (StatAcc): completion + morsel/granule/sizing fold; an
         // observed exhaustion ends this worker's participation (no claim
         // can succeed past an exhausted cursor), so flush the slot then.
@@ -2837,16 +2944,21 @@ impl Scheduler {
         // try_outcome after a wake; the completion word itself only
         // unparks registered leader waiters.
         //
-        // GL-STMTTASK-2 (wake elision, same knob as the submission wake):
-        // completion is NOT new work for pool workers — only legacy
-        // (external-driver) parkers need the notify; a parked pool worker
-        // stays parked (slot release re-admission publishes through
-        // publish_taskset_locked, which carries its own wake).
-        if wake_spinner_enabled() {
-            self.park.wake_legacy();
-        } else {
-            self.park.wake_all();
-        }
+        // GL-STMTTASK-2 (wake elision): completion is NOT subject to the
+        // submission-wake elision. The Retry-park protocol's documented
+        // liveness invariant (see RETRY_PARK_AFTER) is that BOTH publish
+        // AND completion wake_all, which is what makes an invalidated-slot
+        // Retry park (seal / last-out / straggler tail) lost-wakeup-free.
+        // A pool worker Retry-parked on the DIRECTED stack against the
+        // completing slot has no other guaranteed wake: wake_legacy bumps
+        // the epoch but never notifies a directed parker's per-worker
+        // condvar (it waits on parker.cv, not the legacy cv), so eliding
+        // the directed subset here strands it whenever completion is NOT
+        // followed by a re-admission publish into the slot (empty waitq —
+        // the common last-out case). Completion therefore wakes ALL parked
+        // workers unconditionally, honoring the "wake all parked" contract
+        // regardless of the wake-spinner knob.
+        self.park.wake_all();
         if self.trace {
             self.trace(&format!("rg {} complete (aborted={aborted})", rg.rg_id));
         }

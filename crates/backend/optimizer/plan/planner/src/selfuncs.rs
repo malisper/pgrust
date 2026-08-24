@@ -560,34 +560,107 @@ fn get_actual_variable_endpoint<'mcx>(
         let value =
             unsafe { nbtree::itup::index_getattr(itup.as_ptr(), 1, itupdesc, &mut isnull) };
         assert!(!isnull, "found unexpected null value in index");
-        result = Some(endpoint_datum_copy(mcx, value, typbyval, typlen)?);
+        // The probed by-ref datum points into the AM's BLCKSZ page-copy buffer
+        // (nbtree currTuples, which xs_itup indexes into: xs_itup =
+        // currTuples.as_ptr() + tupleOffset). Bound the copy to that buffer's
+        // extent so a crafted leaf page whose attr-1 varlena header declares an
+        // oversized length cannot drive an OOB read past the page (the finding's
+        // up-to-1 GiB read). This is exactly the extent C's datumCopy stays
+        // within, so a datum that legitimately fits in the page is never
+        // rejected. This probe always runs over a btree (amcanorder); the else
+        // arm is unreachable, and leaving it unbounded there is inert.
+        let page_bounds: Option<(*const u8, *const u8)> =
+            if let types_relscan::IndexScanOpaque::Btree(so) = &scan.opaque {
+                so.currTuples.as_ref().map(|buf| {
+                    let start = buf.as_ptr();
+                    (start, start.wrapping_add(buf.capacity()))
+                })
+            } else {
+                None
+            };
+        result = Some(endpoint_datum_copy_bounded(mcx, value, typbyval, typlen, page_bounds)?);
         break;
     }
     indexam::index_endscan(scan)?;
     Ok(result)
 }
 
+// A probed endpoint datum whose declared/scanned size would read past the
+// end of the AM's page-copy buffer is a corrupt on-page tuple: raise a
+// catchable ERRCODE_DATA_CORRUPTED (aborts the statement, not the backend)
+// rather than performing the OOB read.
+#[track_caller]
+fn endpoint_page_overrun() -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(
+            "index endpoint datum length exceeds its access-method page buffer".to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_DATA_CORRUPTED),
+    )
+}
+
 // datumCopy (datum.c): the probed value points into the AM's page buffer and
 // must outlive the scan; index_form_tuple packs, so the -1 arm is C's
 // VARSIZE_ANY (short 1B headers and inline-compressed images included).
+//
+// Unbounded lane, retained for callers that already own the datum's extent
+// (unit tests). The scan probe uses the page-bounded lane below.
 pub(crate) fn endpoint_datum_copy<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     value: Datum,
     typbyval: bool,
     typlen: i16,
 ) -> PgResult<Datum> {
+    endpoint_datum_copy_bounded(mcx, value, typbyval, typlen, None)
+}
+
+// Same copy as endpoint_datum_copy, but every read of the value is confined to
+// `page = (start, end)` — the AM's BLCKSZ page-copy buffer that `value` points
+// into. Because a well-formed index tuple lies wholly within that buffer, and
+// attribute 1's bytes are a subset of its tuple, a legitimate datum always
+// satisfies `value + size <= end`; only a crafted/corrupt on-page header can
+// declare a size (or omit the cstring NUL) that would overrun the page, and
+// that is rejected here instead of read out of bounds. `page == None` restores
+// the historic unbounded behavior for callers that own the extent themselves.
+fn endpoint_datum_copy_bounded<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    value: Datum,
+    typbyval: bool,
+    typlen: i16,
+    page: Option<(*const u8, *const u8)>,
+) -> PgResult<Datum> {
     if typbyval {
         return Ok(value);
     }
     let p = value.as_usize() as *const u8;
     assert!(!p.is_null());
+    // Bytes readable from `p` without leaving the page buffer. None => caller
+    // owns the extent (no bound). If `p` itself is outside the buffer the page
+    // is corrupt.
+    let avail: Option<usize> = match page {
+        Some((start, end)) => {
+            if p < start || p >= end {
+                return Err(endpoint_page_overrun());
+            }
+            Some((end as usize) - (p as usize))
+        }
+        None => None,
+    };
+    // `n` bytes at `p` stay within the buffer?
+    let fits = |n: usize| avail.is_none_or(|a| n <= a);
     let size = match typlen {
         -1 => {
-            // SAFETY: non-null by-ref varlena datum, readable for its
-            // header-declared (VARSIZE_ANY) size.
+            // SAFETY: non-null by-ref varlena datum; every header byte read is
+            // gated by `fits(..)` against the page buffer above.
             unsafe {
+                if !fits(1) {
+                    return Err(endpoint_page_overrun());
+                }
                 let b0 = *p;
                 if b0 == 0x01 {
+                    if !fits(2) {
+                        return Err(endpoint_page_overrun());
+                    }
                     2 + match *p.add(1) {
                         18 => 16,
                         1 => 8,
@@ -599,24 +672,36 @@ pub(crate) fn endpoint_datum_copy<'mcx>(
                 } else if b0 & 0x01 != 0 {
                     (b0 as usize >> 1) & 0x7F
                 } else {
+                    if !fits(4) {
+                        return Err(endpoint_page_overrun());
+                    }
                     datum::VarlenaRef::from_ptr(p).varsize()
                 }
             }
         }
         -2 => {
             let mut n = 0usize;
-            // SAFETY: non-null NUL-terminated cstring datum.
-            while unsafe { *p.add(n) } != 0 {
+            // SAFETY: non-null cstring datum; the NUL scan is bounded to the
+            // page buffer, so a missing terminator errors instead of running on.
+            loop {
+                if !fits(n + 1) {
+                    return Err(endpoint_page_overrun());
+                }
+                if unsafe { *p.add(n) } == 0 {
+                    break n + 1;
+                }
                 n += 1;
             }
-            n + 1
         }
         l => {
             debug_assert!(l > 0);
             l as usize
         }
     };
-    // SAFETY: `size` bytes readable per the arms above.
+    if !fits(size) {
+        return Err(endpoint_page_overrun());
+    }
+    // SAFETY: `size` bytes readable per the arms above and confirmed in-buffer.
     let src = unsafe { core::slice::from_raw_parts(p, size) };
     let out = mcx::slice_in(mcx, src)?;
     Ok(Datum::from_usize(out.leak().as_ptr() as usize))

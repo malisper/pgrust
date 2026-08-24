@@ -93,7 +93,7 @@ pub(crate) unsafe fn bt_dedup_pass(
         debug_assert!(!itemid.is_dead());
 
         if offnum == minoff {
-            state.start_pending(itup, offnum);
+            state.start_pending(itup, offnum)?;
         } else if state.deduplicate
             && bt_keep_natts_fast(rel, state.base, itup) > nkeyatts
             && state.save_htid(itup)
@@ -113,7 +113,7 @@ pub(crate) unsafe fn bt_dedup_pass(
                 }
             }
 
-            state.start_pending(itup, offnum);
+            state.start_pending(itup, offnum)?;
         }
     }
 
@@ -208,11 +208,11 @@ pub(crate) unsafe fn bt_bottomupdel_pass<'mcx>(
         debug_assert!(!itemid.is_dead());
 
         if offnum == minoff {
-            state.start_pending(itup, offnum);
+            state.start_pending(itup, offnum)?;
         } else if bt_keep_natts_fast(rel, state.base, itup) > nkeyatts && state.save_htid(itup) {
         } else {
             bt_bottomupdel_finish_pending(&page, &mut state, &mut delstate);
-            state.start_pending(itup, offnum);
+            state.start_pending(itup, offnum)?;
         }
     }
     bt_bottomupdel_finish_pending(&page, &mut state, &mut delstate);

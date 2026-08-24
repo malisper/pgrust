@@ -2,7 +2,9 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use mcx::MemoryContext;
 use types_core::{ProcNumber, TransactionId, INVALID_PROC_NUMBER};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use types_error::{
+    PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR,
+};
 use types_storage::lock::{
     LOCKBIT_ON, LOCKMODE, LOCKTAG, LOCKTAG_RELATION, LOCKTAG_VIRTUALTRANSACTION, PROCLOCK,
     PROCLOCKTAG,
@@ -42,8 +44,32 @@ fn lock_record_bytes(locktag: &LOCKTAG, lockmode: LOCKMODE) -> [u8; SIZEOF_TWOPH
     b
 }
 
-fn decode_lock_record(recdata: &[u8]) -> (LOCKTAG, LOCKMODE) {
-    assert_eq!(recdata.len(), SIZEOF_TWOPHASE_LOCK_RECORD);
+#[track_caller]
+#[cold]
+fn corrupt_record_error(len: usize) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!(
+                "invalid 2PC lock record length: {len} (expected {SIZEOF_TWOPHASE_LOCK_RECORD})"
+            ),
+        )
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+// Recovery-path decode: `recdata` originates from an on-disk pg_twophase state
+// file / WAL, which is untrusted (an attacker can plant a crafted record with a
+// recomputable CRC/magic). Validate the declared length matches the fixed
+// TwoPhaseLockRecord layout BEFORE decoding, mirroring C's
+// `Assert(len == sizeof(TwoPhaseLockRecord))` but as a catchable ERROR rather
+// than an assertion that is compiled out in production. The returned lockmode is
+// still raw and MUST be range-checked (via check_lockmode / lock_method_checked)
+// before it is used to index any per-mode array.
+fn decode_lock_record(recdata: &[u8]) -> PgResult<(LOCKTAG, LOCKMODE)> {
+    if recdata.len() != SIZEOF_TWOPHASE_LOCK_RECORD {
+        return Err(corrupt_record_error(recdata.len()));
+    }
     let rd_u32 = |o: usize| u32::from_ne_bytes(recdata[o..o + 4].try_into().unwrap());
     let locktag = LOCKTAG {
         locktag_field1: rd_u32(0),
@@ -53,7 +79,7 @@ fn decode_lock_record(recdata: &[u8]) -> (LOCKTAG, LOCKMODE) {
         locktag_type: recdata[14],
         locktag_lockmethodid: recdata[15],
     };
-    (locktag, rd_u32(16) as LOCKMODE)
+    Ok((locktag, rd_u32(16) as LOCKMODE))
 }
 
 #[track_caller]
@@ -309,9 +335,14 @@ pub fn PostPrepare_Locks(xid: TransactionId) -> PgResult<()> {
 }
 
 pub fn lock_twophase_recover(xid: TransactionId, _info: u16, recdata: &[u8]) -> PgResult<()> {
-    let (locktag, lockmode) = decode_lock_record(recdata);
+    let (locktag, lockmode) = decode_lock_record(recdata)?;
     let procno: ProcNumber = twophase_seams::two_phase_get_dummy_proc_number::call(xid, false)?;
-    let lock_method_table = crate::lock_method_by_id(locktag.locktag_lockmethodid as _)?;
+    // Validate the untrusted lockmode against this method's range BEFORE it is
+    // used to index the fixed-size per-mode arrays in SetupLockInTable /
+    // GrantLock. This is the same check_lockmode / MAX_LOCKMODES validation the
+    // live acquire path applies (see lock_method_checked).
+    let lock_method_table =
+        crate::lock_method_checked(locktag.locktag_lockmethodid as _, lockmode)?;
 
     let hashcode = LockTagHashCode(&locktag);
     let partition_lock = LockHashPartitionLock(hashcode);
@@ -346,9 +377,13 @@ pub fn lock_twophase_recover(xid: TransactionId, _info: u16, recdata: &[u8]) -> 
 }
 
 pub fn lock_twophase_postcommit(xid: TransactionId, _info: u16, recdata: &[u8]) -> PgResult<()> {
-    let (locktag, lockmode) = decode_lock_record(recdata);
+    let (locktag, lockmode) = decode_lock_record(recdata)?;
     let procno: ProcNumber = twophase_seams::two_phase_get_dummy_proc_number::call(xid, true)?;
-    let lock_method_table = crate::lock_method_by_id(locktag.locktag_lockmethodid as _)?;
+    // Validate the untrusted lockmode against this method's range BEFORE it is
+    // used to index the fixed-size per-mode arrays inside LockRefindAndRelease
+    // (same check_lockmode / MAX_LOCKMODES validation as the live path).
+    let lock_method_table =
+        crate::lock_method_checked(locktag.locktag_lockmethodid as _, lockmode)?;
     LockRefindAndRelease(lock_method_table, procno, &locktag, lockmode, true)
 }
 
@@ -357,7 +392,7 @@ pub fn lock_twophase_postabort(xid: TransactionId, info: u16, recdata: &[u8]) ->
 }
 
 pub fn lock_twophase_standby_recover(xid: TransactionId, _info: u16, recdata: &[u8]) -> PgResult<()> {
-    let (locktag, lockmode) = decode_lock_record(recdata);
+    let (locktag, lockmode) = decode_lock_record(recdata)?;
     if lockmode == crate::AccessExclusiveLock
         && locktag.locktag_type == LOCKTAG_RELATION
     {

@@ -184,7 +184,7 @@ fn disabled_module_arms_and_error_texts() {
     ExtendCommitTs(FirstNormalTransactionId).unwrap();
     assert!(XLOG_INSERTS.lock().unwrap().is_empty());
 
-    let err = TransactionIdGetCommitTsData(100).unwrap_err();
+    let err = TransactionIdGetCommitTsData(100).err().unwrap();
     assert_eq!(err.message(), "could not get commit timestamp data");
     assert_eq!(err.sqlstate(), ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
     assert_eq!(
@@ -192,12 +192,12 @@ fn disabled_module_arms_and_error_texts() {
         Some("Make sure the configuration parameter \"track_commit_timestamp\" is set.")
     );
 
-    let err = GetLatestCommitTsData().unwrap_err();
+    let err = GetLatestCommitTsData().err().unwrap();
     assert_eq!(err.message(), "could not get commit timestamp data");
 
     // Recovery flavor of the hint.
     IN_RECOVERY.store(true, Relaxed);
-    let err = TransactionIdGetCommitTsData(100).unwrap_err();
+    let err = TransactionIdGetCommitTsData(100).err().unwrap();
     assert_eq!(
         err.hint(),
         Some(
@@ -207,7 +207,7 @@ fn disabled_module_arms_and_error_texts() {
     IN_RECOVERY.store(false, Relaxed);
 
     // Invalid / non-normal xids error or no-op regardless of activation.
-    let err = TransactionIdGetCommitTsData(InvalidTransactionId).unwrap_err();
+    let err = TransactionIdGetCommitTsData(InvalidTransactionId).err().unwrap();
     assert_eq!(
         err.message(),
         "cannot retrieve commit timestamp for transaction 0"
@@ -265,6 +265,47 @@ fn activation_state_machine_and_set_get() {
     assert_eq!(tv.oldestCommitTsXid.load(Relaxed), InvalidTransactionId);
     assert_eq!(tv.newestCommitTsXid.load(Relaxed), InvalidTransactionId);
     assert!(std::fs::read_dir("pg_commit_ts").unwrap().next().is_none());
+}
+
+// A crafted RM_COMMIT_TS record can carry a main-data payload shorter than the
+// arm reads, or a negative int64 pageno. C memcpy's fixed sizes and does
+// `pageno % nbanks` without a sign check, so it never faults; the Rust startup
+// redo thread must reject both as a typed ERRCODE_DATA_CORRUPTED, never a
+// slice/index panic.
+#[test]
+fn commit_ts_redo_pageno_rejects_short_and_negative() {
+    // Valid ZEROPAGE payload (8-byte non-negative pageno) passes.
+    let mut ok = [0u8; 8];
+    ok.copy_from_slice(&5i64.to_ne_bytes());
+    assert_eq!(
+        commit_ts_redo_pageno(&ok, SIZEOF_COMMIT_TS_ZEROPAGE, "COMMIT_TS_ZEROPAGE").unwrap(),
+        5
+    );
+
+    // Valid TRUNCATE payload (12 bytes) passes.
+    let mut trunc = [0u8; SIZEOF_COMMIT_TS_TRUNCATE];
+    trunc[..8].copy_from_slice(&9i64.to_ne_bytes());
+    assert_eq!(
+        commit_ts_redo_pageno(&trunc, SIZEOF_COMMIT_TS_TRUNCATE, "COMMIT_TS_TRUNCATE").unwrap(),
+        9
+    );
+
+    // Short payloads for either op yield a typed error, not a panic.
+    for &need in &[SIZEOF_COMMIT_TS_ZEROPAGE, SIZEOF_COMMIT_TS_TRUNCATE] {
+        for bad_len in 0..need {
+            let err = commit_ts_redo_pageno(&vec![0u8; bad_len], need, "test")
+                .err()
+                .unwrap();
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+    }
+
+    // Negative pageno (well-formed 8-byte payload) is rejected before SLRU.
+    let neg = (-1i64).to_ne_bytes();
+    let err = commit_ts_redo_pageno(&neg, SIZEOF_COMMIT_TS_ZEROPAGE, "COMMIT_TS_ZEROPAGE")
+        .err()
+        .unwrap();
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
 }
 
 #[test]

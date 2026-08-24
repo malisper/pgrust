@@ -9,6 +9,7 @@ use std::rc::Rc;
 use ::datum::Datum;
 use ::fmgr::FmgrInfo;
 use ::mcx::MemoryContext;
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, Oid, BLCKSZ};
 use ::types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
 use ::types_tuple::itemptr::ItemPointerData;
@@ -284,11 +285,33 @@ pub struct XlBrinCreateIdx {
     pub version: u16,
 }
 
-pub fn decode_createidx(d: &[u8]) -> XlBrinCreateIdx {
-    XlBrinCreateIdx {
+/// A BRIN WAL record whose main-data length (`main_data_len`, taken verbatim
+/// from the attacker-controllable record header) is shorter than the fixed
+/// struct the opcode decodes is data corruption. C casts `XLogRecGetData()` to
+/// the struct pointer and reads whatever bytes follow in the (over-sized)
+/// decode buffer — garbage, but never a crash. The Rust port must not turn the
+/// same malformed record into a slice-index panic in the startup/redo thread
+/// (which would crash-loop the cluster on every replay of the LSN); instead
+/// surface a catchable `ERRCODE_DATA_CORRUPTED` replay error, matching the
+/// redo/corruption idiom used across the AM crates.
+#[cold]
+fn short_brin_record(op: &str, need: usize, got: usize) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "BRIN redo: {op} record main data too short: need {need} bytes, got {got}"
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+pub fn decode_createidx(d: &[u8]) -> PgResult<XlBrinCreateIdx> {
+    if d.len() < SizeOfBrinCreateIdx {
+        return Err(short_brin_record("create_index", SizeOfBrinCreateIdx, d.len()));
+    }
+    Ok(XlBrinCreateIdx {
         pagesPerRange: u32::from_ne_bytes(d[0..4].try_into().unwrap()),
         version: u16::from_ne_bytes(d[4..6].try_into().unwrap()),
-    }
+    })
 }
 
 pub struct XlBrinInsert {
@@ -297,12 +320,15 @@ pub struct XlBrinInsert {
     pub offnum: u16,
 }
 
-pub fn decode_insert(d: &[u8]) -> XlBrinInsert {
-    XlBrinInsert {
+pub fn decode_insert(d: &[u8]) -> PgResult<XlBrinInsert> {
+    if d.len() < SizeOfBrinInsert {
+        return Err(short_brin_record("insert", SizeOfBrinInsert, d.len()));
+    }
+    Ok(XlBrinInsert {
         heapBlk: u32::from_ne_bytes(d[0..4].try_into().unwrap()),
         pagesPerRange: u32::from_ne_bytes(d[4..8].try_into().unwrap()),
         offnum: u16::from_ne_bytes(d[8..10].try_into().unwrap()),
-    }
+    })
 }
 
 pub struct XlBrinUpdate {
@@ -310,19 +336,38 @@ pub struct XlBrinUpdate {
     pub insert: XlBrinInsert,
 }
 
-pub fn decode_update(d: &[u8]) -> XlBrinUpdate {
-    XlBrinUpdate {
-        oldOffnum: u16::from_ne_bytes(d[0..2].try_into().unwrap()),
-        insert: decode_insert(&d[4..14]),
+pub fn decode_update(d: &[u8]) -> PgResult<XlBrinUpdate> {
+    // Validate the full struct up front so the &d[4..14] subslice below (which
+    // would itself panic on a short record) is in bounds.
+    if d.len() < SizeOfBrinUpdate {
+        return Err(short_brin_record("update", SizeOfBrinUpdate, d.len()));
     }
+    Ok(XlBrinUpdate {
+        oldOffnum: u16::from_ne_bytes(d[0..2].try_into().unwrap()),
+        insert: decode_insert(&d[4..14])?,
+    })
 }
 
-pub fn decode_samepage_update(d: &[u8]) -> u16 {
-    u16::from_ne_bytes(d[0..2].try_into().unwrap())
+pub fn decode_samepage_update(d: &[u8]) -> PgResult<u16> {
+    if d.len() < SizeOfBrinSamepageUpdate {
+        return Err(short_brin_record(
+            "samepage_update",
+            SizeOfBrinSamepageUpdate,
+            d.len(),
+        ));
+    }
+    Ok(u16::from_ne_bytes(d[0..2].try_into().unwrap()))
 }
 
-pub fn decode_revmap_extend(d: &[u8]) -> BlockNumber {
-    u32::from_ne_bytes(d[0..4].try_into().unwrap())
+pub fn decode_revmap_extend(d: &[u8]) -> PgResult<BlockNumber> {
+    if d.len() < SizeOfBrinRevmapExtend {
+        return Err(short_brin_record(
+            "revmap_extend",
+            SizeOfBrinRevmapExtend,
+            d.len(),
+        ));
+    }
+    Ok(u32::from_ne_bytes(d[0..4].try_into().unwrap()))
 }
 
 pub struct XlBrinDesummarize {
@@ -331,12 +376,15 @@ pub struct XlBrinDesummarize {
     pub regOffset: u16,
 }
 
-pub fn decode_desummarize(d: &[u8]) -> XlBrinDesummarize {
-    XlBrinDesummarize {
+pub fn decode_desummarize(d: &[u8]) -> PgResult<XlBrinDesummarize> {
+    if d.len() < SizeOfBrinDesummarize {
+        return Err(short_brin_record("desummarize", SizeOfBrinDesummarize, d.len()));
+    }
+    Ok(XlBrinDesummarize {
         pagesPerRange: u32::from_ne_bytes(d[0..4].try_into().unwrap()),
         heapBlk: u32::from_ne_bytes(d[4..8].try_into().unwrap()),
         regOffset: u16::from_ne_bytes(d[8..10].try_into().unwrap()),
-    }
+    })
 }
 
 // The closed opclass set (rule 4); the OPCINFO pg_amproc OID selects the arm.
@@ -492,4 +540,85 @@ pub struct BrinInsertState<'mcx> {
     pub bis_rmAccess: BrinRevmap,
     pub bis_desc: BrinDesc<'mcx>,
     pub bis_pages_per_range: BlockNumber,
+}
+
+#[cfg(test)]
+mod short_record_tests {
+    use super::*;
+
+    // A hostile/short WAL record (main_data_len below the opcode's fixed
+    // struct, including the len==0 null-data case) must produce a catchable
+    // ERRCODE_DATA_CORRUPTED replay error, never a slice-index panic in the
+    // startup/redo thread.
+    fn assert_short(op: &str, err: Box<PgError>) {
+        assert_eq!(
+            err.sqlstate(),
+            ERRCODE_DATA_CORRUPTED,
+            "{op}: short record must map to ERRCODE_DATA_CORRUPTED"
+        );
+    }
+
+    #[test]
+    fn all_ops_reject_short_and_empty_main_data() {
+        // Empty (main_data_len == 0) and one-below-full-struct for each opcode.
+        assert_short("create_index", decode_createidx(&[]).err().unwrap());
+        assert_short(
+            "create_index",
+            decode_createidx(&[0u8; SizeOfBrinCreateIdx - 1]).err().unwrap(),
+        );
+
+        assert_short("insert", decode_insert(&[]).err().unwrap());
+        assert_short(
+            "insert",
+            decode_insert(&[0u8; SizeOfBrinInsert - 1]).err().unwrap(),
+        );
+
+        assert_short("update", decode_update(&[]).err().unwrap());
+        assert_short(
+            "update",
+            decode_update(&[0u8; SizeOfBrinUpdate - 1]).err().unwrap(),
+        );
+
+        assert_short("samepage_update", decode_samepage_update(&[]).err().unwrap());
+        assert_short(
+            "samepage_update",
+            decode_samepage_update(&[0u8; SizeOfBrinSamepageUpdate - 1]).err().unwrap(),
+        );
+
+        assert_short("revmap_extend", decode_revmap_extend(&[]).err().unwrap());
+        assert_short(
+            "revmap_extend",
+            decode_revmap_extend(&[0u8; SizeOfBrinRevmapExtend - 1]).err().unwrap(),
+        );
+
+        assert_short("desummarize", decode_desummarize(&[]).err().unwrap());
+        assert_short(
+            "desummarize",
+            decode_desummarize(&[0u8; SizeOfBrinDesummarize - 1]).err().unwrap(),
+        );
+    }
+
+    #[test]
+    fn full_length_records_decode() {
+        let ci = decode_createidx(&xl_brin_createidx(128, BRIN_CURRENT_VERSION)).unwrap();
+        assert_eq!(ci.pagesPerRange, 128);
+        assert_eq!(ci.version, BRIN_CURRENT_VERSION);
+
+        let ins = decode_insert(&xl_brin_insert(7, 128, 3)).unwrap();
+        assert_eq!(ins.heapBlk, 7);
+        assert_eq!(ins.pagesPerRange, 128);
+        assert_eq!(ins.offnum, 3);
+
+        let upd = decode_update(&xl_brin_update(5, 7, 128, 3)).unwrap();
+        assert_eq!(upd.oldOffnum, 5);
+        assert_eq!(upd.insert.heapBlk, 7);
+
+        assert_eq!(decode_samepage_update(&xl_brin_samepage_update(9)).unwrap(), 9);
+        assert_eq!(decode_revmap_extend(&xl_brin_revmap_extend(42)).unwrap(), 42);
+
+        let de = decode_desummarize(&xl_brin_desummarize(128, 7, 2)).unwrap();
+        assert_eq!(de.pagesPerRange, 128);
+        assert_eq!(de.heapBlk, 7);
+        assert_eq!(de.regOffset, 2);
+    }
 }

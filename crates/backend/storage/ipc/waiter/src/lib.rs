@@ -265,10 +265,22 @@ impl Slot {
             Mode::ParkedFd => {
                 g.mode = Mode::Notified;
                 let wfd = g.wake_wfd;
-                drop(g);
+                // Write the wake byte while STILL holding the slot mutex so the
+                // liveness/ownership check above and this fd use are atomic
+                // w.r.t. thread-exit close+recycle: `retire_token` (which takes
+                // the fds and lets `WaiterGuard::drop` close them) cannot run
+                // until we release the guard, so `wfd` cannot be closed and its
+                // number reused under us. Dropping the guard first (as this arm
+                // used to) opened a window in which the owner could exit, close
+                // `wake_wfd`, and let an unrelated `pipe(2)` recycle the fd
+                // number — the write would then wake/corrupt the wrong backend.
+                // The pipe is nonblocking (O_NONBLOCK) and `send_wake_byte`
+                // returns on EAGAIN, so no blocking syscall is held under the
+                // lock, and it takes no locks so there is no order inversion.
                 if wfd >= 0 {
                     send_wake_byte(wfd);
                 }
+                drop(g);
                 Unparked::Delivered
             }
         }

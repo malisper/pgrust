@@ -19,8 +19,8 @@ pub mod var;
 mod tests;
 
 use types_error::{
-    PgError, ERRCODE_DIVISION_BY_ZERO, ERRCODE_INVALID_TEXT_REPRESENTATION,
-    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+    PgError, ERRCODE_DATA_CORRUPTED, ERRCODE_DIVISION_BY_ZERO,
+    ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
 
 pub use aggregates::{
@@ -119,12 +119,34 @@ pub struct Num<'a> {
 impl<'a> Num<'a> {
     #[inline]
     pub fn from_payload(bytes: &'a [u8]) -> Num<'a> {
-        assert!(bytes.len() >= 2);
-        Num {
+        let num = Num {
             ptr: bytes.as_ptr(),
             len: bytes.len(),
             _life: core::marker::PhantomData,
+        };
+        // Validate the payload length against the header size its accessors
+        // will read BEFORE any accessor runs — the generic guarantee that makes
+        // weight()/ndigits()/dscale()/digits()/sign() safe by construction on a
+        // forged or truncated image (planted in a pgrc2 part, backup, or
+        // tampered data dir). Mirrors C's NUMERIC_HEADER_SIZE, which depends on
+        // NUMERIC_IS_SHORT: a short-format header is 2 bytes (u16 word only),
+        // a long-format header is 4 (u16 word + int16 weight). Reading the
+        // header word itself requires 2 bytes; header_size() then tells us
+        // whether the long-format weight field is also present. On an
+        // undersized image, raise a catchable ERRCODE_DATA_CORRUPTED instead of
+        // reading out of bounds in release builds (debug-only asserts do not
+        // protect release).
+        if bytes.len() < 2 {
+            undersized_numeric_error(bytes.len(), 2);
         }
+        let need = num.header_size();
+        if bytes.len() < need {
+            undersized_numeric_error(bytes.len(), need);
+        }
+        // The digits region is ndigits * sizeof(NumericDigit) = ((len -
+        // header_size) / 2) * 2 bytes, which floors to <= len - header_size, so
+        // it always fits within the payload once the header size does.
+        num
     }
 
     #[inline]
@@ -263,6 +285,21 @@ impl<'a> Num<'a> {
 #[inline(never)]
 fn unaligned_digits_panic() -> ! {
     panic!("adt_numeric: packed numeric image is not 2-byte aligned")
+}
+
+/// Reject an undersized packed numeric image with a catchable
+/// ERRCODE_DATA_CORRUPTED (raised as a `panic_any(PgError)`, recovered by
+/// `pg_error_from_panic` at the transaction boundary — the same structured-error
+/// channel used elsewhere for corrupt on-disk images).
+#[cold]
+#[inline(never)]
+fn undersized_numeric_error(len: usize, need: usize) -> ! {
+    std::panic::panic_any(
+        PgError::error(format!(
+            "corrupt numeric datum: payload is {len} byte(s), header requires at least {need}"
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
 }
 
 #[cold]

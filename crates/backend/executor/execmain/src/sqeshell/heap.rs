@@ -927,31 +927,64 @@ fn recognize_topn(
 ///
 /// # Safety
 /// `p` points at a live varlena image (pinned page or staged page copy)
-/// readable through its own header.
+/// and `avail` is the number of bytes readable from `p` to the end of the
+/// containing tuple image (`t_data + t_len`, or the staged page-copy
+/// tuple extent). Nothing past `p.add(avail)` is dereferenced.
 unsafe fn push_varlena_payload(
     p: *const u8,
+    avail: usize,
     arena: &mut Vec<u8>,
 ) -> Result<u32, &'static str> {
     use ::types_tuple::varatt as va;
+    // [idx 5] The varlena header is attacker-influenceable page/catalog
+    // bytes (a restored basebackup, storage corruption, or a raw-page
+    // writer). Every declared length below is validated against `avail`
+    // BEFORE any slice is built, mirroring the deform-bound fix in
+    // types_tuple (`varsize_bounded`): the header must fit, the declared
+    // size must cover its own header (no unchecked `l - VARHDRSZ`
+    // underflow), and the full datum must lie within the containing tuple
+    // — otherwise a typed `text-corrupt` (ERRCODE_DATA_CORRUPTED) is
+    // raised instead of a massive out-of-bounds read.
+    if avail == 0 {
+        return Err("text-corrupt");
+    }
     if va::varatt_is_1b_e(p) {
         return Err("text-external");
     }
     if va::varatt_is_1b(p) {
+        // 1B header (VARHDRSZ_SHORT == 1): `avail >= 1` guarantees the
+        // header byte is readable; `varsize_1b` is the total (<= 0x7F).
         let l = va::varsize_1b(p);
+        if l < va::VARHDRSZ_SHORT || l > avail {
+            return Err("text-corrupt");
+        }
         let b = std::slice::from_raw_parts(p.add(va::VARHDRSZ_SHORT), l - va::VARHDRSZ_SHORT);
         arena.extend_from_slice(b);
         return Ok(b.len() as u32);
     }
     if va::varatt_is_4b_u(p) {
+        if avail < va::VARHDRSZ {
+            return Err("text-corrupt");
+        }
         let l = va::varsize_4b(p);
+        if l < va::VARHDRSZ || l > avail {
+            return Err("text-corrupt");
+        }
         let b = std::slice::from_raw_parts(p.add(va::VARHDRSZ), l - va::VARHDRSZ);
         arena.extend_from_slice(b);
         return Ok(b.len() as u32);
     }
     // 4B-C inline compressed (varattrib_4b va_compressed): va_tcinfo =
     // raw payload size | method << 30 (toast_compression.c's law); the
-    // compressed stream follows the 8-byte header.
+    // compressed stream follows the 8-byte header (4B varlena header +
+    // 4B va_tcinfo). Bound the whole datum before reading either.
+    if avail < 8 {
+        return Err("text-corrupt");
+    }
     let vl = va::varsize_4b(p);
+    if vl < 8 || vl > avail {
+        return Err("text-corrupt");
+    }
     let tcinfo = p.add(4).cast::<u32>().read_unaligned();
     let rawsize = (tcinfo & ((1u32 << 30) - 1)) as usize;
     if tcinfo >> 30 != 0 {
@@ -1109,9 +1142,16 @@ impl ScanFace for HeapFace<'_, '_> {
                         } else {
                             vscratch.clear();
                             let p = datums[i].as_usize() as *const u8;
+                            // [idx 5] Bound the header read by the tuple's
+                            // real extent (t_data..t_data+t_len): the datum
+                            // points inside this tuple, so bytes to the
+                            // tuple's end cap any trusted-header read.
+                            let tend = tup.header_ptr() as usize + tup.t_len as usize;
+                            let avail = tend.saturating_sub(p as usize);
                             // SAFETY: non-null varlena datum deformed off
-                            // a page pinned for the duration of the fill.
-                            match unsafe { push_varlena_payload(p, vscratch) } {
+                            // a page pinned for the duration of the fill;
+                            // `avail` stops the read at the tuple's end.
+                            match unsafe { push_varlena_payload(p, avail, vscratch) } {
                                 Ok(_) => out.push_bytes(ci, Some(vscratch)),
                                 Err("text-external") if det => {
                                     match unsafe { detoast_external(mcx, p, vscratch) } {
@@ -1606,12 +1646,20 @@ impl PackDeform<HeapPack> for HeapDeformer {
                             *nulls += 1;
                         } else {
                             let p = this.datums[a].as_usize() as *const u8;
+                            // [idx 5] Bound the header read by this tuple's
+                            // real extent within the staged page image
+                            // (`ptr`..`ptr + len`, the item's t_len): the
+                            // datum points inside this tuple, so bytes to
+                            // its end cap any trusted-header read.
+                            let tend = ptr + len as usize;
+                            let avail = tend.saturating_sub(p as usize);
                             let (arena, spans, vwords, _) = out.bytes_lane_mut(ci);
                             let off = arena.len() as u32;
                             // SAFETY: non-null varlena datum inside the
-                            // pack's page image (stable while the
-                            // pack is checked out).
-                            match unsafe { push_varlena_payload(p, arena) } {
+                            // pack's page image (stable while the pack is
+                            // checked out); `avail` stops the read at the
+                            // tuple's end.
+                            match unsafe { push_varlena_payload(p, avail, arena) } {
                                 Ok(plen) => {
                                     spans[r] = (off, plen);
                                     vwords[r >> 6] |= 1u64 << (r & 63);
@@ -2187,6 +2235,11 @@ pub(crate) fn maybe_run_heap<'mcx, 'd>(
                 .refuse(fp)
                 .into_error(&relname)));
         }
+        Ok(Err(FaceFoldErr::RowOrdinalOverflow { .. })) => {
+            return Some(Err(RefuseCause::Heap(HeapDetail::RowOrdinalOverflow)
+                .refuse(fp)
+                .into_error(&relname)));
+        }
         Ok(Err(FaceFoldErr::Face(fe))) => {
             return Some(Err(match io_err {
                 Some(e) => e,
@@ -2198,6 +2251,10 @@ pub(crate) fn maybe_run_heap<'mcx, 'd>(
                     let d = match fe.what {
                         "text-external" => HeapDetail::TextOutOfLine,
                         "text-compression" => HeapDetail::TextCompression,
+                        // [idx 5] A crafted/corrupt on-disk varlena (declared
+                        // size past the tuple, header undershoot, or a failed
+                        // pglz stream) surfaces as ERRCODE_DATA_CORRUPTED.
+                        "text-corrupt" => HeapDetail::TextCorrupt,
                         _ => HeapDetail::Face,
                     };
                     RefuseCause::Heap(d).refuse(fp).into_error(&relname)
@@ -2314,4 +2371,74 @@ pub(super) fn heap_relname(estate: &EStateData<'_>) -> Option<String> {
         .flatten()
         .find(|rel| ::tableam::TableAm::of(rel) == Some(::tableam_vocab::TableAm::Heap))
         .map(|rel| String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned())
+}
+
+#[cfg(test)]
+mod varlena_bound_tests {
+    //! [idx 5] `push_varlena_payload` must never read past the containing
+    //! tuple: a varlena header parsed from crafted on-disk bytes is
+    //! untrusted, so a declared size beyond `avail` (or below its own
+    //! header) is a typed `text-corrupt` (ERRCODE_DATA_CORRUPTED), not an
+    //! out-of-bounds read. Each buffer here is sized to `avail` exactly,
+    //! so any read past the declared bound would fault under Miri.
+    use super::push_varlena_payload;
+
+    /// Little-endian 4B-uncompressed header word for a total size `total`
+    /// (header + payload): low two bits 00, size in bits 2..=31.
+    #[cfg(target_endian = "little")]
+    fn hdr_4b_u(total: u32) -> [u8; 4] {
+        (total << 2).to_le_bytes()
+    }
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn valid_4b_uncompressed_copies_payload() {
+        // total = 8 (4B header + 4B payload "abcd").
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&hdr_4b_u(8));
+        buf.extend_from_slice(b"abcd");
+        let mut arena = Vec::new();
+        let n = unsafe { push_varlena_payload(buf.as_ptr(), buf.len(), &mut arena) };
+        assert_eq!(n, Ok(4));
+        assert_eq!(&arena, b"abcd");
+    }
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn lying_oversized_4b_header_is_corrupt_not_oob() {
+        // Header declares ~1 GiB but only 8 bytes are readable.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&hdr_4b_u(0x3FFF_FFFF));
+        buf.extend_from_slice(b"abcd");
+        let mut arena = Vec::new();
+        // avail == buf.len(): a trusting read would walk ~1 GiB past it.
+        let r = unsafe { push_varlena_payload(buf.as_ptr(), buf.len(), &mut arena) };
+        assert_eq!(r, Err("text-corrupt"));
+        assert!(arena.is_empty());
+    }
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn undersized_4b_headers_do_not_underflow() {
+        // Declared totals 0 and 3 are below VARHDRSZ (4): the old
+        // `l - VARHDRSZ` wrapped to ~usize::MAX. Now typed-corrupt.
+        for total in [0u32, 3u32] {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&hdr_4b_u(total));
+            buf.extend_from_slice(&[0u8; 4]);
+            let mut arena = Vec::new();
+            let r = unsafe { push_varlena_payload(buf.as_ptr(), buf.len(), &mut arena) };
+            assert_eq!(r, Err("text-corrupt"), "total={total}");
+            assert!(arena.is_empty());
+        }
+    }
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn zero_avail_is_corrupt() {
+        let buf = [0u8; 4];
+        let mut arena = Vec::new();
+        let r = unsafe { push_varlena_payload(buf.as_ptr(), 0, &mut arena) };
+        assert_eq!(r, Err("text-corrupt"));
+    }
 }

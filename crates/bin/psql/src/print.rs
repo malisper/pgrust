@@ -63,6 +63,72 @@ fn cell_lines(s: &str) -> Vec<&str> {
     s.split('\n').collect()
 }
 
+/// Neutralize control characters in a server-controlled string exactly as
+/// upstream psql's `pg_wcsformat` (fe_utils/mbprint.c) does, so that
+/// server-controlled bytes cannot inject terminal escape sequences. This is
+/// the single shared control-char neutralization applied to every string that
+/// upstream feeds through `pg_wcsformat` — the headers and cells of the
+/// aligned and expanded (vertical) render paths, including wrapped/multi-line
+/// cells (title and footers are emitted raw here, matching upstream, which
+/// does not run them through `pg_wcsformat`).
+///
+/// Newlines are preserved as real line breaks (the render paths split on
+/// '\n'); every other control byte is rendered as inert text:
+///   - '\r'                    -> "\r"
+///   - tab                     -> spaces to the next multiple of 8
+///   - single-byte control/DEL -> "\xNN" (uppercase hex)
+///   - non-ASCII (UTF-8) control char -> "\uXXXX"
+/// All other characters are copied verbatim.
+fn wcsformat(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(b.len());
+    let mut linewidth = 0usize;
+    let mut i = 0;
+    while i < b.len() {
+        let chlen = (wchar::pg_encoding_mblen(wchar::PG_UTF8, &b[i..]) as usize)
+            .min(b.len() - i)
+            .max(1);
+        let w = wchar::pg_encoding_dsplen(wchar::PG_UTF8, &b[i..]);
+        if chlen == 1 {
+            let c = b[i];
+            if c == b'\n' {
+                // Newline: real line break, reset the running line width.
+                out.push('\n');
+                linewidth = 0;
+            } else if c == b'\r' {
+                out.push_str("\\r");
+                linewidth += 2;
+            } else if c == b'\t' {
+                // Expand to the next 8-column tab stop.
+                loop {
+                    out.push(' ');
+                    linewidth += 1;
+                    if linewidth % 8 == 0 {
+                        break;
+                    }
+                }
+            } else if w < 0 {
+                // Other single-byte control char (incl. DEL): \xNN.
+                out.push_str(&format!("\\x{c:02X}"));
+                linewidth += 4;
+            } else {
+                out.push(c as char);
+                linewidth += w as usize;
+            }
+        } else if w < 0 {
+            // Non-ASCII control char (UTF-8): \uXXXX.
+            out.push_str(&format!("\\u{:04X}", wchar::utf8_to_unicode(&b[i..])));
+            linewidth += 6;
+        } else {
+            // All other (multibyte) chars: copy verbatim.
+            out.push_str(std::str::from_utf8(&b[i..i + chlen]).unwrap_or(""));
+            linewidth += w as usize;
+        }
+        i += chlen;
+    }
+    out
+}
+
 pub fn print_table(t: &Table, opt: &PrintOptions, out: &mut dyn Write) -> std::io::Result<()> {
     if opt.format == FORMAT_UNALIGNED {
         if opt.expanded {
@@ -89,20 +155,26 @@ fn print_aligned_text(t: &Table, opt: &PrintOptions, out: &mut dyn Write) -> std
     let ncols = t.headers.len();
     let nrows = t.cells.len();
 
+    // Neutralize control chars in server-controlled headers exactly as
+    // upstream pg_wcsformat does (terminal escape-injection defense), before
+    // any width computation so widths reflect the displayed text.
+    let headers: Vec<String> = t.headers.iter().map(|h| wcsformat(h)).collect();
+
     // Column widths: max over header and all cell lines.
-    let mut widths: Vec<usize> = t.headers.iter().map(|h| dsplen(h)).collect();
+    let mut widths: Vec<usize> = headers.iter().map(|h| dsplen(h)).collect();
     if opt.tuples_only {
         for w in widths.iter_mut() {
             *w = 0;
         }
     }
-    // Resolve cell text (NULL replacement) once.
+    // Resolve cell text (NULL replacement) once, then neutralize control chars
+    // the same way upstream pg_wcsformat does.
     let resolved: Vec<Vec<String>> = t
         .cells
         .iter()
         .map(|row| {
             row.iter()
-                .map(|c| c.clone().unwrap_or_else(|| opt.null_string.clone()))
+                .map(|c| wcsformat(c.as_deref().unwrap_or(&opt.null_string)))
                 .collect()
         })
         .collect();
@@ -133,7 +205,7 @@ fn print_aligned_text(t: &Table, opt: &PrintOptions, out: &mut dyn Write) -> std
             // Header: centered, extra space to the right; fully padded
             // including the trailing space of the last column.
             let mut line = String::new();
-            for (j, h) in t.headers.iter().enumerate() {
+            for (j, h) in headers.iter().enumerate() {
                 if j > 0 {
                     line.push('|');
                 }
@@ -240,13 +312,16 @@ fn print_aligned_vertical(
         writeln!(out)?;
         return Ok(());
     }
-    let hwidth = t.headers.iter().map(|h| dsplen(h)).max().unwrap_or(0);
+    // Neutralize control chars in server-controlled headers and cells exactly
+    // as upstream pg_wcsformat does (terminal escape-injection defense).
+    let headers: Vec<String> = t.headers.iter().map(|h| wcsformat(h)).collect();
+    let hwidth = headers.iter().map(|h| dsplen(h)).max().unwrap_or(0);
     let resolved: Vec<Vec<String>> = t
         .cells
         .iter()
         .map(|row| {
             row.iter()
-                .map(|c| c.clone().unwrap_or_else(|| opt.null_string.clone()))
+                .map(|c| wcsformat(c.as_deref().unwrap_or(&opt.null_string)))
                 .collect()
         })
         .collect();
@@ -274,7 +349,7 @@ fn print_aligned_vertical(
             writeln!(out)?;
         }
         for j in 0..ncols {
-            let name = &t.headers[j];
+            let name = &headers[j];
             let lines = cell_lines(&row[j]);
             for (ln, l) in lines.iter().enumerate() {
                 let more = ln + 1 < lines.len();

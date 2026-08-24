@@ -552,6 +552,9 @@ pub(crate) fn miss_via_l2(relid: Oid) -> PgResult<Option<Rc<RelationData<'static
         }
         match l2cache::acquire_gate(key, gen) {
             l2cache::GateOutcome::Waited => continue,
+            // The bounded wait expired (possible undetected deadlock): fall
+            // back to a private build instead of retrying forever.
+            l2cache::GateOutcome::TimedOut => return crate::build::RelationBuildDesc(relid, true),
             l2cache::GateOutcome::Recursive => return crate::build::RelationBuildDesc(relid, true),
             l2cache::GateOutcome::Owner(_guard) => {
                 let built = crate::build::RelationBuildDesc(relid, true)?;

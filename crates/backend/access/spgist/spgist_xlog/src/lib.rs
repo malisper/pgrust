@@ -3,7 +3,7 @@
 #![allow(non_upper_case_globals)]
 
 use types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber};
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use types_spgist::xlog::*;
 use types_spgist::*;
 use types_storage::bufpage::{PageMut, SizeOfPageHeaderData};
@@ -84,18 +84,89 @@ fn add_or_replace_tuple(pm: &mut PageMut<'_>, tuple: &[u8], offset: OffsetNumber
     }
 }
 
-fn u16s_at(data: &[u8], off: usize, n: usize) -> Vec<OffsetNumber> {
-    (0..n)
+#[cold]
+#[inline(never)]
+fn corrupt_err(msg: String) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_DATA_CORRUPTED))
+}
+
+#[inline]
+fn require(cond: bool, msg: impl FnOnce() -> String) -> PgResult<()> {
+    if cond {
+        Ok(())
+    } else {
+        Err(corrupt_err(msg()))
+    }
+}
+
+/// Decode `n` OffsetNumber (u16) entries starting at `off`, after confirming the
+/// whole array lies within `data`. The counts (nMoves, nDelete, nInsert, nDead,
+/// nPlaceholder, nMove, nChain, nToPlaceholder) are attacker-declared in the WAL
+/// main data; C walks the decode buffer with pointer arithmetic (reads garbage
+/// past the payload but does not crash), whereas an unchecked slice index here
+/// would panic the startup redo thread. Surface a catchable
+/// ERRCODE_DATA_CORRUPTED instead.
+fn checked_u16s_at(data: &[u8], off: usize, n: usize) -> PgResult<Vec<OffsetNumber>> {
+    let end = off.checked_add(n.checked_mul(2).unwrap_or(usize::MAX)).unwrap_or(usize::MAX);
+    require(end <= data.len(), || {
+        format!(
+            "SP-GiST redo: offset array of {n} entries at {off} exceeds {} bytes of main data",
+            data.len()
+        )
+    })?;
+    Ok((0..n)
         .map(|i| OffsetNumber::from_ne_bytes([data[off + i * 2], data[off + i * 2 + 1]]))
-        .collect()
+        .collect())
+}
+
+/// Leaf-tuple size over a raw image, validated against the remaining payload.
+/// `leaf_size()` extracts a 30-bit length (up to ~1 GiB) from attacker bytes;
+/// confirm the fixed header is present and the declared size fits within `lt`
+/// (and is at least a full header) before callers slice `lt[..sz]`.
+fn checked_leaf_size(lt: &[u8]) -> PgResult<usize> {
+    require(lt.len() >= SIZEOF_SPGIST_LEAF_TUPLE_DATA, || {
+        format!(
+            "SP-GiST redo: main data too short for leaf tuple header: {} bytes",
+            lt.len()
+        )
+    })?;
+    let sz = leaf_size(lt);
+    require(sz >= SIZEOF_SPGIST_LEAF_TUPLE_DATA && sz <= lt.len(), || {
+        format!(
+            "SP-GiST redo: invalid leaf tuple size {sz} in {} bytes of main data",
+            lt.len()
+        )
+    })?;
+    Ok(sz)
+}
+
+/// Inner-tuple size over a raw image, validated against the remaining payload.
+/// The size word is read from bytes 4..6 of the header; confirm the header is
+/// present and the declared size fits within `it` (and is at least a full
+/// header) before callers slice `it[..sz]`.
+fn checked_inner_size(it: &[u8]) -> PgResult<usize> {
+    require(it.len() >= SGITHDRSZ, || {
+        format!(
+            "SP-GiST redo: main data too short for inner tuple header: {} bytes",
+            it.len()
+        )
+    })?;
+    let sz = SpGistInnerTupleHeader::decode(it).size as usize;
+    require(sz >= SGITHDRSZ && sz <= it.len(), || {
+        format!(
+            "SP-GiST redo: invalid inner tuple size {sz} in {} bytes of main data",
+            it.len()
+        )
+    })?;
+    Ok(sz)
 }
 
 fn spgRedoAddLeaf(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let md = main_data(record);
-    let xldata = spgxlogAddLeaf::decode(md);
+    let xldata = spgxlogAddLeaf::decode(md)?;
     let leaf_tuple = &md[SizeOfSpgxlogAddLeaf..];
-    let leaf_size = leaf_size(leaf_tuple);
+    let leaf_size = checked_leaf_size(leaf_tuple)?;
 
     let (action, buffer) = if xldata.newPage {
         let b = XLogInitBufferForRedo(record, 0)?;
@@ -157,14 +228,14 @@ fn spgRedoAddLeaf(record: &XLogReaderState) -> PgResult<()> {
 fn spgRedoMoveLeafs(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let md = main_data(record);
-    let xldata = spgxlogMoveLeafs::decode(md);
+    let xldata = spgxlogMoveLeafs::decode(md)?;
     let blkno_dst = block_blkno(record, 1);
 
     let n_insert = if xldata.replaceDead { 1 } else { xldata.nMoves as usize + 1 };
     let mut ptr = SizeOfSpgxlogMoveLeafs;
-    let to_delete = u16s_at(md, ptr, xldata.nMoves as usize);
+    let to_delete = checked_u16s_at(md, ptr, xldata.nMoves as usize)?;
     ptr += 2 * xldata.nMoves as usize;
-    let to_insert = u16s_at(md, ptr, n_insert);
+    let to_insert = checked_u16s_at(md, ptr, n_insert)?;
     ptr += 2 * n_insert;
 
     // dest page first, so the redirect is valid
@@ -185,7 +256,7 @@ fn spgRedoMoveLeafs(record: &XLogReaderState) -> PgResult<()> {
         let mut p = ptr;
         for &off in to_insert.iter() {
             let lt = &md[p..];
-            let sz = leaf_size(lt);
+            let sz = checked_leaf_size(lt)?;
             add_or_replace_tuple(&mut pm, &lt[..sz], off);
             p += sz;
         }
@@ -236,9 +307,9 @@ fn spgRedoMoveLeafs(record: &XLogReaderState) -> PgResult<()> {
 fn spgRedoAddNode(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let md = main_data(record);
-    let xldata = spgxlogAddNode::decode(md);
+    let xldata = spgxlogAddNode::decode(md)?;
     let inner_tuple = &md[SizeOfSpgxlogAddNode..];
-    let inner_size = SpGistInnerTupleHeader::decode(inner_tuple).size as usize;
+    let inner_size = checked_inner_size(inner_tuple)?;
 
     if !record.has_block_ref(1) {
         debug_assert!(xldata.parentBlk == -1);
@@ -345,11 +416,11 @@ fn spgRedoAddNode(record: &XLogReaderState) -> PgResult<()> {
 fn spgRedoSplitTuple(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let md = main_data(record);
-    let xldata = spgxlogSplitTuple::decode(md);
+    let xldata = spgxlogSplitTuple::decode(md)?;
     let prefix_tuple = &md[SizeOfSpgxlogSplitTuple..];
-    let prefix_size = SpGistInnerTupleHeader::decode(prefix_tuple).size as usize;
+    let prefix_size = checked_inner_size(prefix_tuple)?;
     let postfix_tuple = &prefix_tuple[prefix_size..];
-    let postfix_size = SpGistInnerTupleHeader::decode(postfix_tuple).size as usize;
+    let postfix_size = checked_inner_size(postfix_tuple)?;
 
     // insert postfix tuple first to avoid dangling link
     if !xldata.postfixBlkSame {
@@ -399,19 +470,29 @@ fn spgRedoSplitTuple(record: &XLogReaderState) -> PgResult<()> {
 fn spgRedoPickSplit(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let md = main_data(record);
-    let xldata = spgxlogPickSplit::decode(md);
+    let xldata = spgxlogPickSplit::decode(md)?;
     let blkno_inner = block_blkno(record, 2);
 
     let mut ptr = SizeOfSpgxlogPickSplit;
-    let to_delete = u16s_at(md, ptr, xldata.nDelete as usize);
+    let to_delete = checked_u16s_at(md, ptr, xldata.nDelete as usize)?;
     ptr += 2 * xldata.nDelete as usize;
-    let to_insert = u16s_at(md, ptr, xldata.nInsert as usize);
+    let to_insert = checked_u16s_at(md, ptr, xldata.nInsert as usize)?;
     ptr += 2 * xldata.nInsert as usize;
-    let leaf_page_select = &md[ptr..ptr + xldata.nInsert as usize];
-    ptr += xldata.nInsert as usize;
+    let sel_end = ptr
+        .checked_add(xldata.nInsert as usize)
+        .unwrap_or(usize::MAX);
+    require(sel_end <= md.len(), || {
+        format!(
+            "SP-GiST redo: PickSplit page-select array of {} entries at {ptr} exceeds {} bytes of main data",
+            xldata.nInsert,
+            md.len()
+        )
+    })?;
+    let leaf_page_select = &md[ptr..sel_end];
+    ptr = sel_end;
 
     let inner_tuple = &md[ptr..];
-    let inner_size = SpGistInnerTupleHeader::decode(inner_tuple).size as usize;
+    let inner_size = checked_inner_size(inner_tuple)?;
     ptr += inner_size;
 
     // src page
@@ -478,7 +559,7 @@ fn spgRedoPickSplit(record: &XLogReaderState) -> PgResult<()> {
     // restore leaf tuples
     for i in 0..xldata.nInsert as usize {
         let lt = &md[ptr..];
-        let sz = leaf_size(lt);
+        let sz = checked_leaf_size(lt)?;
         ptr += sz;
 
         let (buffer, needs) = if leaf_page_select[i] != 0 {
@@ -561,20 +642,20 @@ fn spgRedoPickSplit(record: &XLogReaderState) -> PgResult<()> {
 fn spgRedoVacuumLeaf(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let md = main_data(record);
-    let xldata = spgxlogVacuumLeaf::decode(md);
+    let xldata = spgxlogVacuumLeaf::decode(md)?;
 
     let mut ptr = SizeOfSpgxlogVacuumLeaf;
-    let to_dead = u16s_at(md, ptr, xldata.nDead as usize);
+    let to_dead = checked_u16s_at(md, ptr, xldata.nDead as usize)?;
     ptr += 2 * xldata.nDead as usize;
-    let to_placeholder = u16s_at(md, ptr, xldata.nPlaceholder as usize);
+    let to_placeholder = checked_u16s_at(md, ptr, xldata.nPlaceholder as usize)?;
     ptr += 2 * xldata.nPlaceholder as usize;
-    let move_src = u16s_at(md, ptr, xldata.nMove as usize);
+    let move_src = checked_u16s_at(md, ptr, xldata.nMove as usize)?;
     ptr += 2 * xldata.nMove as usize;
-    let move_dest = u16s_at(md, ptr, xldata.nMove as usize);
+    let move_dest = checked_u16s_at(md, ptr, xldata.nMove as usize)?;
     ptr += 2 * xldata.nMove as usize;
-    let chain_src = u16s_at(md, ptr, xldata.nChain as usize);
+    let chain_src = checked_u16s_at(md, ptr, xldata.nChain as usize)?;
     ptr += 2 * xldata.nChain as usize;
-    let chain_dest = u16s_at(md, ptr, xldata.nChain as usize);
+    let chain_dest = checked_u16s_at(md, ptr, xldata.nChain as usize)?;
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
     if action == BLK_NEEDS_REDO {
@@ -635,8 +716,8 @@ fn spgRedoVacuumLeaf(record: &XLogReaderState) -> PgResult<()> {
 fn spgRedoVacuumRoot(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let md = main_data(record);
-    let xldata = spgxlogVacuumRoot::decode(md);
-    let to_delete = u16s_at(md, SizeOfSpgxlogVacuumRoot, xldata.nDelete as usize);
+    let xldata = spgxlogVacuumRoot::decode(md)?;
+    let to_delete = checked_u16s_at(md, SizeOfSpgxlogVacuumRoot, xldata.nDelete as usize)?;
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
     if action == BLK_NEEDS_REDO {
@@ -655,8 +736,8 @@ fn spgRedoVacuumRoot(record: &XLogReaderState) -> PgResult<()> {
 fn spgRedoVacuumRedirect(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let md = main_data(record);
-    let xldata = spgxlogVacuumRedirect::decode(md);
-    let item_to_placeholder = u16s_at(md, SizeOfSpgxlogVacuumRedirect, xldata.nToPlaceholder as usize);
+    let xldata = spgxlogVacuumRedirect::decode(md)?;
+    let item_to_placeholder = checked_u16s_at(md, SizeOfSpgxlogVacuumRedirect, xldata.nToPlaceholder as usize)?;
 
     if xlogutils::InHotStandby() {
         let (rlocator, _, _, _) =
@@ -737,5 +818,61 @@ pub fn spg_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
         bufmask::mask_unused_space(pagedata);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Attacker-declared offset-array counts that overrun the WAL main data must
+    // yield a catchable ERRCODE_DATA_CORRUPTED, never a slice-index panic.
+    #[test]
+    fn checked_u16s_at_rejects_overrun() {
+        let data = [0u8; 4];
+        assert!(checked_u16s_at(&data, 0, 2).is_ok()); // exactly fits
+        let e = checked_u16s_at(&data, 0, 3).unwrap_err(); // needs 6 bytes
+        assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        let e = checked_u16s_at(&data, 2, 2).unwrap_err(); // off+2*2 = 6 > 4
+        assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        // Multiplication/addition overflow must not wrap into a bogus small end.
+        let e = checked_u16s_at(&data, 0, usize::MAX).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    #[test]
+    fn checked_leaf_size_validates_declared_size() {
+        // Well-formed: 12-byte image declaring size 12.
+        let mut lt = [0u8; 12];
+        lt[0..4].copy_from_slice(&((12u32) << 2).to_ne_bytes());
+        assert_eq!(checked_leaf_size(&lt).unwrap(), 12);
+
+        // Too short for even the fixed header.
+        let e = checked_leaf_size(&[0u8; 4]).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // Declared size (~1 GiB) far exceeds the remaining payload.
+        let mut big = [0u8; 12];
+        big[0..4].copy_from_slice(&(0x3FFF_FFFFu32 << 2).to_ne_bytes());
+        let e = checked_leaf_size(&big).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    #[test]
+    fn checked_inner_size_validates_declared_size() {
+        // Well-formed: 8-byte image declaring size 8 (size word at bytes 4..6).
+        let mut it = [0u8; 8];
+        it[4..6].copy_from_slice(&(8u16).to_ne_bytes());
+        assert_eq!(checked_inner_size(&it).unwrap(), 8);
+
+        // Too short for the header.
+        let e = checked_inner_size(&[0u8; 6]).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // Declared size exceeds remaining payload.
+        let mut big = [0u8; 8];
+        big[4..6].copy_from_slice(&(0xFFFFu16).to_ne_bytes());
+        let e = checked_inner_size(&big).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
 }
 

@@ -994,7 +994,7 @@ fn unique_index_rejects_live_duplicate() {
     assert!(unique_insert(30, tid(0, 3)).unwrap());
 
     // key 20 again, pointing at another live row: 23505.
-    let err = unique_insert(20, tid(0, 3)).unwrap_err();
+    let err = unique_insert(20, tid(0, 3)).err().unwrap();
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_UNIQUE_VIOLATION);
     assert!(err.message().contains("duplicate key value"));
 
@@ -1078,12 +1078,12 @@ fn unique_check_existing_rechecks_without_inserting() {
     assert_eq!(drain_forward(cx.mcx(), &rel).len(), 3, "recheck never inserts");
 
     // Recheck that finds another live row under its key: 23505.
-    let err = insert(20, tid(0, 3), UNIQUE_CHECK_EXISTING).unwrap_err();
+    let err = insert(20, tid(0, 3), UNIQUE_CHECK_EXISTING).err().unwrap();
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_UNIQUE_VIOLATION);
     assert!(err.message().contains("duplicate key value"));
 
     // Recheck that cannot re-find its tuple: internal re-find failure.
-    let err = insert(99, tid(0, 1), UNIQUE_CHECK_EXISTING).unwrap_err();
+    let err = insert(99, tid(0, 1), UNIQUE_CHECK_EXISTING).err().unwrap();
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
     assert!(err.message().contains("failed to re-find tuple"));
 
@@ -1133,7 +1133,7 @@ fn unique_check_walks_posting_list_tids() {
 
     assert!(unique_insert(20, tid(2, 1)).unwrap());
     // a live duplicate sitting past the dead posting lists: 23505.
-    let err = unique_insert(20, tid(2, 2)).unwrap_err();
+    let err = unique_insert(20, tid(2, 2)).err().unwrap();
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_UNIQUE_VIOLATION);
 
     assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
@@ -1756,4 +1756,47 @@ fn parallel_seize_park_is_interruptible_on_die() {
         BtPsState::Advancing,
         "shared state untouched: the seizer woke via interruptibility, not a release/done"
     );
+}
+
+// bug idx86: _bt_saveitem copied IndexTupleSize(itup) bytes from an on-page
+// tuple into so->currTuples (a fixed BLCKSZ work area) without bounding the
+// cumulative nextTupleOffset. A crafted page whose tuple's t_info encodes a
+// near-maximal size (up to INDEX_SIZE_MASK = 8191) drives writes past the
+// 8 KiB allocation — a heap buffer overflow. The fix bounds the copy against
+// the buffer capacity and raises a catchable ERRCODE_INDEX_CORRUPTED error.
+// Here we drive the REAL bt_saveitem with a partially-filled work area and a
+// max-size tuple header; the guard must reject it (Err) BEFORE any copy,
+// while an in-bounds tuple still saves normally.
+#[test]
+fn bt_saveitem_rejects_oversized_tuple_instead_of_overflowing() {
+    let cx = MemoryContext::new("saveitem-guard");
+    let mcx = cx.mcx();
+
+    let mut so = ::types_nbtree::BTScanOpaqueData::alloc_in(mcx).unwrap();
+    so.currTuples = Some(::mcx::vec_with_capacity_in(mcx, BLCKSZ).unwrap());
+
+    // A minimal 16-byte MAXALIGNed tuple image: t_info at bytes 6..8 encodes a
+    // near-maximal size (8191) with no INDEX_ALT_TID_MASK bit, so it reads as a
+    // plain non-pivot / non-posting tuple. The guard fires before the copy, so
+    // the image need not actually be 8191 bytes long.
+    let mut img = Img::<16>([0u8; 16]);
+    img.0[6..8].copy_from_slice(&(0x1FFFu16).to_ne_bytes());
+    let itup = img.0.as_ptr();
+
+    // Only 16 bytes consumed so far: 16 + MAXALIGN(8191) = 8208 > BLCKSZ.
+    so.currPos.nextTupleOffset = 16;
+    let res = unsafe { crate::search::bt_saveitem(&mut so, 0, 1, itup) };
+    assert!(res.is_err(), "oversized tuple must be rejected, not copied OOB");
+    assert_eq!(
+        so.currPos.nextTupleOffset, 16,
+        "rejected save must not advance the work-area cursor"
+    );
+
+    // An in-bounds tuple (size 16) at offset 0 still saves and advances.
+    let mut ok_img = Img::<16>([0u8; 16]);
+    ok_img.0[6..8].copy_from_slice(&(16u16).to_ne_bytes());
+    so.currPos.nextTupleOffset = 0;
+    let ok = unsafe { crate::search::bt_saveitem(&mut so, 0, 1, ok_img.0.as_ptr()) };
+    assert!(ok.is_ok(), "an in-bounds tuple must save normally");
+    assert_eq!(so.currPos.nextTupleOffset, 16, "cursor advances by MAXALIGN(itupsz)");
 }

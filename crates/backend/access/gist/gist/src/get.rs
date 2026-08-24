@@ -22,7 +22,7 @@ use ::types_storage::bufpage::MaxIndexTuplesPerPage;
 
 use crate::util::{
     gist_index_getattr, gist_tuple_is_invalid, gistFetchTupleValues, gistcheckpage,
-    gistdentryinit, itup_get_tid, FirstOffsetNumber, ITup,
+    gistdentryinit, index_corrupted, itup_get_tid, FirstOffsetNumber, ITup,
 };
 
 const GIST_SHARE: i32 = bufmgr::BUFFER_LOCK_SHARE;
@@ -262,7 +262,31 @@ fn gist_scan_page(
         if ignore_killed && iid.is_dead() {
             continue;
         }
-        let it = page.item_raw(iid).0;
+        let (it, it_len) = page.item_raw(iid);
+
+        // Validate the on-page tuple's internal structure against the line-
+        // pointer extent before any header read or deform. item_raw only bounds
+        // lp_off/lp_len against the page; the tuple's own t_info size and its
+        // varlena/cstring length words are attacker-influenceable on-disk bytes
+        // that otherwise drive raw-pointer reads past the page image (OOB read
+        // / cross-buffer info disclosure on the index-only-scan reconstruction
+        // path). Reject a tuple whose claimed sizes escape [it, it+lp_len).
+        {
+            let atts = if page_is_leaf {
+                &so.giststate.leafTupdesc.compact_attrs[..]
+            } else {
+                &so.giststate.nonLeafTupdesc.compact_attrs[..]
+            };
+            // SAFETY: item_raw bounds-checked `it` to `it_len` readable bytes.
+            if !unsafe { ::nbtree::itup::index_tuple_verify(it, it_len as usize, atts) } {
+                return Err(index_corrupted(format!(
+                    "index \"{}\" contains corrupted tuple at block {} offset {}",
+                    rel.name(),
+                    pin.block_number(),
+                    i
+                )));
+            }
+        }
 
         let (matched, recheck, recheck_distances) = {
             let out = gistindex_keytest(

@@ -65,6 +65,19 @@ fn parse_prepare_record<'a>(data: &'a [u8]) -> PgResult<(ParsedPrepare<'a>, Tran
     };
     off += MAXALIGN(gidlen);
 
+    // Validate a count against the bytes remaining in the record before
+    // allocating: a crafted count near i32::MAX (or negative, which sign-casts
+    // to a huge usize) would otherwise force an infallible multi-GiB
+    // Vec::with_capacity that can abort the process. C bounds these implicitly
+    // via the record framing; reject with a catchable error instead.
+    let check = |count: usize, elem: usize, off: usize| -> PgResult<()> {
+        if count.saturating_mul(elem) > data.len().saturating_sub(off) {
+            return Err(crate::record_truncated(what));
+        }
+        Ok(())
+    };
+
+    check(nsubxacts, 4, off)?;
     let mut subxacts = Vec::with_capacity(nsubxacts);
     for i in 0..nsubxacts {
         subxacts.push(r.u32(off + 4 * i, what)?);
@@ -72,6 +85,7 @@ fn parse_prepare_record<'a>(data: &'a [u8]) -> PgResult<(ParsedPrepare<'a>, Tran
     off += MAXALIGN(nsubxacts * 4);
 
     let rels = |n: usize, off: &mut usize| -> PgResult<Vec<RelFileLocator>> {
+        check(n, 12, *off)?;
         let mut v = Vec::with_capacity(n);
         for i in 0..n {
             v.push(RelFileLocator::new(
@@ -88,6 +102,7 @@ fn parse_prepare_record<'a>(data: &'a [u8]) -> PgResult<(ParsedPrepare<'a>, Tran
 
     // xl_xact_stats_item: kind, dboid, objid_lo, objid_hi (4×u32).
     let stats_at = |n: usize, off: &mut usize| -> PgResult<Vec<XlXactStatsItem>> {
+        check(n, 16, *off)?;
         let mut v = Vec::with_capacity(n);
         for i in 0..n {
             let base = *off + 16 * i;
@@ -304,6 +319,35 @@ pub fn xact_desc(buf: &mut StringInfo<'_>, record: &XLogReaderState) -> PgResult
         crate::standbydesc::standby_desc_invalidations_raw(buf, nmsgs, raw, 0, 0, false)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A crafted XLOG_XACT_PREPARE record whose nsubxacts count is near i32::MAX
+    // must be rejected with a catchable error rather than triggering a huge
+    // (potentially aborting) Vec allocation.
+    #[test]
+    fn parse_prepare_rejects_oversized_count() {
+        // MAXALIGN(sizeof(xl_xact_prepare)) == 72; gidlen 0, no trailing arrays.
+        let mut data = vec![0u8; 72];
+        // nsubxacts at offset 28.
+        data[28..32].copy_from_slice(&i32::MAX.to_ne_bytes());
+        let err = parse_prepare_record(&data).err().unwrap();
+        assert!(err.to_string().contains("xl_xact_prepare"));
+    }
+
+    // A record whose counts fit its length parses without error.
+    #[test]
+    fn parse_prepare_accepts_valid_record() {
+        let mut data = vec![0u8; 72 + 8]; // header + two subxacts (2 * 4 bytes)
+        data[28..32].copy_from_slice(&2i32.to_ne_bytes()); // nsubxacts = 2
+        data[72..76].copy_from_slice(&11u32.to_ne_bytes());
+        data[76..80].copy_from_slice(&22u32.to_ne_bytes());
+        let (parsed, _) = parse_prepare_record(&data).unwrap();
+        assert_eq!(parsed.subxacts, vec![11, 22]);
+    }
 }
 
 pub fn xact_identify(info: u8) -> Option<&'static str> {

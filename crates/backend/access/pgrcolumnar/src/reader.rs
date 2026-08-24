@@ -45,6 +45,87 @@ fn corrupt_code(code: u32, ndict: u32, enc: crate::format::Encoding, g: usize) -
     )
 }
 
+#[cold]
+#[inline(never)]
+fn corrupt_framed_dict(detail: &str, blob_len: usize) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "pgrcolumnar: corrupt part file: framed dictionary geometry out of range \
+             ({detail}; blob region has {blob_len} bytes)"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+// Every text image the writer emits carries a 4-byte (4B-U) varlena header
+// whose declared size includes the header itself (writer.rs VARLENA_IMG_HDR).
+const VARLENA_IMG_HDR: usize = 4;
+
+#[cold]
+#[inline(never)]
+fn corrupt_text_offset(
+    o: usize,
+    region_len: usize,
+    enc: crate::format::Encoding,
+    g: usize,
+) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "pgrcolumnar: corrupt part file: text value offset {o} out of range \
+             (text region has {region_len} bytes; encoding {enc:?}, granule {g})"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+/// Validate the untrusted per-row text offsets of one granule before they are
+/// minted into executor-visible varlena Datum pointers (RawText/Lz4Text).
+///
+/// `offs` is the granule's per-row u32 offset array (LE); `region` is the
+/// owning byte extent those offsets index into — the chunk's text blob for
+/// RawText, the decompressed frame arena for Lz4Text. Each offset is added to
+/// the region base and published as a `Datum::from_usize`; every downstream
+/// consumer (slot output/send, `length()` lane, LIKE span witness, ANALYZE
+/// sampling, writer re-ingest) then dereferences the varlena header there and
+/// reads the header-declared byte count. #340 established this validation bar
+/// for the dict-code path (a corrupt on-file value otherwise drives an
+/// out-of-region pointer dereference that SIGSEGVs the whole process, since
+/// backends are threads); the RawText/Lz4Text per-row offsets feed the same
+/// dereference class and must clear the same bar.
+///
+/// Each offset must leave room for the 4B-U varlena header AND the entire
+/// header-declared image (header + payload) inside `region`. A violation is a
+/// clean, catchable data-corruption error rather than an out-of-region read.
+fn validate_text_offsets(
+    offs: &[u8],
+    region: &[u8],
+    enc: crate::format::Encoding,
+    g: usize,
+) -> Result<(), Box<PgError>> {
+    let region_len = region.len();
+    for c in offs.chunks_exact(4) {
+        let o = u32::from_le_bytes(c.try_into().unwrap()) as usize;
+        // The 4-byte header must be fully in-region to even read the size word.
+        // `o` is a u32 widened to usize, so `o + VARLENA_IMG_HDR` cannot
+        // overflow on a 64-bit target, and the check leaves `region_len - o`
+        // non-negative for the size check below.
+        if o + VARLENA_IMG_HDR > region_len {
+            return Err(corrupt_text_offset(o, region_len, enc, g));
+        }
+        // The varlena header word is stored native-endian (writer
+        // set_varsize_4b -> to_ne_bytes; downstream varsize_4b reads it
+        // native), so decode it the same way varsize_4b_word expects.
+        let word = u32::from_ne_bytes(region[o..o + VARLENA_IMG_HDR].try_into().unwrap());
+        let vsz = ::types_tuple::varatt::varsize_4b_word(word) as usize;
+        // A 4B-U image's declared size spans its 4-byte header plus payload;
+        // the whole image must fit within the region from `o`.
+        if vsz < VARLENA_IMG_HDR || vsz > region_len - o {
+            return Err(corrupt_text_offset(o, region_len, enc, g));
+        }
+    }
+    Ok(())
+}
+
 pub fn read_header(hdr: &[u8]) -> PgResult<(u64, u64, u32)> {
     let version = get_u32(hdr, 8);
     if get_u64(hdr, 0) != CB_MAGIC || !(CB_VERSION_V1..=CB_VERSION).contains(&version) {
@@ -706,10 +787,24 @@ impl Part {
                     ino: md.ino,
                     len: md.size as u64,
                     footer_off,
+                    // Generation stamp that survives inode recycling: a
+                    // recreated part (DROP/TRUNCATE/reingest) with a coincident
+                    // (dev, ino, len, footer_off) still carries a fresh mtime,
+                    // so its condition-cache key no longer aliases the dead
+                    // part's verdicts.
+                    mtime_sec: md.mtime_sec,
+                    mtime_nsec: md.mtime_nsec,
                 },
                 // Unstat-able path (should be unreachable past open_rw):
                 // a null identity that the condition cache refuses to key on.
-                None => crate::condcache::PartIdent { dev: 0, ino: 0, len: 0, footer_off: 0 },
+                None => crate::condcache::PartIdent {
+                    dev: 0,
+                    ino: 0,
+                    len: 0,
+                    footer_off: 0,
+                    mtime_sec: 0,
+                    mtime_nsec: 0,
+                },
             }
         };
         Ok(Some(Part {
@@ -1110,6 +1205,79 @@ fn parse_framed_dict(blob: &[u8]) -> (Vec<u32>, Vec<u32>, usize) {
     (raw_off, comp_off, 4 + nframes * 8)
 }
 
+/// Parse AND validate the untrusted framed-dict directory before any frame is
+/// dereferenced — the checked counterpart of `parse_framed_dict` for the lazy
+/// read path.
+///
+/// The frame directory (nframes + per-frame raw/stored byte lengths) is
+/// file-controlled. `DictLazy::ensure_frame` later builds a raw-pointer slice
+/// `from_raw_parts(src + comp_lo, comp_len)` straight off the cumulative stored
+/// offsets, where `src` points `data` bytes into the chunk's `blob` region
+/// (itself a subslice of `payload()`, hence of the pinned part mmap). A
+/// corrupt/hostile directory must never drive that slice outside the frames
+/// region (and thus past the part mapping): an OOB raw-pointer read is a
+/// memory-safety violation, not a recoverable error.
+///
+/// Same #189/#340 bar as `validate_text_offsets`: every file-controlled offset
+/// is validated against its owning region before use, and a violation is a
+/// clean, catchable ERRCODE_DATA_CORRUPTED rather than an out-of-region read.
+/// Concretely: the frame count and the full frame directory must lie within
+/// `blob`; the frames-data base `data` must lie within `blob` (so `src` and
+/// `region_len` are well-formed); every cumulative stored offset must be
+/// monotonic (no u32 wrap) and land within the frames region reachable from
+/// `src` (`blob.len() - data`); and every cumulative raw offset must be
+/// monotonic so the per-frame raw lengths (and the heap-arena writes they
+/// drive) never underflow. Computed cumulatively with checked arithmetic so a
+/// wrapping directory is rejected on all targets (usize is 32-bit on wasm32).
+fn parse_framed_dict_checked(
+    blob: &[u8],
+) -> Result<(Vec<u32>, Vec<u32>, usize), Box<PgError>> {
+    let blob_len = blob.len();
+    // The 4-byte frame count, then the whole nframes*8 directory, must be
+    // in-region before we read them (and before `src` is formed at `data`).
+    if blob_len < 4 {
+        return Err(corrupt_framed_dict("blob too small for frame count", blob_len));
+    }
+    let nframes = get_u32(blob, 0) as usize;
+    // `data` = end of the frame directory = frames-data base within `blob`.
+    // checked so a huge nframes cannot overflow usize (32-bit on wasm32).
+    let data = match nframes.checked_mul(8).and_then(|d| d.checked_add(4)) {
+        Some(d) if d <= blob_len => d,
+        _ => return Err(corrupt_framed_dict("frame directory past blob region", blob_len)),
+    };
+    let region_len = blob_len - data; // bytes reachable from DictLazy::src
+    let mut raw_off = Vec::with_capacity(nframes + 1);
+    let mut comp_off = Vec::with_capacity(nframes + 1);
+    let (mut r, mut c) = (0u32, 0u32);
+    raw_off.push(0);
+    comp_off.push(0);
+    for f in 0..nframes {
+        // Directory reads are in-bounds: 12 + (nframes-1)*8 == data <= blob_len.
+        let dr = get_u32(blob, 4 + f * 8);
+        let dc = get_u32(blob, 8 + f * 8);
+        // Cumulative stored offset: monotonic (no wrap) and within the frames
+        // region — this is the bound `ensure_frame`'s raw-pointer slice needs.
+        c = match c.checked_add(dc) {
+            Some(c) if (c as usize) <= region_len => c,
+            _ => {
+                return Err(corrupt_framed_dict(
+                    "compressed frame offset out of range",
+                    blob_len,
+                ))
+            }
+        };
+        // Cumulative raw offset: monotonic so per-frame raw lengths never
+        // underflow (they size the in-arena decompress/copy).
+        r = match r.checked_add(dr) {
+            Some(r) => r,
+            None => return Err(corrupt_framed_dict("raw frame offset overflow", blob_len)),
+        };
+        raw_off.push(r);
+        comp_off.push(c);
+    }
+    Ok((raw_off, comp_off, data))
+}
+
 /// Lazy sub-framed dictionary arena (one per (scan, RG, column) while the
 /// per-RG dict table is cached): the dict Datum table is published at build
 /// (pointers into `buf` at the dict_off offsets — the framed layout keeps
@@ -1192,9 +1360,11 @@ impl DictLazy {
         let raw_len = raw_hi - raw_lo;
         let comp_lo = self.comp_off[f] as usize;
         let comp_len = self.comp_off[f + 1] as usize - comp_lo;
-        // SAFETY: the frame directory came off the chunk (the payload
-        // file-trust posture everywhere in this module); src spans the
-        // frames region of the pinned mmap.
+        // SAFETY: `parse_framed_dict_checked` validated the whole frame
+        // directory at build (before this DictLazy was published): comp_off is
+        // monotonic and comp_off[f+1] <= blob.len() - data, so [comp_lo,
+        // comp_lo+comp_len) lies within the frames region `src` points into —
+        // itself a subslice of the pinned part mmap. The read stays in-bounds.
         let src = unsafe { core::slice::from_raw_parts(self.src.add(comp_lo), comp_len) };
         if comp_len == raw_len {
             // Stored-raw frame (writer incompressible guard).
@@ -1451,7 +1621,15 @@ impl<'a> ChunkView<'a> {
         let codes_len = align4(self.nrows as usize * w);
         let off_tab = &p[codes_len..codes_len + ndv * 4];
         let blob = &p[codes_len + ndv * 4..];
-        let (raw_off, comp_off, data) = parse_framed_dict(blob);
+        // Validate the file-controlled frame geometry BEFORE publishing the
+        // DictLazy: `ensure_frame` dereferences these cumulative stored offsets
+        // through a raw-pointer slice into the part mmap, so a corrupt/hostile
+        // directory must be rejected here (a catchable ERRCODE_DATA_CORRUPTED)
+        // rather than driving an OOB read later. panic_any(PgError) from this
+        // infallible call chain is the message loop's corruption path (same as
+        // the dict-code and text-offset checks; node_funcs precedent).
+        let (raw_off, comp_off, data) = parse_framed_dict_checked(blob)
+            .unwrap_or_else(|e| std::panic::panic_any(e));
         let nframes = raw_off.len() - 1;
         let total = *raw_off.last().unwrap() as usize;
         let words = (total + crate::lz4dec::OUT_PAD).div_ceil(8);
@@ -1721,11 +1899,19 @@ impl<'a> ChunkView<'a> {
             }
             Encoding::RawText => {
                 let offs_len = self.nrows as usize * 4;
-                // One bounds check per granule; per-row offsets add to the
-                // blob base unchecked, same file-trust posture as Lz4Text.
-                let base = self.part[self.payload_off + offs_len..].as_ptr() as usize;
+                let offs = &p[lo * 4..(lo + n) * 4];
+                // The per-row offsets are untrusted file bytes added to the
+                // blob base and published as varlena Datum pointers. Validate
+                // each fits (4B-U header + declared image) within this chunk's
+                // text blob before minting — same #340 bar as the dict-code
+                // check; a violation aborts the txn (ERRCODE_DATA_CORRUPTED)
+                // instead of publishing an out-of-region pointer.
+                let blob = &p[offs_len..];
+                validate_text_offsets(offs, blob, self.hdr.encoding, g)
+                    .unwrap_or_else(|e| std::panic::panic_any(e));
+                let base = blob.as_ptr() as usize;
                 let dst = &mut out.spare_capacity_mut()[..n];
-                for (d, c) in dst.iter_mut().zip(p[lo * 4..(lo + n) * 4].chunks_exact(4)) {
+                for (d, c) in dst.iter_mut().zip(offs.chunks_exact(4)) {
                     let o = u32::from_le_bytes(c.try_into().unwrap()) as usize;
                     d.write(Datum::from_usize(base + o));
                 }
@@ -1738,9 +1924,14 @@ impl<'a> ChunkView<'a> {
                 let comp_len = get_u32(p, fo + 4) as usize;
                 let dst = arena_frame(arena, raw_len);
                 decompress_frame_into(self.hdr.frame_codec(), &p[fo + 8..fo + 8 + comp_len], dst, raw_len);
+                let offs = &p[lo * 4..(lo + n) * 4];
+                // Same untrusted-offset validation as RawText, against the
+                // decompressed frame arena (the region these offsets index).
+                validate_text_offsets(offs, &dst[..raw_len], self.hdr.encoding, g)
+                    .unwrap_or_else(|e| std::panic::panic_any(e));
                 let base = dst.as_ptr() as usize;
                 let dst = &mut out.spare_capacity_mut()[..n];
-                for (d, c) in dst.iter_mut().zip(p[lo * 4..(lo + n) * 4].chunks_exact(4)) {
+                for (d, c) in dst.iter_mut().zip(offs.chunks_exact(4)) {
                     let o = u32::from_le_bytes(c.try_into().unwrap()) as usize;
                     d.write(Datum::from_usize(base + o));
                 }
@@ -2373,13 +2564,24 @@ mod tests {
         let nrows = GRANULE_ROWS + 41;
         let mut payload = Vec::new();
         let mut offs = Vec::with_capacity(nrows);
+        let mut sizes = Vec::with_capacity(nrows);
         let mut o = 0u32;
         for i in 0..nrows {
             put_u32(&mut payload, o);
             offs.push(o);
-            o += 8 + (i % 7) as u32;
+            let sz = 8 + (i % 7) as u32; // total 4B-U varlena size (>= header)
+            sizes.push(sz);
+            o += sz;
         }
         payload.resize(payload.len() + o as usize, 0x42);
+        // Each offset points at a real 4B-U varlena image (header + payload), as
+        // the RawText encoder writes — so the per-offset header validation
+        // (#189) accepts this well-formed column. The blob filler stays 0x42.
+        let blob_start = nrows * 4;
+        for i in 0..nrows {
+            let at = blob_start + offs[i] as usize;
+            payload[at..at + 4].copy_from_slice(&::datum::set_varsize_4b(sizes[i] as usize));
+        }
         let blob_base = payload[nrows * 4..].as_ptr() as usize;
         let hdr = ChunkHeader {
             encoding: Encoding::RawText,
@@ -2401,6 +2603,51 @@ mod tests {
         }
         let expected: Vec<usize> = offs.iter().map(|&off| blob_base + off as usize).collect();
         assert_eq!(got, expected);
+    }
+
+    // #189: untrusted per-row text offsets must be validated against their
+    // owning region before being minted into varlena Datum pointers. A crafted
+    // offset (or a lying varlena header) that would point outside the text
+    // blob / decompressed arena must yield a clean, catchable
+    // ERRCODE_DATA_CORRUPTED error rather than an out-of-region read.
+    #[test]
+    fn text_offset_validation_rejects_out_of_region() {
+        // A well-formed region: one 4B-U varlena image ("hi") at offset 0.
+        let mut region = Vec::new();
+        region.extend_from_slice(&::datum::set_varsize_4b(VARLENA_IMG_HDR + 2));
+        region.extend_from_slice(b"hi");
+
+        // Valid in-region offset passes.
+        let ok = 0u32.to_le_bytes();
+        validate_text_offsets(&ok, &region, Encoding::RawText, 0).unwrap();
+
+        // An offset whose header runs past the region end is rejected.
+        let past = (region.len() as u32 + 64).to_le_bytes();
+        let e = validate_text_offsets(&past, &region, Encoding::RawText, 0)
+            .err()
+            .unwrap();
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+
+        // An offset whose header is in-region but claims a size that overruns
+        // the region (a lying varlena header) is rejected too.
+        let mut liar = Vec::new();
+        liar.extend_from_slice(&::datum::set_varsize_4b(VARLENA_IMG_HDR + 4096));
+        liar.extend_from_slice(b"x");
+        let o = 0u32.to_le_bytes();
+        let e2 = validate_text_offsets(&o, &liar, Encoding::Lz4Text, 3)
+            .err()
+            .unwrap();
+        assert_eq!(e2.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+
+        // A header declaring a size smaller than its own 4-byte header is
+        // rejected (would underflow the payload-length derivation downstream).
+        let mut tiny = Vec::new();
+        tiny.extend_from_slice(&::datum::set_varsize_4b(2));
+        tiny.extend_from_slice(&[0u8; 8]);
+        let e3 = validate_text_offsets(&o, &tiny, Encoding::RawText, 0)
+            .err()
+            .unwrap();
+        assert_eq!(e3.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
     }
 
     // coldio lane: process-shared SegMap registry — one live mapping per

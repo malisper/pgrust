@@ -168,6 +168,11 @@ impl<'a> Reader<'a> {
         }
         Ok(())
     }
+    // Bytes still unread in the message body; used to bound pre-allocations
+    // driven by wire-supplied counts so a lying count can't reserve gigabytes.
+    fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
+    }
     pub fn get_byte(&mut self) -> PgResult<u8> {
         self.need(1)?;
         let b = self.buf[self.pos];
@@ -463,7 +468,11 @@ pub fn logicalrep_read_truncate(r: &mut Reader<'_>) -> PgResult<(Vec<Oid>, bool,
     let flags = r.get_byte()?;
     let cascade = flags & TRUNCATE_CASCADE != 0;
     let restart_seqs = flags & TRUNCATE_RESTART_SEQS != 0;
-    let mut relids = Vec::with_capacity(nrelids);
+    // Each relid is a 4-byte Oid; a hostile publisher can claim nrelids up to
+    // ~1B in a tiny message, so cap the pre-allocation by the bytes actually
+    // present. The per-element get_int32() still errors if nrelids overstates
+    // the body (C appends via lappend_oid, bounded by the message length).
+    let mut relids = Vec::with_capacity(nrelids.min(r.remaining() / 4));
     for _ in 0..nrelids {
         relids.push(r.get_int32()?);
     }

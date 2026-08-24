@@ -215,8 +215,14 @@ impl Default for ScannerSettings {
             backslash_quote: gucs::backslash_quote(),
             escape_string_warning: gucs::escape_string_warning(),
             standard_conforming_strings: gucs::standard_conforming_strings(),
-            encoding: wchar::PG_UTF8,
-            client_encoding: wchar::PG_UTF8,
+            // Reflect the live session encodings so scanner_init's rejection
+            // paths fire correctly: GetDatabaseEncoding() for the server-side
+            // scan buffer, and pg_get_client_encoding() for the backslash_quote
+            // = safe_encoding SJIS/BIG5/GBK/UHC/GB18030 injection defense
+            // (scan.l:711 -> backslash_quote_forbidden). Callers wanting a fixed
+            // encoding (tests) still override via the struct's public fields.
+            encoding: mbutils::GetDatabaseEncoding(),
+            client_encoding: mbutils::pg_get_client_encoding(),
         }
     }
 }

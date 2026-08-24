@@ -81,6 +81,37 @@ pub fn get_backup_status() -> SessionBackupState {
 // do_pg_backup_start — xlog.c:8842.
 // ===========================================================================
 
+/// Validate a caller-supplied backup label before it is stored in `state.name`
+/// and later embedded verbatim (`LABEL: <name>\n`) into the backup_label and
+/// `*.backup` history files by build_backup_content.
+///
+/// C (xlog.c:8860) rejects only over-length labels. We additionally reject any
+/// label containing a newline or carriage return: such a byte would forge whole
+/// metadata lines into backup_label / the history file (e.g. an injected
+/// `INCREMENTAL FROM LSN`, `START TIMELINE`, or `BACKUP FROM: standby` line),
+/// which read_backup_label parses at restore time — a CRLF-injection that can
+/// silently corrupt or misdirect a restore. This is the single chokepoint every
+/// backup label (pg_backup_start SQL function and the BASE_BACKUP replication
+/// command) passes through, so rejecting here neutralizes the injection for all
+/// entry points and both output files.
+fn check_backup_label(backupidstr: &str) -> PgResult<()> {
+    if backupidstr.len() > MAXPGPATH {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!("backup label too long (max {MAXPGPATH} bytes)"))
+            .finish(loc("do_pg_backup_start"));
+    }
+
+    if backupidstr.bytes().any(|b| b == b'\n' || b == b'\r') {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg("backup label contains invalid characters")
+            .finish(loc("do_pg_backup_start"));
+    }
+
+    Ok(())
+}
+
 /// do_pg_backup_start(backupidstr, fast, tablespaces, state, tblspcmapfile)
 /// (xlog.c:8842). Forces a checkpoint, fills `state` with the start metadata,
 /// enumerates auxiliary tablespaces into `tablespaces` (when Some, matching C's
@@ -104,12 +135,7 @@ pub fn do_pg_backup_start(
             .finish(loc("do_pg_backup_start"));
     }
 
-    if backupidstr.len() > MAXPGPATH {
-        return ereport(ERROR)
-            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-            .errmsg(format!("backup label too long (max {MAXPGPATH} bytes)"))
-            .finish(loc("do_pg_backup_start"));
-    }
+    check_backup_label(backupidstr)?;
 
     state.set_name(backupidstr.as_bytes());
 
@@ -641,4 +667,33 @@ fn IsBackupHistoryFileName(fname: &str) -> bool {
     const XLOG_FNAME_LEN: usize = 24;
     let hex_run = fname.bytes().take_while(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(b)).count();
     fname.len() > XLOG_FNAME_LEN && hex_run == XLOG_FNAME_LEN && fname.ends_with(".backup")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_backup_label_accepts_ordinary_labels() {
+        check_backup_label("nightly backup 2026-08-22").unwrap();
+        check_backup_label("").unwrap();
+        // Non-ASCII/invalid-UTF8-adjacent bytes are fine; only line delimiters
+        // and over-length are rejected (label stays server-encoding opaque).
+        check_backup_label("café backup — ticket #42").unwrap();
+    }
+
+    #[test]
+    fn check_backup_label_rejects_newline_injection() {
+        // A newline would forge a whole backup_label metadata line at restore.
+        check_backup_label("a\nINCREMENTAL FROM LSN: 0/1").err().unwrap();
+        // Carriage return is rejected too (CRLF injection).
+        check_backup_label("a\rBACKUP FROM: standby").err().unwrap();
+        check_backup_label("trailing newline\n").err().unwrap();
+    }
+
+    #[test]
+    fn check_backup_label_rejects_over_length() {
+        let long = "x".repeat(MAXPGPATH + 1);
+        check_backup_label(&long).err().unwrap();
+    }
 }

@@ -347,17 +347,104 @@ const SHARDS: usize = 64;
 
 struct Shard {
     map: Mutex<HashMap<L2Key, Bucket>>,
+    /// Live entry count for this shard (mutated only under `map`'s lock, so it
+    /// stays exact); read to decide when the shard is over its budget.
+    count: AtomicUsize,
 }
 
 fn shards() -> &'static [Shard; SHARDS] {
     static SHARDS_CELL: std::sync::OnceLock<Box<[Shard; SHARDS]>> = std::sync::OnceLock::new();
     SHARDS_CELL.get_or_init(|| {
         let v: Vec<Shard> = (0..SHARDS)
-            .map(|_| Shard { map: Mutex::new(HashMap::new()) })
+            .map(|_| Shard { map: Mutex::new(HashMap::new()), count: AtomicUsize::new(0) })
             .collect();
         let boxed: Box<[Shard; SHARDS]> = v.try_into().ok().unwrap();
         boxed
     })
+}
+
+/// Global entry budget for the whole shared L2 map (all shards combined).
+///
+/// The map is process-global and outlives every session, so — unlike the
+/// per-backend L1 catcache, which is capped by `catcache_size_limit` — it needs
+/// its own bound. Without one, an unprivileged session probing unboundedly many
+/// distinct catalog keys (e.g. negative `to_regtype`/`to_regproc` lookups over
+/// `generate_series`, each publishing an immortal negative entry, or generation
+/// bumps that strand whole domains of superseded entries) grows server heap
+/// without limit and can OOM the entire instance (CWE-770).
+///
+/// Eviction is correctness-preserving: an evicted entry is exactly a laggard L2
+/// miss — the next probe re-builds it from the underlying catcache/catalog, the
+/// same fallback used for a pruned superseded generation. Because eviction
+/// removes arbitrary live entries (including stranded superseded generations),
+/// it also reclaims those independently of same-key re-insertion.
+///
+/// Sized to roughly mirror the catcache ceiling scaled to a shared, all-session
+/// store: ~262k entries at ~300 B/entry ≈ 75 MB hard cap. `0` disables the cap.
+/// `PGRUST_L2_CACHE_MAX_ENTRIES` overrides it for harnesses (env wins if set;
+/// cached at first read).
+const L2_MAX_ENTRIES_DEFAULT: usize = 262_144;
+
+#[inline]
+fn l2_max_entries() -> usize {
+    static ENV: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    if let Some(v) = *ENV.get_or_init(|| {
+        std::env::var("PGRUST_L2_CACHE_MAX_ENTRIES")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+    }) {
+        return v;
+    }
+    L2_MAX_ENTRIES_DEFAULT
+}
+
+/// Per-shard slice of the global budget (`0` == cap disabled). Ceil so the sum
+/// of per-shard budgets is never below the configured global cap.
+#[inline]
+fn shard_budget() -> usize {
+    let cap = l2_max_entries();
+    if cap == 0 {
+        return 0;
+    }
+    cap.div_ceil(SHARDS).max(1)
+}
+
+/// Evict arbitrary live entries from a shard's `map` until its `count` is back
+/// within `budget`, keeping `count` exact. Returns `(entries_removed,
+/// bytes_removed)` so the caller can apply the same deltas to the global stats.
+///
+/// Called under the shard lock right after an insert overruns the budget.
+/// HashMap iteration order is randomized, so this is approximately random
+/// eviction — correctness-preserving regardless of which entries are dropped
+/// (an evicted entry is just a laggard miss that re-fetches from the catalog).
+fn evict_shard(
+    map: &mut HashMap<L2Key, Bucket>,
+    count: &AtomicUsize,
+    budget: usize,
+) -> (usize, usize) {
+    let mut n_removed = 0usize;
+    let mut bytes_removed = 0usize;
+    let mut empty: Vec<L2Key> = Vec::new();
+    for (k, b) in map.iter_mut() {
+        if count.load(Ordering::Relaxed) <= budget {
+            break;
+        }
+        while let Some((_, _, sz)) = b.entries.pop() {
+            n_removed += 1;
+            bytes_removed += sz;
+            count.fetch_sub(1, Ordering::Relaxed);
+            if count.load(Ordering::Relaxed) <= budget {
+                break;
+            }
+        }
+        if b.entries.is_empty() {
+            empty.push(*k);
+        }
+    }
+    for k in empty {
+        map.remove(&k);
+    }
+    (n_removed, bytes_removed)
 }
 
 #[inline]
@@ -455,6 +542,7 @@ pub fn insert(
     ENTRIES.fetch_add(1, Ordering::Relaxed);
     BYTES.fetch_add(bytes, Ordering::Relaxed);
     INSERTS.fetch_add(1, Ordering::Relaxed);
+    shard.count.fetch_add(1, Ordering::Relaxed);
 
     // Prune this logical key down to its two newest generations.
     let mut newest = 0u64;
@@ -474,9 +562,23 @@ pub fn insert(
         if !keep {
             ENTRIES.fetch_sub(1, Ordering::Relaxed);
             BYTES.fetch_sub(*sz, Ordering::Relaxed);
+            shard.count.fetch_sub(1, Ordering::Relaxed);
         }
         keep
     });
+
+    // Enforce the global entry budget. Same-key pruning above only reclaims
+    // superseded generations of THIS logical key; without a hard cap, entries
+    // whose keys are never re-inserted (attacker-driven negative lookups,
+    // generation-stranded entries of other domains) accumulate forever. Evict
+    // arbitrary entries from this shard until it is back within its share of
+    // the budget — a miss simply re-fetches from the underlying cache/catalog.
+    let budget = shard_budget();
+    if budget != 0 && shard.count.load(Ordering::Relaxed) > budget {
+        let (n, b) = evict_shard(&mut map, &shard.count, budget);
+        ENTRIES.fetch_sub(n, Ordering::Relaxed);
+        BYTES.fetch_sub(b, Ordering::Relaxed);
+    }
     entry
 }
 
@@ -488,6 +590,7 @@ pub fn clear_all() {
             for (_, _, sz) in b.entries.iter() {
                 ENTRIES.fetch_sub(1, Ordering::Relaxed);
                 BYTES.fetch_sub(*sz, Ordering::Relaxed);
+                s.count.fetch_sub(1, Ordering::Relaxed);
             }
         }
         map.clear();
@@ -513,8 +616,11 @@ fn gates() -> &'static Mutex<HashMap<(L2Key, u64), Arc<GateCell>>> {
 pub enum GateOutcome {
     /// This thread builds; publish, then drop the guard (wakes waiters).
     Owner(GateGuard),
-    /// Another thread finished (or the wait timed out); re-check L2.
+    /// The gate owner finished; re-check L2.
     Waited,
+    /// The bounded wait expired without the owner finishing (possible
+    /// undetected deadlock): fall back to a private build, do not retry.
+    TimedOut,
     /// Re-entered while owning this key's gate (recursive build): build
     /// privately, do not wait.
     Recursive,
@@ -571,7 +677,14 @@ pub fn acquire_gate(key: L2Key, gen: u64) -> GateOutcome {
         let (guard, _timeout) = cell.cv.wait_timeout(done, deadline - now).unwrap();
         done = guard;
     }
-    GateOutcome::Waited
+    // Distinguish 'owner finished' from 'genuine timeout': the latter must not
+    // be retried forever (the gate is invisible to the deadlock detector), so
+    // callers fall back to a private build.
+    if *done {
+        GateOutcome::Waited
+    } else {
+        GateOutcome::TimedOut
+    }
 }
 
 #[cfg(test)]
@@ -664,6 +777,54 @@ mod tests {
     }
 
     #[test]
+    fn evict_shard_bounds_a_shard_to_its_budget() {
+        // Simulate an attacker publishing many distinct-key negative entries
+        // into one shard. Eviction must bring it back to budget and report the
+        // exact deltas, with `count` kept consistent.
+        let mut map: HashMap<L2Key, Bucket> = HashMap::new();
+        let count = AtomicUsize::new(0);
+        const N: usize = 500;
+        const BYTES_EACH: usize = 300;
+        for i in 0..N as u32 {
+            // Distinct logical keys -> distinct buckets (no same-key pruning),
+            // exactly the unbounded-growth vector.
+            let k = L2Key { kind: KIND_CAT, id: 7, db: 1, hash: i };
+            map.entry(k)
+                .or_insert_with(|| Bucket { entries: Vec::new() })
+                .entries
+                .push((1, Arc::new(E(i)) as L2Value, BYTES_EACH));
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(count.load(Ordering::Relaxed), N);
+
+        let budget = 64;
+        let (n_removed, bytes_removed) = evict_shard(&mut map, &count, budget);
+        assert_eq!(n_removed, N - budget, "must evict down to exactly budget");
+        assert_eq!(bytes_removed, (N - budget) * BYTES_EACH);
+        assert_eq!(count.load(Ordering::Relaxed), budget);
+        let live: usize = map.values().map(|b| b.entries.len()).sum();
+        assert_eq!(live, budget, "live entries match the tracked count");
+
+        // Already within budget: a no-op.
+        let (n2, b2) = evict_shard(&mut map, &count, budget);
+        assert_eq!((n2, b2), (0, 0));
+        assert_eq!(count.load(Ordering::Relaxed), budget);
+    }
+
+    #[test]
+    fn shard_budget_covers_the_configured_cap() {
+        // Per-shard budgets must sum to at least the global cap so the cap is
+        // never under-enforced, and 0 (disabled) must propagate.
+        let b = shard_budget();
+        if l2_max_entries() == 0 {
+            assert_eq!(b, 0);
+        } else {
+            assert!(b * SHARDS >= l2_max_entries());
+            assert!(b >= 1);
+        }
+    }
+
+    #[test]
     fn gate_wait_times_out() {
         let k = key(1006);
         let GateOutcome::Owner(_guard) = acquire_gate(k, 2) else {
@@ -672,7 +833,7 @@ mod tests {
         let t = std::thread::spawn(move || {
             let started = std::time::Instant::now();
             let out = acquire_gate(k, 2);
-            (matches!(out, GateOutcome::Waited), started.elapsed())
+            (matches!(out, GateOutcome::TimedOut), started.elapsed())
         });
         let (waited, dur) = t.join().unwrap();
         assert!(waited);

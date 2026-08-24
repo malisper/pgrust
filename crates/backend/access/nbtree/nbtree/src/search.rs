@@ -983,10 +983,10 @@ fn bt_readpage(
 
                 if passes_quals {
                     if !bt_tuple_is_posting(itup) {
-                        bt_saveitem(so, item_index, offnum, itup);
+                        bt_saveitem(so, item_index, offnum, itup)?;
                         item_index += 1;
                     } else {
-                        let tuple_offset = bt_setuppostingitems(so, item_index, offnum, itup);
+                        let tuple_offset = bt_setuppostingitems(so, item_index, offnum, itup)?;
                         item_index += 1;
                         for i in 1..bt_tuple_get_nposting(itup) {
                             bt_savepostingitem(
@@ -1118,10 +1118,10 @@ fn bt_readpage(
                 if passes_quals && tuple_alive {
                     if !bt_tuple_is_posting(itup) {
                         item_index -= 1;
-                        bt_saveitem(so, item_index, offnum, itup);
+                        bt_saveitem(so, item_index, offnum, itup)?;
                     } else {
                         item_index -= 1;
-                        let tuple_offset = bt_setuppostingitems(so, item_index, offnum, itup);
+                        let tuple_offset = bt_setuppostingitems(so, item_index, offnum, itup)?;
                         for i in 1..bt_tuple_get_nposting(itup) {
                             item_index -= 1;
                             bt_savepostingitem(
@@ -1168,16 +1168,29 @@ fn bt_readpage(
     Ok(so.currPos.firstItem <= so.currPos.lastItem)
 }
 
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn currtuples_overflow() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "index tuple size exceeds btree scan-position work area".to_string(),
+        )
+        .with_sqlstate(::types_error::ERRCODE_INDEX_CORRUPTED)
+        .with_hint("Please REINDEX it."),
+    )
+}
+
 /// _bt_saveitem.
 ///
 /// # Safety
 /// `itup` is a live non-pivot, non-posting tuple on the locked currPos page.
-unsafe fn bt_saveitem(
+pub(crate) unsafe fn bt_saveitem(
     so: &mut BTScanOpaqueData<'_>,
     item_index: i32,
     offnum: OffsetNumber,
     itup: ITup,
-) {
+) -> PgResult<()> {
     debug_assert!(!bt_tuple_is_pivot(itup) && !bt_tuple_is_posting(itup));
 
     let mut item = BTScanPosItem {
@@ -1187,18 +1200,22 @@ unsafe fn bt_saveitem(
     };
     if let Some(curr_tuples) = so.currTuples.as_mut() {
         let itupsz = index_tuple_size(itup);
+        // C leans on writer invariants (all tuples on a valid page fit in
+        // BLCKSZ) to keep nextTupleOffset within the work area. A crafted page
+        // can violate that with an oversized t_info; bound the copy against the
+        // fixed BLCKSZ buffer before writing, so corruption is a catchable
+        // ERROR rather than a heap overflow.
+        let start = so.currPos.nextTupleOffset as usize;
+        if start.checked_add(MAXALIGN(itupsz)).is_none_or(|end| end > curr_tuples.capacity()) {
+            return Err(currtuples_overflow());
+        }
         item.tupleOffset = so.currPos.nextTupleOffset as u16;
-        // SAFETY: nextTupleOffset stays <= BLCKSZ (page-sourced tuples).
-        core::ptr::copy_nonoverlapping(
-            itup,
-            curr_tuples
-                .as_mut_ptr()
-                .add(so.currPos.nextTupleOffset as usize),
-            itupsz,
-        );
+        // SAFETY: start + MAXALIGN(itupsz) <= capacity (checked above).
+        core::ptr::copy_nonoverlapping(itup, curr_tuples.as_mut_ptr().add(start), itupsz);
         so.currPos.nextTupleOffset += MAXALIGN(itupsz) as i32;
     }
     so.currPos.set_item(item_index as usize, item);
+    Ok(())
 }
 
 /// _bt_setuppostingitems.
@@ -1210,7 +1227,7 @@ unsafe fn bt_setuppostingitems(
     item_index: i32,
     offnum: OffsetNumber,
     itup: ITup,
-) -> u16 {
+) -> PgResult<u16> {
     debug_assert!(bt_tuple_is_posting(itup));
 
     let mut item = BTScanPosItem {
@@ -1221,19 +1238,29 @@ unsafe fn bt_setuppostingitems(
     let mut tuple_offset = 0u16;
     if let Some(curr_tuples) = so.currTuples.as_mut() {
         let itupsz = MAXALIGN(crate::itup::bt_tuple_get_posting_offset(itup));
+        // The posting offset is a full on-page value; a crafted tuple can drive
+        // a multi-gigabyte copy. Bound it against the fixed BLCKSZ buffer before
+        // writing (the base.add(6) header patch also lands inside this extent),
+        // turning corruption into a catchable ERROR rather than a heap overflow.
+        // Bound both the copy (itupsz bytes) and the base.add(6) header patch:
+        // a crafted posting offset could be < 8, so floor the checked extent at
+        // the 8-byte index-tuple header.
+        let start = so.currPos.nextTupleOffset as usize;
+        if start.checked_add(itupsz.max(8)).is_none_or(|end| end > curr_tuples.capacity()) {
+            return Err(currtuples_overflow());
+        }
         item.tupleOffset = so.currPos.nextTupleOffset as u16;
         tuple_offset = item.tupleOffset;
-        let base = curr_tuples
-            .as_mut_ptr()
-            .add(so.currPos.nextTupleOffset as usize);
-        // SAFETY: nextTupleOffset stays <= BLCKSZ.
+        let base = curr_tuples.as_mut_ptr().add(start);
+        // SAFETY: start + itupsz <= capacity (checked above); itupsz >= 8, so
+        // the base.add(6) u16 write is in-bounds too.
         core::ptr::copy_nonoverlapping(itup, base, itupsz);
         let info_p = base.add(6).cast::<u16>();
         info_p.write((info_p.read() & !INDEX_SIZE_MASK) | itupsz as u16);
         so.currPos.nextTupleOffset += itupsz as i32;
     }
     so.currPos.set_item(item_index as usize, item);
-    tuple_offset
+    Ok(tuple_offset)
 }
 
 /// _bt_savepostingitem.

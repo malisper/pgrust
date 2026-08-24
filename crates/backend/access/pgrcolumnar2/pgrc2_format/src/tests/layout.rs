@@ -162,8 +162,8 @@ fn grain_ladder_pinned_and_closed_forms_hold_at_every_grain() {
         assert_eq!(frames_in_granule_at(1, grain), 1);
     }
     // The default forms delegate to the `_at` forms exactly.
-    assert_eq!(granule_count(100_000), granule_count_at(100_000, GranuleGrain::DEFAULT));
-    assert_eq!(band_count(100_000), band_count_at(100_000, GranuleGrain::DEFAULT));
+    assert_eq!(granule_count(100_000) as u64, granule_count_at(100_000, GranuleGrain::DEFAULT));
+    assert_eq!(band_count(100_000) as u64, band_count_at(100_000, GranuleGrain::DEFAULT));
     assert_eq!(
         rows_in_granule(8193, 1),
         rows_in_granule_at(8193, GranuleGrain::DEFAULT, 1)
@@ -201,8 +201,8 @@ fn footer_carries_the_grain_and_validates_it() {
             magic: crate::part::FOOTER_MAGIC,
             format_version: crate::FORMAT_VERSION,
             rows,
-            granule_count: granule_count_at(rows, grain),
-            band_count: band_count_at(rows, grain),
+            granule_count: granule_count_at(rows, grain) as u32,
+            band_count: band_count_at(rows, grain) as u32,
             section_count: 0,
             flags: 0,
             section_table_off: 64,
@@ -228,8 +228,8 @@ fn footer_carries_the_grain_and_validates_it() {
         magic: crate::part::FOOTER_MAGIC,
         format_version: crate::FORMAT_VERSION,
         rows,
-        granule_count: granule_count_at(rows, grain),
-        band_count: band_count_at(rows, grain),
+        granule_count: granule_count_at(rows, grain) as u32,
+        band_count: band_count_at(rows, grain) as u32,
         section_count: 0,
         flags: 0,
         section_table_off: 64,

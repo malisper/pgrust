@@ -272,28 +272,28 @@ fn add_remove_keeps_pgprocnos_sorted_and_offsets_dense() {
     let arrayP = procArray();
     let hdr = ProcGlobal();
 
-    let base = arrayP.numProcs.get();
+    let base = unsafe { arrayP.numProcs.get() };
     let others: Vec<ProcNumber> = (0..3).map(|_| claim_other()).collect();
     for (i, &p) in others.iter().enumerate() {
         other_proc_running(p, 200 + i as TransactionId);
     }
-    assert_eq!(arrayP.numProcs.get(), base + 3);
+    assert_eq!(unsafe { arrayP.numProcs.get() }, base + 3);
 
-    let n = arrayP.numProcs.get() as usize;
+    let n = unsafe { arrayP.numProcs.get() } as usize;
     for i in 0..n {
-        let p = arrayP.pgprocnos[i].get();
+        let p = unsafe { arrayP.pgprocnos[i].get() };
         assert_eq!(hdr.allProcs[p as usize].pgxactoff.load(Relaxed), i as i32);
         if i > 0 {
-            assert!(arrayP.pgprocnos[i - 1].get() < p);
+            assert!(unsafe { arrayP.pgprocnos[i - 1].get() } < p);
         }
     }
 
     // Remove the middle one; offsets must re-densify.
     other_proc_end(others[1], 201);
-    let n = arrayP.numProcs.get() as usize;
+    let n = unsafe { arrayP.numProcs.get() } as usize;
     assert_eq!(n as i32, base + 2);
     for i in 0..n {
-        let p = arrayP.pgprocnos[i].get();
+        let p = unsafe { arrayP.pgprocnos[i].get() };
         assert_eq!(hdr.allProcs[p as usize].pgxactoff.load(Relaxed), i as i32);
     }
 
@@ -316,13 +316,13 @@ fn in_progress_finds_cached_subxids() {
         let proc = GetPGProcByNumber(other);
         proc.xid.value.store(top, Relaxed);
         proc.pgxactoff.store(-1, Relaxed);
-        let mut cache = proc.subxids.get();
+        let mut cache = unsafe { proc.subxids.get() };
         cache.xids[0] = sub;
-        proc.subxids.set(cache);
-        proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
+        unsafe { proc.subxids.set(cache) };
+        unsafe { proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
             count: 1,
             overflowed: false,
-        });
+        }) };
     }
     ProcArrayAdd(other).unwrap();
     TransamVariables()
@@ -395,10 +395,10 @@ fn proc_number_transaction_ids_and_pid_lookup() {
     other_proc_running(other, 700);
     let proc = GetPGProcByNumber(other);
     proc.xmin.value.store(695, Relaxed);
-    proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
+    unsafe { proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
         count: 2,
         overflowed: true,
-    });
+    }) };
 
     // pid == 0: dummy PGPROC, ids withheld and PID lookup never matches.
     assert_eq!(
@@ -414,7 +414,7 @@ fn proc_number_transaction_ids_and_pid_lookup() {
 
     proc.pid.store(0, Relaxed);
     proc.xmin.value.store(InvalidTransactionId, Relaxed);
-    proc.subxidStatus.set(Default::default());
+    unsafe { proc.subxidStatus.set(Default::default()) };
     other_proc_end(other, 700);
 }
 
@@ -1026,9 +1026,9 @@ fn minimum_active_backends_counts_other_active_backends() {
 
     // Blocked waiting for a lock: not counted (it cannot run until someone
     // else commits). The pointer is only null-tested, never dereferenced.
-    op.waitLock.set(core::ptr::NonNull::dangling().as_ptr());
+    unsafe { op.waitLock.set(core::ptr::NonNull::dangling().as_ptr()) };
     assert!(!MinimumActiveBackends(1));
-    op.waitLock.set(core::ptr::null_mut());
+    unsafe { op.waitLock.set(core::ptr::null_mut()) };
     assert!(MinimumActiveBackends(1));
 
     // No XID assigned: not counted.
@@ -1151,16 +1151,16 @@ fn snapshot_arrays_demand_grow_and_decay() {
         let proc = GetPGProcByNumber(other);
         proc.xid.value.store(top, Relaxed);
         proc.pgxactoff.store(-1, Relaxed);
-        let mut cache = proc.subxids.get();
+        let mut cache = unsafe { proc.subxids.get() };
         for j in 0..NSUB {
             cache.xids[j] = top + 1 + j as TransactionId;
             expected_subs.push(top + 1 + j as TransactionId);
         }
-        proc.subxids.set(cache);
-        proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
+        unsafe { proc.subxids.set(cache) };
+        unsafe { proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
             count: NSUB as u8,
             overflowed: false,
-        });
+        }) };
         ProcArrayAdd(other).unwrap();
         others.push((other, top));
     }
@@ -1193,10 +1193,10 @@ fn snapshot_arrays_demand_grow_and_decay() {
     for (other, top) in others {
         other_proc_end(other, top);
         let proc = GetPGProcByNumber(other);
-        proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
+        unsafe { proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
             count: 0,
             overflowed: false,
-        });
+        }) };
     }
     let mut floor = (usize::MAX, usize::MAX);
     for _ in 0..(2 * SNAPSHOT_DEMAND_WINDOW_XACTS) {

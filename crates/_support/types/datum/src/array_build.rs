@@ -1,10 +1,14 @@
 use crate::datum::Datum;
 use ::types_core::Oid;
+use alloc::boxed::Box;
 use mcx::{slice_borrow_in, vec_with_capacity_in, Mcx, PgVec};
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 
 pub const MAXDIM: usize = 6;
 const INIT_ELEMS: usize = 64;
+
+// array.h: MaxArraySize == MaxAllocSize / sizeof(Datum) == 0x3fffffff / 8.
+const MAX_ARRAY_SIZE: usize = 0x3fff_ffff / 8;
 
 // C's ArrayBuildState private-subcontext model: element storage lives in the
 // caller-owned child `mcx`, so teardown is that context's reset.
@@ -104,6 +108,44 @@ unsafe fn cstring_len(p: *const u8) -> usize {
         n += 1;
     }
     n
+}
+
+// Fully safe varlena-size read that never reaches past `buf`. Returns the
+// total on-disk length of the varlena whose header begins at buf[0], or None
+// when the header (or the length it advertises) does not fit inside `buf`.
+// External (on-disk TOAST) pointers are rejected: a raw catalog image walked
+// here must be inline. This is the bounds-checked twin of `varsize_any`, used
+// by `deconstruct_array_image` where `buf` is attacker-influenceable content.
+#[inline]
+fn varsize_any_bounded(buf: &[u8]) -> Option<usize> {
+    let b0 = *buf.first()?;
+    let total = if b0 & 0x01 != 0 {
+        if b0 == 0x01 {
+            // 1-byte external TOAST pointer: not a self-contained inline datum.
+            return None;
+        }
+        (b0 as usize >> 1) & 0x7F
+    } else {
+        if buf.len() < 4 {
+            return None;
+        }
+        let w = u32::from_ne_bytes(buf[..4].try_into().unwrap());
+        (w as usize) >> 2
+    };
+    // A varlena's advertised length includes its own header, so it must be at
+    // least 1 (short) and cannot exceed the bytes actually present.
+    if total == 0 || total > buf.len() {
+        None
+    } else {
+        Some(total)
+    }
+}
+
+// Bounds-checked cstring scan: length of the NUL-terminated string at buf[0],
+// excluding the terminator, or None when no NUL exists within `buf`.
+#[inline]
+fn cstring_len_bounded(buf: &[u8]) -> Option<usize> {
+    buf.iter().position(|&b| b == 0)
 }
 
 // buildint2vector/buildoidvector (int.c/oid.c): fixed-len by-val elements,
@@ -279,42 +321,94 @@ pub fn deconstruct_array_image<'mcx>(
     elmalign: u8,
 ) -> PgResult<PgVec<'mcx, Datum>> {
     let align = align_of_typalign(elmalign);
-    let rd = |off: usize| i32::from_ne_bytes(image[off..off + 4].try_into().unwrap());
-    if image.len() >= 16 && rd(4) == 0 {
+    // Catchable error for any content-driven inconsistency in the image. C's
+    // callers reach deconstruct_array only after array_recv/ArrayGetNItems have
+    // validated the header; here the image bytes may come verbatim from an
+    // on-disk catalog page, so every read below is bounded against the slice
+    // and a violation returns rather than reading out of bounds.
+    let corrupt = || -> Box<PgError> {
+        Box::new(PgError::error("deconstruct_array_image: malformed array image").with_sqlstate(ERRCODE_DATA_CORRUPTED))
+    };
+    // Bounds-checked 4-byte header read.
+    let rd = |off: usize| -> PgResult<i32> {
+        if off + 4 > image.len() {
+            return Err(corrupt());
+        }
+        Ok(i32::from_ne_bytes(image[off..off + 4].try_into().unwrap()))
+    };
+    if image.len() >= 16 && rd(4)? == 0 {
         // construct_empty_array's zero-dimensional image: no elements.
         return Ok(PgVec::new_in(mcx));
     }
-    assert!(
-        image.len() >= ARR_1D_HDRSZ && rd(4) == 1,
-        "deconstruct_array_image: not a 1-D array"
-    );
-    assert!(rd(8) == 0, "deconstruct_array_image: null bitmap present");
-    let nelems = rd(16) as usize;
+    // This codec only handles the 1-D no-nulls shape; anything else (including a
+    // truncated header) is treated as corrupt rather than trusted.
+    if image.len() < ARR_1D_HDRSZ || rd(4)? != 1 {
+        return Err(corrupt());
+    }
+    if rd(8)? != 0 {
+        // Null bitmap present: unsupported here (dataoffset != 0).
+        return Err(corrupt());
+    }
+    // nelems is content-controlled; a negative i32 must not become a huge usize
+    // (ArrayGetNItems rejects negative dims), and the count is capped at
+    // MaxArraySize exactly as ArrayGetNItems does before palloc.
+    let nelems_i32 = rd(16)?;
+    if nelems_i32 < 0 || nelems_i32 as usize > MAX_ARRAY_SIZE {
+        return Err(corrupt());
+    }
+    let nelems = nelems_i32 as usize;
     let inline_fetch = elmbyval && array_fetch_inline_enabled();
-    let mut out: PgVec<'mcx, Datum> = vec_with_capacity_in(mcx, nelems)?;
+    // Every element occupies at least one byte, so a valid count can never
+    // exceed the remaining bytes; cap the capacity hint so a bogus (but
+    // in-range) nelems cannot force a huge up-front allocation.
+    let cap = core::cmp::min(nelems, image.len());
+    let mut out: PgVec<'mcx, Datum> = vec_with_capacity_in(mcx, cap)?;
     let mut off = ARR_1D_HDRSZ;
     for _ in 0..nelems {
         // att_align_pointer: a short-varlena header byte is never a pad byte.
-        if !(elmlen == -1 && image[off] != 0) {
+        // The header byte read must itself be in bounds.
+        let is_short_varlena = elmlen == -1 && *image.get(off).ok_or_else(corrupt)? != 0;
+        if !is_short_varlena {
             off = (off + align - 1) & !(align - 1);
         }
         if elmbyval {
+            let n = elmlen as usize;
+            if elmlen <= 0 || off + n > image.len() {
+                return Err(corrupt());
+            }
             out.push(fetch_byval_datum(image, off, elmlen, inline_fetch));
-            off += elmlen as usize;
+            off += n;
         } else if elmlen > 0 {
+            let n = elmlen as usize;
+            if off + n > image.len() {
+                return Err(corrupt());
+            }
             out.push(Datum::from_usize(image[off..].as_ptr() as usize));
-            off += elmlen as usize;
+            off += n;
         } else if elmlen == -1 {
+            if off > image.len() {
+                return Err(corrupt());
+            }
+            // Bounds-checked varlena size: the whole element must fit.
+            let vsize = varsize_any_bounded(&image[off..]).ok_or_else(corrupt)?;
             out.push(Datum::from_usize(image[off..].as_ptr() as usize));
-            off += varsize_any(image[off..].as_ptr());
+            off += vsize;
         } else if elmlen == -2 {
+            if off > image.len() {
+                return Err(corrupt());
+            }
+            // Bounds-checked NUL scan: a missing terminator is corruption, not
+            // a walk into adjacent memory.
+            let clen = cstring_len_bounded(&image[off..]).ok_or_else(corrupt)?;
             out.push(Datum::from_usize(image[off..].as_ptr() as usize));
-            // SAFETY: cstring element is NUL-terminated within the image.
-            off += unsafe { cstring_len(image[off..].as_ptr()) } + 1;
+            off += clen + 1;
         } else {
-            panic!("deconstruct_array_image: unsupported typlen {elmlen}");
+            return Err(corrupt());
         }
-        assert!(off <= image.len());
+        // Redundant given the per-branch checks, but pins the invariant.
+        if off > image.len() {
+            return Err(corrupt());
+        }
     }
     Ok(out)
 }
@@ -462,6 +556,72 @@ mod tests {
         let img = construct_array_image(mcx, &v1, 18, 1, true, b'c').unwrap();
         let out = deconstruct_array_image(mcx, &img, 1, true, b'c').unwrap();
         assert_eq!([out[0].as_u8(), out[1].as_u8()], [0xFF, 7]);
+    }
+
+    // A safe fn must never read past `image` for ANY input. These craft the
+    // malformed shapes from the finding (idx 167) and require a catchable error
+    // instead of an out-of-bounds read.
+    #[test]
+    fn deconstruct_rejects_malformed_images() {
+        let ctx = MemoryContext::new_bump("arr-oob");
+        let mcx = ctx.mcx();
+
+        // Helper: build a valid 1-D header, then let the caller mangle it.
+        let header = |ndim: i32, dataoffset: i32, nelems: i32| -> [u8; ARR_1D_HDRSZ] {
+            let mut h = [0u8; ARR_1D_HDRSZ];
+            h[0..4].copy_from_slice(&((ARR_1D_HDRSZ as i32) << 2).to_ne_bytes());
+            h[4..8].copy_from_slice(&ndim.to_ne_bytes());
+            h[8..12].copy_from_slice(&dataoffset.to_ne_bytes());
+            h[12..16].copy_from_slice(&23i32.to_ne_bytes());
+            h[16..20].copy_from_slice(&nelems.to_ne_bytes());
+            h[20..24].copy_from_slice(&1i32.to_ne_bytes());
+            h
+        };
+
+        // (a) Truncated header (fewer than ARR_1D_HDRSZ bytes).
+        let _ = deconstruct_array_image(mcx, &[0u8; 10], 4, true, b'i')
+            .err()
+            .unwrap();
+
+        // (b) Negative nelems must not become a huge usize.
+        let h = header(1, 0, -1);
+        let _ = deconstruct_array_image(mcx, &h, 4, true, b'i').err().unwrap();
+
+        // (c) nelems beyond MaxArraySize.
+        let h = header(1, 0, i32::MAX);
+        let _ = deconstruct_array_image(mcx, &h, 4, true, b'i').err().unwrap();
+
+        // (d) Byval element count that walks off the end (nelems=2 but only one
+        // int4 of payload present).
+        let mut img = header(1, 0, 2).to_vec();
+        img.extend_from_slice(&7i32.to_ne_bytes());
+        let _ = deconstruct_array_image(mcx, &img, 4, true, b'i')
+            .err()
+            .unwrap();
+
+        // (e) Varlena element whose 4-byte header advertises a length running
+        // past the image end (elmlen == -1).
+        let mut img = header(1, 0, 1).to_vec();
+        img.extend_from_slice(&(((100u32) << 2)).to_ne_bytes()); // claims 100 bytes
+        let _ = deconstruct_array_image(mcx, &img, -1, false, b'i')
+            .err()
+            .unwrap();
+
+        // (f) cstring element with no NUL terminator (elmlen == -2).
+        let mut img = header(1, 0, 1).to_vec();
+        img.extend_from_slice(b"no terminator here");
+        let _ = deconstruct_array_image(mcx, &img, -2, false, b'c')
+            .err()
+            .unwrap();
+
+        // (g) Null bitmap present (dataoffset != 0): unsupported, not trusted.
+        let h = header(1, 32, 1);
+        let _ = deconstruct_array_image(mcx, &h, 4, true, b'i').err().unwrap();
+
+        // Valid empty (zero-dim) image still deconstructs to no elements.
+        let empty = construct_empty_array_image(mcx, 23).unwrap();
+        let out = deconstruct_array_image(mcx, &empty, 4, true, b'i').unwrap();
+        assert_eq!(out.len(), 0);
     }
 
     #[test]

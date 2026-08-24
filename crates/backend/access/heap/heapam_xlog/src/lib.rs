@@ -11,8 +11,8 @@
 use types_core::{Buffer, InvalidBuffer, OffsetNumber, TransactionId, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_storage::bufpage::{
-    MaxHeapTupleSize, MaxHeapTuplesPerPage, PageMut, SizeofHeapTupleHeader, PAI_IS_HEAP,
-    PAI_OVERWRITE,
+    MaxHeapTupleSize, MaxHeapTuplesPerPage, PageMut, SizeOfPageHeaderData, SizeofHeapTupleHeader,
+    PAI_IS_HEAP, PAI_OVERWRITE,
 };
 use types_tuple::{
     HeapTupleHeaderData, ItemPointerData, HEAP_KEYS_UPDATED, HEAP_MOVED, HEAP_XMAX_BITS,
@@ -113,6 +113,83 @@ fn panic_err(msg: String) -> Box<PgError> {
     Box::new(PgError::new(types_error::PANIC, msg))
 }
 
+// A malformed but CRC-valid WAL record (record-declared lengths/counts that do
+// not match the payload) must surface as a catchable, diagnosable
+// data-corruption error rather than a slice-index panic on the startup redo
+// thread. C 18.3 only Assert()s these invariants (compiled out of production),
+// so on the same bytes production C performs an out-of-bounds memcpy; the checks
+// below keep valid records behaving identically while turning the malformed
+// path into ERRCODE_DATA_CORRUPTED.
+fn corrupt_err(msg: String) -> Box<PgError> {
+    Box::new(PgError::new(types_error::ERROR, msg).with_sqlstate(types_error::ERRCODE_DATA_CORRUPTED))
+}
+
+// Bounds-checked little-endian u16/u32 reads from a record payload; never
+// panics, unlike a bare slice index.
+fn read_u16(data: &[u8], off: usize, ctx: &str) -> PgResult<u16> {
+    match off.checked_add(2).and_then(|end| data.get(off..end)) {
+        Some(b) => Ok(u16::from_ne_bytes(b.try_into().unwrap())),
+        None => Err(corrupt_err(format!(
+            "{ctx}: WAL record overrun reading u16 at offset {off} (payload {} bytes)",
+            data.len()
+        ))),
+    }
+}
+
+fn read_u32(data: &[u8], off: usize, ctx: &str) -> PgResult<u32> {
+    match off.checked_add(4).and_then(|end| data.get(off..end)) {
+        Some(b) => Ok(u32::from_ne_bytes(b.try_into().unwrap())),
+        None => Err(corrupt_err(format!(
+            "{ctx}: WAL record overrun reading u32 at offset {off} (payload {} bytes)",
+            data.len()
+        ))),
+    }
+}
+
+// Validate an xl_heap_header block payload of `datalen` bytes and return the
+// tuple body length (newlen). Mirrors the C Assert
+// `datalen > SizeOfHeapHeader && newlen <= MaxHeapTupleSize`.
+fn checked_heap_tuple_body_len(datalen: usize, ctx: &str) -> PgResult<usize> {
+    if datalen <= SizeOfHeapHeader {
+        return Err(corrupt_err(format!(
+            "{ctx}: block data length {datalen} too short for xl_heap_header ({SizeOfHeapHeader} bytes)"
+        )));
+    }
+    let newlen = datalen - SizeOfHeapHeader;
+    if newlen > MaxHeapTupleSize {
+        return Err(corrupt_err(format!(
+            "{ctx}: tuple length {newlen} exceeds MaxHeapTupleSize {MaxHeapTupleSize}"
+        )));
+    }
+    Ok(newlen)
+}
+
+// Re-establish the lp_len >= SizeofHeapTupleHeader invariant before any redo or
+// freeze arm reinterprets an in-page item as a HeapTupleHeaderData. Writers keep
+// every LP_NORMAL heap item at least header-sized, but a page restored from a
+// hostile full-page image (or a crafted too-short LP_NORMAL line pointer) can
+// violate it. `item_raw` only bounds the item's own extent against BLCKSZ
+// (off + lp_len <= BLCKSZ); forming a &(mut) HeapTupleHeaderData spanning
+// SizeofHeapTupleHeader bytes over an item shorter than that would read/write
+// past the item — and, near the page tail, past the page image. C only Assert()s
+// this (compiled out of production), so on the same bytes production C performs
+// an out-of-bounds access; verifying it here keeps valid records identical while
+// turning the malformed path into a catchable ERRCODE_DATA_CORRUPTED. Callers
+// must pass the (ptr, len) returned by `Page::item_raw` for a normal item, so
+// len >= SizeofHeapTupleHeader guarantees the header pointer stays in-page.
+fn checked_item_header_ptr(
+    ptr: *const u8,
+    len: u32,
+    ctx: &str,
+) -> PgResult<*mut HeapTupleHeaderData> {
+    if (len as usize) < SizeofHeapTupleHeader {
+        return Err(corrupt_err(format!(
+            "{ctx}: invalid lp_len {len} for heap tuple item (need at least {SizeofHeapTupleHeader})"
+        )));
+    }
+    Ok(ptr.cast_mut().cast::<HeapTupleHeaderData>())
+}
+
 // SAFETY contract shared by both redo arms: the buffer is pinned and
 // exclusively locked (XLogReadBufferForRedo protocol), so the PageMut is the
 // sole writer of the image until the unlock below.
@@ -200,10 +277,9 @@ fn heap_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
         };
 
         let (ptr, len) = page.item_raw(lp);
-        // SAFETY: in-page tuple image under the pin+lock; exclusive for this arm.
-        let htup =
-            unsafe { &mut *(ptr.cast_mut().cast::<HeapTupleHeaderData>()) };
-        let _ = len;
+        // SAFETY: header-length checked; in-page tuple image under the pin+lock,
+        // exclusive for this arm.
+        let htup = unsafe { &mut *checked_item_header_ptr(ptr, len, "heap_xlog_delete")? };
 
         htup.t_infomask &= !(HEAP_XMAX_BITS | HEAP_MOVED);
         htup.t_infomask2 &= !HEAP_KEYS_UPDATED;
@@ -242,8 +318,11 @@ fn heap_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
 fn heap_xlog_insert(record: &mut XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let xlrec = main_data(record);
-    let offnum = u16::from_ne_bytes(xlrec[0..2].try_into().unwrap());
-    let flags = xlrec[2];
+    // xl_heap_insert { OffsetNumber offnum; uint8 flags } == 3 bytes.
+    let offnum = read_u16(xlrec, 0, "heap_xlog_insert")?;
+    let flags = *xlrec
+        .get(2)
+        .ok_or_else(|| corrupt_err("heap_xlog_insert: main data too short for xl_heap_insert".into()))?;
 
     let (target_locator, _fork, blkno, _) = record
         .block_tag_extended(0)
@@ -279,11 +358,13 @@ fn heap_xlog_insert(record: &mut XLogReaderState) -> PgResult<()> {
         debug_assert!(blk.has_data);
         // SAFETY: block data points into the decode buffer, live for this arm.
         let data = unsafe { blk.data_bytes() };
-        debug_assert!(data.len() > SizeOfHeapHeader);
-        let newlen = data.len() - SizeOfHeapHeader;
-        debug_assert!(newlen <= MaxHeapTupleSize);
+        // The record declares its own block-0 payload length; validate it
+        // before slicing so a short/oversized record errors out instead of
+        // wrapping `newlen` or overrunning the fixed tuple buffer.
+        let newlen = checked_heap_tuple_body_len(data.len(), "heap_xlog_insert")?;
 
         // xl_heap_header { uint16 t_infomask2; uint16 t_infomask; uint8 t_hoff }
+        // data.len() > SizeOfHeapHeader (== 5) is guaranteed above.
         let xl_infomask2 = u16::from_ne_bytes(data[0..2].try_into().unwrap());
         let xl_infomask = u16::from_ne_bytes(data[2..4].try_into().unwrap());
         let xl_hoff = data[4];
@@ -340,8 +421,16 @@ fn heap_xlog_multi_insert(record: &mut XLogReaderState) -> PgResult<()> {
 
     let lsn = record.EndRecPtr;
     let xlrec = main_data(record).to_vec();
+    // xl_heap_multi_insert { uint8 flags; 1 pad; uint16 ntuples; OffsetNumber
+    // offsets[ntuples] } — offsets present only when the page is not init'd.
+    if xlrec.len() < SizeOfHeapMultiInsert {
+        return Err(corrupt_err(format!(
+            "heap_xlog_multi_insert: main data length {} too short for xl_heap_multi_insert",
+            xlrec.len()
+        )));
+    }
     let flags = xlrec[0];
-    let ntuples = u16::from_ne_bytes(xlrec[2..4].try_into().unwrap()) as usize;
+    let ntuples = read_u16(&xlrec, 2, "heap_xlog_multi_insert")? as usize;
 
     let (target_locator, _fork, blkno, _) = record
         .block_tag_extended(0)
@@ -382,11 +471,8 @@ fn heap_xlog_multi_insert(record: &mut XLogReaderState) -> PgResult<()> {
             let offnum = if isinit {
                 i as u16 + 1
             } else {
-                u16::from_ne_bytes(
-                    xlrec[SizeOfHeapMultiInsert + 2 * i..SizeOfHeapMultiInsert + 2 * i + 2]
-                        .try_into()
-                        .unwrap(),
-                )
+                // offsets[] follows the fixed header; validated read.
+                read_u16(&xlrec, SizeOfHeapMultiInsert + 2 * i, "heap_xlog_multi_insert")?
             };
             if pm.as_ref().max_offset_number() + 1 < offnum {
                 return Err(panic_err("invalid max offset number".into()));
@@ -395,20 +481,38 @@ fn heap_xlog_multi_insert(record: &mut XLogReaderState) -> PgResult<()> {
             // xl_multi_insert_tuple is SHORTALIGNed relative to the block
             // data base (matches the writer's scratch-relative padding).
             off = (off + 1) & !1;
-            let datalen =
-                u16::from_ne_bytes(tupdata[off..off + 2].try_into().unwrap()) as usize;
+            // xl_multi_insert_tuple { uint16 datalen; uint16 t_infomask2;
+            // uint16 t_infomask; uint8 t_hoff } == SizeOfMultiInsertTuple bytes.
+            if tupdata.len() - off.min(tupdata.len()) < SizeOfMultiInsertTuple {
+                return Err(corrupt_err(format!(
+                    "heap_xlog_multi_insert: xl_multi_insert_tuple header at offset {off} overruns block data ({} bytes)",
+                    tupdata.len()
+                )));
+            }
+            let datalen = u16::from_ne_bytes(tupdata[off..off + 2].try_into().unwrap()) as usize;
             let xl_infomask2 = u16::from_ne_bytes(tupdata[off + 2..off + 4].try_into().unwrap());
             let xl_infomask = u16::from_ne_bytes(tupdata[off + 4..off + 6].try_into().unwrap());
             let xl_hoff = tupdata[off + 6];
             off += SizeOfMultiInsertTuple;
-            debug_assert!(datalen <= MaxHeapTupleSize);
+            if datalen > MaxHeapTupleSize {
+                return Err(corrupt_err(format!(
+                    "heap_xlog_multi_insert: tuple length {datalen} exceeds MaxHeapTupleSize {MaxHeapTupleSize}"
+                )));
+            }
+            let tup_end = off.checked_add(datalen).filter(|&e| e <= tupdata.len());
+            let Some(tup_end) = tup_end else {
+                return Err(corrupt_err(format!(
+                    "heap_xlog_multi_insert: tuple length {datalen} at offset {off} overruns block data ({} bytes)",
+                    tupdata.len()
+                )));
+            };
 
             #[repr(align(8))]
             struct TBuf([u8; MaxHeapTupleSize + SizeofHeapTupleHeader]);
             let mut tbuf = TBuf([0u8; MaxHeapTupleSize + SizeofHeapTupleHeader]);
             tbuf.0[SizeofHeapTupleHeader..SizeofHeapTupleHeader + datalen]
-                .copy_from_slice(&tupdata[off..off + datalen]);
-            off += datalen;
+                .copy_from_slice(&tupdata[off..tup_end]);
+            off = tup_end;
             let tuple_len = SizeofHeapTupleHeader + datalen;
             {
                 // SAFETY: 8-aligned zeroed buffer at least header-sized.
@@ -486,8 +590,10 @@ fn heap_xlog_inplace(record: &mut XLogReaderState) -> PgResult<()> {
             return Err(panic_err("invalid lp".into()));
         };
         let (ptr, len) = page.item_raw(lp);
-        // SAFETY: in-page tuple image under the pin+lock; exclusive for this arm.
-        let hoff = unsafe { (*(ptr.cast::<HeapTupleHeaderData>())).t_hoff } as usize;
+        let htptr = checked_item_header_ptr(ptr, len, "heap_xlog_inplace")?;
+        // SAFETY: header-length checked; in-page tuple image under the pin+lock,
+        // exclusive for this arm.
+        let hoff = unsafe { (*htptr).t_hoff } as usize;
         if len as usize - hoff != newlen {
             return Err(panic_err("wrong tuple length".into()));
         }
@@ -572,8 +678,9 @@ fn heap_xlog_update(record: &mut XLogReaderState, hot_update: bool) -> PgResult<
         };
         let (ptr, len) = page.item_raw(lp);
         old_item = Some((ptr, len));
-        // SAFETY: in-page tuple image under the pin+lock; exclusive for this arm.
-        let htup = unsafe { &mut *(ptr.cast_mut().cast::<HeapTupleHeaderData>()) };
+        // SAFETY: header-length checked; in-page tuple image under the pin+lock,
+        // exclusive for this arm.
+        let htup = unsafe { &mut *checked_item_header_ptr(ptr, len, "heap_xlog_update")? };
 
         htup.t_infomask &= !(HEAP_XMAX_BITS | HEAP_MOVED);
         htup.t_infomask2 &= !HEAP_KEYS_UPDATED;
@@ -756,9 +863,10 @@ fn heap_xlog_confirm(record: &mut XLogReaderState) -> PgResult<()> {
         let Some(lp) = lp.filter(|id| id.is_normal()) else {
             return Err(panic_err("invalid lp".into()));
         };
-        let (ptr, _len) = page.item_raw(lp);
-        // SAFETY: in-page tuple image under the pin+lock; exclusive for this arm.
-        let htup = unsafe { &mut *(ptr.cast_mut().cast::<HeapTupleHeaderData>()) };
+        let (ptr, len) = page.item_raw(lp);
+        // SAFETY: header-length checked; in-page tuple image under the pin+lock,
+        // exclusive for this arm.
+        let htup = unsafe { &mut *checked_item_header_ptr(ptr, len, "heap_xlog_confirm")? };
 
         htup.t_ctid = ItemPointerData::new(
             bufmgr_seams::buffer_get_block_number::call(buffer),
@@ -809,9 +917,10 @@ fn heap_xlog_lock_common(record: &mut XLogReaderState, lock_updated: bool) -> Pg
         let Some(lp) = lp.filter(|id| id.is_normal()) else {
             return Err(panic_err("invalid lp".into()));
         };
-        let (ptr, _len) = page.item_raw(lp);
-        // SAFETY: in-page tuple image under the pin+lock; exclusive for this arm.
-        let htup = unsafe { &mut *(ptr.cast_mut().cast::<HeapTupleHeaderData>()) };
+        let (ptr, len) = page.item_raw(lp);
+        // SAFETY: header-length checked; in-page tuple image under the pin+lock,
+        // exclusive for this arm.
+        let htup = unsafe { &mut *checked_item_header_ptr(ptr, len, "heap_xlog_lock")? };
 
         htup.t_infomask &= !(HEAP_XMAX_BITS | HEAP_MOVED);
         htup.t_infomask2 &= !HEAP_KEYS_UPDATED;
@@ -866,7 +975,9 @@ fn heap_xlog_prune_freeze(record: &mut XLogReaderState) -> PgResult<()> {
     // xl_heap_prune { uint8 reason; uint8 flags }; the conflict horizon
     // follows unaligned when XLHP_HAS_CONFLICT_HORIZON is set (its only
     // consumer is the Hot Standby conflict arm, gated below).
-    let flags = main_data(record)[1];
+    let flags = *main_data(record)
+        .get(1)
+        .ok_or_else(|| corrupt_err("heap_xlog_prune_freeze: main data too short for xl_heap_prune".into()))?;
 
     let (rlocator, _fork, blkno, _) = record
         .block_tag_extended(0)
@@ -879,7 +990,7 @@ fn heap_xlog_prune_freeze(record: &mut XLogReaderState) -> PgResult<()> {
 
     if flags & XLHP_HAS_CONFLICT_HORIZON != 0 && xlogutils::InHotStandby() {
         let md = main_data(record);
-        let horizon = u32::from_ne_bytes(md[2..6].try_into().unwrap());
+        let horizon = read_u32(md, 2, "heap_xlog_prune_freeze")?;
         standby::ResolveRecoveryConflictWithSnapshot(
             horizon,
             flags & XLHP_IS_CATALOG_REL != 0,
@@ -899,17 +1010,26 @@ fn heap_xlog_prune_freeze(record: &mut XLogReaderState) -> PgResult<()> {
         // SAFETY: block data points into the decode buffer, live for this arm.
         let data = unsafe { blk.data_bytes() };
         let mut cur = 0usize;
-        let rd = |cur: usize| u16::from_ne_bytes(data[cur..cur + 2].try_into().unwrap());
+        // All counts and offsets below are record-declared; every read is
+        // bounds-checked against the actual block payload so a malformed record
+        // errors out (ERRCODE_DATA_CORRUPTED) instead of panicking.
+        let rd = |cur: usize| read_u16(data, cur, "heap_xlog_prune_freeze");
 
         let mut nplans = 0usize;
         let plans_off;
         if flags & XLHP_HAS_FREEZE_PLANS != 0 {
-            nplans = rd(cur) as usize;
+            nplans = rd(cur)? as usize;
             debug_assert!(nplans > 0);
             // xlhp_freeze_plans: uint16 nplans, 2 pad bytes, 12-byte plans.
             cur += 4;
             plans_off = cur;
-            cur += 12 * nplans;
+            // Validate the whole plan array fits before we advance past it.
+            cur = cur.checked_add(12 * nplans).filter(|&e| e <= data.len()).ok_or_else(|| {
+                corrupt_err(format!(
+                    "heap_xlog_prune_freeze: {nplans} freeze plans overrun block data ({} bytes)",
+                    data.len()
+                ))
+            })?;
         } else {
             plans_off = 0;
         }
@@ -920,25 +1040,33 @@ fn heap_xlog_prune_freeze(record: &mut XLogReaderState) -> PgResult<()> {
         let mut nredirected = 0usize;
         let mut ndead = 0usize;
         let mut nunused = 0usize;
-        let read_items = |cur: &mut usize, out: &mut [OffsetNumber], pairs: bool| {
-            let n = rd(*cur) as usize;
+        // `out` is a fixed [OffsetNumber; MaxHeapTuplesPerPage]; a declared
+        // count above what the page can hold is corruption, not a valid record.
+        let read_items = |cur: &mut usize, out: &mut [OffsetNumber], pairs: bool| -> PgResult<usize> {
+            let n = rd(*cur)? as usize;
             debug_assert!(n > 0);
             *cur += 2;
             let count = if pairs { 2 * n } else { n };
+            if count > out.len() {
+                return Err(corrupt_err(format!(
+                    "heap_xlog_prune_freeze: item count {n} exceeds MaxHeapTuplesPerPage {}",
+                    out.len() / if pairs { 2 } else { 1 }
+                )));
+            }
             for slot in out[..count].iter_mut() {
-                *slot = rd(*cur);
+                *slot = rd(*cur)?;
                 *cur += 2;
             }
-            n
+            Ok(n)
         };
         if flags & XLHP_HAS_REDIRECTIONS != 0 {
-            nredirected = read_items(&mut cur, &mut redirected, true);
+            nredirected = read_items(&mut cur, &mut redirected, true)?;
         }
         if flags & XLHP_HAS_DEAD_ITEMS != 0 {
-            ndead = read_items(&mut cur, &mut nowdead, false);
+            ndead = read_items(&mut cur, &mut nowdead, false)?;
         }
         if flags & XLHP_HAS_NOW_UNUSED_ITEMS != 0 {
-            nunused = read_items(&mut cur, &mut nowunused, false);
+            nunused = read_items(&mut cur, &mut nowunused, false)?;
         }
 
         if nredirected > 0 || ndead > 0 || nunused > 0 {
@@ -954,20 +1082,23 @@ fn heap_xlog_prune_freeze(record: &mut XLogReaderState) -> PgResult<()> {
         // SAFETY: pin + (cleanup or exclusive) lock per the redo protocol.
         let mut pm = unsafe { page_mut(buffer) };
         for p in 0..nplans {
+            // plan..plan+12 is within `data` (validated when advancing `cur`).
             let plan = plans_off + 12 * p;
-            let xmax = u32::from_ne_bytes(data[plan..plan + 4].try_into().unwrap());
-            let t_infomask2 = rd(plan + 4);
-            let t_infomask = rd(plan + 6);
+            let xmax = read_u32(data, plan, "heap_xlog_prune_freeze")?;
+            let t_infomask2 = rd(plan + 4)?;
+            let t_infomask = rd(plan + 6)?;
             let frzflags = data[plan + 8];
-            let ntuples = rd(plan + 10) as usize;
+            let ntuples = rd(plan + 10)? as usize;
             for _ in 0..ntuples {
-                let offset = rd(cur);
+                let offset = rd(cur)?;
                 cur += 2;
                 let page = pm.as_ref();
                 let lp = page.item_id(offset);
-                let (ptr, _len) = page.item_raw(lp);
-                // SAFETY: in-page tuple image under the pin+lock.
-                let htup = unsafe { &mut *(ptr.cast_mut().cast::<HeapTupleHeaderData>()) };
+                let (ptr, len) = page.item_raw(lp);
+                // SAFETY: header-length checked; in-page tuple image under the
+                // pin+lock.
+                let htup =
+                    unsafe { &mut *checked_item_header_ptr(ptr, len, "heap_xlog_prune_freeze")? };
                 heap_execute_freeze_tuple(htup, xmax, t_infomask2, t_infomask, frzflags);
             }
         }
@@ -1218,9 +1349,41 @@ pub fn heap_mask(pagedata: &mut [u8], blkno: types_core::BlockNumber) -> PgResul
     let maxoff = pm.as_ref().max_offset_number();
     for off in 1..=maxoff {
         let iid = pm.as_ref().item_id(off);
+        let lp_off = iid.lp_off() as usize;
+        let lp_len = iid.lp_len() as usize;
+
+        // The page image can be attacker-controlled (e.g. a full-page image
+        // restored from a hostile WAL stream and masked under
+        // `wal_consistency_checking`). C derefs `page + ItemIdGetOffset(iid)`
+        // unconditionally, relying on palloc'd buffers and upstream page
+        // validation; that unchecked arithmetic would be an out-of-bounds
+        // read/write here. Confine every access below to the BLCKSZ image:
+        // reject line pointers whose offset or storage extent (the header we
+        // dereference for normal items, plus the MAXALIGN padding fill for
+        // items with storage) falls outside the page. `item_raw` applies the
+        // same rule for the normal read path.
+        if lp_off < SizeOfPageHeaderData || lp_off > BLCKSZ {
+            return Err(corrupt_err(format!(
+                "heap_mask: line pointer {off} offset {lp_off} out of range"
+            )));
+        }
+        let mut extent = 0usize;
+        if iid.is_normal() {
+            extent = extent.max(SizeofHeapTupleHeader);
+        }
+        if iid.has_storage() {
+            extent = extent.max(maxalign(lp_len));
+        }
+        if lp_off + extent > BLCKSZ {
+            return Err(corrupt_err(format!(
+                "heap_mask: line pointer {off} extent {extent} at offset {lp_off} overflows page"
+            )));
+        }
+
         // page_item = (char *) (page + ItemIdGetOffset(iid))
-        // SAFETY: item offset is within the page for a used line pointer.
-        let page_item = unsafe { pm.as_mut_ptr().add(iid.lp_off() as usize) };
+        // SAFETY: `lp_off` was validated above to lie within the page, and the
+        // accesses below stay within `[lp_off, lp_off + extent) <= BLCKSZ`.
+        let page_item = unsafe { pm.as_mut_ptr().add(lp_off) };
 
         if iid.is_normal() {
             // SAFETY: a normal line pointer references a HeapTupleHeaderData
@@ -1252,11 +1415,12 @@ pub fn heap_mask(pagedata: &mut [u8], blkno: types_core::BlockNumber) -> PgResul
 
         // Ignore padding bytes after a non-MAXALIGNed item.
         if iid.has_storage() {
-            let len = iid.lp_len() as usize;
+            let len = lp_len;
             let padlen = maxalign(len) - len;
             if padlen > 0 {
                 // SAFETY: [page_item+len, page_item+MAXALIGN(len)) lies within
-                // the item's page storage.
+                // the item's page storage; the extent check above guarantees
+                // lp_off + MAXALIGN(lp_len) <= BLCKSZ.
                 unsafe { core::ptr::write_bytes(page_item.add(len), MASK_MARKER, padlen) };
             }
         }
@@ -1317,6 +1481,28 @@ mod mask_tests {
         let mut p2 = P(masked);
         heap_mask(&mut p2.0, 0).unwrap();
         assert_eq!(p2.0, masked);
+    }
+
+    #[test]
+    fn heap_mask_rejects_forged_line_pointer_offset() {
+        use types_storage::bufpage::{ItemIdData, LP_NORMAL};
+
+        let mut p = P([0u8; BLCKSZ]);
+        {
+            let mut page = pm(&mut p);
+            page.init(0);
+            // A real item so pd_lower advertises one line pointer.
+            let body = [0xAAu8; SizeofHeapTupleHeader];
+            page.add_item(&body, 0, PAI_IS_HEAP).unwrap();
+            // Forge lp_off/lp_len to their 15-bit maxima. Without validation
+            // heap_mask would dereference and write ~56KB past the 8KB image
+            // (an out-of-bounds stack write in verify_backup_page_consistency).
+            page.set_item_id(1, ItemIdData::new(0x7fff, LP_NORMAL, 0x7fff));
+        }
+
+        // Must reject with a catchable corruption error, never write OOB.
+        let err = heap_mask(&mut p.0, 0).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
     }
 }
 

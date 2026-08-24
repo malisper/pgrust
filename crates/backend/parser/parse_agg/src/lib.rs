@@ -1758,6 +1758,22 @@ fn sgc_query_news<'mcx>(
                     .expect("RangeTblEntry");
                 }
             }
+            RTEKind::RTE_RELATION => {
+                // C range_table_mutator walks rte->tablesample for RTE_RELATION:
+                // its args and REPEATABLE expression can reference columns that
+                // grouped-column substitution must rewrite (and the ungrouped-
+                // column check must reach). Routing through the same mutator also
+                // stamps varnullingrels correctly under GROUPING SETS.
+                if let Some(ts) = sgc_mutate_opt(ctx, rte.tablesample)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.tablesample = Some(ts)
+                        })
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
             _ => {}
         }
         if let Some(l) = sgc_list(ctx, &rte.securityQuals)? {

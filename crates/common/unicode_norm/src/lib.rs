@@ -6,6 +6,7 @@ mod qc_tables;
 mod tables;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use secure_zero::secure_zero_slice;
 use types_error::PgResult;
 use wchar::pg_wchar;
 
@@ -334,7 +335,14 @@ fn normalize_into<'mcx>(
     canonical_order(decomp_chars.as_mut_slice());
 
     if is_recompose_form(form) {
-        recompose(mcx, &decomp_chars)
+        // decomp_chars is scratch here (recompose returns a fresh buffer). When
+        // this runs under pg_saslprep it holds the cleartext password in
+        // codepoint form, so wipe it before it is released to the arena
+        // freelist, which pgrust recycles across sessions. On the non-recompose
+        // path decomp_chars IS the returned buffer, so it is not wiped here.
+        let result = recompose(mcx, &decomp_chars);
+        secure_zero_slice(decomp_chars.as_mut_slice());
+        result
     } else {
         Ok(decomp_chars)
     }

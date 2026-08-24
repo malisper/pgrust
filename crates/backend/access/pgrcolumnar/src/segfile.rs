@@ -58,6 +58,20 @@ fn io_err(path: &str, e: std::io::Error) -> Box<PgError> {
     Box::new(PgError::error(format!("pgrcolumnar io error on \"{path}\": {e}")))
 }
 
+/// Corrupt/hostile on-disk segment table: the md layout law the reservation
+/// math and every reader's in-bounds byte view depend on is violated. Matches
+/// the crate's corruption convention (reader.rs `corrupt_code`) —
+/// ERRCODE_DATA_CORRUPTED — so an open of a tampered part fails catchably
+/// instead of running the overrunning MAP_FIXED or exposing a PROT_NONE hole.
+#[cold]
+#[inline(never)]
+fn corrupt_segs(base: &str, msg: impl std::fmt::Display) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("pgrcolumnar: corrupt part \"{base}\" ({msg})"))
+            .with_sqlstate(::types_error::ERRCODE_DATA_CORRUPTED),
+    )
+}
+
 /// The errno of the vfs op that just failed, rendered exactly as the old
 /// std::fs path rendered it (io::Error Display for raw OS errors).
 fn io_err_errno(path: &str) -> Box<PgError> {
@@ -454,7 +468,44 @@ impl SegMap {
         if total == 0 {
             return Ok(None);
         }
-        let maplen = ((files.len() - 1) as u64 * seg_bytes() + *lens.last().unwrap()) as usize;
+        // Validate the on-disk segment table against the md layout law BEFORE
+        // any mapping is built. map_segs maps each segment at i*seg_bytes()
+        // with MAP_FIXED using lens[i] verbatim, and the reservation length
+        // below assumes every non-last segment is exactly seg_bytes(). A
+        // non-last segment LARGER than seg_bytes() would overrun the PROT_NONE
+        // reservation and MAP_FIXED-clobber unrelated process mappings
+        // (heap/thread stacks/other parts) with a PROT_READ view of hostile
+        // bytes; a SHORTER interior segment would leave a PROT_NONE hole inside
+        // bytes()'s advertised range that faults the whole process on read.
+        // The legitimate writer (write_all_at splits on seg boundaries;
+        // pad_and_sync grows to the exact size) can mint neither state — only
+        // corrupt/tampered on-disk state reaches here, and a single fstat
+        // comparison closes it. Checked arithmetic keeps the reservation math
+        // from wrapping on adversarial sizes.
+        let nsegs = files.len();
+        let seg = seg_bytes();
+        for (i, &len) in lens.iter().enumerate() {
+            let is_last = i + 1 == nsegs;
+            if !is_last && len != seg {
+                return Err(corrupt_segs(
+                    base,
+                    format_args!("non-last segment {i} is {len} bytes, expected {seg}"),
+                ));
+            }
+            if is_last && len > seg {
+                return Err(corrupt_segs(
+                    base,
+                    format_args!("last segment {i} is {len} bytes, exceeds seg size {seg}"),
+                ));
+            }
+        }
+        let maplen = (nsegs as u64 - 1)
+            .checked_mul(seg)
+            .and_then(|head| head.checked_add(*lens.last().unwrap()))
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| {
+                corrupt_segs(base, "segment table size overflows the address space")
+            })?;
         Ok(Some((files, lens, maplen)))
     }
 
@@ -653,6 +704,71 @@ mod dirsync_tests {
         assert!(!f.dirents_pending(), "seg 0 existed already; nothing minted");
         f.sync_dir_if_minted().unwrap(); // no-op, must not error
         drop(f);
+        std::fs::remove_file(&base).unwrap();
+    }
+}
+
+// SegMap segment-table validation (finding: MAP_FIXED trusted on-disk segment
+// sizes). A hostile/corrupt part whose non-last segment is not exactly
+// seg_bytes() must be rejected with a catchable ERRCODE_DATA_CORRUPTED BEFORE
+// any mmap runs — never overrunning the reservation (oversized) nor exposing a
+// PROT_NONE hole (short interior).
+#[cfg(all(test, not(target_family = "wasm")))]
+mod segmap_validation_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> String {
+        let p = std::env::temp_dir()
+            .join(format!("pgrcolumnar-segmap-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(format!("{}.1", p.display()));
+        p.to_str().unwrap().to_string()
+    }
+
+    // Non-last segment LARGER than seg_bytes(): mapping it verbatim with
+    // MAP_FIXED would overrun the PROT_NONE reservation and clobber unrelated
+    // process mappings. Must error cleanly instead — nothing gets mapped.
+    #[test]
+    fn oversized_non_last_segment_is_rejected() {
+        let base = tmp("oversized");
+        // Sparse: no bytes materialize for the 1 GiB+ length.
+        let f0 = std::fs::OpenOptions::new().create(true).truncate(true).write(true).open(&base).unwrap();
+        f0.set_len(seg_bytes() + BLCKSZ).unwrap();
+        drop(f0);
+        std::fs::write(format!("{base}.1"), b"tail").unwrap();
+
+        let err = SegMap::open(&base).err().unwrap();
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+
+        std::fs::remove_file(&base).unwrap();
+        std::fs::remove_file(format!("{base}.1")).unwrap();
+    }
+
+    // SHORT interior segment (a following segment exists): mapping it verbatim
+    // would leave a PROT_NONE hole inside bytes()'s advertised range that
+    // faults on read. Must error cleanly instead.
+    #[test]
+    fn short_interior_segment_is_rejected() {
+        let base = tmp("short");
+        std::fs::write(&base, b"short seg0").unwrap();
+        std::fs::write(format!("{base}.1"), b"tail").unwrap();
+
+        let err = SegMap::open(&base).err().unwrap();
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+
+        std::fs::remove_file(&base).unwrap();
+        std::fs::remove_file(format!("{base}.1")).unwrap();
+    }
+
+    // A well-formed single-segment part (last segment <= seg_bytes()) still
+    // maps and serves its bytes: valid layouts are preserved.
+    #[test]
+    fn well_formed_single_segment_still_maps() {
+        let base = tmp("ok");
+        std::fs::write(&base, b"hello columnar").unwrap();
+        let m = SegMap::open(&base).unwrap().expect("non-empty part maps");
+        assert_eq!(&m.bytes()[..5], b"hello");
+        drop(m);
         std::fs::remove_file(&base).unwrap();
     }
 }

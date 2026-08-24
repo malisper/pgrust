@@ -464,6 +464,51 @@ fn twophase_recover_rebuilds_sxact_and_lock_then_finish_releases() {
     assert!(!still, "recovered lock should be gone after ROLLBACK PREPARED finish");
 }
 
+// A crafted / truncated 2PC statefile record must be rejected with a clean
+// ERRCODE_DATA_CORRUPTED error in release builds (C only Assert()s len), not a
+// slice-index panic. This path returns before touching any shared state, so it
+// needs no backend setup.
+#[test]
+fn twophase_recover_short_record_is_clean_error() {
+    // Far shorter than SIZEOF_TWOPHASE_PREDICATE_RECORD (24).
+    let short = [0u8; 4];
+    let err = crate::engine::predicatelock_twophase_recover(1000, 0, &short)
+        .expect_err("short record must be rejected, not panic");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+}
+
+// An unexpected record type tag (neither XACT nor LOCK) is corruption, not a
+// silent fall-through. C Assert()s this; we enforce it in release.
+#[test]
+fn twophase_recover_unknown_type_is_clean_error() {
+    become_backend();
+    let (_gate, xid) = exclusive();
+    let mut rec = [0u8; 24];
+    rec[0..4].copy_from_slice(&99u32.to_ne_bytes()); // neither 0 nor 1
+    let err = crate::engine::predicatelock_twophase_recover(xid, 0, &rec)
+        .expect_err("unknown record type must be rejected");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+}
+
+// A LOCK record whose xid was never registered by a preceding XACT record
+// (misordered / crafted statefile) leaves the xid_hash lookup empty. In release
+// builds C would dereference the resulting null SERIALIZABLEXID; we must instead
+// return a clean corruption error.
+#[test]
+fn twophase_recover_lock_without_xact_is_clean_error() {
+    become_backend();
+    let (_gate, xid) = exclusive();
+    // Build a LOCK record (type 1) for an xid with no prior XACT record.
+    let mut lrec = [0u8; 24];
+    lrec[0..4].copy_from_slice(&1u32.to_ne_bytes());
+    lrec[4..8].copy_from_slice(&TESTDB.to_ne_bytes());
+    lrec[8..12].copy_from_slice(&REL_A.to_ne_bytes());
+    lrec[12..16].copy_from_slice(&5u32.to_ne_bytes());
+    let err = crate::engine::predicatelock_twophase_recover(xid, 0, &lrec)
+        .expect_err("LOCK without preceding XACT must be rejected, not null-deref");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+}
+
 
 // SetSerializableTransactionSnapshot import arm (predicate.c:1722 ->
 // GetSerializableTransactionSnapshotInt's sourcevxid path): the sxact is

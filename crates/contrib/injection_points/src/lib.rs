@@ -20,10 +20,25 @@ fn arg_text_string(fcinfo: &Fcinfo, i: usize) -> PgResult<String> {
     Ok(String::from_utf8_lossy(v.data()).into_owned())
 }
 
+// These functions attach/detach/wake injection points process-wide — they
+// steer server behavior and must not be callable by ordinary roles. The
+// extension script also REVOKEs EXECUTE from PUBLIC, but enforce it in-function
+// too so ACL misconfiguration (or a role granted the function) cannot bypass it.
+fn require_superuser() -> PgResult<()> {
+    if !superuser_seams::superuser::call()? {
+        return Err(Box::new(
+            PgError::error("must be superuser to use injection points")
+                .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+    Ok(())
+}
+
 fn fc_injection_points_attach(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    require_superuser()?;
     let name = arg_text_string(fcinfo, 0)?;
     let action = arg_text_string(fcinfo, 1)?;
     injection_point::attach(&name, &action)?;
@@ -34,6 +49,7 @@ fn fc_injection_points_detach(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    require_superuser()?;
     let name = arg_text_string(fcinfo, 0)?;
     if !injection_point::detach(&name) {
         return Err(Box::new(PgError::error(format!(
@@ -47,6 +63,7 @@ fn fc_injection_points_wakeup(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    require_superuser()?;
     let name = arg_text_string(fcinfo, 0)?;
     injection_point::wakeup(&name)?;
     Ok(Datum::null())

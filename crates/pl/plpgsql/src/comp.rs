@@ -102,7 +102,22 @@ impl CompState {
     pub fn new_expr_id(&mut self) -> u32 {
         let id = NEXT_EXPR_ID.with(|c| {
             let v = c.get();
-            c.set(v + 1);
+            // The exec-side plan tables (EXPR_PLANS / CALL_TARGETS in exec.rs) are
+            // keyed *solely* by this id, and it also round-trips through plancache's
+            // i32 reanalyze argument (exec.rs SetCachedPlanReanalyze / arg as u32).
+            // A silently wrapping counter would reissue a live expression's id and
+            // alias its plan-cache entry (wrong plan executed -> wrong results or
+            // crash). u32 -> i32 -> u32 is bit-preserving, so the whole u32 range is
+            // usable; detect true exhaustion and hard-fail rather than wrap, so id
+            // reuse is impossible for the thread's lifetime.
+            let next = v.checked_add(1).unwrap_or_else(|| {
+                panic!(
+                    "plpgsql expression-id counter exhausted ({} ids in one backend thread); \
+                     refusing to wrap and alias plan-cache keys",
+                    u32::MAX as u64 + 1
+                )
+            });
+            c.set(next);
             v
         });
         self.expr_ids.push(id);

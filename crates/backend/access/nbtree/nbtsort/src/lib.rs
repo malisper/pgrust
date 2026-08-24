@@ -241,13 +241,13 @@ fn leafbuild<'mcx>(
                 if levels.is_empty() {
                     let st = pagestate(&mut wstate, 0);
                     levels.push(st);
-                    start_pending_copy(&mut dstate, &mut basebuf, itup);
+                    start_pending_copy(&mut dstate, &mut basebuf, itup)?;
                 } else if nbtree::bt_keep_natts_fast(index, dstate.base, itup) > keysz
                     && dstate.save_htid(itup)
                 {
                 } else {
                     sort_dedup_finish_pending(mcx, &mut wstate, &mut levels, &mut dstate)?;
-                    start_pending_copy(&mut dstate, &mut basebuf, itup);
+                    start_pending_copy(&mut dstate, &mut basebuf, itup)?;
                 }
             }
         }
@@ -317,9 +317,13 @@ fn bt_get_deduplicate_items(index: &Relation<'_>) -> bool {
 /// _bt_dedup_start_pending over an owned base copy (C's CopyIndexTuple).
 /// # Safety
 /// `itup` is a live index-tuple image.
-unsafe fn start_pending_copy(dstate: &mut BTDedupState, basebuf: &mut ItupBuf<'_>, itup: ITup) {
+unsafe fn start_pending_copy(
+    dstate: &mut BTDedupState,
+    basebuf: &mut ItupBuf<'_>,
+    itup: ITup,
+) -> PgResult<()> {
     core::ptr::copy_nonoverlapping(itup, basebuf.as_mut_ptr(), index_tuple_size(itup));
-    dstate.start_pending(basebuf.as_ptr(), InvalidOffsetNumber);
+    dstate.start_pending(basebuf.as_ptr(), InvalidOffsetNumber)
 }
 
 /// _bt_sort_dedup_finish_pending.

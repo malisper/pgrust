@@ -76,6 +76,9 @@ pub(crate) fn gist_tuple_set_valid(itup: &mut [u8]) {
     itup[4..6].copy_from_slice(&TUPLE_IS_VALID.to_ne_bytes());
 }
 
+/// Copy an owned, self-consistent index-tuple image (its declared size must
+/// already be within `itup`'s allocation). For on-page tuples, whose declared
+/// t_info size is untrusted disk data, use [`copy_page_item`] instead.
 pub(crate) fn copy_itup<'mcx>(mcx: Mcx<'mcx>, itup: ITup) -> PgResult<ItupBuf<'mcx>> {
     // SAFETY: caller holds the pin/lock keeping itup live.
     let sz = unsafe { index_tuple_size(itup) };
@@ -85,10 +88,41 @@ pub(crate) fn copy_itup<'mcx>(mcx: Mcx<'mcx>, itup: ITup) -> PgResult<ItupBuf<'m
     Ok(buf)
 }
 
+/// Copy an on-page index tuple into an owned buffer, validating its self-declared
+/// t_info size against the line pointer's `lp_len` first.
+///
+/// C's gistextractpage/gistformdownlink do `PageGetItem` + `IndexTupleSize` and
+/// trust the result, which is memory-safe only because each page is an isolated
+/// image. Here the buffer pool is one contiguous allocation, so a crafted tuple
+/// whose t_info size (up to 8191) exceeds its `lp_len` would over-read into the
+/// adjacent shared buffer. `item_raw` already bounds `lp_off + lp_len <= BLCKSZ`;
+/// requiring `size <= lp_len` therefore also guarantees `lp_off + size <= BLCKSZ`,
+/// keeping every read within the page image.
+pub(crate) fn copy_page_item<'mcx>(
+    mcx: Mcx<'mcx>,
+    page: &PageRef<'_>,
+    offnum: OffsetNumber,
+) -> PgResult<ItupBuf<'mcx>> {
+    let id = page.item_id(offnum);
+    let (itup, lp_len) = page.item_raw(id);
+    // SAFETY: item_raw validated lp_off/lp_len within the page image.
+    let sz = unsafe { index_tuple_size(itup) };
+    if sz > lp_len as usize {
+        return Err(index_corrupted(format!(
+            "index tuple size {sz} exceeds line pointer length {lp_len} at offset {offnum}"
+        )));
+    }
+    let mut buf = ItupBuf::with_size(mcx, maxalign(sz))?;
+    // SAFETY: sz <= lp_len and lp_off + lp_len <= BLCKSZ (item_raw), so the read
+    // stays within the page image; dst freshly sized to maxalign(sz).
+    unsafe { core::ptr::copy_nonoverlapping(itup, buf.as_mut_ptr(), sz) };
+    Ok(buf)
+}
+
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn index_corrupted(msg: std::string::String) -> Box<PgError> {
+pub(crate) fn index_corrupted(msg: std::string::String) -> Box<PgError> {
     Box::new(
         PgError::error(msg)
             .with_sqlstate(ERRCODE_INDEX_CORRUPTED)
@@ -177,9 +211,16 @@ pub fn gistnospace(
         size += it.len() + SIZEOF_ITEM_ID_DATA;
     }
     if todelete != InvalidOffsetNumber {
-        let itup = page_item(page, todelete);
-        // SAFETY: page item under the caller's lock.
-        deleted = unsafe { index_tuple_size(itup) } + SIZEOF_ITEM_ID_DATA;
+        // Reclaimable size comes from the line pointer's validated `lp_len`
+        // (C's PageGetItemId + ItemIdGetLength), never the tuple's self-declared
+        // t_info size. Trusting t_info would both over-read the 8-byte tuple
+        // header out of a too-short item extent (this buffer pool is one
+        // contiguous allocation, so the read escapes the page image) and, on a
+        // corrupt tuple, mis-account the freed space. `lp_len` is the exact
+        // on-page extent PageIndexTupleDelete would reclaim.
+        let id = page.item_id(todelete);
+        let (_itup, lp_len) = page.item_raw(id);
+        deleted = lp_len as usize + SIZEOF_ITEM_ID_DATA;
     }
     page.free_space() + deleted < size
 }
@@ -201,7 +242,7 @@ pub fn gistextractpage<'mcx>(
     let maxoff = page.max_offset_number();
     let mut itvec = Vec::with_capacity(maxoff as usize);
     for i in FirstOffsetNumber..=maxoff {
-        itvec.push(copy_itup(mcx, page_item(page, i))?);
+        itvec.push(copy_page_item(mcx, page, i)?);
     }
     Ok(itvec)
 }
@@ -701,6 +742,62 @@ pub fn gistPageRecyclable(
         );
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod copy_page_item_tests {
+    use super::*;
+    use ::mcx::MemoryContext;
+    use ::types_storage::bufpage::PageMut;
+
+    #[repr(align(8))]
+    struct AlignedPage([u8; BLCKSZ]);
+
+    // Build a GiST leaf page holding one index tuple whose t_info header (offset
+    // 6) declares `declared_size` bytes, added to the page with a line-pointer
+    // length equal to `lp_len` (the true on-page extent).
+    fn page_with_tuple(buf: &mut AlignedPage, declared_size: u16, lp_len: usize) -> OffsetNumber {
+        let ptr = core::ptr::NonNull::new(buf.0.as_mut_ptr()).unwrap();
+        // SAFETY: owned, 8-aligned, BLCKSZ image, exclusively borrowed.
+        let mut page = unsafe { PageMut::from_raw(ptr) };
+        gistinitpage(&mut page, 0);
+        let mut img = std::vec![0u8; lp_len];
+        // t_info low 13 bits carry the self-declared tuple size.
+        img[6..8].copy_from_slice(&declared_size.to_ne_bytes());
+        page.add_item(&img, InvalidOffsetNumber, 0).expect("add_item")
+    }
+
+    #[test]
+    fn copy_page_item_rejects_oversized_t_info() {
+        // Crafted tuple: real on-page extent (lp_len) is 40 bytes, but t_info
+        // claims ~8000 bytes — the OOB-read primitive.
+        let mut buf = AlignedPage([0u8; BLCKSZ]);
+        let off = page_with_tuple(&mut buf, 8000, 40);
+        let ptr = core::ptr::NonNull::new(buf.0.as_mut_ptr()).unwrap();
+        // SAFETY: same owned image, now shared-borrowed.
+        let page = unsafe { PageRef::from_raw(ptr) };
+
+        let cx = MemoryContext::new("copy_page_item_test");
+        let err = copy_page_item(cx.mcx(), &page, off)
+            .err()
+            .expect("oversized t_info must be rejected, not copied");
+        assert_eq!(err.sqlstate(), ERRCODE_INDEX_CORRUPTED);
+    }
+
+    #[test]
+    fn copy_page_item_accepts_consistent_tuple() {
+        // Well-formed tuple: declared size equals the line-pointer extent.
+        let mut buf = AlignedPage([0u8; BLCKSZ]);
+        let off = page_with_tuple(&mut buf, 40, 40);
+        let ptr = core::ptr::NonNull::new(buf.0.as_mut_ptr()).unwrap();
+        // SAFETY: same owned image, now shared-borrowed.
+        let page = unsafe { PageRef::from_raw(ptr) };
+
+        let cx = MemoryContext::new("copy_page_item_test");
+        let out = copy_page_item(cx.mcx(), &page, off).expect("consistent tuple copies");
+        // SAFETY: freshly copied owned image.
+        assert_eq!(unsafe { index_tuple_size(out.as_ptr()) }, 40);
+    }
 }
 
 // gistGetFakeLSN's static counters (backend-local, matching C's statics).

@@ -1578,7 +1578,18 @@ pub fn append_string_info_string_quoted(
 ) -> PgResult<()> {
     let slen = s.len() as i32;
     let (s, ellipsis) = if maxlen >= 0 && maxlen < slen {
-        (&s[..mbutils::pg_mbcliplen(s.as_bytes(), slen, maxlen) as usize], true)
+        {
+            // pg_mbcliplen clips by DB-encoding bytes (SQL_ASCII = per byte),
+            // which can land inside a UTF-8 sequence; back off to a char
+            // boundary so we never slice the &str mid-char (matches C's byte
+            // truncation for ASCII).
+            let mut clip =
+                (mbutils::pg_mbcliplen(s.as_bytes(), slen, maxlen) as usize).min(s.len());
+            while clip > 0 && !s.is_char_boundary(clip) {
+                clip -= 1;
+            }
+            (&s[..clip], true)
+        }
     } else {
         (s, false)
     };

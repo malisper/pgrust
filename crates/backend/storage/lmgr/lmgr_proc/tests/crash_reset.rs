@@ -68,7 +68,7 @@ fn reset_restores_post_init_image() {
     let proc = lmgr_proc::GetPGProcByNumber(procno);
     assert_eq!(proc.pid.load(Relaxed), 9001);
     hdr.walwriterProc.store(3, Relaxed);
-    hdr.spins_per_delay.set(7);
+    unsafe { hdr.spins_per_delay.set(7) };
     hdr.startupBufferPinWaitBufId.store(42, Relaxed);
     hdr.xids[procno as usize].value.store(77, Relaxed);
 
@@ -79,7 +79,7 @@ fn reset_restores_post_init_image() {
     assert_eq!(proc.databaseId.load(Relaxed), 0);
     assert_eq!(proc.lockGroupLeader.load(Relaxed), INVALID_PROC_NUMBER);
     assert_eq!(hdr.walwriterProc.load(Relaxed), INVALID_PROC_NUMBER);
-    assert_eq!(hdr.spins_per_delay.get(), 100);
+    assert_eq!(unsafe { hdr.spins_per_delay.get() }, 100);
     assert_eq!(hdr.startupBufferPinWaitBufId.load(Relaxed), -1);
     assert_eq!(hdr.xids[procno as usize].read(), 0);
     let (enough, nfree) = lmgr_proc::HaveNFreeProcs(MAX_CONNECTIONS);

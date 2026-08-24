@@ -437,7 +437,14 @@ fn pgaio_io_wait_for_free() -> PgResult<()> {
     let io_handle_off = {
         crate::backend_slot(my_backend_procno()).io_handle_off
     };
-    let imc = crate::io_max_concurrency() as u32;
+    // The scan bound must come from the immutable boot-time table geometry, NOT
+    // the live io_max_concurrency GUC: in this thread-per-backend server the GUC
+    // backing is a process-global that child-launch republication can restamp to
+    // its -1 sentinel (the auto-tuned value never round-trips the GUC engine), so
+    // `io_max_concurrency() as u32` can be u32::MAX and walk ~4B handle indices
+    // out of bounds. io_handles_per_backend() is the true fixed range length,
+    // matching C where io_max_concurrency is a PGC_POSTMASTER value fixed at boot.
+    let imc = crate::io_handles_per_backend() as u32;
 
     for i in 0..imc {
         let index = io_handle_off + i;

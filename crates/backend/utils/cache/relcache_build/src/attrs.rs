@@ -276,7 +276,7 @@ fn check_nn_constraint_fetch(
         if isnull {
             continue;
         }
-        let name_bytes = name_from(req(rel.descr(), tup, Anum_pg_constraint_conname)?);
+        let name_bytes = name_from(tup, req(rel.descr(), tup, Anum_pg_constraint_conname)?);
         let ccname = PgString::from_str_in(
             core::str::from_utf8(name_bytes.name_str()).expect("conname UTF-8"),
             mcx,
@@ -453,7 +453,7 @@ pub(crate) fn decode(
 ) -> PgResult<FormData_pg_attribute> {
     let a = FormData_pg_attribute {
         attrelid: req(td, tup, 1)?.as_oid(),
-        attname: name_from(req(td, tup, 2)?),
+        attname: name_from(tup, req(td, tup, 2)?),
         atttypid: req(td, tup, 3)?.as_oid(),
         attlen: req(td, tup, 4)?.as_i16(),
         attnum: req(td, tup, 5)?.as_i16(),

@@ -5,25 +5,18 @@ use datum::{Datum, NullableDatum};
 use mcx::Mcx;
 use types_error::{PgError, PgResult};
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
-use types_tuple::varatt;
 
 use crate::repr::{build_hstore, find_key, HstoreView, Pair};
 use crate::{check_key_len, check_val_len};
 
-// DatumGetTextPP payload (short or 4B header; already detoasted upstream).
-fn text_payload<'a>(d: Datum) -> &'a [u8] {
-    let p = d.as_usize() as *const u8;
-    // SAFETY: a live inline text varlena datum.
-    unsafe {
-        if varatt::varatt_is_1b(p) && !varatt::varatt_is_1b_e(p) {
-            core::slice::from_raw_parts(
-                p.add(varatt::VARHDRSZ_SHORT),
-                varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,
-            )
-        } else {
-            core::slice::from_raw_parts(p.add(4), varatt::varsize_4b(p) - 4)
-        }
-    }
+// DatumGetTextPP payload. The execexpr subscript plumbing delivers raw
+// expression results, which include 1B_E external TOAST pointers and 4B_C
+// compressed-inline images, so we must detoast before slicing (parity with C's
+// DatumGetTextPP). detoasted_image fetches external / decompresses compressed /
+// accepts short/4B-U in place and always yields a 4B-header image.
+fn text_payload<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
+    let img = crate::gist::detoasted_image(mcx, d)?;
+    Ok(&img[4..])
 }
 
 fn hstore_view<'a>(mcx: Mcx<'a>, d: Datum) -> PgResult<HstoreView<'a>> {
@@ -33,7 +26,7 @@ fn hstore_view<'a>(mcx: Mcx<'a>, d: Datum) -> PgResult<HstoreView<'a>> {
 
 pub(crate) fn fetch<'m>(mcx: Mcx<'m>, source: Datum, key: Datum) -> PgResult<NullableDatum> {
     let hs = hstore_view(mcx, source)?;
-    let key = text_payload(key);
+    let key = text_payload(mcx, key)?;
     match find_key(&hs, None, key) {
         Some(idx) if !hs.val_isnull(idx) => {
             let t = varlena::cstring_to_text(mcx, hs.val(idx))?;
@@ -49,12 +42,12 @@ pub(crate) fn assign<'m>(
     key: Datum,
     replace: NullableDatum,
 ) -> PgResult<Datum> {
-    let key = text_payload(key).to_vec();
+    let key = text_payload(mcx, key)?.to_vec();
     check_key_len(key.len())?;
     let val = if replace.isnull {
         None
     } else {
-        let v = text_payload(replace.value).to_vec();
+        let v = text_payload(mcx, replace.value)?.to_vec();
         check_val_len(v.len())?;
         Some(v)
     };

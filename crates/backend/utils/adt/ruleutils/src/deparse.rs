@@ -1490,10 +1490,18 @@ fn get_const_collation(c: &Const, ctx: &mut DeparseContext<'_>) -> PgResult<()> 
 }
 
 pub(crate) fn simple_quote_literal(buf: &mut String, val: &str) {
-    // standard_conforming_strings=on shape: only ' doubles, never E''.
+    // C simple_quote_literal (ruleutils.c): form the literal per the prevailing
+    // standard_conforming_strings; we never use E''. ' is always doubled, and \
+    // is doubled too when standard_conforming_strings is off -- i.e.
+    // SQL_STR_DOUBLE(ch, escape_backslash) with escape_backslash =
+    // !standard_conforming_strings. Without doubling backslashes under
+    // standard_conforming_strings=off, a crafted string re-parsed by such a
+    // reader (e.g. a pg_dump restore) mis-tokenizes the closing quote, allowing
+    // SQL injection.
+    let escape_backslash = !guc_tables::vars::standard_conforming_strings.read();
     buf.push('\'');
     for ch in val.chars() {
-        if ch == '\'' {
+        if ch == '\'' || (ch == '\\' && escape_backslash) {
             buf.push(ch);
         }
         buf.push(ch);

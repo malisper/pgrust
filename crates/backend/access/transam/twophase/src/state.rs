@@ -112,24 +112,30 @@ impl TwoPhaseShared {
     }
 
     pub fn prep_xact(&self, i: i32) -> i32 {
-        self.prep_xacts[i as usize].get()
+        // SAFETY: serialized by TwoPhaseStateLock
+        unsafe { self.prep_xacts[i as usize].get() }
     }
 
     /// C `TwoPhaseState->freeGXacts` pop; `None` mirrors the NULL head.
     pub fn pop_free(&self) -> Option<i32> {
-        let head = self.free_gxacts.get();
+        // SAFETY: serialized by TwoPhaseStateLock
+        let head = unsafe { self.free_gxacts.get() };
         if head == NO_GXACT {
             return None;
         }
-        self.free_gxacts.set(self.gxact(head).next.get());
+        // SAFETY: serialized by TwoPhaseStateLock
+        unsafe { self.free_gxacts.set(self.gxact(head).next.get()) };
         Some(head)
     }
 
     pub fn push_active(&self, idx: i32) {
-        let n = self.num_prep_xacts.get();
+        // SAFETY: serialized by TwoPhaseStateLock
+        let n = unsafe { self.num_prep_xacts.get() };
         debug_assert!((n as usize) < self.prep_xacts.len());
-        self.prep_xacts[n as usize].set(idx);
-        self.num_prep_xacts.set(n + 1);
+        // SAFETY: serialized by TwoPhaseStateLock
+        unsafe { self.prep_xacts[n as usize].set(idx) };
+        // SAFETY: serialized by TwoPhaseStateLock
+        unsafe { self.num_prep_xacts.set(n + 1) };
     }
 }
 
@@ -150,9 +156,11 @@ pub fn TwoPhaseShmemInit() {
     let mut free_head = NO_GXACT;
     for i in 0..max {
         let g = GXact::blank();
-        g.next.set(free_head);
+        // SAFETY: single-threaded shmem init; exclusive access
+        unsafe { g.next.set(free_head) };
         free_head = i as i32;
-        g.pgprocno.set(base + i as ProcNumber);
+        // SAFETY: single-threaded shmem init; exclusive access
+        unsafe { g.pgprocno.set(base + i as ProcNumber) };
         gxacts.push(g);
         prep.push(SyncCell::new(NO_GXACT));
     }
@@ -172,22 +180,25 @@ pub fn TwoPhaseStateResetAfterCrash() {
         return;
     };
     let mut free_head = NO_GXACT;
+    // SAFETY: crash-cycle reset; postmaster thread only, children dead
     for (i, g) in st.gxacts.iter().enumerate() {
-        g.next.set(free_head);
+        unsafe { g.next.set(free_head) };
         free_head = i as i32;
-        g.prepared_at.set(0);
-        g.prepare_start_lsn.set(0);
-        g.prepare_end_lsn.set(0);
-        g.xid.set(InvalidTransactionId);
-        g.owner.set(0);
-        g.locking_backend.set(INVALID_PROC_NUMBER);
-        g.valid.set(false);
-        g.ondisk.set(false);
-        g.inredo.set(false);
-        g.gid.set(GidBuf::empty());
+        unsafe { g.prepared_at.set(0) };
+        unsafe { g.prepare_start_lsn.set(0) };
+        unsafe { g.prepare_end_lsn.set(0) };
+        unsafe { g.xid.set(InvalidTransactionId) };
+        unsafe { g.owner.set(0) };
+        unsafe { g.locking_backend.set(INVALID_PROC_NUMBER) };
+        unsafe { g.valid.set(false) };
+        unsafe { g.ondisk.set(false) };
+        unsafe { g.inredo.set(false) };
+        unsafe { g.gid.set(GidBuf::empty()) };
     }
-    st.free_gxacts.set(free_head);
-    st.num_prep_xacts.set(0);
+    // SAFETY: crash-cycle reset; postmaster thread only, children dead
+    unsafe { st.free_gxacts.set(free_head) };
+    // SAFETY: crash-cycle reset; postmaster thread only, children dead
+    unsafe { st.num_prep_xacts.set(0) };
 }
 
 thread_local! {

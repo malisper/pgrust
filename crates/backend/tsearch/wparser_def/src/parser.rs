@@ -243,8 +243,23 @@ impl TParserPosition {
 pub struct TParser {
     str_ptr: *const u8,
     lenstr: usize,
-    wstr: Option<Vec<u32>>,
-    pgwstr: Option<Vec<u32>>,
+    // Owned wide-char buffers, populated only by the top-level tparser_init
+    // (via char2wchar / pg_mb2wchar). Sub-parsers made by tparser_copy_init
+    // leave these None and borrow the owner's buffer through {wstr,pgwstr}_ptr,
+    // matching C's TParserCopyInit, which shares the buffer by pointer instead
+    // of copying (`prs->wstr = orig->wstr + poschar`). The pointers reference
+    // the Vec's heap allocation, so they survive moving this struct; the owner
+    // (the top-level parser) outlives its transient copies — C's documented
+    // "must not close the original before the copy" invariant.
+    wstr_owned: Option<Vec<u32>>,
+    pgwstr_owned: Option<Vec<u32>>,
+    // View into the owner's buffer starting at THIS parser's origin; null when
+    // absent (was Option::None). Reads index these by the current poschar.
+    wstr_ptr: *const u32,
+    pgwstr_ptr: *const u32,
+    // Number of valid wide slots reachable from this parser's origin (for
+    // debug bounds checks; C keeps no length and relies on the terminating 0).
+    wstr_len: usize,
     usewide: bool,
     charmaxlen: i32,
     stack: Vec<TParserPosition>,
@@ -354,8 +369,11 @@ pub fn tparser_init(mcx: Mcx<'_>, str_ptr: *const u8, len: usize) -> PgResult<TP
     let mut prs = TParser {
         str_ptr,
         lenstr: len,
-        wstr: None,
-        pgwstr: None,
+        wstr_owned: None,
+        pgwstr_owned: None,
+        wstr_ptr: core::ptr::null(),
+        pgwstr_ptr: core::ptr::null(),
+        wstr_len: 0,
         usewide: false,
         charmaxlen,
         stack: Vec::new(),
@@ -379,9 +397,14 @@ pub fn tparser_init(mcx: Mcx<'_>, str_ptr: *const u8, len: usize) -> PgResult<TP
             let w = ::mbutils::pg_mb2wchar_with_len(mcx, head)?;
             let mut v: Vec<u32> = w.iter().map(|&c| c as u32).collect();
             v.resize(len + 1, 0);
-            prs.pgwstr = Some(v);
+            prs.wstr_len = v.len();
+            prs.pgwstr_owned = Some(v);
+            prs.pgwstr_ptr = prs.pgwstr_owned.as_ref().unwrap().as_ptr();
         } else {
-            prs.wstr = Some(char2wchar_default(head)?);
+            let v = char2wchar_default(head)?;
+            prs.wstr_len = v.len();
+            prs.wstr_owned = Some(v);
+            prs.wstr_ptr = prs.wstr_owned.as_ref().unwrap().as_ptr();
         }
     }
     let mut base = new_tparser_position(None);
@@ -397,8 +420,23 @@ fn tparser_copy_init(orig: &TParser) -> TParser {
         // SAFETY: offset stays inside the borrowed input buffer.
         str_ptr: unsafe { orig.str_ptr.add(posbyte) },
         lenstr: orig.lenstr - posbyte,
-        wstr: orig.wstr.as_ref().map(|w| w[poschar..].to_vec()),
-        pgwstr: orig.pgwstr.as_ref().map(|w| w[poschar..].to_vec()),
+        // Borrow the owner's wide buffer at the current offset — O(1), no copy
+        // (C: prs->wstr = orig->wstr + poschar). The .to_vec() this replaces
+        // copied the whole remaining array on every p_ishost/p_isurlpath probe,
+        // making the default-parser scan O(n^2) on host-token-dense input.
+        wstr_owned: None,
+        pgwstr_owned: None,
+        wstr_ptr: if orig.wstr_ptr.is_null() {
+            core::ptr::null()
+        } else {
+            unsafe { orig.wstr_ptr.add(poschar) }
+        },
+        pgwstr_ptr: if orig.pgwstr_ptr.is_null() {
+            core::ptr::null()
+        } else {
+            unsafe { orig.pgwstr_ptr.add(poschar) }
+        },
+        wstr_len: orig.wstr_len.saturating_sub(poschar),
         usewide: orig.usewide,
         charmaxlen: orig.charmaxlen,
         stack: Vec::new(),
@@ -455,15 +493,19 @@ impl IsWhat {
 fn p_iswhat(prs: &TParser, which: IsWhat, nonascii: i32) -> i32 {
     let st = prs.top();
     if prs.usewide {
-        if let Some(pw) = &prs.pgwstr {
-            let c = pw[st.poschar];
+        if !prs.pgwstr_ptr.is_null() {
+            debug_assert!(st.poschar < prs.wstr_len);
+            // SAFETY: pgwstr_ptr is non-null (present) and poschar is in bounds
+            // (C shape: len+1 slots incl. terminating 0); the owner outlives us.
+            let c = unsafe { *prs.pgwstr_ptr.add(st.poschar) };
             if c > 0x7f {
                 return nonascii;
             }
             return which.byte_fn(c);
         }
-        let w = prs.wstr.as_ref().expect("wstr present when usewide");
-        return which.wide_fn(w[st.poschar]);
+        debug_assert!(!prs.wstr_ptr.is_null() && st.poschar < prs.wstr_len);
+        // SAFETY: as above; wstr_ptr present when usewide && !pgwstr.
+        return which.wide_fn(unsafe { *prs.wstr_ptr.add(st.poschar) });
     }
     which.byte_fn(prs.str()[st.posbyte] as u32)
 }
@@ -565,10 +607,13 @@ fn p_isspecial(prs: &TParser) -> i32 {
         return 1;
     }
     if ::mbutils::GetDatabaseEncoding() == ::wchar::PG_UTF8 && prs.usewide {
-        let c = if let Some(pw) = &prs.pgwstr {
-            pw[st.poschar]
+        debug_assert!(st.poschar < prs.wstr_len);
+        // SAFETY: usewide implies one of pgwstr_ptr/wstr_ptr is non-null;
+        // poschar is in bounds (C len+1 shape); the owner outlives us.
+        let c = if !prs.pgwstr_ptr.is_null() {
+            unsafe { *prs.pgwstr_ptr.add(st.poschar) }
         } else {
-            prs.wstr.as_ref().expect("wstr present when usewide")[st.poschar]
+            unsafe { *prs.wstr_ptr.add(st.poschar) }
         };
         if STRANGE_LETTER.binary_search(&c).is_ok() {
             return 1;
@@ -730,6 +775,13 @@ fn run_special(prs: &mut TParser, special: Special) {
 }
 
 pub fn tparser_get(prs: &mut TParser) -> PgResult<bool> {
+    // Parity with C's TParserGet (wparser_def.c), which begins with
+    // CHECK_FOR_INTERRUPTS(). This is the sole cancellation point for the whole
+    // tsearch parse/lexize pipeline; a check per invocation (including the
+    // nested p_ishost/p_isurlpath subparser recursions, which call back into
+    // tparser_get) keeps long or crafted-input parses cancellable.
+    ::postgres_seams::check_for_interrupts::call()?;
+
     if prs.top().posbyte >= prs.lenstr {
         return Ok(false);
     }

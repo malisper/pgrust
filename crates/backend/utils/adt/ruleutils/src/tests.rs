@@ -80,6 +80,9 @@ fn type_shape(typid: Oid) -> Option<PgTypeShape> {
 static SEAMS: Once = Once::new();
 
 fn install() {
+    // simple_quote_literal (reached via get_const_expr for string constants)
+    // reads the standard_conforming_strings GUC; make it available.
+    install_scs();
     SEAMS.call_once(|| {
         use syscache_seams as s;
         s::lookup_pg_type_shape::set(|typid| Ok(type_shape(typid)));
@@ -247,7 +250,7 @@ fn booltest_nulltest_deparse_matches_c() {
 fn expr_with_var_and_no_relation_errors() {
     install();
     let ctx = MemoryContext::new("ruleutils test");
-    let err = pg_get_expr_worker(ctx.mcx(), BOOL_NULLTEST, 0, PRETTYFLAG_INDENT).unwrap_err();
+    let err = pg_get_expr_worker(ctx.mcx(), BOOL_NULLTEST, 0, PRETTYFLAG_INDENT).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
 }
 
@@ -265,11 +268,47 @@ fn quote_qualified() {
     assert_eq!(quote_qualified_identifier(None, "select"), "\"select\"");
 }
 
+// simple_quote_literal reads the standard_conforming_strings GUC; install a
+// test-controllable accessor once, backed by a static the tests can flip.
+static SCS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+fn install_scs() {
+    use core::sync::atomic::Ordering;
+    guc_tables::vars::standard_conforming_strings.install_if_absent(guc_tables::GucVarAccessors {
+        get: || SCS.load(Ordering::Relaxed),
+        set: |v| SCS.store(v, Ordering::Relaxed),
+    });
+}
+
 #[test]
 fn simple_quote_literal_doubles_quotes() {
+    install_scs();
     let mut buf = String::new();
     deparse::simple_quote_literal(&mut buf, "it's");
     assert_eq!(buf, "'it''s'");
+}
+
+#[test]
+fn simple_quote_literal_backslash_follows_standard_conforming_strings() {
+    install_scs();
+    let saved = guc_tables::vars::standard_conforming_strings.read();
+
+    // standard_conforming_strings=on (the common case): backslashes are left
+    // alone and no E'' prefix is emitted -- output must be unchanged.
+    guc_tables::vars::standard_conforming_strings.write(true);
+    let mut on = String::new();
+    deparse::simple_quote_literal(&mut on, "a\\b'c");
+    assert_eq!(on, "'a\\b''c'");
+
+    // standard_conforming_strings=off: backslashes are doubled so the literal is
+    // unambiguous to a reader that treats backslashes as escapes, closing the
+    // SQL-injection hole. C never uses E'' here either.
+    guc_tables::vars::standard_conforming_strings.write(false);
+    let mut off = String::new();
+    deparse::simple_quote_literal(&mut off, "a\\b'c");
+    assert_eq!(off, "'a\\\\b''c'");
+
+    guc_tables::vars::standard_conforming_strings.write(saved);
 }
 
 // ev_action fixtures + expected strings captured from live C PG 18.3
@@ -340,7 +379,7 @@ fn unsupported_rule_event_type_is_ereport_0a000() {
     for ev in [b'1', b'2', b'3', b'4'] {
         assert!(super::ruledef::rule_event_keyword("r", ev).is_ok());
     }
-    let err = super::ruledef::rule_event_keyword("r", b'9').unwrap_err();
+    let err = super::ruledef::rule_event_keyword("r", b'9').err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
     assert_eq!(err.message(), "rule \"r\" has unsupported event type 57");
 }
@@ -348,7 +387,7 @@ fn unsupported_rule_event_type_is_ereport_0a000() {
 #[test]
 fn deparse_too_many_arguments_is_ereport_54023() {
     super::deparse::check_deparse_nargs(FUNC_MAX_ARGS).unwrap();
-    let err = super::deparse::check_deparse_nargs(FUNC_MAX_ARGS + 1).unwrap_err();
+    let err = super::deparse::check_deparse_nargs(FUNC_MAX_ARGS + 1).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_TOO_MANY_ARGUMENTS);
     assert_eq!(err.message(), "too many arguments");
 }

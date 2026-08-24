@@ -68,6 +68,67 @@ fn is_polymorphic(t: Oid) -> bool {
 struct FuncCacheEntry {
     func: Rc<PlFunction>,
     use_count: Rc<core::cell::Cell<u32>>,
+    // The search_path/role resolution environment that shaped this
+    // compilation's name resolution, captured as C plancache.c tracks a
+    // cached plan (GetSearchPathMatcher / SearchPathMatchesCurrentEnvironment).
+    //
+    // funccache.c keeps a compiled function "for the life of the backend" and
+    // revalidates only on the pg_proc tuple's xmin/tid: in C one backend serves
+    // exactly one session, so a stale resolution context can never be inherited
+    // by a different session/user. This port's FUNC_CACHE is a thread_local on
+    // parallel-worker pool threads that are reused across sessions and users,
+    // so xmin/tid alone would let a PlFunction compiled under an attacker's
+    // search_path be reused for a victim (search_path poisoning / wrong-object
+    // resolution). Revalidating the matcher on every lookup restores C's
+    // per-backend isolation: a differing resolution environment forces recompile
+    // exactly as it would after a fresh backend start. The Rc<..Cell..> lets the
+    // fast-path generation re-stamp be shared with every clone of the entry.
+    search_path: Rc<PathFingerprint>,
+}
+
+// Owned copy of a namespace::SearchPathMatcher (its PgVec is mcx-bound and
+// cannot outlive a call, but the cache entry does): the schema list plus the
+// implicit pg_catalog/pg_temp flags, and the last generation known to match.
+struct PathFingerprint {
+    schemas: Vec<Oid>,
+    add_catalog: bool,
+    add_temp: bool,
+    generation: core::cell::Cell<u64>,
+}
+
+// Capture the current search_path/role resolution environment for a
+// freshly-compiled function (plancache.c GetSearchPathMatcher). The matcher's
+// schemas live in `cx`, so copy them into the owned fingerprint before `cx`
+// drops.
+fn capture_search_path() -> PgResult<Rc<PathFingerprint>> {
+    let cx = mcx::MemoryContext::new("plpgsql search_path fingerprint");
+    let matcher = catalog_namespace::GetSearchPathMatcher(cx.mcx())?;
+    Ok(Rc::new(PathFingerprint {
+        schemas: matcher.schemas.iter().copied().collect(),
+        add_catalog: matcher.addCatalog,
+        add_temp: matcher.addTemp,
+        generation: core::cell::Cell::new(matcher.generation),
+    }))
+}
+
+// plancache.c SearchPathMatchesCurrentEnvironment against a cached entry's
+// fingerprint. Rebuilds an mcx-bound matcher from the owned copy, compares, and
+// re-stamps the generation on a match so the next lookup takes the fast path.
+fn search_path_still_matches(fp: &PathFingerprint) -> PgResult<bool> {
+    let cx = mcx::MemoryContext::new("plpgsql search_path recheck");
+    let mut schemas = mcx::vec_with_capacity_in(cx.mcx(), fp.schemas.len())?;
+    schemas.extend_from_slice(&fp.schemas);
+    let mut matcher = catalog_namespace::SearchPathMatcher {
+        schemas,
+        addCatalog: fp.add_catalog,
+        addTemp: fp.add_temp,
+        generation: fp.generation.get(),
+    };
+    let matches = catalog_namespace::SearchPathMatchesCurrentEnvironment(&mut matcher)?;
+    if matches {
+        fp.generation.set(matcher.generation);
+    }
+    Ok(matches)
 }
 
 std::thread_local! {
@@ -126,7 +187,14 @@ fn plpgsql_compile(
     let key = (fn_oid, fn_collation, is_trigger, trig_oid, is_event_trigger, key_argtypes);
     let cached = FUNC_CACHE.with(|c| c.borrow().get(&key).cloned());
     if let Some(entry) = cached {
-        if entry.func.fn_xmin == cur_xmin && entry.func.fn_tid == cur_tid {
+        // xmin/tid (funccache.c) covers a redefined pg_proc row; the
+        // search_path recheck additionally covers a resolution-environment
+        // change — a new session/user bound onto this reused pool thread, or a
+        // SET search_path — that C never sees because its cache is per-backend.
+        if entry.func.fn_xmin == cur_xmin
+            && entry.func.fn_tid == cur_tid
+            && search_path_still_matches(&entry.search_path)?
+        {
             return Ok(entry);
         }
         FUNC_CACHE.with(|c| {
@@ -150,7 +218,11 @@ fn plpgsql_compile(
         is_event_trigger,
         call_expr,
     )?);
-    let entry = FuncCacheEntry { func, use_count: Rc::new(core::cell::Cell::new(0)) };
+    let entry = FuncCacheEntry {
+        func,
+        use_count: Rc::new(core::cell::Cell::new(0)),
+        search_path: capture_search_path()?,
+    };
     // Validator compiles are cached too (funccache.c cached_function_compile
     // has no validator carve-out): the CREATE-time compile is the one the
     // first call reuses, so compile-time messages fire once, at CREATE.

@@ -22,8 +22,8 @@ pub struct XmlExprState {
     pub xexpr: NonNull<XmlExpr<'static>>,
     pub named_slots: NonNull<NullableDatum>,
     pub arg_slots: NonNull<NullableDatum>,
-    pub n_named: u16,
-    pub n_args: u16,
+    pub n_named: usize,
+    pub n_args: usize,
     pub resmcx: ResMcx,
 }
 
@@ -65,8 +65,8 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
     let x: &XmlExpr<'_> = unsafe { st.xexpr.as_ref() };
     // SAFETY: compile-allocated slot arrays sized to the arg lists.
     let named =
-        unsafe { core::slice::from_raw_parts(st.named_slots.as_ptr(), st.n_named as usize) };
-    let args = unsafe { core::slice::from_raw_parts(st.arg_slots.as_ptr(), st.n_args as usize) };
+        unsafe { core::slice::from_raw_parts(st.named_slots.as_ptr(), st.n_named) };
+    let args = unsafe { core::slice::from_raw_parts(st.arg_slots.as_ptr(), st.n_args) };
     let mcx = res_mcx(&st.resmcx);
 
     match x.op {

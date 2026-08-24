@@ -783,8 +783,17 @@ fn populate_record<'c>(
         }
         let col = record.columns[i].as_mut().expect("column cache just filled");
         let dfl_datum = if nulls[i] { None } else { Some(values[i]) };
-        // SAFETY: attnames are valid server-encoding text.
-        let colname_str = unsafe { core::str::from_utf8_unchecked(colname) };
+        // The server encoding may permit non-UTF-8 identifiers, so the
+        // attname bytes cannot be assumed valid UTF-8: validate and raise a
+        // catchable error rather than forge an unsound &str.
+        let colname_str = core::str::from_utf8(colname).map_err(|_| {
+            Box::new(
+                PgError::error(alloc::format!(
+                    "invalid byte sequence in record attribute name"
+                ))
+                .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
+            )
+        })?;
         values[i] = populate_record_field(
             col,
             Some(colname_str),

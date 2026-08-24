@@ -245,9 +245,11 @@ pub fn logicalrep_rel_open<'mcx>(
             if attr.attisdropped {
                 continue;
             }
-            let attname = std::str::from_utf8(attr.attname.name_str())
-                .expect("attname utf8")
-                .to_string();
+            // C logicalrep_rel_open treats NameStr(attname) as opaque bytes
+            // (strcmp), never requiring UTF-8; a SQL_ASCII subscriber catalog
+            // can hold non-UTF-8 attnames, so decode lossily instead of aborting
+            // the apply worker (which would crash-loop the whole instance).
+            let attname = String::from_utf8_lossy(attr.attname.name_str()).into_owned();
             let m = rel_att_by_name(&remoterel, &attname);
             entry.attrmap[i] = m;
             if m >= 0 {

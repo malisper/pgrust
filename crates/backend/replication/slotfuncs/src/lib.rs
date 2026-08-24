@@ -51,9 +51,9 @@ pub(crate) fn create_physical_replication_slot(
             slot::ReplicationSlotReserveWal()?;
         } else {
             let s = slot::MyReplicationSlot().unwrap();
-            let mut d = s.data.get();
+            let mut d = unsafe { s.data.get() };
             d.restart_lsn = restart_lsn;
-            s.data.set(d);
+            unsafe { s.data.set(d) };
         }
         slot::ReplicationSlotMarkDirty();
         slot::ReplicationSlotSave()?;
@@ -226,15 +226,15 @@ pub(crate) fn PhysicalWakeupLogicalWalSnd() {
 // pg_physical_replication_slot_advance (slotfuncs.c).
 pub(crate) fn pg_physical_replication_slot_advance(moveto: XLogRecPtr) -> PgResult<XLogRecPtr> {
     let slot = slot::MyReplicationSlot().expect("pg_physical_replication_slot_advance: no slot");
-    let startlsn = slot.data.get().restart_lsn;
+    let startlsn = unsafe { slot.data.get() }.restart_lsn;
     let mut retlsn = startlsn;
     debug_assert!(moveto != InvalidXLogRecPtr);
 
     if startlsn < moveto {
         slot.with_mutex(|| {
-            let mut d = slot.data.get();
+            let mut d = unsafe { slot.data.get() };
             d.restart_lsn = moveto;
-            slot.data.set(d);
+            unsafe { slot.data.set(d) };
         });
         retlsn = moveto;
 
@@ -267,7 +267,7 @@ pub(crate) fn LogicalSlotAdvanceAndCheckSnapState(
 
         slot::WaitForStandbyConfirmation(moveto)?;
 
-        ctx.reader.XLogBeginRead(ctx.slot.data.get().restart_lsn);
+        ctx.reader.XLogBeginRead(unsafe { ctx.slot.data.get() }.restart_lsn);
         inval::local::InvalidateSystemCaches()?;
 
         let mut routine = LocalPageRead { wait_for_wal: true };
@@ -308,10 +308,10 @@ pub(crate) fn LogicalSlotAdvanceAndCheckSnapState(
 
     match attempt {
         Ok(ctx) => {
-            let retlsn = slot::MyReplicationSlot()
+            let retlsn = unsafe { slot::MyReplicationSlot()
                 .expect("LogicalSlotAdvanceAndCheckSnapState: no slot")
                 .data
-                .get()
+                .get() }
                 .confirmed_flush;
             ctx.free()?;
             inval::local::InvalidateSystemCaches()?;
@@ -350,7 +350,7 @@ pub(crate) fn copy_replication_slot(
     )?;
     let mut found: Option<(&'static ReplicationSlot, SlotSnapshot)> = None;
     for s in slot::ReplicationSlotCtl() {
-        if s.in_use.get() && name_matches(s, src_name) {
+        if unsafe { s.in_use.get() } && name_matches(s, src_name) {
             let snap = s.with_mutex(|| snapshot(s));
             found = Some((s, snap));
             break;
@@ -442,14 +442,14 @@ pub(crate) fn copy_replication_slot(
 
     let dst = slot::MyReplicationSlot().expect("copy_replication_slot: destination not acquired");
     dst.with_mutex(|| {
-        dst.effective_xmin.set(second.effective_xmin);
-        dst.effective_catalog_xmin.set(second.effective_catalog_xmin);
-        let mut d = dst.data.get();
+        unsafe { dst.effective_xmin.set(second.effective_xmin) };
+        unsafe { dst.effective_catalog_xmin.set(second.effective_catalog_xmin) };
+        let mut d = unsafe { dst.data.get() };
         d.xmin = second.xmin;
         d.catalog_xmin = second.catalog_xmin;
         d.restart_lsn = second.restart_lsn;
         d.confirmed_flush = second.confirmed_flush;
-        dst.data.set(d);
+        unsafe { dst.data.set(d) };
     });
 
     slot::ReplicationSlotMarkDirty();
@@ -486,7 +486,7 @@ struct SlotSnapshot {
 }
 
 fn snapshot(s: &ReplicationSlot) -> SlotSnapshot {
-    let d = s.data.get();
+    let d = unsafe { s.data.get() };
     SlotSnapshot {
         name: String::from_utf8_lossy(d.name.name_str()).into_owned(),
         plugin: String::from_utf8_lossy(d.plugin.name_str()).into_owned(),
@@ -497,13 +497,13 @@ fn snapshot(s: &ReplicationSlot) -> SlotSnapshot {
         invalidated: d.invalidated,
         xmin: d.xmin,
         catalog_xmin: d.catalog_xmin,
-        effective_xmin: s.effective_xmin.get(),
-        effective_catalog_xmin: s.effective_catalog_xmin.get(),
+        effective_xmin: unsafe { s.effective_xmin.get() },
+        effective_catalog_xmin: unsafe { s.effective_catalog_xmin.get() },
     }
 }
 
 fn name_matches(s: &ReplicationSlot, name: &str) -> bool {
-    s.data.get().name.name_str() == name.as_bytes()
+    unsafe { s.data.get() }.name.name_str() == name.as_bytes()
 }
 
 // Seam glue: slotsync's update_local_synced_slot advances slots through

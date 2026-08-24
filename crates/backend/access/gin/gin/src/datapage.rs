@@ -5,7 +5,7 @@ use ::bufmgr_seams as bm;
 use ::gin_vocab::*;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber, BLCKSZ};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{PageRef, PageTemp};
 use ::types_tuple::itemptr::{FirstOffsetNumber, InvalidOffsetNumber, ItemPointerData};
@@ -14,7 +14,7 @@ use ::xloginsert_seams::{XLogRegBuf, REGBUF_WILL_INIT};
 use crate::btree::{Frame, GinBt, GinPlace, GinStack};
 use crate::postinglist::{
     ginCompressPostingList, ginMergeItemPointers, ginPostingListDecodeAllSegments, seg_first,
-    seg_size,
+    seg_size, validate_posting_list_segments,
 };
 use crate::util::{gin_init_page_bytes, GinNewBuffer};
 use crate::{
@@ -50,12 +50,37 @@ pub(crate) fn set_data_page_right_bound(bytes: &mut [u8], bound: &ItemPointerDat
 #[inline]
 pub(crate) fn data_leaf_posting_list_size(bytes: &[u8]) -> usize {
     let pd_lower = u16::from_ne_bytes([bytes[12], bytes[13]]) as usize;
-    pd_lower - GinDataPageDataOffset
+    // pd_lower comes from disk; a crafted value below GinDataPageDataOffset would
+    // wrap this usize subtraction. saturating_sub keeps size==0 (empty) callers
+    // safe; the read paths use data_leaf_posting_list_checked for a typed error.
+    pd_lower.saturating_sub(GinDataPageDataOffset)
 }
 
+#[cold]
+#[inline(never)]
+fn corrupt_pd_lower(pd_lower: usize) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "corrupted GIN posting-tree leaf: pd_lower {pd_lower} out of range \
+             [{GinDataPageDataOffset}, {}]",
+            GinDataPageDataOffset + GinDataPageMaxDataSize
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+/// Bounds-checked GinDataLeafPageGetItems posting-list accessor. Validates the
+/// on-disk pd_lower and the segment chain before any raw segment walk; returns
+/// a typed data-corruption error rather than reading past the page image.
 #[inline]
-pub(crate) fn data_leaf_posting_list(bytes: &[u8]) -> &[u8] {
-    &bytes[GinDataPageDataOffset..GinDataPageDataOffset + data_leaf_posting_list_size(bytes)]
+pub(crate) fn data_leaf_posting_list_checked(bytes: &[u8]) -> PgResult<&[u8]> {
+    let pd_lower = u16::from_ne_bytes([bytes[12], bytes[13]]) as usize;
+    if pd_lower < GinDataPageDataOffset || pd_lower > GinDataPageDataOffset + GinDataPageMaxDataSize {
+        return Err(corrupt_pd_lower(pd_lower));
+    }
+    let all = &bytes[GinDataPageDataOffset..pd_lower];
+    validate_posting_list_segments(all)?;
+    Ok(all)
 }
 
 /// GinDataPageSetDataSize.
@@ -86,10 +111,47 @@ fn write_posting_item(bytes: &mut [u8], off: OffsetNumber, item: &PostingItem) {
     }
 }
 
-/// GinNonLeafDataPageGetFreeSpace.
+/// Maximum posting items a non-leaf (internal) posting-tree data page can hold.
+/// maxoff is read straight from the on-disk page opaque and drives raw-pointer
+/// PostingItem access (posting_item_at/write_posting_item); a legitimate page
+/// never declares more than this many items (GinDataPageMaxDataSize is the byte
+/// budget for the item array, each PostingItem is 10 bytes).
+pub(crate) const GinMaxNonLeafDataItems: usize =
+    GinDataPageMaxDataSize / core::mem::size_of::<PostingItem>();
+
+#[cold]
+#[inline(never)]
+fn corrupt_maxoff(maxoff: OffsetNumber) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "corrupted GIN posting-tree internal page: maxoff {maxoff} exceeds \
+             maximum {GinMaxNonLeafDataItems} posting items per page"
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+/// Validated GinPageGetOpaque(page)->maxoff for a non-leaf data page. maxoff is
+/// attacker-controlled on a crafted/corrupt page and is used as a raw-pointer
+/// bound for PostingItem reads and writes; reject any value that would push
+/// posting_item_at/write_posting_item past the BLCKSZ page image with a typed
+/// data-corruption error instead of accessing out of bounds.
+#[inline]
+pub(crate) fn nonleaf_maxoff_checked(bytes: &[u8]) -> PgResult<OffsetNumber> {
+    let maxoff = opaque_of(bytes).maxoff;
+    if maxoff as usize > GinMaxNonLeafDataItems {
+        return Err(corrupt_maxoff(maxoff));
+    }
+    Ok(maxoff)
+}
+
+/// GinNonLeafDataPageGetFreeSpace. maxoff is disk-derived; use saturating
+/// arithmetic so an oversized (corrupt) maxoff yields zero free space, forcing
+/// the split/error path instead of wrapping in release and passing the "fits"
+/// guard on a corrupt page.
 #[inline]
 fn nonleaf_free_space(bytes: &[u8]) -> usize {
-    GinDataPageMaxDataSize - opaque_of(bytes).maxoff as usize * 10
+    GinDataPageMaxDataSize.saturating_sub(opaque_of(bytes).maxoff as usize * 10)
 }
 
 /// GinDataPageAddPostingItem over a raw image.
@@ -148,7 +210,7 @@ pub fn gin_data_leaf_page_get_items(
         // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
         panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
     }
-    let all = data_leaf_posting_list(bytes);
+    let all = data_leaf_posting_list_checked(bytes)?;
     let mut off = 0usize;
     if gin_item_pointer_offset(advance_past) != 0 || gin_item_pointer_block(advance_past) != 0 {
         // Skip to the segment containing advancePast+1.
@@ -180,7 +242,11 @@ pub(crate) fn gin_data_leaf_page_get_items_to_tbm(
         // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
         panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
     }
-    crate::postinglist::ginPostingListDecodeAllSegmentsToTbm(mcx, data_leaf_posting_list(bytes), tbm)
+    crate::postinglist::ginPostingListDecodeAllSegmentsToTbm(
+        mcx,
+        data_leaf_posting_list_checked(bytes)?,
+        tbm,
+    )
 }
 
 
@@ -258,7 +324,7 @@ fn items_slice<'x>(si: &SegItems, new_items: &'x [ItemPointerData]) -> &'x [Item
 }
 
 /// disassembleLeaf.
-fn disassemble_leaf(bytes: &[u8]) -> DisassembledLeaf {
+fn disassemble_leaf(bytes: &[u8]) -> PgResult<DisassembledLeaf> {
     if !GinPageIsCompressed(&opaque_of(bytes)) {
         // INVARIANT: every pgrust-created posting-tree leaf is stamped GIN_COMPRESSED
         // (datapage.rs:1171 createPostingTree, datapage.rs:658-659 leaf split,
@@ -267,7 +333,10 @@ fn disassemble_leaf(bytes: &[u8]) -> DisassembledLeaf {
         // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
         panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
     }
-    let all = data_leaf_posting_list(bytes);
+    // Bounds-check pd_lower and the whole segment chain before recording any
+    // (ptr, seg_size) extent: a crafted segment size would otherwise drive an
+    // out-of-page from_raw_parts read in SegBytes::as_slice.
+    let all = data_leaf_posting_list_checked(bytes)?;
     let mut segs = Vec::new();
     let mut off = 0usize;
     while off < all.len() {
@@ -281,13 +350,13 @@ fn disassemble_leaf(bytes: &[u8]) -> DisassembledLeaf {
         });
         off += n;
     }
-    DisassembledLeaf {
+    Ok(DisassembledLeaf {
         segs,
         lastleft: 0,
         lsize: 0,
         rsize: 0,
         walinfo: Vec::new(),
-    }
+    })
 }
 
 fn decode_seg<'s>(mcx: Mcx<'s>, seg: &SegBytes) -> PgResult<SegItems> {
@@ -767,7 +836,7 @@ impl<'a, 'r, 's> DataBtree<'a, 'r, 's> {
             maxitems = i;
         }
 
-        let mut leaf = disassemble_leaf(bytes);
+        let mut leaf = disassemble_leaf(bytes)?;
 
         // Appending to the end of the page?
         let (append, max_old_item) = if !leaf.segs.is_empty() {
@@ -898,19 +967,21 @@ impl<'r> GinBt<'r> for DataBtree<'_, 'r, '_> {
     }
 
     /// dataLocateItem.
-    fn find_child_page(&self, page: &PageRef<'_>, frame: &mut Frame) -> BlockNumber {
+    fn find_child_page(&self, page: &PageRef<'_>, frame: &mut Frame) -> PgResult<BlockNumber> {
         let bytes = page_bytes(page);
         let opaque = opaque_of(bytes);
         debug_assert!(!GinPageIsLeaf(&opaque) && crate::GinPageIsData(&opaque));
+        // maxoff bounds every posting_item_at below; reject a crafted value
+        // before any raw access rather than reading past the page image.
+        let maxoff = nonleaf_maxoff_checked(bytes)?;
 
         if self.full_scan {
             frame.off = FirstOffsetNumber;
-            frame.predictNumber *= opaque.maxoff as u32;
+            frame.predictNumber *= maxoff as u32;
             return self.get_leftmost_child(page);
         }
 
         let mut low = FirstOffsetNumber;
-        let maxoff = opaque.maxoff;
         let mut high = maxoff;
         debug_assert!(high >= low);
         high += 1;
@@ -925,7 +996,7 @@ impl<'r> GinBt<'r> for DataBtree<'_, 'r, '_> {
             };
             if result == 0 {
                 frame.off = mid;
-                return PostingItemGetBlockNumber(&pitem);
+                return Ok(PostingItemGetBlockNumber(&pitem));
             } else if result > 0 {
                 low = mid + 1;
             } else {
@@ -934,14 +1005,15 @@ impl<'r> GinBt<'r> for DataBtree<'_, 'r, '_> {
         }
         debug_assert!(high >= FirstOffsetNumber && high <= maxoff);
         frame.off = high;
-        PostingItemGetBlockNumber(&posting_item_at(bytes, high))
+        Ok(PostingItemGetBlockNumber(&posting_item_at(bytes, high)))
     }
 
     /// dataGetLeftMostPage.
-    fn get_leftmost_child(&self, page: &PageRef<'_>) -> BlockNumber {
+    fn get_leftmost_child(&self, page: &PageRef<'_>) -> PgResult<BlockNumber> {
         let bytes = page_bytes(page);
-        debug_assert!(opaque_of(bytes).maxoff >= FirstOffsetNumber);
-        PostingItemGetBlockNumber(&posting_item_at(bytes, FirstOffsetNumber))
+        let maxoff = nonleaf_maxoff_checked(bytes)?;
+        debug_assert!(maxoff >= FirstOffsetNumber);
+        Ok(PostingItemGetBlockNumber(&posting_item_at(bytes, FirstOffsetNumber)))
     }
 
     /// dataIsMoveRight.
@@ -963,26 +1035,26 @@ impl<'r> GinBt<'r> for DataBtree<'_, 'r, '_> {
         page: &PageRef<'_>,
         blkno: BlockNumber,
         stored_off: OffsetNumber,
-    ) -> OffsetNumber {
+    ) -> PgResult<OffsetNumber> {
         let bytes = page_bytes(page);
-        let mut maxoff = opaque_of(bytes).maxoff;
+        let mut maxoff = nonleaf_maxoff_checked(bytes)?;
         if stored_off >= FirstOffsetNumber && stored_off <= maxoff {
             if PostingItemGetBlockNumber(&posting_item_at(bytes, stored_off)) == blkno {
-                return stored_off;
+                return Ok(stored_off);
             }
             for i in stored_off + 1..=maxoff {
                 if PostingItemGetBlockNumber(&posting_item_at(bytes, i)) == blkno {
-                    return i;
+                    return Ok(i);
                 }
             }
             maxoff = stored_off - 1;
         }
         for i in FirstOffsetNumber..=maxoff {
             if PostingItemGetBlockNumber(&posting_item_at(bytes, i)) == blkno {
-                return i;
+                return Ok(i);
             }
         }
-        InvalidOffsetNumber
+        Ok(InvalidOffsetNumber)
     }
 
     /// dataBeginPlaceToPage.
@@ -1003,6 +1075,11 @@ impl<'r> GinBt<'r> for DataBtree<'_, 'r, '_> {
             // SAFETY: pin + exclusive lock held.
             let fits = {
                 let bytes = page_bytes(&unsafe { page_ref(buf) });
+                // Reject a corrupt maxoff before the free-space decision: a
+                // split (the !fits branch) would otherwise walk posting items
+                // up to the crafted maxoff in split_internal and read/write
+                // out of bounds.
+                nonleaf_maxoff_checked(bytes)?;
                 nonleaf_free_space(bytes) >= 10
             };
             if fits {
@@ -1294,7 +1371,7 @@ pub(crate) fn ginVacuumPostingTreeLeaf<'s>(
     let rel = gvs.rel;
     // SAFETY: pin + exclusive lock held by the caller.
     let bytes = page_bytes(&unsafe { page_ref(buffer) });
-    let mut leaf = disassemble_leaf(bytes);
+    let mut leaf = disassemble_leaf(bytes)?;
 
     let mut removed_something = false;
     for seg in leaf.segs.iter_mut() {
@@ -1375,4 +1452,51 @@ pub(crate) fn ginVacuumPostingTreeLeaf<'s>(
 /// GinDataLeafPageIsEmpty (compressed leaves only; pre-9.4 loud upstream).
 pub(crate) fn gin_data_leaf_page_is_empty(bytes: &[u8]) -> bool {
     data_leaf_posting_list_size(bytes) == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::gin_vocab::GIN_DATA;
+
+    fn make_internal_page(maxoff: OffsetNumber) -> Vec<u8> {
+        let mut bytes = vec![0u8; BLCKSZ];
+        gin_init_page_bytes(&mut bytes, GIN_DATA);
+        let mut opaque = opaque_of(&bytes);
+        opaque.maxoff = maxoff;
+        write_opaque_to(&mut bytes, &opaque);
+        bytes
+    }
+
+    #[test]
+    fn nonleaf_maxoff_checked_accepts_legit_and_rejects_crafted() {
+        // The largest legitimate maxoff keeps every posting_item_at within the
+        // BLCKSZ image.
+        let ok = make_internal_page(GinMaxNonLeafDataItems as OffsetNumber);
+        assert_eq!(
+            nonleaf_maxoff_checked(&ok).unwrap(),
+            GinMaxNonLeafDataItems as OffsetNumber
+        );
+
+        // One past the maximum, and a maximally-crafted maxoff, must yield a
+        // typed data-corruption error rather than an out-of-bounds access.
+        for crafted in [GinMaxNonLeafDataItems as OffsetNumber + 1, 816, u16::MAX] {
+            let page = make_internal_page(crafted);
+            let err = nonleaf_maxoff_checked(&page).unwrap_err();
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+    }
+
+    #[test]
+    fn nonleaf_free_space_saturates_on_crafted_maxoff() {
+        // A crafted maxoff far beyond the legitimate maximum must not wrap the
+        // free-space computation (which would make the insert "fits" guard pass
+        // on a corrupt page); it saturates to zero, forcing the split/error path.
+        let page = make_internal_page(u16::MAX);
+        assert_eq!(nonleaf_free_space(&page), 0);
+
+        // A legitimately empty page still reports full free space.
+        let empty = make_internal_page(0);
+        assert_eq!(nonleaf_free_space(&empty), GinDataPageMaxDataSize);
+    }
 }

@@ -552,8 +552,15 @@ fn bt_check_level_from_leftmost<'mcx>(
         if state.readonly && !P_RIGHTMOST(&opaque) {
             let itemid =
                 page_get_item_id_careful(state, state.targetblock, &state.target_page(), P_HIKEY)?;
-            let itup = page_item(&state.target_page(), itemid);
-            // SAFETY: itup is the live high-key tuple on the alive target copy.
+            // Validate the high key's self-declared size against lp_len before copying (OOB-safe).
+            let itup = page_item_size_careful(
+                state,
+                state.targetblock,
+                &state.target_page(),
+                itemid,
+                P_HIKEY,
+            )?;
+            // SAFETY: itup is the live high-key tuple on the alive target copy, validated against lp_len.
             state.lowkey = Some(unsafe { OwnedTuple::from_itup(itup) });
         }
 
@@ -906,7 +913,14 @@ fn bt_target_page_check(state: &mut BtreeCheckState<'_>) -> PgResult<()> {
                             &rightpage2.page(),
                             rightfirstoffset,
                         )?;
-                        let ritup = page_item(&rightpage2.page(), ritemid);
+                        // Validate the right sibling's first tuple size against lp_len before use (OOB-safe).
+                        let ritup = page_item_size_careful(
+                            state,
+                            rightblock_number,
+                            &rightpage2.page(),
+                            ritemid,
+                            rightfirstoffset,
+                        )?;
                         bt_entry_unique_check(state, ritup, rightblock_number, rightfirstoffset, &mut l_vis)?;
                     }
                 }
@@ -970,7 +984,9 @@ fn bt_right_page_check_scankey<'mcx>(
     };
 
     let ritemid = page_get_item_id_careful(state, targetnext, &rightpage.page(), rightitem_offset)?;
-    let firstitup = page_item(&rightpage.page(), ritemid);
+    // Validate the right sibling's first tuple size against lp_len before deforming (OOB-safe).
+    let firstitup =
+        page_item_size_careful(state, targetnext, &rightpage.page(), ritemid, rightitem_offset)?;
     let skey = bt_mkscankey_pivotsearch(&state.rel, firstitup)?;
     Ok(Some((skey, rightpage)))
 }
@@ -1243,7 +1259,8 @@ fn bt_child_highkey_check(
 
         if !rightsplit && !P_RIGHTMOST(&opaque) && !P_ISHALFDEAD(&opaque) {
             let hitemid = page_get_item_id_careful(state, blkno, &page, P_HIKEY)?;
-            let highkey = page_item(&page, hitemid);
+            // Validate the child high key's size against lp_len before comparison (OOB-safe).
+            let highkey = page_item_size_careful(state, blkno, &page, hitemid, P_HIKEY)?;
 
             let pivotkey_offset = if blkno == downlink {
                 target_downlinkoffnum + 1
@@ -1280,7 +1297,14 @@ fn bt_child_highkey_check(
                     &state.target_page(),
                     pivotkey_offset,
                 )?;
-                itup_to_match = page_item(&state.target_page(), itemid);
+                // Validate the target pivot's size against lp_len before comparison (OOB-safe).
+                itup_to_match = page_item_size_careful(
+                    state,
+                    state.targetblock,
+                    &state.target_page(),
+                    itemid,
+                    pivotkey_offset,
+                )?;
             } else {
                 match state.lowkey.as_ref() {
                     None => {
@@ -1980,6 +2004,51 @@ fn page_get_item_id_careful(
     }
 
     Ok(itemid)
+}
+
+/// Return the tuple at a line pointer that already passed
+/// `page_get_item_id_careful`, after validating the tuple's self-declared
+/// `IndexTupleSize` (t_info) against the line pointer's `lp_len`.
+///
+/// amcheck's input is corrupt by definition.  `page_get_item_id_careful` bounds
+/// only `lp_off + lp_len` within the page; a tuple whose t_info declares a size
+/// larger than `lp_len` would make callers that copy or deform the whole tuple
+/// by its self-declared size (`OwnedTuple::from_itup`, `bt_mkscankey`,
+/// `bt_pivot_tuple_identical`) read past the owned BLCKSZ page image.  C reads
+/// such tuples straight out of a raw BLCKSZ buffer where an over-read merely
+/// touches adjacent bytes; here we instead report corruption via the existing
+/// report path, matching the "index tuple size does not equal lp_len" check C
+/// applies to ordinary data items in bt_target_page_check (verify_nbtree.c).
+fn page_item_size_careful(
+    state: &BtreeCheckState<'_>,
+    block: BlockNumber,
+    page: &PageRef<'_>,
+    itemid: ItemIdData,
+    offset: OffsetNumber,
+) -> PgResult<ITup> {
+    let itup = page_item(page, itemid);
+    // SAFETY: itemid passed page_get_item_id_careful, so the tuple header
+    // (t_info) lies within the owned BLCKSZ page image.
+    let tupsize = unsafe { index_tuple_size(itup) };
+    if tupsize != itemid.lp_len() as usize {
+        return Err(Box::new(
+            PgError::error(format!(
+                "index tuple size does not equal lp_len in index \"{}\"",
+                state.rel.name()
+            ))
+            .with_sqlstate(ERRCODE_INDEX_CORRUPTED)
+            .with_detail(format!(
+                "Index tid=({},{}) tuple size={} lp_len={} page lsn={}.",
+                block,
+                offset,
+                tupsize,
+                itemid.lp_len(),
+                fmt_lsn(page.lsn())
+            ))
+            .with_hint("This could be a torn page problem."),
+        ));
+    }
+    Ok(itup)
 }
 
 fn btree_tuple_get_heap_tid_careful(

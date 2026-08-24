@@ -22,6 +22,7 @@ members = [
     "crates/_support/types/types_error",
     "crates/_support/types/types_core",
     "crates/_support/mcx",
+    "crates/_support/secure_zero",
     "crates/_support/pg_qsort",
     "crates/_support/jit_deform",
     "crates/_support/types/datum",

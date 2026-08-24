@@ -352,14 +352,30 @@ impl<'a> ColPayloadRef<'a> {
         let pc = part_count as usize;
         let ot_len = 8 * (pc + 1);
         let dg_len = pc * BANKSTATS_DIGEST_LEN;
-        let want = ot_len as u64 + entry.stats_len + dg_len as u64;
+        // Overflow-checked: `entry.stats_len` is file-controlled, so a plain
+        // sum can wrap in u64 and spuriously match `entry.len`, after which
+        // the `split_at` below panics on an out-of-bounds mid. Refuse instead.
+        let want = (ot_len as u64)
+            .checked_add(entry.stats_len)
+            .and_then(|s| s.checked_add(dg_len as u64))
+            .ok_or(FormatError::Corrupt {
+                at: "bankstats col payload shape",
+            })?;
         if entry.len != want {
             return Err(FormatError::Corrupt {
                 at: "bankstats col payload shape",
             });
         }
-        let (offtab, rest) = payload.split_at(ot_len);
-        let (stats, digests) = rest.split_at(entry.stats_len as usize);
+        // `want == entry.len == payload.len()` here, but split with the
+        // checked forms so a bad offset is a catchable refusal, never a panic.
+        let (offtab, rest) = payload.split_at_checked(ot_len).ok_or(FormatError::Corrupt {
+            at: "bankstats col payload shape",
+        })?;
+        let (stats, digests) =
+            rest.split_at_checked(entry.stats_len as usize)
+                .ok_or(FormatError::Corrupt {
+                    at: "bankstats col payload shape",
+                })?;
         // offtab sanity: monotone, ends at stats_len.
         let rel = |i: usize| {
             u64::from_le_bytes(offtab[i * 8..i * 8 + 8].try_into().expect("len 8"))

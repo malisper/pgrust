@@ -9,3 +9,4 @@ mcx = { path = "../../_support/mcx" }
 types_error = { path = "../../_support/types/types_error" }
 wchar = { path = "../wchar" }
 unicode_norm = { path = "../unicode_norm" }
+secure_zero = { path = "../../_support/secure_zero" }

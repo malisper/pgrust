@@ -12,6 +12,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // ReadNextFullTransactionId (transam.h); PgResult: takes XidGenLock
+    // shared. The epoch-qualified horizon consumers need to map a bare 32-bit
+    // xid back to the FullTransactionId it actually names (recent-past window),
+    // rather than aliasing a recycled xid across wraparound.
+    pub fn read_next_full_transaction_id() -> PgResult<FullTransactionId>
+);
+
+seam_core::seam!(
     // AdvanceNextFullTransactionIdPastXid (varsup.c); redo-only. PgResult:
     // takes XidGenLock, whose acquire carries C's ereport surface.
     pub fn advance_next_full_transaction_id_past_xid(xid: TransactionId) -> PgResult<()>

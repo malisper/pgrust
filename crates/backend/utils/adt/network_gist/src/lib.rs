@@ -5,7 +5,7 @@
 use ::adt_network::{bitncmp, bitncommon, InetRef, InetValue, PGSQL_AF_INET6};
 use ::datum::Datum;
 use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use ::types_fmgr::{
     byref_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
@@ -85,6 +85,50 @@ impl<'a> GkRef<'a> {
     fn maxbits(self) -> i32 {
         ip_family_maxbits(self.family())
     }
+
+    /// Validate that the address length implied by the family byte actually
+    /// fits within this key's on-disk image.
+    ///
+    /// C's GistInetKey is a fixed struct with `ipaddr[16]`, so C's gk_ip_addr
+    /// never reads past the struct even when the family byte is bogus. Here the
+    /// image is variable-width (4 vs 16 address bytes) and `addr()` derives the
+    /// slice length from the family byte, so a crafted key whose family byte
+    /// claims a wider address than the image holds — e.g. an 8-byte IPv4-sized
+    /// image with family AF_INET6 — would make `addr()`'s `from_raw_parts` read
+    /// past the on-disk image (memory-safety violation, leaking adjacent bytes
+    /// through index scans / inet_gist_fetch). Reject such images with a
+    /// catchable ERRCODE_DATA_CORRUPTED before any accessor forms the slice.
+    ///
+    /// `addr()` is the only content-derived-length accessor in this file (its
+    /// `from_raw_parts` is sized by `addrsize()`); `entry_result`'s
+    /// `from_raw_parts` is a fixed `size_of::<GISTENTRY>()` and not attacker
+    /// controlled. Call this once per untrusted key before touching accessors.
+    fn validate(self) -> PgResult<()> {
+        // SAFETY: construction contract — a live 1B-header GistInetKey image;
+        // the varlena header byte is always readable.
+        let image_size = unsafe { ::types_tuple::varatt::varsize_1b(self.0) };
+        // family/minbits/commonbits live below GK_ADDR_OFF; require the fixed
+        // header region first, so reading the family byte below is in bounds.
+        if image_size < GK_ADDR_OFF {
+            return Err(gk_corrupt(format!(
+                "gist inet key image too small: header claims {image_size} bytes, \
+                 need at least {GK_ADDR_OFF}"
+            )));
+        }
+        let need = GK_ADDR_OFF + self.addrsize();
+        if image_size < need {
+            return Err(gk_corrupt(format!(
+                "gist inet key image too small: header claims {image_size} bytes, \
+                 family {} needs {need}",
+                self.family()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn gk_corrupt(msg: impl Into<String>) -> Box<PgError> {
+    Box::new(PgError::error(msg.into()).with_sqlstate(ERRCODE_DATA_CORRUPTED))
 }
 
 /// build_inet_union_key: 1B-header image, address zero-padded past
@@ -128,6 +172,7 @@ fn fc_inet_gist_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     let recheck = fcinfo.arg(4).as_usize() as *mut bool;
     // SAFETY: key datum per protocol; recheck out-param live in caller frame.
     let key = unsafe { GkRef::at(ent.key) };
+    key.validate()?;
     unsafe { *recheck = false };
     Ok(Datum::from_bool(consistent_internal(
         key,
@@ -299,6 +344,11 @@ fn fc_inet_gist_union(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     // SAFETY: gist fmgr protocol.
     let entryvec = unsafe { &*(fcinfo.arg(0).as_usize() as *const GistEntryVector) };
     let n = entryvec.n as usize;
+    // Validate every untrusted key image before any accessor derives an address
+    // slice length from its family byte (see GkRef::validate).
+    for e in &entryvec.vector[..n] {
+        unsafe { GkRef::at(e.key) }.validate()?;
+    }
     let p = calc_inet_union_params(
         entryvec.vector[..n]
             .iter()
@@ -345,6 +395,7 @@ fn fc_inet_gist_fetch(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     // SAFETY: gist fmgr protocol.
     let entry = unsafe { entry_arg(fcinfo, 0) };
     let key = unsafe { GkRef::at(entry.key) };
+    key.validate()?;
     let mut ipaddr = [0u8; 16];
     ipaddr[..key.addrsize()].copy_from_slice(&key.addr()[..key.addrsize()]);
     let v = InetValue {
@@ -365,6 +416,8 @@ fn fc_inet_gist_penalty(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     let penalty = fcinfo.arg(2).as_usize() as *mut f32;
     let orig = unsafe { GkRef::at(origent.key) };
     let new = unsafe { GkRef::at(newent.key) };
+    orig.validate()?;
+    new.validate()?;
     // SAFETY: penalty out-param live in the caller frame.
     unsafe { *penalty = penalty_internal(orig, new) };
     Ok(fcinfo.arg(2))
@@ -413,6 +466,12 @@ fn fc_inet_gist_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     let maxoff = (entryvec.n - 1) as usize;
     // SAFETY: as above.
     let key_at = |i: usize| unsafe { GkRef::at(entryvec.vector[i].key) };
+
+    // Validate every untrusted key image before any accessor derives an address
+    // slice length from its family byte (see GkRef::validate).
+    for i in 1..=maxoff {
+        key_at(i).validate()?;
+    }
 
     v.spl_left = Vec::with_capacity(maxoff + 1);
     v.spl_right = Vec::with_capacity(maxoff + 1);
@@ -494,6 +553,8 @@ fn fc_inet_gist_same(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     // SAFETY: gist fmgr protocol; args 0/1 are key datums.
     let left = unsafe { GkRef::at(fcinfo.arg(0)) };
     let right = unsafe { GkRef::at(fcinfo.arg(1)) };
+    left.validate()?;
+    right.validate()?;
     let result = fcinfo.arg(2).as_usize() as *mut bool;
     let r = left.family() == right.family()
         && left.minbits() == right.minbits()

@@ -235,6 +235,54 @@ fn bms_basics() {
 }
 
 #[test]
+fn bms_prev_member_out_of_range_is_safe() {
+    // Regression test for a soundness bug: prev_member is a safe fn that did
+    // raw indexed reads whose bound depended on an unenforced caller contract.
+    // Out-of-range prevbit values (i32::MAX, or negatives other than -1 which
+    // wrap to a huge usize in wordnum) must return the exhausted sentinel -2
+    // without reading past the words buffer. Run under Miri to confirm no OOB.
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+
+    // Small single-word set: {5}. nwords == 1, so nwords*64 == 64.
+    let s = Bitmapset::make_singleton(mcx, 5).unwrap();
+
+    // Out-of-range: must be rejected as exhausted, no OOB read.
+    assert_eq!(s.prev_member(i32::MAX), -2, "prev_member(i32::MAX)");
+    assert_eq!(s.prev_member(-5), -2, "prev_member(-5)");
+    assert_eq!(s.prev_member(i32::MIN), -2, "prev_member(i32::MIN)");
+    // One past the highest representable bit (nwords*64) is the valid upper
+    // bound per the C contract; anything above it is rejected.
+    assert_eq!(s.prev_member(65), -2, "prev_member(nwords*64 + 1)");
+
+    // prev_member(0) means "no bits to the right": exhausted sentinel.
+    assert_eq!(s.prev_member(0), -2, "prev_member(0)");
+
+    // In-range behavior is preserved: 64 == nwords*64 is the valid upper bound
+    // and finds the highest member below it.
+    assert_eq!(s.prev_member(64), 5, "prev_member(nwords*64)");
+    assert_eq!(s.prev_member(-1), 5, "prev_member(-1) finds highest");
+    assert_eq!(s.prev_member(5), -2, "prev_member(5) exhausted");
+
+    // Normal reverse iteration over a multi-word set still works end to end.
+    let mut b = Bitmapset::empty();
+    for &m in &[3i32, 5, 64, 130] {
+        b.add_member(mcx, m).unwrap();
+    }
+    let mut collected = Vec::new();
+    let mut x = -1;
+    loop {
+        x = b.prev_member(x);
+        if x < 0 {
+            break;
+        }
+        collected.push(x);
+    }
+    assert_eq!(x, -2, "iteration terminates with -2");
+    assert_eq!(collected.as_slice(), &[130, 64, 5, 3]);
+}
+
+#[test]
 fn bms_next_prev_member_match_c_vectors() {
     let ctx = MemoryContext::new_bump("t");
     let mcx = ctx.mcx();

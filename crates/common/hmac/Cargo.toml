@@ -6,3 +6,4 @@ publish.workspace = true
 
 [dependencies]
 pg_sha2 = { path = "../sha2" }
+secure_zero = { path = "../../_support/secure_zero" }

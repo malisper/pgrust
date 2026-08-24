@@ -222,6 +222,16 @@ impl ReorderBuffer {
 
         let mut hash = self.txn_mut(txn).toast_hash.take().expect("checked above");
         let mut replaced_any = false;
+        // Own every reconstructed buffer here until heap_form_tuple has consumed
+        // the values[] pointers. C keeps each reconstructed varlena alive in
+        // rb->context (freed only in ReorderBufferToastReset), so overwriting
+        // ent->reconstructed on a duplicate chunk id never invalidates an
+        // already-published attrs[] pointer. Storing directly in the hash entry
+        // instead would drop the prior PgVec while its raw pointer is still
+        // live in values[], a use-after-free. The Vec may reallocate as it
+        // grows, but that only moves the PgVec structs, not their heap data, so
+        // the published data pointers stay valid.
+        let mut keepalive: Vec<PgVec<'static, u8>> = Vec::new();
 
         for natt in 0..natts {
             let attr = desc.attr(natt);
@@ -235,7 +245,7 @@ impl ReorderBuffer {
                 continue;
             }
             let toast_pointer = VarattExternal::from_image(varlena);
-            let Some(ent) = hash.get_mut(&toast_pointer.va_valueid) else {
+            let Some(ent) = hash.get(&toast_pointer.va_valueid) else {
                 continue;
             };
 
@@ -265,9 +275,9 @@ impl ReorderBuffer {
             let header = varsize_4b_word(data_done + VARHDRSZ, toast_pointer.is_compressed());
             reconstructed[..VARHDRSZ].copy_from_slice(&header);
 
-            ent.reconstructed = Some(reconstructed);
+            keepalive.push(reconstructed);
             values[natt] = Datum::from_usize(
-                ent.reconstructed.as_ref().expect("just set").as_ptr() as usize,
+                keepalive.last().expect("just pushed").as_ptr() as usize,
             );
             replaced_any = true;
         }

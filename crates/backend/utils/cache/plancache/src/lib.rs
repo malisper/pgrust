@@ -1516,6 +1516,78 @@ fn push_proc_dep(items: &mut PgVec<'static, (i32, u32)>, funcid: Oid) -> PgResul
     Ok(())
 }
 
+// extract_query_dependencies_walker's per-node dependency logic (setrefs.c
+// fix_expr_common): a regclass Const is a relation dependency (ISREGCLASSCONST
+// accepts OIDOID because oideq-style folding coerces regclass Consts to it);
+// function-calling nodes are PROCOID invalItems, CoerceToDomain a TYPEOID one;
+// a SubLink transfers attention to the contained analyzed Query.
+fn record_one_dep(
+    node: types_nodes::Node<'static>,
+    out: &mut PgVec<'static, Oid>,
+    items: &mut PgVec<'static, (i32, u32)>,
+) -> PgResult<()> {
+    if let Some(c) = node.as_const() {
+        if (c.consttype == REGCLASSOID || c.consttype == types_core::OIDOID) && !c.constisnull {
+            out.try_reserve(1).map_err(|_| mcx_oom(out))?;
+            out.push(c.constvalue.as_u32());
+        }
+    } else if let Some(sl) = node.as_sub_link() {
+        extract_query_deps(
+            sl.subselect.as_query().expect("analyzed sublink sub-select"),
+            out,
+            items,
+        )?;
+    } else if let Some(f) = node.as_func_expr() {
+        push_proc_dep(items, f.funcid)?;
+    } else if let Some(o) = node.as_op_expr() {
+        push_proc_dep(items, o.opfuncid)?;
+    } else if let Some(o) = node.as_distinct_expr() {
+        push_proc_dep(items, o.opfuncid)?;
+    } else if let Some(o) = node.as_null_if_expr() {
+        push_proc_dep(items, o.opfuncid)?;
+    } else if let Some(sa) = node.as_scalar_array_op_expr() {
+        push_proc_dep(items, sa.opfuncid)?;
+    } else if let Some(a) = node.as_aggref() {
+        push_proc_dep(items, a.aggfnoid)?;
+    } else if let Some(w) = node.as_window_func() {
+        push_proc_dep(items, w.winfnoid)?;
+    } else if let Some(cd) = node.as_coerce_to_domain() {
+        if cd.resulttype >= FIRST_UNPINNED_OBJECT_ID {
+            let hash = syscache_oid_hash(TYPEOID, cd.resulttype)?;
+            items
+                .try_reserve(1)
+                .map_err(|_| Box::new(items.allocator().oom(core::mem::size_of::<(i32, u32)>())))?;
+            items.push((TYPEOID, hash));
+        }
+    }
+    Ok(())
+}
+
+// Apply record_one_dep to a bare expression subtree (the node and every
+// descendant), mirroring extract_query_dependencies_walker recursing through
+// expression_tree_walker. Used for CallStmt's transformed funcexpr/outargs,
+// which are not reachable from a Query's rtable/expression fields.
+fn record_expr_tree_deps(
+    node: types_nodes::Node<'static>,
+    out: &mut PgVec<'static, Oid>,
+    items: &mut PgVec<'static, (i32, u32)>,
+) -> PgResult<()> {
+    struct W<'a> {
+        out: &'a mut PgVec<'static, Oid>,
+        items: &'a mut PgVec<'static, (i32, u32)>,
+    }
+    impl nodes_core::NodeWalker<'static> for W<'_> {
+        fn visit(&mut self, node: types_nodes::Node<'static>) -> PgResult<bool> {
+            record_one_dep(node, self.out, self.items)?;
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let mut w = W { out, items };
+    // Process `node` itself then recurse (visit = record_one_dep + expression walk).
+    nodes_core::NodeWalker::visit(&mut w, node)?;
+    Ok(())
+}
+
 // extract_query_dependencies (setrefs.c): relation OIDs + the fix_expr_common
 // function/type invalItems.
 fn extract_query_deps(
@@ -1523,55 +1595,47 @@ fn extract_query_deps(
     out: &mut PgVec<'static, Oid>,
     items: &mut PgVec<'static, (i32, u32)>,
 ) -> PgResult<()> {
+    // extract_query_dependencies_walker's CMD_UTILITY arm (setrefs.c): the
+    // outer utility Query has an empty rtable, so its dependencies live in the
+    // utility statement. CALL contributes its transformed funcexpr/outargs;
+    // EXPLAIN/DECLARE CURSOR/CREATE TABLE AS transfer attention to their
+    // contained analyzed Query. Without this, a plancache source wrapping such
+    // a statement carries no relation/syscache keys and survives every DDL
+    // invalidation, so its retained analyzed tree is re-planned against a
+    // changed schema (stale operator/Var types -> type confusion).
+    if query.commandType == CmdType::CMD_UTILITY {
+        let ustmt = query.utilityStmt.expect("CMD_UTILITY query has utilityStmt");
+        if let Some(callstmt) = ustmt.as_call_stmt() {
+            // We need not examine funccall, just the transformed exprs.
+            if let Some(fe) = callstmt.funcexpr {
+                push_proc_dep(items, fe.funcid)?;
+                for arg in fe.args.iter() {
+                    record_expr_tree_deps(arg, out, items)?;
+                }
+            }
+            for outarg in callstmt.outargs.iter() {
+                record_expr_tree_deps(outarg, out, items)?;
+            }
+            return Ok(());
+        }
+        // Other utility statements: transfer attention to the contained query,
+        // if any (UtilityContainsQuery). Statements with no contained query
+        // (plain DDL) have no dependency keys of their own here.
+        if let Some(contained) = utility_seams::utility_contains_query::call(ustmt) {
+            extract_query_deps(
+                contained.as_query().expect("contained analyzed Query"),
+                out,
+                items,
+            )?;
+        }
+        return Ok(());
+    }
     for cte_node in &query.cteList {
         let cte = cte_node.as_common_table_expr().expect("cteList cell");
         let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
         extract_query_deps(ctequery, out, items)?;
     }
-    // extract_query_dependencies_walker runs fix_expr_common on every node:
-    // a regclass Const is a relation dependency (ISREGCLASSCONST accepts
-    // OIDOID because oideq-style folding coerces regclass Consts to it);
-    // function-calling nodes are PROCOID invalItems, CoerceToDomain a TYPEOID
-    // one.
-    walk_query_expr_nodes(query, &mut |node| {
-        if let Some(c) = node.as_const() {
-            if (c.consttype == REGCLASSOID || c.consttype == types_core::OIDOID)
-                && !c.constisnull
-            {
-                out.try_reserve(1).map_err(|_| mcx_oom(out))?;
-                out.push(c.constvalue.as_u32());
-            }
-        } else if let Some(sl) = node.as_sub_link() {
-            extract_query_deps(
-                sl.subselect.as_query().expect("analyzed sublink sub-select"),
-                out,
-                items,
-            )?;
-        } else if let Some(f) = node.as_func_expr() {
-            push_proc_dep(items, f.funcid)?;
-        } else if let Some(o) = node.as_op_expr() {
-            push_proc_dep(items, o.opfuncid)?;
-        } else if let Some(o) = node.as_distinct_expr() {
-            push_proc_dep(items, o.opfuncid)?;
-        } else if let Some(o) = node.as_null_if_expr() {
-            push_proc_dep(items, o.opfuncid)?;
-        } else if let Some(sa) = node.as_scalar_array_op_expr() {
-            push_proc_dep(items, sa.opfuncid)?;
-        } else if let Some(a) = node.as_aggref() {
-            push_proc_dep(items, a.aggfnoid)?;
-        } else if let Some(w) = node.as_window_func() {
-            push_proc_dep(items, w.winfnoid)?;
-        } else if let Some(cd) = node.as_coerce_to_domain() {
-            if cd.resulttype >= FIRST_UNPINNED_OBJECT_ID {
-                let hash = syscache_oid_hash(TYPEOID, cd.resulttype)?;
-                items.try_reserve(1).map_err(|_| {
-                    Box::new(items.allocator().oom(core::mem::size_of::<(i32, u32)>()))
-                })?;
-                items.push((TYPEOID, hash));
-            }
-        }
-        Ok(())
-    })?;
+    walk_query_expr_nodes(query, &mut |node| record_one_dep(node, out, items))?;
     for rte_node in query.rtable.iter() {
         let rte = rte_node.as_range_tbl_entry().expect("rtable holds RangeTblEntry");
         match rte.rtekind {

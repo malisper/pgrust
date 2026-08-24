@@ -42,3 +42,19 @@ fn wref_roundtrip() {
     pgaio_wref_clear(&mut w2);
     assert!(!pgaio_wref_valid(&w2));
 }
+
+#[test]
+fn io_handles_per_backend_ignores_clobbered_guc() {
+    // Boot-time geometry: 3 backends, 8 handles each = 24 handles total.
+    BACKEND_COUNT.store(3, Ordering::Relaxed);
+    HANDLE_COUNT.store(24, Ordering::Relaxed);
+
+    // Simulate child-launch GUC republication clobbering io_max_concurrency
+    // back to its -1 sentinel (which becomes u32::MAX when cast).
+    IO_MAX_CONCURRENCY.store(-1, Ordering::Relaxed);
+
+    // The scan bound used by pgaio_io_wait_for_free must come from the
+    // immutable table geometry, NOT the live GUC.
+    assert_eq!(io_handles_per_backend(), 8);
+    assert_ne!(io_handles_per_backend() as i64, io_max_concurrency() as i64);
+}

@@ -1,0 +1,13 @@
+-- Finding (thermite idx 233): the RI trigger SQL hardcoded the pg_catalog
+-- operator namespace, so an FK over a citext opclass did not enforce citext
+-- equality and let a referenced row be deleted. The DELETE must be blocked.
+CREATE EXTENSION IF NOT EXISTS citext;
+CREATE TABLE thermite_pk(k citext PRIMARY KEY);
+CREATE TABLE thermite_fk(k citext REFERENCES thermite_pk(k));
+INSERT INTO thermite_pk VALUES ('Abc');
+INSERT INTO thermite_fk VALUES ('abc');
+DELETE FROM thermite_pk WHERE k = 'Abc';
+ERROR:  update or delete on table "thermite_pk" violates foreign key constraint "thermite_fk_k_fkey" on table "thermite_fk"
+DETAIL:  Key (k)=(Abc) is still referenced from table "thermite_fk".
+DROP TABLE thermite_fk;
+DROP TABLE thermite_pk;

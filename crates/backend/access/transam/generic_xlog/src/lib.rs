@@ -7,7 +7,7 @@
 
 use mcx::{alloc_in, Mcx, PgBox};
 use types_core::{BlockNumber, Buffer, InvalidBuffer, OffsetNumber, XLogRecPtr, BLCKSZ};
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use types_rel::Relation;
 use xloginsert_seams::{XLogRegBuf, REGBUF_FORCE_IMAGE, REGBUF_STANDARD};
 use xlogreader_seams::XLogReaderState;
@@ -347,29 +347,71 @@ fn compute_delta(delta: &mut [u8], delta_len: &mut usize, curpage: &[u8], target
     );
 }
 
-fn apply_page_redo(page: &mut [u8], delta: &[u8]) {
+fn corrupt_delta(msg: impl Into<String>) -> Box<PgError> {
+    Box::new(PgError::error(msg.into()).with_sqlstate(ERRCODE_DATA_CORRUPTED))
+}
+
+// C applyPageRedo only Assert()s the fragment structure and would OOB-write in
+// release; the WAL payload here is untrusted (a crafted RM_GENERIC record can
+// carry any offset/length), so every fragment bound is validated and a
+// malformed delta becomes a catchable ERRCODE_DATA_CORRUPTED for the recovery
+// driver rather than a panic/OOB write in the startup redo thread.
+fn apply_page_redo(page: &mut [u8], delta: &[u8]) -> PgResult<()> {
     let mut ptr = 0usize;
     while ptr < delta.len() {
+        if delta.len() - ptr < FRAGMENT_HEADER_SIZE {
+            return Err(corrupt_delta(
+                "generic xlog record has truncated fragment header",
+            ));
+        }
         let offset = u16::from_ne_bytes([delta[ptr], delta[ptr + 1]]) as usize;
         let length = u16::from_ne_bytes([delta[ptr + 2], delta[ptr + 3]]) as usize;
         ptr += FRAGMENT_HEADER_SIZE;
+        if length > delta.len() - ptr {
+            return Err(corrupt_delta(
+                "generic xlog fragment length exceeds remaining delta",
+            ));
+        }
+        if offset > page.len() || length > page.len() - offset {
+            return Err(corrupt_delta(
+                "generic xlog fragment offset/length is out of page bounds",
+            ));
+        }
         page[offset..offset + length].copy_from_slice(&delta[ptr..ptr + length]);
         ptr += length;
     }
+    Ok(())
 }
 
 /// The BLK_NEEDS_REDO page transform of generic_redo (cross-replay test hook).
-pub fn redo_page_transform(page: &mut [u8], delta: &[u8], lsn: XLogRecPtr) {
-    apply_page_redo(page, delta);
+pub fn redo_page_transform(page: &mut [u8], delta: &[u8], lsn: XLogRecPtr) -> PgResult<()> {
+    apply_page_redo(page, delta)?;
+    // pd_lower/pd_upper were just written by the untrusted delta; validate the
+    // hole bounds before zeroing so a crafted header cannot panic (lower>upper)
+    // or write OOB (upper>BLCKSZ) in the startup redo thread.
     let (lower, upper) = (pd_lower(page), pd_upper(page));
+    if lower > upper || upper > page.len() {
+        return Err(corrupt_delta(
+            "generic xlog page has invalid pd_lower/pd_upper after redo",
+        ));
+    }
     page[lower..upper].fill(0);
     page_set_lsn(page, lsn);
+    Ok(())
 }
 
 pub fn generic_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let max_block_id = record.record.as_ref().map_or(-1, |r| r.max_block_id);
-    debug_assert!((max_block_id as i32) < MAX_GENERIC_XLOG_PAGES as i32);
+    // C only Assert()s this (compiled out in release); the WAL format permits
+    // block IDs up to XLR_MAX_BLOCK_ID (32), so an untrusted record could index
+    // past the fixed-size buffers[] array. Reject out-of-range records as
+    // corruption in all builds rather than panicking the redo thread.
+    if (max_block_id as i32) >= MAX_GENERIC_XLOG_PAGES as i32 {
+        return Err(corrupt_delta(format!(
+            "generic xlog record has too many blocks (max_block_id {max_block_id} >= {MAX_GENERIC_XLOG_PAGES})"
+        )));
+    }
 
     let mut buffers = [InvalidBuffer; MAX_GENERIC_XLOG_PAGES];
     let mut block_id: u8 = 0;
@@ -384,7 +426,7 @@ pub fn generic_redo(record: &mut XLogReaderState) -> PgResult<()> {
             // SAFETY: points into the reader's decode buffer, valid for the callback.
             let delta = unsafe { record.block(block_id).data_bytes() };
             // SAFETY: contract at buffer_page (redo holds pin + lock).
-            redo_page_transform(unsafe { buffer_page(buffer) }, delta, lsn);
+            redo_page_transform(unsafe { buffer_page(buffer) }, delta, lsn)?;
             bufmgr_seams::mark_buffer_dirty::call(buffer)?;
         }
         block_id += 1;

@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use mcx::{PgString, PgVec};
 use types_core::{InvalidXLogRecPtr, Oid, TransactionId, XLogRecPtr};
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_OUT_OF_MEMORY};
 use types_snapshot::{SnapshotData, SnapshotType};
 use types_storage::{RelFileLocator, SharedInvalidationMessage};
 use types_tuple::{BlockIdData, ItemPointerData, SizeofHeapTupleHeader};
@@ -35,6 +35,15 @@ use crate::{
 const MAX_CHANGES_IN_MEMORY: u64 = 4096;
 
 const SHARED_INVAL_MESSAGE_SIZE: usize = 16;
+
+// C's MaxAllocSize (utils/memutils.h): 1 GB - 1, the ceiling
+// AllocSizeIsValid() enforces inside every palloc/repalloc. On the restore
+// path C sizes rb->outbuf from the on-disk record length via
+// ReorderBufferSerializeReserve -> repalloc (reorderbuffer.c:4610), so a
+// crafted length above this ceiling is refused there with a catchable ERROR
+// rather than honored. This port must reproduce that admission check before
+// its own (infallible) buffer allocation.
+const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
 
 // ReorderBufferSerializedPath (reorderbuffer.c:4889):
 // pg_replslot/<slot>/xid-%u-lsn-%X-%X.spill, LSN = the segment start.
@@ -196,6 +205,33 @@ impl ReorderBuffer {
         tuple.image_mut().copy_from_slice(image);
         tuple.t_self = t_self;
         tuple.t_tableOid = t_table_oid;
+
+        // Establish the header invariants heap_deform_tuple relies on before
+        // this image is ever handed to unsafe deform/varlena code. C builds
+        // these at heap_form_tuple time (heaptuple.c:1151-1156: t_hoff =
+        // MAXALIGN(SizeofHeapTupleHeader + (HEAP_HASNULL ? BITMAPLEN(natts) :
+        // 0))) but ReorderBufferRestoreChange (reorderbuffer.c:4676) re-hydrates
+        // the image straight from disk without re-checking them. These spill
+        // bytes are untrusted (a crafted file under pg_replslot/<slot>/), so a
+        // t_hoff past the image end would make GETSTRUCT / `tp = tup + t_hoff`
+        // (heaptuple.c:1368) read out of bounds, and a null bitmap that
+        // overruns t_hoff would make att_isnull() read past the header region.
+        // Reject either with a catchable DATA_CORRUPTED error rather than
+        // deforming into out-of-bounds memory.
+        let header = tuple.t_data();
+        let t_hoff = header.t_hoff as usize;
+        // BITMAPLEN(natts) = (natts + 7) / 8; only present when HEAP_HASNULL.
+        let null_bitmap_len =
+            if tuple.has_nulls() { (header.natts() as usize + 7) / 8 } else { 0 };
+        let min_hoff = SizeofHeapTupleHeader + null_bitmap_len;
+        if t_hoff < min_hoff || t_hoff > t_len {
+            return Err(PgError::error(format!(
+                "invalid tuple header offset {t_hoff} (t_len {t_len}) in reorderbuffer spill file"
+            ))
+            .with_sqlstate(ERRCODE_DATA_CORRUPTED)
+            .into());
+        }
+
         Ok(tuple)
     }
 
@@ -584,9 +620,35 @@ impl ReorderBuffer {
                     "invalid record size {size} in reorderbuffer spill file"
                 )));
             }
+            // The length prefix is attacker-controllable (a crafted file under
+            // pg_replslot/<slot>/), so it must clear C's MaxAllocSize admission
+            // (reorderbuffer.c:4610, repalloc) BEFORE it is used to size a
+            // buffer. Without this the resize below is an infallible
+            // allocation that aborts the whole process on an oversized value.
+            // Catchable, DATA_CORRUPTED-classed, so ReorderBufferRestoreChanges
+            // fails the decode rather than crashing.
+            if size > MAX_ALLOC_SIZE {
+                return Err(PgError::error(format!(
+                    "invalid record size {size} in reorderbuffer spill file"
+                ))
+                .with_sqlstate(ERRCODE_DATA_CORRUPTED)
+                .into());
+            }
 
             let body = size - szbuf.len();
             buf.clear();
+            // Fallible reservation: at or below MaxAllocSize a failure here is
+            // genuine memory pressure (C's palloc would raise
+            // ERRCODE_OUT_OF_MEMORY), not corruption — so raise a catchable
+            // error instead of aborting via the infallible allocator.
+            buf.try_reserve_exact(body).map_err(|_| {
+                Box::new(
+                    PgError::error(format!(
+                        "out of memory restoring {body}-byte change from reorderbuffer spill file"
+                    ))
+                    .with_sqlstate(ERRCODE_OUT_OF_MEMORY),
+                )
+            })?;
             buf.resize(body, 0);
             let n = read_full(f, &mut buf)?;
             if n != body {

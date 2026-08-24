@@ -3,7 +3,7 @@ use ::types_core::AttrNumber;
 use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_slot::{HeapTupleTableSlot, MinimalTupleTableSlot, SlotBase, SlotData, TTS_FLAG_SLOW};
 use ::types_tuple::tupmacs::{
-    att_addlength_pointer, att_isnull, att_nominal_alignby, att_pointer_alignby, fetch_att,
+    att_isnull, att_nominal_alignby, att_pointer_alignby, fetch_att,
 };
 use ::types_tuple::{
     heap_getsysattr, CompactAttribute, HeapTupleData, MinimalTupleData,
@@ -22,17 +22,30 @@ pub(crate) struct TupleImage {
     bp: *const u8,
     hasnulls: bool,
     tuple_natts: i32,
+    // User-data extent at `tp`: t_len - t_hoff (heap) or the minimal-body length.
+    // Every offset the deform walk dereferences is bounded against this so a
+    // crafted on-disk image (short body with a full natts, or a lying varlena
+    // header) cannot over-read past the tuple — see `deform_internal`.
+    data_len: usize,
 }
 
 impl TupleImage {
     #[inline]
     pub(crate) fn from_heap(t: &HeapTupleData<'_>) -> TupleImage {
+        let t_hoff = t.t_data().t_hoff as usize;
+        // t_hoff is an attacker-controlled on-disk field; a header claiming a
+        // t_hoff past t_len would make getstruct() form an out-of-bounds pointer.
+        let data_len = match (t.t_len as usize).checked_sub(t_hoff) {
+            Some(len) => len,
+            None => deform_corrupt(),
+        };
         TupleImage {
             tp: t.getstruct(),
             // SAFETY: in-bounds offset within the image (t_len >= header).
             bp: unsafe { t.header_ptr().add(::types_tuple::SizeofHeapTupleHeader) },
             hasnulls: t.has_nulls(),
             tuple_natts: t.t_data().natts() as i32,
+            data_len,
         }
     }
 
@@ -42,15 +55,54 @@ impl TupleImage {
     pub(crate) unsafe fn from_minimal(p: NonNull<MinimalTupleData>) -> TupleImage {
         let mt = unsafe { p.as_ref() };
         let base = p.as_ptr().cast::<u8>();
+        // The body begins t_hoff - MINIMAL_TUPLE_OFFSET bytes below base; both
+        // t_hoff and t_len are attacker-controlled on-disk fields.
+        let body_off = match (mt.t_hoff as usize).checked_sub(MINIMAL_TUPLE_OFFSET) {
+            Some(off) => off,
+            None => deform_corrupt(),
+        };
+        let data_len = match (mt.t_len as usize).checked_sub(body_off) {
+            Some(len) => len,
+            None => deform_corrupt(),
+        };
         unsafe {
             TupleImage {
-                tp: base.add(mt.t_hoff as usize - MINIMAL_TUPLE_OFFSET),
+                tp: base.add(body_off),
                 bp: base.add(SizeofMinimalTupleHeader),
                 hasnulls: (mt.t_infomask & HEAP_HASNULL) != 0,
                 tuple_natts: mt.natts() as i32,
+                data_len,
             }
         }
     }
+}
+
+// Cold, divergent: a crafted/mismatched on-disk image walked off the tuple.
+// Mirrors types_tuple's deform bound (getattr.rs idx 38): the backend error
+// boundary turns the unwind into an aborted transaction rather than an OOB read.
+#[cold]
+#[inline(never)]
+fn deform_corrupt() -> ! {
+    panic!("heap tuple data is corrupt: attribute offset exceeds tuple length");
+}
+
+// Advance past a NUL-terminated cstring at `tp[off..]`, bounded by data_len.
+// Returns the offset just past the terminator; a string with no NUL inside the
+// tuple body is corruption (C's strlen would run off the end).
+//
+// # Safety
+// `tp` points to an image readable for at least `data_len` bytes.
+#[inline]
+unsafe fn cstring_end_bounded(tp: *const u8, off: usize, data_len: usize) -> usize {
+    let mut n = off;
+    while n < data_len {
+        // SAFETY: n < data_len, in range.
+        if unsafe { *tp.add(n) } == 0 {
+            return n + 1;
+        }
+        n += 1;
+    }
+    deform_corrupt();
 }
 
 /// # Safety
@@ -103,7 +155,9 @@ unsafe fn deform_internal(
         let attbyval = thisatt.attbyval;
         let attalignby = thisatt.attalignby;
 
-        // SAFETY: offsets walk attributes present in the tuple (caller contract).
+        // SAFETY: offsets walk attributes present in the tuple (caller contract);
+        // every image dereference below is bounded by img.data_len, so a lying
+        // on-page length turns an OOB read into a deterministic corruption error.
         unsafe {
             if !slow && thisatt.attcacheoff.get() >= 0 {
                 *offp = thisatt.attcacheoff.get() as usize;
@@ -112,6 +166,10 @@ unsafe fn deform_internal(
                 if !slow && *offp == att_nominal_alignby(*offp, attalignby) {
                     thisatt.attcacheoff.set(*offp as i32);
                 } else {
+                    // att_pointer_alignby peeks tp[off] (the pad byte).
+                    if *offp >= img.data_len {
+                        deform_corrupt();
+                    }
                     *offp = att_pointer_alignby(*offp, attalignby, -1, tp.add(*offp));
                     if !slow {
                         slownext = true;
@@ -124,12 +182,27 @@ unsafe fn deform_internal(
                 }
             }
 
+            // Bound the read at the finalized offset. Fixed-width reads span
+            // attlen bytes; varlena/cstring dereference the header/first byte
+            // (their full length is bounded at the advance step below).
+            if attlen > 0 {
+                if *offp + attlen as usize > img.data_len {
+                    deform_corrupt();
+                }
+            } else if *offp >= img.data_len {
+                deform_corrupt();
+            }
+
             *values.get_unchecked_mut(attnum) = fetch_att(tp.add(*offp), attbyval, attlen);
 
             if attlen > 0 {
                 *offp += attlen as usize;
             } else if attlen == -1 {
-                *offp += ::types_tuple::varatt::varsize_any(tp.add(*offp));
+                // *offp < data_len (checked above), so avail >= 1.
+                match ::types_tuple::varatt::varsize_bounded(tp.add(*offp), img.data_len - *offp) {
+                    Some(vlen) => *offp += vlen,
+                    None => deform_corrupt(),
+                }
             } else {
                 debug_assert!(attlen == -2);
                 *slowp = true;
@@ -161,9 +234,13 @@ unsafe fn deform_cstring_rest(
     offp: &mut usize,
 ) -> usize {
     let tp = img.tp;
-    // SAFETY: caller contract — the walk covers attributes present in the tuple.
+    let data_len = img.data_len;
+    // SAFETY: caller contract — the walk covers attributes present in the tuple;
+    // every deref below is bounded by data_len.
     unsafe {
-        *offp = att_addlength_pointer(*offp, -2, tp.add(*offp));
+        // Finish the cstring attribute already staged in deform_internal: its
+        // NUL terminator must lie within the tuple body (no unbounded strlen).
+        *offp = cstring_end_bounded(tp, *offp, data_len);
         for i in attnum + 1..natts {
             let thisatt = atts.get_unchecked(i);
             if img.hasnulls && att_isnull(i, img.bp) {
@@ -174,12 +251,32 @@ unsafe fn deform_cstring_rest(
             *isnull.get_unchecked_mut(i) = false;
             let attlen = thisatt.attlen as i32;
             if attlen == -1 {
+                if *offp >= data_len {
+                    deform_corrupt();
+                }
                 *offp = att_pointer_alignby(*offp, thisatt.attalignby, -1, tp.add(*offp));
             } else {
                 *offp = att_nominal_alignby(*offp, thisatt.attalignby);
             }
+            if attlen > 0 {
+                if *offp + attlen as usize > data_len {
+                    deform_corrupt();
+                }
+            } else if *offp >= data_len {
+                deform_corrupt();
+            }
             *values.get_unchecked_mut(i) = fetch_att(tp.add(*offp), thisatt.attbyval, attlen);
-            *offp = att_addlength_pointer(*offp, attlen, tp.add(*offp));
+            if attlen > 0 {
+                *offp += attlen as usize;
+            } else if attlen == -1 {
+                match ::types_tuple::varatt::varsize_bounded(tp.add(*offp), data_len - *offp) {
+                    Some(vlen) => *offp += vlen,
+                    None => deform_corrupt(),
+                }
+            } else {
+                debug_assert!(attlen == -2);
+                *offp = cstring_end_bounded(tp, *offp, data_len);
+            }
         }
     }
     natts
@@ -492,11 +589,12 @@ pub fn slot_getattr(slot: &mut SlotData<'_>, attnum: i32, isnull: &mut bool) -> 
     let base = slot.base();
     if attnum <= base.tts_nvalid as i32 {
         let i = (attnum - 1) as usize;
-        // SAFETY: attnum <= tts_nvalid <= len (slot invariant).
-        unsafe {
-            *isnull = *base.tts_isnull.get_unchecked(i);
-            return *base.tts_values.get_unchecked(i);
-        }
+        // Checked indexing: the bound is attnum <= tts_nvalid, but tts_nvalid and
+        // the vector length live in separate (pub) fields, so a safe caller that
+        // desyncs them must get a deterministic panic here, not a release-mode OOB
+        // read (idx 256). Matches C's Assert-in-debug + defined-in-release.
+        *isnull = base.tts_isnull[i];
+        return base.tts_values[i];
     }
     slot_getattr_miss(slot, attnum, isnull)
 }
@@ -505,11 +603,10 @@ fn slot_getattr_miss(slot: &mut SlotData<'_>, attnum: i32, isnull: &mut bool) ->
     slot_getsomeattrs_int(slot, attnum);
     let base = slot.base();
     let i = (attnum - 1) as usize;
-    // SAFETY: getsomeattrs postcondition tts_nvalid >= attnum, len invariant.
-    unsafe {
-        *isnull = *base.tts_isnull.get_unchecked(i);
-        *base.tts_values.get_unchecked(i)
-    }
+    // Checked indexing (idx 256): getsomeattrs postcondition is tts_nvalid >= attnum,
+    // but release-safety must not depend on it — a desynced slot panics, not UB.
+    *isnull = base.tts_isnull[i];
+    base.tts_values[i]
 }
 
 #[inline]
@@ -517,12 +614,11 @@ pub fn slot_attisnull(slot: &mut SlotData<'_>, attnum: i32) -> bool {
     debug_assert!(attnum > 0);
     let base = slot.base();
     if attnum <= base.tts_nvalid as i32 {
-        // SAFETY: attnum <= tts_nvalid <= len (slot invariant).
-        return unsafe { *base.tts_isnull.get_unchecked((attnum - 1) as usize) };
+        // Checked indexing (idx 256): release-safe, panics on a desynced slot.
+        return base.tts_isnull[(attnum - 1) as usize];
     }
     slot_getsomeattrs_int(slot, attnum);
-    // SAFETY: as above via the getsomeattrs postcondition.
-    unsafe { *slot.base().tts_isnull.get_unchecked((attnum - 1) as usize) }
+    slot.base().tts_isnull[(attnum - 1) as usize]
 }
 
 // Monomorphized fast lanes for callers that hold the concrete slot kind: the
@@ -588,5 +684,90 @@ pub fn slot_getsysattr(slot: &SlotData<'_>, attnum: i32, isnull: &mut bool) -> P
     match tuple {
         Some(t) => Ok(heap_getsysattr(t, attnum, isnull)),
         None => Err(no_system_columns()),
+    }
+}
+
+#[cfg(test)]
+mod deform_bounds_tests {
+    use super::*;
+    use ::types_tuple::varatt::set_varsize_4b_word;
+    use core::cell::Cell;
+
+    // 8-byte aligned scratch image (varlena/fixed reads want MAXALIGN).
+    #[repr(align(8))]
+    struct Image([u8; 64]);
+
+    fn att(attlen: i16, attbyval: bool, attalignby: u8) -> CompactAttribute {
+        CompactAttribute {
+            attcacheoff: Cell::new(-1),
+            attlen,
+            attbyval,
+            attispackable: attlen < 0,
+            atthasmissing: false,
+            attisdropped: false,
+            attgenerated: false,
+            attnullability: 0,
+            attalignby,
+        }
+    }
+
+    // Drive the deform WALK directly over a crafted null-free single-attribute
+    // image whose user-data extent is `data_len` bytes — exactly the offsets
+    // slot_deform_heap_tuple feeds deform_internal from a stored tuple.
+    fn walk_one(image: &Image, data_len: usize, a: CompactAttribute) {
+        let img = TupleImage {
+            tp: image.0.as_ptr(),
+            bp: image.0.as_ptr(),
+            hasnulls: false,
+            tuple_natts: 1,
+            data_len,
+        };
+        let atts = [a];
+        let mut values = [Datum::null(); 1];
+        let mut isnull = [false; 1];
+        let mut off = 0usize;
+        let mut slow = false;
+        // SAFETY: attnum 0 < natts 1 == atts.len() == values.len() == isnull.len();
+        // img is the crafted image with a matching data_len.
+        unsafe {
+            deform_internal(
+                &mut values, &mut isnull, &atts, img, 0, 1, false, false, &mut off, &mut slow,
+            );
+        }
+    }
+
+    // A varlena whose 4-byte header declares 100 bytes over an 8-byte body must
+    // raise a deterministic corruption error, not advance the walk ~100 bytes
+    // past the tuple (the idx 97 out-of-bounds read).
+    #[test]
+    #[should_panic(expected = "corrupt")]
+    fn lying_varlena_header_is_bounded() {
+        let mut image = Image([0u8; 64]);
+        // SAFETY: writing the 4-byte varlena header within the data area.
+        unsafe {
+            image
+                .0
+                .as_mut_ptr()
+                .cast::<u32>()
+                .write_unaligned(set_varsize_4b_word(100));
+        }
+        walk_one(&image, 8, att(-1, false, 4));
+    }
+
+    // A fixed-width (int8) attribute wider than the data area must be rejected
+    // rather than reading the 4 bytes past the tuple body.
+    #[test]
+    #[should_panic(expected = "corrupt")]
+    fn truncated_fixed_attribute_is_bounded() {
+        let image = Image([0u8; 64]);
+        walk_one(&image, 4, att(8, true, 8));
+    }
+
+    // A well-formed image deforms without error: guards never fire on a valid
+    // tuple (one int8 in an 8-byte body).
+    #[test]
+    fn well_formed_fixed_attribute_deforms() {
+        let image = Image([0u8; 64]);
+        walk_one(&image, 8, att(8, true, 8));
     }
 }

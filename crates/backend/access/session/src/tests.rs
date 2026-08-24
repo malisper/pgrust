@@ -1040,7 +1040,30 @@ fn tls_source_census_and_session_surface_are_pinned() {
     // meet here; the merged tree counts 573 by direct census (this test's
     // own predicate replicated over crates/). Every delta above is
     // classified in its own lineage block.
-    assert_eq!(count_tree(crates), 573, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 577, security-scan remediation (thermite-sec, 2026-08-24): four
+    // net-new NON-session TLS sites land with the memory-/thread-safety
+    // fixes; renumbered 41-44 over the t28 slots. All are per-thread
+    // transient state a session never owns — no envelope capture/restore,
+    // no SESSION_ENVELOPE_MANIFEST rows:
+    //   41. _support/mcx/src/lib.rs SESSION_ROOT_RETIRING — Cell<bool>
+    //      reentrancy guard set only for the duration of retire_session_root
+    //      so the debug leak-check in reset_noncore skips the deliberate
+    //      session-root teardown; cleared by a Drop guard on the same call.
+    //      A transient per-thread flag, no session identity (slot-35
+    //      COMPILE_ECONOMY class).
+    //   42. executor/execexpr/src/compile.rs EXECUTE_ACL_SESSION —
+    //      RefCell<Option<..>> per-thread dedup cache of already-ACL-checked
+    //      funcids within ONE execute-privilege evaluation (the CWE
+    //      authz-hardening fix); lives and dies inside the ACL walk, spans
+    //      no statement boundary, carries no session state.
+    //   43. executor/execexpr/src/tests.rs — test-only thread_local (unit
+    //      harness fixture; counted by the tree census, never product code).
+    //   44. regex/regex_core/src/regex_error.rs PENDING_CANCEL —
+    //      Cell<Option<Box<PgError>>> per-thread parked cancel/error raised
+    //      inside the regex engine and re-raised at the FFI boundary (the
+    //      panic-across-FFI safety fix); per-call transient, no session
+    //      identity.
+    assert_eq!(count_tree(crates), 577, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

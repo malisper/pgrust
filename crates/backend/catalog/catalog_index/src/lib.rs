@@ -504,7 +504,9 @@ pub fn index_opclass_options<'mcx>(
 pub fn relation_get_index_att_options(
     rel: &Relation<'_>,
 ) -> PgResult<std::rc::Rc<[Option<Box<[u8]>>]>> {
-    const Anum_pg_attribute_attoptions: i32 = 25;
+    // pg_attribute.attoptions is attnum 23 (attmissingval is 25). Reading the
+    // wrong attnum here silently discarded all per-column opclass options.
+    const Anum_pg_attribute_attoptions: i32 = 23;
     if let Some(cached) = rel.rd_opcoptions.borrow().as_ref() {
         return Ok(cached.clone());
     }
@@ -1515,5 +1517,27 @@ mod tests {
         assert_eq!(INDEX_CONSTR_CREATE_UPDATE_INDEX, 1 << 3);
         assert_eq!(INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS, 1 << 4);
         assert_eq!(INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS, 1 << 5);
+    }
+
+    // relation_get_index_att_options fetches per-column opclass options from
+    // pg_attribute.attoptions. That column is attnum 23; attmissingval (25)
+    // must not be confused for it, or every stored opclass option is silently
+    // dropped and GiST/BRIN indexes run with default parameters that disagree
+    // with the catalog and with C-built on-disk keys.
+    #[test]
+    fn attoptions_is_attnum_23() {
+        let attnum_of = |name: &[u8]| -> i16 {
+            relcache::schemapg::DESC_PG_ATTRIBUTE
+                .iter()
+                .find(|a| {
+                    let d = &a.attname.data;
+                    let end = d.iter().position(|&c| c == 0).unwrap_or(d.len());
+                    &d[..end] == name
+                })
+                .map(|a| a.attnum)
+                .unwrap()
+        };
+        assert_eq!(attnum_of(b"attoptions"), 23);
+        assert_eq!(attnum_of(b"attmissingval"), 25);
     }
 }

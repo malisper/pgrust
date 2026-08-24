@@ -65,6 +65,46 @@ fn recovery_lock_table_bookkeeping_dedupes_and_chains() {
     assert_eq!(ts::chain(702), vec![]);
 }
 
+// A hostile primary/archive can set arbitrary counts in a RM_STANDBY_ID
+// record (the WAL CRC is a checksum, not a MAC). validate_count must reject
+// every out-of-range count as a catchable ERRCODE_DATA_CORRUPTED error rather
+// than letting it reach slice-index/allocation panics on the redo thread.
+#[test]
+fn validate_count_rejects_hostile_counts() {
+    use types_error::ERRCODE_DATA_CORRUPTED;
+
+    // Well-formed: 2 * 12-byte locks backed by a 4-byte header.
+    let ok = validate_count(4 + 2 * SIZE_OF_XL_STANDBY_LOCK, 4, 2, SIZE_OF_XL_STANDBY_LOCK, "t");
+    assert_eq!(ok.unwrap(), 2);
+
+    // Negative count (sign-extends to a huge usize in the buggy path).
+    let e = validate_count(4, 4, -1, SIZE_OF_XL_STANDBY_LOCK, "t").err().unwrap();
+    assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+    // Positive but unbacked by the record (would OOB-index).
+    let e = validate_count(4 + SIZE_OF_XL_STANDBY_LOCK, 4, 2, SIZE_OF_XL_STANDBY_LOCK, "t")
+        .err()
+        .unwrap();
+    assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+    // count * elem_size overflows usize (would wrap/allocate absurdly).
+    let e = validate_count(64, 16, i32::MAX, SHARED_INVALIDATION_MESSAGE_SIZE, "t")
+        .err()
+        .unwrap();
+    assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+    // Zero-count records are valid (header only).
+    assert_eq!(validate_count(16, 16, 0, SHARED_INVALIDATION_MESSAGE_SIZE, "t").unwrap(), 0);
+}
+
+#[test]
+fn require_len_rejects_truncated_header() {
+    use types_error::ERRCODE_DATA_CORRUPTED;
+    assert!(require_len(&[0u8; 24], MIN_SIZE_OF_XACT_RUNNING_XACTS, "t").is_ok());
+    let e = require_len(&[0u8; 8], MIN_SIZE_OF_XACT_RUNNING_XACTS, "t").err().unwrap();
+    assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+}
+
 static FROM_STREAM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 #[test]

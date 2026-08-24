@@ -537,6 +537,11 @@ mod emit {
         lits: Vec<u64>,
         lit_uses: Vec<(usize, u32)>,
         local_seq: u32,
+        // Set when a resolved branch displacement did not fit the target
+        // instruction's signed immediate field. emit_program then abandons
+        // JIT for this expression (fails open to the interpreter) rather
+        // than installing a kernel with a truncated / wrong branch target.
+        branch_overflow: bool,
     }
 
     impl Emitter {
@@ -547,6 +552,7 @@ mod emit {
                 lits: Vec::new(),
                 lit_uses: Vec::new(),
                 local_seq: 0,
+                branch_overflow: false,
             }
         }
 
@@ -1174,28 +1180,71 @@ mod emit {
         while i < e.fixups.len() {
             if e.fixups[i].1 == t {
                 let (pos, _) = e.fixups.remove(i);
-                patch_branch(&mut e.code, pos, here);
+                if !patch_branch(&mut e.code, pos, here) {
+                    e.branch_overflow = true;
+                }
             } else {
                 i += 1;
             }
         }
     }
 
-    fn patch_branch(code: &mut [u32], pos: usize, target: usize) {
+    /// True when `v` fits a signed `bits`-wide two's-complement field.
+    fn fits_signed(v: i32, bits: u32) -> bool {
+        let v = v as i64;
+        let lim = 1i64 << (bits - 1);
+        v >= -lim && v < lim
+    }
+
+    /// Patches the branch/ADR fixup at `pos` to reach `target`.
+    ///
+    /// Returns `false` when the displacement does not fit the target
+    /// instruction's signed immediate field. AArch64 branch reaches are
+    /// narrow (TBNZ/TBZ imm14 = +/-32KiB, B.cond/CBZ/CBNZ imm19, ADR
+    /// imm21, B imm26); previously the delta was masked straight into the
+    /// field, so an out-of-range displacement silently wrapped (e.g. a
+    /// forward TBNZ of 8192..16383 words flipped the imm14 sign bit and
+    /// branched ~64KiB backwards). Masking off the high bits corrupts
+    /// control flow, so instead of encoding a wrong branch we report the
+    /// overflow and let the caller fail open to the interpreter.
+    #[must_use]
+    fn patch_branch(code: &mut [u32], pos: usize, target: usize) -> bool {
         let delta = (target as i64 - pos as i64) as i32;
         let w = code[pos];
-        code[pos] = match w >> 24 {
-            0x14 => 0x1400_0000 | ((delta as u32) & 0x03FF_FFFF),
-            // adr: imm21 in bytes.
+        match w >> 24 {
+            0x14 => {
+                if !fits_signed(delta, 26) {
+                    return false;
+                }
+                code[pos] = 0x1400_0000 | ((delta as u32) & 0x03FF_FFFF);
+            }
+            // adr: imm21 in bytes (byte delta = word delta * 4, so the
+            // word delta must fit 19 signed bits).
             0x10 | 0x30 | 0x50 | 0x70 => {
+                if !fits_signed(delta, 19) {
+                    return false;
+                }
                 let byte = delta << 2;
                 let immlo = (byte & 3) as u32;
                 let immhi = ((byte >> 2) as u32) & 0x7FFFF;
-                (w & 0x9F00_001F) | (immlo << 29) | (immhi << 5)
+                code[pos] = (w & 0x9F00_001F) | (immlo << 29) | (immhi << 5);
             }
-            0xB7 | 0x37 | 0xB6 | 0x36 => (w & 0xFFF8_001F) | (((delta as u32) & 0x3FFF) << 5),
-            _ => (w & 0xFF00_001F) | (((delta as u32) & 0x7FFFF) << 5),
-        };
+            // tbnz/tbz: imm14 word displacement.
+            0xB7 | 0x37 | 0xB6 | 0x36 => {
+                if !fits_signed(delta, 14) {
+                    return false;
+                }
+                code[pos] = (w & 0xFFF8_001F) | (((delta as u32) & 0x3FFF) << 5);
+            }
+            // b.cond / cbz / cbnz: imm19 word displacement.
+            _ => {
+                if !fits_signed(delta, 19) {
+                    return false;
+                }
+                code[pos] = (w & 0xFF00_001F) | (((delta as u32) & 0x7FFFF) << 5);
+            }
+        }
+        true
     }
 
     /// Emits the whole program; None = a step outside the supported set (the
@@ -1336,7 +1385,16 @@ mod emit {
                 Target::Local(LOCAL_TABLE) => table_pos,
                 Target::Local(l) => panic!("unbound local label {l}"),
             };
-            patch_branch(&mut e.code, pos, target);
+            if !patch_branch(&mut e.code, pos, target) {
+                // Displacement outside the instruction's encodable range:
+                // abandon JIT for this expression rather than install a
+                // truncated branch. Caller falls open to the interpreter.
+                return None;
+            }
+        }
+        // An intra-step (bind_local) fixup may also have overflowed.
+        if e.branch_overflow {
+            return None;
         }
         Some((e.code, fetch))
     }
@@ -1634,6 +1692,50 @@ mod emit {
                 emit_helper_call(e, ix, nsteps);
                 cache.flush();
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod branch_range_tests {
+        use super::*;
+
+        #[test]
+        fn fits_signed_boundaries() {
+            assert!(fits_signed(8191, 14));
+            assert!(fits_signed(-8192, 14));
+            assert!(!fits_signed(8192, 14));
+            assert!(!fits_signed(-8193, 14));
+        }
+
+        #[test]
+        fn tbnz_at_reach_encodes() {
+            // TBNZ x0, #63, +8191 words: the maximum encodable forward imm14.
+            let mut code = vec![0xB7F8_0000u32];
+            assert!(patch_branch(&mut code, 0, 8191));
+            // imm14 field (bits 5..=18) holds the raw word delta.
+            assert_eq!((code[0] >> 5) & 0x3FFF, 8191);
+        }
+
+        #[test]
+        fn tbnz_beyond_reach_fails_open() {
+            // A forward displacement of 8192 words no longer fits imm14. The
+            // old code masked it (8192 & 0x3FFF == 0x2000) which set the imm14
+            // sign bit, silently turning the forward branch into a backward
+            // one. patch_branch must now refuse and leave the word untouched so
+            // the caller falls open to the interpreter.
+            let mut code = vec![0xB7F8_0000u32];
+            assert!(!patch_branch(&mut code, 0, 8192));
+            assert_eq!(code[0], 0xB7F8_0000, "instruction must be left untouched");
+        }
+
+        #[test]
+        fn imm19_branch_range_enforced() {
+            // b.cond / cbz / cbnz use imm19: +/-262143 words of forward reach.
+            let mut ok = vec![0x5400_0000u32]; // b.cond
+            assert!(patch_branch(&mut ok, 0, (1 << 18) - 1));
+            let mut bad = vec![0x5400_0000u32];
+            assert!(!patch_branch(&mut bad, 0, 1 << 18));
+            assert_eq!(bad[0], 0x5400_0000, "instruction must be left untouched");
         }
     }
 }

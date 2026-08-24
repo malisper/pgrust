@@ -58,11 +58,13 @@ fn spin_acquire(lock: &Spinlock) {
 }
 
 fn cv_wait_link(procno: ProcNumber) -> proclist_node {
-    GetPGProcByNumber(procno).cvWaitLink.get()
+    // SAFETY: [CV] serialized by the condition variable's spinlock
+    unsafe { GetPGProcByNumber(procno).cvWaitLink.get() }
 }
 
 fn set_cv_wait_link(procno: ProcNumber, node: proclist_node) {
-    GetPGProcByNumber(procno).cvWaitLink.set(node);
+    // SAFETY: [CV] serialized by the condition variable's spinlock
+    unsafe { GetPGProcByNumber(procno).cvWaitLink.set(node); }
 }
 
 fn proclist_push_tail(list: &mut proclist_head, procno: ProcNumber) {
@@ -348,10 +350,13 @@ fn checkpointer_cv(cv: condition_variable_seams::CheckpointerCv) -> &'static Con
 // cvWaitLink side; both must clear together. Postmaster only, children dead.
 pub fn cv_reset_after_crash(cv: &ConditionVariable) {
     cv.mutex.unlock();
-    cv.wakeup.set(proclist_head {
-        head: INVALID_PROC_NUMBER,
-        tail: INVALID_PROC_NUMBER,
-    });
+    // SAFETY: [CV] postmaster-only crash re-init; children dead
+    unsafe {
+        cv.wakeup.set(proclist_head {
+            head: INVALID_PROC_NUMBER,
+            tail: INVALID_PROC_NUMBER,
+        });
+    }
 }
 
 pub fn ProcSignalBarrierCvsResetAfterCrash() {

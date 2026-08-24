@@ -907,6 +907,15 @@ pub struct EStateData<'mcx> {
     // instrumentation; blocks released in teardown (droppy owner).
     pub es_jit_blocks: Vec<::jit_deform::CodeBlock>,
     pub es_jit_instr: ::jit_deform::JitInstrumentation,
+    // idx-112 (CWE-863): funcids whose EXECUTE ACL was checked at compile
+    // time (init_func / operator / grouping paths). In C every ExprState is
+    // rebuilt per ExecutorStart, so those checks re-run on every execution of
+    // a cached plan; pgrust parks and reuses the compiled executor, so the
+    // reuse path (skeleton_rearm_exec) must replay these checks against the
+    // current user id via `execexpr::recheck_execute_acls`. Populated by
+    // execmain's InitPlan recording window; empty for executors that never
+    // reference a function (nothing to recheck).
+    pub es_execute_acl_funcs: Vec<::types_core::Oid>,
     // C EPQState.relsubs_*, hosted on the (shared) estate — no child EState.
     pub es_epq: Option<EpqSubs<'mcx>>,
     // C `es_epq_active != NULL`; scan nodes select their EPQ variant on it.
@@ -1289,6 +1298,7 @@ impl<'mcx> EStateData<'mcx> {
             es_jit_flags: 0,
             es_jit_blocks: Vec::new(),
             es_jit_instr: ::jit_deform::JitInstrumentation::default(),
+            es_execute_acl_funcs: Vec::new(),
             es_epq: None,
             es_epq_active: false,
         }
@@ -1732,6 +1742,7 @@ impl<'mcx> EStateData<'mcx> {
         }
         self.es_aux_contexts.clear();
         self.es_jit_blocks.clear();
+        self.es_execute_acl_funcs.clear();
         // [sqe-cursors] the spool is a droppy owner (Box): released here
         // so the forget path reclaims it (partial-FETCH-then-CLOSE
         // hygiene rides this line).
@@ -1750,6 +1761,7 @@ impl<'mcx> EStateData<'mcx> {
             && self.es_worktable_shared.iter().all(Option::is_none)
             && self.es_aux_contexts.is_empty()
             && self.es_jit_blocks.is_empty()
+            && self.es_execute_acl_funcs.is_empty()
             && self.es_sqe_spool.is_none()
             && self.es_subplan_expr_states.is_empty()
             && self
@@ -1808,6 +1820,9 @@ mcx::forget_safe_struct!(
         // asserts it) — exempt group [1].
         es_sqe_spool,
         es_jit_blocks,
+        // idx-112: global-heap Vec<Oid>, cleared in teardown() before the
+        // bundle is forgotten (owners_released asserts it) — exempt group [1].
+        es_execute_acl_funcs,
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
         es_tupleTable, es_exprcontexts, es_cte_shared, es_worktable_shared,
         es_aux_contexts,

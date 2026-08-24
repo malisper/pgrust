@@ -175,8 +175,8 @@ fn reset_proc_xid_state() {
     ProcGlobal().xids[pgxactoff]
         .value
         .store(types_core::InvalidTransactionId, Relaxed);
-    proc.subxidStatus.set(Default::default());
-    ProcGlobal().subxidStates[pgxactoff].set(Default::default());
+    unsafe { proc.subxidStatus.set(Default::default()) };
+    unsafe { ProcGlobal().subxidStates[pgxactoff].set(Default::default()) };
 }
 
 #[test]
@@ -230,19 +230,19 @@ fn subxact_ids_fill_cache_then_overflow() {
     ProcGlobal().xids[pgxactoff].value.store(200, Relaxed);
 
     let full = GetNewTransactionId(true).unwrap();
-    assert_eq!(proc.subxidStatus.get().count, 1);
-    assert_eq!(proc.subxids.get().xids[0], full.xid());
-    assert_eq!(ProcGlobal().subxidStates[pgxactoff].get().count, 1);
+    assert_eq!(unsafe { proc.subxidStatus.get() }.count, 1);
+    assert_eq!(unsafe { proc.subxids.get() }.xids[0], full.xid());
+    assert_eq!(unsafe { ProcGlobal().subxidStates[pgxactoff].get() }.count, 1);
 
     // fill the cache to the brim, then one more overflows
-    let mut status = proc.subxidStatus.get();
+    let mut status = unsafe { proc.subxidStatus.get() };
     status.count = PGPROC_MAX_CACHED_SUBXIDS as u8;
-    proc.subxidStatus.set(status);
-    ProcGlobal().subxidStates[pgxactoff].set(status);
+    unsafe { proc.subxidStatus.set(status) };
+    unsafe { ProcGlobal().subxidStates[pgxactoff].set(status) };
 
     GetNewTransactionId(true).unwrap();
-    assert!(proc.subxidStatus.get().overflowed);
-    assert!(ProcGlobal().subxidStates[pgxactoff].get().overflowed);
+    assert!(unsafe { proc.subxidStatus.get() }.overflowed);
+    assert!(unsafe { ProcGlobal().subxidStates[pgxactoff].get() }.overflowed);
 
     reset_proc_xid_state();
 }

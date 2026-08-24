@@ -398,13 +398,19 @@ pub fn seal_part(
 
     // ---- SB-10 grain election (closed-form over exact chunk stats) ---------
     let grain = elect_part_grain(rows, &streams);
+    // The closed forms are untruncated u64 (geom §, idx 253). Bound the
+    // granule count in u64 first; a legitimate part is well within u32, so
+    // only after the MAX_GRANULES_PER_PART guard do we narrow to the u32 the
+    // footer/manifest fields (and the downstream loops) carry.
     let granule_count = geom::granule_count_at(rows, grain);
     let band_count = geom::band_count_at(rows, grain);
-    if granule_count > MAX_GRANULES_PER_PART {
+    if granule_count > MAX_GRANULES_PER_PART as u64 {
         return Err(WriteError::Contract {
             detail: "part exceeds the rowid granule budget (cut policy breach)",
         });
     }
+    let granule_count = granule_count as u32;
+    let band_count = band_count as u32;
 
     let mut buf: Vec<u8> = Vec::new();
     PartHeader::new(
@@ -1176,7 +1182,7 @@ pub fn seal_part(
     // ---- PathTable (spec §6.5; shredded parts only) ------------------------
     if !lanes.is_empty() {
         let paths: Vec<&str> = lanes.iter().map(|l| l.path.as_str()).collect();
-        let body = encode_path_table(&paths);
+        let body = encode_path_table(&paths)?;
         push_raw_section(&mut buf, &mut sections, SectionKind::PathTable, 0, 0, &body);
     }
 
@@ -1459,7 +1465,7 @@ fn encode_stream_dir(plans: &[StreamPlan]) -> Vec<u8> {
 fn elect_part_grain(rows: u64, streams: &[(u32, u32, &ColBuffer, Option<i32>)]) -> GranuleGrain {
     for &g in &geom::GRAIN_LADDER {
         let grain = GranuleGrain::from_rows(g).expect("ladder grain");
-        let gc = geom::granule_count_at(rows, grain).max(1) as u64;
+        let gc = geom::granule_count_at(rows, grain).max(1);
         let fits = streams.iter().all(|&(_, _, col, _)| {
             col.granule_pricing_bytes().div_ceil(gc) <= geom::GRANULE_BYTE_BOUND_PROVISIONAL
         });

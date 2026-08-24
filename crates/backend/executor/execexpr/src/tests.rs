@@ -25,9 +25,18 @@ const BOOLOID: u32 = 16;
 
 static SEAMS: Once = Once::new();
 
+// idx-112: funcids the object_aclcheck seam should report as lacking
+// EXECUTE (empty by default -> every check passes, preserving existing tests).
+thread_local! {
+    static ACL_DENY: core::cell::RefCell<alloc::vec::Vec<u32>> =
+        const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+}
+
 fn install_seams() {
     SEAMS.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
+        // idx-112: get_func_name backing for permission_denied's message.
+        syscache_seams::pg_proc_proname::set(|_funcid| Ok(None));
         namespace_seams::is_temp_namespace::set(|_| false);
         syscache_seams::pg_type_typnamespace::set(|_| Ok(Some(11)));
         syscache_seams::pg_type_element_shape::set(|typid| {
@@ -44,7 +53,15 @@ fn install_seams() {
                 _ => None,
             })
         });
-        aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
+        // idx-112: ACLCHECK_NO_PRIV (2) for any funcid marked revoked, else
+        // ACLCHECK_OK (0). Defaults to OK for every existing test.
+        aclchk_seams::object_aclcheck::set(|_classid, objid, _roleid, _mode| {
+            Ok(if ACL_DENY.with(|d| d.borrow().contains(&objid)) {
+                2
+            } else {
+                0
+            })
+        });
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
                 INT4OID => Some(PgTypeShape {
@@ -908,7 +925,7 @@ fn still_valid_check_rejects_type_mismatch() {
             inner: None,
             outer: None,
         };
-        let err = exec_eval_expr(&mut state, &mut slots).unwrap_err();
+        let err = exec_eval_expr(&mut state, &mut slots).err().unwrap();
         // CheckVarSlotCompatibility's C-exact wrong-type message (B5).
         assert!(
             err.message().contains("has wrong type"),
@@ -958,6 +975,49 @@ fn step_footprint_and_program_shapes() {
         assert!(matches!(state.steps()[2], Step::Qual { jumpdone: 3 }));
         assert!(matches!(state.steps()[3], Step::DoneReturn));
         assert_eq!(shapes.len(), 4);
+    });
+}
+
+// idx-112 (CWE-863): a parked/reused executor must replay the compile-time
+// function EXECUTE-ACL checks against the CURRENT user id. Here we prove the
+// two halves of the mechanism: (1) InitPlan's recording window captures the
+// funcid whose EXECUTE ACL is checked when an OpExpr is compiled, and (2)
+// recheck_execute_acls (run on every parked reuse) passes while the grant
+// stands and fails with C's "permission denied" text once it is revoked,
+// exactly as C's per-execution ExecInitFunc recheck would.
+#[test]
+fn parked_reuse_replays_function_execute_acl() {
+    install_seams();
+    ACL_DENY.with(|d| d.borrow_mut().clear());
+    with_mcx(|mcx| {
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, INT4OID),
+            mk_int4_const(mcx, Some(7)),
+        )
+        .unwrap();
+        // Compile under a recording window (execmain opens one around InitPlan).
+        crate::compile::execute_acl_session_begin();
+        let _state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
+        let funcids = crate::compile::execute_acl_session_end();
+        assert!(
+            funcids.contains(&65),
+            "compile must record the checked EXECUTE-ACL funcid, got {funcids:?}"
+        );
+
+        // Reuse while the current user still holds EXECUTE: recheck passes.
+        crate::compile::recheck_execute_acls(mcx, &funcids).unwrap();
+
+        // REVOKE EXECUTE (or SET ROLE to a user without it) between executions:
+        // the next reuse's recheck must now deny, matching C.
+        ACL_DENY.with(|d| d.borrow_mut().push(65));
+        let err = crate::compile::recheck_execute_acls(mcx, &funcids).err().unwrap();
+        assert!(
+            err.message().contains("permission denied"),
+            "revoked reuse must be denied, got: {}",
+            err.message()
+        );
+        ACL_DENY.with(|d| d.borrow_mut().clear());
     });
 }
 
@@ -1242,7 +1302,7 @@ fn sysvar_steps_read_slot_and_tuple_header() {
             eval_sysvar(mcx, &mut vslot, -6, 26).unwrap().value.as_oid(),
             7
         );
-        let err = eval_sysvar(mcx, &mut vslot, -2, 28).unwrap_err();
+        let err = eval_sysvar(mcx, &mut vslot, -2, 28).err().unwrap();
         assert_eq!(
             err.message,
             "cannot retrieve a system column in this context"
@@ -1306,7 +1366,7 @@ fn param_extern_missing_value_errors_42704() {
             .unwrap();
         assert!(matches!(state.steps()[0], Step::ParamExternMissing { .. }));
         let mut slots = EvalSlots::default();
-        let err = exec_eval_expr(&mut state, &mut slots).unwrap_err();
+        let err = exec_eval_expr(&mut state, &mut slots).err().unwrap();
         assert_eq!(err.message, "no value found for parameter 2");
         assert_eq!(err.sqlstate, ::types_error::ERRCODE_UNDEFINED_OBJECT);
     });
@@ -1823,7 +1883,7 @@ fn coerce_to_domain_valid_value_passes() {
 
 #[test]
 fn coerce_to_domain_check_violation_is_23514() {
-    let e = eval_domain(Some(0)).unwrap_err();
+    let e = eval_domain(Some(0)).err().unwrap();
     assert_eq!(
         e.message(),
         "value for domain posint violates check constraint \"posint_check\""
@@ -1835,7 +1895,7 @@ fn coerce_to_domain_check_violation_is_23514() {
 
 #[test]
 fn coerce_to_domain_null_is_23502() {
-    let e = eval_domain(None).unwrap_err();
+    let e = eval_domain(None).err().unwrap();
     assert_eq!(e.message(), "domain posint does not allow null values");
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
 }
@@ -1845,9 +1905,9 @@ fn domain_check_input_engine_matches() {
     install_seams();
     assert!(crate::domain::domain_check_input(Datum::from_i32(7), false, DOMAIN_OID, None).is_ok());
     let e = crate::domain::domain_check_input(Datum::from_i32(-1), false, DOMAIN_OID, None)
-        .unwrap_err();
+        .err().unwrap();
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_CHECK_VIOLATION);
-    let e = crate::domain::domain_check_input(Datum::null(), true, DOMAIN_OID, None).unwrap_err();
+    let e = crate::domain::domain_check_input(Datum::null(), true, DOMAIN_OID, None).err().unwrap();
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
 }
 #[test]
@@ -2204,7 +2264,7 @@ fn thin_fused_chain_overflow_error_intact() {
             inner: None,
             outer: None,
         };
-        let e = exec_eval_expr(&mut state, &mut slots).unwrap_err();
+        let e = exec_eval_expr(&mut state, &mut slots).err().unwrap();
         assert_eq!(
             e.sqlstate(),
             ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
@@ -2281,7 +2341,7 @@ fn thin_strict1_single_rewrite() {
             inner: None,
             outer: None,
         };
-        let e = exec_eval_expr(&mut state, &mut slots).unwrap_err();
+        let e = exec_eval_expr(&mut state, &mut slots).err().unwrap();
         assert_eq!(
             e.sqlstate(),
             ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
@@ -2889,7 +2949,7 @@ mod json {
         with_mcx(|mcx| {
             let mut spec = value_spec(mcx, r#"{"a": "abc"}"#, "$.a", INT4OID);
             spec.on_error = behavior(mcx, JBT::JSON_BEHAVIOR_ERROR, null_const(mcx, INT4OID));
-            let e = eval(mcx, mk_json_expr(mcx, spec)).unwrap_err();
+            let e = eval(mcx, mk_json_expr(mcx, spec)).err().unwrap();
             assert_eq!(
                 e.sqlstate(),
                 ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION
@@ -2934,7 +2994,7 @@ mod json {
                 JBT::JSON_BEHAVIOR_ERROR,
                 null_const(mcx, INT4OID),
             ));
-            let e = eval(mcx, mk_json_expr(mcx, spec)).unwrap_err();
+            let e = eval(mcx, mk_json_expr(mcx, spec)).err().unwrap();
             assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NO_SQL_JSON_ITEM);
             assert_eq!(e.message(), "no SQL/JSON item found for specified path");
         });
@@ -5180,7 +5240,7 @@ fn current_of_expr_compiles_and_errors_cleanly_at_eval() {
         .unwrap();
     state.arm_result_mcx(mcx);
     let mut slots = EvalSlots::default();
-    let e = exec_eval_expr(&mut state, &mut slots).unwrap_err();
+    let e = exec_eval_expr(&mut state, &mut slots).err().unwrap();
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
     assert_eq!(
         e.message(),

@@ -12,9 +12,12 @@ use std::sync::Arc;
 
 #[inline(always)]
 pub fn minute_of(us: i64) -> u64 {
-    // PG extract(minute FROM timestamp): minute of the time of day. The
-    // bank's EventTime values are all positive (2013 > the 2000 epoch).
-    ((us % 3_600_000_000) / 60_000_000) as u64
+    // PG extract(minute FROM timestamp): minute of the time of day. Timestamps
+    // are signed microseconds since 2000-01-01, so pre-2000 values are negative;
+    // rem_euclid gives sign-correct field extraction over the full domain
+    // (matches the oracle and kernels_f6::trunc_minute). Result is always 0..=59,
+    // upholding the minute < 64 pack invariant.
+    (us.rem_euclid(3_600_000_000) / 60_000_000) as u64
 }
 
 // ---------------------------------------------------------------------------

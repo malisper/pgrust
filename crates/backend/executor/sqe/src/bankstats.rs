@@ -111,7 +111,40 @@ impl Plane {
         let slot = self.bufs[ci].get_or_init(|| {
             let t0 = std::time::Instant::now();
             let e = &self.cols[ci];
-            let mut buf = vec![0u8; e.len as usize];
+            // The per-column payload length is an untrusted on-disk u64
+            // (decode_meta bounds nothing but `pad == 0`). Validate the
+            // [off, off+len) extent against the sidecar's ACTUAL size —
+            // the external truth — before committing any memory, mirroring
+            // Plane::open's fail-closed meta_len posture. A crafted length
+            // (multi-GiB / wrapping) would otherwise drive an infallible
+            // `vec![0u8; len]` whose alloc_zeroed failure aborts the whole
+            // single-process server. Any violation → typed refusal → the
+            // caller falls back to per-part sections.
+            let file_len = match self.file.metadata() {
+                Ok(md) => md.len(),
+                Err(_) => {
+                    println!("BANKSTATS|fault-fail|attno={attno}|reason=stat");
+                    return None;
+                }
+            };
+            match e.off.checked_add(e.len) {
+                Some(end) if end <= file_len => {}
+                _ => {
+                    println!(
+                        "BANKSTATS|stale|reason=bad-col-len|attno={attno}|off={}|len={}|file={file_len}",
+                        e.off, e.len
+                    );
+                    return None;
+                }
+            }
+            // Bounded by file_len above; the fallible reserve is a final
+            // guard so no path can reach an infallible huge allocation.
+            let mut buf = Vec::new();
+            if buf.try_reserve_exact(e.len as usize).is_err() {
+                println!("BANKSTATS|stale|reason=col-alloc|attno={attno}|len={}", e.len);
+                return None;
+            }
+            buf.resize(e.len as usize, 0);
             if self.file.read_exact_at(&mut buf, e.off).is_err() {
                 println!("BANKSTATS|fault-fail|attno={attno}");
                 return None;
@@ -152,5 +185,83 @@ impl Plane {
         let e = &self.cols[ci];
         let view = fb::ColPayloadRef::new_validated(e, self.header.part_count, &buf).ok()?;
         Some(view.digest(pi).and_then(|b| <[u8; 24]>::try_from(b).ok()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plane_with_col(path: &std::path::Path, entry: fb::ColDirEntry) -> Plane {
+        let file = std::fs::File::open(path).expect("open sidecar");
+        let header = fb::BankStatsHeader {
+            gen: 0,
+            schema_fingerprint: 0,
+            part_count: 1,
+            ncols: 1,
+            meta_len: 0,
+            flags: 0,
+        };
+        let attno = entry.attno as usize;
+        let mut by_attno = vec![None; attno + 1];
+        by_attno[attno] = Some(0);
+        Plane {
+            file,
+            header,
+            cols: vec![entry],
+            by_attno,
+            bufs: vec![OnceLock::new()],
+            faults: AtomicU64::new(0),
+            fault_bytes: AtomicU64::new(0),
+        }
+    }
+
+    /// A crafted ColDirEntry whose declared payload length dwarfs (or
+    /// wraps past) the sidecar's actual size must be refused BEFORE any
+    /// allocation — no `vec![0u8; huge]` abort of the single-process
+    /// server. col_buf returns None so the caller falls back to per-part
+    /// sections, matching the module's fail-closed posture.
+    #[test]
+    fn crafted_col_len_refused_without_alloc() {
+        // A tiny real sidecar file (16 bytes) as the external truth.
+        let path = std::env::temp_dir().join(format!(
+            "pgrust-bankstats-test-{}-{}.pgrc2bs",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, [0u8; 16]).expect("write sidecar");
+
+        // Multi-gibibyte length far beyond the 16-byte file.
+        let huge = plane_with_col(
+            &path,
+            fb::ColDirEntry {
+                attno: 1,
+                flags: 0,
+                off: 0,
+                len: 1u64 << 62,
+                stats_len: 0,
+                crc: 0,
+            },
+        );
+        assert!(huge.col_buf(1).is_none(), "huge column length must be refused");
+
+        // Wrapping extent: off + len overflows u64.
+        let wrap = plane_with_col(
+            &path,
+            fb::ColDirEntry {
+                attno: 1,
+                flags: 0,
+                off: u64::MAX - 3,
+                len: 64,
+                stats_len: 0,
+                crc: 0,
+            },
+        );
+        assert!(wrap.col_buf(1).is_none(), "wrapping extent must be refused");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

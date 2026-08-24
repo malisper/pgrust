@@ -155,7 +155,7 @@ pub(crate) fn build_positive(cache_id: i32, ntp: &HeapTupleData<'_>) -> PgResult
 
     let mut keys = [Datum::null(); CATCACHE_MAXKEYS];
     for i in 0..nkeys as usize {
-        keys[i] = match tuple_key(kinds[i], &cached_view, keyno[i], tupdesc) {
+        keys[i] = match tuple_key(kinds[i], &cached_view, keyno[i], tupdesc)? {
             CatCKey::Value(d) => d,
             CatCKey::Bytes(b) => {
                 let off = b.as_ptr() as usize - buf.as_ptr() as usize;

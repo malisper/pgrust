@@ -33,6 +33,18 @@ use crate::ReadResult;
 /// Stat-only registry key: `(dev, ino, len)`.
 pub type PartKey = (u64, u64, u64);
 
+/// Default cap on the number of live cache entries (charter §1 "sharing"
+/// budget is guidance, not law). Each entry pins one raw kernel fd for its
+/// whole life (`VfsPartIo`, outside the VFD EMFILE-LRU pool), so the byte
+/// budget alone does NOT bound descriptor use: an entry whose part was opened
+/// but never decoded has `resident()==0` and exerts zero budget pressure, so a
+/// stream of such entries (e.g. scans that fetch no rows, or self-scans of
+/// aborted publishes) would accumulate fds without bound. A count cap makes the
+/// janitor reclaim LRU-unpinned entries by entry count as well, bounding held
+/// descriptors regardless of resident bytes. A miss re-resolves from the
+/// manifest, so eviction is correctness-preserving.
+pub const DEFAULT_MAX_ENTRIES: u64 = 4096;
+
 struct RegState {
     parts: BTreeMap<PartKey, Arc<OpenPart>>,
 }
@@ -82,6 +94,9 @@ pub struct PartRegistry {
     /// Logical LRU clock (monotone counter).
     clock: AtomicU64,
     budget: AtomicU64,
+    /// Cap on live entry count — bounds held kernel fds independently of the
+    /// resident-byte budget (zero-resident entries still each hold one fd).
+    max_entries: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
     evictions: AtomicU64,
@@ -96,6 +111,7 @@ impl PartRegistry {
             }),
             clock: AtomicU64::new(1),
             budget: AtomicU64::new(budget_bytes),
+            max_entries: AtomicU64::new(DEFAULT_MAX_ENTRIES),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
@@ -109,6 +125,18 @@ impl PartRegistry {
 
     pub fn budget(&self) -> u64 {
         self.budget.load(Ordering::Relaxed)
+    }
+
+    /// Runtime-settable cap on live entry count (the fd-bound GUC seam). A
+    /// value of 0 is clamped to 1 so the cache always holds at least the entry
+    /// it just opened. Lowering it makes the next janitor pass reclaim
+    /// LRU-unpinned entries down to the new cap.
+    pub fn set_max_entries(&self, n: u64) {
+        self.max_entries.store(n.max(1), Ordering::Relaxed);
+    }
+
+    pub fn max_entries(&self) -> u64 {
+        self.max_entries.load(Ordering::Relaxed)
     }
 
     /// Open-or-share a part, returning it pinned. `open_io` opens the file
@@ -195,13 +223,20 @@ impl PartRegistry {
         part.last_used.store(now, Ordering::Relaxed);
     }
 
-    /// Evict LRU unpinned entries while over budget. Deterministic: the
-    /// victim is min by (last_used, key) over a BTreeMap (stable order).
+    /// Evict LRU unpinned entries while over EITHER budget: resident bytes over
+    /// the byte budget, OR live entry count over the entry cap. The count cap
+    /// bounds held kernel fds independently of resident bytes — a zero-resident
+    /// entry exerts no byte pressure but still pins one fd (and, for an unlinked
+    /// part, its inode), so byte-only eviction would let such entries (aborted
+    /// self-publish self-scans, zero-row scans) accumulate without bound.
+    /// Deterministic: the victim is min by (last_used, key) over a BTreeMap
+    /// (stable order).
     fn janitor(&self, st: &mut RegState) {
         let budget = self.budget.load(Ordering::Relaxed);
+        let max_entries = self.max_entries.load(Ordering::Relaxed) as usize;
         loop {
             let total: u64 = st.parts.values().map(|p| p.resident()).sum();
-            if total <= budget {
+            if total <= budget && st.parts.len() <= max_entries {
                 return;
             }
             let victim = st

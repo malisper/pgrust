@@ -1,9 +1,10 @@
+use alloc::boxed::Box;
 use core::alloc::Layout;
 use core::ffi::CStr;
 use core::marker::PhantomData;
 
 use ::mcx::{Allocator, Mcx};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use ::types_tuple::varatt;
 
 use crate::fcinfo::FunctionCallInfoBaseData;
@@ -90,20 +91,53 @@ impl<'a> PackedVarlena<'a> {
     #[inline]
     pub fn data(self) -> &'a [u8] {
         // SAFETY: from_ptr contract — image readable for its full size.
+        //
+        // The header-declared length is untrusted (it can originate from a
+        // corrupt on-disk page: this wrapper is built directly over the raw
+        // datum by `from_ptr`/`arg_varlena_packed`/`datum_varlena_packed`
+        // without a structural floor check). A 4B-uncompressed header whose
+        // 30-bit length word decodes below VARHDRSZ (e.g. a zeroed 4-byte
+        // header) would underflow the payload length and mint an out-of-bounds
+        // slice. `saturating_sub` clamps the exhdr length to 0 so the reader is
+        // structurally incapable of returning a slice longer than the declared
+        // image — no over-read regardless of how the wrapper was constructed.
         unsafe {
             if varatt::varatt_is_1b(self.ptr) {
                 core::slice::from_raw_parts(
                     self.ptr.add(varatt::VARHDRSZ_SHORT),
-                    varatt::varsize_1b(self.ptr) - varatt::VARHDRSZ_SHORT,
+                    varatt::varsize_1b(self.ptr).saturating_sub(varatt::VARHDRSZ_SHORT),
                 )
             } else {
                 core::slice::from_raw_parts(
                     self.ptr.add(varatt::VARHDRSZ),
-                    varatt::varsize_4b(self.ptr) - varatt::VARHDRSZ,
+                    varatt::varsize_4b(self.ptr).saturating_sub(varatt::VARHDRSZ),
                 )
             }
         }
     }
+}
+
+/// A 4B-uncompressed varlena must declare a total size of at least `VARHDRSZ`;
+/// a shorter length word (a zeroed/short 4-byte header on a corrupt page)
+/// would underflow the payload-length computation. C's `VARSIZE_4B` macros
+/// trust the header, but pgrust validates untrusted on-disk datums before use.
+/// Only the 4B-U arm can underflow: a 1B header declaring size 0 is byte
+/// `0x01`, classified `1B_E` and rejected by the form checks upstream.
+///
+/// # Safety
+/// `p` points to a live varlena readable through its header.
+#[inline]
+unsafe fn varlena_header_underflows(p: *const u8) -> bool {
+    // SAFETY: caller contract — header readable.
+    unsafe { varatt::varatt_is_4b_u(p) && varatt::varsize_4b(p) < varatt::VARHDRSZ }
+}
+
+#[cold]
+fn corrupt_varlena_header_error() -> Box<PgError> {
+    Box::new(
+        PgError::error("varlena datum has a corrupt 4-byte header (declared size below VARHDRSZ)")
+            .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
 }
 
 // Detoast copies leak into the arena (C pallocs in CurrentMemoryContext).
@@ -127,6 +161,9 @@ pub unsafe fn datum_varlena_packed<'m>(d: ::datum::Datum, mcx: Mcx<'m>) -> PgRes
         let p = d.as_usize() as *const u8;
         if varatt::varatt_is_1b_e(p) || (!varatt::varatt_is_1b(p) && !varatt::varatt_is_4b_u(p)) {
             return detoast_arg(p, mcx);
+        }
+        if varlena_header_underflows(p) {
+            return Err(corrupt_varlena_header_error());
         }
         Ok(PackedVarlena { ptr: p, _image: PhantomData })
     }
@@ -191,6 +228,9 @@ impl FunctionCallInfoBaseData {
             if varatt::varatt_is_1b_e(p) || (!varatt::varatt_is_1b(p) && !varatt::varatt_is_4b_u(p))
             {
                 return detoast_arg(p, self.result_mcx());
+            }
+            if varlena_header_underflows(p) {
+                return Err(corrupt_varlena_header_error());
             }
             Ok(PackedVarlena {
                 ptr: p,

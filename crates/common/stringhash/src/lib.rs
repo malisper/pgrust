@@ -207,6 +207,23 @@ unsafe fn eq_bytes(a: *const u8, b: *const u8, len: usize) -> bool {
     i == len || load8(a.add(len - 8)) == load8(b.add(len - 8))
 }
 
+/// Bounds guard for a recorded `(off, len)` cell against the slice supplied by
+/// the CURRENT call. The safe public APIs here (`BytesDedup::insert`,
+/// `ExtIdMap::insert_or_get`/`find`) record offsets during earlier calls into a
+/// caller-owned blob/arena, then re-dereference them via `eq_bytes` on later
+/// calls against a slice passed fresh each time. Nothing structurally ties a
+/// recorded range to the slice now provided, so a caller that truncates, swaps,
+/// or shrinks the blob/arena while entries remain could otherwise drive an
+/// out-of-bounds read from 100% safe code. Treating any out-of-range entry as a
+/// non-match fails safe: valid in-tree callers (whose ranges are always in
+/// bounds) see identical behavior, while a violated cross-call invariant
+/// degrades to a lookup miss instead of undefined behavior. `off`/`len` are
+/// `u32`, so the sum never overflows `usize` on supported targets.
+#[inline(always)]
+fn cell_in_bounds(off: u32, len: u32, slice_len: usize) -> bool {
+    (off as usize).saturating_add(len as usize) <= slice_len
+}
+
 
 /// Advise transparent hugepages for large allocations (>= 2 MiB). The
 /// lane-v2-hugepages change applies the same advice to the executor's
@@ -847,9 +864,13 @@ impl TabX {
                 }
                 return (id, true, off as u32);
             }
-            if c.hash == hash && c.len as usize == key.len() && unsafe {
-                eq_bytes(arena.as_ptr().add(c.off as usize), key.as_ptr(), key.len())
-            } {
+            if c.hash == hash
+                && c.len as usize == key.len()
+                && cell_in_bounds(c.off, c.len, arena.len())
+                && unsafe {
+                    eq_bytes(arena.as_ptr().add(c.off as usize), key.as_ptr(), key.len())
+                }
+            {
                 return (c.v, false, c.off);
             }
             pos = (pos + 1) & self.mask;
@@ -867,9 +888,13 @@ impl TabX {
             if c.len == 0 {
                 return None;
             }
-            if c.hash == hash && c.len as usize == key.len() && unsafe {
-                eq_bytes(arena.as_ptr().add(c.off as usize), key.as_ptr(), key.len())
-            } {
+            if c.hash == hash
+                && c.len as usize == key.len()
+                && cell_in_bounds(c.off, c.len, arena.len())
+                && unsafe {
+                    eq_bytes(arena.as_ptr().add(c.off as usize), key.as_ptr(), key.len())
+                }
+            {
                 return Some(c.v);
             }
             pos = (pos + 1) & self.mask;
@@ -1349,9 +1374,13 @@ impl BytesDedup {
                 }
                 return true;
             }
-            if c.hash == hash && c.len as usize == content.len() && unsafe {
-                eq_bytes(blob.as_ptr().add(c.off as usize), content.as_ptr(), content.len())
-            } {
+            if c.hash == hash
+                && c.len as usize == content.len()
+                && cell_in_bounds(c.off, c.len, blob.len())
+                && unsafe {
+                    eq_bytes(blob.as_ptr().add(c.off as usize), content.as_ptr(), content.len())
+                }
+            {
                 return false;
             }
             pos = (pos + 1) & self.mask;
@@ -1477,6 +1506,76 @@ mod tests {
             want[..sz].copy_from_slice(&v);
             assert_eq!(pack8(&boxed), u64::from_le_bytes(want), "sz={sz}");
         }
+    }
+
+    /// idx 260 (OOB read): `BytesDedup::insert` records a cell's `(off, len)`
+    /// against the blob supplied on an earlier call, then re-reads it via
+    /// `eq_bytes` on later calls against a blob passed fresh each time. A safe
+    /// caller that later passes a SHORTER blob must not trigger an
+    /// out-of-bounds read (run under Miri/ASan to catch it); the fix treats an
+    /// out-of-range recorded entry as a non-match, so lookup/insert still
+    /// behaves correctly.
+    #[test]
+    fn bytesdedup_insert_shrunk_blob_no_oob() {
+        let content = b"AAAABBBBCCCC"; // 12 bytes
+        let hash = 0xdead_beef_u32;
+
+        // First insert records the entry at a high offset into a long blob.
+        let mut d = BytesDedup::new();
+        let content_off = 16u32;
+        let mut long_blob = vec![0u8; content_off as usize];
+        long_blob.extend_from_slice(content); // content image lives at [16..28]
+        assert!(
+            d.insert(hash, content, &long_blob, content_off),
+            "first insert records the entry"
+        );
+
+        // Positive control: identical content, still-valid blob => dedup hit,
+        // no new entry recorded. Confirms behavior is preserved for callers
+        // that keep the invariant.
+        assert!(
+            !d.insert(hash, content, &long_blob, content_off + 100),
+            "matching content in a valid blob is a dedup hit"
+        );
+
+        // Shrink-blob: the recorded cell needs off+len = 28 bytes, this blob
+        // is only 8. Must NOT read out of bounds and must fail safe: the
+        // out-of-range entry is treated as a mismatch, so the content is
+        // (re)inserted rather than silently deduped against unreadable memory.
+        let short_blob = vec![0u8; 8];
+        assert!(
+            d.insert(hash, content, &short_blob, 200),
+            "out-of-range recorded entry is a mismatch, not an OOB read"
+        );
+    }
+
+    /// idx 260 (OOB read): `ExtIdMap::find`/`insert_or_get` long-tail (TabX)
+    /// path reads `arena[off..off+len]` recorded during earlier inserts. Keys
+    /// longer than 24 bytes take that path. A shorter arena on a later call
+    /// must not read out of bounds; the entry becomes a miss.
+    #[test]
+    fn extidmap_find_shrunk_arena_no_oob() {
+        let key_a: Vec<u8> = (0..30u8).collect(); // 30 bytes -> TabX path
+        let key_b: Vec<u8> = (100..130u8).collect(); // 30 bytes -> TabX path
+
+        let mut m = ExtIdMap::new();
+        let mut arena: Vec<u8> = Vec::new();
+        let (_ida, ins_a, _) = m.insert_or_get(&key_a, &mut arena);
+        let (idb, ins_b, off_b) = m.insert_or_get(&key_b, &mut arena);
+        assert!(ins_a && ins_b, "both distinct keys inserted");
+        assert!(off_b as usize + key_b.len() <= arena.len());
+
+        // Positive control: full arena => hit.
+        assert_eq!(m.find(&key_b, &arena), Some(idb));
+
+        // Shrink-arena: the recorded (off_b, 30) range exceeds this arena, so
+        // it must be a miss (fail safe), not an OOB read.
+        let short = vec![0u8; off_b as usize]; // one full key short of the entry
+        assert_eq!(
+            m.find(&key_b, &short),
+            None,
+            "out-of-range recorded entry is a miss, not an OOB read"
+        );
     }
 
     /// dedupsub I3: a projection reserve mid-stream must lose nothing (a

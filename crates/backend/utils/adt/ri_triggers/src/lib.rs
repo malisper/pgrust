@@ -17,8 +17,9 @@ use types_core::{
 };
 use types_tuple::NameData;
 use types_error::{
-    PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_FOREIGN_KEY_VIOLATION,
-    ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_RESTRICT_VIOLATION, ERROR,
+    PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED,
+    ERRCODE_FOREIGN_KEY_VIOLATION, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION,
+    ERRCODE_RESTRICT_VIOLATION, ERROR,
 };
 use types_rel::{Relation, RowShareLock, RELKIND_PARTITIONED_TABLE};
 use types_trigger::{
@@ -1369,8 +1370,10 @@ fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
         let unpack = |d: Datum| -> PgResult<PgVec<'_, u8>> {
             // DatumGetArrayTypeP: the on-disk image may carry a 1-byte
             // header; rebuild the 4-byte form (relcache_build precedent).
-            // SAFETY: not-null array datum of the held syscache tuple.
-            let img = unsafe { array_image_bytes(d) };
+            // not-null array datum of the held syscache tuple; the declared
+            // varlena length is validated against the tuple image extent.
+            let htup = tup.tuple();
+            let img = array_image_bytes(&htup, d)?;
             let payload = varlena::open_image(smcx, img)?;
             let body = payload.as_bytes();
             let total = body.len() + 4;
@@ -1429,13 +1432,39 @@ fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
     Ok(info)
 }
 
-// SAFETY contract: d is a not-null, untoasted array datum; returns its full
-// varlena image.
-unsafe fn array_image_bytes<'a>(d: Datum) -> &'a [u8] {
+// Full varlena image of the not-null, untoasted array datum `d` fetched from
+// `tuple` (the held syscache pg_constraint tuple). C reaches these arrays via
+// DatumGetArrayTypeP on a tuple whose length the backend trusts; here `d`'s
+// self-declared varlena length (`varsize_any`) is untrusted on-disk catalog
+// data, so it is validated against the containing tuple image extent before a
+// slice is formed — a forged/truncated header can never drive an out-of-bounds
+// read, and instead raises a catchable ERRCODE_DATA_CORRUPTED.
+fn array_image_bytes<'t>(tuple: &'t HeapTupleData<'_>, d: Datum) -> PgResult<&'t [u8]> {
     let p = d.as_usize() as *const u8;
-    // SAFETY: caller contract.
-    let len = unsafe { types_tuple::varatt::varsize_any(p) };
-    core::slice::from_raw_parts(p, len)
+    // Bytes reachable from the datum pointer to the end of the tuple image.
+    let avail = datum_avail_in_tuple(tuple, d).ok_or_else(array_image_corrupt)?;
+    // SAFETY: `avail` bounds the readable extent from `p` within the tuple
+    // image, so no header or body byte is read past the tuple.
+    let len = unsafe { types_tuple::varatt::varsize_bounded(p, avail) }
+        .ok_or_else(array_image_corrupt)?;
+    // SAFETY: `len <= avail` was checked by varsize_bounded above.
+    Ok(unsafe { core::slice::from_raw_parts(p, len) })
+}
+
+// Cold, divergent: a pg_constraint array datum whose self-declared varlena
+// length runs past its syscache tuple image — crafted/corrupt on-disk catalog
+// bytes. The backend error boundary turns this into an aborted transaction
+// rather than an out-of-bounds read.
+#[cold]
+#[inline(never)]
+fn array_image_corrupt() -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            "pg_constraint array datum length exceeds tuple image".to_string(),
+        )
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
 }
 
 // C: a stale plan is rebuilt from scratch (query text too — renames), not
@@ -1741,7 +1770,10 @@ fn ri_ReportViolation<'mcx>(
         for idx in 0..riinfo.nkeys {
             let fnum = attnums[idx];
             let att = desc.attr(fnum as usize - 1);
-            let name = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+            // Diagnostic detail only; a column name may be non-UTF-8 in a
+            // SQL_ASCII database, where C emits the raw bytes. Use lossy instead
+            // of panicking on the constraint-violation error path.
+            let name = String::from_utf8_lossy(att.attname.name_str());
             let mut isnull = false;
             // SAFETY: live user column of the violator's descriptor.
             let d =
@@ -1755,7 +1787,7 @@ fn ri_ReportViolation<'mcx>(
                 key_names.push_str(", ");
                 key_values.push_str(", ");
             }
-            key_names.push_str(name);
+            key_names.push_str(&name);
             key_values.push_str(&val);
         }
     }
@@ -1933,7 +1965,22 @@ fn ri_KeysEqual(
         }
         let att = rel.rd_att.attr(attnums[i] as usize - 1);
         if rel_is_pk {
-            if !datum_image_eq(oldvalue, newvalue, att.attbyval, att.attlen) {
+            // Bound each by-ref datum by the extent of the tuple image it was
+            // fetched from. The old datum points straight into a pinned page
+            // whose bytes an attacker can craft (crafted-page precondition), so
+            // datum_image_eq must never size a varlena by its own header alone.
+            let (avail_old, avail_new) = if att.attbyval {
+                (0, 0)
+            } else {
+                match (
+                    datum_avail_in_tuple(oldtup, oldvalue),
+                    datum_avail_in_tuple(newtup, newvalue),
+                ) {
+                    (Some(o), Some(n)) => (o, n),
+                    _ => datum_image_corrupt(),
+                }
+            };
+            if !datum_image_eq(oldvalue, newvalue, att.attbyval, att.attlen, avail_old, avail_new) {
                 return Ok(false);
             }
         } else {
@@ -2021,7 +2068,18 @@ fn ri_GenerateQual(
     if leftoptype != shape.0 {
         add_cast_to(buf, shape.0)?;
     }
-    write!(buf, " OPERATOR(pg_catalog.{}) {rightop}", shape.2.as_str()).expect("PgString write");
+    // Qualify with the operator's REAL namespace (parity with
+    // ruleutils::generate_operator_clause), not a hardcoded pg_catalog: an FK
+    // whose '=' lives in another schema (e.g. citext) must resolve exactly the
+    // conpfeqop/conppeqop operator, or the RI probe enforces different equality
+    // semantics than the constraint declares and lets dangling rows through.
+    write!(
+        buf,
+        " OPERATOR({}.{}) {rightop}",
+        quote_one_name(shape.3.as_str()),
+        shape.2.as_str()
+    )
+    .expect("PgString write");
     if rightoptype != shape.1 {
         add_cast_to(buf, shape.1)?;
     }
@@ -2042,12 +2100,16 @@ fn add_cast_to(buf: &mut PgString<'_>, typid: Oid) -> PgResult<()> {
     Ok(())
 }
 
-fn syscache_shape_for_operator(opoid: Oid) -> PgResult<(Oid, Oid, String)> {
+fn syscache_shape_for_operator(opoid: Oid) -> PgResult<(Oid, Oid, String, String)> {
     let (left, right) = lsyscache::operator::op_input_types(opoid)?;
     let scratch = mcx::MemoryContext::new("ri-opname");
     let name = lsyscache::operator::get_opname(scratch.mcx(), opoid)?
         .unwrap_or_else(|| panic!("cache lookup failed for operator {opoid}"));
-    Ok((left, right, name.as_str().to_string()))
+    let opshape = syscache_seams::lookup_pg_operator_shape::call(opoid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for operator {opoid}"));
+    let nsp = lsyscache::get_namespace_name(scratch.mcx(), opshape.oprnamespace)?
+        .unwrap_or_else(|| panic!("cache lookup failed for namespace {}", opshape.oprnamespace));
+    Ok((left, right, name.as_str().to_string(), nsp.as_str().to_string()))
 }
 
 // ri_GenerateQualCollation (ri_triggers.c): append an always-qualified
@@ -2098,7 +2160,24 @@ fn quote_relation_name<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<S
 
 // datumIsEqual (datum.c) image comparison; typlen -2 (cstring) unreachable
 // for FK key columns backed by a btree unique index.
-fn datum_image_eq(a: Datum, b: Datum, typbyval: bool, typlen: i16) -> bool {
+//
+// `avail_a`/`avail_b` are the bytes reachable from each by-ref datum before the
+// end of the heap-tuple image it was fetched from (see `datum_avail_in_tuple`).
+// The PK-side old datum points directly into a pinned shared-buffer page whose
+// bytes an attacker can craft; a forged varlena header could otherwise declare
+// a size far past the tuple and drive the byte comparison off the page. Every
+// length that forms a slice is bounded against `avail`, so a lying header turns
+// into a deterministic corruption error instead of an out-of-bounds read. C is
+// insulated here because slot_getattr feeds datum_image_eq from validated
+// deformed slots rather than raw page pointers.
+fn datum_image_eq(
+    a: Datum,
+    b: Datum,
+    typbyval: bool,
+    typlen: i16,
+    avail_a: usize,
+    avail_b: usize,
+) -> bool {
     if typbyval {
         // Compare at typlen width: a formed-then-deformed datum may differ
         // from the original in the upper bits (C 49315de).
@@ -2110,18 +2189,56 @@ fn datum_image_eq(a: Datum, b: Datum, typbyval: bool, typlen: i16) -> bool {
             _ => x == y,
         };
     }
-    // SAFETY: by-ref datums point at live untoasted images (heap_getattr of
-    // pinned-page tuples re-fetched by the trigger machinery).
+    // SAFETY: by-ref datums point into the heap-tuple images they were fetched
+    // from; `avail_a`/`avail_b` bound the readable extent from each pointer, and
+    // every slice length below is validated against that bound before use.
     unsafe {
         let (pa, pb) = (a.as_usize() as *const u8, b.as_usize() as *const u8);
         let (la, lb) = if typlen > 0 {
-            (typlen as usize, typlen as usize)
+            let l = typlen as usize;
+            // Fixed-width by-ref: the image must hold `typlen` bytes for each.
+            if l > avail_a || l > avail_b {
+                datum_image_corrupt();
+            }
+            (l, l)
         } else {
             assert!(typlen == -1, "datum_image_eq: cstring keys unreachable");
-            (types_tuple::varatt::varsize_any(pa), types_tuple::varatt::varsize_any(pb))
+            match (
+                types_tuple::varatt::varsize_bounded(pa, avail_a),
+                types_tuple::varatt::varsize_bounded(pb, avail_b),
+            ) {
+                (Some(la), Some(lb)) => (la, lb),
+                // A varlena header declaring a size past its tuple image: a
+                // crafted/forged length. Never happens for a well-formed tuple.
+                _ => datum_image_corrupt(),
+            }
         };
         la == lb && core::slice::from_raw_parts(pa, la) == core::slice::from_raw_parts(pb, lb)
     }
+}
+
+/// Bytes of `tuple`'s image reachable from the by-ref datum `d`: the distance
+/// from the datum pointer to the end of the image. `heap_getattr` returns a
+/// pointer into the tuple for by-ref attributes, so a well-formed varlena's
+/// declared length never exceeds this. Returns `None` when the datum does not
+/// point within the image (never for `heap_getattr` output over these tuples),
+/// which callers treat as corruption rather than reading an unbounded extent.
+fn datum_avail_in_tuple(tuple: &HeapTupleData<'_>, d: Datum) -> Option<usize> {
+    let base = tuple.header_ptr() as usize;
+    let end = base.checked_add(tuple.t_len as usize)?;
+    let p = d.as_usize();
+    (p >= base && p < end).then(|| end - p)
+}
+
+// Cold, divergent: a by-ref key datum whose declared length runs past its
+// heap-tuple image — a mismatched descriptor or crafted on-disk bytes. Mirrors
+// the deform walk's corruption precedent (types_tuple deform_corrupt); the
+// backend error boundary turns the unwind into an aborted transaction rather
+// than an out-of-bounds read.
+#[cold]
+#[inline(never)]
+fn datum_image_corrupt() -> ! {
+    panic!("heap tuple key datum is corrupt: varlena length exceeds tuple image");
 }
 
 fn att_type(rel: &Relation<'_>, attnum: i16) -> Oid {

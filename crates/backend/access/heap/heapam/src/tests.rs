@@ -923,6 +923,49 @@ fn hot_chain_search_and_latest_tid() {
 }
 
 #[test]
+fn hot_chain_cycle_errors_not_hangs() {
+    // A crafted page with a 2-tuple t_ctid cycle (off1 <-> off2), both
+    // HOT-updated and both invisible, satisfies the xmin/xmax continuity check
+    // at every step. Without a bound the walk would spin forever holding the
+    // buffer pin; the fix must instead raise a catchable data-corruption error.
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+
+    // off1 -> off2 -> off1 -> ... ; xmax == next tuple's xmin == INVISIBLE_XMIN
+    // so the chain never tests visible and continuity always holds.
+    let mut t1 = tuple_image(INVISIBLE_XMIN, INVISIBLE_XMIN, 1);
+    set_infomask(&mut t1, 0, ::types_tuple::HEAP_HOT_UPDATED); // xmax valid
+    set_ctid(&mut t1, 0, 2);
+    let mut t2 = tuple_image(INVISIBLE_XMIN, INVISIBLE_XMIN, 2);
+    set_infomask(
+        &mut t2,
+        0,
+        ::types_tuple::HEAP_HOT_UPDATED | ::types_tuple::HEAP_ONLY_TUPLE,
+    );
+    set_ctid(&mut t2, 0, 1);
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(t1), Item::Tuple(t2)], false)],
+    );
+    let rel = test_relation(mcx, oid);
+    let snap = SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_MVCC);
+
+    let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(&rel, 0).unwrap()).unwrap();
+    {
+        let _lock = pin.lock_share().unwrap();
+        let err = heap_hot_search_buffer(ItemPointerData::new(0, 1), &rel, &pin, &snap, true, true)
+            .err()
+            .unwrap();
+        assert_eq!(err.sqlstate, ::types_error::ERRCODE_DATA_CORRUPTED);
+    }
+    pin.release();
+    quiesced();
+}
+
+#[test]
 fn update_xid_plain_xmax_paths() {
     #[repr(align(8))]
     struct Aligned([u8; 28]);
@@ -1309,7 +1352,7 @@ fn dml_delete_invisible_errmsg_is_c_exact() {
         &mut tmfd,
         false,
     )
-    .unwrap_err();
+    .err().unwrap();
     assert_eq!(err.message(), "attempted to delete invisible tuple");
     assert_eq!(
         err.sqlstate(),
@@ -1345,7 +1388,7 @@ fn dml_update_invisible_errmsg_is_c_exact() {
         &mut lockmode,
         &mut update_indexes,
     )
-    .unwrap_err();
+    .err().unwrap();
     assert_eq!(err.message(), "attempted to update invisible tuple");
     assert_eq!(
         err.sqlstate(),
@@ -1482,7 +1525,7 @@ fn dml_row_too_big_is_54000() {
     let oid = fresh_oid();
     register_table(oid, vec![]);
     let rel = test_relation(mcx, oid);
-    let err = hio::RelationGetBufferForTuple(&rel, BLCKSZ, None, 0, None, 0).unwrap_err();
+    let err = hio::RelationGetBufferForTuple(&rel, BLCKSZ, None, 0, None, 0).err().unwrap();
     assert_eq!(
         err.sqlstate(),
         ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED

@@ -5,13 +5,13 @@
 #![allow(non_upper_case_globals)]
 
 use types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber};
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use types_gist::{
     page_opaque_set, page_opaque_update, GISTPageOpaqueData, GistPageSetDeleted,
     GistxlogDelete, GistxlogPageDelete, GistxlogPageSplit, GistxlogPageUpdate, F_FOLLOW_RIGHT,
     F_HAS_GARBAGE, F_LEAF, F_TUPLES_DELETED, GIST_PAGE_ID, GIST_ROOT_BLKNO, SizeOfGistxlogDelete,
-    XLOG_GIST_ASSIGN_LSN, XLOG_GIST_DELETE, XLOG_GIST_PAGE_DELETE, XLOG_GIST_PAGE_REUSE,
-    XLOG_GIST_PAGE_SPLIT, XLOG_GIST_PAGE_UPDATE,
+    SizeOfGistxlogPageReuse, XLOG_GIST_ASSIGN_LSN, XLOG_GIST_DELETE, XLOG_GIST_PAGE_DELETE,
+    XLOG_GIST_PAGE_REUSE, XLOG_GIST_PAGE_SPLIT, XLOG_GIST_PAGE_UPDATE,
 };
 use types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
 
@@ -44,9 +44,51 @@ fn unlock_release(buffer: Buffer) -> PgResult<()> {
     bufmgr_seams::release_buffer::call(buffer)
 }
 
+/// sizeof(IndexTupleData): 6-byte ItemPointerData t_tid + 2-byte t_info. Every
+/// index tuple is at least this large, and the size word lives in t_info.
+const SIZE_OF_INDEX_TUPLE_DATA: usize = 8;
+
+#[cold]
+#[inline(never)]
+fn corrupt_err(msg: String) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_DATA_CORRUPTED))
+}
+
 #[inline]
-unsafe fn index_tuple_size(itup: *const u8) -> usize {
-    (itup.add(6).cast::<u16>().read_unaligned() & 0x1FFF) as usize
+fn require(cond: bool, msg: impl FnOnce() -> String) -> PgResult<()> {
+    if cond {
+        Ok(())
+    } else {
+        Err(corrupt_err(msg()))
+    }
+}
+
+/// IndexTupleSize() over a block-data slice, validated against what remains.
+///
+/// C casts the block-data pointer to an IndexTuple and reads the size word out
+/// of the decode buffer (gistxlog.c: `IndexTupleSize((IndexTuple) data)`); on a
+/// truncated or size-inflated tuple stream that read — and the subsequent
+/// `data[off..off+sz]` slice — would run past the buffer here. Confirm the
+/// header is present and the declared size lies within the remaining payload
+/// (and is at least a full header) before returning, so callers can slice
+/// `data[..sz]` safely. Malformed input yields ERRCODE_DATA_CORRUPTED rather
+/// than an out-of-bounds read or slice panic in the startup redo thread.
+fn checked_index_tuple_size(data: &[u8]) -> PgResult<usize> {
+    require(data.len() >= SIZE_OF_INDEX_TUPLE_DATA, || {
+        format!(
+            "GiST redo: block data too short for index tuple header: {} bytes",
+            data.len()
+        )
+    })?;
+    // t_info size bits: low 13 bits of the u16 at offset 6.
+    let sz = (u16::from_ne_bytes([data[6], data[7]]) & 0x1FFF) as usize;
+    require(sz >= SIZE_OF_INDEX_TUPLE_DATA && sz <= data.len(), || {
+        format!(
+            "GiST redo: invalid index tuple size {sz} in {} bytes of block data",
+            data.len()
+        )
+    })?;
+    Ok(sz)
 }
 
 fn page_is_leaf(page: &PageRef<'_>) -> bool {
@@ -83,7 +125,7 @@ fn gistRedoClearFollowRight(record: &XLogReaderState, block_id: u8) -> PgResult<
 
 fn gistRedoPageUpdateRecord(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
-    let xldata = GistxlogPageUpdate::decode(main_data(record));
+    let xldata = GistxlogPageUpdate::decode(main_data(record))?;
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
     if action == BLK_NEEDS_REDO {
@@ -94,10 +136,15 @@ fn gistRedoPageUpdateRecord(record: &XLogReaderState) -> PgResult<()> {
         let mut pm = unsafe { page_mut(buffer) };
 
         if xldata.ntodelete == 1 && xldata.ntoinsert == 1 {
+            require(data.len() >= 2, || {
+                format!(
+                    "GiST redo: PAGE_UPDATE block data too short for offset: {} bytes",
+                    data.len()
+                )
+            })?;
             let offnum = OffsetNumber::from_ne_bytes([data[0], data[1]]);
             off += 2;
-            // SAFETY: block data image.
-            let sz = unsafe { index_tuple_size(data[off..].as_ptr()) };
+            let sz = checked_index_tuple_size(&data[off..])?;
             let itup = &data[off..off + sz];
             if !pm.index_tuple_overwrite(offnum, itup) {
                 panic!("failed to add item to GiST index page, size {sz} bytes");
@@ -106,6 +153,12 @@ fn gistRedoPageUpdateRecord(record: &XLogReaderState) -> PgResult<()> {
             debug_assert!(off == data.len());
         } else if xldata.ntodelete > 0 {
             let n = xldata.ntodelete as usize;
+            require(data.len() >= 2 * n, || {
+                format!(
+                    "GiST redo: PAGE_UPDATE block data too short for {n} deletions: {} bytes",
+                    data.len()
+                )
+            })?;
             let mut todelete: Vec<OffsetNumber> = Vec::with_capacity(n);
             for i in 0..n {
                 todelete.push(OffsetNumber::from_ne_bytes([
@@ -127,8 +180,7 @@ fn gistRedoPageUpdateRecord(record: &XLogReaderState) -> PgResult<()> {
                 pm.as_ref().max_offset_number() + 1
             };
             while off < data.len() {
-                // SAFETY: block data image.
-                let sz = unsafe { index_tuple_size(data[off..].as_ptr()) };
+                let sz = checked_index_tuple_size(&data[off..])?;
                 add_item(&mut pm, &data[off..off + sz], insert_off);
                 off += sz;
                 insert_off += 1;
@@ -152,7 +204,7 @@ fn gistRedoPageUpdateRecord(record: &XLogReaderState) -> PgResult<()> {
 fn gistRedoDeleteRecord(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let md = main_data(record);
-    let xldata = GistxlogDelete::decode(md);
+    let xldata = GistxlogDelete::decode(md)?;
 
     if xlogutils::InHotStandby() {
         let (rlocator, _, _, _) =
@@ -167,6 +219,12 @@ fn gistRedoDeleteRecord(record: &XLogReaderState) -> PgResult<()> {
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
     if action == BLK_NEEDS_REDO {
         let n = xldata.ntodelete as usize;
+        require(md.len() >= SizeOfGistxlogDelete + 2 * n, || {
+            format!(
+                "GiST redo: DELETE record too short for {n} offsets: {} bytes",
+                md.len()
+            )
+        })?;
         let mut todelete: Vec<OffsetNumber> = Vec::with_capacity(n);
         for i in 0..n {
             let base = SizeOfGistxlogDelete + i * 2;
@@ -192,7 +250,7 @@ fn gistRedoDeleteRecord(record: &XLogReaderState) -> PgResult<()> {
 
 fn gistRedoPageSplitRecord(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
-    let xldata = GistxlogPageSplit::decode(main_data(record));
+    let xldata = GistxlogPageSplit::decode(main_data(record))?;
     let mut firstbuffer: Buffer = 0;
     let mut isrootsplit = false;
 
@@ -211,7 +269,17 @@ fn gistRedoPageSplitRecord(record: &XLogReaderState) -> PgResult<()> {
         let data = block_data(record, block_id);
 
         // decodePageSplitRecord: int num, then the tuple images
-        let num = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        require(data.len() >= 4, || {
+            format!(
+                "GiST redo: PAGE_SPLIT block data too short for tuple count: {} bytes",
+                data.len()
+            )
+        })?;
+        let num_raw = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+        require(num_raw >= 0, || {
+            format!("GiST redo: PAGE_SPLIT negative tuple count {num_raw}")
+        })?;
+        let num = num_raw as usize;
         let mut off = 4usize;
 
         let flags = if xldata.origleaf && blkno != GIST_ROOT_BLKNO {
@@ -235,8 +303,7 @@ fn gistRedoPageSplitRecord(record: &XLogReaderState) -> PgResult<()> {
 
         let mut insert_off = FirstOffsetNumber;
         for _ in 0..num {
-            // SAFETY: block data image.
-            let sz = unsafe { index_tuple_size(data[off..].as_ptr()) };
+            let sz = checked_index_tuple_size(&data[off..])?;
             add_item(&mut pm, &data[off..off + sz], insert_off);
             insert_off += 1;
             off += sz;
@@ -290,7 +357,7 @@ fn gistRedoPageSplitRecord(record: &XLogReaderState) -> PgResult<()> {
 
 fn gistRedoPageDelete(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
-    let xldata = GistxlogPageDelete::decode(main_data(record));
+    let xldata = GistxlogPageDelete::decode(main_data(record))?;
 
     let (action, leaf_buffer) = XLogReadBufferForRedo(record, 0)?;
     if action == BLK_NEEDS_REDO {
@@ -323,6 +390,12 @@ fn gistRedoPageDelete(record: &XLogReaderState) -> PgResult<()> {
 fn gistRedoPageReuse(record: &XLogReaderState) -> PgResult<()> {
     if xlogutils::InHotStandby() {
         let md = main_data(record);
+        require(md.len() >= SizeOfGistxlogPageReuse, || {
+            format!(
+                "GiST redo: PAGE_REUSE record too short: need {SizeOfGistxlogPageReuse} bytes, got {}",
+                md.len()
+            )
+        })?;
         let locator = types_storage::RelFileLocator::new(
             u32::from_ne_bytes(md[0..4].try_into().unwrap()),
             u32::from_ne_bytes(md[4..8].try_into().unwrap()),
@@ -379,4 +452,48 @@ pub fn gist_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
     let mut pm = unsafe { PageMut::from_raw(ptr) };
     types_gist::page_opaque_update(&mut pm, |op| op.flags &= !F_HAS_GARBAGE);
     Ok(())
+}
+
+#[cfg(test)]
+mod redo_bounds_tests {
+    use super::*;
+
+    // A truncated block-data tuple stream (fewer than an IndexTupleData header)
+    // must surface as ERRCODE_DATA_CORRUPTED, never an out-of-bounds read/slice
+    // panic in the startup redo thread.
+    #[test]
+    fn short_tuple_header_is_data_corruption() {
+        for len in 0..SIZE_OF_INDEX_TUPLE_DATA {
+            let err = checked_index_tuple_size(&vec![0u8; len]).unwrap_err();
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+    }
+
+    // A size word larger than the remaining payload (or smaller than a full
+    // header) is rejected instead of driving a `data[..sz]` slice past the end.
+    #[test]
+    fn inflated_or_undersized_tuple_size_is_rejected() {
+        // 16-byte buffer whose t_info size word claims 0x1FFF bytes.
+        let mut data = vec![0u8; 16];
+        data[6] = 0xFF;
+        data[7] = 0x1F;
+        let err = checked_index_tuple_size(&data).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // Size word below the 8-byte header minimum.
+        let mut small = vec![0u8; 16];
+        small[6] = 4;
+        small[7] = 0;
+        let err = checked_index_tuple_size(&small).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    // A well-formed tuple whose declared size fits the payload decodes cleanly.
+    #[test]
+    fn valid_tuple_size_is_accepted() {
+        let mut data = vec![0u8; 24];
+        data[6] = 16; // size = 16, fits within 24 bytes and >= 8-byte header
+        data[7] = 0;
+        assert_eq!(checked_index_tuple_size(&data).unwrap(), 16);
+    }
 }

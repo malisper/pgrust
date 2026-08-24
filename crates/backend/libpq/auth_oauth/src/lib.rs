@@ -524,15 +524,33 @@ fn validate(mech: &OAuthMech, ctx: &OauthCtx, port: &Port, auth: &[u8]) -> PgRes
     Ok(map_status == STATUS_OK)
 }
 
-// Builtin deterministic test validator (C core ships none); reachable only
-// when named by oauth_validator_libraries + the hba validator option.
-// Tokens: "valid-<id>" authorized as <id>; "noauthz-<id>" denied as <id>;
-// "noident" authorized w/o identity; "modulefail" module error; else denied.
+// Builtin deterministic test validator. It authorizes any "valid-<id>" bearer
+// token as identity <id> with NO cryptographic/issuer/audience/expiry check —
+// a forgeable credential. Upstream C PostgreSQL ships NO validator in the
+// production server; its equivalent lives in src/test/modules/oauth_validator,
+// built and dlopen'd only for the regression suite (auth-oauth.c has no
+// built-in token-accepting validator). Because pgrust has no dlopen, the
+// builtin registry is the only validator source, so this MUST NOT be compiled
+// into or registered by production binaries — otherwise naming it in
+// oauth_validator_libraries would turn it into a live authentication backdoor.
+//
+// It is therefore gated entirely behind #[cfg(test)]: absent from every shipped
+// server binary (which is built without cfg(test)), where load_validator_library
+// then treats the name as a registry miss and raises 58P01 — the exact parity
+// of C's dlopen stat miss. It remains available only to this crate's in-crate
+// unit tests.
+//
+// Tokens (test builds only): "valid-<id>" authorized as <id>; "noauthz-<id>"
+// denied as <id>; "noident" authorized w/o identity; "modulefail" module error;
+// else denied.
 
+#[cfg(test)]
 pub const TEST_VALIDATOR_NAME: &str = "oauth_test_validator";
 
+#[cfg(test)]
 struct TestValidator;
 
+#[cfg(test)]
 impl OAuthValidator for TestValidator {
     fn validate(
         &self,
@@ -562,9 +580,15 @@ impl OAuthValidator for TestValidator {
     }
 }
 
+#[cfg(test)]
 static TEST_VALIDATOR: TestValidator = TestValidator;
 
+// Production binaries ship no builtin validator (C-parity: no built-in
+// token-accepting validator exists in the server). Under #[cfg(test)] only, the
+// forgeable test validator is registered so the crate's own unit tests can
+// exercise the dispatch path.
 pub fn init_seams() {
+    #[cfg(test)]
     register_builtin_validator(TEST_VALIDATOR_NAME, &TEST_VALIDATOR);
 }
 

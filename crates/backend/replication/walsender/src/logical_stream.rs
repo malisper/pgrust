@@ -108,12 +108,12 @@ pub(crate) fn StartLogicalReplication(cmd: &StartReplicationCmd) -> PgResult<()>
     pqcomm::pq_flush()?;
 
     // Start reading WAL from the oldest required WAL.
-    let restart_lsn = ctx.slot.data.get().restart_lsn;
+    let restart_lsn = unsafe { ctx.slot.data.get() }.restart_lsn;
     ctx.reader.XLogBeginRead(restart_lsn);
 
     // Report the location after which we'll send out further commits as the
     // current sentPtr; shared memory gets the restart position.
-    crate::SENT_PTR.with(|c| c.set(ctx.slot.data.get().confirmed_flush));
+    crate::SENT_PTR.with(|c| c.set(unsafe { ctx.slot.data.get() }.confirmed_flush));
     crate::my_set_sentptr(restart_lsn);
 
     crate::REPLICATION_ACTIVE.with(|c| c.set(true));
@@ -306,7 +306,7 @@ fn need_to_wait_for_standbys(flushed_lsn: XLogRecPtr) -> PgResult<bool> {
         types_error::WARNING
     };
     let failover_slot = crate::REPLICATION_ACTIVE.with(|c| c.get())
-        && slot::MyReplicationSlot().is_some_and(|s| s.data.get().failover);
+        && slot::MyReplicationSlot().is_some_and(|s| unsafe { s.data.get() }.failover);
     if failover_slot && !slot::StandbySlotsHaveCaughtup(flushed_lsn, elevel)? {
         return Ok(true);
     }

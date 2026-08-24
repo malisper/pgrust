@@ -6,7 +6,7 @@
 
 use gin_vocab::*;
 use types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber, BLCKSZ};
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use types_storage::bufpage::{PageMut, SizeOfPageHeaderData as SIZE_OF_PAGE_HEADER};
 use types_tuple::itemptr::{FirstOffsetNumber, ItemPointerData};
 use xlogreader_seams::XLogReaderState;
@@ -121,6 +121,71 @@ fn error_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg))
 }
 
+/// Malformed replayed WAL is a corruption condition, not a bug: report it as a
+/// catchable ERRCODE_DATA_CORRUPTED error so the startup/recovery thread fails
+/// the record instead of panicking (which would SIGABRT and re-panic at the
+/// same LSN on every restart — a persistent crash loop).
+#[track_caller]
+#[cold]
+fn corrupt_err(msg: String) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_DATA_CORRUPTED))
+}
+
+/// Validate that a WAL payload (main-data or block-data, both attacker-declared
+/// in length — 0 is legal and passes all xlogreader validation) covers at least
+/// `need` bytes before a fixed-offset decode. C reads these fields through raw
+/// pointer casts and tolerates a short record by reading adjacent garbage; the
+/// Rust port must turn the same input into a controlled error rather than a
+/// slice-bounds panic.
+fn require_len(data: &[u8], need: usize, what: &str) -> PgResult<()> {
+    if data.len() < need {
+        return Err(corrupt_err(format!(
+            "GIN redo: {what} record too short: {} bytes, need at least {need}",
+            data.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Read an embedded IndexTuple size word and validate it against the remaining
+/// payload. Rejects a truncated header, a size word that overruns the payload,
+/// and a zero size (which would also spin the ntuples loops forever).
+fn checked_itup_size(stream: &[u8], what: &str) -> PgResult<usize> {
+    if stream.len() < 8 {
+        return Err(corrupt_err(format!(
+            "GIN redo: {what} truncated index tuple: {} bytes, need at least 8",
+            stream.len()
+        )));
+    }
+    let n = itup_size(stream);
+    if n == 0 || n > stream.len() {
+        return Err(corrupt_err(format!(
+            "GIN redo: {what} index tuple size {n} out of range (payload {} bytes)",
+            stream.len()
+        )));
+    }
+    Ok(n)
+}
+
+/// Read a GIN posting-list segment size from the front of `b`, validating the
+/// header is present and the whole segment fits within `b`.
+fn seg_size_checked(b: &[u8], what: &str) -> PgResult<usize> {
+    if b.len() < SizeOfGinPostingListHeader {
+        return Err(corrupt_err(format!(
+            "GIN redo recompress: {what} truncated posting-list header: {} bytes",
+            b.len()
+        )));
+    }
+    let n = size_of_gin_posting_list(u16::from_ne_bytes([b[6], b[7]]) as usize);
+    if n > b.len() {
+        return Err(corrupt_err(format!(
+            "GIN redo recompress: {what} posting-list segment size {n} exceeds {} available bytes",
+            b.len()
+        )));
+    }
+    Ok(n)
+}
+
 /// ginRedoClearIncompleteSplit.
 fn clear_incomplete_split(record: &XLogReaderState, block_id: u8) -> PgResult<()> {
     let lsn = record.EndRecPtr;
@@ -144,7 +209,14 @@ fn clear_incomplete_split(record: &XLogReaderState, block_id: u8) -> PgResult<()
 fn redo_create_ptree(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let data = main_data(record);
+    require_len(data, 4, "create-ptree")?;
     let size = u32::from_ne_bytes(data[0..4].try_into().unwrap()) as usize;
+    require_len(data, 4 + size, "create-ptree posting list")?;
+    if size > GinDataPageMaxDataSize {
+        return Err(corrupt_err(format!(
+            "GIN redo: create-ptree posting list size {size} exceeds page capacity {GinDataPageMaxDataSize}"
+        )));
+    }
 
     let buffer = XLogInitBufferForRedo(record, 0)?;
     // SAFETY: redo lock protocol.
@@ -159,10 +231,12 @@ fn redo_create_ptree(record: &XLogReaderState) -> PgResult<()> {
 
 /// ginRedoInsertEntry.
 fn redo_insert_entry(buffer: Buffer, rightblkno: BlockNumber, rdata: &[u8]) -> PgResult<()> {
+    // ginxlogInsertEntry: offset @0, isDelete @2, tuple @4 (variable length).
+    require_len(rdata, 4, "insert-entry")?;
     let offset = u16::from_ne_bytes([rdata[0], rdata[1]]) as OffsetNumber;
     let is_delete = rdata[2] != 0;
     let tuple = &rdata[4..];
-    let tuplen = itup_size(tuple);
+    let tuplen = checked_itup_size(tuple, "insert-entry")?;
 
     // SAFETY: redo lock protocol.
     let mut page = unsafe { page_mut(buffer) };
@@ -206,15 +280,23 @@ fn redo_recompress(buffer: Buffer, rdata: &[u8]) -> PgResult<()> {
         panic!("gin redo recompress on non-GIN_COMPRESSED leaf: pgrust WAL never describes pre-9.4 pages (gin_xlog/src/lib.rs:152, gin/src/datapage.rs:1171)");
     }
 
+    // ginxlogRecompressDataLeaf: nactions @0 (uint16), action stream follows.
+    require_len(rdata, 2, "recompress")?;
     let nactions = u16::from_ne_bytes([rdata[0], rdata[1]]) as usize;
     let mut walbuf = &rdata[2..];
 
-    let seg_size_at = |b: &[u8]| -> usize {
-        size_of_gin_posting_list(u16::from_ne_bytes([b[6], b[7]]) as usize)
-    };
-
     let list_start = GinDataPageDataOffset;
+    // The posting-list area ends at the page's special/opaque pointer; every
+    // write extent must stay within it (C asserts writePtr + n <= special).
+    let page_end = OPAQUE_OFF;
     let pd_lower = u16::from_ne_bytes([bytes[12], bytes[13]]) as usize;
+    // pd_lower is restorable from a hostile full-page image; bound it before it
+    // is used to slice the original posting-list area.
+    if pd_lower < list_start || pd_lower > page_end {
+        return Err(corrupt_err(format!(
+            "GIN redo recompress: pd_lower {pd_lower} outside posting-list bounds [{list_start}, {page_end}]"
+        )));
+    }
     let orig: Vec<u8> = bytes[list_start..pd_lower].to_vec();
 
     let mut oldoff = 0usize; // offset into orig
@@ -222,27 +304,42 @@ fn redo_recompress(buffer: Buffer, rdata: &[u8]) -> PgResult<()> {
     let mut segno = 0usize;
 
     for _ in 0..nactions {
+        require_len(walbuf, 2, "recompress action header")?;
         let a_segno = walbuf[0] as usize;
         let mut a_action = walbuf[1];
         walbuf = &walbuf[2..];
 
         let mut newseg: &[u8] = &[];
         if a_action == GIN_SEGMENT_INSERT || a_action == GIN_SEGMENT_REPLACE {
-            let n = seg_size_at(walbuf);
+            let n = seg_size_checked(walbuf, "new segment")?;
             newseg = &walbuf[..n];
+            // n == size_of_gin_posting_list(..) is already short-aligned, so
+            // SHORTALIGN(n) == n and stays within walbuf (checked above).
             walbuf = &walbuf[SHORTALIGN(n)..];
         }
 
         let mut additems: &[u8] = &[];
         if a_action == GIN_SEGMENT_ADDITEMS {
+            require_len(walbuf, 2, "recompress additems count")?;
             let nitems = u16::from_ne_bytes([walbuf[0], walbuf[1]]) as usize;
-            additems = &walbuf[2..2 + nitems * 6];
-            walbuf = &walbuf[2 + nitems * 6..];
+            let end = 2 + nitems * 6;
+            require_len(walbuf, end, "recompress additems")?;
+            additems = &walbuf[2..end];
+            walbuf = &walbuf[end..];
         }
 
-        debug_assert!(segno <= a_segno);
+        if segno > a_segno {
+            return Err(corrupt_err(format!(
+                "GIN redo recompress: action segment {a_segno} precedes current segment {segno}"
+            )));
+        }
         while segno < a_segno {
-            let n = seg_size_at(&orig[oldoff..]);
+            let n = seg_size_checked(&orig[oldoff..], "unmodified segment")?;
+            if write_ptr + n > page_end {
+                return Err(corrupt_err(
+                    "GIN redo recompress: unmodified segment overflows page".into(),
+                ));
+            }
             bytes[write_ptr..write_ptr + n].copy_from_slice(&orig[oldoff..oldoff + n]);
             write_ptr += n;
             oldoff += n;
@@ -251,7 +348,7 @@ fn redo_recompress(buffer: Buffer, rdata: &[u8]) -> PgResult<()> {
 
         let merged;
         if a_action == GIN_SEGMENT_ADDITEMS {
-            let oldn = seg_size_at(&orig[oldoff..]);
+            let oldn = seg_size_checked(&orig[oldoff..], "additems target segment")?;
             merged = recompress_additems(&orig[oldoff..oldoff + oldn], additems)?;
             newseg = &merged;
             a_action = GIN_SEGMENT_REPLACE;
@@ -259,10 +356,14 @@ fn redo_recompress(buffer: Buffer, rdata: &[u8]) -> PgResult<()> {
 
         let at_end = oldoff >= orig.len();
         let segsize = if at_end {
-            debug_assert!(a_action == GIN_SEGMENT_INSERT);
+            if a_action != GIN_SEGMENT_INSERT {
+                return Err(corrupt_err(format!(
+                    "GIN redo recompress: action {a_action} past last segment (only INSERT expected)"
+                )));
+            }
             0
         } else {
-            seg_size_at(&orig[oldoff..])
+            seg_size_checked(&orig[oldoff..], "current segment")?
         };
 
         match a_action {
@@ -271,21 +372,38 @@ fn redo_recompress(buffer: Buffer, rdata: &[u8]) -> PgResult<()> {
                 segno += 1;
             }
             GIN_SEGMENT_INSERT => {
+                if write_ptr + newseg.len() > page_end {
+                    return Err(corrupt_err(
+                        "GIN redo recompress: inserted segment overflows page".into(),
+                    ));
+                }
                 bytes[write_ptr..write_ptr + newseg.len()].copy_from_slice(newseg);
                 write_ptr += newseg.len();
             }
             GIN_SEGMENT_REPLACE => {
+                if write_ptr + newseg.len() > page_end {
+                    return Err(corrupt_err(
+                        "GIN redo recompress: replacement segment overflows page".into(),
+                    ));
+                }
                 bytes[write_ptr..write_ptr + newseg.len()].copy_from_slice(newseg);
                 write_ptr += newseg.len();
                 oldoff += segsize;
                 segno += 1;
             }
-            other => panic!("unexpected GIN leaf action: {other}"),
+            other => {
+                return Err(corrupt_err(format!("GIN redo recompress: unexpected leaf action {other}")))
+            }
         }
     }
 
     if oldoff < orig.len() {
         let rest = orig.len() - oldoff;
+        if write_ptr + rest > page_end {
+            return Err(corrupt_err(
+                "GIN redo recompress: trailing segments overflow page".into(),
+            ));
+        }
         bytes[write_ptr..write_ptr + rest].copy_from_slice(&orig[oldoff..]);
         write_ptr += rest;
     }
@@ -380,6 +498,32 @@ fn write_item(out: &mut [u8], off: usize, val: u64) {
     out[off + 4..off + 6].copy_from_slice(&posid.to_ne_bytes());
 }
 
+/// Validate a WAL-supplied posting-item offset for an internal-page insert
+/// before it drives raw-pointer writes of a 10-byte PostingItem into the page.
+/// C's ginRedoInsertData / GinDataPageAddPostingItem trust `data->offset`
+/// under Assert only (compiled out in release), so a hostile or corrupt record
+/// can place the write far past the page. Mirror the C contract
+/// (dataPlaceToPageInternal produces 1..=maxoff+1) as a hard, catchable check:
+/// reject offset 0 or > maxoff+1, and reject a maxoff whose resulting posting
+/// items would not fit the page (a full-page image can plant an arbitrary
+/// maxoff). Callers pass the current on-page maxoff.
+fn checked_posting_item_offset(offset: OffsetNumber, maxoff: OffsetNumber) -> PgResult<()> {
+    let maxoff = maxoff as usize;
+    if offset == 0 || offset as usize > maxoff + 1 {
+        return Err(corrupt_err(format!(
+            "GIN redo: insert-data internal offset {offset} out of range [1, {}]",
+            maxoff + 1
+        )));
+    }
+    if (maxoff + 1) * 10 > GinDataPageMaxDataSize {
+        return Err(corrupt_err(format!(
+            "GIN redo: insert-data internal item extent {} exceeds page capacity {GinDataPageMaxDataSize}",
+            (maxoff + 1) * 10
+        )));
+    }
+    Ok(())
+}
+
 /// ginRedoInsertData (internal page arm) + ginRedoRecompress (leaf arm).
 fn redo_insert_data(
     buffer: Buffer,
@@ -390,6 +534,8 @@ fn redo_insert_data(
     if is_leaf {
         redo_recompress(buffer, rdata)
     } else {
+        // ginxlogInsertDataInternal: offset @0 (uint16) + PostingItem @2 (10-byte POD).
+        require_len(rdata, 12, "insert-data internal")?;
         let offset = u16::from_ne_bytes([rdata[0], rdata[1]]) as OffsetNumber;
         // SAFETY: PostingItem is a 10-byte POD in the WAL image.
         let newitem =
@@ -397,19 +543,29 @@ fn redo_insert_data(
         // SAFETY: redo lock protocol.
         let bytes = unsafe { page_bytes_mut(buffer) };
 
+        let mut o = opaque_of(bytes);
+        let maxoff = o.maxoff;
+        // Validate the WAL-supplied offset against the page's maxoff BEFORE any
+        // write: the two unsafe PostingItem writes below index the page at
+        // `offset` and shift maxoff-offset+1 items, so an unchecked offset (up
+        // to 65535) is an out-of-page write into neighbouring buffer-pool
+        // memory. C guards this with Assert only.
+        checked_posting_item_offset(offset, maxoff)?;
+
         let p = GinDataPageDataOffset + (offset as usize - 1) * 10;
-        // SAFETY: in-bounds posting item slot.
+        // SAFETY: offset validated in [1, maxoff+1] and the page has room for
+        // maxoff+1 posting items, so p is an in-bounds slot.
         unsafe {
             let mut old = bytes.as_ptr().add(p).cast::<PostingItem>().read_unaligned();
             PostingItemSetBlockNumber(&mut old, rightblkno);
             bytes.as_mut_ptr().add(p).cast::<PostingItem>().write_unaligned(old);
         }
 
-        let mut o = opaque_of(bytes);
-        let maxoff = o.maxoff;
-        if offset != maxoff + 1 && offset != 0 {
+        if offset != maxoff + 1 {
             let start = GinDataPageDataOffset + (offset as usize - 1) * 10;
-            let n = (maxoff - offset + 1) as usize * 10;
+            // offset <= maxoff here (offset != maxoff+1 and validated <= maxoff+1),
+            // so this does not underflow.
+            let n = (maxoff as usize - offset as usize + 1) * 10;
             bytes.copy_within(start..start + n, start + 10);
         }
         let dst = GinDataPageDataOffset + (offset as usize - 1) * 10;
@@ -432,12 +588,16 @@ fn redo_insert_data(
 fn redo_insert(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let data = main_data(record);
+    // ginxlogInsert: flags @0 (uint16); for a non-leaf, BlockIdData[2] (left,
+    // right child) follows at @2 and @6.
+    require_len(data, 2, "insert")?;
     let flags = u16::from_ne_bytes([data[0], data[1]]);
     let is_leaf = flags & GIN_INSERT_ISLEAF != 0;
     let is_data = flags & GIN_INSERT_ISDATA != 0;
 
     let mut right_child_blkno = InvalidBlockNumber;
     if !is_leaf {
+        require_len(data, 10, "insert non-leaf child links")?;
         let rc_hi = u16::from_ne_bytes([data[6], data[7]]) as u32;
         let rc_lo = u16::from_ne_bytes([data[8], data[9]]) as u32;
         right_child_blkno = (rc_hi << 16) | rc_lo;
@@ -464,6 +624,8 @@ fn redo_insert(record: &XLogReaderState) -> PgResult<()> {
 /// ginRedoSplit.
 fn redo_split(record: &XLogReaderState) -> PgResult<()> {
     let data = main_data(record);
+    // ginxlogSplit: locator(12) + rrlink(4) + leftChild(4) + rightChild(4) + flags @24.
+    require_len(data, 26, "split")?;
     let flags = u16::from_ne_bytes([data[24], data[25]]);
     let is_leaf = flags & GIN_INSERT_ISLEAF != 0;
     let is_root = flags & GIN_SPLIT_ROOT != 0;
@@ -502,6 +664,7 @@ fn redo_update_metapage(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let data = main_data(record);
     // ginxlogUpdateMeta: metadata @16, prevTail @72, newRightlink @76, ntuples @80.
+    require_len(data, 84, "update-metapage")?;
     let metadata = &data[16..72];
     let prev_tail = u32::from_ne_bytes(data[72..76].try_into().unwrap());
     let new_rightlink = u32::from_ne_bytes(data[76..80].try_into().unwrap());
@@ -530,7 +693,7 @@ fn redo_update_metapage(record: &XLogReaderState) -> PgResult<()> {
             };
             let mut p = 0usize;
             for _ in 0..ntuples {
-                let tupsize = itup_size(&payload[p..]);
+                let tupsize = checked_itup_size(&payload[p..], "update-metapage tuple")?;
                 if page.add_item(&payload[p..p + tupsize], off, 0).is_none() {
                     return Err(error_err("failed to add item to index page".into()));
                 }
@@ -572,6 +735,8 @@ fn redo_update_metapage(record: &XLogReaderState) -> PgResult<()> {
 fn redo_insert_listpage(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let data = main_data(record);
+    // ginxlogInsertListPage: rightlink @0, ntuples @4.
+    require_len(data, 8, "insert-listpage")?;
     let rightlink = u32::from_ne_bytes(data[0..4].try_into().unwrap());
     let ntuples = i32::from_ne_bytes(data[4..8].try_into().unwrap());
 
@@ -605,7 +770,7 @@ fn redo_insert_listpage(record: &XLogReaderState) -> PgResult<()> {
         let mut off = FirstOffsetNumber;
         let mut p = 0usize;
         for _ in 0..ntuples {
-            let tupsize = itup_size(&payload[p..]);
+            let tupsize = checked_itup_size(&payload[p..], "insert-listpage tuple")?;
             if page.add_item(&payload[p..p + tupsize], off, 0).is_none() {
                 return Err(error_err("failed to add item to index page".into()));
             }
@@ -623,6 +788,8 @@ fn redo_insert_listpage(record: &XLogReaderState) -> PgResult<()> {
 fn redo_delete_listpages(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let data = main_data(record);
+    // ginxlogDeleteListPages: metadata @0 (56), ndeleted @56.
+    require_len(data, 60, "delete-listpages")?;
     let metadata = &data[0..56];
     let ndeleted = i32::from_ne_bytes(data[56..60].try_into().unwrap());
 
@@ -680,6 +847,8 @@ fn redo_vacuum_page(record: &XLogReaderState) -> PgResult<()> {
 fn redo_delete_page(record: &XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let data = main_data(record);
+    // ginxlogDeletePage: parentOffset @0, rightLink @4, deleteXid @8.
+    require_len(data, 12, "delete-page")?;
     let parent_offset = u16::from_ne_bytes([data[0], data[1]]) as OffsetNumber;
     let right_link = u32::from_ne_bytes(data[4..8].try_into().unwrap());
     let delete_xid = u32::from_ne_bytes(data[8..12].try_into().unwrap());
@@ -772,3 +941,101 @@ pub fn gin_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
 }
 
 pub fn init_seams() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A short / truncated / size-inflated GIN record must surface as a
+    // catchable ERRCODE_DATA_CORRUPTED error, never a slice-bounds panic in the
+    // recovery thread. These exercise the shared validation helpers that guard
+    // every redo arm's fixed-offset reads and the recompress stream walk.
+
+    #[test]
+    fn require_len_short_record_is_corruption_not_panic() {
+        // Empty main-data (0 bytes is legal and passes xlogreader validation)
+        // against an arm that needs its fixed struct.
+        let err = require_len(&[], 84, "update-metapage").err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // One byte short of the struct.
+        let buf = vec![0u8; 83];
+        let err = require_len(&buf, 84, "update-metapage").err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // Exactly enough is accepted.
+        let buf = vec![0u8; 84];
+        assert!(require_len(&buf, 84, "update-metapage").is_ok());
+    }
+
+    #[test]
+    fn checked_itup_size_rejects_truncated_zero_and_inflated() {
+        // Truncated tuple header (< 8 bytes).
+        let err = checked_itup_size(&[0u8; 4], "tuple").err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // Size word of 0 would also spin the ntuples loop forever.
+        let mut stream = vec![0u8; 8];
+        stream[6..8].copy_from_slice(&0u16.to_ne_bytes());
+        let err = checked_itup_size(&stream, "tuple").err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // Size word declaring more than the payload provides.
+        let mut stream = vec![0u8; 8];
+        stream[6..8].copy_from_slice(&(100u16).to_ne_bytes());
+        let err = checked_itup_size(&stream, "tuple").err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // Well-formed: declared size within the payload.
+        let mut stream = vec![0u8; 16];
+        stream[6..8].copy_from_slice(&(16u16).to_ne_bytes());
+        assert_eq!(checked_itup_size(&stream, "tuple").unwrap(), 16);
+    }
+
+    #[test]
+    fn checked_posting_item_offset_rejects_zero_over_maxoff_and_overflow() {
+        // offset 0 (InvalidOffsetNumber) is not a valid slot for the redo
+        // insert-data internal write (C's first raw read would underflow).
+        let err = checked_posting_item_offset(0, 5).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // The out-of-bounds-write finding: offset 65535 into an 8 KB page.
+        let err = checked_posting_item_offset(65535, 5).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // One slot past the append position (maxoff+1) is rejected.
+        let err = checked_posting_item_offset(7, 5).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // A hostile full-page image can plant a maxoff whose posting items
+        // would overrun the page; reject it even at a small offset.
+        let big = (GinDataPageMaxDataSize / 10) as OffsetNumber;
+        let err = checked_posting_item_offset(1, big).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // Valid: any existing slot and the append position (maxoff+1).
+        assert!(checked_posting_item_offset(1, 5).is_ok());
+        assert!(checked_posting_item_offset(5, 5).is_ok());
+        assert!(checked_posting_item_offset(6, 5).is_ok());
+    }
+
+    #[test]
+    fn seg_size_checked_rejects_truncated_and_inflated() {
+        // Truncated posting-list header.
+        let err = seg_size_checked(&[0u8; 4], "seg").err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // Header declares nbytes that overrun the buffer.
+        let mut b = vec![0u8; 8];
+        b[6..8].copy_from_slice(&(4096u16).to_ne_bytes());
+        let err = seg_size_checked(&b, "seg").err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // Well-formed single-segment buffer: header + short-aligned payload.
+        let nbytes = 4usize;
+        let total = size_of_gin_posting_list(nbytes);
+        let mut b = vec![0u8; total];
+        b[6..8].copy_from_slice(&(nbytes as u16).to_ne_bytes());
+        assert_eq!(seg_size_checked(&b, "seg").unwrap(), total);
+    }
+}

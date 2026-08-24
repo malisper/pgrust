@@ -243,12 +243,17 @@ pub fn checkDomainOwner(typtype: i8, type_oid: Oid) -> PgResult<()> {
     Ok(())
 }
 
-pub fn AlterDomain<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterDomainStmt<'mcx>) -> PgResult<()> {
+pub fn AlterDomain<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &AlterDomainStmt<'mcx>,
+) -> PgResult<ObjectAddress> {
     match stmt.subtype {
         b'T' => AlterDomainDefault(mcx, &stmt.typeName, stmt.def),
         b'N' => AlterDomainNotNull(mcx, &stmt.typeName, false),
         b'O' => AlterDomainNotNull(mcx, &stmt.typeName, true),
-        b'C' => AlterDomainAddConstraint(mcx, &stmt.typeName, stmt.def.expect("constraint def")),
+        b'C' => {
+            alter_domain_add_constraint_impl(mcx, &stmt.typeName, stmt.def.expect("constraint def"))
+        }
         b'X' => AlterDomainDropConstraint(
             mcx,
             &stmt.typeName,
@@ -269,7 +274,7 @@ fn AlterDomainDefault<'mcx>(
     mcx: Mcx<'mcx>,
     names: &NodeList<'mcx>,
     default_raw: Option<Node<'mcx>>,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let typename = typename_from_list(mcx, names)?;
     let (domainoid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
     let row = fetch_type_row(mcx, domainoid)?;
@@ -324,7 +329,7 @@ fn AlterDomainDefault<'mcx>(
     rebuild_domain_dependencies(mcx, domainoid, &row, default_expr)?;
 
     objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, domainoid, 0)?;
-    Ok(())
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, domainoid))
 }
 
 // GenerateTypeDependencies (pg_type.c) rebuild arm, domain shape: delete +
@@ -393,14 +398,16 @@ fn AlterDomainNotNull<'mcx>(
     mcx: Mcx<'mcx>,
     names: &NodeList<'mcx>,
     not_null: bool,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let typename = typename_from_list(mcx, names)?;
     let (domainoid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
     let row = fetch_type_row(mcx, domainoid)?;
     checkDomainOwner(row.typtype, domainoid)?;
 
+    // C: `ObjectAddress address = InvalidObjectAddress;` returned unchanged
+    // when the domain is already in the requested state.
     if row.typnotnull == not_null {
-        return Ok(());
+        return Ok(ObjectAddress::set(InvalidOid, InvalidOid));
     }
 
     if not_null {
@@ -433,7 +440,7 @@ fn AlterDomainNotNull<'mcx>(
     })?;
 
     objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, domainoid, 0)?;
-    Ok(())
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, domainoid))
 }
 
 fn AlterDomainDropConstraint<'mcx>(
@@ -442,7 +449,7 @@ fn AlterDomainDropConstraint<'mcx>(
     constr_name: &str,
     behavior: types_nodes::parsenodes::DropBehavior,
     missing_ok: bool,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let typename = typename_from_list(mcx, names)?;
     let (domainoid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
     let row = fetch_type_row(mcx, domainoid)?;
@@ -524,14 +531,28 @@ fn AlterDomainDropConstraint<'mcx>(
         }
     }
 
-    cache_inval_type_tuple(mcx, domainoid)
+    cache_inval_type_tuple(mcx, domainoid)?;
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, domainoid))
 }
 
+// Seam-facing entry point (typecmds_seams::alter_domain_add_constraint expects
+// `-> PgResult<()>`); the address-returning impl below mirrors C's
+// AlterDomainAddConstraint, whose ObjectAddress return the tablecmds
+// AT_ReAddDomainConstraint path discards.
 pub(crate) fn AlterDomainAddConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     names: &NodeList<'mcx>,
     new_constraint: Node<'mcx>,
 ) -> PgResult<()> {
+    alter_domain_add_constraint_impl(mcx, names, new_constraint)?;
+    Ok(())
+}
+
+fn alter_domain_add_constraint_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &NodeList<'mcx>,
+    new_constraint: Node<'mcx>,
+) -> PgResult<ObjectAddress> {
     let typename = typename_from_list(mcx, names)?;
     let (domainoid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
     let row = fetch_type_row(mcx, domainoid)?;
@@ -559,8 +580,10 @@ pub(crate) fn AlterDomainAddConstraint<'mcx>(
             cache_inval_type_tuple(mcx, domainoid)?;
         }
         ConstrType::CONSTR_NOTNULL => {
+            // C: returns the InvalidObjectAddress initializer when the domain
+            // is already NOT NULL.
             if row.typnotnull {
-                return Ok(());
+                return Ok(ObjectAddress::set(InvalidOid, InvalidOid));
             }
             domainAddNotNullConstraint(mcx, domainoid, row.typnamespace, constr, &row.typname)?;
             if !constr.skip_validation {
@@ -575,14 +598,14 @@ pub(crate) fn AlterDomainAddConstraint<'mcx>(
         }
         other => panic!("AlterDomainAddConstraint: parser let through {other:?}"),
     }
-    Ok(())
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, domainoid))
 }
 
 fn AlterDomainValidateConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     names: &NodeList<'mcx>,
     constr_name: &str,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let typename = typename_from_list(mcx, names)?;
     let (domainoid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
     let row = fetch_type_row(mcx, domainoid)?;
@@ -671,7 +694,8 @@ fn AlterDomainValidateConstraint<'mcx>(
 
     objectaccess::InvokeObjectPostAlterHook(types_core::CONSTRAINT_RELATION_ID, con_oid, 0)?;
 
-    con_rel.close(RowExclusiveLock)
+    con_rel.close(RowExclusiveLock)?;
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, domainoid))
 }
 
 struct RelToCheck<'mcx> {

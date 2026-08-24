@@ -25,8 +25,8 @@ use logicalrelation::LogicalRepRelMapEntry;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{
-    PgResult, ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-    ERRCODE_PROTOCOL_VIOLATION, ERROR, LOG,
+    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_BINARY_REPRESENTATION,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROTOCOL_VIOLATION, ERROR, LOG,
 };
 use types_rel::Relation;
 use types_scan::scankey::{ScanKeyData, BTEqualStrategyNumber, SK_ISNULL, SK_SEARCHNULL};
@@ -114,6 +114,21 @@ fn slot_store_datum<'mcx>(
 ) -> PgResult<(Datum, bool)> {
     match colstatus {
         LOGICALREP_COLUMN_TEXT => {
+            // Publisher-supplied TEXT bytes are trusted only to the extent
+            // that the remote honored the client_encoding we requested at
+            // connect; a hostile/compromised publisher (or an honest
+            // SQL_ASCII publisher) can ship bytes invalid in the subscriber's
+            // database encoding. C tolerates the resulting mojibake because it
+            // is byte-oriented, but this port has from_utf8_unchecked sinks
+            // (e.g. jsonpath_exec over stored jsonb) that rely on the engine
+            // invariant that stored strings are valid in the database
+            // encoding; feeding them invalid bytes is UB. Verify against the
+            // database encoding — as C's pg_client_to_server would when
+            // client_encoding == database encoding — before the input
+            // function runs. SQL_ASCII accepts every byte, so valid behavior
+            // is preserved. This covers every apply path (direct, streamed,
+            // parallel), which all funnel through here.
+            mbutils::pg_verifymbstr(bytes, false)?;
             let cstr = CString::new(bytes).map_err(|_| {
                 Box::new(types_error::PgError::error(
                     "invalid text column data in logical replication message".to_string(),
@@ -566,7 +581,16 @@ fn slot_store_data<'mcx>(
         let remote = entry.attrmap.get(i).copied().unwrap_or(-1);
         let (value, isnull) = if !att.attisdropped && remote >= 0 {
             let m = remote as usize;
-            debug_assert!(m < tup.ncols);
+            if m >= tup.ncols {
+                ereport(ERROR)
+                    .errcode(ERRCODE_PROTOCOL_VIOLATION)
+                    .errmsg(format!(
+                        "remote tuple for relation \"{}.{}\" has fewer columns than its relation message declared",
+                        entry.remoterel.nspname, entry.remoterel.relname
+                    ))
+                    .finish(loc("slot_store_data"))?;
+                unreachable!();
+            }
             let bytes = tup.colvalues[m].as_deref().unwrap_or(&[]);
             slot_store_datum(
                 mcx,
@@ -675,6 +699,16 @@ fn slot_modify_data<'mcx>(
             continue;
         }
         let m = remote as usize;
+        if m >= tup.ncols {
+            ereport(ERROR)
+                .errcode(ERRCODE_PROTOCOL_VIOLATION)
+                .errmsg(format!(
+                    "remote tuple for relation \"{}.{}\" has fewer columns than its relation message declared",
+                    entry.remoterel.nspname, entry.remoterel.relname
+                ))
+                .finish(loc("slot_modify_data"))?;
+            unreachable!();
+        }
         if tup.colstatus[m] == LOGICALREP_COLUMN_UNCHANGED {
             continue;
         }
@@ -829,16 +863,37 @@ fn apply_trig<'mcx>(rel: &Relation<'_>) -> PgResult<Option<ApplyTrig<'mcx>>> {
 // blanket row-trigger refusal — BEFORE ROW INSERT and every AFTER ROW trigger
 // now fire. Loud rather than silently skipped: a BEFORE trigger that would
 // rewrite or suppress the row changes the applied result.
-fn refuse_br_triggers(trig: Option<&ApplyTrig<'_>>, op: &str) {
-    let Some(t) = trig else { return };
-    let refuse = match op {
-        "UPDATE" => t.td.trig_update_before_row,
-        "DELETE" => t.td.trig_delete_before_row,
-        _ => false,
-    };
-    if refuse {
-        panic!("unported: BEFORE ROW {op} triggers on a logical replication target");
+fn refuse_br_triggers(trig: Option<&ApplyTrig<'_>>, op: &str) -> PgResult<()> {
+    let Some(t) = trig else { return Ok(()) };
+    // A BEFORE ROW UPDATE/DELETE trigger firing during apply is still unported
+    // (ExecBRUpdate/DeleteTriggers have no standalone caller form here yet).
+    // Match C: the apply worker runs under session_replication_role = replica,
+    // so only triggers TriggerEnabled admits (ENABLE REPLICA/ALWAYS) would
+    // fire; ordinary ENABLE ORIGIN and DISABLED BEFORE-row triggers are
+    // silently skipped and must not block apply. Refuse recoverably (a
+    // per-subscription ERROR, never a panic) and only when such a trigger
+    // would actually fire.
+    for i in 0..t.td.triggers.len() {
+        let trg = &t.td.triggers[i];
+        let tt = trg.tgtype;
+        let is_br = types_trigger::TRIGGER_FOR_ROW(tt)
+            && types_trigger::TRIGGER_FOR_BEFORE(tt)
+            && match op {
+                "UPDATE" => types_trigger::TRIGGER_FOR_UPDATE(tt),
+                "DELETE" => types_trigger::TRIGGER_FOR_DELETE(tt),
+                _ => false,
+            };
+        if is_br && trigger::TriggerEnabled(trg) {
+            ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "cannot apply replicated {op} to relation with enabled BEFORE ROW {op} trigger"
+                ))
+                .finish(loc("refuse_br_triggers"))?;
+            unreachable!();
+        }
     }
+    Ok(())
 }
 
 // check_relation_updatable (worker.c:2510).
@@ -1135,6 +1190,40 @@ fn find_repl_tuple_seq<'mcx>(
 }
 
 // FindReplTupleInLocalRel (worker.c:2915).
+// TargetPrivilegesCheck (worker.c:2356): the subscription owner must hold the
+// required privilege on the target relation to perform the given operation, and
+// RLS is unsupported on the apply path (tablesync workers lack it too), so any
+// relation with RLS enabled is refused for every command alike.
+fn target_privileges_check<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    mode: u64,
+) -> PgResult<()> {
+    let relid = rel.rd_id;
+    let aclresult = aclchk::pg_class_aclcheck(relid, miscinit::GetUserId(), mode)?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        let relname = lsyscache::get_rel_name(mcx, relid)?;
+        aclchk::aclcheck_error(
+            aclresult,
+            tablecmds::get_relkind_objtype(rel.rd_rel.relkind),
+            relname.as_ref().map(|s| s.as_str()).unwrap_or(""),
+        )?;
+    }
+
+    if rls::check_enable_rls(relid, InvalidOid, false)? == rls::CheckEnableRls::RlsEnabled {
+        let username = miscinit::GetUserNameFromId(mcx, miscinit::GetUserId(), true)?;
+        ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "user \"{}\" cannot replicate into relation with row-level security enabled: \"{}\"",
+                username.as_ref().map(|s| s.as_str()).unwrap_or(""),
+                rel.name()
+            ))
+            .finish(loc("target_privileges_check"))?;
+    }
+    Ok(())
+}
+
 fn find_repl_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -1142,6 +1231,7 @@ fn find_repl_tuple<'mcx>(
     searchslot: &mut SlotData<'mcx>,
     outslot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
+    target_privileges_check(mcx, rel, types_nodes::parsenodes::ACL_SELECT)?;
     if entry.localindexoid != InvalidOid {
         find_repl_tuple_by_index(mcx, rel, entry.localindexoid, searchslot, outslot)
     } else {
@@ -1155,6 +1245,7 @@ fn do_insert<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
+    target_privileges_check(mcx, rel, types_nodes::parsenodes::ACL_INSERT)?;
     execreplication::CheckCmdReplicaIdentity(mcx, rel, types_nodes::nodes_enums::CmdType::CMD_INSERT)?;
 
     let mut trig = apply_trig(rel)?;
@@ -1258,10 +1349,11 @@ fn do_update<'mcx>(
 ) -> PgResult<()> {
     use tableam_vocab::TU_UpdateIndexes;
 
+    target_privileges_check(mcx, rel, types_nodes::parsenodes::ACL_UPDATE)?;
     execreplication::CheckCmdReplicaIdentity(mcx, rel, types_nodes::nodes_enums::CmdType::CMD_UPDATE)?;
 
     let mut trig = apply_trig(rel)?;
-    refuse_br_triggers(trig.as_ref(), "UPDATE");
+    refuse_br_triggers(trig.as_ref(), "UPDATE")?;
 
     let mut generated_exprs = None;
     if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
@@ -1332,10 +1424,11 @@ fn do_delete<'mcx>(
     rel: &Relation<'mcx>,
     searchslot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
+    target_privileges_check(mcx, rel, types_nodes::parsenodes::ACL_DELETE)?;
     execreplication::CheckCmdReplicaIdentity(mcx, rel, types_nodes::nodes_enums::CmdType::CMD_DELETE)?;
 
     let mut trig = apply_trig(rel)?;
-    refuse_br_triggers(trig.as_ref(), "DELETE");
+    refuse_br_triggers(trig.as_ref(), "DELETE")?;
 
     let tid = searchslot.base().tts_tid;
     let snap = Some(snapmgr::GetActiveSnapshot());
@@ -1803,4 +1896,41 @@ fn apply_handle_truncate(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> 
     }
 
     end_replication_step()
+}
+
+#[cfg(test)]
+mod tests {
+    // The TEXT-column arm of slot_store_datum now runs pg_verifymbstr against
+    // the subscriber's database encoding before handing publisher-supplied
+    // bytes to the type input function (idx 76). slot_store_datum itself needs
+    // a live backend (mcx, fmgr, catalogs), so guard the exact predicate it
+    // relies on: under a UTF-8 database, invalid multibyte sequences must
+    // produce a catchable error rather than flow through to from_utf8_unchecked
+    // sinks, while valid text passes. SQL_ASCII (byte-transparent) is left to
+    // mbutils' own coverage.
+    #[test]
+    fn text_column_bytes_are_encoding_verified() {
+        use wchar::PG_UTF8;
+
+        // Valid UTF-8 (ASCII and a multibyte codepoint) is accepted.
+        assert!(mbutils::pg_verify_mbstr(PG_UTF8, b"hello", false).unwrap());
+        assert!(mbutils::pg_verify_mbstr(PG_UTF8, "ol\u{00e9}".as_bytes(), false).unwrap());
+
+        // A lone 0xFF and a truncated multibyte sequence are rejected with a
+        // catchable error instead of becoming a poisoned datum.
+        let err = mbutils::pg_verify_mbstr(PG_UTF8, b"bad\xff", false)
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.sqlstate(),
+            types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
+        );
+        let err = mbutils::pg_verify_mbstr(PG_UTF8, b"bad\xe2\x82", false)
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.sqlstate(),
+            types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
+        );
+    }
 }

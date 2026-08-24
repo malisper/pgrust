@@ -28,7 +28,7 @@ fn regex_wc_isclass_builtin(class: WcClass, c: PgWChar, posix: bool) -> bool {
 
 use crate::regex_consts::{NUM_CCLASSES, REG_ECOLLATE, REG_ECTYPE, REG_ERANGE, REG_ESPACE,
     REG_ETOOBIG, REG_FAKE, REG_ULOCALE};
-use crate::regex_error::{RegError, RegResult};
+use crate::regex_error::{check_interrupt, RegError, RegResult};
 use crate::regex_foundation::{addchr, addrange, getcvec};
 use crate::regguts::{char_classes, chr, ColorMap, Cvec, CvecRange, MAX_SIMPLE_CHR};
 
@@ -590,6 +590,9 @@ pub fn range<'mcx>(mcx: Mcx<'mcx>, a: chr, b: chr, cases: i32) -> RegResult<Cvec
             }
             addchr(&mut cv, cc);
         }
+        // C regc_locale.c:478 INTERRUPT(v->re): tail of range()'s case-mapping
+        // loop — the ~2^31-iteration case-insensitive full-space bracket bomb.
+        check_interrupt()?;
         if c == b {
             break;
         }

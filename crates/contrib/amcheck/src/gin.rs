@@ -78,15 +78,56 @@ pub(crate) fn gin_index_check_internal(mcx: Mcx<'_>, indrelid: Oid) -> PgResult<
 
 unsafe fn gin_read_tuple_without_state<'a>(
     amcx: Mcx<'a>,
+    rel: &Relation<'_>,
     itup: *const u8,
     out: &mut PgVec<'a, ItemPointerData>,
 ) -> PgResult<()> {
     let nipd = ginam::gin_get_nposting(itup) as usize;
-    let ptr = itup.add(ginam::gin_get_posting_offset(itup));
+    let posting_offset = ginam::gin_get_posting_offset(itup);
+
+    // The posting offset (31 bits) and posting count (16 bits) come straight
+    // from the on-disk t_tid bytes, so on a corrupt page (which is exactly what
+    // amcheck exists to detect) they cannot be trusted to point inside the
+    // tuple. The index tuple size was already validated against the line-pointer
+    // length by the caller (see the IndexTupleSize check in check_entry_page,
+    // matching verify_gin.c), so treat it as the trustworthy upper bound and
+    // confirm the posting data lies fully within it before deriving any
+    // raw-pointer reads. Report a violation as index corruption rather than
+    // reading out of bounds.
+    let itupsize = index_tuple_size(itup);
+    if posting_offset > itupsize {
+        return Err(corrupt(format!(
+            "index \"{}\": GIN entry tuple posting offset {} exceeds tuple size {}",
+            rel.name(),
+            posting_offset,
+            itupsize
+        )));
+    }
+    let avail = itupsize - posting_offset;
+    let ptr = itup.add(posting_offset);
     if ginam::gin_itup_is_compressed(itup) {
         if nipd > 0 {
-            let before = out.len();
+            // Need a full posting-list segment header before seg_size can read
+            // the declared segment length out of it.
+            if avail < 8 {
+                return Err(corrupt(format!(
+                    "index \"{}\": GIN entry tuple posting list header runs past tuple end (offset {}, tuple size {})",
+                    rel.name(),
+                    posting_offset,
+                    itupsize
+                )));
+            }
             let seglen = ginam::seg_size(core::slice::from_raw_parts(ptr, 8));
+            if seglen > avail {
+                return Err(corrupt(format!(
+                    "index \"{}\": GIN entry tuple posting list (offset {}, length {}) runs past tuple size {}",
+                    rel.name(),
+                    posting_offset,
+                    seglen,
+                    itupsize
+                )));
+            }
+            let before = out.len();
             ginam::ginPostingListDecodeAllSegments(core::slice::from_raw_parts(ptr, seglen), out)?;
             let ndecoded = out.len() - before;
             if nipd != ndecoded {
@@ -96,6 +137,16 @@ unsafe fn gin_read_tuple_without_state<'a>(
             }
         }
     } else {
+        let needed = nipd * core::mem::size_of::<ItemPointerData>();
+        if needed > avail {
+            return Err(corrupt(format!(
+                "index \"{}\": GIN entry tuple posting list ({} items, offset {}) runs past tuple size {}",
+                rel.name(),
+                nipd,
+                posting_offset,
+                itupsize
+            )));
+        }
         out.try_reserve(nipd).map_err(|_| amcx.oom(nipd * core::mem::size_of::<ItemPointerData>()))?;
         for i in 0..nipd {
             out.push(ptr.add(i * core::mem::size_of::<ItemPointerData>()).cast::<ItemPointerData>().read_unaligned());
@@ -530,7 +581,7 @@ fn check_entry_page<'a>(
         } else {
             let mut ipd: PgVec<'a, ItemPointerData> = mcx::vec_new_in(amcx);
             // SAFETY: as above.
-            unsafe { gin_read_tuple_without_state(amcx, idxtuple, &mut ipd)? };
+            unsafe { gin_read_tuple_without_state(amcx, rel, idxtuple, &mut ipd)? };
             for j in 0..ipd.len() {
                 if !OffsetNumberIsValid(ItemPointerGetOffsetNumberNoCheck(&ipd[j])) {
                     return Err(corrupt(format!(

@@ -67,6 +67,61 @@ fn error_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg))
 }
 
+// Malformed replayed WAL (a hostile/compromised primary or archive is the
+// stated trust boundary) must surface as a catchable ERRCODE_DATA_CORRUPTED
+// error on the startup redo thread rather than a slice-index / arithmetic panic
+// that crash-loops the standby. C 18.3 (nbtxlog.c) reads these same fields with
+// raw pointer arithmetic and only Assert()s the invariants (compiled out of
+// production), so on the same bytes production C performs out-of-bounds reads;
+// the checks below leave every well-formed record behaving identically while
+// turning the malformed path into a recoverable error.
+#[track_caller]
+#[cold]
+fn corrupt_err(msg: String) -> Box<PgError> {
+    Box::new(
+        PgError::new(types_error::ERROR, msg)
+            .with_sqlstate(types_error::ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+// Every redo arm opens by decoding a fixed-size struct from the record's main
+// data at hard-coded offsets; main_data_len is attacker-declared (0 is legal),
+// so verify the payload covers the struct before any fixed-offset read.
+fn require_len(data: &[u8], need: usize, ctx: &str) -> PgResult<()> {
+    if data.len() < need {
+        return Err(corrupt_err(format!(
+            "{ctx}: WAL payload length {} shorter than the {need} bytes it must hold",
+            data.len()
+        )));
+    }
+    Ok(())
+}
+
+// Bounds-checked little-endian u16 read from a WAL payload; never panics.
+fn read_u16(data: &[u8], off: usize, ctx: &str) -> PgResult<u16> {
+    match off.checked_add(2).and_then(|end| data.get(off..end)) {
+        Some(b) => Ok(u16::from_ne_bytes([b[0], b[1]])),
+        None => Err(corrupt_err(format!(
+            "{ctx}: WAL payload overrun reading u16 at offset {off} (payload {} bytes)",
+            data.len()
+        ))),
+    }
+}
+
+// SizeOf* for the btree WAL structs (nbtxlog.h), expressed as the byte offset
+// past the last field each redo arm decodes.
+const SizeOfBtreeInsert: usize = 2; // offnum
+const SizeOfBtreeSplit: usize = 10; // level, firstrightoff, newitemoff, postingoff
+const SizeOfBtreeDedup: usize = 2; // nintervals
+const SizeOfBtreeNewroot: usize = 8; // rootblk, level
+const SizeOfBtreeVacuum: usize = 4; // ndeleted, nupdated
+const SizeOfBtreeDelete: usize = 9; // horizon, ndeleted, nupdated, isCatalogRel
+const SizeOfBtreeMarkPageHalfDead: usize = 20; // poffset .. topparent
+const SizeOfBtreeUnlinkPage: usize = 36; // leftsib .. leaftopparent
+const SizeOfBtreeReusePage: usize = 25; // locator, block, horizon, isCatalogRel
+const SizeOfBtreeMetadata: usize = 25; // version .. allequalimage
+const MinIndexTupleSize: usize = 8; // IndexTupleData header (t_tid + t_info)
+
 // SAFETY contract shared by the redo arms: the buffer is pinned and
 // exclusively locked (XLogReadBufferForRedo protocol), so the PageMut is the
 // sole writer of the image until the unlock below.
@@ -79,20 +134,46 @@ fn unlock_release(buffer: Buffer) -> PgResult<()> {
     bufmgr_seams::release_buffer::call(buffer)
 }
 
-fn page_opaque(page: &PageRef<'_>) -> BTPageOpaqueData {
-    let off = page.pd_special() as usize;
-    debug_assert!(off == BLCKSZ - SizeOfBtreeOpaque);
-    // SAFETY: in-bounds 4-aligned special area of a btree page.
-    unsafe { page.as_ptr().add(off).cast::<BTPageOpaqueData>().read() }
+// Every btree page carries exactly one MAXALIGN'd BTPageOpaqueData as its
+// special space, so PageInit fixes pd_special at this single value. Pages we
+// build via bt_pageinit always satisfy it, but a page reached through a redo
+// buffer may be a replayed FPI or on-disk image whose header (pd_special
+// included) is attacker-controlled at the stated trust boundary. C 18.3 forms
+// the opaque pointer as `PageGetSpecialPointer` (raw pd_special) with only
+// Assert()s, so a crafted pd_special makes production C read/write 16 bytes
+// out of bounds. Validating the offset here — the single choke point every
+// opaque access passes through — turns that into a catchable
+// ERRCODE_DATA_CORRUPTED error while leaving well-formed pages identical.
+const BtreeSpecialOffset: usize = BLCKSZ - maxalign(SizeOfBtreeOpaque);
+
+fn check_special(pd_special: usize, ctx: &str) -> PgResult<()> {
+    if pd_special != BtreeSpecialOffset {
+        return Err(corrupt_err(format!(
+            "{ctx}: page special offset {pd_special} is not the required \
+             {BtreeSpecialOffset} (BLCKSZ - MAXALIGN(sizeof(BTPageOpaqueData))); \
+             a 16-byte BTPageOpaqueData access there would fall outside the page"
+        )));
+    }
+    Ok(())
 }
 
-fn write_opaque(page: &mut PageMut<'_>, opaque: &BTPageOpaqueData) {
+fn page_opaque(page: &PageRef<'_>) -> PgResult<BTPageOpaqueData> {
+    let off = page.pd_special() as usize;
+    check_special(off, "btree redo: page_opaque")?;
+    // SAFETY: validated to be the in-bounds MAXALIGN'd special area of a btree
+    // page, so the 16-byte read stays within [0, BLCKSZ).
+    Ok(unsafe { page.as_ptr().add(off).cast::<BTPageOpaqueData>().read() })
+}
+
+fn write_opaque(page: &mut PageMut<'_>, opaque: &BTPageOpaqueData) -> PgResult<()> {
     let off = page.as_ref().pd_special() as usize;
-    debug_assert!(off == BLCKSZ - SizeOfBtreeOpaque);
-    // SAFETY: in-bounds 4-aligned special area; exclusive page access.
+    check_special(off, "btree redo: write_opaque")?;
+    // SAFETY: validated in-bounds MAXALIGN'd special area; exclusive page access,
+    // so the 16-byte write stays within [0, BLCKSZ).
     unsafe {
         page.as_ref().as_ptr().cast_mut().add(off).cast::<BTPageOpaqueData>().write(*opaque)
     }
+    Ok(())
 }
 
 fn bt_pageinit(page: &mut PageMut<'_>) {
@@ -103,8 +184,19 @@ const fn maxalign(sz: usize) -> usize {
     (sz + 7) & !7
 }
 
-fn itup_size_at(stream: &[u8], off: usize) -> usize {
-    (u16::from_ne_bytes([stream[off + 6], stream[off + 7]]) & INDEX_SIZE_MASK) as usize
+// Read an IndexTuple's size word (t_info low bits) at `off`, bounds-checking
+// against a WAL-provided stream that may be truncated. Never panics.
+fn itup_size_at(stream: &[u8], off: usize) -> PgResult<usize> {
+    let hdr = off
+        .checked_add(MinIndexTupleSize)
+        .and_then(|end| stream.get(off..end))
+        .ok_or_else(|| {
+            corrupt_err(format!(
+                "btree redo: tuple stream overrun reading item header at offset {off} (stream {} bytes)",
+                stream.len()
+            ))
+        })?;
+    Ok((u16::from_ne_bytes([hdr[6], hdr[7]]) & INDEX_SIZE_MASK) as usize)
 }
 
 // _bt_restore_page: the stream is page-memory order (highest offset number
@@ -114,7 +206,28 @@ fn bt_restore_page(page: &mut PageMut<'_>, from: &[u8]) -> PgResult<()> {
     let mut nitems = 0usize;
     let mut off = 0usize;
     while off < from.len() {
-        let itemsz = maxalign(itup_size_at(from, off));
+        // A size word below the header minimum (in particular 0) would never
+        // advance `off`, spinning until the bounds[] index overruns.
+        let rawsz = itup_size_at(from, off)?;
+        if rawsz < MinIndexTupleSize {
+            return Err(corrupt_err(format!(
+                "_bt_restore_page: item at offset {off} has invalid size {rawsz}"
+            )));
+        }
+        let itemsz = maxalign(rawsz);
+        // A stream of many tiny items would over-index the fixed bounds[] array.
+        if nitems >= MaxIndexTuplesPerPage {
+            return Err(corrupt_err(
+                "_bt_restore_page: tuple stream has more items than a page can hold".into(),
+            ));
+        }
+        // The full item body must lie within the stream.
+        if off.checked_add(itemsz).is_none_or(|end| end > from.len()) {
+            return Err(corrupt_err(format!(
+                "_bt_restore_page: item at offset {off} size {itemsz} overruns stream ({} bytes)",
+                from.len()
+            )));
+        }
         bounds[nitems] = (off as u16, itemsz as u16);
         nitems += 1;
         off += itemsz;
@@ -134,10 +247,12 @@ fn bt_restore_page(page: &mut PageMut<'_>, from: &[u8]) -> PgResult<()> {
 
 fn bt_restore_meta(record: &mut XLogReaderState, block_id: u8) -> PgResult<()> {
     let lsn = record.EndRecPtr;
+    // Validate the metapage payload before acquiring the buffer: the fixed reads
+    // below cover 25 bytes (the write side registers the 28-byte padded struct).
+    require_len(block_data(record, block_id), SizeOfBtreeMetadata, "bt_restore_meta")?;
     let metabuf = XLogInitBufferForRedo(record, block_id)?;
     let xlrec = block_data(record, block_id);
 
-    debug_assert!(xlrec.len() == 28);
     debug_assert!(bufmgr_seams::buffer_get_block_number::call(metabuf) == BTREE_METAPAGE);
 
     // SAFETY: pin + exclusive lock per the redo protocol (module contract).
@@ -176,7 +291,7 @@ fn bt_restore_meta(record: &mut XLogReaderState, block_id: u8) -> PgResult<()> {
             btpo_flags: BTP_META,
             btpo_cycleid: 0,
         },
-    );
+    )?;
 
     // pd_lower past the metadata keeps it out of the xlog page-hole.
     pm.set_pd_lower((SizeOfPageHeaderData + core::mem::size_of::<BTMetaPageData>()) as u16);
@@ -192,10 +307,10 @@ fn bt_clear_incomplete_split(record: &mut XLogReaderState, block_id: u8) -> PgRe
     if action == BLK_NEEDS_REDO {
         // SAFETY: pin + exclusive lock per the redo protocol (module contract).
         let mut pm = unsafe { page_mut(buf) };
-        let mut opaque = page_opaque(&pm.as_ref());
+        let mut opaque = page_opaque(&pm.as_ref())?;
         debug_assert!(P_INCOMPLETE_SPLIT(&opaque));
         opaque.btpo_flags &= !BTP_INCOMPLETE_SPLIT;
-        write_opaque(&mut pm, &opaque);
+        write_opaque(&mut pm, &opaque)?;
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(buf)?;
     }
@@ -243,6 +358,7 @@ fn btree_xlog_insert(
 ) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let xlrec = main_data(record);
+    require_len(xlrec, SizeOfBtreeInsert, "btree_xlog_insert")?;
     let offnum = u16::from_ne_bytes(xlrec[0..2].try_into().unwrap());
 
     if !isleaf {
@@ -261,6 +377,7 @@ fn btree_xlog_insert(
             // block data = uint16 postingoff + orignewitem; repeat the
             // primary's _bt_swap_posting against oposting at offnum - 1.
             debug_assert!(isleaf);
+            require_len(datapos, 2, "btree_xlog_insert(posting)")?;
             let postingoff = u16::from_ne_bytes(datapos[0..2].try_into().unwrap());
             let orignewitem = &datapos[2..];
             debug_assert!(postingoff > 0);
@@ -322,6 +439,7 @@ fn u16_le_native(page: PageRef<'_>, off: usize) -> u16 {
 fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let xlrec = main_data(record);
+    require_len(xlrec, SizeOfBtreeSplit, "btree_xlog_split")?;
     let level = u32::from_ne_bytes(xlrec[0..4].try_into().unwrap());
     let firstrightoff = u16::from_ne_bytes(xlrec[4..6].try_into().unwrap());
     let newitemoff = u16::from_ne_bytes(xlrec[6..8].try_into().unwrap());
@@ -353,7 +471,7 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
                 btpo_flags: if isleaf { BTP_LEAF } else { 0 },
                 btpo_cycleid: 0,
             },
-        );
+        )?;
         bt_restore_page(&mut rpm, rdata)?;
         rpm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(rbuf)?;
@@ -367,7 +485,7 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
         // SAFETY: pinned + exclusively locked; reads only until the restore
         // memcpy below ends this borrow.
         let origpage = unsafe { PageRef::from_raw(raw) };
-        let oopaque = page_opaque(&origpage);
+        let oopaque = page_opaque(&origpage)?;
 
         // posting-split coincidence: reconstruct newitem + nposting by
         // re-running the primary's _bt_swap_posting against oposting at
@@ -382,8 +500,10 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
 
         let mut newitem: &[u8] = &[];
         if newitemonleft || postingoff != 0 {
-            let newitemsz = maxalign(itup_size_at(datapos, 0));
-            newitem = &datapos[..newitemsz];
+            let newitemsz = maxalign(itup_size_at(datapos, 0)?);
+            newitem = datapos.get(..newitemsz).ok_or_else(|| {
+                corrupt_err("btree_xlog_split: newitem overruns left-page block data".into())
+            })?;
             datapos = &datapos[newitemsz..];
 
             if postingoff != 0 {
@@ -411,8 +531,10 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
             }
         }
 
-        let left_hikeysz = maxalign(itup_size_at(datapos, 0));
-        let left_hikey = &datapos[..left_hikeysz];
+        let left_hikeysz = maxalign(itup_size_at(datapos, 0)?);
+        let left_hikey = datapos.get(..left_hikeysz).ok_or_else(|| {
+            corrupt_err("btree_xlog_split: left high key overruns block data".into())
+        })?;
         datapos = &datapos[left_hikeysz..];
         debug_assert!(datapos.is_empty());
 
@@ -425,7 +547,7 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
             PageMut::from_raw(core::ptr::NonNull::new(temp.0.as_mut_ptr()).unwrap())
         };
         bt_pageinit(&mut leftpage);
-        write_opaque(&mut leftpage, &oopaque);
+        write_opaque(&mut leftpage, &oopaque)?;
 
         let mut leftoff = P_HIKEY;
         if leftpage.add_item(left_hikey, P_HIKEY, 0).is_none() {
@@ -438,7 +560,7 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
             if postingoff != 0 && off == replacepostingoff {
                 debug_assert!(newitemonleft || firstrightoff == newitemoff);
                 let nposting = &swap_imgs.as_ref().unwrap().1;
-                let np_sz = maxalign(itup_size_at(&nposting.0, 0));
+                let np_sz = maxalign(itup_size_at(&nposting.0, 0)?);
                 debug_assert!(np_sz == maxalign(nposting_sz));
                 if leftpage.add_item(&nposting.0[..np_sz], leftoff, 0).is_none() {
                     return Err(error_err(
@@ -489,7 +611,7 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
         }
         o.btpo_next = rightpagenumber;
         o.btpo_cycleid = 0;
-        write_opaque(&mut opm, &o);
+        write_opaque(&mut opm, &o)?;
 
         opm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(buf)?;
@@ -500,9 +622,9 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
         if saction == BLK_NEEDS_REDO {
             // SAFETY: pin + exclusive lock per the redo protocol.
             let mut spm = unsafe { page_mut(sbuf) };
-            let mut spageop = page_opaque(&spm.as_ref());
+            let mut spageop = page_opaque(&spm.as_ref())?;
             spageop.btpo_prev = rightpagenumber;
-            write_opaque(&mut spm, &spageop);
+            write_opaque(&mut spm, &spageop)?;
             spm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(sbuf)?;
         }
@@ -520,11 +642,19 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
 
 fn btree_xlog_dedup(record: &mut XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
+    require_len(main_data(record), SizeOfBtreeDedup, "btree_xlog_dedup")?;
     let nintervals = u16::from_ne_bytes(main_data(record)[0..2].try_into().unwrap()) as usize;
 
     let (action, buf) = XLogReadBufferForRedo(record, 0)?;
     if action == BLK_NEEDS_REDO {
         let intervals = block_data(record, 0);
+        // nintervals BTDedupInterval structs (4 bytes each) must be present.
+        if nintervals.checked_mul(4).is_none_or(|n| intervals.len() < n) {
+            return Err(corrupt_err(format!(
+                "btree_xlog_dedup: block data length {} shorter than {nintervals} intervals",
+                intervals.len()
+            )));
+        }
         let interval_at = |i: usize| {
             (
                 u16::from_ne_bytes(intervals[i * 4..i * 4 + 2].try_into().unwrap()),
@@ -535,7 +665,7 @@ fn btree_xlog_dedup(record: &mut XLogReaderState) -> PgResult<()> {
         // SAFETY: pin + exclusive lock per the redo protocol (module contract).
         let pm = unsafe { page_mut(buf) };
         let page = pm.as_ref();
-        let opaque = page_opaque(&page);
+        let opaque = page_opaque(&page)?;
 
         // conservatively larger maxpostingsize than the primary
         let mut state = types_nbtree::dedup::BTDedupState::new(types_nbtree::BTMaxItemSize);
@@ -552,7 +682,7 @@ fn btree_xlog_dedup(record: &mut XLogReaderState) -> PgResult<()> {
             PageMut::from_raw(core::ptr::NonNull::new(temp.0.as_mut_ptr()).unwrap())
         };
         bt_pageinit(&mut newpage);
-        write_opaque(&mut newpage, &opaque);
+        write_opaque(&mut newpage, &opaque)?;
 
         if !types_nbtree::P_RIGHTMOST(&opaque) {
             let hitemid = page.item_id(P_HIKEY);
@@ -572,7 +702,7 @@ fn btree_xlog_dedup(record: &mut XLogReaderState) -> PgResult<()> {
             // storage so base pointers stay valid across finish_pending.
             unsafe {
                 if offnum == minoff {
-                    state.start_pending(itup, offnum);
+                    state.start_pending(itup, offnum)?;
                 } else if state.nintervals < nintervals
                     && state.baseoff == interval_at(state.nintervals).0
                     && state.nitems < interval_at(state.nintervals).1 as usize
@@ -589,7 +719,7 @@ fn btree_xlog_dedup(record: &mut XLogReaderState) -> PgResult<()> {
                             "deduplication failed to add tuple to page".into(),
                         ));
                     }
-                    state.start_pending(itup, offnum);
+                    state.start_pending(itup, offnum)?;
                 }
             }
         }
@@ -601,9 +731,9 @@ fn btree_xlog_dedup(record: &mut XLogReaderState) -> PgResult<()> {
         debug_assert!(state.intervals_bytes() == intervals);
 
         if types_nbtree::P_HAS_GARBAGE(&opaque) {
-            let mut nopaque = page_opaque(&newpage.as_ref());
+            let mut nopaque = page_opaque(&newpage.as_ref())?;
             nopaque.btpo_flags &= !types_nbtree::BTP_HAS_GARBAGE;
-            write_opaque(&mut newpage, &nopaque);
+            write_opaque(&mut newpage, &nopaque)?;
         }
 
         // PageRestoreTempPage
@@ -630,6 +760,7 @@ fn btree_xlog_dedup(record: &mut XLogReaderState) -> PgResult<()> {
 fn btree_xlog_newroot(record: &mut XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let xlrec = main_data(record);
+    require_len(xlrec, SizeOfBtreeNewroot, "btree_xlog_newroot")?;
     let level = u32::from_ne_bytes(xlrec[4..8].try_into().unwrap());
 
     let buffer = XLogInitBufferForRedo(record, 0)?;
@@ -650,7 +781,7 @@ fn btree_xlog_newroot(record: &mut XLogReaderState) -> PgResult<()> {
                 btpo_flags: flags,
                 btpo_cycleid: 0,
             },
-        );
+        )?;
 
         if level > 0 {
             bt_restore_page(&mut pm, block_data(record, 0))?;
@@ -691,18 +822,47 @@ fn tup_posting_offset(b: &[u8]) -> usize {
 
 // _bt_update_posting over raw tuple bytes: write the replacement image
 // (original minus deletetids posting entries) into `out`, returning its size.
-fn xlog_update_posting(orig: &[u8], deletetids: &[u8], out: &mut [u8]) -> usize {
+fn xlog_update_posting(orig: &[u8], deletetids: &[u8], out: &mut [u8]) -> PgResult<usize> {
+    // `orig` is an on-page tuple the record claims is a posting list; validate
+    // that shape and the WAL-controlled delete count before deriving sizes.
+    if orig.len() < MinIndexTupleSize || !tup_is_posting(orig) {
+        return Err(corrupt_err(
+            "_bt_update_posting: target tuple is not a posting list".into(),
+        ));
+    }
     let ndeleted = deletetids.len() / 2;
     let norig = tup_nposting(orig);
+    // C Assert: nhtids > 0 && nhtids < norig, i.e. 0 < ndeleted < norig.
+    if ndeleted == 0 || ndeleted >= norig {
+        return Err(corrupt_err(format!(
+            "_bt_update_posting: cannot delete {ndeleted} of {norig} posting-list entries"
+        )));
+    }
     let nhtids = norig - ndeleted;
-    debug_assert!(nhtids > 0 && nhtids < norig);
 
     let keysize = tup_posting_offset(orig);
+    // Every original TID (posting_base + i*6) must lie within `orig`.
+    let orig_need = keysize
+        .checked_add(norig.checked_mul(6).unwrap_or(usize::MAX))
+        .unwrap_or(usize::MAX);
+    if keysize > orig.len() || orig_need > orig.len() {
+        return Err(corrupt_err(format!(
+            "_bt_update_posting: posting list ({keysize} key + {norig} TIDs) overruns {}-byte tuple",
+            orig.len()
+        )));
+    }
     let newsize = if nhtids > 1 {
         maxalign(keysize + nhtids * 6)
     } else {
         keysize
     };
+    // The reconstructed image is written into the caller's fixed scratch buffer.
+    if newsize > out.len() {
+        return Err(corrupt_err(format!(
+            "_bt_update_posting: rebuilt tuple size {newsize} exceeds scratch buffer {}",
+            out.len()
+        )));
+    }
 
     out[..newsize].fill(0);
     out[..keysize].copy_from_slice(&orig[..keysize]);
@@ -739,7 +899,7 @@ fn xlog_update_posting(orig: &[u8], deletetids: &[u8], out: &mut [u8]) -> usize 
         ui += 1;
     }
     debug_assert!(ui == nhtids && d == ndeleted);
-    newsize
+    Ok(newsize)
 }
 
 // btree_xlog_updates: apply the xl_btree_update stream to the page.
@@ -751,10 +911,23 @@ fn btree_xlog_updates(
 ) -> PgResult<()> {
     let mut scratch = [0u8; BLCKSZ];
     for i in 0..nupdated {
-        let offnum =
-            u16::from_ne_bytes([updatedoffsets[i * 2], updatedoffsets[i * 2 + 1]]);
-        let ndeletedtids = u16::from_ne_bytes([updates[0], updates[1]]) as usize;
-        let deletetids = &updates[2..2 + ndeletedtids * 2];
+        // updatedoffsets carries nupdated 2-byte offsets; the caller sizes it
+        // from nupdated, but guard the read against a short caller slice too.
+        let ob = updatedoffsets.get(i * 2..i * 2 + 2).ok_or_else(|| {
+            corrupt_err("btree_xlog_updates: updated-offset array too short".into())
+        })?;
+        let offnum = u16::from_ne_bytes([ob[0], ob[1]]);
+
+        // Each xl_btree_update is a uint16 ndeletedtids followed by that many
+        // uint16 TID offsets; ndeletedtids is WAL-controlled.
+        let ndeletedtids = read_u16(updates, 0, "btree_xlog_updates")? as usize;
+        let tids_end = ndeletedtids
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(2))
+            .ok_or_else(|| corrupt_err("btree_xlog_updates: ndeletedtids overflow".into()))?;
+        let deletetids = updates.get(2..tids_end).ok_or_else(|| {
+            corrupt_err("btree_xlog_updates: deleted-TID list overruns update stream".into())
+        })?;
 
         let orig = {
             let page = pm.as_ref();
@@ -764,14 +937,14 @@ fn btree_xlog_updates(
             // borrow ends before index_tuple_overwrite mutates the page.
             unsafe { core::slice::from_raw_parts(ptr, len as usize) }
         };
-        let newsize = xlog_update_posting(orig, deletetids, &mut scratch);
+        let newsize = xlog_update_posting(orig, deletetids, &mut scratch)?;
         let img_len = maxalign(newsize);
         let img = &scratch[..img_len];
         if !pm.index_tuple_overwrite(offnum, img) {
             return Err(panic_err("failed to update partially dead item".into()));
         }
 
-        updates = &updates[2 + ndeletedtids * 2..];
+        updates = &updates[tids_end..];
     }
     Ok(())
 }
@@ -783,6 +956,7 @@ fn btree_xlog_vacuum(record: &mut XLogReaderState) -> PgResult<()> {
 fn btree_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
     if xlogutils::InHotStandby() {
         let xlrec = main_data(record);
+        require_len(xlrec, SizeOfBtreeDelete, "btree_xlog_delete")?;
         let horizon = u32::from_ne_bytes(xlrec[0..4].try_into().unwrap());
         let is_catalog_rel = xlrec[8] != 0;
         let (rlocator, _, _, _) =
@@ -796,11 +970,15 @@ fn btree_xlog_vacuum_or_delete(record: &mut XLogReaderState, is_vacuum: bool) ->
     let lsn = record.EndRecPtr;
     let xlrec = main_data(record);
     let (ndeleted, nupdated) = if is_vacuum {
+        require_len(xlrec, SizeOfBtreeVacuum, "btree_xlog_vacuum")?;
         (
             u16::from_ne_bytes(xlrec[0..2].try_into().unwrap()) as usize,
             u16::from_ne_bytes(xlrec[2..4].try_into().unwrap()) as usize,
         )
     } else {
+        // horizon (0..4) + ndeleted (4..6) + nupdated (6..8); isCatalogRel (8)
+        // is only consulted in the hot-standby arm above.
+        require_len(xlrec, 8, "btree_xlog_delete")?;
         (
             u16::from_ne_bytes(xlrec[4..6].try_into().unwrap()) as usize,
             u16::from_ne_bytes(xlrec[6..8].try_into().unwrap()) as usize,
@@ -820,8 +998,23 @@ fn btree_xlog_vacuum_or_delete(record: &mut XLogReaderState, is_vacuum: bool) ->
         let mut pm = unsafe { page_mut(buffer) };
 
         if nupdated > 0 {
-            let updatedoffsets = &ptr[ndeleted * 2..ndeleted * 2 + nupdated * 2];
-            let updates = &ptr[ndeleted * 2 + nupdated * 2..];
+            // Both counts come from attacker-controlled main data; slice the
+            // block payload with checked arithmetic.
+            let del_bytes = ndeleted
+                .checked_mul(2)
+                .ok_or_else(|| corrupt_err("btree redo: ndeleted overflow".into()))?;
+            let upd_bytes = nupdated
+                .checked_mul(2)
+                .ok_or_else(|| corrupt_err("btree redo: nupdated overflow".into()))?;
+            let mid = del_bytes
+                .checked_add(upd_bytes)
+                .ok_or_else(|| corrupt_err("btree redo: offset array overflow".into()))?;
+            let updatedoffsets = ptr.get(del_bytes..mid).ok_or_else(|| {
+                corrupt_err("btree redo: updated-offset array overruns block data".into())
+            })?;
+            let updates = ptr.get(mid..).ok_or_else(|| {
+                corrupt_err("btree redo: update metadata overruns block data".into())
+            })?;
             btree_xlog_updates(&mut pm, updatedoffsets, updates, nupdated)?;
         }
 
@@ -831,19 +1024,29 @@ fn btree_xlog_vacuum_or_delete(record: &mut XLogReaderState, is_vacuum: bool) ->
         let ndeleted = if is_vacuum && crate::sim_red::armed() { 0 } else { ndeleted };
 
         if ndeleted > 0 {
+            // ndeleted indexes a fixed MaxIndexTuplesPerPage array and reads
+            // 2*ndeleted bytes from the block payload; validate both.
+            if ndeleted > MaxIndexTuplesPerPage {
+                return Err(corrupt_err(format!(
+                    "btree redo: ndeleted {ndeleted} exceeds MaxIndexTuplesPerPage {MaxIndexTuplesPerPage}"
+                )));
+            }
+            let del_bytes = ptr.get(..ndeleted * 2).ok_or_else(|| {
+                corrupt_err("btree redo: deleted-offset array overruns block data".into())
+            })?;
             let mut offsets = [0 as OffsetNumber; MaxIndexTuplesPerPage];
             for (i, off) in offsets[..ndeleted].iter_mut().enumerate() {
-                *off = u16::from_ne_bytes([ptr[i * 2], ptr[i * 2 + 1]]);
+                *off = u16::from_ne_bytes([del_bytes[i * 2], del_bytes[i * 2 + 1]]);
             }
             pm.index_multi_delete(&offsets[..ndeleted]);
         }
 
-        let mut opaque = page_opaque(&pm.as_ref());
+        let mut opaque = page_opaque(&pm.as_ref())?;
         if is_vacuum {
             opaque.btpo_cycleid = 0;
         }
         opaque.btpo_flags &= !types_nbtree::BTP_HAS_GARBAGE;
-        write_opaque(&mut pm, &opaque);
+        write_opaque(&mut pm, &opaque)?;
 
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(buffer)?;
@@ -857,6 +1060,7 @@ fn btree_xlog_vacuum_or_delete(record: &mut XLogReaderState, is_vacuum: bool) ->
 fn btree_xlog_mark_page_halfdead(record: &mut XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let xlrec = main_data(record);
+    require_len(xlrec, SizeOfBtreeMarkPageHalfDead, "btree_xlog_mark_page_halfdead")?;
     let poffset = u16::from_ne_bytes(xlrec[0..2].try_into().unwrap());
     let leftblk = u32::from_ne_bytes(xlrec[8..12].try_into().unwrap());
     let rightblk = u32::from_ne_bytes(xlrec[12..16].try_into().unwrap());
@@ -913,7 +1117,7 @@ fn btree_xlog_mark_page_halfdead(record: &mut XLogReaderState) -> PgResult<()> {
                 btpo_flags: types_nbtree::BTP_HALF_DEAD | BTP_LEAF,
                 btpo_cycleid: 0,
             },
-        );
+        )?;
 
         let trunctuple = trunc_hikey(topparent);
         if pm.add_item(&trunctuple, P_HIKEY, 0).is_none() {
@@ -940,6 +1144,7 @@ fn trunc_hikey(topparent: u32) -> [u8; 8] {
 fn btree_xlog_unlink_page(info: u8, record: &mut XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let xlrec = main_data(record);
+    require_len(xlrec, SizeOfBtreeUnlinkPage, "btree_xlog_unlink_page")?;
     let leftsib = u32::from_ne_bytes(xlrec[0..4].try_into().unwrap());
     let rightsib = u32::from_ne_bytes(xlrec[4..8].try_into().unwrap());
     let level = u32::from_ne_bytes(xlrec[8..12].try_into().unwrap());
@@ -956,9 +1161,9 @@ fn btree_xlog_unlink_page(info: u8, record: &mut XLogReaderState) -> PgResult<()
         if action == BLK_NEEDS_REDO {
             // SAFETY: pin + exclusive lock per the redo protocol.
             let mut pm = unsafe { page_mut(buf) };
-            let mut opaque = page_opaque(&pm.as_ref());
+            let mut opaque = page_opaque(&pm.as_ref())?;
             opaque.btpo_next = rightsib;
-            write_opaque(&mut pm, &opaque);
+            write_opaque(&mut pm, &opaque)?;
             pm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(buf)?;
         }
@@ -978,8 +1183,8 @@ fn btree_xlog_unlink_page(info: u8, record: &mut XLogReaderState) -> PgResult<()
                 btpo_flags: if isleaf { BTP_LEAF } else { 0 },
                 btpo_cycleid: 0,
             },
-        );
-        page_set_deleted(&mut pm, safexid);
+        )?;
+        page_set_deleted(&mut pm, safexid)?;
 
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(target)?;
@@ -989,9 +1194,9 @@ fn btree_xlog_unlink_page(info: u8, record: &mut XLogReaderState) -> PgResult<()
     if action == BLK_NEEDS_REDO {
         // SAFETY: pin + exclusive lock per the redo protocol.
         let mut pm = unsafe { page_mut(rightbuf) };
-        let mut opaque = page_opaque(&pm.as_ref());
+        let mut opaque = page_opaque(&pm.as_ref())?;
         opaque.btpo_prev = leftsib;
-        write_opaque(&mut pm, &opaque);
+        write_opaque(&mut pm, &opaque)?;
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(rightbuf)?;
     }
@@ -1020,7 +1225,7 @@ fn btree_xlog_unlink_page(info: u8, record: &mut XLogReaderState) -> PgResult<()
                     btpo_flags: types_nbtree::BTP_HALF_DEAD | BTP_LEAF,
                     btpo_cycleid: 0,
                 },
-            );
+            )?;
 
             let trunctuple = trunc_hikey(leaftopparent);
             if pm.add_item(&trunctuple, P_HIKEY, 0).is_none() {
@@ -1041,11 +1246,11 @@ fn btree_xlog_unlink_page(info: u8, record: &mut XLogReaderState) -> PgResult<()
 }
 
 // BTPageSetDeleted over a freshly initialized page image.
-fn page_set_deleted(pm: &mut PageMut<'_>, safexid: u64) {
-    let mut opaque = page_opaque(&pm.as_ref());
+fn page_set_deleted(pm: &mut PageMut<'_>, safexid: u64) -> PgResult<()> {
+    let mut opaque = page_opaque(&pm.as_ref())?;
     opaque.btpo_flags &= !types_nbtree::BTP_HALF_DEAD;
     opaque.btpo_flags |= types_nbtree::BTP_DELETED | types_nbtree::BTP_HAS_FULLXID;
-    write_opaque(pm, &opaque);
+    write_opaque(pm, &opaque)?;
     let contents_off = maxalign(SizeOfPageHeaderData);
     pm.set_pd_lower((contents_off + 8) as u16);
     pm.set_pd_upper(pm.as_ref().pd_special());
@@ -1058,6 +1263,7 @@ fn page_set_deleted(pm: &mut PageMut<'_>, safexid: u64) {
             .cast::<u64>()
             .write(safexid)
     };
+    Ok(())
 }
 
 pub fn btree_redo(record: &mut XLogReaderState) -> PgResult<()> {
@@ -1082,6 +1288,7 @@ pub fn btree_redo(record: &mut XLogReaderState) -> PgResult<()> {
             // Conflict point for hot standby only; nothing to replay.
             if xlogutils::InHotStandby() {
                 let xlrec = main_data(record);
+                require_len(xlrec, SizeOfBtreeReusePage, "btree_xlog_reuse_page")?;
                 let locator = types_storage::RelFileLocator::new(
                     u32::from_ne_bytes(xlrec[0..4].try_into().unwrap()),
                     u32::from_ne_bytes(xlrec[4..8].try_into().unwrap()),
@@ -1116,7 +1323,7 @@ pub fn btree_mask(pagedata: &mut [u8], _blkno: types_core::BlockNumber) -> PgRes
     let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
     // SAFETY: `pagedata` is a full BLCKSZ page image, exclusively borrowed here.
     let pm = unsafe { PageMut::from_raw(ptr) };
-    let mut maskopaq = page_opaque(&pm.as_ref());
+    let mut maskopaq = page_opaque(&pm.as_ref())?;
     let is_leaf = P_ISLEAF(&maskopaq);
     drop(pm);
 
@@ -1134,7 +1341,7 @@ pub fn btree_mask(pagedata: &mut [u8], _blkno: types_core::BlockNumber) -> PgRes
     let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
     // SAFETY: as above.
     let mut pm = unsafe { PageMut::from_raw(ptr) };
-    write_opaque(&mut pm, &maskopaq);
+    write_opaque(&mut pm, &maskopaq)?;
     Ok(())
 }
 
@@ -1161,10 +1368,10 @@ mod mask_tests {
             let mut page = pm(&mut p);
             page.init(SizeOfBtreeOpaque);
             page.set_lsn(0x0102_0304_0506_0708);
-            let mut op = page_opaque(&page.as_ref());
+            let mut op = page_opaque(&page.as_ref()).unwrap();
             op.btpo_flags = BTP_LEAF | BTP_HAS_GARBAGE | BTP_SPLIT_END;
             op.btpo_cycleid = 42;
-            write_opaque(&mut page, &op);
+            write_opaque(&mut page, &op).unwrap();
         }
 
         btree_mask(&mut p.0, 0).unwrap();
@@ -1173,7 +1380,7 @@ mod mask_tests {
         {
             let page = pm(&mut p);
             assert_eq!(page.as_ref().lsn(), 0);
-            let op = page_opaque(&page.as_ref());
+            let op = page_opaque(&page.as_ref()).unwrap();
             assert_eq!(op.btpo_flags & (BTP_HAS_GARBAGE | BTP_SPLIT_END), 0);
             assert_eq!(op.btpo_cycleid, 0);
             assert_eq!(op.btpo_flags & BTP_LEAF, BTP_LEAF); // logged flag preserved

@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use pgrc2_format::dict::{dict_entry, DictEntryRef, DictSections, DICT_INDEX_ENTRY_LEN};
+use pgrc2_format::dict::{DictEntryRef, DICT_INDEX_ENTRY_LEN};
 use pgrc2_format::enc::Wrapper;
 use pgrc2_format::geom::DICT_FRAME_ENTRIES;
 use pgrc2_format::part::{StreamRole, StreamSectionHdr, STREAMF_DICT_EXEC, STREAM_SECTION_HDR_LEN};
@@ -338,6 +338,13 @@ struct FrameLazyPayload {
     /// Per-frame publication bits (Release on store; Acquire on the fast
     /// path) — bit i set ⇔ extent i's bytes are resident and immutable.
     frame_bits: Vec<AtomicU64>,
+    /// [idx251] Region-relative start offset of each extent (frame),
+    /// published once (write-once) alongside the region ptr so the read
+    /// path can bound an entry to its SPECIFIC published frame extent in
+    /// O(1) without taking the cell lock. `offsets[i]` = start of extent i;
+    /// extent i's byte span is `[offsets[i], offsets[i+1])` (the last frame
+    /// runs to `len`).
+    frame_offsets: pgsync::OnceLock<Vec<usize>>,
     /// Faulted payload bytes — the residency census term
     /// (`pgrc2_dict_frames_resident` class; the born-RED whole-fault arm
     /// shows the whole region here).
@@ -355,9 +362,25 @@ impl FrameLazyPayload {
             payload_start: AtomicUsize::new(0),
             payload_end: AtomicUsize::new(0),
             frame_bits: (0..words).map(|_| AtomicU64::new(0)).collect(),
+            frame_offsets: pgsync::OnceLock::new(),
             resident: AtomicUsize::new(0),
             frames: nextents as u32,
         }
+    }
+
+    /// [idx251] Region-relative `[lo, hi)` byte span of frame `f` (extent
+    /// `f`), for per-frame bounding of the lazy read. `None` until the
+    /// region is published (`frame_offsets` set alongside the ptr).
+    #[inline]
+    fn frame_span(&self, f: u32) -> Option<(usize, usize)> {
+        let offs = self.frame_offsets.get()?;
+        let i = f as usize;
+        let lo = *offs.get(i)?;
+        let hi = match offs.get(i + 1) {
+            Some(&h) => h,
+            None => self.len.load(Ordering::Acquire),
+        };
+        Some((lo, hi))
     }
 
     #[inline]
@@ -413,15 +436,35 @@ impl FrameLazyPayload {
                     }));
                 }
             }
-            let total: usize = ps.extents.iter().map(|e| e.len as usize).sum();
+            // [idx200] Bound the CLAIMED whole-region total against the
+            // absolute cap BEFORE reserving — the extent lengths are
+            // file-controlled and no read has yet witnessed them (the
+            // whole-fault path reads every extent, each file-bounds-checked in
+            // `fault_range`, before it assembles `total`; the lazy arm reserves
+            // up front, so it MUST refuse hostile geometry here). Typed,
+            // catchable (ERRCODE_DATA_CORRUPTED) — never an unbounded reservation.
+            let total =
+                dict_region_total_checked(ps.extents.iter().map(|e| e.len as usize).sum())?;
             let mut offsets = Vec::with_capacity(ps.extents.len());
             let mut off = 0usize;
             for e in &ps.extents {
                 offsets.push(off);
                 off += e.len as usize;
             }
+            // [idx200] Fallible reservation: even under the cap, an allocation
+            // failure must be a typed refusal, not `handle_alloc_error`'s
+            // process abort (which the infallible `vec!` would take, bypassing
+            // statement-thread panic containment).
+            let words = total.div_ceil(8);
+            let mut buf: Vec<u64> = Vec::new();
+            buf.try_reserve_exact(words).map_err(|_| {
+                ReadError::Format(FormatError::Corrupt {
+                    at: "dict region reservation",
+                })
+            })?;
+            buf.resize(words, 0);
             *cell = Some(FrameLazyState {
-                buf: vec![0u64; total.div_ceil(8)].into_boxed_slice(),
+                buf: buf.into_boxed_slice(),
                 len: total,
                 offsets,
             });
@@ -468,6 +511,11 @@ impl FrameLazyPayload {
                 return Err(ReadError::Format(FormatError::Corrupt { at: what }));
             }
             let (pstart, pend) = crate::cursor::payload_bounds(&hdr, state.len)?;
+            // [idx251] Publish the extent offset table BEFORE the ptr so a
+            // reader that sees a non-null ptr (Acquire) also sees the
+            // offsets — the read path bounds each entry to its published
+            // frame extent via `frame_span`.
+            let _ = self.frame_offsets.set(state.offsets.clone());
             self.payload_start.store(pstart as usize, Ordering::Release);
             self.payload_end.store(pend as usize, Ordering::Release);
             self.len.store(state.len, Ordering::Release);
@@ -634,6 +682,58 @@ impl FrameDirectPayload {
 /// Any geometry the probe would skip (no frame table, block/frame count
 /// skew, binding without block decode) falls back to the whole-region
 /// unwrap — never wrong, only whole.
+/// [idx136] Anti-amplification bound on a block-lazy dict payload's declared
+/// uncompressed image. `hdr.uncompressed_len` is file-controlled (a u32, up
+/// to ~4 GiB) and sizes BOTH the write-once reservation (`BlockLazyState::buf`)
+/// and the per-block decompress target (`fault_block`'s last-block span reaches
+/// `unc_len`). A crafted part can declare a ~4 GiB image over a few-hundred-KB
+/// extent (zstd RLE expands ~30000:1), so the reader MUST refuse — typed,
+/// never a 4 GiB reservation nor an infallible-alloc abort — any declared
+/// image exceeding a sane absolute cap OR a maximum expansion over the extent's
+/// actual compressed payload span. The whole-region fallback is not a safe
+/// escape (it reserves `uncompressed_len` too), so this is a hard refusal, not
+/// a fall-through. Valid dicts (image a few× the compressed span, well under
+/// the cap) pass untouched.
+const DICT_PAYLOAD_MAX_UNC_BYTES: usize = 1 << 30; // 1 GiB (PG MaxAllocSize class)
+const DICT_PAYLOAD_MAX_EXPANSION: usize = 1024; // uncompressed:compressed ceiling
+
+/// Validate a block-lazy dict payload's declared uncompressed length against
+/// [`DICT_PAYLOAD_MAX_UNC_BYTES`] and a `DICT_PAYLOAD_MAX_EXPANSION`× bound over
+/// the compressed payload span. Returns the validated `unc_len` or a typed
+/// `Bounds` refusal — never a reservation-sized-from-attacker-input.
+fn dict_payload_unc_checked(unc_len: usize, comp_len: usize) -> ReadResult<usize> {
+    let max_by_ratio = comp_len.saturating_mul(DICT_PAYLOAD_MAX_EXPANSION);
+    if unc_len > DICT_PAYLOAD_MAX_UNC_BYTES || unc_len > max_by_ratio {
+        return Err(ReadError::Format(FormatError::Bounds {
+            at: "dict payload uncompressed_len",
+        }));
+    }
+    Ok(unc_len)
+}
+
+/// [idx200] Anti-amplification bound on a FRAME-LAZY / whole-region dict
+/// region's declared total byte size. The frame-lazy arm sums the CLAIMED
+/// per-extent lengths (`ExtentRecord::len` — file-controlled u64s) and reserves
+/// ONE whole-region buffer of that total BEFORE any extent read witnesses the
+/// claim against the file, so a crafted part with hostile extent geometry could
+/// size a multi-GiB (or larger) reservation over a few-hundred-byte file
+/// (unbounded allocation → `handle_alloc_error` cluster abort). The reader MUST
+/// refuse any claimed total exceeding the absolute cap ([`DICT_PAYLOAD_MAX_UNC_BYTES`],
+/// the PG MaxAllocSize class) — typed and catchable (`ERRCODE_DATA_CORRUPTED`
+/// via [`FormatError::Corrupt`]), never an unbounded reservation. The
+/// whole-fault path (`cursor::load_region`) is naturally witnessed — it reads
+/// every extent (each file-bounds-checked in `OpenPart::fault_range`) before it
+/// assembles the total — so this bound closes only the lazy arm's up-front
+/// reservation gap. Valid dicts (region well under the cap) pass untouched.
+fn dict_region_total_checked(total: usize) -> ReadResult<usize> {
+    if total > DICT_PAYLOAD_MAX_UNC_BYTES {
+        return Err(ReadError::Format(FormatError::Corrupt {
+            at: "dict region total",
+        }));
+    }
+    Ok(total)
+}
+
 struct BlockLazyState {
     /// Reserved zeroed uncompressed-payload image (`alloc_zeroed` ⇒
     /// untouched blocks stay uncommitted). NEVER reallocated. Empty on the
@@ -658,6 +758,14 @@ pub(crate) struct BlockLazyPayload {
     /// bytes are resident and immutable. Whole-fallback publishes ONE
     /// all-set bit.
     bits: pgsync::OnceLock<Vec<AtomicU64>>,
+    /// [idx251] Uncompressed frame starts (`ftab`, payload-relative),
+    /// published once (write-once) on the BLOCK path so the read path can
+    /// bound an entry to its SPECIFIC published block in O(1) without the
+    /// cell lock. Block `b` covers payload bytes `[ftab[b], ftab[b+1])`
+    /// (the last block runs to `len`). UNSET on the whole-fallback path
+    /// (that publishes the entire payload atomically — the whole window IS
+    /// the published window, so no per-block bound is needed).
+    frame_starts: pgsync::OnceLock<Vec<u32>>,
     nblocks: AtomicUsize,
     /// Published payload window (base, len): Release after the cell owns
     /// the backing store — the same idiom as [`LazyRegion`].
@@ -677,6 +785,7 @@ impl BlockLazyPayload {
         BlockLazyPayload {
             cell: Mutex::new(None),
             bits: pgsync::OnceLock::new(),
+            frame_starts: pgsync::OnceLock::new(),
             nblocks: AtomicUsize::new(0),
             ptr: AtomicPtr::new(core::ptr::null_mut()),
             len: AtomicUsize::new(0),
@@ -716,6 +825,26 @@ impl BlockLazyPayload {
     fn block_of_frame(&self, frame: u32) -> usize {
         let nb = self.nblocks.load(Ordering::Acquire);
         (frame as usize).min(nb.saturating_sub(1))
+    }
+
+    /// [idx251] Payload-relative `[lo, hi)` byte span of the block backing
+    /// dict `frame`, for per-block bounding of the lazy read. `plen` is the
+    /// published payload window length (the last block runs to it). `None`
+    /// on the whole-fallback path (`frame_starts` unset) — there the whole
+    /// window IS the published window, so no per-block bound applies.
+    #[inline]
+    fn block_span(&self, frame: u32, plen: usize) -> Option<(usize, usize)> {
+        let ftab = self.frame_starts.get()?;
+        if ftab.is_empty() {
+            return None;
+        }
+        let b = self.block_of_frame(frame);
+        let lo = *ftab.get(b)? as usize;
+        let hi = match ftab.get(b + 1) {
+            Some(&h) => h as usize,
+            None => plen,
+        };
+        Some((lo, hi))
     }
 
     /// Initialize the state under the cell lock: head pread (header +
@@ -782,6 +911,12 @@ impl BlockLazyPayload {
             {
                 return Ok(None);
             }
+            // [idx136] Refuse a declared uncompressed image that exceeds the
+            // absolute cap or the expansion bound over the compressed payload
+            // span — before any image-sized reservation or decompress. Typed,
+            // catchable; a crafted ~4 GiB unc_len over a small extent stops
+            // here instead of reserving/committing ~4 GiB.
+            let unc_len = dict_payload_unc_checked(unc_len, comp_len as usize)?;
             // Frame table at the raw tail: uncompressed frame starts.
             let tail = part.subrange_bytes(
                 rec,
@@ -802,8 +937,20 @@ impl BlockLazyPayload {
             {
                 return Ok(None);
             }
+            // [idx136] Fallible reservation: even under the cap, an allocation
+            // failure must be a typed refusal, not `handle_alloc_error`'s abort
+            // (which the infallible `vec!` would take, bypassing statement-
+            // thread panic containment).
+            let words = unc_len.div_ceil(8);
+            let mut buf: Vec<u64> = Vec::new();
+            buf.try_reserve_exact(words).map_err(|_| {
+                ReadError::Format(FormatError::Bounds {
+                    at: "dict payload reservation",
+                })
+            })?;
+            buf.resize(words, 0);
             Ok(Some(BlockLazyState {
-                buf: vec![0u64; unc_len.div_ceil(8)].into_boxed_slice(),
+                buf: buf.into_boxed_slice(),
                 len: unc_len,
                 btab,
                 ftab,
@@ -813,6 +960,11 @@ impl BlockLazyPayload {
         if let Some(st) = try_blocks()? {
             let nb = st.ftab.len();
             let _ = self.bits.set((0..nb.div_ceil(64)).map(|_| AtomicU64::new(0)).collect());
+            // [idx251] Publish the frame-start table BEFORE the ptr so a
+            // reader that sees a non-null ptr (Acquire) also sees it — the
+            // read path bounds each entry to its published block via
+            // `block_span`.
+            let _ = self.frame_starts.set(st.ftab.clone());
             self.nblocks.store(nb, Ordering::Release);
             self.len.store(st.len, Ordering::Release);
             self.ptr.store(st.buf.as_ptr() as *mut u8, Ordering::Release);
@@ -1128,6 +1280,58 @@ pub struct DictHandle {
     /// [sqe8blk] Block faults THIS handle's demands caused (the
     /// bytes-touched election input; shared-image hits don't count).
     demand_block_faults: AtomicU32,
+}
+
+/// [idx251] Resolve an entry from a slice bounded to its PUBLISHED
+/// frame/block (the fix for the lazy-window data race): `seg` is exactly the
+/// bytes of the published window (frame extent or block), `seg_base` is that
+/// window's start in the same coordinate space as `payload_start`, and
+/// `payload_end` is the window's exclusive upper bound. `payload_off` (from
+/// untrusted index bytes) is validated to land at/above the window start and
+/// below its end — so the varlena read cannot reference bytes outside the
+/// published window (which other threads may still be writing). Typed,
+/// catchable refusals (`ERRCODE_DATA_CORRUPTED`) on any violation.
+fn present_bounded_entry<'a>(
+    seg: &'a [u8],
+    seg_base: usize,
+    payload_start: usize,
+    payload_end: usize,
+    payload_off: usize,
+    byte_len: u32,
+    char_field: u32,
+    charlen_form: pgrc2_format::dict::DictCharLenForm,
+) -> ReadResult<DictEntryRef<'a>> {
+    let region_off = payload_start + payload_off;
+    if region_off >= payload_end {
+        return Err(ReadError::Format(FormatError::Bounds { at: "dict payload" }));
+    }
+    // Below the window start ⇒ the entry claims another (possibly
+    // unpublished) frame/block: refuse before any read.
+    let lo = region_off
+        .checked_sub(seg_base)
+        .ok_or(ReadError::Format(FormatError::Bounds { at: "dict payload" }))?;
+    let (image, bytes) = pgrc2_format::wire::varlena_entry_at(seg, lo, "dict payload")?;
+    if bytes.len() != byte_len as usize {
+        return Err(ReadError::Format(FormatError::Corrupt {
+            at: "dict entry byte_len",
+        }));
+    }
+    use pgrc2_format::dict::DictCharLenForm;
+    let char_len = match charlen_form {
+        DictCharLenForm::Absolute => char_field,
+        DictCharLenForm::Delta => byte_len.checked_sub(char_field).ok_or(
+            ReadError::Format(FormatError::Corrupt {
+                at: "dict entry char_len delta",
+            }),
+        )?,
+        DictCharLenForm::Absent => pgrc2_format::dict::utf8_char_count(bytes),
+    };
+    Ok(DictEntryRef {
+        image,
+        bytes,
+        byte_len,
+        char_len,
+    })
 }
 
 impl DictHandle {
@@ -1623,48 +1827,93 @@ impl DictHandle {
             };
             return Ok(DictEntryRef { image, bytes, byte_len, char_len });
         }
-        let (pptr, plen) = match &self.payload {
-            PayloadRegion::Whole(r) => r.ensure(
-                &self.part,
-                self.unwrappers,
-                &self.payload_stream,
-                "dict payload stream",
-            )?,
+        // Read the index rec once. `payload_off` is untrusted file bytes;
+        // the FrameLazy/BlockLazy arms below bound it to `code`'s PUBLISHED
+        // frame/block (idx251) rather than the whole payload window.
+        let index = unsafe { core::slice::from_raw_parts(iptr, ilen) };
+        let ioff = code as usize * DICT_INDEX_ENTRY_LEN;
+        let rec = index
+            .get(ioff..ioff + DICT_INDEX_ENTRY_LEN)
+            .ok_or(ReadError::Format(FormatError::Bounds { at: "dict index" }))?;
+        let payload_off = u32::from_le_bytes(rec[0..4].try_into().expect("len 4")) as usize;
+        let byte_len = u32::from_le_bytes(rec[4..8].try_into().expect("len 4"));
+        let char_field = u32::from_le_bytes(rec[8..12].try_into().expect("len 4"));
+        match &self.payload {
             PayloadRegion::FrameDirect(_) => unreachable!("handled above"),
-            PayloadRegion::BlockLazy(bl) => {
-                // SAFETY: published write-once payload window (reserved
-                // buffer or the whole-fallback region), live and immovable
-                // for `self`'s lifetime; only bytes of PUBLISHED blocks are
-                // dereferenced (`ensure_code` above published `code`'s
-                // block; `dict_entry` reads only that entry's bytes).
-                bl.get().ok_or(ReadError::Format(FormatError::Corrupt {
-                    at: "dict payload region unpublished after ensure",
-                }))?
+            PayloadRegion::Whole(r) => {
+                let (pptr, plen) = r.ensure(
+                    &self.part,
+                    self.unwrappers,
+                    &self.payload_stream,
+                    "dict payload stream",
+                )?;
+                // Whole-fault publishes the ENTIRE region atomically (every
+                // byte resident before the ptr is published), so the whole
+                // window IS the published window — no per-frame race.
+                // SAFETY: published from a payload slice of an `Arc<[u8]>`
+                // rooted in this handle's write-once cell; live and immovable
+                // for `self`'s lifetime.
+                let payload = unsafe { core::slice::from_raw_parts(pptr, plen) };
+                present_bounded_entry(
+                    payload, 0, 0, plen, payload_off, byte_len, char_field, self.charlen_form,
+                )
             }
             PayloadRegion::FrameLazy(fl) => {
-                let (base, _len, pstart, pend) =
+                let (base, region_len, pstart, pend) =
                     fl.get().ok_or(ReadError::Format(FormatError::Corrupt {
                         at: "dict payload region unpublished after ensure",
                     }))?;
+                // [idx251] Bound the read to `code`'s PUBLISHED frame extent
+                // — not the whole payload window. `ensure_code` above
+                // published frame `f` (its frame bit is set, Acquire); other
+                // extents may be unpublished / concurrently written, so an
+                // entry that points outside frame `f` is refused before any
+                // dereference.
+                let f = self.frame_of_code(code);
+                let (flo, fhi) =
+                    fl.frame_span(f).ok_or(ReadError::Format(FormatError::Corrupt {
+                        at: "dict payload geometry unpublished after ensure",
+                    }))?;
+                let hi = fhi.min(pend);
                 // SAFETY: `base` is the published, never-moving region
-                // reservation; the payload window is a fixed sub-range.
-                // Only bytes of PUBLISHED frames are dereferenced through
-                // this slice (`ensure_code` above published `code`'s
-                // frame; `dict_entry` reads only that entry's bytes).
-                (unsafe { base.add(pstart) }, pend - pstart)
+                // reservation; `[flo, hi)` lies within frame `f`'s extent,
+                // whose bytes the frame bit proves resident and immutable.
+                let region = unsafe { core::slice::from_raw_parts(base, region_len) };
+                let seg = region
+                    .get(flo..hi)
+                    .ok_or(ReadError::Format(FormatError::Corrupt { at: "dict frame span" }))?;
+                present_bounded_entry(
+                    seg, flo, pstart, hi, payload_off, byte_len, char_field, self.charlen_form,
+                )
             }
-        };
-        // SAFETY: both regions were published from payload slices of
-        // `Arc<[u8]>` buffers rooted in this handle's write-once cells; they
-        // are live for `self`'s lifetime and never move, so tying the
-        // returned slices to `&self` is sound.
-        let sections = DictSections {
-            index: unsafe { core::slice::from_raw_parts(iptr, ilen) },
-            payload: unsafe { core::slice::from_raw_parts(pptr, plen) },
-            entry_count: self.entry_count,
-            charlen_form: self.charlen_form,
-        };
-        dict_entry(&sections, code).map_err(Into::into)
+            PayloadRegion::BlockLazy(bl) => {
+                let (pptr, plen) = bl.get().ok_or(ReadError::Format(FormatError::Corrupt {
+                    at: "dict payload region unpublished after ensure",
+                }))?;
+                // SAFETY: published write-once payload window (reserved
+                // buffer or the whole-fallback region), live and immovable
+                // for `self`'s lifetime.
+                let payload = unsafe { core::slice::from_raw_parts(pptr, plen) };
+                // [idx251] On the block path bound the read to `code`'s
+                // PUBLISHED block; the whole-fallback publishes every byte at
+                // once, so its whole window IS the published window.
+                match bl.block_span(self.frame_of_code(code), plen) {
+                    Some((blo, bhi)) => {
+                        let seg = payload.get(blo..bhi).ok_or(ReadError::Format(
+                            FormatError::Corrupt { at: "dict block span" },
+                        ))?;
+                        present_bounded_entry(
+                            seg, blo, 0, bhi, payload_off, byte_len, char_field,
+                            self.charlen_form,
+                        )
+                    }
+                    None => present_bounded_entry(
+                        payload, 0, 0, plen, payload_off, byte_len, char_field,
+                        self.charlen_form,
+                    ),
+                }
+            }
+        }
     }
 
     /// The owning part.
@@ -1763,18 +2012,34 @@ impl<'a> DictEntryCursor<'a> {
                 BulkWin::Contig(unsafe { core::slice::from_raw_parts(p, l) })
             }
             PayloadRegion::FrameLazy(fl) => {
-                let (base, _len, pstart, pend) =
+                let (base, region_len, pstart, pend) =
                     fl.get().ok_or(ReadError::Format(FormatError::Corrupt {
                         at: "dict payload region unpublished after ensure",
                     }))?;
+                // [idx251] Bind a per-frame window (not the whole payload):
+                // `ensure_frame` above published exactly frame `frame`; other
+                // extents may be unpublished / concurrently written. The
+                // `Direct` win bounds each entry to `[flo, hi)`, so a crafted
+                // `payload_off` cannot reach outside the published frame.
+                let (flo, fhi) =
+                    fl.frame_span(frame).ok_or(ReadError::Format(FormatError::Corrupt {
+                        at: "dict payload geometry unpublished after ensure",
+                    }))?;
+                let hi = fhi.min(pend);
                 // SAFETY: `base` is the published, never-moving region
-                // reservation; the payload window is a fixed sub-range.
-                // Only bytes of PUBLISHED frames are dereferenced through
-                // this slice (`ensure_frame` above published the frame this
-                // window serves until the next refill).
-                BulkWin::Contig(unsafe {
-                    core::slice::from_raw_parts(base.add(pstart), pend - pstart)
-                })
+                // reservation; `[flo, hi)` lies within frame `frame`'s
+                // extent, whose bytes the frame bit proves resident and
+                // immutable for `'a`.
+                let region = unsafe { core::slice::from_raw_parts(base, region_len) };
+                let seg = region
+                    .get(flo..hi)
+                    .ok_or(ReadError::Format(FormatError::Corrupt { at: "dict frame span" }))?;
+                BulkWin::Direct {
+                    seg,
+                    base: flo,
+                    payload_start: pstart,
+                    payload_end: hi,
+                }
             }
             PayloadRegion::BlockLazy(bl) => {
                 let (p, l) = bl.get().ok_or(ReadError::Format(FormatError::Corrupt {
@@ -1782,9 +2047,25 @@ impl<'a> DictEntryCursor<'a> {
                 }))?;
                 // SAFETY: published write-once payload window (reserved
                 // buffer or the whole-fallback region), live and immovable
-                // for `'a`; only bytes of PUBLISHED blocks are dereferenced
-                // (`ensure_frame` above published this frame's block).
-                BulkWin::Contig(unsafe { core::slice::from_raw_parts(p, l) })
+                // for `'a`.
+                let payload = unsafe { core::slice::from_raw_parts(p, l) };
+                // [idx251] On the block path bind a per-block window; the
+                // whole-fallback publishes every byte at once, so its whole
+                // window IS the published window.
+                match bl.block_span(frame, l) {
+                    Some((blo, bhi)) => {
+                        let seg = payload.get(blo..bhi).ok_or(ReadError::Format(
+                            FormatError::Corrupt { at: "dict block span" },
+                        ))?;
+                        BulkWin::Direct {
+                            seg,
+                            base: blo,
+                            payload_start: 0,
+                            payload_end: bhi,
+                        }
+                    }
+                    None => BulkWin::Contig(payload),
+                }
             }
             PayloadRegion::FrameDirect(fd) => {
                 let geom = fd
@@ -1879,5 +2160,146 @@ impl<'a> DictEntryCursor<'a> {
                 char_len,
             },
         )))
+    }
+}
+
+#[cfg(test)]
+mod idx136_tests {
+    use super::*;
+    use crate::ReadError;
+
+    // [idx136] A block-lazy dict payload declaring a near-4-GiB uncompressed
+    // image over a tiny compressed span must be REFUSED with a typed Bounds
+    // error before any image-sized reservation — never a 4 GiB alloc/abort.
+    #[test]
+    fn crafted_uncompressed_len_refused() {
+        // ~4 GiB declared image, a few-hundred-KB compressed span.
+        let unc_len = (u32::MAX - 7) as usize; // 0xFFFF_FFF8
+        let comp_len = 256 * 1024;
+        let err = dict_payload_unc_checked(unc_len, comp_len).err().unwrap();
+        assert!(
+            matches!(
+                err,
+                ReadError::Format(FormatError::Bounds {
+                    at: "dict payload uncompressed_len"
+                })
+            ),
+            "expected typed Bounds refusal, got {err:?}"
+        );
+    }
+
+    // The absolute cap catches amplification even when the compressed span is
+    // itself large enough that the ratio bound alone would admit >1 GiB.
+    #[test]
+    fn over_absolute_cap_refused() {
+        let comp_len = 8 * 1024 * 1024; // ratio bound would admit up to 8 GiB
+        let unc_len = DICT_PAYLOAD_MAX_UNC_BYTES + 1;
+        assert!(dict_payload_unc_checked(unc_len, comp_len).is_err());
+    }
+
+    // Valid dicts (image a few× the compressed span, well under the cap) pass
+    // untouched — the bound preserves legitimate payloads.
+    #[test]
+    fn valid_payload_accepted() {
+        let comp_len = 300 * 1024;
+        let unc_len = comp_len * 4; // realistic dict expansion
+        assert_eq!(
+            dict_payload_unc_checked(unc_len, comp_len).ok().unwrap(),
+            unc_len
+        );
+        // Exactly at the ratio boundary is still accepted.
+        let at_ratio = comp_len * DICT_PAYLOAD_MAX_EXPANSION;
+        assert_eq!(
+            dict_payload_unc_checked(at_ratio, comp_len).ok().unwrap(),
+            at_ratio
+        );
+        // One past the ratio boundary (still under the absolute cap) refuses.
+        assert!(dict_payload_unc_checked(at_ratio + 1, comp_len).is_err());
+    }
+}
+
+#[cfg(test)]
+mod idx251_tests {
+    use super::*;
+    use pgrc2_format::dict::DictCharLenForm;
+
+    // A published-window frame at region offset 100..106; the payload origin
+    // (payload_off == 0) maps to region offset 10. A single 2-byte entry
+    // ("hi") lives at the window start.
+    fn frame_window() -> (Vec<u8>, usize, usize, usize) {
+        let mut seg = Vec::new();
+        seg.extend_from_slice(&pgrc2_format::wire::varlena_header_4b_u(2).to_le_bytes());
+        seg.extend_from_slice(b"hi");
+        let seg_base = 100usize; // region offset of the published frame start
+        let payload_start = 10usize; // region offset where payload_off==0 maps
+        let payload_end = seg_base + seg.len(); // window upper bound
+        (seg, seg_base, payload_start, payload_end)
+    }
+
+    // [idx251] An entry whose bytes fall inside the published window resolves.
+    #[test]
+    fn entry_within_published_window_ok() {
+        let (seg, seg_base, payload_start, payload_end) = frame_window();
+        // region_off == seg_base ⇒ payload_off == seg_base - payload_start.
+        let payload_off = seg_base - payload_start;
+        let e = present_bounded_entry(
+            &seg,
+            seg_base,
+            payload_start,
+            payload_end,
+            payload_off,
+            2,
+            2,
+            DictCharLenForm::Absolute,
+        )
+        .expect("entry inside the published window resolves");
+        assert_eq!(e.bytes, b"hi");
+    }
+
+    // [idx251] The core fix: an entry whose `payload_off` points BELOW the
+    // published window (into an adjacent / possibly-unpublished frame) is
+    // refused with a typed Bounds error — the old whole-window bound would
+    // have read those unpublished bytes (the data race).
+    #[test]
+    fn entry_below_published_window_refused() {
+        let (seg, seg_base, payload_start, payload_end) = frame_window();
+        // One byte below the window start ⇒ region_off < seg_base.
+        let payload_off = seg_base - payload_start - 1;
+        let err = present_bounded_entry(
+            &seg,
+            seg_base,
+            payload_start,
+            payload_end,
+            payload_off,
+            2,
+            2,
+            DictCharLenForm::Absolute,
+        )
+        .err()
+        .expect("below-window entry must be refused");
+        assert!(
+            matches!(err, ReadError::Format(FormatError::Bounds { at: "dict payload" })),
+            "expected typed Bounds refusal, got {err:?}"
+        );
+    }
+
+    // [idx251] An entry at/above the window's exclusive upper bound (into a
+    // later, possibly-unpublished frame) is also refused.
+    #[test]
+    fn entry_above_published_window_refused() {
+        let (seg, seg_base, payload_start, payload_end) = frame_window();
+        // region_off == payload_end (exclusive) ⇒ refused.
+        let payload_off = payload_end - payload_start;
+        assert!(present_bounded_entry(
+            &seg,
+            seg_base,
+            payload_start,
+            payload_end,
+            payload_off,
+            2,
+            2,
+            DictCharLenForm::Absolute,
+        )
+        .is_err());
     }
 }

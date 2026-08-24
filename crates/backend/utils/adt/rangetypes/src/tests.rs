@@ -121,7 +121,7 @@ fn serialize_empty_and_bound_order() {
     assert_eq!(range_get_flags(&img), RANGE_EMPTY);
     // lower > upper errors
     let err = range_serialize(mcx, &mut ri, &mut bound(6, true, true), &mut bound(5, true, false), false, None)
-        .unwrap_err();
+        .err().unwrap();
     assert!(err.message().contains("less than or equal"));
 }
 
@@ -161,7 +161,7 @@ fn canonical_normalizes_discrete_bounds() {
         false,
         None,
     )
-    .unwrap_err();
+    .err().unwrap();
     assert!(err.message().contains("integer out of range"));
 }
 
@@ -245,7 +245,7 @@ fn parse_and_deparse_round_trip_grammar() {
         (b"empty x", "Junk after \"empty\" key word."),
         (b"[1,2", "Unexpected end of input."),
     ] {
-        let err = crate::io::range_parse(mcx, bad, None).unwrap_err();
+        let err = crate::io::range_parse(mcx, bad, None).err().unwrap();
         assert_eq!(err.detail(), Some(detail), "case {:?}", String::from_utf8_lossy(bad));
         assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
     }
@@ -593,7 +593,7 @@ mod recv_wire {
         let mcx = ctx.mcx();
         // flags = LB_INC|UB_INC (both bounds present), lower bound length 0.
         let wire = [RANGE_LB_INC | RANGE_UB_INC, 0, 0, 0, 0];
-        let e = recv(mcx, &wire).expect_err("zero-length bound must be a protocol error");
+        let e = recv(mcx, &wire).err().expect("zero-length bound must be a protocol error");
         assert_eq!(e.sqlstate, ERRCODE_PROTOCOL_VIOLATION);
     }
 
@@ -605,7 +605,7 @@ mod recv_wire {
         // rejects it before any allocation, so pgrust must too (never a
         // multi-GiB reserve).
         let wire = [RANGE_LB_INC | RANGE_UB_INC, 0xEB, 0xFF, 0xFF, 0xFF];
-        let e = recv(mcx, &wire).expect_err("oversized bound length must be a protocol error");
+        let e = recv(mcx, &wire).err().expect("oversized bound length must be a protocol error");
         assert_eq!(e.sqlstate, ERRCODE_PROTOCOL_VIOLATION);
     }
 
@@ -1049,7 +1049,7 @@ fn range_deparse_over_ceiling_bound_raises_stringinfo_error() {
     let n = ::mcx::MAX_ALLOC_SIZE / 2 + 16;
     let huge = std::vec![b'"'; n];
     let err = crate::io::range_deparse(mcx, RANGE_LB_INC, Some(&huge), Some(b"x"))
-        .expect_err("range output above MaxAllocSize must raise the StringInfo ceiling error");
+        .err().expect("range output above MaxAllocSize must raise the StringInfo ceiling error");
     assert_eq!(
         err.message(),
         std::format!(
@@ -1118,4 +1118,70 @@ fn pseudotype_aliases_delegate_to_range_out() {
     assert_eq!(by_oid(3833).func as usize, crate::builtins::fc_range_out as usize);
     assert_eq!(by_oid(5095).func as usize, crate::builtins::fc_range_out as usize);
     assert_eq!(by_oid(5095).name, "anycompatiblerange_out");
+}
+
+#[cfg(test)]
+mod deserialize_checked_bounds {
+    use super::*;
+
+    const INT4: ElemInfo =
+        ElemInfo { typlen: 4, typbyval: true, typalign: b'i', typstorage: b'p' };
+    const VARLENA: ElemInfo =
+        ElemInfo { typlen: -1, typbyval: false, typalign: b'i', typstorage: b'x' };
+
+    fn img_with(rngtypid: u32, payload: &[u8], flags: u8) -> Vec<u8> {
+        let total = RANGE_HDRSZ + payload.len() + 1;
+        let mut v = Vec::with_capacity(total);
+        v.extend_from_slice(&::datum::set_varsize_4b(total));
+        v.extend_from_slice(&rngtypid.to_ne_bytes());
+        v.extend_from_slice(payload);
+        v.push(flags);
+        v
+    }
+
+    #[test]
+    fn valid_int4_range_parses() {
+        // [1, 10): lower inclusive, both finite.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1i32.to_ne_bytes());
+        payload.extend_from_slice(&10i32.to_ne_bytes());
+        let img = img_with(3904, &payload, RANGE_LB_INC);
+        let (lo, up, empty) = range_deserialize_checked(&INT4, &img).unwrap();
+        assert!(!empty);
+        assert!(lo.inclusive && !up.inclusive);
+        assert_eq!(lo.val.as_u64() as i32, 1);
+        assert_eq!(up.val.as_u64() as i32, 10);
+    }
+
+    #[test]
+    fn undersized_image_is_rejected() {
+        // Fewer than RANGE_HDRSZ + 1 bytes: no room even for the flag byte.
+        let img = [0u8; RANGE_HDRSZ];
+        let _ = range_deserialize_checked(&INT4, &img).err().unwrap();
+    }
+
+    #[test]
+    fn lower_bound_past_slice_is_rejected() {
+        // Claims a lower bound (fixed 4 bytes) but only 2 payload bytes exist.
+        let img = img_with(3904, &[0u8; 2], RANGE_LB_INC | RANGE_UB_INF);
+        let _ = range_deserialize_checked(&INT4, &img).err().unwrap();
+    }
+
+    #[test]
+    fn oversized_inner_varlena_length_is_rejected() {
+        // Crafted 4-byte varlena header claims ~100 bytes but the slice holds 4.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&::datum::set_varsize_4b(100));
+        let img = img_with(3904, &payload, RANGE_LB_INC | RANGE_UB_INF);
+        let _ = range_deserialize_checked(&VARLENA, &img).err().unwrap();
+    }
+
+    #[test]
+    fn upper_bound_past_slice_is_rejected() {
+        // Lower present (4 bytes) then an upper claimed with no bytes left.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1i32.to_ne_bytes());
+        let img = img_with(3904, &payload, RANGE_LB_INC);
+        let _ = range_deserialize_checked(&INT4, &img).err().unwrap();
+    }
 }

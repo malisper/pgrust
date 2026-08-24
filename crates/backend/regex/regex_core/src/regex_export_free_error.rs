@@ -13,7 +13,7 @@ use ::regex::{
 };
 
 use crate::regex_consts::{
-    REG_ATOI, REG_BADBR, REG_BADOPT, REG_BADPAT, REG_BADRPT, REG_ASSERT, REG_ECOLLATE,
+    REG_ATOI, REG_BADBR, REG_BADOPT, REG_BADPAT, REG_BADRPT, REG_ASSERT, REG_CANCEL, REG_ECOLLATE,
     REG_ECOLORS, REG_ECTYPE, REG_EBRACE, REG_EBRACK, REG_EESCAPE, REG_EPAREN, REG_ERANGE,
     REG_ESPACE, REG_ESUBREG, REG_ETOOBIG, REG_EXACT, REG_INVARG, REG_ITOA, REG_MIXED,
     REG_NOMATCH, REG_OKAY, REG_PREFIX, REMAGIC,
@@ -40,6 +40,7 @@ pub fn seam_pg_regcomp(
             let engine: Rc<dyn core::any::Any> = Rc::new(re);
             Ok(RegcompResult::Compiled(RegexCompiled { engine, re_nsub }))
         }
+        Err(e) if e.code() == REG_CANCEL => Err(crate::regex_error::take_cancel_error()),
         Err(e) => Ok(RegcompResult::Failed(RegexFailure {
             message: pg_regerror(e.code()),
         })),
@@ -53,6 +54,13 @@ pub fn seam_pg_regexec(
     pmatch: &mut [RegMatch],
 ) -> PgResult<RegexecResult> {
     let re = regex_of(re);
+    // Re-establish the compiled regex's own collation into thread-local locale
+    // state before any locale-dependent execution work, matching C's
+    // pg_regexec (regexec.c: pg_set_regex_collation(re->re_collation)). Without
+    // this, a cache-hit execution would run under whatever locale a later
+    // compile last left in the thread-local state.
+    let cx = MemoryContext::new("RegexpExecuteContext");
+    crate::regex_locale::pg_set_regex_collation(cx.mcx(), re.re_collation)?;
     let guts = re
         .re_guts
         .as_ref()
@@ -63,6 +71,7 @@ pub fn seam_pg_regexec(
         Ok(true) => Ok(RegexecResult::Matched),
         Ok(false) => Ok(RegexecResult::NoMatch),
         Err(e) if e.code() == REG_NOMATCH => Ok(RegexecResult::NoMatch),
+        Err(e) if e.code() == REG_CANCEL => Err(crate::regex_error::take_cancel_error()),
         Err(e) => Ok(RegexecResult::Failed(RegexFailure {
             message: pg_regerror(e.code()),
         })),
@@ -74,6 +83,10 @@ pub fn seam_pg_regprefix<'mcx>(
     re: &RegexCompiled,
 ) -> PgResult<RegprefixResult<'mcx>> {
     let re = regex_of(re);
+    // Re-establish the compiled regex's own collation into thread-local locale
+    // state before any locale-dependent work, matching C's pg_regprefix
+    // (regprefix.c: pg_set_regex_collation(re->re_collation)).
+    crate::regex_locale::pg_set_regex_collation(mcx, re.re_collation)?;
     let guts = re
         .re_guts
         .as_ref()
@@ -96,6 +109,7 @@ pub fn seam_pg_regprefix<'mcx>(
             })),
         },
         Err(e) if e.code() == REG_NOMATCH => Ok(RegprefixResult::NoMatch),
+        Err(e) if e.code() == REG_CANCEL => Err(crate::regex_error::take_cancel_error()),
         Err(e) => Ok(RegprefixResult::Failed(RegexFailure {
             message: pg_regerror(e.code()),
         })),

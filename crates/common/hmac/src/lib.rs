@@ -2,9 +2,12 @@
 // ipad/opad per RFC 2104; update/final mirror the C incremental sequence.
 // Monomorphized per hash (no fn-pointer table); infallible — C's error arms
 // are OOM/EVP-failure only. Target builds use hmac_openssl.c; output identical.
-// DIVERGENCE: C explicit_bzero's key material on free; ctxs here drop unwiped.
+// C explicit_bzero's the key material on free (hmac.c:124,295); we mirror that
+// with a compiler-fenced wipe of the key-XOR-folded pads (k_ipad local in init,
+// k_opad in PgHmacCtx::drop) so key-equivalent bytes never reach recycled heap.
 
 use pg_sha2::{PgSha256Ctx, PgSha512Ctx};
+use secure_zero::secure_zero;
 
 const HMAC_IPAD: u8 = 0x36;
 const HMAC_OPAD: u8 = 0x5c;
@@ -48,8 +51,19 @@ hmac_hash!(Sha512, PgSha512Ctx, init_sha512, final_sha512,
     pg_sha2::PG_SHA512_BLOCK_LENGTH, pg_sha2::PG_SHA512_DIGEST_LENGTH);
 
 pub struct PgHmacCtx<H: HmacHash> {
-    hash: H,
+    // Option so `finalize` can move the inner hash out without a partial move
+    // of `self` (disallowed for a Drop type); `Drop` wipes `k_opad`.
+    hash: Option<H>,
     k_opad: [u8; 128],
+}
+
+// C pg_hmac_free explicit_bzero's the whole context before freeing (hmac.c:295)
+// because k_opad is key-XOR-opad, i.e. key-equivalent. Wipe it on every drop
+// path (normal finalize and any early drop) so it never reaches recycled heap.
+impl<H: HmacHash> Drop for PgHmacCtx<H> {
+    fn drop(&mut self) {
+        secure_zero(&mut self.k_opad);
+    }
 }
 
 impl<H: HmacHash> PgHmacCtx<H> {
@@ -74,18 +88,22 @@ impl<H: HmacHash> PgHmacCtx<H> {
 
         let mut hash = H::init();
         hash.update(&k_ipad[..H::BLOCK_LENGTH]);
-        PgHmacCtx { hash, k_opad }
+        // k_ipad holds key-XOR-ipad (key-equivalent); wipe the stack copy
+        // before it is dropped, matching C's explicit_bzero of the context.
+        secure_zero(&mut k_ipad);
+        PgHmacCtx { hash: Some(hash), k_opad }
     }
 
     pub fn update(&mut self, data: &[u8]) {
-        self.hash.update(data);
+        self.hash.as_mut().expect("HMAC ctx used after finalize").update(data);
     }
 
-    pub fn finalize(self) -> H::Digest {
-        let inner = self.hash.finalize();
+    pub fn finalize(mut self) -> H::Digest {
+        let inner = self.hash.take().expect("HMAC ctx finalized twice").finalize();
         let mut outer = H::init();
         outer.update(&self.k_opad[..H::BLOCK_LENGTH]);
         outer.update(inner.as_ref());
+        // `self` drops here, wiping k_opad via Drop.
         outer.finalize()
     }
 }

@@ -48,7 +48,7 @@ use pgrc2_write::wvfs::RealVfs;
 use pgrc2_format::relopt::ShredOptions;
 use types_error::{PgError, PgResult};
 use types_rel::Relation;
-use types_tuple::varatt::varsize_any;
+use types_tuple::varatt::{self, varsize_any};
 
 use crate::probe::ClogTxnProbe;
 use crate::{session, write_error};
@@ -242,10 +242,79 @@ fn open_writer(rel: &Relation<'_>, stamp: TxnStamp) -> PgResult<TableWriter> {
     .map_err(write_error)
 }
 
+/// Validate a borrowed inline varlena image against the bytes that are
+/// actually backed at its location. `avail` is the remaining bytes of the
+/// materialized tuple from the datum's pointer onward — an INDEPENDENT
+/// readable-byte witness (derived from the tuple's `t_len`, never from the
+/// varlena header itself), so a crafted 4B header claiming ~1 GiB of process
+/// memory is refused here instead of sizing an out-of-bounds read. Returns
+/// the validated total length (header included). External (1B_E) pointers
+/// must be screened by the caller before this is reached.
+fn checked_varlena_len(avail: &[u8]) -> PgResult<usize> {
+    let b0 = *avail
+        .first()
+        .ok_or_else(|| crate::corrupt("empty varlena image in tuple"))?;
+    // Header footprint: a 1B short header (low bit set) vs a 4B long header.
+    // `varsize_any` reads only these header bytes for the non-external forms,
+    // so guarding it here keeps even the header read in bounds.
+    let hdr = if b0 & 0x01 == 0x01 {
+        varatt::VARHDRSZ_SHORT
+    } else {
+        varatt::VARHDRSZ
+    };
+    if avail.len() < hdr {
+        return Err(crate::corrupt(
+            "varlena header truncated within its tuple image",
+        ));
+    }
+    // SAFETY: `avail` is backed for at least `hdr` bytes (checked above), and
+    // the caller has screened the external (1B_E) form, so `varsize_any`
+    // reads only in-bounds header bytes of a 1B/4B inline form.
+    let len = unsafe { varsize_any(avail.as_ptr()) };
+    if len < hdr || len > avail.len() {
+        // The header claims more (or fewer) bytes than the tuple backs: a
+        // crafted/corrupt on-page header. Refuse before forming the slice.
+        return Err(crate::corrupt(
+            "varlena length exceeds the bytes backed by its tuple image",
+        ));
+    }
+    Ok(len)
+}
+
+/// The readable window of a by-reference datum within the materialized tuple
+/// image: the bytes from `p` to the end of the image. Returns a typed
+/// corruption error when the datum points outside the image (a corrupt or
+/// aliased offset), or `None` when no image witness was supplied.
+fn datum_window<'i>(p: *const u8, tuple_image: Option<&'i [u8]>) -> PgResult<Option<&'i [u8]>> {
+    let Some(img) = tuple_image else {
+        return Ok(None);
+    };
+    let base = img.as_ptr() as usize;
+    let end = base + img.len();
+    let pa = p as usize;
+    if pa < base || pa >= end {
+        return Err(crate::corrupt(
+            "by-reference datum points outside its tuple image",
+        ));
+    }
+    Ok(Some(&img[pa - base..]))
+}
+
 /// Build one writer-face row image from a deformed slot row. By-reference
 /// datums are passed as raw images; varlena images may arrive in any inline
 /// toast form (the writer normalizes; external pointers refuse typed —
 /// unreachable from COPY, whose input datums are always inline).
+///
+/// `tuple_image`, when supplied, is the flat backing bytes of the caller's
+/// MATERIALIZED physical tuple (see [`exectuples::slot_materialized_image`]):
+/// after materialize + deform every by-reference datum points INTO this
+/// image, so each datum's header-claimed size is bounded against the bytes
+/// actually backed there. This is the independent witness the OOB/info-leak
+/// class requires — the datum's own on-tuple varlena header is UNTRUSTED for
+/// sizing. `None` means the caller could not supply a single flat image (a
+/// Virtual slot, whose materialize pass owns its own bounding — see the
+/// executor materialize lane); the legacy header-sized behavior is preserved
+/// there.
 ///
 /// SAFETY of the pointer reads: the slot is materialized/deformed by the
 /// caller; byref datums point at live images for the duration of the call
@@ -258,6 +327,7 @@ pub fn raw_row<'a>(
     rel: &Relation<'_>,
     values: &'a [datum::Datum],
     isnull: &'a [bool],
+    tuple_image: Option<&[u8]>,
 ) -> PgResult<Vec<RawDatum<'a>>> {
     let atts = &rel.rd_att.attrs;
     if values.len() < atts.len() || isnull.len() < atts.len() {
@@ -275,14 +345,30 @@ pub fn raw_row<'a>(
             out.push(RawDatum::Word(values[i].as_u64()));
         } else if att.attlen > 0 {
             let p = values[i].as_u64() as *const u8;
-            // SAFETY: fixed-length byref datum — attlen readable bytes.
-            let img = unsafe { core::slice::from_raw_parts(p, att.attlen as usize) };
+            let n = att.attlen as usize;
+            // Fixed-length byref: the catalog attlen must fit the tuple image.
+            if let Some(avail) = datum_window(p, tuple_image)? {
+                if avail.len() < n {
+                    return Err(crate::corrupt(
+                        "fixed-length datum overruns its tuple image",
+                    ));
+                }
+            }
+            // SAFETY: fixed-length byref datum — attlen readable bytes,
+            // bounded above against the tuple image when one was supplied.
+            let img = unsafe { core::slice::from_raw_parts(p, n) };
             out.push(RawDatum::Bytes(img));
         } else if att.attlen == -1 {
             let p = values[i].as_u64() as *const u8;
-            // SAFETY: varlena datum — header-readable; varsize_any gives
-            // the full inline image length for 1B/4B forms.
-            let b0 = unsafe { *p };
+            let avail = datum_window(p, tuple_image)?;
+            // Screen the external (1B_E) form first: COPY never produces one,
+            // and its header sizing (`varsize_external`) is a different tag.
+            let b0 = match avail {
+                Some(w) => w[0], // `window` guarantees >= 1 backed byte
+                // SAFETY: no independent witness — legacy header-readable
+                // trust for the Virtual-slot path (see the doc comment).
+                None => unsafe { *p },
+            };
             if b0 == 0x01 {
                 // 1B_E external/indirect pointer: COPY never produces one;
                 // refuse typed rather than size an unknown tag.
@@ -290,8 +376,16 @@ pub fn raw_row<'a>(
                     "ingesting externally-toasted datums (detoast capability arrives with the DML sink)",
                 ));
             }
-            let len = unsafe { varsize_any(p) };
-            // SAFETY: inline varlena image — len readable bytes.
+            let len = match avail {
+                // Validated against the tuple's own byte extent (t_len), the
+                // independent witness that breaks the writer's circular
+                // header-derived bound.
+                Some(w) => checked_varlena_len(w)?,
+                // SAFETY: legacy path — header-sized inline image length.
+                None => unsafe { varsize_any(p) },
+            };
+            // SAFETY: inline varlena image — `len` readable bytes, proven
+            // in-bounds by `checked_varlena_len` when a witness was supplied.
             let img = unsafe { core::slice::from_raw_parts(p, len) };
             out.push(RawDatum::Bytes(img));
         } else {
@@ -322,17 +416,21 @@ fn shred_source_for(rel: &Relation<'_>) -> JsonbShredSource {
 
 /// Ingest one deformed row (the `table_tuple_insert` / `table_multi_insert`
 /// arm body). The caller has already deformed the slot
-/// (`slot_getallattrs`).
+/// (`slot_getallattrs`) and supplies `tuple_image` — the flat backing bytes
+/// of the materialized physical tuple — as the independent readable-byte
+/// witness for `raw_row`'s by-reference bound (`None` when the slot has no
+/// single flat image).
 pub fn ingest_row(
     rel: &Relation<'_>,
     values: &[datum::Datum],
     isnull: &[bool],
+    tuple_image: Option<&[u8]>,
 ) -> PgResult<()> {
     session::ensure_session_hooks();
     crate::inval::ensure_inval_registered()?;
     let stamp = current_stamp()?;
     let relfilenumber = rel.rd_locator.get().relNumber as u64;
-    let row = raw_row(rel, values, isnull)?;
+    let row = raw_row(rel, values, isnull, tuple_image)?;
     let mut vfs = RealVfs;
     let resolver = CodecResolver;
     let mut shred = shred_source_for(rel);
@@ -537,4 +635,59 @@ pub fn with_parallel_copy_writer<R>(
     }
     reg.map_err(write_error)?;
     body_out.expect("writer body ran")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_varlena_len;
+    use types_tuple::varatt;
+
+    /// A 4B-U varlena image whose header claims `claim` total bytes, laid
+    /// into a buffer whose backing is exactly `backed` bytes (the tuple
+    /// witness). Native-endian, matching `varsize_4b`'s unaligned read.
+    fn mk_4b(claim: usize, backed: usize) -> Vec<u8> {
+        let word = varatt::set_varsize_4b_word(claim as u32);
+        let mut v = vec![0u8; backed.max(varatt::VARHDRSZ)];
+        v[..varatt::VARHDRSZ].copy_from_slice(&word.to_ne_bytes());
+        v.truncate(backed);
+        v
+    }
+
+    #[test]
+    fn honest_4b_header_within_witness_is_accepted() {
+        // Header claims exactly the 8 backed bytes: honored.
+        let img = mk_4b(8, 8);
+        assert_eq!(checked_varlena_len(&img).expect("in bounds"), 8);
+    }
+
+    #[test]
+    fn overclaiming_4b_header_is_refused_not_overread() {
+        // The exploit shape: a 4B-U header claiming far more than the tuple
+        // backs (8 bytes). Must refuse typed, never size the OOB slice.
+        let img = mk_4b(1_000_000, 8);
+        let err = checked_varlena_len(&img).expect_err("over-claim must refuse");
+        assert_eq!(
+            err.sqlstate(),
+            types_error::ERRCODE_DATA_CORRUPTED,
+            "over-claiming varlena header must be a typed data-corruption error"
+        );
+    }
+
+    #[test]
+    fn truncated_4b_header_is_refused() {
+        // Fewer bytes backed than the 4-byte header itself: refuse before
+        // the header read.
+        let img = vec![0u8; 2]; // even b0 => 4B form, only 2 backed
+        assert!(checked_varlena_len(&img).is_err());
+    }
+
+    #[test]
+    fn short_1b_header_bounds_are_enforced() {
+        // 1B short header, total = 3 (incl. header), 3 bytes backed: honored.
+        let ok = vec![(3u8 << 1) | 0x01, b'a', b'b'];
+        assert_eq!(checked_varlena_len(&ok).expect("in bounds"), 3);
+        // 1B short header claiming 100 bytes over a 3-byte witness: refused.
+        let bad = vec![(100u8 << 1) | 0x01, b'a', b'b'];
+        assert!(checked_varlena_len(&bad).is_err());
+    }
 }

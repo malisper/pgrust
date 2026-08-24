@@ -753,9 +753,11 @@ unsafe fn states_extra_bytes(pg: *const AggPerGroup, kinds: &[CombineKind]) -> u
                 align16(core::mem::size_of::<NumericAggState>() + st.digits_bytes())
             }
             CombineKind::AvgInt8Array | CombineKind::VarlenaMinMax { .. } => {
-                // SAFETY: non-null byref transvalue is a live plain inline
-                // varlena image (transition/combine outputs are never
-                // toasted; the relocation below asserts the form).
+                // SAFETY: non-null byref transvalue is a live varlena image
+                // of some form — plain inline (avg transarray; the common
+                // text min/max case) or, from the first-value adoption path,
+                // an external toast pointer / compressed image. varsize_any
+                // sizes every form for the verbatim, self-contained copy below.
                 align16(unsafe { varsize_any(s.trans_value.as_usize() as *const u8) })
             }
         };
@@ -804,17 +806,19 @@ unsafe fn relocate_states_into(
                     off += align16(core::mem::size_of::<NumericAggState>() + sp.digits_bytes());
                 }
                 CombineKind::AvgInt8Array | CombineKind::VarlenaMinMax { .. } => {
-                    // Verbatim image copy into the 16-aligned slot. The
-                    // sources are plain inline images by construction: the
-                    // avg transarray is the accum family's 4B-U MAXALIGNed
-                    // aggcontext image; text min/max transvalues are
-                    // ExecAggCopyTransValue datumCopies of detoasted inputs
-                    // (short or 4B-U — never compressed/external).
+                    // Verbatim, self-contained image copy into the 16-aligned
+                    // slot (varsize_any covers every form: short, 4B-U, the
+                    // external toast-pointer struct, and the compressed 4B-C
+                    // body). The avg transarray is always the accum family's
+                    // 4B-U MAXALIGNed aggcontext image. A text min/max
+                    // transvalue is USUALLY a plain inline datumCopy, but the
+                    // first-value adoption path (advance_transition_function's
+                    // datumCopy of the raw input) can store a 1B_E external
+                    // toast pointer or a 4B-C compressed image verbatim — so
+                    // the native combine's plain-only reads are gated by the
+                    // consume-time validation pass, which falls the whole
+                    // shape back to the serial fmgr combine (it detoasts).
                     let sp = pg.trans_value.as_usize() as *const u8;
-                    debug_assert!(
-                        varatt_is_1b(sp) || varatt_is_4b_u(sp),
-                        "handed byref transvalue must be a plain inline varlena"
-                    );
                     debug_assert!(
                         !matches!(k, CombineKind::AvgInt8Array) || varatt_is_4b_u(sp),
                         "avg transarray images are 4B-U MAXALIGNed"
@@ -1765,11 +1769,32 @@ fn merge_bucket_par(
     Ok(out)
 }
 
+// A varlena datum the thread-native comparator can read in place: a plain
+// inline image (1B-short but NOT a 1B_E external toast pointer, or a 4B_U
+// uncompressed header). Non-plain forms — external toast pointers (1B_E) and
+// compressed 4B_C images — must be detoasted before their payload is read
+// (C reads them through PG_DETOAST_DATUM / PG_GETARG_TEXT_PP); the native
+// arms cannot, so shapes carrying them fall back to the serial bucket merge,
+// whose fmgr combine detoasts.
+//
+// # Safety
+// `p` points at a live varlena image readable through its first (tag) byte.
+#[inline]
+unsafe fn varlena_is_plain_inline(p: *const u8) -> bool {
+    // SAFETY: caller contract — first byte readable.
+    unsafe { (varatt_is_1b(p) && !varatt_is_1b_e(p)) || varatt_is_4b_u(p) }
+}
+
 // The parallel run at the consume boundary. Ok(None) = fell back to the
-// serial bucket merge (a varlena key datum with a compressed/external
-// representation, which the thread comparator must not touch — detoast needs
-// the executor). The validation pass mutates nothing, so falling back is
-// clean.
+// serial bucket merge — a varlena the thread comparator must not touch in
+// place because it has a compressed/external representation that needs
+// detoasting (detoast needs the executor). This covers both grouping-key
+// datums (deformed from the stored tuple) AND VarlenaMinMax transvalues: the
+// min/max first-value adoption path (C advance_transition_function's
+// datumCopy of the raw input) stores raw 1B_E toast pointers / 4B_C
+// compressed images verbatim, which var_payload's plain-only arms would
+// misread (a 1B_E header underflows the 1B length -> OOB read). The
+// validation pass mutates nothing, so falling back is clean.
 fn parallel_merge(
     spec: &ParSpec,
     leader: &[TupleHashEntryData],
@@ -1778,25 +1803,52 @@ fn parallel_merge(
     additionalsize: usize,
 ) -> PgResult<Option<Vec<Vec<TupleHashEntryData>>>> {
     let ncols = spec.atts.len();
-    if spec.has_varlena {
+    // VarlenaMinMax transvalues are compared in place by var_payload /
+    // varstrfastcmp_c, so they too must be plain inline images — independent
+    // of whether any grouping KEY is varlena (e.g. GROUP BY int, min(text)).
+    let has_varlena_trans =
+        spec.combines.iter().any(|c| matches!(c.kind, CombineKind::VarlenaMinMax { .. }));
+    if spec.has_varlena || has_varlena_trans {
         let mut values = vec![Datum::null(); ncols];
         let mut isnull = vec![false; ncols];
         let mut check = |entries: &[TupleHashEntryData]| -> bool {
             for e in entries {
-                // SAFETY: live entry images under the KeyAtt plan (as the
-                // merge itself).
-                unsafe { deform_key_prefix(e.tuple(), &spec.atts, &mut values, &mut isnull) };
-                for (i, a) in spec.atts.iter().enumerate() {
-                    if !a.memcmp_payload || isnull[i] {
-                        continue;
-                    }
-                    let p = values[i].as_usize() as *const u8;
-                    // SAFETY: non-null varlena datum in a live image.
-                    let plain = unsafe {
-                        (varatt_is_1b(p) && !varatt_is_1b_e(p)) || varatt_is_4b_u(p)
+                if spec.has_varlena {
+                    // SAFETY: live entry images under the KeyAtt plan (as the
+                    // merge itself).
+                    unsafe {
+                        deform_key_prefix(e.tuple(), &spec.atts, &mut values, &mut isnull)
                     };
-                    if !plain {
-                        return false;
+                    for (i, a) in spec.atts.iter().enumerate() {
+                        if !a.memcmp_payload || isnull[i] {
+                            continue;
+                        }
+                        let p = values[i].as_usize() as *const u8;
+                        // SAFETY: non-null varlena datum in a live image.
+                        if !unsafe { varlena_is_plain_inline(p) } {
+                            return false;
+                        }
+                    }
+                }
+                if has_varlena_trans {
+                    let Some(add) = e.additional(additionalsize) else { continue };
+                    let pg = add.as_ptr().cast::<AggPerGroup>();
+                    for (transno, c) in spec.combines.iter().enumerate() {
+                        if !matches!(c.kind, CombineKind::VarlenaMinMax { .. }) {
+                            continue;
+                        }
+                        // SAFETY: additionalsize holds numtrans live pergroups.
+                        let s = unsafe { &*pg.add(transno) };
+                        if s.trans_value_is_null {
+                            continue;
+                        }
+                        let p = s.trans_value.as_usize() as *const u8;
+                        // SAFETY: non-null byref transvalue is a live varlena
+                        // image (plain inline, or a toast pointer / compressed
+                        // image the first-value adoption path stored verbatim).
+                        if !unsafe { varlena_is_plain_inline(p) } {
+                            return false;
+                        }
                     }
                 }
             }
@@ -1804,7 +1856,9 @@ fn parallel_merge(
         };
         if !check(leader) || !tables.iter().all(|t| check(&t.entries)) {
             if merge_stats_enabled() {
-                eprintln!("AGG_MERGE_STATS parallel-fallback: non-plain varlena key");
+                eprintln!(
+                    "AGG_MERGE_STATS parallel-fallback: non-plain varlena key/transvalue"
+                );
             }
             return Ok(None);
         }

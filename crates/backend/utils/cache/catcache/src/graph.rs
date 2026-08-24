@@ -1,7 +1,7 @@
 use datum::Datum;
 use mcx::PgVec;
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
 use types_tuple::varatt;
 use types_tuple::{HeapTupleData, TupleDescData};
 
@@ -480,9 +480,30 @@ pub(crate) unsafe fn varlena_payload(p: *const u8) -> (*const u8, usize) {
 /// # Safety
 /// `p` points at a live, plain-storage (4-byte header) oidvector image;
 /// `hashoidvector` hashes `values, dim1 * 4` bytes.
-pub(crate) unsafe fn oidvector_elements(p: *const u8) -> (*const u8, usize) {
+///
+/// The on-image `dim1` (offset 16) is attacker-controllable in crafted catalog
+/// pages: a negative value sign-extends and `* 4` wraps (release builds have no
+/// overflow checks), and an inflated value drives the resulting `from_raw_parts`
+/// values slice past the image (OOB read / UB). C's `hashoidvector` /
+/// `oidvectoreq` gate on `check_valid_oidvector`; we re-derive the element-count
+/// bound from the datum's own VARSIZE (the header is at offset 0 for a 4B-U
+/// plain-storage oidvector) with `array::vector_dim1_fits`, exactly as the
+/// adt/nbtree oidvector paths do, and surface the same
+/// "array is not a valid oidvector" error instead of walking out of bounds.
+pub(crate) unsafe fn oidvector_elements(p: *const u8) -> PgResult<(*const u8, usize)> {
     let dim1 = unsafe { core::ptr::read_unaligned(p.add(16).cast::<i32>()) };
-    (unsafe { p.add(24) }, dim1 as usize * 4)
+    // SAFETY: 4B-U plain-storage oidvector datum; header readable for VARSIZE.
+    let varsize = unsafe { datum::varlena::VarlenaRef::from_ptr(p) }.varsize();
+    if !array::vector_dim1_fits(varsize, dim1, core::mem::size_of::<Oid>()) {
+        return Err(Box::new(
+            PgError::error("array is not a valid oidvector")
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+        ));
+    }
+    // `vector_dim1_fits` treats a negative dim1 as an empty vector; clamp the
+    // element count the same way (matching the adt/nbtree `dim1.max(0)` slicing)
+    // so `* 4` can never wrap a sign-extended negative into a huge length.
+    Ok((unsafe { p.add(24) }, dim1.max(0) as usize * 4))
 }
 
 /// # Safety
@@ -501,13 +522,13 @@ pub(crate) fn tuple_key<'a>(
     tuple: &HeapTupleData<'a>,
     attnum: i32,
     tupdesc: &TupleDescData<'_>,
-) -> CatCKey<'a> {
+) -> PgResult<CatCKey<'a>> {
     let mut isnull = false;
     // SAFETY: catcache key columns are user columns of the cache's own
     // catalog descriptor; NULL keys are impossible (NOT NULL catalog keys).
     let d = unsafe { types_tuple::heap_getattr(tuple, attnum, tupdesc, &mut isnull) };
     debug_assert!(!isnull);
-    match kind {
+    Ok(match kind {
         CCFastKind::Char | CCFastKind::Int2 | CCFastKind::Int4 => CatCKey::Value(d),
         CCFastKind::Name => {
             // SAFETY: by-ref datum points into the live tuple image.
@@ -521,10 +542,12 @@ pub(crate) fn tuple_key<'a>(
         }
         CCFastKind::OidVector => {
             // SAFETY: as above; oidvector is plain storage (4-byte header).
-            let (p, len) = unsafe { oidvector_elements(d.as_usize() as *const u8) };
+            // `oidvector_elements` validates dim1 against VARSIZE before the
+            // slice is formed, rejecting a crafted image instead of over-reading.
+            let (p, len) = unsafe { oidvector_elements(d.as_usize() as *const u8) }?;
             CatCKey::Bytes(unsafe { core::slice::from_raw_parts(p, len) })
         }
-    }
+    })
 }
 
 /// `CatalogCacheComputeTupleHashValue`.
@@ -534,12 +557,12 @@ pub(crate) fn compute_tuple_hash_value(
     keyno: &[i32; 4],
     tupdesc: &TupleDescData<'_>,
     tuple: &HeapTupleData<'_>,
-) -> u32 {
+) -> PgResult<u32> {
     let mut keys = [CatCKey::UNUSED; 4];
     for i in 0..nkeys as usize {
-        keys[i] = tuple_key(kinds[i], tuple, keyno[i], tupdesc);
+        keys[i] = tuple_key(kinds[i], tuple, keyno[i], tupdesc)?;
     }
-    compute_hash_value(kinds, nkeys, &keys)
+    Ok(compute_hash_value(kinds, nkeys, &keys))
 }
 
 /// `CatalogCacheCreateEntry` (positive): the entry slot is linked at its
@@ -576,7 +599,7 @@ pub(crate) fn create_entry_positive(
     let (nkeys, kinds, keyno) = (cache.cc_nkeys, cache.cc_kind, cache.cc_keyno);
     let mut keys = [Datum::null(); CATCACHE_MAXKEYS];
     for i in 0..nkeys as usize {
-        keys[i] = match tuple_key(kinds[i], &cached_view, keyno[i], tupdesc) {
+        keys[i] = match tuple_key(kinds[i], &cached_view, keyno[i], tupdesc)? {
             CatCKey::Value(d) => d,
             CatCKey::Bytes(b) => {
                 // Offsets are payload-relative (stored_bytes contract).
@@ -847,4 +870,56 @@ pub(crate) fn push_in_progress(st: &mut CatCacheState<'_>, cache_id: i32, hash_v
 
 pub(crate) fn pop_in_progress(st: &mut CatCacheState<'_>) -> bool {
     st.in_progress.pop().expect("catcache: empty in-progress stack").dead
+}
+
+#[cfg(test)]
+mod oidvector_key_tests {
+    use super::oidvector_elements;
+
+    /// Build a plain-storage (4B-U header) oidvector image with the given
+    /// declared VARSIZE and on-image dim1. The header word is `varsize << 2`
+    /// (little-endian 4B-U form that `VarlenaRef::varsize` decodes).
+    fn image(varsize: u32, dim1: i32, buf_len: usize) -> Vec<u8> {
+        let mut b = vec![0u8; buf_len];
+        b[0..4].copy_from_slice(&(varsize << 2).to_le_bytes());
+        // ndim(4) at 4, dataoffset(8), elemtype(12) left 0/unused by this walk.
+        b[16..20].copy_from_slice(&dim1.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn valid_oidvector_reports_dim1_times_four() {
+        // 3 Oids: header(24) + 3*4 = 36 bytes.
+        let img = image(36, 3, 36);
+        // SAFETY: `img` is a live 4B-U oidvector image for its full VARSIZE.
+        let (_p, len) = unsafe { oidvector_elements(img.as_ptr()) }.unwrap();
+        assert_eq!(len, 12);
+    }
+
+    #[test]
+    fn empty_oidvector_is_zero_length() {
+        let img = image(24, 0, 24);
+        // SAFETY: as above.
+        let (_p, len) = unsafe { oidvector_elements(img.as_ptr()) }.unwrap();
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn inflated_dim1_is_rejected_not_walked() {
+        // dim1 claims 1000 Oids but the image is only header-sized: OOB if trusted.
+        let img = image(24, 1000, 24);
+        // SAFETY: as above; the crafted dim1 must be rejected before any walk.
+        let err = unsafe { oidvector_elements(img.as_ptr()) }.err().unwrap();
+        assert!(err.message().contains("not a valid oidvector"));
+    }
+
+    #[test]
+    fn negative_dim1_does_not_wrap() {
+        // A negative dim1 must not sign-extend into a huge `* 4` length; it is
+        // treated as an empty vector (same as the adt `dim1.max(0)` slicing).
+        let img = image(24, -1, 24);
+        // SAFETY: as above.
+        let (_p, len) = unsafe { oidvector_elements(img.as_ptr()) }.unwrap();
+        assert_eq!(len, 0);
+    }
 }

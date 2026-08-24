@@ -850,9 +850,58 @@ mod interrupt_tests {
         });
 
         init_small::globals::SetInterruptPending(true);
-        let err = super::check_for_interrupts().unwrap_err();
+        let err = super::check_for_interrupts().err().unwrap();
         assert_eq!(err.sqlstate(), ERRCODE_QUERY_CANCELED);
         assert!(!init_small::globals::InterruptPending());
         assert!(super::check_for_interrupts().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod drop_relation_forget_tests {
+    //! Relation-drop redo must forget invalid-page entries for every fork of the
+    //! dropped relation, matching C DropRelationFiles (md.c), which loops
+    //! XLogDropRelation over fork 0..=MAX_FORKNUM when isRedo. This is the
+    //! mechanism the catalog_storage::DropRelationFiles redo path now wires in;
+    //! without it, entries for a legitimately dropped relfilenode survive and
+    //! XLogCheckInvalidPages PANICs at the consistency point.
+    use super::*;
+    use ::types_core::{ForkNumber, MAX_FORKNUM};
+    use ::types_storage::RelFileLocator;
+
+    #[test]
+    fn drop_relation_forgets_all_forks() {
+        // No consistency reached: log_invalid_page records instead of PANICking.
+        xlogrecovery_seams::reached_consistency::set(|| false);
+        // invalid-page logging renders a relpath for its messages.
+        relpath_seams::relpathperm::set(|rlocator, forknum| {
+            format!("base/{}/{}_{}", rlocator.dbOid, rlocator.relNumber, forknum as i32)
+        });
+
+        let rel = RelFileLocator::new(1663, 5, 987654);
+        let other = RelFileLocator::new(1663, 5, 987655);
+
+        // Log an invalid-page reference on every fork of `rel`, plus one on an
+        // unrelated relation that must survive the drop.
+        for fork in 0..=(MAX_FORKNUM as i32) {
+            let fork = ForkNumber::from_i32(fork).unwrap();
+            log_invalid_page(rel, fork, 0, false).unwrap();
+        }
+        log_invalid_page(other, ForkNumber::MAIN_FORKNUM, 0, false).unwrap();
+        assert!(XLogHaveInvalidPages());
+
+        // Replay the drop: forget every fork of `rel`, as the redo path does.
+        for fork in 0..=(MAX_FORKNUM as i32) {
+            let fork = ForkNumber::from_i32(fork).unwrap();
+            XLogDropRelation(rel, fork).unwrap();
+        }
+
+        // The unrelated relation's entry keeps the table non-empty, but a
+        // consistency check restricted to `rel` would now pass; forget it too
+        // and confirm the table is fully cleared and the check succeeds.
+        assert!(XLogHaveInvalidPages());
+        XLogDropRelation(other, ForkNumber::MAIN_FORKNUM).unwrap();
+        assert!(!XLogHaveInvalidPages());
+        assert!(XLogCheckInvalidPages().is_ok());
     }
 }

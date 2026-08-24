@@ -120,16 +120,20 @@ fn group_link_of(proc: &PGPROC) -> &SyncCell<proclist_node> {
 }
 
 fn plist_is_empty(list: &SyncCell<proclist_head>) -> bool {
-    list.get().head == INVALID_PROC_NUMBER
+    // SAFETY: [PSL]/[LEAD] caller holds the list's governing lock (ProcStructLock
+    // for freelists, leader partition LWLock for lock groups).
+    unsafe { list.get() }.head == INVALID_PROC_NUMBER
 }
 
 /// Iterate `leader.lockGroupMembers` (linked via lockGroupLink), [LEAD] rule:
 /// caller holds the leader's lock partition LWLock.
 pub fn foreach_lock_group_member(leader: &PGPROC, mut body: impl FnMut(ProcNumber) -> bool) {
     let hdr = ProcGlobal();
-    let mut cur = leader.lockGroupMembers.get().head;
+    // SAFETY: [LEAD] caller holds the leader's lock-partition LWLock.
+    let mut cur = unsafe { leader.lockGroupMembers.get() }.head;
     while cur != INVALID_PROC_NUMBER {
-        let next = group_link_of(&hdr.allProcs[cur as usize]).get().next;
+        // SAFETY: [LEAD] lockGroupLink, leader's lock-partition LWLock held.
+        let next = unsafe { group_link_of(&hdr.allProcs[cur as usize]).get() }.next;
         if !body(cur) {
             break;
         }
@@ -143,7 +147,10 @@ fn plist_push_head(
     procno: ProcNumber,
     node_of: NodeOf,
 ) {
-    let mut head = list.get();
+    // SAFETY: [PSL]/[LEAD] caller holds the list's governing lock (ProcStructLock
+    // for freelists, leader partition LWLock for lock groups). Applies to every
+    // SyncCell get/set in this helper.
+    let mut head = unsafe { list.get() };
     let node = proclist_node {
         prev: INVALID_PROC_NUMBER,
         next: head.head,
@@ -152,13 +159,17 @@ fn plist_push_head(
         head.tail = procno;
     } else {
         let next_cell = node_of(&hdr.allProcs[head.head as usize]);
-        let mut next = next_cell.get();
+        // SAFETY: [PSL]/[LEAD] list lock held by caller.
+        let mut next = unsafe { next_cell.get() };
         next.prev = procno;
-        next_cell.set(next);
+        // SAFETY: [PSL]/[LEAD] list lock held by caller.
+        unsafe { next_cell.set(next) };
     }
     head.head = procno;
-    node_of(&hdr.allProcs[procno as usize]).set(node);
-    list.set(head);
+    // SAFETY: [PSL]/[LEAD] list lock held by caller.
+    unsafe { node_of(&hdr.allProcs[procno as usize]).set(node) };
+    // SAFETY: [PSL]/[LEAD] list lock held by caller.
+    unsafe { list.set(head) };
 }
 
 fn plist_push_tail(
@@ -167,7 +178,10 @@ fn plist_push_tail(
     procno: ProcNumber,
     node_of: NodeOf,
 ) {
-    let mut head = list.get();
+    // SAFETY: [PSL]/[LEAD] caller holds the list's governing lock (ProcStructLock
+    // for freelists, leader partition LWLock for lock groups). Applies to every
+    // SyncCell get/set in this helper.
+    let mut head = unsafe { list.get() };
     let node = proclist_node {
         prev: head.tail,
         next: INVALID_PROC_NUMBER,
@@ -176,13 +190,17 @@ fn plist_push_tail(
         head.head = procno;
     } else {
         let prev_cell = node_of(&hdr.allProcs[head.tail as usize]);
-        let mut prev = prev_cell.get();
+        // SAFETY: [PSL]/[LEAD] list lock held by caller.
+        let mut prev = unsafe { prev_cell.get() };
         prev.next = procno;
-        prev_cell.set(prev);
+        // SAFETY: [PSL]/[LEAD] list lock held by caller.
+        unsafe { prev_cell.set(prev) };
     }
     head.tail = procno;
-    node_of(&hdr.allProcs[procno as usize]).set(node);
-    list.set(head);
+    // SAFETY: [PSL]/[LEAD] list lock held by caller.
+    unsafe { node_of(&hdr.allProcs[procno as usize]).set(node) };
+    // SAFETY: [PSL]/[LEAD] list lock held by caller.
+    unsafe { list.set(head) };
 }
 
 fn plist_delete(
@@ -191,26 +209,36 @@ fn plist_delete(
     procno: ProcNumber,
     node_of: NodeOf,
 ) {
-    let mut head = list.get();
-    let node = node_of(&hdr.allProcs[procno as usize]).get();
+    // SAFETY: [PSL]/[LEAD] caller holds the list's governing lock (ProcStructLock
+    // for freelists, leader partition LWLock for lock groups). Applies to every
+    // SyncCell get/set in this helper.
+    let mut head = unsafe { list.get() };
+    // SAFETY: [PSL]/[LEAD] list lock held by caller.
+    let node = unsafe { node_of(&hdr.allProcs[procno as usize]).get() };
     if node.prev == INVALID_PROC_NUMBER {
         head.head = node.next;
     } else {
         let prev_cell = node_of(&hdr.allProcs[node.prev as usize]);
-        let mut prev = prev_cell.get();
+        // SAFETY: [PSL]/[LEAD] list lock held by caller.
+        let mut prev = unsafe { prev_cell.get() };
         prev.next = node.next;
-        prev_cell.set(prev);
+        // SAFETY: [PSL]/[LEAD] list lock held by caller.
+        unsafe { prev_cell.set(prev) };
     }
     if node.next == INVALID_PROC_NUMBER {
         head.tail = node.prev;
     } else {
         let next_cell = node_of(&hdr.allProcs[node.next as usize]);
-        let mut next = next_cell.get();
+        // SAFETY: [PSL]/[LEAD] list lock held by caller.
+        let mut next = unsafe { next_cell.get() };
         next.prev = node.prev;
-        next_cell.set(next);
+        // SAFETY: [PSL]/[LEAD] list lock held by caller.
+        unsafe { next_cell.set(next) };
     }
-    node_of(&hdr.allProcs[procno as usize]).set(proclist_node::detached());
-    list.set(head);
+    // SAFETY: [PSL]/[LEAD] list lock held by caller.
+    unsafe { node_of(&hdr.allProcs[procno as usize]).set(proclist_node::detached()) };
+    // SAFETY: [PSL]/[LEAD] list lock held by caller.
+    unsafe { list.set(head) };
 }
 
 fn plist_pop_head(
@@ -218,7 +246,9 @@ fn plist_pop_head(
     list: &SyncCell<proclist_head>,
     node_of: NodeOf,
 ) -> Option<ProcNumber> {
-    let procno = list.get().head;
+    // SAFETY: [PSL]/[LEAD] caller holds the list's governing lock (ProcStructLock
+    // for freelists, leader partition LWLock for lock groups).
+    let procno = unsafe { list.get() }.head;
     if procno == INVALID_PROC_NUMBER {
         return None;
     }
@@ -322,11 +352,18 @@ pub fn InitProcGlobal(cfg: &ProcGlobalConfig) {
     let mut procs = Vec::with_capacity(total as usize);
     for i in 0..total {
         let mut proc = PGPROC::new_zeroed();
-        proc.fpLockBits.set(fp_bits[(i * groups) as usize..].as_ptr());
-        proc.fpRelId
-            .set(fp_relids[(i * slots_per_backend) as usize..].as_ptr());
-        proc.fpUseCounts
-            .set(fp_use_counts[(i * groups) as usize..].as_ptr());
+        // SAFETY: [FPL] fpInfoLock; exclusive during single-threaded InitProcGlobal.
+        unsafe { proc.fpLockBits.set(fp_bits[(i * groups) as usize..].as_ptr()) };
+        // SAFETY: [FPL] fpInfoLock; exclusive during single-threaded InitProcGlobal.
+        unsafe {
+            proc.fpRelId
+                .set(fp_relids[(i * slots_per_backend) as usize..].as_ptr())
+        };
+        // SAFETY: [FPL] fpInfoLock; exclusive during single-threaded InitProcGlobal.
+        unsafe {
+            proc.fpUseCounts
+                .set(fp_use_counts[(i * groups) as usize..].as_ptr())
+        };
 
         // Prepared-xact dummy PGPROCs never run: no sema/latch/fpInfoLock.
         if i < max_backends + NUM_AUXILIARY_PROCS {
@@ -360,7 +397,8 @@ pub fn InitProcGlobal(cfg: &ProcGlobalConfig) {
         } else {
             None
         };
-        proc.procgloballist.set(list);
+        // SAFETY: [PSL] procgloballist set once during single-threaded InitProcGlobal.
+        unsafe { proc.procgloballist.set(list) };
         procs.push(proc);
     }
 
@@ -381,11 +419,13 @@ pub fn InitProcGlobal(cfg: &ProcGlobalConfig) {
     // XXX (as C): allProcCount excludes prepared xacts.
     hdr.allProcCount = (max_backends + NUM_AUXILIARY_PROCS) as u32;
     hdr.fpLockGroupsPerBackend = groups as u32;
-    hdr.spins_per_delay.set(DEFAULT_SPINS_PER_DELAY);
+    // SAFETY: [PSL] exclusive during single-threaded InitProcGlobal.
+    unsafe { hdr.spins_per_delay.set(DEFAULT_SPINS_PER_DELAY) };
     let hdr: &'static PROC_HDR = Box::leak(Box::new(hdr));
 
     for i in 0..max_backends {
-        if let Some(list) = hdr.allProcs[i as usize].procgloballist.get() {
+        // SAFETY: [PSL] procgloballist fixed at InitProcGlobal.
+        if let Some(list) = unsafe { hdr.allProcs[i as usize].procgloballist.get() } {
             plist_push_tail(hdr, freelist(hdr, list), i, links_of);
         }
     }
@@ -414,7 +454,8 @@ pub fn ProcGlobalResetAfterCrash() {
 
     let groups = hdr.fpLockGroupsPerBackend as usize;
     for (i, proc) in hdr.allProcs.iter().enumerate() {
-        proc.links.set(proclist_node::detached());
+        // SAFETY: [PSL]/[PART] links; exclusive during crash reset (all children dead).
+        unsafe { proc.links.set(proclist_node::detached()) };
         proc.waitStatus.store(PROC_WAIT_STATUS_OK, Relaxed);
         proc.procLatch.is_set.store(0, Relaxed);
         proc.procLatch.maybe_sleeping.store(0, Relaxed);
@@ -432,23 +473,34 @@ pub fn ProcGlobalResetAfterCrash() {
         proc.recoveryConflictPending.store(false, Relaxed);
         proc.lwWaiting.store(LW_WS_NOT_WAITING, Relaxed);
         proc.lwWaitMode.store(0, Relaxed);
-        proc.lwWaitLink.set(proclist_node::default());
-        proc.cvWaitLink.set(proclist_node::default());
-        proc.waitLock.set(core::ptr::null_mut());
-        proc.waitProcLock.set(core::ptr::null_mut());
-        proc.waitLockMode.set(0);
-        proc.heldLocks.set(0);
+        // SAFETY: [WLL] lwWaitLink; exclusive during crash reset (all children dead).
+        unsafe { proc.lwWaitLink.set(proclist_node::default()) };
+        // SAFETY: [CV] cvWaitLink; exclusive during crash reset (all children dead).
+        unsafe { proc.cvWaitLink.set(proclist_node::default()) };
+        // SAFETY: [PART] waitLock; exclusive during crash reset (all children dead).
+        unsafe { proc.waitLock.set(core::ptr::null_mut()) };
+        // SAFETY: [PART] waitProcLock; exclusive during crash reset (all children dead).
+        unsafe { proc.waitProcLock.set(core::ptr::null_mut()) };
+        // SAFETY: [PART] waitLockMode; exclusive during crash reset (all children dead).
+        unsafe { proc.waitLockMode.set(0) };
+        // SAFETY: [PART] heldLocks; exclusive during crash reset (all children dead).
+        unsafe { proc.heldLocks.set(0) };
         proc.waitStart.write(0);
         proc.delayChkptFlags.store(0, Relaxed);
         proc.statusFlags.store(0, Relaxed);
         proc.waitLSN.store(0, Relaxed);
-        proc.syncRepState.set(0);
-        proc.syncRepLinks.set(proclist_node::detached());
+        // SAFETY: [SRL] syncRepState; exclusive during crash reset (all children dead).
+        unsafe { proc.syncRepState.set(0) };
+        // SAFETY: [SRL] syncRepLinks; exclusive during crash reset (all children dead).
+        unsafe { proc.syncRepLinks.set(proclist_node::detached()) };
         for part in proc.myProcLocks.iter() {
-            part.set(types_storage::ilist::dlist_head::new());
+            // SAFETY: [PART] myProcLocks[i]; exclusive during crash reset (all children dead).
+            unsafe { part.set(types_storage::ilist::dlist_head::new()) };
         }
-        proc.subxidStatus.set(XidCacheStatus::default());
-        proc.subxids.set(types_storage::storage::XidCache::default());
+        // SAFETY: [PAL] subxidStatus; exclusive during crash reset (all children dead).
+        unsafe { proc.subxidStatus.set(XidCacheStatus::default()) };
+        // SAFETY: [PAL] subxids; exclusive during crash reset (all children dead).
+        unsafe { proc.subxids.set(types_storage::storage::XidCache::default()) };
         proc.procArrayGroupMember.store(false, Relaxed);
         proc.procArrayGroupNext
             .value
@@ -488,26 +540,34 @@ pub fn ProcGlobalResetAfterCrash() {
         proc.fpLocalTransactionId
             .store(InvalidLocalTransactionId, Relaxed);
         proc.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
-        proc.lockGroupMembers.set(proclist_head::default());
-        proc.lockGroupLink.set(proclist_node::detached());
+        // SAFETY: [LEAD] lockGroupMembers; exclusive during crash reset (all children dead).
+        unsafe { proc.lockGroupMembers.set(proclist_head::default()) };
+        // SAFETY: [LEAD] lockGroupLink; exclusive during crash reset (all children dead).
+        unsafe { proc.lockGroupLink.set(proclist_node::detached()) };
     }
 
     for xid in hdr.xids.iter() {
         xid.value.store(0, Relaxed);
     }
     for st in hdr.subxidStates.iter() {
-        st.set(XidCacheStatus::default());
+        // SAFETY: [PAL] subxidStates[i]; exclusive during crash reset (all children dead).
+        unsafe { st.set(XidCacheStatus::default()) };
     }
     for flags in hdr.statusFlags.iter() {
         flags.store(0, Relaxed);
     }
 
-    hdr.freeProcs.set(proclist_head::default());
-    hdr.autovacFreeProcs.set(proclist_head::default());
-    hdr.bgworkerFreeProcs.set(proclist_head::default());
-    hdr.walsenderFreeProcs.set(proclist_head::default());
+    // SAFETY: [PSL] freelists; exclusive during crash reset (all children dead).
+    unsafe { hdr.freeProcs.set(proclist_head::default()) };
+    // SAFETY: [PSL] freelists; exclusive during crash reset (all children dead).
+    unsafe { hdr.autovacFreeProcs.set(proclist_head::default()) };
+    // SAFETY: [PSL] freelists; exclusive during crash reset (all children dead).
+    unsafe { hdr.bgworkerFreeProcs.set(proclist_head::default()) };
+    // SAFETY: [PSL] freelists; exclusive during crash reset (all children dead).
+    unsafe { hdr.walsenderFreeProcs.set(proclist_head::default()) };
     for i in 0..max_backends {
-        if let Some(list) = hdr.allProcs[i as usize].procgloballist.get() {
+        // SAFETY: [PSL] procgloballist fixed at InitProcGlobal.
+        if let Some(list) = unsafe { hdr.allProcs[i as usize].procgloballist.get() } {
             plist_push_tail(hdr, freelist(hdr, list), i, links_of);
         }
     }
@@ -519,7 +579,8 @@ pub fn ProcGlobalResetAfterCrash() {
         .store(INVALID_PROC_NUMBER as u32, Relaxed);
     hdr.walwriterProc.store(INVALID_PROC_NUMBER, Relaxed);
     hdr.checkpointerProc.store(INVALID_PROC_NUMBER, Relaxed);
-    hdr.spins_per_delay.set(DEFAULT_SPINS_PER_DELAY);
+    // SAFETY: [PSL] spins_per_delay; exclusive during crash reset (all children dead).
+    unsafe { hdr.spins_per_delay.set(DEFAULT_SPINS_PER_DELAY) };
     hdr.startupBufferPinWaitBufId.store(-1, Relaxed);
     ProcStructLock.unlock();
 }
@@ -534,7 +595,9 @@ pub fn PreparedXactProcsBase() -> ProcNumber {
 
 // The field resets shared verbatim between InitProcess/InitAuxiliaryProcess.
 fn init_my_proc_common(proc: &PGPROC, vxid_procno: ProcNumber) {
-    proc.links.set(proclist_node::detached());
+    // SAFETY: [PSL]/[PART] links; this proc is exclusively owned by the
+    // initializing thread (just popped from the freelist / claimed as aux).
+    unsafe { proc.links.set(proclist_node::detached()) };
     proc.waitStatus.store(PROC_WAIT_STATUS_OK, Relaxed);
     proc.fpVXIDLock.store(false, Relaxed);
     proc.fpLocalTransactionId
@@ -551,12 +614,15 @@ fn init_my_proc_common(proc: &PGPROC, vxid_procno: ProcNumber) {
     proc.statusFlags.store(0, Relaxed);
     proc.lwWaiting.store(LW_WS_NOT_WAITING, Relaxed);
     proc.lwWaitMode.store(0, Relaxed);
-    proc.waitLock.set(core::ptr::null_mut());
-    proc.waitProcLock.set(core::ptr::null_mut());
+    // SAFETY: [PART] waitLock; proc exclusively owned by the initializing thread.
+    unsafe { proc.waitLock.set(core::ptr::null_mut()) };
+    // SAFETY: [PART] waitProcLock; proc exclusively owned by the initializing thread.
+    unsafe { proc.waitProcLock.set(core::ptr::null_mut()) };
     proc.waitStart.write(0);
     for i in 0..NUM_LOCK_PARTITIONS as usize {
         // Last owner should have released all locks.
-        debug_assert!(proc.myProcLocks[i].get().head.next.is_none());
+        // SAFETY: [PART] myProcLocks[i]; proc exclusively owned by the initializing thread.
+        debug_assert!(unsafe { proc.myProcLocks[i].get() }.head.next.is_none());
     }
 }
 
@@ -590,7 +656,8 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
     let divert = queue_eligible && connqueue::queued_count() > 0;
 
     spin_acquire(&ProcStructLock);
-    s_lock_seams::set_spins_per_delay::call(hdr.spins_per_delay.get());
+    // SAFETY: [PSL] spins_per_delay read under ProcStructLock.
+    s_lock_seams::set_spins_per_delay::call(unsafe { hdr.spins_per_delay.get() });
     let popped = if divert {
         None
     } else {
@@ -634,7 +701,8 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
     MY_PROC.set(procno);
     g::SetMyProcNumber(procno);
     let proc = &hdr.allProcs[procno as usize];
-    debug_assert_eq!(proc.procgloballist.get(), Some(list_id));
+    // SAFETY: [PSL] procgloballist fixed at InitProcGlobal.
+    debug_assert_eq!(unsafe { proc.procgloballist.get() }, Some(list_id));
 
     // TRIPWIRE (concurrent-window mode-P forensics): a freelist pop must
     // yield a DEAD proc. A live pid here means the freelist handed out a
@@ -659,8 +727,11 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
     }
     proc.recoveryConflictPending.store(false, Relaxed);
     proc.waitLSN.store(0, Relaxed);
-    proc.syncRepState.set(SYNC_REP_NOT_WAITING);
-    proc.syncRepLinks.set(proclist_node::detached());
+    // SAFETY: [SRL] syncRepState; this proc is owned by the initializing thread
+    // and not yet published to any syncrep queue.
+    unsafe { proc.syncRepState.set(SYNC_REP_NOT_WAITING) };
+    // SAFETY: [SRL] syncRepLinks; owned by the initializing thread, not yet queued.
+    unsafe { proc.syncRepLinks.set(proclist_node::detached()) };
     proc.procArrayGroupMember.store(false, Relaxed);
     proc.procArrayGroupMemberXid
         .store(InvalidTransactionId, Relaxed);
@@ -726,8 +797,11 @@ pub fn ReattachRetainedProc(backend_type: BackendType) -> PgResult<()> {
     }
     proc.recoveryConflictPending.store(false, Relaxed);
     proc.waitLSN.store(0, Relaxed);
-    proc.syncRepState.set(SYNC_REP_NOT_WAITING);
-    proc.syncRepLinks.set(proclist_node::detached());
+    // SAFETY: [SRL] syncRepState; this proc is owned by the initializing thread
+    // and not yet published to any syncrep queue.
+    unsafe { proc.syncRepState.set(SYNC_REP_NOT_WAITING) };
+    // SAFETY: [SRL] syncRepLinks; owned by the initializing thread, not yet queued.
+    unsafe { proc.syncRepLinks.set(proclist_node::detached()) };
     proc.procArrayGroupMember.store(false, Relaxed);
     proc.procArrayGroupMemberXid
         .store(InvalidTransactionId, Relaxed);
@@ -758,7 +832,8 @@ pub fn InitAuxiliaryProcess() -> PgResult<()> {
 
     let aux_base = AuxiliaryProcsBase();
     spin_acquire(&ProcStructLock);
-    s_lock_seams::set_spins_per_delay::call(hdr.spins_per_delay.get());
+    // SAFETY: [PSL] spins_per_delay read under ProcStructLock.
+    s_lock_seams::set_spins_per_delay::call(unsafe { hdr.spins_per_delay.get() });
     let mut claimed = None;
     for proctype in 0..NUM_AUXILIARY_PROCS {
         let auxproc = &hdr.allProcs[(aux_base + proctype) as usize];
@@ -808,13 +883,15 @@ pub fn HaveNFreeProcs(n: i32) -> (bool, i32) {
     let hdr = ProcGlobal();
     let mut nfree = 0;
     spin_acquire(&ProcStructLock);
-    let mut cur = hdr.freeProcs.get().head;
+    // SAFETY: [PSL] freeProcs traversed under ProcStructLock.
+    let mut cur = unsafe { hdr.freeProcs.get() }.head;
     while cur != INVALID_PROC_NUMBER {
         nfree += 1;
         if nfree == n {
             break;
         }
-        cur = hdr.allProcs[cur as usize].links.get().next;
+        // SAFETY: [PSL] freelist links traversed under ProcStructLock.
+        cur = unsafe { hdr.allProcs[cur as usize].links.get() }.next;
     }
     ProcStructLock.unlock();
     (nfree == n, nfree)
@@ -848,7 +925,8 @@ pub fn LockErrorCleanup() -> PgResult<()> {
     let partition_lock = LockHashPartitionLock(hashcode);
     lwlock::LWLockAcquire(partition_lock, lwlock::LW_EXCLUSIVE, procno)?;
 
-    if !proc.links.get().is_detached() {
+    // SAFETY: [PART] links as wait-queue node, read under the lock partition LWLock.
+    if !unsafe { proc.links.get() }.is_detached() {
         // We could not have been granted the lock yet.
         lock_seams::remove_from_wait_queue::call(procno, hashcode);
     } else if proc.waitStatus.load(Acquire) == PROC_WAIT_STATUS_OK {
@@ -907,6 +985,27 @@ pub fn KillRetainedProc() {
     if proc.pid.load(Relaxed) == 0 {
         panic!("KillRetainedProc: PGPROC already released");
     }
+    // Kill-path lock-state release (finding idx 295, same GL-GANGWEDGE-1 class
+    // as the lock-group detach below). A thread KILLED mid-engagement skips the
+    // transaction-abort and ProcKill exit callbacks that normally release its
+    // lock state; this callback owns that cleanup, so it must run their release
+    // set BEFORE freelisting the PGPROC. Otherwise the proc is pushed onto the
+    // freelist while still linked into a lock wait queue (proc.links, which the
+    // freelist push reuses), still holding PROCLOCKs/heavyweight locks, or still
+    // owning LWLocks -> corrupt lock tables / dangling wait-queue links.
+    //
+    // Mirrors the C exit chain's release set: LWLockReleaseAll (ProcKill) plus
+    // LockErrorCleanup (wait-queue unlink under the partition lock) and
+    // LockReleaseAll for both lock methods (transaction abort) — the latter two
+    // composed by ProcReleaseLocks, exactly as the abort path uses it. LWLocks
+    // are dropped FIRST so the partition-lock acquires inside
+    // LockErrorCleanup/LockReleaseAll cannot self-deadlock against a partition
+    // LWLock the killed thread was still holding; ProcKill likewise runs
+    // LWLockReleaseAll before touching any partition lock. No-op on the healthy
+    // parked path: the park arm already released all of this, so nothing is held.
+    lwlock::LWLockReleaseAll().expect("LWLockReleaseAll failed in KillRetainedProc");
+    ProcReleaseLocks(false).expect("ProcReleaseLocks failed in KillRetainedProc");
+
     // Kill-path detach (see above). Ordered BEFORE the MY_PROC clear because
     // LeaveLockGroup re-reads MyProc. A group LEADER cannot reach here with
     // members (a live leader is always on its own members list, which the
@@ -926,7 +1025,8 @@ pub fn KillRetainedProc() {
     proc.vxid.procNumber.store(INVALID_PROC_NUMBER, Relaxed);
     proc.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
 
-    let list = proc.procgloballist.get().expect("proc freelist");
+    // SAFETY: [PSL] procgloballist fixed at InitProcGlobal.
+    let list = unsafe { proc.procgloballist.get() }.expect("proc freelist");
     spin_acquire(&ProcStructLock);
     plist_push_tail(hdr, freelist(hdr, list), procno, links_of);
     ProcStructLock.unlock();
@@ -958,7 +1058,8 @@ pub fn ProcKill(_code: i32, _arg: usize) {
     }
 
     for i in 0..NUM_LOCK_PARTITIONS as usize {
-        debug_assert!(proc.myProcLocks[i].get().head.next.is_none());
+        // SAFETY: [PART] myProcLocks[i]; owning thread at exit, locks already released.
+        debug_assert!(unsafe { proc.myProcLocks[i].get() }.head.next.is_none());
     }
 
     lwlock::LWLockReleaseAll().expect("LWLockReleaseAll failed in ProcKill");
@@ -1001,7 +1102,8 @@ pub fn ProcKill(_code: i32, _arg: usize) {
                 // the leader's ProcKill, and only dying procs detach. Our
                 // LeaveLockGroup (live pool workers, per-engagement) makes
                 // the window hot, hence the stronger locking here.
-                let list = leader.procgloballist.get().expect("leader freelist");
+                // SAFETY: [PSL] procgloballist fixed at InitProcGlobal.
+                let list = unsafe { leader.procgloballist.get() }.expect("leader freelist");
                 spin_acquire(&ProcStructLock);
                 leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
                 let pushed = leader.pid.load(Relaxed) == 0;
@@ -1071,7 +1173,8 @@ pub fn ProcKill(_code: i32, _arg: usize) {
     proc.vxid.procNumber.store(INVALID_PROC_NUMBER, Relaxed);
     proc.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
 
-    let list = proc.procgloballist.get().expect("proc freelist");
+    // SAFETY: [PSL] procgloballist fixed at InitProcGlobal.
+    let list = unsafe { proc.procgloballist.get() }.expect("proc freelist");
     spin_acquire(&ProcStructLock);
     // pid=0 INSIDE the ProcStructLock section: it is the deferred-return
     // arbiter. The last member's empty-transition arm (ProcKill member arm
@@ -1091,10 +1194,13 @@ pub fn ProcKill(_code: i32, _arg: usize) {
         plist_push_tail(hdr, freelist(hdr, list), procno, links_of);
         pushed = true;
     }
-    hdr.spins_per_delay
-        .set(s_lock_seams::update_spins_per_delay::call(
-            hdr.spins_per_delay.get(),
-        ));
+    // SAFETY: [PSL] spins_per_delay read and updated under ProcStructLock.
+    unsafe {
+        hdr.spins_per_delay
+            .set(s_lock_seams::update_spins_per_delay::call(
+                hdr.spins_per_delay.get(),
+            ))
+    };
     ProcStructLock.unlock();
 
     // D6 (connqueue): a regular PGPROC just became available — wake the
@@ -1140,8 +1246,9 @@ pub fn LeaveLockGroup() {
         "LeaveLockGroup: caller is a lock-group LEADER (standing executors only ever join)"
     );
     for i in 0..NUM_LOCK_PARTITIONS as usize {
+        // SAFETY: [PART] myProcLocks[i]; owning thread, engagement locks released.
         debug_assert!(
-            proc.myProcLocks[i].get().head.next.is_none(),
+            unsafe { proc.myProcLocks[i].get() }.head.next.is_none(),
             "LeaveLockGroup with locks still held"
         );
     }
@@ -1169,7 +1276,8 @@ pub fn LeaveLockGroup() {
         //               after seeing this clear), or it wretain-parked and
         //               keeps its retained PGPROC. Designed handoff, no
         //               push here.
-        let list = leader.procgloballist.get().expect("leader freelist");
+        // SAFETY: [PSL] procgloballist fixed at InitProcGlobal.
+        let list = unsafe { leader.procgloballist.get() }.expect("leader freelist");
         spin_acquire(&ProcStructLock);
         leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
         let pushed = leader.pid.load(Relaxed) == 0;
@@ -1213,10 +1321,13 @@ pub fn AuxiliaryProcKill(_code: i32, arg: usize) {
     proc.pid.store(0, Relaxed);
     proc.vxid.procNumber.store(INVALID_PROC_NUMBER, Relaxed);
     proc.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
-    hdr.spins_per_delay
-        .set(s_lock_seams::update_spins_per_delay::call(
-            hdr.spins_per_delay.get(),
-        ));
+    // SAFETY: [PSL] spins_per_delay read and updated under ProcStructLock.
+    unsafe {
+        hdr.spins_per_delay
+            .set(s_lock_seams::update_spins_per_delay::call(
+                hdr.spins_per_delay.get(),
+            ))
+    };
     ProcStructLock.unlock();
 }
 
@@ -1349,17 +1460,21 @@ pub fn init_seams() {
         GetPGProcByNumber(procno).lwWaitMode.store(mode, Relaxed)
     });
     s::proc_lw_wait_link::set(|procno| {
-        let node = GetPGProcByNumber(procno).lwWaitLink.get();
+        // SAFETY: [WLL] lwWaitLink accessed under the LWLock wait-list LW_FLAG_LOCKED bit.
+        let node = unsafe { GetPGProcByNumber(procno).lwWaitLink.get() };
         s::proclist_node {
             next: node.next,
             prev: node.prev,
         }
     });
     s::set_proc_lw_wait_link::set(|procno, node| {
-        GetPGProcByNumber(procno).lwWaitLink.set(proclist_node {
-            next: node.next,
-            prev: node.prev,
-        })
+        // SAFETY: [WLL] lwWaitLink accessed under the LWLock wait-list LW_FLAG_LOCKED bit.
+        unsafe {
+            GetPGProcByNumber(procno).lwWaitLink.set(proclist_node {
+                next: node.next,
+                prev: node.prev,
+            })
+        }
     });
     s::pg_semaphore_lock::set(|procno| pg_sema_seams::pg_semaphore_lock::call(procno));
     s::pg_semaphore_unlock::set(|procno| pg_sema_seams::pg_semaphore_unlock::call(procno));

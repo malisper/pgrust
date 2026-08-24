@@ -10,7 +10,7 @@ pub fn spg_desc(buf: &mut StringInfo<'_>, record: &XLogReaderState) -> PgResult<
 
     match info {
         XLOG_SPGIST_ADD_LEAF => {
-            let x = spgxlogAddLeaf::decode(rec);
+            let x = spgxlogAddLeaf::decode(rec)?;
             appendf!(
                 buf,
                 "off: {}, headoff: {}, parentoff: {}, nodeI: {}",
@@ -27,7 +27,7 @@ pub fn spg_desc(buf: &mut StringInfo<'_>, record: &XLogReaderState) -> PgResult<
             }
         }
         XLOG_SPGIST_MOVE_LEAFS => {
-            let x = spgxlogMoveLeafs::decode(rec);
+            let x = spgxlogMoveLeafs::decode(rec)?;
             appendf!(
                 buf,
                 "nmoves: {}, parentoff: {}, nodeI: {}",
@@ -46,7 +46,7 @@ pub fn spg_desc(buf: &mut StringInfo<'_>, record: &XLogReaderState) -> PgResult<
             }
         }
         XLOG_SPGIST_ADD_NODE => {
-            let x = spgxlogAddNode::decode(rec);
+            let x = spgxlogAddNode::decode(rec)?;
             appendf!(
                 buf,
                 "off: {}, newoff: {}, parentBlk: {}, parentoff: {}, nodeI: {}",
@@ -61,7 +61,7 @@ pub fn spg_desc(buf: &mut StringInfo<'_>, record: &XLogReaderState) -> PgResult<
             }
         }
         XLOG_SPGIST_SPLIT_TUPLE => {
-            let x = spgxlogSplitTuple::decode(rec);
+            let x = spgxlogSplitTuple::decode(rec)?;
             appendf!(
                 buf,
                 "prefixoff: {}, postfixoff: {}",
@@ -76,7 +76,7 @@ pub fn spg_desc(buf: &mut StringInfo<'_>, record: &XLogReaderState) -> PgResult<
             }
         }
         XLOG_SPGIST_PICKSPLIT => {
-            let x = spgxlogPickSplit::decode(rec);
+            let x = spgxlogPickSplit::decode(rec)?;
             appendf!(
                 buf,
                 "ndelete: {}, ninsert: {}, inneroff: {}, parentoff: {}, nodeI: {}",
@@ -97,7 +97,7 @@ pub fn spg_desc(buf: &mut StringInfo<'_>, record: &XLogReaderState) -> PgResult<
             }
         }
         XLOG_SPGIST_VACUUM_LEAF => {
-            let x = spgxlogVacuumLeaf::decode(rec);
+            let x = spgxlogVacuumLeaf::decode(rec)?;
             appendf!(
                 buf,
                 "ndead: {}, nplaceholder: {}, nmove: {}, nchain: {}",
@@ -108,11 +108,11 @@ pub fn spg_desc(buf: &mut StringInfo<'_>, record: &XLogReaderState) -> PgResult<
             )?;
         }
         XLOG_SPGIST_VACUUM_ROOT => {
-            let x = spgxlogVacuumRoot::decode(rec);
+            let x = spgxlogVacuumRoot::decode(rec)?;
             appendf!(buf, "ndelete: {}", x.nDelete)?;
         }
         XLOG_SPGIST_VACUUM_REDIRECT => {
-            let x = spgxlogVacuumRedirect::decode(rec);
+            let x = spgxlogVacuumRedirect::decode(rec)?;
             appendf!(
                 buf,
                 "ntoplaceholder: {}, firstplaceholder: {}, snapshotConflictHorizon: {}, isCatalogRel: {}",

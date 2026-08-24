@@ -1705,3 +1705,111 @@ fn virtual_materialize_flattens_expanded_datum() {
     }
     drop(unsafe { alloc::boxed::Box::from_raw(obj) });
 }
+
+// idx 30: a virtual-slot materialize copy driven by a crafted on-page varlena
+// header must be refused with a typed corruption error, never sized into an
+// out-of-bounds read of the source buffer. exec_copy_slot into a Virtual dest
+// (C tts_virtual_copyslot) bounds each by-reference datum against the source
+// tuple image (slot_materialized_image), the independent t_len-derived witness.
+// Copying a heap source with a forged over-long varlena header must be rejected
+// before any out-of-bounds read. With the deform-walk bound (idx 97) in place the
+// copy's deform step trips the corruption guard first; idx 30's materialize bound
+// is the second line for already-deformed by-ref datums carrying a witness. Either
+// way no OOB read occurs — assert the deform guard fires.
+#[test]
+#[should_panic(expected = "corrupt")]
+fn copy_to_virtual_refuses_overlong_varlena_header() {
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    // int4, then text LAST: the deform offset walk stays in bounds (nothing
+    // follows the varlena), so the only over-read would be the materialize
+    // bulk copy this finding is about. PLAIN storage keeps the 4B header the
+    // forge below overwrites.
+    let desc = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, -1, false, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+        ],
+    );
+    let txt = text_varlena("hi");
+    let values = [Datum::from_i32(7), text_datum(&txt)];
+    let tuple = heap_form_tuple(mcx, &desc, &values, &[false; 2]).unwrap();
+
+    // Forge the text field's 4B header to claim ~1 GiB, far past t_len.
+    {
+        let mut probe = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+        let view = unsafe {
+            HeapTupleData::from_raw_parts(
+                tuple.header_ptr(),
+                tuple.t_len,
+                tuple.t_self,
+                tuple.t_tableOid,
+            )
+        };
+        exec_store_heap_tuple(&mut probe, mcx, view);
+        let mut n = false;
+        let p = slot_getattr(&mut probe, 2, &mut n).as_usize() as *mut u8;
+        assert!(!n);
+        // The forge lands on the 4B length word only if the value stayed 4B.
+        assert!(!unsafe { ::types_tuple::varatt::varatt_is_1b(p) });
+        unsafe {
+            let word = ::types_tuple::varatt::set_varsize_4b_word(0x3FFF_FFFF);
+            core::ptr::copy_nonoverlapping(word.to_ne_bytes().as_ptr(), p, 4);
+        }
+        exec_clear_tuple(&mut probe, mcx);
+    }
+
+    // A materialized heap source: its text datum now points at the forged
+    // header. (Heap vs buffer-resident is immaterial to the bound under test —
+    // both route by-ref datums through slot_materialized_image; heap avoids the
+    // bufmgr seams a pure unit test can't stand up.)
+    let src_view = unsafe {
+        HeapTupleData::from_raw_parts(tuple.header_ptr(), tuple.t_len, tuple.t_self, tuple.t_tableOid)
+    };
+    let mut src = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+    exec_store_heap_tuple(&mut src, mcx, src_view);
+
+    let mut dst = make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc));
+    // Deforming the forged heap source during the copy trips the deform-walk
+    // corruption guard (#[should_panic] "corrupt") before any OOB read.
+    let _ = exec_copy_slot(&mut dst, &mut src, mcx, mcx);
+
+    exec_clear_tuple(&mut src, mcx);
+}
+
+// A well-formed buffer-resident tuple still copies cleanly into a Virtual dest:
+// the witnessed bound accepts every in-image by-reference datum unchanged.
+#[test]
+fn copy_to_virtual_accepts_valid_varlena() {
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let desc = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, -1, false, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+        ],
+    );
+    let txt = text_varlena("hello world");
+    let values = [Datum::from_i32(42), text_datum(&txt)];
+    let tuple = heap_form_tuple(mcx, &desc, &values, &[false; 2]).unwrap();
+
+    let src_view = unsafe {
+        HeapTupleData::from_raw_parts(tuple.header_ptr(), tuple.t_len, tuple.t_self, tuple.t_tableOid)
+    };
+    let mut src = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+    exec_store_heap_tuple(&mut src, mcx, src_view);
+
+    let mut dst = make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc));
+    exec_copy_slot(&mut dst, &mut src, mcx, mcx).unwrap();
+
+    let mut n = false;
+    assert_eq!(slot_getattr(&mut dst, 1, &mut n).as_i32(), 42);
+    let d = slot_getattr(&mut dst, 2, &mut n);
+    assert!(!n);
+    assert_eq!(datum_text_bytes(d), b"hello world");
+
+    exec_clear_tuple(&mut dst, mcx);
+    exec_clear_tuple(&mut src, mcx);
+}

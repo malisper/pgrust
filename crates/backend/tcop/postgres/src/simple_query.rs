@@ -373,6 +373,12 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
     if query_string == "pgrust: inject panic"
         && std::env::var_os("PGRUST_CRASH_TEST").is_some()
     {
+        if !superuser_seams::superuser::call()? {
+            return Err(ereport(ERROR)
+                .errmsg("crash-backend injection requires superuser")
+                .into_error()
+                .into());
+        }
         ereport(types_error::PANIC)
             .errmsg("crash-restart test injection")
             .finish(loc(0, "exec_simple_query"))?;

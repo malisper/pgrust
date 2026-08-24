@@ -91,7 +91,17 @@ pub fn validate_lanes(
 /// `{ count: u32, entries: [{ len: u16, bytes… }] }`, entries 4-byte
 /// aligned. `paths[i]` is path_ord `i + 1` (path_ord 0 = root, never
 /// listed).
-pub fn encode_path_table(paths: &[&str]) -> Vec<u8> {
+///
+/// The per-entry length rides a u16 on-disk field, so a path whose byte
+/// length exceeds `u16::MAX` cannot be framed honestly. Shred paths are
+/// minted verbatim from attacker-supplied jsonb keys (which the vendored
+/// machinery allows up to the 28-bit JEntry bound, far past 64 KiB), so a
+/// silent `as u16` cast would truncate the declared length modulo 65536
+/// while still emitting the full path bytes — an internally inconsistent
+/// section that lets a reader decode an aliased (attacker-chosen) path.
+/// Reject such a path with a typed contract error instead of truncating;
+/// valid paths (≤ `u16::MAX` bytes) round-trip unchanged.
+pub fn encode_path_table(paths: &[&str]) -> WriteResult<Vec<u8>> {
     let mut out = Vec::new();
     put_u32(&mut out, paths.len() as u32);
     for p in paths {
@@ -100,10 +110,13 @@ pub fn encode_path_table(paths: &[&str]) -> Vec<u8> {
         if rem != 0 {
             out.resize(out.len() + (4 - rem), 0);
         }
-        put_u16(&mut out, p.len() as u16);
+        let len = u16::try_from(p.len()).map_err(|_| WriteError::Contract {
+            detail: "shred path length exceeds PathTable u16 framing",
+        })?;
+        put_u16(&mut out, len);
         out.extend_from_slice(p.as_bytes());
     }
-    out
+    Ok(out)
 }
 
 /// Decode a PathTable body (the round-trip witness for the emission tests;

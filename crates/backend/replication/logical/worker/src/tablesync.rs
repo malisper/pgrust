@@ -546,7 +546,14 @@ fn copy_table(mcx: Mcx<'static>, conn: &mut PgConn, nspname: &str, relname: &str
         }
     });
 
-    let mut cstate = copy_cmd::BeginCopyFromCallback(mcx, &rel, &attnamelist, &options, cb)?;
+    // SAFETY: the callback captures only two shared references (`&conn_cell`,
+    // `&pending`) to `RefCell`s on this stack frame. Those captures have no
+    // drop glue, and both `RefCell`s outlive `cstate` (declared above it and
+    // dropped after it in reverse-declaration order), so the callback's state
+    // strictly outlives the returned `CopyFromState`'s drop — satisfying
+    // BeginCopyFromCallback's safety contract.
+    let mut cstate =
+        unsafe { copy_cmd::BeginCopyFromCallback(mcx, &rel, &attnamelist, &options, cb)? };
     copy_cmd::CopyFrom(mcx, &mut cstate, &rel)?;
     copy_cmd::EndCopyFrom(cstate)?;
 
@@ -694,7 +701,9 @@ pub(crate) fn LogicalRepSyncTableStart(
         let nsp = lsyscache::get_namespace_name(mcx, rel.rd_rel.relnamespace)?
             .map(|s| s.to_string())
             .unwrap_or_default();
-        let name = rel.name().to_string();
+        // SQL_ASCII relation names may be non-UTF-8; rel.name() would panic.
+        // Match C's opaque NameData bytes with a lossy copy for the COPY command.
+        let name = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
         (nsp, name)
     };
 

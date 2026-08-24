@@ -13,7 +13,7 @@ mod tests;
 
 use core::slice;
 
-use datum::Datum;
+use datum::{Datum, VarlenaRef};
 use types_core::catalog::C_COLLATION_OID;
 use types_core::fmgr::{F_OIDEQ, NAMEDATALEN};
 use types_core::primitive::RegProcedure;
@@ -79,24 +79,66 @@ fn unexpected_null(attno: i32) -> Box<PgError> {
     )
 }
 
-fn name_from(d: Datum) -> NameData {
+// Shared bounded reader for every fixed-width NameData catalog column.
+//
+// A NameData column is NAMEDATALEN wide, and C reads it as a fixed field via
+// GETSTRUCT + NameStr; C is safe only because that field lies within the heap
+// tuple's validated t_len extent. A Datum carries no length of its own, so a
+// truncated/crafted catalog tuple would drive a blind NAMEDATALEN read past the
+// tuple image (CWE-125 out-of-bounds read / heap disclosure). Mirror C's
+// implicit bound explicitly: clamp the copy to the bytes remaining between the
+// datum pointer and the end of the containing tuple image
+// (header_ptr()..header_ptr()+t_len), then NUL-pad to NAMEDATALEN. A valid name
+// has its full NAMEDATALEN bytes in range and is returned unchanged; a short
+// datum yields a NUL-padded prefix instead of an OOB read.
+fn name_from(tup: &HeapTupleData<'_>, d: Datum) -> NameData {
     let mut n = NameData::default();
-    // SAFETY: d comes off a NameData column: NAMEDATALEN readable bytes.
-    let bytes =
-        unsafe { slice::from_raw_parts(d.as_usize() as *const u8, NAMEDATALEN as usize) };
-    n.data.copy_from_slice(bytes);
+    let dp = d.as_usize() as *const u8;
+    let end = tup.header_ptr() as usize + tup.t_len as usize;
+    let take = end.saturating_sub(dp as usize).min(NAMEDATALEN as usize);
+    // SAFETY: `take` bytes lie within the tuple image [header_ptr, +t_len),
+    // whose readability for t_len bytes is the HeapTupleData construction
+    // invariant; the remaining tail of `n.data` stays NUL from Default.
+    let bytes = unsafe { slice::from_raw_parts(dp, take) };
+    n.data[..take].copy_from_slice(bytes);
     n
+}
+
+// Elements of an int2vector/oidvector image that actually fit within the
+// datum's varlena length word. The on-image `dim1` element count is read
+// verbatim from catalog bytes; C trusts it because int2vectorin/oidvectorin
+// validated it at DDL time, but a crafted pg_index tuple can plant an inflated
+// or negative `dim1` that would drive the values slice far past the tuple image
+// (CWE-125 out-of-bounds read / heap disclosure). Clamp the count to what the
+// varlena length word (the sanctioned per-column extent, established when the
+// tuple was deformed) can hold: a valid vector's `dim1` fits exactly and is
+// returned unchanged, matching C's RelationInitIndexAccessInfo; a forged
+// `dim1` yields a short slice that the caller's indnkeyatts/indnatts
+// consistency check rejects as a clean error instead of reading out of bounds.
+fn vector_fit_len(varsize: usize, dim1: i32, elemsz: usize) -> usize {
+    let fit = varsize.saturating_sub(array::VECTOR_HDRSZ) / elemsz;
+    if dim1 < 0 {
+        0
+    } else {
+        (dim1 as usize).min(fit)
+    }
 }
 
 // SAFETY contract for both: d comes off a not-null oidvector/int2vector
 // column; typstorage is plain so the image is never packed or toasted, and
-// the values tail follows the 24-byte header in place.
+// the values tail follows the 24-byte header in place. The values slice is
+// bounded by vector_fit_len against the datum's varlena length word so a
+// crafted on-image `dim1` can never extend the read past the tuple.
 unsafe fn oidvector_values<'a>(d: Datum) -> &'a [Oid] {
     let p = d.as_usize() as *const array::oidvector;
-    slice::from_raw_parts(p.add(1) as *const Oid, (*p).dim1 as usize)
+    let varsize = VarlenaRef::from_ptr(d.as_usize() as *const u8).varsize();
+    let n = vector_fit_len(varsize, (*p).dim1, core::mem::size_of::<Oid>());
+    slice::from_raw_parts(p.add(1) as *const Oid, n)
 }
 
 unsafe fn int2vector_values<'a>(d: Datum) -> &'a [i16] {
     let p = d.as_usize() as *const array::int2vector;
-    slice::from_raw_parts(p.add(1) as *const i16, (*p).dim1 as usize)
+    let varsize = VarlenaRef::from_ptr(d.as_usize() as *const u8).varsize();
+    let n = vector_fit_len(varsize, (*p).dim1, core::mem::size_of::<i16>());
+    slice::from_raw_parts(p.add(1) as *const i16, n)
 }

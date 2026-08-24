@@ -112,43 +112,54 @@ fn links_of(procno: ProcNumber) -> &'static types_storage::storage::SyncCell<pro
 
 fn q_delete(mode: i32, procno: ProcNumber) {
     let list = queue(mode);
-    let mut head = list.get();
-    let node = links_of(procno).get();
+    // SAFETY: [SRL] serialized by SyncRepLock
+    let mut head = unsafe { list.get() };
+    // SAFETY: [SRL] serialized by SyncRepLock
+    let node = unsafe { links_of(procno).get() };
     if node.prev == types_core::INVALID_PROC_NUMBER {
         head.head = node.next;
     } else {
         let prev = links_of(node.prev);
-        let mut p = prev.get();
+        // SAFETY: [SRL] serialized by SyncRepLock
+        let mut p = unsafe { prev.get() };
         p.next = node.next;
-        prev.set(p);
+        // SAFETY: [SRL] serialized by SyncRepLock
+        unsafe { prev.set(p) };
     }
     if node.next == types_core::INVALID_PROC_NUMBER {
         head.tail = node.prev;
     } else {
         let next = links_of(node.next);
-        let mut n = next.get();
+        // SAFETY: [SRL] serialized by SyncRepLock
+        let mut n = unsafe { next.get() };
         n.prev = node.prev;
-        next.set(n);
+        // SAFETY: [SRL] serialized by SyncRepLock
+        unsafe { next.set(n) };
     }
-    links_of(procno).set(proclist_node::detached());
-    list.set(head);
+    // SAFETY: [SRL] serialized by SyncRepLock
+    unsafe { links_of(procno).set(proclist_node::detached()) };
+    // SAFETY: [SRL] serialized by SyncRepLock
+    unsafe { list.set(head) };
 }
 
 // dlist_delete_thoroughly on whichever queue holds us: the queues never share
 // a proc, and C deletes via the node without knowing the queue; scan modes.
 fn q_delete_any(procno: ProcNumber) {
     for mode in 0..NUM_SYNC_REP_WAIT_MODE as i32 {
-        let mut cur = queue(mode).get().head;
+        // SAFETY: [SRL] serialized by SyncRepLock
+        let mut cur = unsafe { queue(mode).get() }.head;
         while cur != types_core::INVALID_PROC_NUMBER {
             if cur == procno {
                 q_delete(mode, procno);
                 return;
             }
-            cur = links_of(cur).get().next;
+            // SAFETY: [SRL] serialized by SyncRepLock
+            cur = unsafe { links_of(cur).get() }.next;
         }
     }
     // Not found: already removed; mark detached for the invariant.
-    links_of(procno).set(proclist_node::detached());
+    // SAFETY: [SRL] serialized by SyncRepLock
+    unsafe { links_of(procno).set(proclist_node::detached()) };
 }
 
 // SyncRepQueueInsert: keep the queue ordered by waitLSN, scanning from the
@@ -157,61 +168,79 @@ fn queue_insert(mode: i32, procno: ProcNumber) {
     let list = queue(mode);
     let my_lsn = lmgr_proc::GetPGProcByNumber(procno).waitLSN.load(Relaxed);
 
-    let mut cur = list.get().tail;
+    // SAFETY: [SRL] serialized by SyncRepLock
+    let mut cur = unsafe { list.get() }.tail;
     while cur != types_core::INVALID_PROC_NUMBER {
         let cur_lsn = lmgr_proc::GetPGProcByNumber(cur).waitLSN.load(Relaxed);
         if cur_lsn < my_lsn {
             // dlist_insert_after(cur, procno)
             let cur_node_cell = links_of(cur);
-            let mut cur_node = cur_node_cell.get();
+            // SAFETY: [SRL] serialized by SyncRepLock
+            let mut cur_node = unsafe { cur_node_cell.get() };
             let next = cur_node.next;
-            links_of(procno).set(proclist_node { prev: cur, next });
+            // SAFETY: [SRL] serialized by SyncRepLock
+            unsafe { links_of(procno).set(proclist_node { prev: cur, next }) };
             cur_node.next = procno;
-            cur_node_cell.set(cur_node);
-            let mut head = list.get();
+            // SAFETY: [SRL] serialized by SyncRepLock
+            unsafe { cur_node_cell.set(cur_node) };
+            // SAFETY: [SRL] serialized by SyncRepLock
+            let mut head = unsafe { list.get() };
             if next == types_core::INVALID_PROC_NUMBER {
                 head.tail = procno;
             } else {
                 let next_cell = links_of(next);
-                let mut n = next_cell.get();
+                // SAFETY: [SRL] serialized by SyncRepLock
+                let mut n = unsafe { next_cell.get() };
                 n.prev = procno;
-                next_cell.set(n);
+                // SAFETY: [SRL] serialized by SyncRepLock
+                unsafe { next_cell.set(n) };
             }
-            list.set(head);
+            // SAFETY: [SRL] serialized by SyncRepLock
+            unsafe { list.set(head) };
             return;
         }
-        cur = links_of(cur).get().prev;
+        // SAFETY: [SRL] serialized by SyncRepLock
+        cur = unsafe { links_of(cur).get() }.prev;
     }
 
     // Empty list, or we belong at the head.
-    let mut head = list.get();
-    links_of(procno).set(proclist_node {
-        prev: types_core::INVALID_PROC_NUMBER,
-        next: head.head,
-    });
+    // SAFETY: [SRL] serialized by SyncRepLock
+    let mut head = unsafe { list.get() };
+    // SAFETY: [SRL] serialized by SyncRepLock
+    unsafe {
+        links_of(procno).set(proclist_node {
+            prev: types_core::INVALID_PROC_NUMBER,
+            next: head.head,
+        })
+    };
     if head.head == types_core::INVALID_PROC_NUMBER {
         head.tail = procno;
     } else {
         let old_head = links_of(head.head);
-        let mut h = old_head.get();
+        // SAFETY: [SRL] serialized by SyncRepLock
+        let mut h = unsafe { old_head.get() };
         h.prev = procno;
-        old_head.set(h);
+        // SAFETY: [SRL] serialized by SyncRepLock
+        unsafe { old_head.set(h) };
     }
     head.head = procno;
-    list.set(head);
+    // SAFETY: [SRL] serialized by SyncRepLock
+    unsafe { list.set(head) };
 }
 
 #[cfg(debug_assertions)]
 fn queue_is_ordered_by_lsn(mode: i32) -> bool {
     let mut last: XLogRecPtr = 0;
-    let mut cur = queue(mode).get().head;
+    // SAFETY: [SRL] serialized by SyncRepLock
+    let mut cur = unsafe { queue(mode).get() }.head;
     while cur != types_core::INVALID_PROC_NUMBER {
         let lsn = lmgr_proc::GetPGProcByNumber(cur).waitLSN.load(Relaxed);
         if lsn <= last {
             return false;
         }
         last = lsn;
-        cur = links_of(cur).get().next;
+        // SAFETY: [SRL] serialized by SyncRepLock
+        cur = unsafe { links_of(cur).get() }.next;
     }
     true
 }
@@ -246,10 +275,12 @@ pub fn SyncRepWaitForLSN(lsn: XLogRecPtr, commit: bool) -> PgResult<()> {
     let Some((proc, procno)) = my_proc() else {
         return Ok(());
     };
-    debug_assert!(proc.syncRepLinks.get().is_detached());
+    // SAFETY: [SRL] serialized by SyncRepLock
+    debug_assert!(unsafe { proc.syncRepLinks.get() }.is_detached());
 
     lock_sync_rep()?;
-    debug_assert_eq!(proc.syncRepState.get(), SYNC_REP_NOT_WAITING);
+    // SAFETY: [SRL] serialized by SyncRepLock
+    debug_assert_eq!(unsafe { proc.syncRepState.get() }, SYNC_REP_NOT_WAITING);
 
     let status = ctl.sync_standbys_status.load(Relaxed);
     if status & SYNC_STANDBY_INIT != 0 {
@@ -273,7 +304,8 @@ pub fn SyncRepWaitForLSN(lsn: XLogRecPtr, commit: bool) -> PgResult<()> {
 
     // Set our waitLSN so the walsender knows when to wake us, and enqueue.
     proc.waitLSN.store(lsn, Relaxed);
-    proc.syncRepState.set(SYNC_REP_WAITING);
+    // SAFETY: [SRL] serialized by SyncRepLock
+    unsafe { proc.syncRepState.set(SYNC_REP_WAITING) };
     queue_insert(mode, procno);
     #[cfg(debug_assertions)]
     debug_assert!(queue_is_ordered_by_lsn(mode));
@@ -291,7 +323,8 @@ pub fn SyncRepWaitForLSN(lsn: XLogRecPtr, commit: bool) -> PgResult<()> {
     loop {
         latch::ResetLatch(init_small::globals::MyLatch().expect("SyncRepWaitForLSN: no MyLatch"));
 
-        if proc.syncRepState.get() == SYNC_REP_WAIT_COMPLETE {
+        // SAFETY: [SRL] serialized by SyncRepLock
+        if unsafe { proc.syncRepState.get() } == SYNC_REP_WAIT_COMPLETE {
             break;
         }
 
@@ -345,8 +378,10 @@ pub fn SyncRepWaitForLSN(lsn: XLogRecPtr, commit: bool) -> PgResult<()> {
 
     // The walsender removed us from the queue (or we canceled). Reset state.
     std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-    debug_assert!(proc.syncRepLinks.get().is_detached());
-    proc.syncRepState.set(SYNC_REP_NOT_WAITING);
+    // SAFETY: [SRL] serialized by SyncRepLock
+    debug_assert!(unsafe { proc.syncRepLinks.get() }.is_detached());
+    // SAFETY: [SRL] serialized by SyncRepLock
+    unsafe { proc.syncRepState.set(SYNC_REP_NOT_WAITING) };
     proc.waitLSN.store(0, Relaxed);
 
     if guc_tables::vars::update_process_title.read() {
@@ -358,19 +393,23 @@ pub fn SyncRepWaitForLSN(lsn: XLogRecPtr, commit: bool) -> PgResult<()> {
 // SyncRepCancelWait (syncrep.c:406).
 fn SyncRepCancelWait(procno: ProcNumber) -> PgResult<()> {
     lock_sync_rep()?;
-    if !links_of(procno).get().is_detached() {
+    // SAFETY: [SRL] serialized by SyncRepLock
+    if !unsafe { links_of(procno).get() }.is_detached() {
         q_delete_any(procno);
     }
-    lmgr_proc::GetPGProcByNumber(procno).syncRepState.set(SYNC_REP_NOT_WAITING);
+    // SAFETY: [SRL] serialized by SyncRepLock
+    unsafe { lmgr_proc::GetPGProcByNumber(procno).syncRepState.set(SYNC_REP_NOT_WAITING) };
     unlock_sync_rep()
 }
 
 /// SyncRepCleanupAtProcExit (syncrep.c:416).
 pub fn SyncRepCleanupAtProcExit() {
     let Some(procno) = lmgr_proc::MyProc() else { return };
-    if !links_of(procno).get().is_detached() {
+    // SAFETY: [SRL] serialized by SyncRepLock
+    if !unsafe { links_of(procno).get() }.is_detached() {
         let _ = lock_sync_rep();
-        if !links_of(procno).get().is_detached() {
+        // SAFETY: [SRL] serialized by SyncRepLock
+        if !unsafe { links_of(procno).get() }.is_detached() {
             q_delete_any(procno);
         }
         let _ = unlock_sync_rep();
@@ -609,9 +648,11 @@ fn SyncRepWakeQueue(all: bool, mode: i32) -> i32 {
     debug_assert!(queue_is_ordered_by_lsn(mode));
 
     let mut numprocs = 0;
-    let mut cur = queue(mode).get().head;
+    // SAFETY: [SRL] serialized by SyncRepLock
+    let mut cur = unsafe { queue(mode).get() }.head;
     while cur != types_core::INVALID_PROC_NUMBER {
-        let next = links_of(cur).get().next;
+        // SAFETY: [SRL] serialized by SyncRepLock
+        let next = unsafe { links_of(cur).get() }.next;
         let proc = lmgr_proc::GetPGProcByNumber(cur);
 
         // The queue is ordered by LSN.
@@ -624,7 +665,8 @@ fn SyncRepWakeQueue(all: bool, mode: i32) -> i32 {
         // The waiter reads syncRepState without the lock: make sure the queue
         // unlink is visible before the state change.
         std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-        proc.syncRepState.set(SYNC_REP_WAIT_COMPLETE);
+        // SAFETY: [SRL] serialized by SyncRepLock
+        unsafe { proc.syncRepState.set(SYNC_REP_WAIT_COMPLETE) };
 
         latch::SetLatch(types_storage::latch::LatchHandle::proc(cur));
         numprocs += 1;

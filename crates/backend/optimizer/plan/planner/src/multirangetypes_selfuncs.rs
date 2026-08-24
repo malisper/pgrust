@@ -10,7 +10,7 @@ use types_pathnodes::NodeId;
 
 use crate::rangetypes_selfuncs::{
     calc_hist_selectivity_contained, calc_hist_selectivity_contains,
-    calc_hist_selectivity_scalar, varlena_image, RangeSelCtx,
+    calc_hist_selectivity_scalar, hist_elemtype_matches, varlena_image, RangeSelCtx,
     STATISTIC_KIND_BOUNDS_HISTOGRAM, STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM,
 };
 use crate::run::PlannerRun;
@@ -293,6 +293,15 @@ fn calc_hist_selectivity<'mcx>(
     let Some(hslot) = vardata.slot(STATISTIC_KIND_BOUNDS_HISTOGRAM, 0) else {
         return Ok(-1.0);
     };
+    // The stavalues element type is dictated by the stored array image, not by
+    // the column type; a crafted pg_statistic row could declare a by-value or
+    // fixed-length elemtype so the decoded Datums are not range pointers.
+    // Confirm the histogram's element type is the underlying range type before
+    // treating its datums as serialized ranges (else fall back to no stats),
+    // avoiding a type confusion / wild pointer dereference.
+    if !hist_elemtype_matches(hslot.valuetype()?, rng.ri.rngtypid) {
+        return Ok(-1.0);
+    }
     let hvalues = hslot.values()?;
     if hvalues.len() < 2 {
         return Ok(-1.0);
@@ -303,8 +312,11 @@ fn calc_hist_selectivity<'mcx>(
     let mut hist_upper: mcx::PgVec<'mcx, RangeBound> =
         mcx::vec_with_capacity_in(run.mcx, nhist)?;
     for &v in hvalues {
+        // Stats-sourced image: validate every offset/length against the slice
+        // before dereferencing (crafted pg_statistic could otherwise drive an
+        // out-of-bounds read through the bound fetch).
         let (lo, up, empty) =
-            adt_rangetypes::range_deserialize(&rng.ri.elem, varlena_image(v));
+            adt_rangetypes::range_deserialize_checked(&rng.ri.elem, varlena_image(v))?;
         if empty {
             // C: elog(ERROR) — degenerate stats content aborts the
             // statement, never the backend.
@@ -326,6 +338,12 @@ fn calc_hist_selectivity<'mcx>(
         let Some(lslot) = vardata.slot(STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM, 0) else {
             return Ok(-1.0);
         };
+        // Length-histogram datums are read as float8 (Datum::as_f64); require
+        // that element type or fall back, so foreign datum words are never
+        // reinterpreted as out-of-bounds pointers downstream.
+        if !hist_elemtype_matches(lslot.valuetype()?, types_core::FLOAT8OID) {
+            return Ok(-1.0);
+        }
         let lvalues = lslot.values()?;
         if lvalues.len() < 2 {
             return Ok(-1.0);

@@ -37,11 +37,29 @@ fn string_literal(out: &mut String, val: &str) {
     out.push('\'');
 }
 
-fn col<'a>(row: &'a [Option<Vec<u8>>], i: usize) -> Option<&'a str> {
-    // Remote text-format values are in the local (server) encoding.
-    row.get(i)
-        .and_then(|c| c.as_deref())
-        .map(|b| unsafe { core::str::from_utf8_unchecked(b) })
+fn col<'a>(row: &'a [Option<Vec<u8>>], i: usize) -> PgResult<Option<&'a str>> {
+    // Remote text-format values are supposed to arrive in the local (database)
+    // encoding, but the bytes come straight off the wire from a foreign server
+    // that may be hostile, compromised, or MITM'd (the transport has no TLS),
+    // so nothing has validated them. Feeding un-verified bytes into a &str would
+    // violate Rust's UTF-8 invariant (UB) and let a remote inject invalid
+    // encoding into the generated CREATE FOREIGN TABLE DDL, quote_identifier,
+    // and the local SQL parser. Verify against the database encoding first, as
+    // C's pg_verifymbstr / pg_client_to_server would when client_encoding ==
+    // database encoding, then use the checked conversion so no
+    // from_utf8_unchecked sink is reachable from wire data.
+    match row.get(i).and_then(|c| c.as_deref()) {
+        None => Ok(None),
+        Some(b) => {
+            mbutils::pg_verifymbstr(b, false)?;
+            let s = core::str::from_utf8(b).map_err(|_| {
+                Box::new(PgError::error(
+                    "invalid byte sequence in remote result".to_string(),
+                ))
+            })?;
+            Ok(Some(s))
+        }
+    }
 }
 
 pub fn postgresImportForeignSchema<'mcx>(
@@ -161,7 +179,7 @@ pub fn postgresImportForeignSchema<'mcx>(
     let numrows = res.rows.len();
     let mut i = 0usize;
     while i < numrows {
-        let tablename = col(&res.rows[i], 0).unwrap_or("");
+        let tablename = col(&res.rows[i], 0)?.unwrap_or("");
         let mut sql = String::new();
         sql.push_str("CREATE FOREIGN TABLE ");
         push_quoted_ident(&mut sql, mcx, local_schema)?;
@@ -172,13 +190,13 @@ pub fn postgresImportForeignSchema<'mcx>(
         loop {
             let row = &res.rows[i];
             // A table with no columns shows up as a single all-NULL row.
-            if let Some(attname) = col(row, 1) {
-                let typename = col(row, 2).unwrap_or("");
-                let attnotnull = col(row, 3).unwrap_or("");
-                let attdefault = col(row, 4);
-                let attgenerated = col(row, 5);
-                let collname = col(row, 6);
-                let collnamespace = col(row, 7);
+            if let Some(attname) = col(row, 1)? {
+                let typename = col(row, 2)?.unwrap_or("");
+                let attnotnull = col(row, 3)?.unwrap_or("");
+                let attdefault = col(row, 4)?;
+                let attgenerated = col(row, 5)?;
+                let collname = col(row, 6)?;
+                let collnamespace = col(row, 7)?;
 
                 if first_item {
                     first_item = false;
@@ -226,7 +244,7 @@ pub fn postgresImportForeignSchema<'mcx>(
                 }
             }
             i += 1;
-            if i >= numrows || col(&res.rows[i], 0).unwrap_or("") != tablename {
+            if i >= numrows || col(&res.rows[i], 0)?.unwrap_or("") != tablename {
                 break;
             }
         }
@@ -247,4 +265,39 @@ pub fn postgresImportForeignSchema<'mcx>(
 
     connection::release_connection(conn_key);
     Ok(commands)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::col;
+
+    // A hostile/MITM'd foreign server can put arbitrary bytes into result cells
+    // (relname/attname/format_type/pg_get_expr). col() must never build a &str
+    // out of invalid-encoding bytes (that was UB via from_utf8_unchecked); it
+    // must verify the database encoding and reject bad bytes with a clean error.
+    #[test]
+    fn col_rejects_invalid_encoding() {
+        // The default database encoding is SQL_ASCII, under which pg_verifymbstr
+        // accepts every byte; the checked from_utf8 in col() is what keeps a
+        // &str from ever being built out of invalid bytes.
+
+        // Valid values pass through unchanged.
+        let ok_row = vec![Some(b"orders".to_vec()), Some("caf\u{00e9}".as_bytes().to_vec())];
+        assert_eq!(col(&ok_row, 0).unwrap(), Some("orders"));
+        assert_eq!(col(&ok_row, 1).unwrap(), Some("caf\u{00e9}"));
+
+        // A NULL cell (or out-of-range index) is None, not an error.
+        let null_row: Vec<Option<Vec<u8>>> = vec![None];
+        assert_eq!(col(&null_row, 0).unwrap(), None);
+        assert_eq!(col(&null_row, 7).unwrap(), None);
+
+        // A truncated multi-byte UTF-8 sequence (the concrete UB trigger) is
+        // rejected instead of reaching any unsafe str construction.
+        let bad_trunc = vec![Some(b"col\xc3".to_vec())];
+        col(&bad_trunc, 0).err().unwrap();
+
+        // An outright invalid byte is likewise rejected.
+        let bad_byte = vec![Some(b"bad\xff".to_vec())];
+        col(&bad_byte, 0).err().unwrap();
+    }
 }

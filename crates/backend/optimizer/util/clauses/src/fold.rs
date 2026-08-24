@@ -46,6 +46,12 @@ struct EceContext<'mcx> {
     // record_plan_type_dependency writes them to root->glob->invalItems when
     // context->root is set (clauses.c:3630). Planner callers harvest these.
     type_deps: core::cell::RefCell<Vec<Oid>>,
+    // SQL functions inlined by inline_function; C record_plan_function_dependency
+    // writes them to root->glob->invalItems when context->root is set
+    // (clauses.c:4883), because no trace of the function survives in the plan.
+    // Planner callers harvest these (transitively-inlined functions land here
+    // too, since the recursive re-simplification reuses this context).
+    func_deps: core::cell::RefCell<Vec<Oid>>,
 }
 
 fn ece_context<'mcx>(
@@ -60,6 +66,7 @@ fn ece_context<'mcx>(
         case_val: core::cell::Cell::new(None),
         active_fns: core::cell::RefCell::new(mcx::PgVec::new_in(mcx)),
         type_deps: core::cell::RefCell::new(Vec::new()),
+        func_deps: core::cell::RefCell::new(Vec::new()),
     }
 }
 
@@ -78,16 +85,20 @@ pub fn eval_const_expressions_with_params<'mcx>(
 
 /// The context->root != NULL lane of C eval_const_expressions: folded
 /// constraint-less domains are appended to `type_deps` for the caller's
-/// record_plan_type_dependency (setrefs.c:3594).
+/// record_plan_type_dependency (setrefs.c:3594), and inlined SQL functions
+/// are appended to `func_deps` for the caller's record_plan_function_dependency
+/// (clauses.c:4883, including transitively-inlined functions).
 pub fn eval_const_expressions_planner<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
     bound_params: ParamListHandle,
     type_deps: &mut Vec<Oid>,
+    func_deps: &mut Vec<Oid>,
 ) -> PgResult<Node<'mcx>> {
     let cx = ece_context(mcx, false, bound_params);
     let r = ece_mutator(node, &cx)?.unwrap_or(node);
     type_deps.append(&mut cx.type_deps.borrow_mut());
+    func_deps.append(&mut cx.func_deps.borrow_mut());
     Ok(r)
 }
 
@@ -1457,6 +1468,10 @@ fn inline_function<'mcx>(
     else {
         return Ok(None);
     };
+    // C clauses.c:4883: no trace of the function survives in the plan, so
+    // record the plan's dependency on it. Recorded before the recursive
+    // re-simplification, matching C ordering; transitive inlines push here too.
+    cx.func_deps.borrow_mut().push(funcid);
     {
         let mut af = cx.active_fns.borrow_mut();
         af.try_reserve(1).map_err(|_| cx.mcx.oom(1))?;

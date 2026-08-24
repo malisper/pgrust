@@ -10,8 +10,13 @@ use ::types_nbtree::{
     BT_IS_POSTING, BT_OFFSET_MASK, BT_PIVOT_HEAP_TID_ATTR, INDEX_ALT_TID_MASK,
 };
 use ::types_tuple::itemptr::{ItemPointerData, ItemPointerGetBlockNumberNoCheck};
+use ::types_tuple::tupdesc::CompactAttribute;
 use ::types_tuple::tupmacs::{
     att_addlength_pointer, att_isnull, att_nominal_alignby, att_pointer_alignby, fetchatt,
+};
+use ::types_tuple::varatt::{
+    varatt_is_1b, varatt_is_1b_e, varsize_1b, varsize_4b, vartag_external, VARHDRSZ,
+    VARHDRSZ_EXTERNAL, VARHDRSZ_SHORT,
 };
 use ::types_tuple::TupleDescData;
 
@@ -538,4 +543,237 @@ unsafe fn nocache_index_getattr(
     }
 
     fetchatt(atts.get_unchecked(attnum), tp.add(off))
+}
+
+/// Validate that an on-page index tuple's internal structure lies entirely
+/// within `lp_len` — the line-pointer extent that bounds the readable image —
+/// before any code reads its header, null bitmap, or by-reference (varlena /
+/// cstring) attribute data. The deform path ([`index_getattr`]) advances
+/// attribute offsets by length words read from the tuple bytes themselves; on
+/// an attacker-crafted on-disk tuple those claimed lengths can point past the
+/// page, turning a deform into an out-of-bounds read. Upstream C performs no
+/// such check, so this is an added engine-level guard: callers deforming tuples
+/// whose bytes are not trusted (e.g. GiST index-only-scan reconstruction) must
+/// run this first and raise a corruption error when it returns `false`, rather
+/// than deform out-of-bounds bytes.
+///
+/// `atts` describes the attributes actually present in the tuple (leaf vs. non-
+/// leaf descriptor). Returns `true` iff every header field and every attribute
+/// (including each varlena/cstring payload) is provably contained in
+/// `[itup, itup + lp_len)`.
+///
+/// # Safety
+/// `itup` points at `lp_len` readable bytes (the validated line-pointer extent).
+pub unsafe fn index_tuple_verify(itup: ITup, lp_len: usize, atts: &[CompactAttribute]) -> bool {
+    // The fixed IndexTuple header (t_tid + t_info) must be present before its
+    // size/flag words can be read — guards lp_len in 0..8.
+    if lp_len < INDEX_TUPLE_DATA_SIZE {
+        return false;
+    }
+    let info = t_info(itup);
+    let size = (info & INDEX_SIZE_MASK) as usize;
+    // The tuple's own claimed size must cover the header and fit the extent.
+    if size < INDEX_TUPLE_DATA_SIZE || size > lp_len {
+        return false;
+    }
+    let hoff = index_info_find_data_offset(info);
+    // Null bitmap (when present) must lie within the claimed size.
+    if hoff > size {
+        return false;
+    }
+
+    let hasnulls = (info & INDEX_NULL_MASK) != 0;
+    // Null bitmap base; the data area starts after the (optional) bitmap.
+    let bp = itup.add(INDEX_TUPLE_DATA_SIZE);
+    let tp = itup.add(hoff);
+    // Everything an attribute walk may touch must stay within the data area.
+    let data_len = size - hoff;
+
+    let mut off: usize = 0;
+    for (i, att) in atts.iter().enumerate() {
+        if hasnulls && att_isnull(i, bp) {
+            continue;
+        }
+        let attlen = att.attlen as i32;
+        if attlen == -1 {
+            // Varlena. Peeking the pad byte to decide alignment needs one
+            // readable byte; the (possibly aligned) header needs more.
+            if off >= data_len {
+                return false;
+            }
+            // att_pointer_alignby reads tp[off] to distinguish a short header
+            // (1-byte, unaligned) from a 4-byte header (aligned).
+            off = att_pointer_alignby(off, att.attalignby, -1, tp.add(off));
+            if off >= data_len {
+                return false;
+            }
+            let p = tp.add(off);
+            let this = if varatt_is_1b_e(p) {
+                // External/expanded TOAST pointer: 2-byte header + tag body.
+                if off + VARHDRSZ_EXTERNAL > data_len {
+                    return false;
+                }
+                let tagsz = match vartag_external(p) {
+                    // varatt_indirect / varatt_expanded (8) ; varatt_external (16).
+                    1 | 2 | 3 => 8,
+                    18 => 16,
+                    _ => return false,
+                };
+                VARHDRSZ_EXTERNAL + tagsz
+            } else if varatt_is_1b(p) {
+                // Short 1-byte header: total length is self-contained.
+                varsize_1b(p)
+            } else {
+                // 4-byte header: the length word itself must be in bounds.
+                if off + VARHDRSZ > data_len {
+                    return false;
+                }
+                varsize_4b(p)
+            };
+            // Header length must be sane and the whole datum must fit.
+            if this < VARHDRSZ_SHORT || this > data_len - off {
+                return false;
+            }
+            off += this;
+        } else if attlen == -2 {
+            // Cstring: aligned, then NUL-terminated within the data area.
+            off = att_nominal_alignby(off, att.attalignby);
+            if off >= data_len {
+                return false;
+            }
+            let mut n = 0usize;
+            while off + n < data_len && *tp.add(off + n) != 0 {
+                n += 1;
+            }
+            // A missing terminator means the string runs off the extent.
+            if off + n >= data_len {
+                return false;
+            }
+            off += n + 1;
+        } else if attlen > 0 {
+            // Fixed length: align then require the whole field in bounds.
+            off = att_nominal_alignby(off, att.attalignby);
+            let l = attlen as usize;
+            if off > data_len || l > data_len - off {
+                return false;
+            }
+            off += l;
+        } else {
+            // attlen == 0 (or otherwise invalid) is never a legal on-page shape.
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod index_tuple_verify_tests {
+    use super::*;
+    use ::types_tuple::varatt::set_varsize_4b_word;
+    use core::cell::Cell;
+
+    // 8-byte aligned scratch image (index tuples are MAXALIGNed on-page).
+    #[repr(align(8))]
+    struct Image([u8; 64]);
+
+    fn att(attlen: i16, attbyval: bool, attalignby: u8) -> CompactAttribute {
+        CompactAttribute {
+            attcacheoff: Cell::new(-1),
+            attlen,
+            attbyval,
+            attispackable: attlen < 0,
+            atthasmissing: false,
+            attisdropped: false,
+            attgenerated: false,
+            attnullability: 0,
+            attalignby,
+        }
+    }
+
+    // Write the fixed IndexTuple header (t_info at byte 6) with no t_tid needs.
+    fn set_info(image: &mut Image, info: u16) {
+        image.0[6..8].copy_from_slice(&info.to_ne_bytes());
+    }
+
+    // A single int4 in a 12-byte tuple validates cleanly (no false positive).
+    #[test]
+    fn well_formed_fixed_attribute_passes() {
+        let mut image = Image([0u8; 64]);
+        let size = INDEX_TUPLE_DATA_SIZE + 4;
+        set_info(&mut image, size as u16);
+        let atts = vec![att(4, true, 4)];
+        // SAFETY: image is 8-aligned and holds `size` readable bytes.
+        assert!(unsafe { index_tuple_verify(image.0.as_ptr(), size, &atts) });
+    }
+
+    // A 4-byte varlena header claiming a length past the tuple body is rejected
+    // rather than driving an out-of-bounds read.
+    #[test]
+    fn lying_varlena_header_is_rejected() {
+        let mut image = Image([0u8; 64]);
+        // 8-byte data area; header at byte 8 claims a 100-byte varlena.
+        let size = INDEX_TUPLE_DATA_SIZE + 8;
+        set_info(&mut image, (size as u16) | INDEX_VAR_MASK);
+        // SAFETY: writing the 4-byte header within the data area.
+        unsafe {
+            image
+                .0
+                .as_mut_ptr()
+                .add(INDEX_TUPLE_DATA_SIZE)
+                .cast::<u32>()
+                .write_unaligned(set_varsize_4b_word(100));
+        }
+        let atts = vec![att(-1, false, 4)];
+        // SAFETY: image holds `size` readable bytes.
+        assert!(!unsafe { index_tuple_verify(image.0.as_ptr(), size, &atts) });
+    }
+
+    // A well-formed varlena (4-byte header of exactly its own length) passes.
+    #[test]
+    fn well_formed_varlena_passes() {
+        let mut image = Image([0u8; 64]);
+        let size = INDEX_TUPLE_DATA_SIZE + 8;
+        set_info(&mut image, (size as u16) | INDEX_VAR_MASK);
+        // A 4-byte varlena occupying its whole header+payload (8 bytes).
+        unsafe {
+            image
+                .0
+                .as_mut_ptr()
+                .add(INDEX_TUPLE_DATA_SIZE)
+                .cast::<u32>()
+                .write_unaligned(set_varsize_4b_word(8));
+        }
+        let atts = vec![att(-1, false, 4)];
+        assert!(unsafe { index_tuple_verify(image.0.as_ptr(), size, &atts) });
+    }
+
+    // A line pointer too short to hold the fixed header is rejected before any
+    // header field is read (guards lp_len in 0..8).
+    #[test]
+    fn short_line_pointer_is_rejected() {
+        let image = Image([0u8; 64]);
+        let atts = vec![att(4, true, 4)];
+        assert!(!unsafe { index_tuple_verify(image.0.as_ptr(), 4, &atts) });
+    }
+
+    // A t_info size larger than the line-pointer extent is rejected.
+    #[test]
+    fn oversized_claimed_size_is_rejected() {
+        let mut image = Image([0u8; 64]);
+        set_info(&mut image, 32);
+        let atts = vec![att(4, true, 4)];
+        assert!(!unsafe { index_tuple_verify(image.0.as_ptr(), 16, &atts) });
+    }
+
+    // A fixed attribute wider than the tuple body is rejected rather than read
+    // past the extent.
+    #[test]
+    fn truncated_fixed_attribute_is_rejected() {
+        let mut image = Image([0u8; 64]);
+        // size claims only 4 data bytes but the attribute is an 8-byte int8.
+        let size = INDEX_TUPLE_DATA_SIZE + 4;
+        set_info(&mut image, size as u16);
+        let atts = vec![att(8, true, 8)];
+        assert!(!unsafe { index_tuple_verify(image.0.as_ptr(), size, &atts) });
+    }
 }

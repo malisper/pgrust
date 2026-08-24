@@ -116,8 +116,8 @@ fn reset_after_crash_restores_boot_image() {
     assert_eq!(proc_signal().psh_barrierGeneration.load(Relaxed), 0);
     for s in proc_signal().psh_slot {
         assert_eq!(s.pss_pid.load(Relaxed), 0);
-        assert_eq!(s.pss_cancel_key_len.get(), 0);
-        assert_eq!(s.pss_cancel_key.get(), [0; MAX_CANCEL_KEY_LENGTH]);
+        assert_eq!(unsafe { s.pss_cancel_key_len.get() }, 0);
+        assert_eq!(unsafe { s.pss_cancel_key.get() }, [0; MAX_CANCEL_KEY_LENGTH]);
         for flag in &s.pss_signalFlags {
             assert!(!flag.load(Relaxed));
         }
@@ -137,8 +137,8 @@ fn init_registers_and_cleanup_releases() {
 
     let s = slot(3);
     assert_eq!(s.pss_pid.load(Relaxed), 1003);
-    assert_eq!(s.pss_cancel_key_len.get(), 3);
-    assert_eq!(&s.pss_cancel_key.get()[..3], &[7, 8, 9]);
+    assert_eq!(unsafe { s.pss_cancel_key_len.get() }, 3);
+    assert_eq!(&unsafe { s.pss_cancel_key.get() }[..3], &[7, 8, 9]);
     assert_eq!(
         s.pss_barrierGeneration.load(Relaxed),
         proc_signal().psh_barrierGeneration.load(Relaxed)
@@ -147,7 +147,7 @@ fn init_registers_and_cleanup_releases() {
     s.pss_signalFlags[ProcSignalReason::PROCSIG_CATCHUP_INTERRUPT as usize].store(true, Release);
     ProcSignalInit(&[]).unwrap();
     assert!(!s.pss_signalFlags[ProcSignalReason::PROCSIG_CATCHUP_INTERRUPT as usize].load(Acquire));
-    assert_eq!(s.pss_cancel_key_len.get(), 0);
+    assert_eq!(unsafe { s.pss_cancel_key_len.get() }, 0);
 
     BROADCASTS.lock().unwrap().clear();
     cleanup_current();

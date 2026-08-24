@@ -443,23 +443,39 @@ pub fn inline_varlena_payload<'a>(d: Datum) -> Option<&'a [u8]> {
     }
     // SAFETY: a non-null text datum points at a live varlena image readable
     // through its header (const arg slot / pgrcolumnar-published lane datum).
+    //
+    // The header's declared size is UNTRUSTED — pgrcolumnar publishes lane
+    // datums as raw part-file bytes (reader::build_dict: blob_base + file
+    // offset), so a corrupt/hostile part can lie. Before forming the slice we
+    // enforce the one bound this accessor can always prove: the declared size
+    // must cover its own header. A 4B-U word decoding to 0..3 (an all-zero
+    // word passes `varatt_is_4b_u`) would otherwise underflow
+    // `varsize_4b - VARHDRSZ` into a length near 2^64 — undefined behavior by
+    // the `from_raw_parts` contract (len > isize::MAX) BEFORE any byte is read.
+    // Refusal returns None, which every consumer maps to the catchable
+    // `non_inline_lane_datum` data-corruption error rather than an OOB read.
     unsafe {
         if varatt::varatt_is_1b_e(p) {
             return None;
         }
         if varatt::varatt_is_1b(p) {
+            let sz = varatt::varsize_1b(p);
+            if sz < varatt::VARHDRSZ_SHORT {
+                return None;
+            }
             return Some(core::slice::from_raw_parts(
                 p.add(varatt::VARHDRSZ_SHORT),
-                varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,
+                sz - varatt::VARHDRSZ_SHORT,
             ));
         }
         if !varatt::varatt_is_4b_u(p) {
             return None;
         }
-        Some(core::slice::from_raw_parts(
-            p.add(varatt::VARHDRSZ),
-            varatt::varsize_4b(p) - varatt::VARHDRSZ,
-        ))
+        let sz = varatt::varsize_4b(p);
+        if sz < varatt::VARHDRSZ {
+            return None;
+        }
+        Some(core::slice::from_raw_parts(p.add(varatt::VARHDRSZ), sz - varatt::VARHDRSZ))
     }
 }
 
@@ -1213,6 +1229,43 @@ mod tests {
                 assert_eq!(k.matches(s), want, "pat={:?} s={:?}", pat, s);
             }
         }
+    }
+
+    // idx 137: inline_varlena_payload must refuse a varlena header whose
+    // declared size does not even cover its own header, instead of forming a
+    // slice with an underflowed (~2^64) length — that is UB by the
+    // from_raw_parts contract before any byte is read. A hostile pgrcolumnar
+    // part can publish such a header (all-zero 4B-U word). Valid inline
+    // images must still round-trip byte-exact.
+    #[test]
+    fn inline_payload_rejects_underflowing_header() {
+        // All-zero 4B word: passes varatt_is_4b_u, decodes size 0 -> underflow.
+        let zero = [0u8; 8];
+        let d = Datum::from_usize(zero.as_ptr() as usize);
+        assert!(inline_varlena_payload(d).is_none());
+
+        // 4B-U headers declaring sizes 1..=3 (below VARHDRSZ) also refuse.
+        for declared in 1u32..=3 {
+            let mut buf = [0u8; 8];
+            buf[..4].copy_from_slice(&::datum::set_varsize_4b(declared as usize));
+            let d = Datum::from_usize(buf.as_ptr() as usize);
+            assert!(
+                inline_varlena_payload(d).is_none(),
+                "4B header declaring {declared} bytes must refuse"
+            );
+        }
+
+        // Valid 4B-U image (header + "hi") still yields its exact payload.
+        let mut ok = Vec::new();
+        ok.extend_from_slice(&::datum::set_varsize_4b(varatt::VARHDRSZ + 2));
+        ok.extend_from_slice(b"hi");
+        let d = Datum::from_usize(ok.as_ptr() as usize);
+        assert_eq!(inline_varlena_payload(d), Some(&b"hi"[..]));
+
+        // Valid empty 4B-U image (header only) yields an empty slice, not None.
+        let empty = ::datum::set_varsize_4b(varatt::VARHDRSZ);
+        let d = Datum::from_usize(empty.as_ptr() as usize);
+        assert_eq!(inline_varlena_payload(d), Some(&b""[..]));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use ::gin_vocab::{
     size_of_gin_posting_list, SizeOfGinPostingListHeader, SHORTALIGN,
 };
 use ::mcx::{vec_append_bytes, Mcx, PgVec};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use ::types_tuple::itemptr::{ItemPointerData, OffsetNumberIsValid};
 
 use crate::vec_append;
@@ -80,6 +80,43 @@ pub fn seg_size(seg: &[u8]) -> usize {
     size_of_gin_posting_list(seg_nbytes(seg))
 }
 
+#[cold]
+#[inline(never)]
+fn corrupt_posting_list() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "corrupted GIN posting list: segment size runs past the posting-list data".to_string(),
+        )
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+/// Validate that `data` is a well-formed run of consecutive posting-list
+/// segments: every segment carries a full `SizeOfGinPostingListHeader`-byte
+/// header, and its declared extent (`size_of_gin_posting_list(nbytes)`) lies
+/// entirely within the remaining bytes. On-disk segment `nbytes` values are
+/// attacker-controlled (u16 up to 65535, i.e. a declared extent up to 65544
+/// bytes); C's `GinNextPostingListSegment` walk trusts them, but here an
+/// unchecked size drives `from_raw_parts`/slice reads past the page image
+/// (out-of-bounds read / SIGSEGV). Callers that walk raw segment bytes or
+/// decode them must run this first; a violation is on-disk corruption.
+pub(crate) fn validate_posting_list_segments(data: &[u8]) -> PgResult<()> {
+    let mut off = 0usize;
+    while off < data.len() {
+        let rem = data.len() - off;
+        if rem < SizeOfGinPostingListHeader {
+            return Err(corrupt_posting_list());
+        }
+        let size = seg_size(&data[off..]);
+        // size is always >= SizeOfGinPostingListHeader (>= 8), so it advances.
+        if size > rem {
+            return Err(corrupt_posting_list());
+        }
+        off += size;
+    }
+    Ok(())
+}
+
 /// ginCompressPostingList: encode into a fresh short-aligned segment image of
 /// at most SHORTALIGN_DOWN(maxsize) bytes; returns (image, nwritten).
 pub(crate) fn ginCompressPostingList<'mcx>(
@@ -137,6 +174,9 @@ pub fn ginPostingListDecodeAllSegments(
     data: &[u8],
     out: &mut PgVec<'_, ItemPointerData>,
 ) -> PgResult<()> {
+    // Segment sizes come from disk and are attacker-controlled; bound the
+    // whole run before any unchecked seg_first/payload read below.
+    validate_posting_list_segments(data)?;
     let mcx = *out.allocator();
     let mut segoff = 0usize;
     while segoff < data.len() {
@@ -171,6 +211,49 @@ pub(crate) fn ginPostingListDecodeAllSegmentsToTbm(
     ginPostingListDecodeAllSegments(data, &mut items)?;
     tbm.add_tuples(items.as_slice(), false)?;
     Ok(items.len() as i64)
+}
+
+#[cfg(test)]
+mod validate_segments_tests {
+    use super::*;
+
+    /// Build one segment image with the given declared nbytes (header at 6..8),
+    /// padded to its full short-aligned extent.
+    fn seg_image(nbytes: u16) -> Vec<u8> {
+        let mut v = vec![0u8; size_of_gin_posting_list(nbytes as usize)];
+        v[6..8].copy_from_slice(&nbytes.to_ne_bytes());
+        v
+    }
+
+    #[test]
+    fn accepts_empty_and_well_formed_run() {
+        assert!(validate_posting_list_segments(&[]).is_ok());
+        let mut run = seg_image(0);
+        run.extend_from_slice(&seg_image(3));
+        run.extend_from_slice(&seg_image(4));
+        assert!(validate_posting_list_segments(&run).is_ok());
+    }
+
+    #[test]
+    fn rejects_oversized_last_segment() {
+        // A last segment declaring nbytes=65535 (extent 65544) while only a
+        // handful of bytes remain: pre-fix this drove an out-of-page read.
+        let mut run = seg_image(3);
+        let mut bad = vec![0u8; SizeOfGinPostingListHeader];
+        bad[6..8].copy_from_slice(&65535u16.to_ne_bytes());
+        run.extend_from_slice(&bad);
+        let err = validate_posting_list_segments(&run).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    #[test]
+    fn rejects_trailing_header_fragment() {
+        // A run whose tail is shorter than a segment header.
+        let mut run = seg_image(2);
+        run.extend_from_slice(&[0u8; 3]);
+        let err = validate_posting_list_segments(&run).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
 }
 
 /// ginMergeItemPointers: merge two ordered TID arrays, dropping duplicates.

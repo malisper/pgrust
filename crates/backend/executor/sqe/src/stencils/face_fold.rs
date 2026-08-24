@@ -112,6 +112,12 @@ pub enum FaceFoldErr {
     Face(FaceError),
     /// Live groups exceeded the admitted witness (witness bug).
     GroupCap { cap: u64 },
+    /// A granule produced more rows than the u16 selection-vector ordinal
+    /// domain can name (the largest ordinal `rows - 1` exceeds
+    /// `u16::MAX`). Folding it would truncate the ordinal and silently
+    /// address the wrong rows, so the seam must split the granule instead
+    /// — we refuse loudly here rather than wrap.
+    RowOrdinalOverflow { rows: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,7 +1069,24 @@ impl FoldState {
 /// Reset `sel` to the granule's survivors under `spec.terms` +
 /// `spec.var_terms` (3VL: a NULL operand fails the row — VarPredTerm's
 /// `eval_v`, critically for NOT LIKE / NeEmpty).
-fn apply_terms(plan: &FoldPlan, spec: &FaceFoldSpec, fill: &FaceFill, sel: &mut Vec<u16>) {
+fn apply_terms(
+    plan: &FoldPlan,
+    spec: &FaceFoldSpec,
+    fill: &FaceFill,
+    sel: &mut Vec<u16>,
+) -> Result<(), FaceFoldErr> {
+    // The selection vector names granule rows by u16 ordinal, so the
+    // largest ordinal a granule can produce (`fill.rows - 1`) must fit in
+    // u16. `fill.rows` is a u32 (a heap granule can carry up to
+    // 256 * MaxHeapTuplesPerPage = 74,496 visible rows), so `r as u16`
+    // would wrap silently for a dense granule and fold the WRONG rows
+    // (head rows folded twice, tail rows >= 65,536 never folded). A
+    // granule denser than the ordinal domain is a seam split obligation;
+    // refuse loudly here rather than truncate. `rows == u16::MAX + 1`
+    // (65,536) is still representable — ordinals 0..=65,535 all fit.
+    if fill.rows > u16::MAX as u32 + 1 {
+        return Err(FaceFoldErr::RowOrdinalOverflow { rows: fill.rows });
+    }
     let rows = fill.rows as usize;
     sel.clear();
     sel.extend((0..rows).map(|r| r as u16));
@@ -1088,6 +1111,7 @@ fn apply_terms(plan: &FoldPlan, spec: &FaceFoldSpec, fill: &FaceFill, sel: &mut 
         }
         sel.truncate(w);
     }
+    Ok(())
 }
 
 /// Resolve the word-keyed groups to emit-ordered rows, k-way-merging
@@ -1325,7 +1349,7 @@ pub fn run_face_fold(
         if fill.rows == 0 {
             continue;
         }
-        apply_terms(&plan, spec, fill, &mut sel);
+        apply_terms(&plan, spec, fill, &mut sel)?;
         state.absorb(&plan, spec, fill, &sel)?;
     }
     state.into_answers(&plan, spec)
@@ -1427,7 +1451,7 @@ fn process_pack<P, D: PackDeform<P>, K: PackSinkKind>(
     fill.reset(&plan.fill_cols);
     fill.begin_rows(rows);
     d.deform(pack, &plan.pred_pairs, None, fill).map_err(FaceFoldErr::Face)?;
-    apply_terms(plan, spec, fill, sel);
+    apply_terms(plan, spec, fill, sel)?;
     if sel.is_empty() {
         return Ok(());
     }
@@ -1479,6 +1503,22 @@ struct CloseGuard<'a, P>(&'a Feed<P>);
 impl<P> Drop for CloseGuard<'_, P> {
     fn drop(&mut self) {
         self.0.close();
+    }
+}
+
+/// Worker-side belt: a worker leaving the feed loop by an UNWIND (typed spill
+/// I/O refusal raised inside `process_pack`, or a cancel unwind) never runs the
+/// free-pack push, so the leader would wait forever for a pack a dead worker
+/// will never return. Closing the feed on unwind wakes the leader (it breaks on
+/// `closed`); the pool re-raises the stored panic at the generation join. Only
+/// fires on unwind — normal completion leaves the feed to the leader's
+/// CloseGuard. process_pack runs off-lock, so `close()` cannot self-deadlock.
+struct WorkerCloseGuard<'a, P>(&'a Feed<P>);
+impl<P> Drop for WorkerCloseGuard<'_, P> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.close();
+        }
     }
 }
 
@@ -1551,6 +1591,9 @@ fn run_pack_drive<S: PackSource, K: PackSinkKind>(
         let kind_r = kind;
         let gen = pool.run_feed(width, move |t| {
             let _inh = crate::cancel::inherit(cancel_r);
+            // Wake the leader if this worker unwinds (spill I/O refusal, cancel)
+            // before returning its in-flight pack; the panic is re-raised at join.
+            let _worker_close = WorkerCloseGuard(feed_r);
             let mut d = deformers_r
                 .lock()
                 .unwrap()
@@ -1606,7 +1649,21 @@ fn run_pack_drive<S: PackSource, K: PackSinkKind>(
                     if let Some(p) = q.free.pop() {
                         break Some(p);
                     }
-                    q = feed.free_cv.wait(q).unwrap();
+                    // Bounded wait + off-lock interrupt poll: a dead worker
+                    // closes the feed via its exit guard, but also poll
+                    // cancellation so statement cancel / backend termination can
+                    // recover a starved leader (C's parallel leader runs
+                    // CHECK_FOR_INTERRUPTS here).
+                    let (g, _) = feed
+                        .free_cv
+                        .wait_timeout(q, std::time::Duration::from_millis(10))
+                        .unwrap();
+                    q = g;
+                    if q.err.is_none() && !q.closed && q.free.is_empty() {
+                        drop(q);
+                        crate::cancel::checkpoint();
+                        q = feed.m.lock().unwrap();
+                    }
                 }
             };
             let Some(mut pack) = pack else { break };
@@ -1805,7 +1862,7 @@ pub fn run_face_topn(
         if fill.rows == 0 {
             continue;
         }
-        apply_terms(&plan, spec, fill, &mut sel);
+        apply_terms(&plan, spec, fill, &mut sel)?;
         state.absorb(&plan, keys, fill, &sel);
     }
     Ok(state.into_answers(spec, keys))
@@ -2833,11 +2890,43 @@ mod tests {
             let mut fill = FaceFill::new();
             let _ = run_face_fold(&mut VecFace { units }, &spec, &cfg, &mut fill);
         }));
-        let e = r.expect_err("over-budget answer must refuse");
+        let e = r.err().expect("over-budget answer must refuse");
         let rr = e.downcast::<crate::refuse::RunRefusal>().expect("typed refusal payload");
         assert!(matches!(
             rr.0,
             crate::refuse::Refuse::GroupAnswerOverBudget { .. }
         ));
+    }
+
+    /// A granule denser than the u16 selection-vector ordinal domain
+    /// (rows-1 > u16::MAX) is refused loudly rather than folded with a
+    /// wrapped ordinal. Before the guard, `r as u16` truncated silently:
+    /// head rows were folded twice and rows >= 65,536 never at all, so
+    /// COUNT/SUM/MIN/MAX came back confidently wrong. Now the seam must
+    /// split such a granule; the fold reports RowOrdinalOverflow.
+    #[test]
+    fn dense_granule_over_u16_refuses_not_wraps() {
+        // 65,537 rows: the ordinal 65,536 is not representable in u16.
+        let rows = u16::MAX as usize + 2;
+        let units = vec![vec![(
+            1u32,
+            Face::SignedWord(8),
+            (0..rows as i64).map(Some).collect::<Vec<_>>(),
+        )]];
+        let spec = FaceFoldSpec {
+            terms: vec![],
+            var_terms: vec![],
+            legs: vec![leg(FoldOp::CountStar, None), leg(FoldOp::Sum, Some(1))],
+            group: None,
+        };
+        let cfg = SqeConfig::heap_v1(1);
+        let mut fill = FaceFill::new();
+        let err = run_face_fold(&mut VecFace { units }, &spec, &cfg, &mut fill)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(err, FaceFoldErr::RowOrdinalOverflow { rows: r } if r == rows as u32),
+            "expected RowOrdinalOverflow, got {err:?}"
+        );
     }
 }

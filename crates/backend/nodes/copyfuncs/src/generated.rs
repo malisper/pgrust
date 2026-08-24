@@ -3680,7 +3680,9 @@ pub(crate) fn copy_PlanRowMark(_mcx: Mcx<'_>, s: &PlanRowMark) -> PgResult<PlanR
 pub(crate) fn copy_PlannedStmt<'d>(mcx: Mcx<'d>, s: &PlannedStmt<'_>) -> PgResult<PlannedStmt<'d>> {
     Ok(PlannedStmt {
         commandType: s.commandType,
-        queryId: types_nodes::SyncCell::new(s.queryId.get()),
+        // SAFETY: PlannedStmt.queryId is owned by a single backend's plan tree
+        // (no cross-thread sharing), matching C's in-place scribble discipline.
+        queryId: types_nodes::SyncCell::new(unsafe { s.queryId.get() }),
         planId: s.planId,
         hasReturning: s.hasReturning,
         hasModifyingCTE: s.hasModifyingCTE,

@@ -32,24 +32,24 @@ fn with_write_bracket(f: impl FnOnce(&'static PgBackendStatus)) {
 
 pub fn pgstat_progress_start_command(cmdtype: i32, relid: Oid) {
     with_write_bracket(|be| {
-        be.st_progress_command.set(cmdtype);
-        be.st_progress_command_target.set(relid);
+        unsafe { be.st_progress_command.set(cmdtype); }
+        unsafe { be.st_progress_command_target.set(relid); }
         for p in &be.st_progress_param {
-            p.set(0);
+            unsafe { p.set(0); }
         }
     });
 }
 
 pub fn pgstat_progress_update_param(index: usize, val: i64) {
     debug_assert!(index < PGSTAT_NUM_PROGRESS_PARAM);
-    with_write_bracket(|be| be.st_progress_param[index].set(val));
+    with_write_bracket(|be| unsafe { be.st_progress_param[index].set(val) });
 }
 
 pub fn pgstat_progress_incr_param(index: usize, incr: i64) {
     debug_assert!(index < PGSTAT_NUM_PROGRESS_PARAM);
     with_write_bracket(|be| {
         let p = &be.st_progress_param[index];
-        p.set(p.get() + incr);
+        unsafe { p.set(p.get() + incr); }
     });
 }
 
@@ -69,7 +69,7 @@ pub fn pgstat_progress_update_multi_param(indices: &[usize], vals: &[i64]) {
     with_write_bracket(|be| {
         for (&i, &v) in indices.iter().zip(vals) {
             debug_assert!(i < PGSTAT_NUM_PROGRESS_PARAM);
-            be.st_progress_param[i].set(v);
+            unsafe { be.st_progress_param[i].set(v); }
         }
     });
 }
@@ -81,12 +81,12 @@ pub fn pgstat_progress_end_command() {
     if !backend_status::pgstat_track_activities() {
         return;
     }
-    if beentry.st_progress_command.get() == PROGRESS_COMMAND_INVALID {
+    if unsafe { beentry.st_progress_command.get() } == PROGRESS_COMMAND_INVALID {
         return;
     }
     begin_write_activity(beentry);
-    beentry.st_progress_command.set(PROGRESS_COMMAND_INVALID);
-    beentry.st_progress_command_target.set(InvalidOid);
+    unsafe { beentry.st_progress_command.set(PROGRESS_COMMAND_INVALID); }
+    unsafe { beentry.st_progress_command_target.set(InvalidOid); }
     end_write_activity(beentry);
 }
 

@@ -1,0 +1,12 @@
+-- Finding (thermite idx 216): obj_description/col_description read the
+-- pg_description comment assuming an inline varlena and panicked on a TOASTed
+-- (>2KB) comment. Detoast before reading (C: PG_DETOAST_DATUM).
+CREATE TABLE thermite_cmt(id int);
+DO $$ BEGIN EXECUTE format('COMMENT ON TABLE thermite_cmt IS %L', repeat('A',5000)); END $$;
+SELECT length(obj_description('thermite_cmt'::regclass, 'pg_class')) AS comment_len;
+ comment_len 
+-------------
+        5000
+(1 row)
+
+DROP TABLE thermite_cmt;

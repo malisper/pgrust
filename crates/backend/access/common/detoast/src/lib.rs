@@ -14,6 +14,45 @@ use types_tuple::varatt::{
     self, VARHDRSZ, VARHDRSZ_EXTERNAL, VARHDRSZ_SHORT, VARTAG_INDIRECT, VARTAG_ONDISK,
 };
 
+/// Catchable error raised when an *externally sourced* varlena image carries an
+/// in-memory-only TOAST tag (`VARTAG_INDIRECT` / `VARTAG_EXPANDED_RO/RW`).
+///
+/// These tags embed a raw in-process pointer: the INDIRECT arm dereferences it
+/// (an arbitrary read), and the EXPANDED arm makes an indirect call through the
+/// `eoh_methods` function pointers loaded from it (a control-flow primitive).
+/// C only ever mints these tags in memory (reorderbuffer for INDIRECT,
+/// expanded-object code for EXPANDED) and never stores them on disk or accepts
+/// them from user data; pgrust's reorderbuffer likewise never emits INDIRECT
+/// (see `reorderbuffer::toast::toast_replace`). Any image that reaches
+/// detoasting from an untrusted origin (a SQL `bytea` argument, raw heap/index
+/// page bytes) therefore must not be dispatched into those arms.
+#[cold]
+#[inline(never)]
+fn in_memory_pointer_form() -> PgError {
+    PgError::error("unexpected in-memory TOAST pointer form in externally sourced varlena")
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED)
+}
+
+/// Reject the in-memory-only external forms (INDIRECT / EXPANDED) that embed a
+/// raw in-process pointer, before any dereference or indirect call.
+///
+/// The [`detoast_attr`] family preserves C's full behaviour and is sound only
+/// under C's writer invariant (the embedded pointer was produced in-process and
+/// stays live). Consumers that feed *externally sourced* images to detoasting
+/// code — SQL `bytea` arguments, raw heap/index page bytes, anything not built
+/// by in-process TOAST / reorderbuffer / expanded-object writers — cannot
+/// uphold that invariant and MUST gate on this (or use the `*_checked`
+/// variants) so attacker-controllable tag bytes can never select the pointer
+/// dereference. Returns a catchable `ERRCODE_DATA_CORRUPTED` error for those
+/// forms and `Ok(())` for every trustworthy form (on-disk, compressed, short,
+/// plain).
+pub fn reject_in_memory_pointer_form(attr: &[u8]) -> PgResult<()> {
+    if is_external(attr) && (is_external_indirect(attr) || is_external_expanded(attr)) {
+        return Err(in_memory_pointer_form().into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -197,6 +236,18 @@ pub fn detoast_external_attr<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVe
     }
 }
 
+/// [`detoast_external_attr`] for externally sourced images: rejects the
+/// in-memory-only INDIRECT / EXPANDED forms (see [`reject_in_memory_pointer_form`])
+/// before any embedded-pointer dereference, then defers to the trusted path for
+/// the remaining on-disk / compressed / short / plain forms.
+pub fn detoast_external_attr_checked<'mcx>(
+    mcx: Mcx<'mcx>,
+    attr: &[u8],
+) -> PgResult<PgVec<'mcx, u8>> {
+    reject_in_memory_pointer_form(attr)?;
+    detoast_external_attr(mcx, attr)
+}
+
 /// C `detoast_attr`: fetch/decompress to non-extended (plain 4B-header) form.
 pub fn detoast_attr<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     if is_external_ondisk(attr) {
@@ -235,6 +286,14 @@ pub fn detoast_attr<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u
         // C returns `attr` unchanged; this owned port copies verbatim.
         copy_verbatim(mcx, attr)
     }
+}
+
+/// [`detoast_attr`] for externally sourced images: rejects the in-memory-only
+/// INDIRECT / EXPANDED forms (see [`reject_in_memory_pointer_form`]) before any
+/// embedded-pointer dereference, then defers to the trusted path.
+pub fn detoast_attr_checked<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    reject_in_memory_pointer_form(attr)?;
+    detoast_attr(mcx, attr)
 }
 
 /// C `detoast_attr_slice`: part of a toasted value; `sliceoffset >= 0`,
@@ -338,6 +397,19 @@ pub fn detoast_attr_slice<'mcx>(
         &attrdata[sliceoffset as usize..(sliceoffset + slicelength) as usize],
     )?;
     Ok(result)
+}
+
+/// [`detoast_attr_slice`] for externally sourced images: rejects the
+/// in-memory-only INDIRECT / EXPANDED forms (see [`reject_in_memory_pointer_form`])
+/// before any embedded-pointer dereference, then defers to the trusted path.
+pub fn detoast_attr_slice_checked<'mcx>(
+    mcx: Mcx<'mcx>,
+    attr: &[u8],
+    sliceoffset: i32,
+    slicelength: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    reject_in_memory_pointer_form(attr)?;
+    detoast_attr_slice(mcx, attr, sliceoffset, slicelength)
 }
 
 #[cold]

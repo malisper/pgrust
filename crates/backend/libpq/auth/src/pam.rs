@@ -2,13 +2,17 @@
 //! system libpam (pam_ffi). C's static pam_passwd / pam_port_cludge /
 //! pam_no_password cludges become thread-locals (backends are threads here).
 //! A PgResult error raised inside the conversation (C longjmps out of the
-//! PAM library) is saved and re-raised after pam_authenticate returns.
+//! PAM library) is saved and re-raised unconditionally once control returns
+//! from the pam_* call that drove the conversation — even when the PAM stack
+//! reports PAM_SUCCESS — matching C, where the ereport(ERROR) longjmps out of
+//! libpam and never lets a successful return code hide the error.
 
 use core::ffi::{c_char, c_int, c_void};
 use std::cell::RefCell;
 use std::ffi::CString;
 
 use elog::ereport;
+use pgsync::Mutex;
 use types_error::{PgError, PgResult, LOG, WARNING};
 use types_startup::{ctLocal, Port};
 
@@ -19,6 +23,27 @@ use crate::pam_ffi::{
 use crate::{loc, sendAuthRequest, set_authn_id, AUTH_REQ_PASSWORD, STATUS_EOF, STATUS_ERROR, STATUS_OK};
 
 const PGSQL_PAM_SERVICE: &str = "postgresql";
+
+// Serializes the entire PAM transaction (pam_start .. pam_end, including the
+// blocking client conversation) across the whole process.
+//
+// Upstream PostgreSQL forks a dedicated backend process per connection, so at
+// most one PAM transaction ever executes per address space and libpam's lack
+// of a thread-safety guarantee never matters. This port runs backends as
+// std::thread threads in a single process (see launch_backend), so without
+// serialization two client connections can drive the dlopened, non-reentrant
+// system libpam and its site-configured module stack concurrently in one
+// address space. libpam and common modules (pam_unix's unix_chkpwd SIGCHLD
+// save/restore, pam_ldap/pam_radius global config/session state, non-reentrant
+// libc) assume the single-threaded/forked caller every traditional PAM
+// consumer provides; interleaved execution yields cross-auth confusion,
+// torn/global state, or memory corruption that faults the shared process.
+//
+// Holding this mutex for the full transaction restores the "one PAM invocation
+// per process at a time" invariant that upstream gets for free. The Rust-side
+// conversation state (PAM_STATE, appdata_ptr) is already per-thread/per-call;
+// this guards the C library and its modules, which are not.
+static PAM_LOCK: Mutex<()> = Mutex::new(());
 
 struct PamState {
     // C: pam_passwd (Solaris appdata workaround twin).
@@ -175,19 +200,80 @@ unsafe fn conv_body(
     PAM_SUCCESS
 }
 
-fn clear_state() -> (bool, Option<Box<PgError>>) {
+fn clear_state() -> bool {
     PAM_STATE.with(|s| {
         let mut st = s.borrow_mut();
         st.passwd = None;
         st.port = core::ptr::null();
-        let no_password = st.no_password;
-        (no_password, st.saved_err.take())
+        st.saved_err = None;
+        st.no_password
     })
+}
+
+// Take any error the conversation captured. C's ereport(ERROR) inside the
+// conversation longjmps straight out of libpam, so a captured error must be
+// re-raised regardless of the PAM stack's return code — including PAM_SUCCESS.
+// Kept separate from clear_state so it can be consulted between pam_* calls
+// (before pam_acct_mgmt) without tearing down `port`/`passwd`, which a later
+// conversation turn may still need.
+fn take_saved_err() -> Option<Box<PgError>> {
+    PAM_STATE.with(|s| s.borrow_mut().saved_err.take())
+}
+
+// RAII release of the PAM handle allocated by pam_start.
+//
+// Upstream C's CheckPAMAuth (auth.c:2149) only calls pam_end on the success
+// path and leaks `pamh` on every failure/error return, relying on the
+// per-connection backend *process* exiting to reclaim libpam's heap state.
+// pgrust runs each backend as a std::thread thread in one long-lived process
+// (see PAM_LOCK), so that per-failure leak would accumulate for the life of
+// the process — a remote unauthenticated attacker can drive it with repeated
+// failed logins. This guard makes the release unmissable: pam_end runs exactly
+// once on every path that reaches past a successful pam_start — success, every
+// error return, and the `?` early returns out of ereport().finish().
+struct PamHandle {
+    api: &'static pam_ffi::PamApi,
+    pamh: *mut pam_ffi::pam_handle_t,
+    // Final status handed to pam_end; kept current with the last pam_* call so
+    // libpam modules see the actual outcome, matching pam_end(pamh, retval).
+    status: c_int,
+}
+
+impl PamHandle {
+    // Release explicitly and hand back pam_end's own return value so the
+    // success path can log / act on a release failure. Disarms Drop so the
+    // handle is never released twice.
+    fn end(mut self) -> c_int {
+        let pamh = core::mem::replace(&mut self.pamh, core::ptr::null_mut());
+        // SAFETY: pamh is the live handle from pam_start, released once here;
+        // the null we swapped in makes Drop a no-op.
+        unsafe { (self.api.pam_end)(pamh, self.status) }
+    }
+}
+
+impl Drop for PamHandle {
+    fn drop(&mut self) {
+        if !self.pamh.is_null() {
+            // SAFETY: live handle from pam_start not yet released (end() nulls
+            // it, so this runs at most once). Drops while PAM_LOCK is still
+            // held (declared after `_pam_guard`), keeping pam_end serialized.
+            unsafe {
+                (self.api.pam_end)(self.pamh, self.status);
+            }
+        }
+    }
 }
 
 // C CheckPAMAuth (auth.c:2029). `password` is always "" from dispatch: the
 // conversation fetches the real one from the client.
 pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &str) -> PgResult<i32> {
+    // Serialize the whole transaction: at most one thread may drive the
+    // non-reentrant system libpam / module stack at a time (see PAM_LOCK).
+    // Recover from poisoning — the conversation callback catches unwinds, but
+    // a panic elsewhere while the lock is held must not wedge all future PAM
+    // logins; the guarded data is only (), so there is no torn Rust state.
+    let _pam_guard = PAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let api = match pam_ffi::try_pam() {
         Ok(api) => api,
         Err(e) => {
@@ -224,7 +310,8 @@ pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &str) -> PgResult<
 
     let mut pamh: *mut pam_ffi::pam_handle_t = core::ptr::null_mut();
     // SAFETY: service/user are live NUL-terminated strings; conv outlives
-    // every pam_* call below; pamh is released via pam_end on success paths.
+    // every pam_* call below; pamh is released via `pamh_guard` (pam_end) on
+    // every path once pam_start succeeds.
     let retval = unsafe { (api.pam_start)(service_c.as_ptr(), c"pgsql@".as_ptr(), &conv, &mut pamh) };
     if retval != PAM_SUCCESS {
         ereport(LOG)
@@ -234,11 +321,18 @@ pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &str) -> PgResult<
             ))
             .finish(loc(2062, "CheckPAMAuth"))?;
         clear_state();
+        // pam_start failed: no handle was allocated, nothing to release.
         return Ok(STATUS_ERROR);
     }
 
+    // pam_start succeeded: from here every exit must release `pamh` exactly
+    // once. This guard does so on drop (all error/`?`/return paths) unless the
+    // success path consumes it via `.end()`. See PamHandle above.
+    let mut pamh_guard = PamHandle { api, pamh, status: retval };
+
     // SAFETY: pamh is a live handle; user_c is NUL-terminated.
     let retval = unsafe { (api.pam_set_item)(pamh, PAM_USER, user_c.as_ptr() as *const c_void) };
+    pamh_guard.status = retval;
     if retval != PAM_SUCCESS {
         ereport(LOG)
             .errmsg(format!(
@@ -273,6 +367,7 @@ pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &str) -> PgResult<
         // SAFETY: pamh live; hostinfo_c NUL-terminated.
         let retval =
             unsafe { (api.pam_set_item)(pamh, PAM_RHOST, hostinfo_c.as_ptr() as *const c_void) };
+        pamh_guard.status = retval;
         if retval != PAM_SUCCESS {
             ereport(LOG)
                 .errmsg(format!(
@@ -289,6 +384,7 @@ pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &str) -> PgResult<
     let retval = unsafe {
         (api.pam_set_item)(pamh, PAM_CONV, &conv as *const pam_conv as *const c_void)
     };
+    pamh_guard.status = retval;
     if retval != PAM_SUCCESS {
         ereport(LOG)
             .errmsg(format!(
@@ -302,13 +398,18 @@ pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &str) -> PgResult<
 
     // SAFETY: pamh live; the conversation runs on this thread.
     let retval = unsafe { (api.pam_authenticate)(pamh, 0) };
+    pamh_guard.status = retval;
+    // C's ereport(ERROR) inside the conversation longjmps straight out of
+    // libpam, so a captured error must propagate regardless of retval — even
+    // when the module stack reports PAM_SUCCESS. Consult saved_err before
+    // interpreting the return code so a captured error is never dropped on the
+    // success path.
+    if let Some(e) = take_saved_err() {
+        clear_state();
+        return Err(e);
+    }
     if retval != PAM_SUCCESS {
-        let (no_password, saved) = clear_state();
-        if let Some(e) = saved {
-            // C's ereport(ERROR) inside the conversation longjmps out of
-            // libpam; the saved-error rendering re-raises it here.
-            return Err(e);
-        }
+        let no_password = clear_state();
         // If pam_passwd_conv_proc saw EOF, don't log anything.
         if !no_password {
             ereport(LOG)
@@ -323,11 +424,16 @@ pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &str) -> PgResult<
 
     // SAFETY: pamh live.
     let retval = unsafe { (api.pam_acct_mgmt)(pamh, 0) };
+    pamh_guard.status = retval;
+    // Same unconditional re-raise as after pam_authenticate: a conversation
+    // driven by pam_acct_mgmt may have captured an ERROR/FATAL that must
+    // propagate even if the stack returned PAM_SUCCESS.
+    if let Some(e) = take_saved_err() {
+        clear_state();
+        return Err(e);
+    }
     if retval != PAM_SUCCESS {
-        let (no_password, saved) = clear_state();
-        if let Some(e) = saved {
-            return Err(e);
-        }
+        let no_password = clear_state();
         if !no_password {
             ereport(LOG)
                 .errmsg(format!(
@@ -339,8 +445,10 @@ pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &str) -> PgResult<
         return Ok(if no_password { STATUS_EOF } else { STATUS_ERROR });
     }
 
-    // SAFETY: pamh live; released exactly once here.
-    let retval = unsafe { (api.pam_end)(pamh, retval) };
+    // Success path: release the handle explicitly (status is pam_acct_mgmt's
+    // PAM_SUCCESS retval, matching C's pam_end(pamh, retval)) and consume the
+    // guard so it is not released a second time on drop.
+    let retval = pamh_guard.end();
     if retval != PAM_SUCCESS {
         ereport(LOG)
             .errmsg(format!(
@@ -357,5 +465,51 @@ pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &str) -> PgResult<
         Ok(STATUS_OK)
     } else {
         Ok(STATUS_ERROR)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PAM_LOCK;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // The critical section CheckPAMAuth guards (pam_start .. pam_end) must run
+    // one at a time per process. This mirrors that section's use of PAM_LOCK
+    // and asserts that no two threads are ever inside it simultaneously.
+    #[test]
+    fn pam_lock_serializes_transactions() {
+        let inside = Arc::new(AtomicBool::new(false));
+        let overlaps = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let inside = Arc::clone(&inside);
+                let overlaps = Arc::clone(&overlaps);
+                std::thread::spawn(move || {
+                    for _ in 0..200 {
+                        // Same acquisition CheckPAMAuth uses.
+                        let _guard = PAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                        // If serialization holds, `inside` is false on entry.
+                        if inside.swap(true, Ordering::SeqCst) {
+                            overlaps.fetch_add(1, Ordering::SeqCst);
+                        }
+                        // Widen the window to make any overlap observable.
+                        std::thread::yield_now();
+                        inside.store(false, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(
+            overlaps.load(Ordering::SeqCst),
+            0,
+            "concurrent PAM transactions overlapped under PAM_LOCK"
+        );
     }
 }

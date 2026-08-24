@@ -48,6 +48,7 @@ pub const GSS_C_GSS_CODE: c_int = 1;
 pub const GSS_C_MECH_CODE: c_int = 2;
 pub const GSS_C_DELEG_FLAG: OM_uint32 = 1;
 pub const GSS_C_INITIATE: gss_cred_usage_t = 1;
+pub const GSS_C_ACCEPT: gss_cred_usage_t = 2;
 
 pub struct GssApi {
     pub gss_accept_sec_context: unsafe extern "C" fn(
@@ -88,6 +89,24 @@ pub struct GssApi {
         context_handle: *mut gss_ctx_id_t,
         output_token: *mut gss_buffer_desc,
     ) -> OM_uint32,
+    // MIT credential-store extension; None on Heimdal (macOS GSS.framework).
+    // Lets the acceptor keytab be selected per credential (thread-safe) via a
+    // {"keytab": path} cred store instead of the process-global KRB5_KTNAME
+    // environment variable (which is racy in a threaded, single-process
+    // server). Falls back to the env variable when this symbol is absent.
+    pub gss_acquire_cred_from: Option<
+        unsafe extern "C" fn(
+            minor_status: *mut OM_uint32,
+            desired_name: gss_name_t,
+            time_req: OM_uint32,
+            desired_mechs: gss_OID_set,
+            cred_usage: gss_cred_usage_t,
+            cred_store: *const gss_key_value_set_desc,
+            output_cred_handle: *mut gss_cred_id_t,
+            actual_mechs: *mut gss_OID_set,
+            time_rec: *mut OM_uint32,
+        ) -> OM_uint32,
+    >,
     // MIT credential-store extension; None on Heimdal (macOS GSS.framework).
     pub gss_store_cred_into: Option<
         unsafe extern "C" fn(
@@ -168,15 +187,19 @@ fn resolve_all(handle: *mut c_void) -> Result<GssApi, String> {
             unsafe { core::mem::transmute(p) }
         }};
     }
-    let store_cred_into = {
-        let p = sym(handle, "gss_store_cred_into");
-        if p.is_null() {
-            None
-        } else {
-            // SAFETY: as in resolve! above.
-            Some(unsafe { core::mem::transmute(p) })
-        }
-    };
+    macro_rules! resolve_opt {
+        ($name:literal) => {{
+            let p = sym(handle, $name);
+            if p.is_null() {
+                None
+            } else {
+                // SAFETY: as in resolve! above.
+                Some(unsafe { core::mem::transmute(p) })
+            }
+        }};
+    }
+    let acquire_cred_from = resolve_opt!("gss_acquire_cred_from");
+    let store_cred_into = resolve_opt!("gss_store_cred_into");
     Ok(GssApi {
         gss_accept_sec_context: resolve!(gss_accept_sec_context),
         gss_display_name: resolve!(gss_display_name),
@@ -185,6 +208,7 @@ fn resolve_all(handle: *mut c_void) -> Result<GssApi, String> {
         gss_release_cred: resolve!(gss_release_cred),
         gss_release_name: resolve!(gss_release_name),
         gss_delete_sec_context: resolve!(gss_delete_sec_context),
+        gss_acquire_cred_from: acquire_cred_from,
         gss_store_cred_into: store_cred_into,
     })
 }

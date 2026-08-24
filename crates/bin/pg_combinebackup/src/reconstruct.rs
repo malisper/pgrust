@@ -33,6 +33,18 @@ struct Rfile {
     highest_offset_read: u64,
 }
 
+/// Allocate a `Vec` of `len` copies of `value`, reserving capacity fallibly so
+/// that an oversized (attacker-influenced) request fails via the tool's fatal
+/// path rather than aborting the process on allocation failure.
+fn try_alloc_vec<T: Clone>(len: usize, value: T) -> Vec<T> {
+    let mut v: Vec<T> = Vec::new();
+    if v.try_reserve_exact(len).is_err() {
+        pg_fatal!("out of memory");
+    }
+    v.resize(len, value);
+    v
+}
+
 /// C: reconstruct_from_incremental_file. Returns the checksum payload to be
 /// recorded in the output manifest (None when checksum_type is NONE), like
 /// C's checksum_length/checksum_payload out-parameters.
@@ -73,11 +85,28 @@ pub fn reconstruct_from_incremental_file(
         source[latest_idx].as_ref().unwrap().truncation_block_length;
 
     /*
+     * Bound the reconstructed length against a sane maximum. A relation
+     * segment can hold at most RELSEG_SIZE blocks, so a larger value can only
+     * come from a corrupt or malicious incremental file. Rejecting it here
+     * caps the sourcemap/offsetmap allocations below (which are sized by
+     * block_length) to a small, bounded amount and prevents multi-GiB
+     * allocations driven by attacker-controlled block numbers.
+     */
+    if block_length > RELSEG_SIZE {
+        pg_fatal!(
+            "file \"{}\" has reconstructed block length {} in excess of segment size {}",
+            input_filename.display(),
+            block_length,
+            RELSEG_SIZE
+        );
+    }
+
+    /*
      * For each block in the output file: which source file, and at what
      * offset. sourcemap holds an index into `source`.
      */
-    let mut sourcemap: Vec<Option<usize>> = vec![None; block_length as usize];
-    let mut offsetmap: Vec<u64> = vec![0; block_length as usize];
+    let mut sourcemap: Vec<Option<usize>> = try_alloc_vec(block_length as usize, None);
+    let mut offsetmap: Vec<u64> = try_alloc_vec(block_length as usize, 0u64);
     let mut full_copy_possible = true;
 
     /*
@@ -87,7 +116,18 @@ pub fn reconstruct_from_incremental_file(
         let latest = source[latest_idx].as_ref().unwrap();
         for i in 0..latest.num_blocks as usize {
             let b = latest.relative_block_numbers[i] as usize;
-            debug_assert!(b < block_length as usize);
+            /*
+             * Real runtime bounds check (C uses Assert here, which is compiled
+             * out in production). A block number at or beyond block_length
+             * would index past sourcemap/offsetmap on a crafted file.
+             */
+            if b >= block_length as usize {
+                pg_fatal!(
+                    "file \"{}\" has out-of-range block number {}",
+                    latest.filename.display(),
+                    b
+                );
+            }
             sourcemap[b] = Some(latest_idx);
             offsetmap[b] = latest.header_length as u64 + (i as u64) * BLCKSZ as u64;
             full_copy_possible = false;
@@ -306,8 +346,21 @@ fn debug_reconstruction(sources: &[Option<Rfile>], dry_run: bool) {
 fn find_reconstructed_block_length(s: &Rfile) -> u32 {
     let mut block_length = s.truncation_block_length;
     for i in 0..s.num_blocks as usize {
-        if s.relative_block_numbers[i] >= block_length {
-            block_length = s.relative_block_numbers[i] + 1;
+        let b = s.relative_block_numbers[i];
+        if b >= block_length {
+            /*
+             * Use overflow-checked arithmetic: a crafted incremental file can
+             * contain a block number of u32::MAX, and an unchecked `+ 1` would
+             * wrap to 0 (release builds) or panic (debug builds), yielding a
+             * bogus block_length that later drives out-of-bounds indexing.
+             */
+            block_length = b.checked_add(1).unwrap_or_else(|| {
+                pg_fatal!(
+                    "file \"{}\" has out-of-range block number {}",
+                    s.filename.display(),
+                    b
+                )
+            });
         }
     }
     block_length

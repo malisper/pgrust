@@ -85,8 +85,8 @@ fn wide_values_force_a_smaller_grain_and_the_part_round_trips() {
     let pv = PartView::open(&mut vfs, "part-0.pgrc2");
     let f = pv.footer();
     let g = f.grain().expect("ladder grain");
-    assert_eq!(f.granule_count, geom::granule_count_at(rows, g));
-    assert_eq!(f.band_count, geom::band_count_at(rows, g));
+    assert_eq!(f.granule_count as u64, geom::granule_count_at(rows, g));
+    assert_eq!(f.band_count as u64, geom::band_count_at(rows, g));
     assert_eq!(f.granule_count, 2);
     assert_eq!(f.band_count, 1);
 

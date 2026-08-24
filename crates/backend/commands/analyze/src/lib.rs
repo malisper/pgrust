@@ -2298,12 +2298,12 @@ fn distinct_track_update(
     track: &mut PgVec<'_, (Datum, i32)>,
     track_max: usize,
     value: Datum,
-    datum_eq: &mut dyn FnMut(Datum, Datum) -> bool,
-) {
+    datum_eq: &mut dyn FnMut(Datum, Datum) -> PgResult<bool>,
+) -> PgResult<()> {
     let mut firstcount1 = track.len();
     let mut matched = None;
     for j in 0..track.len() {
-        if datum_eq(value, track[j].0) {
+        if datum_eq(value, track[j].0)? {
             matched = Some(j);
             break;
         }
@@ -2333,6 +2333,7 @@ fn distinct_track_update(
             }
         }
     }
+    Ok(())
 }
 
 fn compute_distinct_stats<'mcx>(
@@ -2356,10 +2357,14 @@ fn compute_distinct_stats<'mcx>(
     let eqfunc = lsyscache::get_opcode(stats.extra.eqopr)?;
     let mut f_cmpeq = fmgr_seams::fmgr_info::call(eqfunc)?;
     let collation = stats.attrcollid;
-    let mut datum_eq = |a: Datum, b: Datum| -> bool {
-        types_fmgr::function_call2_coll_in(&mut f_cmpeq, collation, col_mcx, a, b)
-            .unwrap_or_else(|e| panic!("compute_distinct_stats: equality failed: {e:?}"))
-            .as_bool()
+    let mut datum_eq = |a: Datum, b: Datum| -> PgResult<bool> {
+        // The equality is an fmgr call and can raise mid-ANALYZE (e.g. a
+        // CHECK_FOR_INTERRUPTS tripping on autovacuum terminate / query
+        // cancel). Surface that error up the PgResult chain instead of
+        // panicking so an interrupt becomes a catchable cancellation. In C
+        // the DatumGetBool(FunctionCall2Coll(&f_cmpeq, ...)) error path just
+        // longjmps out of compute_distinct_stats.
+        Ok(types_fmgr::function_call2_coll_in(&mut f_cmpeq, collation, col_mcx, a, b)?.as_bool())
     };
 
     for rowno in 0..samplerows as usize {
@@ -2382,7 +2387,7 @@ fn compute_distinct_stats<'mcx>(
         } else if is_varwidth {
             total_width += cstring_stored_size(value);
         }
-        distinct_track_update(&mut track, track_max, value, &mut datum_eq);
+        distinct_track_update(&mut track, track_max, value, &mut datum_eq)?;
     }
 
     if nonnull_cnt > 0 {
@@ -2569,12 +2574,16 @@ fn compute_scalar_stats<'mcx>(
         let cmp_finfo = core::cell::RefCell::new(entry.cmp_proc_finfo().clone());
         // Armed with col_mcx: packed by-ref args (short numerics) expand there
         // and die at the per-column reset — C's col_context cadence.
-        let cmp = |a: Datum, b: Datum| -> core::cmp::Ordering {
+        let cmp = |a: Datum, b: Datum| -> PgResult<core::cmp::Ordering> {
             let mut finfo = cmp_finfo.borrow_mut();
-            let r = types_fmgr::function_call2_coll_in(&mut finfo, collation, col_mcx, a, b)
-                .unwrap_or_else(|e| panic!("compute_scalar_stats: comparison failed: {e:?}"))
+            // The btree comparison is an fmgr call and can raise mid-sort
+            // (e.g. a CHECK_FOR_INTERRUPTS tripping on autovacuum terminate /
+            // query cancel). Surface that error up the PgResult chain instead
+            // of panicking so an interrupt becomes a catchable cancellation —
+            // in C the ApplySortComparator error path longjmps out.
+            let r = types_fmgr::function_call2_coll_in(&mut finfo, collation, col_mcx, a, b)?
                 .as_i32();
-            r.cmp(&0)
+            Ok(r.cmp(&0))
         };
         // C's compare_scalars piggybacks dup detection on the sort via
         // tupnoLink; here an explicit adjacent-equality pass replaces it
@@ -2583,13 +2592,16 @@ fn compute_scalar_stats<'mcx>(
         // be intransitive (contrib cube's cube_cmp over mixed-dimension
         // values is) — C produces an arbitrary-but-safe order where std's
         // driver panics with "does not correctly implement a total order".
-        ::pg_qsort::pg_qsort(&mut values, |a, b| {
-            match cmp(a.0, b.0) {
+        // pg_qsort_arg (C's qsort_arg) carries the comparator's PgError out:
+        // the first failing comparison aborts the sort and is propagated,
+        // leaving `values` as a valid permutation of its input.
+        ::pg_qsort::pg_qsort_arg(&mut values, |a, b| -> PgResult<i32> {
+            Ok(match cmp(a.0, b.0)? {
                 core::cmp::Ordering::Less => -1,
                 core::cmp::Ordering::Greater => 1,
                 core::cmp::Ordering::Equal => a.1 - b.1,
-            }
-        });
+            })
+        })?;
 
         let mut corr_xysum = 0.0f64;
         let mut ndistinct = 0i32;
@@ -2601,7 +2613,7 @@ fn compute_scalar_stats<'mcx>(
             corr_xysum += i as f64 * values[i as usize].1 as f64;
             dups_cnt += 1;
             let group_end = i == values_cnt - 1
-                || cmp(values[i as usize].0, values[i as usize + 1].0) != core::cmp::Ordering::Equal;
+                || cmp(values[i as usize].0, values[i as usize + 1].0)? != core::cmp::Ordering::Equal;
             if group_end {
                 ndistinct += 1;
                 if dups_cnt > 1 {
@@ -2990,8 +3002,8 @@ fn stat_key(attno: i32, func: types_core::primitive::RegProcedure, arg: Datum) -
 mod tests {
     use super::{
         analyze_mcv_list, compute_scalar_stats, compute_trivial_stats, distinct_track_update,
-        varlena_stored_size, ComputeStats, FetchSource, StdAnalyzeData, VacAttrStats,
-        STATISTIC_NUM_SLOTS,
+        varlena_stored_size, ComputeStats, FetchSource, PgError, PgResult, StdAnalyzeData,
+        VacAttrStats, STATISTIC_NUM_SLOTS,
     };
     use datum::Datum;
     use mcx::{Mcx, MemoryContext, PgVec};
@@ -3010,7 +3022,7 @@ mod tests {
             arg: Some(Node::mk(mcx, Integer { ival: 2 }).unwrap()),
             ..DefElem::default()
         };
-        let e = super::def_get_boolean(&numeric).unwrap_err();
+        let e = super::def_get_boolean(&numeric).err().unwrap();
         assert_eq!(e.message(), "verbose requires a Boolean value");
         assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
 
@@ -3019,7 +3031,7 @@ mod tests {
             arg: Some(Node::mk(mcx, Integer { ival: 2 }).unwrap()),
             ..DefElem::default()
         };
-        let e = super::def_get_boolean(&skip).unwrap_err();
+        let e = super::def_get_boolean(&skip).err().unwrap();
         assert_eq!(e.message(), "skip_locked requires a Boolean value");
         assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
     }
@@ -3132,11 +3144,30 @@ mod tests {
 
     fn run_track(values: &[i32], track_max: usize, cx: &MemoryContext) -> Vec<(i32, i32)> {
         let mut track: PgVec<'_, (Datum, i32)> = PgVec::new_in(cx.mcx());
-        let mut eq = |a: Datum, b: Datum| a.as_i32() == b.as_i32();
+        let mut eq = |a: Datum, b: Datum| -> PgResult<bool> { Ok(a.as_i32() == b.as_i32()) };
         for &v in values {
-            distinct_track_update(&mut track, track_max, Datum::from_i32(v), &mut eq);
+            distinct_track_update(&mut track, track_max, Datum::from_i32(v), &mut eq).unwrap();
         }
         track.iter().map(|&(d, c)| (d.as_i32(), c)).collect()
+    }
+
+    // An interrupt mid-comparison (autovacuum terminate / query cancel) makes
+    // the equality fmgr call raise; distinct_track_update must surface that as
+    // Err, not panic. Guards the compute_distinct_stats comparator error path.
+    #[test]
+    fn distinct_track_update_propagates_comparator_error() {
+        let cx = MemoryContext::new("distinct track err");
+        let mut track: PgVec<'_, (Datum, i32)> = PgVec::new_in(cx.mcx());
+        // Seed one entry so the next update actually invokes datum_eq.
+        let mut ok_eq = |a: Datum, b: Datum| -> PgResult<bool> { Ok(a.as_i32() == b.as_i32()) };
+        distinct_track_update(&mut track, 10, Datum::from_i32(1), &mut ok_eq).unwrap();
+        let mut boom = |_a: Datum, _b: Datum| -> PgResult<bool> {
+            Err(Box::new(PgError::error("interrupted mid-comparison")))
+        };
+        let e = distinct_track_update(&mut track, 10, Datum::from_i32(2), &mut boom)
+            .err()
+            .unwrap();
+        assert_eq!(e.message(), "interrupted mid-comparison");
     }
 
     #[test]

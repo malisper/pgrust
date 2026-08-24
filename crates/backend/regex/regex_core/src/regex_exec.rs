@@ -11,7 +11,7 @@ use crate::regex_consts::{
     REG_EXPECT, REG_NOMATCH, REG_NOSUB, REG_NOTBOL, REG_NOTEOL, REG_OKAY, REG_PREFIX, REG_SMALL,
     REG_UBACKREF, REG_UIMPOSSIBLE,
 };
-use crate::regex_error::{RegError, RegResult};
+use crate::regex_error::{check_interrupt, RegError, RegResult};
 use crate::regguts::{
     chr, color, Cnfa, ColorMap, Guts, NodeId, Subre, BACKR, CHR_MIN, CNFA_NOPROGRESS, COLORLESS,
     HASLACONS, MATCHALL, MAX_SIMPLE_CHR, PSEUDO, RAINBOW, SHORTER, WHITE,
@@ -626,6 +626,9 @@ fn miss(
         return Ok(hit);
     }
 
+    // C rege_dfa.c:808 INTERRUPT(v->re): cancel check on DFA cache miss only;
+    // this is the exec-time cancellation point cfindloop's scans rely on.
+    check_interrupt()?;
 
     let ispseudocolor = (cm.cd[co as usize].flags & PSEUDO) != 0;
     let built = crate::regex_dfa_kernel::build_stateset(d, cnfa, css, co, ispseudocolor);
@@ -1661,6 +1664,9 @@ fn cdissect(
     begin: usize,
     end: usize,
 ) -> RegResult<i32> {
+    // C regexec.c:767 INTERRUPT(v->re): "handy place to check for operation
+    // cancel" — backref dissection (citerdissect) is exponential worst case.
+    check_interrupt()?;
     // C regexec.c / rege_dfa.c STACK_TOO_DEEP(v->re) == stack_is_too_deep().
     if ::stack_depth::stack_is_too_deep() {
         return Ok(REG_ETOOBIG);

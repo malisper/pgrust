@@ -31,7 +31,8 @@ pub fn RelationGetIndexAttrBitmap(relid: Oid) -> PgResult<Rc<IndexAttrBitmaps>> 
         let index_oids = crate::indexlist::RelationGetIndexList(cmcx, relid)?;
         let rel = store::RelationIdGetRelation(relid)?.ok_or_else(|| index_missing(relid))?;
         let (pk_index, replident_index) = pk_replident(&rel);
-        let attempt = build_bitmaps(cmcx, &index_oids, pk_index, replident_index)?;
+        let natts = rel.rd_att.natts as i16;
+        let attempt = build_bitmaps(cmcx, &index_oids, pk_index, replident_index, natts)?;
         let new_oids = crate::indexlist::RelationGetIndexList(cmcx, relid)?;
         let rel = store::RelationIdGetRelation(relid)?.ok_or_else(|| index_missing(relid))?;
         let (pk2, ri2) = pk_replident(&rel);
@@ -57,6 +58,7 @@ fn build_bitmaps(
     index_oids: &[Oid],
     pk_index: Oid,
     replident_index: Oid,
+    natts: i16,
 ) -> PgResult<IndexAttrBitmaps> {
     let mut bm = IndexAttrBitmaps {
         hot_blocking: PgVec::new_in(cmcx),
@@ -103,7 +105,7 @@ fn build_bitmaps(
             .flatten()
         {
             let target = if summarizing { &mut bm.summarized } else { &mut bm.hot_blocking };
-            pull_expr_attrs(src.as_str(), target)?;
+            pull_expr_attrs(src.as_str(), target, natts)?;
         }
     }
     Ok(bm)
@@ -125,18 +127,28 @@ fn index_missing(index_oid: Oid) -> Box<PgError> {
     )
 }
 
-fn pull_expr_attrs(src: &str, out: &mut PgVec<'static, i16>) -> PgResult<()> {
+fn pull_expr_attrs(src: &str, out: &mut PgVec<'static, i16>, natts: i16) -> PgResult<()> {
     struct W<'a> {
         out: &'a mut PgVec<'static, i16>,
+        natts: i16,
     }
     impl<'mcx> nodes_core::NodeWalker<'mcx> for W<'_> {
         fn visit(&mut self, node: types_nodes::Node<'mcx>) -> PgResult<bool> {
             if let Some(v) = node.as_var() {
                 assert!(
-                    v.varno == 1 && v.varlevelsup == 0 && v.varattno > 0,
+                    v.varno == 1 && v.varlevelsup == 0 && v.varattno >= 0,
                     "pull_varattnos (relcache index lane): unexpected Var shape"
                 );
-                add(self.out, v.varattno);
+                if v.varattno == 0 {
+                    // Whole-row Var (e.g. CREATE INDEX ... ((md5(t::text)))): per C's
+                    // pull_varattnos this references the whole row, so every user
+                    // column is index-referenced (all changes must block HOT).
+                    for a in 1..=self.natts {
+                        add(self.out, a);
+                    }
+                } else {
+                    add(self.out, v.varattno);
+                }
                 return Ok(false);
             }
             nodes_core::expression_tree_walker(node, self)
@@ -145,6 +157,6 @@ fn pull_expr_attrs(src: &str, out: &mut PgVec<'static, i16>) -> PgResult<()> {
     let cx = mcx::MemoryContext::new("IndexAttrExprPull");
     let smcx = cx.mcx();
     let node = readfuncs::stringToNode(smcx, src)?;
-    nodes_core::NodeWalker::visit(&mut W { out }, node)?;
+    nodes_core::NodeWalker::visit(&mut W { out, natts }, node)?;
     Ok(())
 }

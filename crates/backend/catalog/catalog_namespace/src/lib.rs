@@ -195,8 +195,21 @@ pub struct SessionNamespaceState {
     namespace_user: Oid,
     base_creation_namespace: Oid,
     base_temp_creation_pending: bool,
-    active_path_generation: u64,
     namespace_search_path: Option<String>,
+    // NOTE: ACTIVE_PATH_GENERATION is deliberately NOT part of the captured
+    // session state. In C (namespace.c: `activePathGeneration`) the generation
+    // counter is a strictly-monotonic per-backend value whose uniqueness is the
+    // entire soundness basis of the SearchPathMatcher fast path
+    // (SearchPathMatchesCurrentEnvironment returns "matches" on generation
+    // equality alone). On a pooled worker thread these session states are
+    // captured and restored across tasks/sessions; restoring a previously
+    // captured generation would REWIND the counter, letting one generation
+    // value denote two different search-path states on the same thread. A
+    // matcher stamped under session A could then falsely fast-path-match under
+    // session B, serving A's name->OID resolutions to B (cache poisoning /
+    // confused deputy). Keeping the counter out of the swapped state preserves
+    // C's monotonic invariant: only recomputeNamespacePath advances it, and it
+    // is never restored to an older value.
 }
 
 pub fn CaptureSessionNamespaceState() -> SessionNamespaceState {
@@ -207,7 +220,6 @@ pub fn CaptureSessionNamespaceState() -> SessionNamespaceState {
         namespace_user: NAMESPACE_USER.with(Cell::get),
         base_creation_namespace: BASE_CREATION_NAMESPACE.with(Cell::get),
         base_temp_creation_pending: BASE_TEMP_CREATION_PENDING.with(Cell::get),
-        active_path_generation: ACTIVE_PATH_GENERATION.with(Cell::get),
         namespace_search_path: NAMESPACE_SEARCH_PATH.with(|v| v.borrow().clone()),
     }
 }
@@ -220,8 +232,12 @@ pub fn ReplaceSessionNamespaceState(state: &SessionNamespaceState) -> SessionNam
     NAMESPACE_USER.with(|c| c.set(state.namespace_user));
     BASE_CREATION_NAMESPACE.with(|c| c.set(state.base_creation_namespace));
     BASE_TEMP_CREATION_PENDING.with(|c| c.set(state.base_temp_creation_pending));
-    ACTIVE_PATH_GENERATION.with(|c| c.set(state.active_path_generation));
     NAMESPACE_SEARCH_PATH.with(|v| *v.borrow_mut() = state.namespace_search_path.clone());
+    // ACTIVE_PATH_GENERATION is intentionally left untouched (see the note on
+    // SessionNamespaceState). Marking the base path invalid forces the next
+    // recomputeNamespacePath to re-derive the path for the restored session and,
+    // if it differs from the residual path, advance the counter to a fresh
+    // never-before-used value - so no stale matcher can fast-path-match.
     BASE_SEARCH_PATH_VALID.with(|c| c.set(false));
     path::invalidate_search_path_cache();
     old

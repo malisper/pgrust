@@ -4,15 +4,15 @@ use std::cell::RefCell;
 
 use ::datum::Datum;
 use ::mcx::{Mcx, MemoryContext};
-use ::types_core::{Oid, RegProcedure};
+use ::types_core::{Oid, RegProcedure, BLCKSZ};
 use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};
 use ::types_fmgr::{FmgrInfo, LocalFcinfo};
 use ::types_hash::{
-    Bucket, HashMetaPageData, HashPageOpaqueData, HASHSTANDARD_PROC, HASH_MAGIC, HASH_METAPAGE,
-    HASH_READ, HASH_VERSION, LH_META_PAGE,
+    Bucket, HashMetaPageData, HashPageOpaqueData, BYTE_TO_BIT, HASHSTANDARD_PROC, HASH_MAGIC,
+    HASH_MAX_BITMAPS, HASH_MAX_SPLITPOINTS, HASH_METAPAGE, HASH_READ, HASH_VERSION, LH_META_PAGE,
 };
 use ::types_rel::Relation;
-use ::types_storage::bufpage::PageRef;
+use ::types_storage::bufpage::{PageRef, SizeOfPageHeaderData};
 
 use crate::page::{_hash_getbuf, _hash_relbuf, page_opaque, with_meta};
 
@@ -223,8 +223,62 @@ pub(crate) fn _hash_checkpage(rel: &Relation<'_>, buf: types_core::Buffer, flags
                 true,
             ));
         }
+        // The bitmap-page geometry (bmsize/bmshift) and the array bounds
+        // (nmaps/ovflpoint) come straight off disk and drive raw bitmap word
+        // indexing and memsets in hashovfl.c. C only ever writes self-consistent
+        // values in _hash_init_metabuffer, so validate them here (the sole
+        // hash-specific gate between disk and those sinks) before any bitmap
+        // math runs: a crafted metapage must fail cleanly, never write
+        // out-of-page.
+        //
+        // SAFETY: pinned metapage per above.
+        let (bmsize, bmshift, nmaps, ovflpoint) = unsafe {
+            let m = crate::page::meta_ptr(buf);
+            (
+                (*m).hashm_bmsize,
+                (*m).hashm_bmshift,
+                (*m).hashm_nmaps,
+                (*m).hashm_ovflpoint,
+            )
+        };
+        if !hash_metapage_geometry_ok(bmsize, bmshift, nmaps, ovflpoint) {
+            return Err(index_corrupted(
+                format!("index \"{}\" has a corrupt hash metapage", rel.name()),
+                true,
+            ));
+        }
     }
     Ok(())
+}
+
+const fn maxalign(sz: usize) -> usize {
+    (sz + 7) & !7
+}
+
+/// True if the metapage's bitmap geometry and array bounds are self-consistent
+/// and keep every downstream bitmap word index / memset inside a page. Mirrors
+/// the invariants C establishes in `_hash_init_metabuffer`; enforcing them on
+/// read prevents a crafted on-disk metapage from driving out-of-page bitmap
+/// writes in hashovfl.c.
+pub(crate) fn hash_metapage_geometry_ok(
+    bmsize: u16,
+    bmshift: u16,
+    nmaps: u32,
+    ovflpoint: u32,
+) -> bool {
+    // HashGetMaxBitmapSize: bytes available for the bit array on a page.
+    let max_bmsize = BLCKSZ
+        - (maxalign(SizeOfPageHeaderData) + maxalign(core::mem::size_of::<HashPageOpaqueData>()));
+    let bmsize_bytes = bmsize as usize;
+    // bmsize is a nonzero power of two no larger than the page bit area, and
+    // bmshift is exactly log2(bmsize in bits): BMPGSZ_BIT == 1 << bmshift.
+    let bmsize_consistent = bmsize_bytes != 0
+        && bmsize_bytes <= max_bmsize
+        && bmsize_bytes.is_power_of_two()
+        && u32::from(bmshift) == bmsize.trailing_zeros() + BYTE_TO_BIT;
+    bmsize_consistent
+        && nmaps as usize <= HASH_MAX_BITMAPS
+        && (ovflpoint as usize) < HASH_MAX_SPLITPOINTS
 }
 
 /// _hash_get_indextuple_hashkey: first attribute, never null, read raw.
@@ -337,4 +391,44 @@ pub(crate) fn _hash_get_newbucket_from_oldbucket(
         new_bucket = CALC_NEW_BUCKET(old_bucket, lowmask);
     }
     new_bucket
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hash_metapage_geometry_ok;
+    use ::types_hash::{HASH_MAX_BITMAPS, HASH_MAX_SPLITPOINTS};
+
+    // The geometry a fresh 8KB hash index metapage carries (see
+    // _hash_init_metabuffer): bmsize = 4096 bytes, bmshift = 15
+    // (1 << 15 == 4096 << 3), and small array counts.
+    #[test]
+    fn accepts_valid_default_geometry() {
+        assert!(hash_metapage_geometry_ok(4096, 15, 1, 1));
+        assert!(hash_metapage_geometry_ok(4096, 15, 0, 0));
+        assert!(hash_metapage_geometry_ok(
+            4096,
+            15,
+            HASH_MAX_BITMAPS as u32,
+            (HASH_MAX_SPLITPOINTS - 1) as u32
+        ));
+    }
+
+    #[test]
+    fn rejects_crafted_out_of_page_geometry() {
+        // The exact attacker values from the finding: bmsize=0xFFFF, bmshift=31.
+        assert!(!hash_metapage_geometry_ok(0xFFFF, 31, 1, 1));
+        // bmsize too large for the page (would memset past the bitmap page).
+        assert!(!hash_metapage_geometry_ok(0xFFFF, 15, 1, 1));
+        // bmsize zero.
+        assert!(!hash_metapage_geometry_ok(0, 3, 1, 1));
+        // Non-power-of-two bmsize.
+        assert!(!hash_metapage_geometry_ok(4095, 15, 1, 1));
+        // bmshift inconsistent with bmsize (mask would over-address the words).
+        assert!(!hash_metapage_geometry_ok(4096, 31, 1, 1));
+        assert!(!hash_metapage_geometry_ok(4096, 14, 1, 1));
+        // Array bounds: nmaps / ovflpoint out of range would index hashm_mapp /
+        // hashm_spares out of bounds.
+        assert!(!hash_metapage_geometry_ok(4096, 15, HASH_MAX_BITMAPS as u32 + 1, 1));
+        assert!(!hash_metapage_geometry_ok(4096, 15, 1, HASH_MAX_SPLITPOINTS as u32));
+    }
 }

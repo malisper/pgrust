@@ -16,7 +16,8 @@ use toastdesc::VarattExternal;
 
 use crate::helper::va_slice;
 use crate::internals::{
-    toast_close_indexes, toast_open_indexes, valueid_scan_key, F_INT4EQ, F_INT4GE, F_INT4LE,
+    open_toast_relation, toast_close_indexes, toast_open_indexes, valueid_scan_key, F_INT4EQ,
+    F_INT4GE, F_INT4LE,
 };
 use crate::TOAST_MAX_CHUNK_SIZE;
 
@@ -214,7 +215,7 @@ pub fn toast_fetch_datum<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'m
         return Ok(result);
     }
 
-    let toastrel = table::table_open(mcx, toast_pointer.va_toastrelid, AccessShareLock)?;
+    let toastrel = open_toast_relation(mcx, toast_pointer.va_toastrelid, AccessShareLock)?;
     heap_fetch_toast_slice(
         mcx,
         &toastrel,
@@ -273,7 +274,7 @@ pub fn toast_fetch_datum_slice<'mcx>(
         return Ok(result);
     }
 
-    let toastrel = table::table_open(mcx, toast_pointer.va_toastrelid, AccessShareLock)?;
+    let toastrel = open_toast_relation(mcx, toast_pointer.va_toastrelid, AccessShareLock)?;
     heap_fetch_toast_slice(
         mcx,
         &toastrel,

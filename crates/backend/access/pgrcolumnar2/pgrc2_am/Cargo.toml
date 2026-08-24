@@ -45,6 +45,7 @@ wchar = { path = "../../../../common/wchar" }
 xact = { path = "../../transam/xact" }
 xact_seams = { path = "../../transam/xact_seams" }
 transam_seams = { path = "../../transam/transam_seams" }
+varsup_seams = { path = "../../transam/varsup_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 snapmgr = { path = "../../../utils/time/snapmgr" }
 inval = { path = "../../../utils/cache/inval" }

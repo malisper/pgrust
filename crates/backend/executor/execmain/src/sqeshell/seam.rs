@@ -566,7 +566,14 @@ fn recognize_json_extract<'p>(
         break attno;
     };
     segs.reverse();
-    Some((JsonLaneReq { base, path: segs.join("."), kind: ShredLaneKind::Text }, TEXTOID))
+    // Canonical, injective PathTable string — MUST match the writer's
+    // `shred_jsonb::dotted` byte-for-byte (the lane binding is string
+    // equality). Segments are dot-free here (the `seg` recognizer refuses
+    // keys containing `.`), so this only differs from a raw join for keys
+    // carrying the escape byte, which it escapes in lockstep with the
+    // writer.
+    let path = pgrc2_format::shredlane::encode_shred_path(segs.iter().map(String::as_str));
+    Some((JsonLaneReq { base, path, kind: ShredLaneKind::Text }, TEXTOID))
 }
 
 /// Extraction-as-column resolution for the agg/group recognizers: hop
@@ -813,11 +820,17 @@ fn containment_legs(
         if key.is_empty() || key.contains('.') {
             return Err("containment-shape");
         }
-        let path = if prefix.is_empty() {
-            key.to_string()
-        } else {
-            format!("{prefix}.{key}")
-        };
+        // Canonical, injective PathTable string, built incrementally on a
+        // running (already-encoded) prefix — MUST match the writer's
+        // `shred_jsonb::dotted` (the lane binding is string equality). The
+        // key is dot-free here (refused above), but its segment is escaped
+        // in lockstep with the writer so escape-byte keys stay unambiguous.
+        let mut path = String::with_capacity(prefix.len() + 1 + key.len());
+        if !prefix.is_empty() {
+            path.push_str(prefix);
+            path.push('.');
+        }
+        pgrc2_format::shredlane::push_shred_segment(key, &mut path);
         let vi = i + count;
         match jc::fill_item(c, vi, base_off, jc::get_jsonb_offset(c, vi)) {
             jc::JsonbItem::String(s) => {
@@ -2045,6 +2058,46 @@ struct CachedEngine {
     /// The table directory the entry resolves under (head-probe target).
     dir: Arc<str>,
     engine: Arc<Engine>,
+}
+
+impl CachedEngine {
+    /// Manifest content identity: does this cached engine descend from the
+    /// SAME published manifest as a freshly resolved snapshot-effective
+    /// manifest? Generation NUMBER alone is NOT identity — an aborted publish
+    /// leaves manifest-<gen>/CURRENT=gen as dead residue and the next
+    /// committed publisher re-mints the same generation number (and part
+    /// numbers) over it, so two distinct data states can share
+    /// (generation, schema_fp, nparts, locator). The publisher (epoch-
+    /// qualified fxid) is the content witness that separates the aborted
+    /// residue from the committed re-mint. The engine/pool-width currency
+    /// check is orthogonal (session GUC, not manifest identity) and stays at
+    /// the call site.
+    fn manifest_matches(
+        &self,
+        generation: u64,
+        publisher_fxid: u64,
+        schema_fp: u64,
+        nparts: usize,
+        locator: ::types_storage::RelFileLocator,
+    ) -> bool {
+        manifest_identity_matches(
+            (self.generation, self.publisher_fxid, self.schema_fp, self.nparts, self.locator),
+            (generation, publisher_fxid, schema_fp, nparts, locator),
+        )
+    }
+}
+
+/// Pure manifest content-identity comparison (extracted from
+/// [`CachedEngine::manifest_matches`] so it is testable without an `Engine`).
+/// Each tuple is `(generation, publisher_fxid, schema_fp, nparts, locator)`.
+/// ALL five terms must be equal — in particular `publisher_fxid`, which is
+/// the content witness that distinguishes an aborted publish's manifest from a
+/// later committed re-mint that recycles the same generation number.
+fn manifest_identity_matches(
+    cached: (u64, u64, u64, usize, ::types_storage::RelFileLocator),
+    resolved: (u64, u64, u64, usize, ::types_storage::RelFileLocator),
+) -> bool {
+    cached == resolved
 }
 
 static ENGINES: Mutex<Option<HashMap<(u32, u32), CachedEngine>>> = Mutex::new(None);
@@ -23960,10 +24013,15 @@ fn open_engine(
         let mut g = ENGINES.lock().unwrap_or_else(|e| e.into_inner());
         let map = g.get_or_insert_with(HashMap::new);
         if let Some(c) = map.get(&key) {
-            if c.generation == generation
-                && c.schema_fp == schema_fp
-                && c.nparts == nparts
-                && c.locator == locator
+            // Serve the standing engine only when its manifest content
+            // identity (generation + publisher_fxid + schema_fp + nparts +
+            // locator) matches the freshly resolved manifest AND its pool
+            // width is current. The publisher_fxid term is what forbids
+            // reusing an engine built from an aborted publish for a later
+            // committed re-mint of the same generation number. A mismatch
+            // falls through to a fresh Bank build that overwrites (refreshes)
+            // the stale entry below.
+            if c.manifest_matches(generation, publisher_fxid, schema_fp, nparts, locator)
                 && c.engine.pool.threads() == engine_threads()
             {
                 return Ok((Arc::clone(&c.engine), false));
@@ -24475,4 +24533,60 @@ pub(crate) fn deliver<'mcx, 'd>(
         delivered += 1;
     }
     Ok((delivered, slot_id))
+}
+
+#[cfg(test)]
+mod stale_generation_reuse_tests {
+    //! Regression: the SQE engine registry must not serve a cached engine
+    //! built from an ABORTED publish for a later COMMITTED re-mint of the
+    //! same generation NUMBER. pgrc2 assigns gen = (newest committed gen)+1,
+    //! so an aborted publish's generation number (and part numbers) are
+    //! re-minted by the next committed publisher: (generation, schema_fp,
+    //! nparts, locator) alone cannot tell the two data states apart. The
+    //! publisher_fxid content witness is what forbids the stale reuse.
+    use super::manifest_identity_matches;
+    use ::types_storage::RelFileLocator;
+
+    fn loc() -> RelFileLocator {
+        RelFileLocator::new(1663, 5, 16384)
+    }
+
+    #[test]
+    fn same_generation_but_different_publisher_is_not_reused() {
+        // The aborted publish and the committed re-mint agree on generation
+        // number, schema, part count, and locator — differing ONLY in the
+        // publisher fxid. This is the exact re-mint collision from the
+        // finding; the reuse predicate MUST reject it.
+        let aborted = (7u64, 0xAAAA_0000_0000_0001u64, 0xFEEDu64, 1usize, loc());
+        let committed = (7u64, 0xBBBB_0000_0000_0002u64, 0xFEEDu64, 1usize, loc());
+        assert!(
+            !manifest_identity_matches(aborted, committed),
+            "engine from an aborted publish must not be reused for a committed \
+             re-mint of the same generation number"
+        );
+    }
+
+    #[test]
+    fn identical_manifest_identity_is_reused() {
+        // Same publisher (and everything else) => genuinely the same
+        // published manifest => reuse is correct (preserves the fast path).
+        let id = (7u64, 0xAAAA_0000_0000_0001u64, 0xFEEDu64, 1usize, loc());
+        assert!(manifest_identity_matches(id, id));
+    }
+
+    #[test]
+    fn any_other_identity_term_mismatch_also_rejects() {
+        let base = (7u64, 0x1111u64, 0xFEEDu64, 2usize, loc());
+        // generation differs
+        assert!(!manifest_identity_matches(base, (8, 0x1111, 0xFEED, 2, loc())));
+        // schema_fp differs
+        assert!(!manifest_identity_matches(base, (7, 0x1111, 0xF00D, 2, loc())));
+        // nparts differs
+        assert!(!manifest_identity_matches(base, (7, 0x1111, 0xFEED, 3, loc())));
+        // locator differs
+        assert!(!manifest_identity_matches(
+            base,
+            (7, 0x1111, 0xFEED, 2, RelFileLocator::new(1663, 5, 99999))
+        ));
+    }
 }

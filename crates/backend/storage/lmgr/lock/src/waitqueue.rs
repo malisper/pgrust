@@ -30,17 +30,22 @@ fn links_of(procno: ProcNumber) -> &'static types_storage::storage::SyncCell<pro
 unsafe fn wq_push_tail(lock: *mut LOCK, procno: ProcNumber) {
     let q = &mut (*lock).waitProcs;
     let tail = q.list.tail;
-    links_of(procno).set(proclist_node {
-        prev: tail,
-        next: INVALID_PROC_NUMBER,
-    });
+    // SAFETY: [PART] serialized by the lock partition lock
+    unsafe {
+        links_of(procno).set(proclist_node {
+            prev: tail,
+            next: INVALID_PROC_NUMBER,
+        });
+    }
     if tail == INVALID_PROC_NUMBER {
         q.list.head = procno;
     } else {
         let cell = links_of(tail);
-        let mut node = cell.get();
+        // SAFETY: [PART] serialized by the lock partition lock
+        let mut node = unsafe { cell.get() };
         node.next = procno;
-        cell.set(node);
+        // SAFETY: [PART] serialized by the lock partition lock
+        unsafe { cell.set(node); }
     }
     q.list.tail = procno;
     q.count += 1;
@@ -48,47 +53,61 @@ unsafe fn wq_push_tail(lock: *mut LOCK, procno: ProcNumber) {
 
 unsafe fn wq_insert_before(lock: *mut LOCK, procno: ProcNumber, before: ProcNumber) {
     let q = &mut (*lock).waitProcs;
-    let prev = links_of(before).get().prev;
-    links_of(procno).set(proclist_node {
-        prev,
-        next: before,
-    });
+    // SAFETY: [PART] serialized by the lock partition lock
+    let prev = unsafe { links_of(before).get() }.prev;
+    // SAFETY: [PART] serialized by the lock partition lock
+    unsafe {
+        links_of(procno).set(proclist_node {
+            prev,
+            next: before,
+        });
+    }
     if prev == INVALID_PROC_NUMBER {
         q.list.head = procno;
     } else {
         let cell = links_of(prev);
-        let mut node = cell.get();
+        // SAFETY: [PART] serialized by the lock partition lock
+        let mut node = unsafe { cell.get() };
         node.next = procno;
-        cell.set(node);
+        // SAFETY: [PART] serialized by the lock partition lock
+        unsafe { cell.set(node); }
     }
     let cell = links_of(before);
-    let mut node = cell.get();
+    // SAFETY: [PART] serialized by the lock partition lock
+    let mut node = unsafe { cell.get() };
     node.prev = procno;
-    cell.set(node);
+    // SAFETY: [PART] serialized by the lock partition lock
+    unsafe { cell.set(node); }
     q.count += 1;
 }
 
 // Leaves the node detached — how waiters detect they left the queue.
 unsafe fn wq_delete(lock: *mut LOCK, procno: ProcNumber) {
     let q = &mut (*lock).waitProcs;
-    let node = links_of(procno).get();
+    // SAFETY: [PART] serialized by the lock partition lock
+    let node = unsafe { links_of(procno).get() };
     if node.prev == INVALID_PROC_NUMBER {
         q.list.head = node.next;
     } else {
         let cell = links_of(node.prev);
-        let mut prev = cell.get();
+        // SAFETY: [PART] serialized by the lock partition lock
+        let mut prev = unsafe { cell.get() };
         prev.next = node.next;
-        cell.set(prev);
+        // SAFETY: [PART] serialized by the lock partition lock
+        unsafe { cell.set(prev); }
     }
     if node.next == INVALID_PROC_NUMBER {
         q.list.tail = node.prev;
     } else {
         let cell = links_of(node.next);
-        let mut next = cell.get();
+        // SAFETY: [PART] serialized by the lock partition lock
+        let mut next = unsafe { cell.get() };
         next.prev = node.prev;
-        cell.set(next);
+        // SAFETY: [PART] serialized by the lock partition lock
+        unsafe { cell.set(next); }
     }
-    links_of(procno).set(proclist_node::detached());
+    // SAFETY: [PART] serialized by the lock partition lock
+    unsafe { links_of(procno).set(proclist_node::detached()); }
     debug_assert!(q.count > 0);
     q.count -= 1;
 }
@@ -97,7 +116,8 @@ unsafe fn wq_delete(lock: *mut LOCK, procno: ProcNumber) {
 pub unsafe fn wq_foreach(lock: *mut LOCK, mut body: impl FnMut(ProcNumber) -> bool) {
     let mut cur = (*lock).waitProcs.list.head;
     while cur != INVALID_PROC_NUMBER {
-        let next = links_of(cur).get().next;
+        // SAFETY: [PART] serialized by the lock partition lock
+        let next = unsafe { links_of(cur).get() }.next;
         if !body(cur) {
             break;
         }
@@ -135,7 +155,8 @@ pub(crate) unsafe fn JoinWaitQueue(
 
     let my_proc_held_locks = (*proclock).holdMask;
     let mut my_held_locks = my_proc_held_locks;
-    proc.heldLocks.set(my_proc_held_locks);
+    // SAFETY: [PART] serialized by the lock partition lock
+    unsafe { proc.heldLocks.set(my_proc_held_locks); }
 
     // Group members' holds give us their priority in the queue.
     if leader != INVALID_PROC_NUMBER {
@@ -159,9 +180,11 @@ pub(crate) unsafe fn JoinWaitQueue(
             if leader != INVALID_PROC_NUMBER && leader == waiter.lockGroupLeader.load(Relaxed) {
                 return true;
             }
-            let waiter_mode = waiter.waitLockMode.get();
+            // SAFETY: [PART] serialized by the lock partition lock
+            let waiter_mode = unsafe { waiter.waitLockMode.get() };
             if lockMethodTable.conflictTab[waiter_mode as usize] & my_held_locks != 0 {
-                if lockMethodTable.conflictTab[lockmode as usize] & waiter.heldLocks.get() != 0 {
+                // SAFETY: [PART] serialized by the lock partition lock
+                if lockMethodTable.conflictTab[lockmode as usize] & unsafe { waiter.heldLocks.get() } != 0 {
                     deadlock_seams::remember_simple_deadlock::call(
                         procno,
                         lockmode,
@@ -208,10 +231,13 @@ pub(crate) unsafe fn JoinWaitQueue(
     }
     (*lock).waitMask |= LOCKBIT_ON(lockmode);
 
-    proc.heldLocks.set(my_proc_held_locks);
-    proc.waitLock.set(lock);
-    proc.waitProcLock.set(proclock);
-    proc.waitLockMode.set(lockmode);
+    // SAFETY: [PART] serialized by the lock partition lock
+    unsafe {
+        proc.heldLocks.set(my_proc_held_locks);
+        proc.waitLock.set(lock);
+        proc.waitProcLock.set(proclock);
+        proc.waitLockMode.set(lockmode);
+    }
     proc.waitStatus.store(PROC_WAIT_STATUS_WAITING, Release);
 
     PROC_WAIT_STATUS_WAITING
@@ -555,16 +581,21 @@ fn log_lock_wait_progress(
 /// SAFETY contract: the lock's partition LWLock held exclusive.
 pub unsafe fn ProcWakeup(procno: ProcNumber, waitStatus: ProcWaitStatus) {
     let proc = lmgr_proc::GetPGProcByNumber(procno);
-    if proc.links.get().is_detached() {
+    // SAFETY: [PART] serialized by the lock partition lock
+    if unsafe { proc.links.get() }.is_detached() {
         return;
     }
     debug_assert_eq!(proc.waitStatus.load(Relaxed), PROC_WAIT_STATUS_WAITING);
 
-    let lock = proc.waitLock.get();
+    // SAFETY: [PART] serialized by the lock partition lock
+    let lock = unsafe { proc.waitLock.get() };
     wq_delete(lock, procno);
 
-    proc.waitLock.set(std::ptr::null_mut());
-    proc.waitProcLock.set(std::ptr::null_mut());
+    // SAFETY: [PART] serialized by the lock partition lock
+    unsafe {
+        proc.waitLock.set(std::ptr::null_mut());
+        proc.waitProcLock.set(std::ptr::null_mut());
+    }
     proc.waitStatus.store(waitStatus, Release);
     // C clears MyProc's waitStart here (not proc's); transcribed faithfully.
     lmgr_proc::GetPGProcByNumber(my_procno()).waitStart.write(0);
@@ -581,8 +612,10 @@ pub unsafe fn ProcLockWakeup(lockMethodTable: LockMethod, lock: *mut LOCK) {
     let mut ahead_requests = 0;
     wq_foreach(lock, |waiter_no| {
         let waiter = lmgr_proc::GetPGProcByNumber(waiter_no);
-        let lockmode = waiter.waitLockMode.get();
-        let proclock: *mut PROCLOCK = waiter.waitProcLock.get();
+        // SAFETY: [PART] serialized by the lock partition lock
+        let lockmode = unsafe { waiter.waitLockMode.get() };
+        // SAFETY: [PART] serialized by the lock partition lock
+        let proclock: *mut PROCLOCK = unsafe { waiter.waitProcLock.get() };
 
         // Waken if it conflicts with neither earlier waiters' requests nor
         // already-held locks.
@@ -648,7 +681,8 @@ pub fn CheckDeadLock() -> PgResult<()> {
 
     let proc = lmgr_proc::GetPGProcByNumber(procno);
     // Awoken in the interim? (Unlinked from the queue == granted.)
-    if !proc.links.get().is_detached() {
+    // SAFETY: [PART] serialized by the lock partition lock
+    if !unsafe { proc.links.get() }.is_detached() {
         let state = deadlock_seams::dead_lock_check::call(procno);
         lmgr_proc::SetDeadlockState(state);
 

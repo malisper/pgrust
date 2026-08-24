@@ -372,8 +372,9 @@ pub fn FlushDatabaseBuffers(dbid: types_core::Oid) -> PgResult<()> {
     crate::uring::drain_own();
     for i in 0..crate::buf_hdr::NBuffersInited() {
         let desc = GetBufferDescriptor(i);
-        // Unlocked precheck, safe as in DropRelationBuffers (C comment).
-        if desc.tag().dbOid != dbid {
+        // Unlocked precheck, safe as in DropRelationBuffers (C comment). Racy
+        // snapshot read: the authoritative test is re-done under LockBufHdr.
+        if desc.tag_racy_snapshot().dbOid != dbid {
             continue;
         }
 
@@ -416,8 +417,9 @@ pub fn FlushRelationsAllBuffers(rels: &[RelFileLocatorBackend]) -> PgResult<()> 
 
     for i in 0..crate::buf_hdr::NBuffersInited() {
         let desc = GetBufferDescriptor(i);
-        let tag = desc.tag();
-        // Unlocked precheck, safe as in DropRelationBuffers (C comment).
+        // Unlocked precheck, safe as in DropRelationBuffers (C comment). Racy
+        // snapshot read: the authoritative tag test is re-done under LockBufHdr.
+        let tag = desc.tag_racy_snapshot();
         let rlocator = if use_bsearch {
             locators
                 .binary_search_by_key(&(tag.spcOid, tag.dbOid, tag.relNumber), |l| {

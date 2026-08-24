@@ -1593,6 +1593,20 @@ fn mutate_query_fields_inplace<'mcx>(
                     .expect("RangeTblEntry");
                 }
             }
+            RTEKind::RTE_RELATION => {
+                // C range_table_mutator walks rte->tablesample for RTE_RELATION.
+                // Omitting it let expression-substitution passes
+                // (ReplaceVarsFromTargetList, map_variable_attnos) skip the
+                // TableSampleClause args/repeatable while later ChangeVarNodes
+                // passes still varno-remapped the leftover Vars — a wrong attno.
+                if let Some(new_ts) = nodes_core::mutate_opt_dyn(rte.tablesample, m)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(new_ts))
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
             _ => {}
         }
         if let Some(new_sq) = nodes_core::mutate_list_dyn(mcx, &rte.securityQuals, m)? {

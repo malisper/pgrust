@@ -954,7 +954,13 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     // Developer knob for the watchdog's standing e2e: each simple query leaks
     // this many MB into a session-lifetime "WatchdogTestHog" context. Hidden
     // (NOT_IN_SAMPLE + NO_SHOW_ALL): a deliberate leak is never a product knob.
-    GucIntSetting { name: "pgrust.memory_watchdog_test_hog", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Leaks this many MB per query into a named memory context (memory watchdog test instrumentation)."), long_desc: None, flags: GUC_UNIT_MB | GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::pgrust_memory_watchdog_test_hog, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024 * 1024, check_hook: None, assign_hook: None, show_hook: None },
+    // PGC_SUSET (not USERSET): its sole effect is deliberate, cumulative memory
+    // consumption, and pgrust is thread-per-backend (one shared address space),
+    // so an unprivileged SET would be a whole-server availability primitive.
+    // Matches PostgreSQL's classification of dangerous DEVELOPER_OPTIONS knobs
+    // (e.g. ignore_checksum_failure = SUSET, ignore_invalid_pages = POSTMASTER):
+    // only superusers (or roles GRANTed SET on it) may arm it.
+    GucIntSetting { name: "pgrust.memory_watchdog_test_hog", context: PGC_SUSET, group: DEVELOPER_OPTIONS, short_desc: Some("Leaks this many MB per query into a named memory context (memory watchdog test instrumentation)."), long_desc: None, flags: GUC_UNIT_MB | GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::pgrust_memory_watchdog_test_hog, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024 * 1024, check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.ephemeral_db_grace (pgrust-only, docs/design/test-views.md D1):
     // how long a prefix-matching ephemeral database must sit at zero backends
     // before the janitor reaps it. PGC_SIGHUP so operators tune it without a
@@ -1239,3 +1245,28 @@ pub static ConfigureNamesEnum: &[GucEnumSetting] = &[
     GucEnumSetting { name: "io_method", context: PGC_POSTMASTER, group: RESOURCES_IO, short_desc: Some("Selects the method for executing asynchronous I/O."), long_desc: None, flags: 0, variable: &vars::io_method, boot_val: GucDefaultValue::Enum(IOMETHOD_SYNC), options: GucEnumOptions::External(&option_sets::io_method_options), check_hook: Some(&hooks::check_io_method), assign_hook: Some(&hooks::assign_io_method), show_hook: None },
     GucEnumSetting { name: "hnsw.iterative_scan", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the mode for iterative scans"), long_desc: None, flags: 0, variable: &vars::hnsw_iterative_scan, boot_val: GucDefaultValue::Enum(0), options: GucEnumOptions::Inline(hnsw_iterative_scan_options), check_hook: None, assign_hook: None, show_hook: None },
 ];
+
+#[cfg(test)]
+mod security_guc_context_tests {
+    use super::*;
+
+    // Regression guard: developer/test-instrumentation knobs whose only effect
+    // is deliberate resource consumption or crashing must never be PGC_USERSET
+    // (settable by any authenticated role). pgrust is thread-per-backend, so a
+    // USERSET memory hog is a whole-server DoS primitive. See the SUSET note on
+    // pgrust.memory_watchdog_test_hog above and PostgreSQL's own classification
+    // of dangerous DEVELOPER_OPTIONS knobs (SUSET / POSTMASTER).
+    #[test]
+    fn memory_watchdog_test_hog_is_not_userset() {
+        let hog = ConfigureNamesInt
+            .iter()
+            .find(|g| g.name == "pgrust.memory_watchdog_test_hog")
+            .expect("pgrust.memory_watchdog_test_hog must be registered");
+        assert_ne!(
+            hog.context, PGC_USERSET,
+            "pgrust.memory_watchdog_test_hog is a deliberate memory-leak knob; \
+             PGC_USERSET lets any authenticated role force unbounded allocations \
+             (DoS). It must be at least PGC_SUSET.",
+        );
+    }
+}

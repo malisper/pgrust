@@ -7,6 +7,7 @@ use mcx::{Mcx, PgString};
 use pg_b64::{pg_b64_enc_len, pg_b64_encode};
 use pg_hmac::{hmac_sha256, PgHmacCtx, Sha256};
 use pg_sha2::PG_SHA256_DIGEST_LENGTH;
+use secure_zero::{secure_zero, secure_zero_slice};
 use types_error::PgResult;
 
 pub const SCRAM_SHA_256_NAME: &str = "SCRAM-SHA-256";
@@ -32,17 +33,27 @@ pub fn scram_salted_password(
     let mut result = ui_prev;
     let mut i = 1;
     while i < iterations {
-        // Interruptible: scram_iterations may be set very large.
-        postgres_seams::check_for_interrupts::call()?;
+        // Interruptible: scram_iterations may be set very large. Wipe the
+        // key-derived intermediates before bailing on an interrupt.
+        if let Err(e) = postgres_seams::check_for_interrupts::call() {
+            secure_zero_slice(&mut result);
+            secure_zero_slice(&mut ui_prev);
+            return Err(e);
+        }
 
-        let ui = hmac_sha256(password, &ui_prev);
+        let mut ui = hmac_sha256(password, &ui_prev);
         for j in 0..SCRAM_SHA_256_KEY_LEN {
             result[j] ^= ui[j];
         }
         ui_prev = ui;
+        // `ui` was copied into `ui_prev`; wipe this iteration's copy.
+        secure_zero_slice(&mut ui);
         i += 1;
     }
 
+    // `ui_prev` holds the last U_i (key-derived); wipe it. `result` is the
+    // SaltedPassword returned to the caller, whose duty it is to wipe it.
+    secure_zero_slice(&mut ui_prev);
     Ok(result)
 }
 
@@ -70,19 +81,34 @@ pub fn scram_build_secret<'mcx>(
 ) -> PgResult<PgString<'mcx>> {
     assert!(iterations > 0);
 
-    let salted_password = scram_salted_password(password, salt, iterations)?;
-    let stored_key = scram_h(&scram_client_key(&salted_password));
-    let server_key = scram_server_key(&salted_password);
+    let mut salted_password = scram_salted_password(password, salt, iterations)?;
+    let mut client_key = scram_client_key(&salted_password);
+    let mut stored_key = scram_h(&client_key);
+    let mut server_key = scram_server_key(&salted_password);
 
-    let encoded_salt = b64(salt);
-    let encoded_stored = b64(&stored_key);
-    let encoded_server = b64(&server_key);
+    let encoded_salt = b64(salt); // salt is public (stored verbatim in the catalog)
+    let mut encoded_stored = b64(&stored_key);
+    let mut encoded_server = b64(&server_key);
 
     // Cold DDL path: one std String temp for the format, then one mcx copy.
-    let secret = format!(
+    let mut secret = format!(
         "{SCRAM_SHA_256_NAME}${iterations}:{encoded_salt}${encoded_stored}:{encoded_server}"
     );
-    PgString::from_str_in(&secret, mcx)
+    let out = PgString::from_str_in(&secret, mcx);
+
+    // Wipe every temporary carrying key-equivalent / verifier material before
+    // it is dropped onto the shared process heap (runs on the OOM error path
+    // of from_str_in too). SAFETY: as_bytes_mut leaves valid UTF-8 (all-zero)
+    // and the strings are dropped immediately after.
+    secure_zero(unsafe { secret.as_bytes_mut() });
+    secure_zero(unsafe { encoded_server.as_bytes_mut() });
+    secure_zero(unsafe { encoded_stored.as_bytes_mut() });
+    secure_zero_slice(&mut salted_password);
+    secure_zero_slice(&mut client_key);
+    secure_zero_slice(&mut stored_key);
+    secure_zero_slice(&mut server_key);
+
+    out
 }
 
 fn b64(src: &[u8]) -> String {

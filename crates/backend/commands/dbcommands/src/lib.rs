@@ -11,7 +11,7 @@ use mcx::Mcx;
 use pg_database_seams::PgDatabaseForm;
 use types_core::catalog::DATABASE_RELATION_ID;
 use types_core::{InvalidOid, Oid};
-use types_error::{ErrorLocation, PgResult, ERROR, PANIC, WARNING};
+use types_error::{ErrorLocation, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, PANIC, WARNING};
 use types_storage::lock::{AccessExclusiveLock, LOCKMODE};
 use types_storage::storage::ProcSignalBarrierType;
 use xlogreader_seams::XLogReaderState;
@@ -62,13 +62,31 @@ pub fn get_database_name(dbid: Oid) -> PgResult<Option<String>> {
     let d = SysCacheGetAttrNotNull(DATABASEOID, &tuple, ANUM_PG_DATABASE_DATNAME)?;
     // SAFETY: datname is a NameData column; the datum points at its
     // NUL-terminated 64-byte buffer inside the pinned tuple image.
-    let name = unsafe {
+    let bytes = unsafe {
         let p = d.as_usize() as *const u8;
         let mut len = 0usize;
         while len < NAMEDATALEN && *p.add(len) != 0 {
             len += 1;
         }
-        core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, len)).to_owned()
+        core::slice::from_raw_parts(p, len)
+    };
+    // datname bytes are attacker-influenceable (SQL_ASCII identifier byte-clip
+    // at CREATE DATABASE, WAL-replayed catalog pages), so they may not be valid
+    // UTF-8. Validate rather than fabricating an unsound str via
+    // from_utf8_unchecked; on invalid input raise a catchable
+    // ERRCODE_DATA_CORRUPTED error instead of triggering UB.
+    let name = match core::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => {
+            ReleaseSysCache(tuple);
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DATA_CORRUPTED)
+                .errmsg(format!(
+                    "database name for database {dbid} is not valid UTF-8"
+                ))
+                .into_error()
+                .into());
+        }
     };
     ReleaseSysCache(tuple);
     Ok(Some(name))
@@ -298,6 +316,53 @@ fn recovery_create_dbdir(path: &str, only_tblspc: bool) -> PgResult<()> {
     fd::pg_mkdir_p(path)
 }
 
+/// The main data of an RM_DBASE record is fully attacker-controlled at the WAL
+/// trust boundary (a compromised primary, or a writable WAL archive): the
+/// xlogreader validates only CRC and structural framing, never the per-rmgr
+/// main-data length. C casts XLogRecGetData() straight to the record structs
+/// and, for DROP, iterates a record-embedded ntablespaces count, over-reading
+/// adjacent decode-buffer memory on a truncated record. In this startup-redo
+/// thread an out-of-range slice would instead be a deterministic panic, i.e. a
+/// permanent crash-restart loop as the poisoned record is replayed on every
+/// restart. So bounds-check every field first and surface a truncated record as
+/// a catchable ERRCODE_DATA_CORRUPTED. (The db/tablespace OIDs only ever reach
+/// the filesystem through GetDatabasePath(), which renders them as decimal
+/// integers, so a WAL record can never drive a path component outside the data
+/// directory.)
+fn require_dbase_len(data: &[u8], need: usize, op: &str) -> PgResult<()> {
+    if data.len() < need {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "{op} dbase record has {} bytes of main data, expected at least {need}",
+                data.len()
+            ))
+            .finish(loc("dbase_redo"))?;
+        unreachable!("ERROR finish returned");
+    }
+    Ok(())
+}
+
+/// Validate an XLOG_DBASE_DROP record's trusted ntablespaces count against the
+/// payload it actually carries (xl_dbase_drop_rec = db_id, ntablespaces, then a
+/// trailing tablespace_ids[ntablespaces] array) before any of the count is used
+/// to index the record. Returns the validated, non-negative count.
+fn dbase_drop_ntablespaces(data: &[u8]) -> PgResult<i32> {
+    require_dbase_len(data, 8, "XLOG_DBASE_DROP")?;
+    let ntablespaces = i32::from_ne_bytes(data[4..8].try_into().expect("short drop record"));
+    if ntablespaces < 0 {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "XLOG_DBASE_DROP dbase record has invalid tablespace count {ntablespaces}"
+            ))
+            .finish(loc("dbase_redo"))?;
+        unreachable!("ERROR finish returned");
+    }
+    require_dbase_len(data, 8 + 4 * ntablespaces as usize, "XLOG_DBASE_DROP")?;
+    Ok(ntablespaces)
+}
+
 /// dbase_redo (dbcommands.c). WAL_LOG-strategy create records are loud: the
 /// WAL_LOG copy engine is unported (createdb runs FILE_COPY only).
 pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
@@ -312,11 +377,15 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let ctx = mcx::MemoryContext::new("dbase_redo");
     let mcx = ctx.mcx();
 
+    // Only ever called after require_dbase_len has proven `off + 4 <= data.len()`.
     let u32_at = |off: usize| -> u32 {
         u32::from_ne_bytes(data[off..off + 4].try_into().expect("short dbase record"))
     };
 
     if info == XLOG_DBASE_CREATE_FILE_COPY {
+        // xl_dbase_create_file_copy_rec: db_id, tablespace_id, src_db_id,
+        // src_tablespace_id (4 x u32).
+        require_dbase_len(data, 16, "XLOG_DBASE_CREATE_FILE_COPY")?;
         let db_id = u32_at(0);
         let tablespace_id = u32_at(4);
         let src_db_id = u32_at(8);
@@ -366,6 +435,8 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
 
         fd::copydir(src_path.as_str(), dst_path.as_str(), false)?;
     } else if info == XLOG_DBASE_CREATE_WAL_LOG {
+        // xl_dbase_create_wal_log_rec: db_id, tablespace_id (2 x u32).
+        require_dbase_len(data, 8, "XLOG_DBASE_CREATE_WAL_LOG")?;
         let db_id = u32_at(0);
         let tablespace_id = u32_at(4);
 
@@ -373,8 +444,10 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
         recovery_create_dbdir(get_parent_directory(dbpath.as_str()), true)?;
         walcopy::CreateDirAndVersionFile(dbpath.as_str(), db_id, tablespace_id, true)?;
     } else if info == XLOG_DBASE_DROP {
+        // The record-embedded ntablespaces count is validated against the actual
+        // payload before it drives any indexing.
+        let ntablespaces = dbase_drop_ntablespaces(data)?;
         let db_id = u32_at(0);
-        let ntablespaces = i32::from_ne_bytes(data[4..8].try_into().expect("short drop record"));
 
         if xlogutils::InHotStandby() {
             // Lock out InitPostgres re-connects (and walsenders on
@@ -396,7 +469,7 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
         );
         procsignal::WaitForProcSignalBarrier(gen)?;
 
-        for i in 0..ntablespaces.max(0) as usize {
+        for i in 0..ntablespaces as usize {
             let tsid = u32_at(8 + 4 * i);
             let dst_path = relpath::GetDatabasePath(mcx, db_id, tsid)?;
             if !fd::rmtree(dst_path.as_str(), true)? {
@@ -441,5 +514,47 @@ mod tests {
         assert!(dbcommands_seams::dbase_redo::is_installed());
         // Unbooted catcache: loud stop, never a fabricated name.
         assert!(std::panic::catch_unwind(|| dbcommands_seams::get_database_name::call(1)).is_err());
+    }
+
+    // Untrusted WAL: a truncated RM_DBASE record must surface as a catchable
+    // ERRCODE_DATA_CORRUPTED, never an out-of-range slice panic on the startup
+    // redo thread. These exercise the length gates directly so they don't
+    // depend on a booted backend runtime.
+    #[test]
+    fn dbase_len_gates_reject_truncated_records() {
+        // 0-byte main data: every opcode's fixed header read is rejected.
+        for (need, op) in [
+            (16usize, "XLOG_DBASE_CREATE_FILE_COPY"),
+            (8, "XLOG_DBASE_CREATE_WAL_LOG"),
+            (8, "XLOG_DBASE_DROP"),
+        ] {
+            let err = require_dbase_len(&[], need, op).err().unwrap();
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        // Exactly the required length is accepted.
+        require_dbase_len(&vec![0u8; 16], 16, "XLOG_DBASE_CREATE_FILE_COPY").unwrap();
+    }
+
+    #[test]
+    fn dbase_drop_ntablespaces_rejects_oversized_count() {
+        // 8-byte payload declaring ntablespaces = 1000: the count exceeds the
+        // trailing array the record carries, so it must be rejected rather than
+        // drive an out-of-range read in the redo loop.
+        let mut data = [0u8; 8];
+        data[0..4].copy_from_slice(&12345u32.to_ne_bytes()); // db_id
+        data[4..8].copy_from_slice(&1000i32.to_ne_bytes()); // ntablespaces
+        let err = dbase_drop_ntablespaces(&data).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // A negative count is likewise corrupt.
+        data[4..8].copy_from_slice(&(-1i32).to_ne_bytes());
+        let err = dbase_drop_ntablespaces(&data).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+        // A well-formed record: ntablespaces = 2 with a matching 8-byte array.
+        let mut ok = vec![0u8; 16];
+        ok[0..4].copy_from_slice(&12345u32.to_ne_bytes());
+        ok[4..8].copy_from_slice(&2i32.to_ne_bytes());
+        assert_eq!(dbase_drop_ntablespaces(&ok).unwrap(), 2);
     }
 }

@@ -159,6 +159,36 @@ fn am_resolution_and_slot_callbacks() {
     assert!(table_finish_bulk_insert(&heap, TABLE_INSERT_SKIP_FSM).is_ok());
 }
 
+// A DROP of a pgrcolumnar2 relation must target its O-7 table directory for
+// removal (heap relations own no such sibling directory). pgrc2_drop_dir is
+// the pure selector the drop-storage wiring consults; regression guard for
+// the disk-leak / relfilenumber-reuse resurrection finding.
+#[test]
+fn drop_storage_targets_columnar_directory_only() {
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+
+    // Heap and unrecognized AMs keep their data in the smgr forks: nothing
+    // extra to schedule.
+    let heap = make(mcx, 1, RELKIND_RELATION, HEAP_TABLE_AM_OID);
+    assert_eq!(pgrc2_drop_dir(&heap), None);
+
+    // A relation whose relam is registered as pgrcolumnar2 resolves to its
+    // per-table directory (pgrc2_<relfilenumber>, sibling of the main fork).
+    const PGRC2_AM_OID: Oid = 99_991;
+    register_pgrcolumnar2_table_am(PGRC2_AM_OID);
+    let columnar = make(mcx, 5, RELKIND_RELATION, PGRC2_AM_OID);
+    assert_eq!(TableAm::of(&columnar), Some(TableAm::Pgrcolumnar2));
+    let dir = pgrc2_drop_dir(&columnar).expect("columnar relation must schedule its directory");
+    let expected =
+        ::pgrc2_am::dirpath::table_dir_path(columnar.rd_locator.get(), columnar.rd_backend);
+    assert_eq!(dir, expected);
+    assert!(
+        dir.rsplit('/').next().unwrap().starts_with("pgrc2_"),
+        "columnar drop dir must be the pgrc2_<relfilenumber> table directory, got {dir}"
+    );
+}
+
 #[test]
 fn guc_storage_and_check_hook() {
     assert_eq!(default_table_access_method(), "heap");
@@ -417,7 +447,7 @@ fn pgrc2_tuple_update_delete_refuse_typed_at_the_dispatch() {
     let mut tmfd = TM_FailureData::default();
 
     let e = table_tuple_delete(ctx.mcx(), &rel, &tid, 0, &None, &None, true, &mut tmfd, false)
-        .unwrap_err();
+        .err().unwrap();
     assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
     assert_eq!(e.message(), "pgrcolumnar2 does not support DELETE");
 
@@ -437,7 +467,7 @@ fn pgrc2_tuple_update_delete_refuse_typed_at_the_dispatch() {
         &mut lockmode,
         &mut update_indexes,
     )
-    .unwrap_err();
+    .err().unwrap();
     assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
     assert_eq!(e.message(), "pgrcolumnar2 does not support UPDATE");
 }

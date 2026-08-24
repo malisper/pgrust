@@ -587,3 +587,34 @@ pub fn reset_all_options() {
     with_store_mut(crate::registry::reset_all_options)
         .unwrap_or_else(|| store_uninitialized("ResetAllOptions"));
 }
+
+/// Scrub a REUSED pooled/retained worker thread's GUC store back to the
+/// session-neutral fresh-backend baseline (boot defaults overlaid with the
+/// postmaster's config), ready for the new leader's GUC pin.
+///
+/// `ResetAllOptions` alone is unsafe on a reused thread: by C parity it
+/// preserves every value sourced `<= PGC_S_OVERRIDE` (client startup options
+/// via PGOPTIONS, `ALTER ROLE`/`ALTER DATABASE ... SET`) and the `reset_val`
+/// stamps `make_default` bookkeeping wrote for them, so a PRIOR session's
+/// `search_path`/`TimeZone`/etc. -- and the worker-side name resolution and
+/// privilege context they drive -- would stay live under the NEXT (different
+/// user's) session's parallel-worker task. A C parallel worker is a fresh
+/// process and cannot leak this way; this reproduces that guarantee for the
+/// thread-pooled engine by rebuilding the fresh-backend store before every
+/// cross-session rebind.
+pub fn reset_store_to_process_base() {
+    // 1. Return every session-settable variable to its boot default, discarding
+    //    the prior session's low-source values AND their reset_val stamps
+    //    (the class ResetAllOptions cannot reach).
+    with_store_mut(crate::registry::reset_session_options_to_boot)
+        .unwrap_or_else(|| store_uninitialized("reset_store_to_process_base"));
+    // 2. Re-overlay the postmaster config base (postgresql.conf/env/argv) that a
+    //    freshly initialized backend has over boot defaults, so legitimate
+    //    config-file settings are preserved. The base is session-neutral and
+    //    was validated by the postmaster; a bind failure here must not abort the
+    //    claim (the store is already at a safe boot baseline).
+    if crate::layers::base_share_enabled() {
+        let base = crate::layers::current_base();
+        let _ = crate::layers::bind_base(&base);
+    }
+}

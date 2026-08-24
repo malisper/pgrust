@@ -343,11 +343,40 @@ pub fn validate_port(opts: &[(String, String)]) -> Result<u16, String> {
 // full parameter list for the startup packet (caller decides user/database/
 // replication/...). Ok(Err(msg)) is libpq's CONNECTION_BAD-with-errorMessage
 // shape; the caller wraps it into its own ereport.
+// Enforce libpq's sslmode contract for a client with no TLS support. Mirrors
+// fe-connect.c connectOptions2's #ifndef USE_SSL arm: an unknown sslmode is an
+// "invalid sslmode value" error, and require/verify-ca/verify-full are rejected
+// with "sslmode value \"...\" invalid when SSL support is not compiled in".
+// disable/allow/prefer are accepted and proceed without encryption. An absent
+// sslmode is treated as the compiled default ("prefer"), which does not require
+// encryption. Refusing here is what prevents a silent cleartext downgrade of a
+// caller that asked for a TLS-required connection.
+fn check_sslmode(opts: &[(String, String)]) -> Result<(), String> {
+    match opt(opts, "sslmode") {
+        None | Some("disable") | Some("allow") | Some("prefer") | Some("") => Ok(()),
+        Some(m @ ("require" | "verify-ca" | "verify-full")) => Err(format!(
+            "sslmode value \"{m}\" invalid when SSL support is not compiled in"
+        )),
+        Some(other) => Err(format!("invalid sslmode value: \"{other}\"")),
+    }
+}
+
 pub fn connect(
     opts: Vec<(String, String)>,
     startup_params: &[(&str, &str)],
     we: WaitEvents,
 ) -> PgResult<Result<PgConn, String>> {
+    // libpq connectOptions2 (fe-connect.c): sslmode is validated BEFORE any
+    // socket is opened. This client carries no TLS implementation, so — exactly
+    // like a libpq built without USE_SSL — the SSL-requiring modes MUST be a
+    // hard error rather than a silent downgrade to a cleartext connection.
+    // disable/allow/prefer never require encryption and proceed in plaintext
+    // (allow/prefer would merely *attempt* SSL first, which we cannot, so they
+    // fall through to plaintext just as no-SSL libpq does). require/verify-ca/
+    // verify-full demand encryption and cannot be satisfied, so we refuse.
+    if let Err(e) = check_sslmode(&opts) {
+        return Ok(Err(e));
+    }
     let port = match validate_port(&opts) {
         Ok(p) => p,
         Err(e) => return Ok(Err(e)),
@@ -1650,14 +1679,14 @@ mod tests {
 
     #[test]
     fn conninfo_parse_errors() {
-        assert!(parse_conninfo("hostonly").unwrap_err().contains("missing \"=\""));
-        assert!(parse_conninfo("host='x").unwrap_err().contains("unterminated"));
+        assert!(parse_conninfo("hostonly").err().unwrap().contains("missing \"=\""));
+        assert!(parse_conninfo("host='x").err().unwrap().contains("unterminated"));
     }
 
     #[test]
     fn conninfo_rejects_unknown_keyword() {
         assert_eq!(
-            resolve_conninfo("dbname=x frobnicate=1").unwrap_err(),
+            resolve_conninfo("dbname=x frobnicate=1").err().unwrap(),
             "invalid connection option \"frobnicate\""
         );
     }
@@ -1665,11 +1694,11 @@ mod tests {
     #[test]
     fn port_validation() {
         let parse = |s: &str| validate_port(&parse_conninfo(s).unwrap());
-        assert_eq!(parse("port=-1").unwrap_err(), "invalid port number: \"-1\"");
-        assert_eq!(parse("port=70000").unwrap_err(), "invalid port number: \"70000\"");
-        assert_eq!(parse("port=0").unwrap_err(), "invalid port number: \"0\"");
+        assert_eq!(parse("port=-1").err().unwrap(), "invalid port number: \"-1\"");
+        assert_eq!(parse("port=70000").err().unwrap(), "invalid port number: \"70000\"");
+        assert_eq!(parse("port=0").err().unwrap(), "invalid port number: \"0\"");
         assert_eq!(
-            parse("port=1foo").unwrap_err(),
+            parse("port=1foo").err().unwrap(),
             "invalid integer value \"1foo\" for connection option \"port\""
         );
         assert_eq!(parse("").unwrap(), 5432);
@@ -1749,7 +1778,7 @@ mod tests {
             &mut opts,
             &mut found,
         )
-        .unwrap_err();
+        .err().unwrap();
         assert_eq!(
             err,
             format!("syntax error in service file \"{}\", line 4", f.to_str().unwrap())
@@ -1821,7 +1850,7 @@ mod tests {
     fn frame_negative_length_is_connection_error() {
         let (mut conn, _srv) = test_conn();
         conn.inbuf = frame(b'Z', -1, b"");
-        let err = conn.next_message().unwrap_err();
+        let err = conn.next_message().err().unwrap();
         assert!(err.contains("lost synchronization"), "{err}");
         assert!(err.contains("length -1"), "{err}");
         assert!(conn.connection_bad());
@@ -1891,7 +1920,7 @@ mod tests {
     fn datarow_missing_column_length_rejected() {
         // Declares 1 column but has no 4-byte length word.
         let body = 1u16.to_be_bytes().to_vec();
-        assert!(parse_data_row(&body).unwrap_err().contains("insufficient data"));
+        assert!(parse_data_row(&body).err().unwrap().contains("insufficient data"));
         // Only half a length word.
         let mut body = 1u16.to_be_bytes().to_vec();
         body.extend_from_slice(&[0, 0]);
@@ -1904,7 +1933,7 @@ mod tests {
         let mut body = 1u16.to_be_bytes().to_vec();
         body.extend_from_slice(&5i32.to_be_bytes());
         body.extend_from_slice(b"ab");
-        assert!(parse_data_row(&body).unwrap_err().contains("insufficient data"));
+        assert!(parse_data_row(&body).err().unwrap().contains("insufficient data"));
     }
 
     #[test]
@@ -1912,7 +1941,7 @@ mod tests {
         for bad in [-2i32, i32::MIN] {
             let mut body = 1u16.to_be_bytes().to_vec();
             body.extend_from_slice(&bad.to_be_bytes());
-            let err = parse_data_row(&body).unwrap_err();
+            let err = parse_data_row(&body).err().unwrap();
             assert!(err.contains("invalid column length"), "{err}");
         }
     }
@@ -1923,7 +1952,7 @@ mod tests {
         body.extend_from_slice(&1i32.to_be_bytes());
         body.extend_from_slice(b"x");
         body.push(0xEE); // leftover byte after the declared columns
-        assert!(parse_data_row(&body).unwrap_err().contains("extraneous data"));
+        assert!(parse_data_row(&body).err().unwrap().contains("extraneous data"));
         // Same via the borrowed (streaming) parser.
         let mut cols = Vec::new();
         assert!(parse_data_row_borrowed(&body, &mut cols).is_err());
@@ -2057,6 +2086,32 @@ mod tests {
         let (s, next) = cstr_at(b"ab", 5);
         assert_eq!(s, "");
         assert_eq!(next, 3);
+    }
+
+    #[test]
+    fn sslmode_refuses_tls_required_modes() {
+        // No TLS support here, so require/verify-* must be a hard error (no
+        // silent cleartext downgrade), matching libpq's no-USE_SSL wording.
+        for m in ["require", "verify-ca", "verify-full"] {
+            let opts = vec![("sslmode".to_string(), m.to_string())];
+            let err = check_sslmode(&opts).err().unwrap();
+            assert_eq!(
+                err,
+                format!("sslmode value \"{m}\" invalid when SSL support is not compiled in")
+            );
+        }
+        // Non-encrypting modes (and the absent/default "prefer") are accepted.
+        for m in ["disable", "allow", "prefer", ""] {
+            let opts = vec![("sslmode".to_string(), m.to_string())];
+            assert!(check_sslmode(&opts).is_ok(), "sslmode={m:?} should be ok");
+        }
+        assert!(check_sslmode(&[]).is_ok());
+        // An unrecognized value is rejected as invalid.
+        let opts = vec![("sslmode".to_string(), "bogus".to_string())];
+        assert_eq!(
+            check_sslmode(&opts).err().unwrap(),
+            "invalid sslmode value: \"bogus\""
+        );
     }
 
     #[test]

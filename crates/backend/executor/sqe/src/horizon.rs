@@ -213,6 +213,9 @@ struct StreamState {
     target: u64,
     inflight: bool,
     seeded: bool,
+    /// This dead slot has been placed on the reclamation free list (guards
+    /// against double-listing it across successive engage sweeps).
+    freed: bool,
     /// A real demand event has touched this stream (chain gating: the
     /// cascade advances only from demand-touched streams, so prefetch
     /// stays <= part_chain parts ahead of demand).
@@ -258,6 +261,9 @@ struct Shared {
     /// (part ptr, attno, path_ord, role) → state slot.
     sids: Mutex<HashMap<(usize, u32, u32, u8), usize>>,
     states: Mutex<Vec<Arc<Mutex<StreamState>>>>,
+    /// Reclaimed `states` slot indices (dead, quiesced) available for
+    /// reuse, so `states` does not grow unboundedly across engine churn.
+    free_states: Mutex<Vec<usize>>,
     queue: Mutex<Vec<usize>>,
     ctr: Counters,
     /// (part ptr, file_off, len) → prefetch-touched (hit/waste witness +
@@ -292,6 +298,7 @@ fn shared() -> &'static Arc<Shared> {
             part2loc: RwLock::new(HashMap::new()),
             sids: Mutex::new(HashMap::new()),
             states: Mutex::new(Vec::new()),
+            free_states: Mutex::new(Vec::new()),
             queue: Mutex::new(Vec::new()),
             ctr: Counters::default(),
             touched: Mutex::new(HashMap::new()),
@@ -320,22 +327,60 @@ pub fn engage(parts: &[Arc<OpenPart>]) {
             return;
         }
     }
-    // Sweep states of dropped banks (their parts' Weaks are dead) so the
-    // registries do not grow with engine-registry churn.
+    // Reclaim per-generation registry state whose parts have been
+    // dropped. A dead part's ArcInner allocation stays pinned as long as
+    // ANY Weak to it survives, so every dead Weak must actually be dropped
+    // here — clearing `st.part` on dead slots and tombstoning dead banks
+    // below — not merely left in place. Quiesced dead slots go on a free
+    // list for reuse so `states` does not grow across engine-registry
+    // churn.
     {
         let mut sids = sh.sids.lock().unwrap();
         let states = sh.states.lock().unwrap();
-        sids.retain(|_, &mut slot| {
-            let st = states[slot].lock().unwrap();
-            let alive = st.part.strong_count() > 0;
-            alive
-        });
-        // Dead slots stay allocated (slot indices are stable) but their
-        // states are marked dead so a queued slot drains to nothing.
-        for st in states.iter() {
-            let mut st = st.lock().unwrap();
+        sids.retain(|_, &mut slot| states[slot].lock().unwrap().part.strong_count() > 0);
+        let mut newly_free: Vec<usize> = Vec::new();
+        for (slot, st_arc) in states.iter().enumerate() {
+            let mut st = st_arc.lock().unwrap();
             if st.part.strong_count() == 0 {
+                // Drop the Weak (frees the pinned ArcInner) and mark dead.
                 st.ps = None;
+                st.part = Weak::new();
+                // Reclaim the slot only when it is quiescent: `inflight`
+                // is false iff the slot is neither queued nor draining, so
+                // no stale queue entry can survive to point at a reused
+                // slot.
+                if !st.inflight && !st.freed {
+                    st.freed = true;
+                    newly_free.push(slot);
+                }
+            }
+        }
+        if !newly_free.is_empty() {
+            sh.free_states.lock().unwrap().extend(newly_free);
+        }
+    }
+    // Reclaim dead banks: once all of a bank's parts are dropped its Weak
+    // handles still pin their ArcInner allocations (and the Vec holding
+    // them). Replace each such entry with a shared empty tombstone —
+    // bank_idx stays stable for part2loc/states, and every dead state of
+    // the bank is itself already dead — so those Weaks are freed and
+    // `banks` grows only by one pointer-sized slot per generation instead
+    // of accreting dead part handles.
+    {
+        let mut banks = sh.banks.write().unwrap();
+        let dead = |b: &Arc<BankReg>| {
+            !b.parts.is_empty() && b.parts.iter().all(|w| w.strong_count() == 0)
+        };
+        if banks.iter().any(dead) {
+            let tomb = Arc::new(BankReg {
+                parts: Vec::new(),
+                cold: AtomicBool::new(false),
+                first_demand_epoch: AtomicU64::new(u64::MAX),
+            });
+            for b in banks.iter_mut() {
+                if dead(b) {
+                    *b = tomb.clone();
+                }
             }
         }
     }
@@ -707,6 +752,7 @@ fn create_state(sh: &Arc<Shared>, key: (usize, u32, u32, u8), bank_idx: usize, p
         target: 0,
         inflight: false,
         seeded: false,
+        freed: false,
         demand_seen: false,
         dist_bytes: 0,
         holdoff: 0,
@@ -717,8 +763,19 @@ fn create_state(sh: &Arc<Shared>, key: (usize, u32, u32, u8), bank_idx: usize, p
         return s; // lost the race
     }
     let mut states = sh.states.lock().unwrap();
-    states.push(Arc::new(Mutex::new(st)));
-    let slot = states.len() - 1;
+    // Reuse a reclaimed slot when one is available (the freed slot is
+    // dead, out of `sids`, and — being quiesced when freed — carries no
+    // stale queue entry), else grow `states`.
+    let slot = match sh.free_states.lock().unwrap().pop() {
+        Some(s) => {
+            states[s] = Arc::new(Mutex::new(st));
+            s
+        }
+        None => {
+            states.push(Arc::new(Mutex::new(st)));
+            states.len() - 1
+        }
+    };
     sids.insert(key, slot);
     slot
 }

@@ -1,0 +1,94 @@
+# Reference point for ABI compliance checks
+#
+# This file lists commits on the current branch that break ABI compatibility in
+# ways that have been deemed acceptable (e.g., removing an extern function with
+# no third-party uses).  The primary intent of this file is to control the ABI
+# compliance checks on the buildfarm, but it also serves as a central location
+# to document the justification for each.
+#
+# In general, entries should be added reactively after an abi-compliance-check
+# buildfarm failure.  It is important to verify the details of the breakage
+# match expectations, as the first entry listed will become the updated ABI
+# baseline point.
+#
+# Add new entries by adding the output of the following to the top of the file:
+#
+# $ git log --pretty=format:"%H%n#%n# %s%n# %cd%n#%n# <ADD JUSTIFICATION HERE>" $ABIBREAKGITHASH -1 --date=iso
+#
+# Be sure to replace "<ADD JUSTIFICATION HERE>" with details of your change and
+# why it is deemed acceptable.
+
+8d9a97e0bb6d820dac553848f0d5d8cc3f3e219d
+#
+# Avoid name collision with NOT NULL constraints
+# 2026-02-21 12:22:08 +0100
+#
+# AddRelationNotNullConstraints() needs to receive the names of constraints
+# already created, so that it can avoid those names when assigning names to
+# not-null constraints.  The purpose of this function is rather obscure, and
+# furthermore it's new in 18, so I don't expect any third-party code to break.
+#
+# Discussion: https://postgr.es/m/19393-6a82427485a744cf@postgresql.org
+
+33e3de6d77e87d6c3c6f8f878dd8de42d37c3b8f
+#
+# Add file_extend_method=posix_fallocate,write_zeros.
+# 2026-02-06 17:38:39 +1300
+#
+# Modifying GUC tables isn't really an ABI break: the relevant object has
+# incomplete type so its layout is unknown to other C translation units.
+#
+# Discussion: https://www.postgresql.org/message-id/flat/e1f0cd3b-0164-45f5-9705-e922e59df90f%40dunslane.net#8a350b54012c0042f9869d288e978cfe
+
+492a69e1407029f8c673484f44aa719a63323d77
+#
+# Reject ADD CONSTRAINT NOT NULL if name mismatches existing constraint
+# 2026-02-03 12:33:29 +0100
+#
+# This commit added the constraint name as a parameter to
+# AdjustNotNullInheritance(), which it needed to verify that the new name
+# matches the existing one.  PGXN contained no calls to that function.
+
+c6ce4dcf9d3b7a8a89aca386124c473f98fc329e
+#
+# Fix trigger transition table capture for MERGE in CTE queries.
+# 2026-01-24 11:30:48 +0000
+#
+# This commit changed the TransitionCaptureState structure, replacing
+# the "tcs_private" field with 3 separate fields. This structure can
+# only be built using MakeTransitionCaptureState(), and PGXN contained
+# no calls to MakeTransitionCaptureState() or uses of the
+# TransitionCaptureState structure.
+
+bae8ca82fd00603ebafa0658640d6e4dfe20af92
+#
+# Revisit cosmetics of "For inplace update, send nontransactional invalidations."
+# 2025-12-15 12:19:53 -0800
+#
+# This removed a CacheInvalidateHeapTupleInplace() parameter.  PGXN contained
+# no calls to that function.
+
+00eb646ea43410e5df77fed96f4a981e66811796
+#
+# Check for CREATE privilege on the schema in CREATE STATISTICS.
+# 2025-11-10 09:00:00 -0600
+#
+# This commit added a parameter to CreateStatistics().  We are unaware of any
+# impacted third-party code.
+
+c8af5019bee5c57502db830f8005a01cba60fee0
+#
+# Fix lookups in pg_{clear,restore}_{attribute,relation}_stats().
+# 2025-10-15 12:47:33 -0500
+#
+# This commit replaced two functions related to lookups/privilege checks for
+# the new stats stuff in v18 with RangeVarGetRelidExtended().  These functions
+# were not intended for use elsewhere, exist in exactly one release (18.0), and
+# do not have any known third-party callers.
+
+9bbcec6030a2744d83311370ec92213fbd76e514
+#
+# Translation updates
+# 2025-09-22 14:18:56 +0200
+#
+# This is the original ABI baseline point for REL_18_STABLE.

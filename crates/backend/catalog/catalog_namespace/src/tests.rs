@@ -237,6 +237,50 @@ fn matcher_generation_fast_path() {
     assert!(SearchPathMatchesCurrentEnvironment(&mut zero_gen).unwrap());
 }
 
+// Regression: a session-state swap (as a pooled worker thread does between
+// tasks/sessions) must NOT rewind ACTIVE_PATH_GENERATION. If it did, the same
+// generation value could denote two different search-path states on one thread,
+// letting a matcher captured under session A falsely fast-path-match session B
+// and execute A's name->OID resolutions under B (cache poisoning). C keeps
+// activePathGeneration strictly monotonic per backend.
+#[test]
+fn session_swap_does_not_rewind_generation() {
+    install_fakes();
+    let ctx = MemoryContext::new("test");
+
+    // Parked baseline captured at the current generation, as a pooled helper
+    // does at bind time. Prime the derived path so the residual base path is a
+    // known value ([pg_catalog, public]) and later swaps deterministically flip
+    // it, forcing the generation to advance.
+    set_search_path("public");
+    let _ = GetSearchPathMatcher(ctx.mcx()).unwrap();
+    let baseline = CaptureSessionNamespaceState();
+
+    // Session A runs with search_path resolving to s1 and captures a matcher.
+    set_search_path("s1");
+    let matcher_a = GetSearchPathMatcher(ctx.mcx()).unwrap();
+    assert_eq!(matcher_a.schemas.as_slice(), &[NS_S1]);
+
+    // Task A exits: restore the parked baseline. This previously rewound the
+    // generation counter.
+    ReplaceSessionNamespaceState(&baseline);
+
+    // Session B arrives on the same thread with a DIFFERENT search path.
+    set_search_path("public");
+
+    // A's stale matcher (schemas=[s1]) must not match B's environment
+    // (schemas=[public]). With the generation rewind bug this returned true via
+    // the generation-equality fast path; with the monotonic counter the
+    // generations differ and the full schema comparison correctly rejects it.
+    let mut stale = CopySearchPathMatcher(ctx.mcx(), &matcher_a).unwrap();
+    assert!(!SearchPathMatchesCurrentEnvironment(&mut stale).unwrap());
+
+    // And B's own generation must be strictly newer than A's, never a reused
+    // value.
+    let gen_b = GetSearchPathMatcher(ctx.mcx()).unwrap().generation;
+    assert!(gen_b > matcher_a.generation);
+}
+
 #[test]
 fn range_var_lookups() {
     install_fakes();
@@ -257,11 +301,11 @@ fn range_var_lookups() {
         InvalidOid
     );
 
-    let err = RangeVarGetRelid(&rv(None, "gone"), 1, false).unwrap_err();
+    let err = RangeVarGetRelid(&rv(None, "gone"), 1, false).err().unwrap();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_TABLE);
     assert!(err.message().contains("relation \"gone\" does not exist"));
 
-    let err = RangeVarGetRelid(&rv(Some("no_such"), "t1"), 1, false).unwrap_err();
+    let err = RangeVarGetRelid(&rv(Some("no_such"), "t1"), 1, false).err().unwrap();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_SCHEMA);
 
     assert_eq!(
@@ -300,7 +344,7 @@ fn lookup_namespace_helpers() {
         ACL_DENIED.with(|d| d.borrow_mut().push(NS_S1));
         LookupExplicitNamespace("s1", false)
     };
-    assert!(denied.unwrap_err().message().contains("permission denied"));
+    assert!(denied.err().unwrap().message().contains("permission denied"));
 }
 
 fn install_proc_candidates() {

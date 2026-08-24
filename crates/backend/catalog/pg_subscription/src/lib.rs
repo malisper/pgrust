@@ -189,7 +189,7 @@ pub fn GetSubscription<'mcx>(
 
     let name_data = name_from_datum(attr(Anum_pg_subscription_subname)?);
     let name = PgString::from_str_in(
-        core::str::from_utf8(name_data.name_str()).expect("subname is UTF-8"),
+        &String::from_utf8_lossy(name_data.name_str()),
         mcx,
     )?;
     let owner = attr(Anum_pg_subscription_subowner)?.as_oid();
@@ -206,7 +206,7 @@ pub fn GetSubscription<'mcx>(
     } else {
         let n = name_from_datum(slot_d);
         Some(PgString::from_str_in(
-            core::str::from_utf8(n.name_str()).expect("subslotname is UTF-8"),
+            &String::from_utf8_lossy(n.name_str()),
             mcx,
         )?)
     };
@@ -315,7 +315,18 @@ pub fn textarray_to_stringlist<'mcx>(
     for &e in elems.iter() {
         let img = detoast_datum(mcx, e)?;
         let bytes = mcx::slice_borrow_in(mcx, varlena_payload(&img))?;
-        res.push(core::str::from_utf8(bytes).expect("publication name is UTF-8"));
+        // SQL_ASCII publication names may be non-UTF-8; keep valid names as-is
+        // and lossily transcode invalid ones (into mcx) instead of panicking.
+        let s = match core::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                let owned =
+                    mcx::slice_borrow_in(mcx, String::from_utf8_lossy(bytes).as_bytes())?;
+                // SAFETY: from_utf8_lossy always yields valid UTF-8.
+                unsafe { core::str::from_utf8_unchecked(owned) }
+            }
+        };
+        res.push(s);
     }
     Ok(res)
 }

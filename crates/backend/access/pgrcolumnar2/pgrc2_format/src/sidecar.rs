@@ -251,6 +251,12 @@ pub const STATS_HIST_BOUNDS: usize = 33;
 /// Values longer than this participate in COUNTS but are ineligible for
 /// the value lists (mcv/histogram) — recorded per column as `long_values`.
 pub const STATS_MCV_VALUE_MAX: usize = 256;
+/// Minimum on-wire size of one per-column record's fixed prefix (attno u32,
+/// path_ord u32, nonnull u64, ndv_eligible u64, long_values u64, nmcv u32,
+/// nhist u32) before any variable mcv/hist bytes. Used to bound the
+/// wire-claimed column count against the bytes actually present, so a tiny
+/// hostile payload cannot command a huge up-front reservation (CWE-789).
+pub const STATS_COL_RECORD_MIN_LEN: usize = 40;
 
 /// One column's part-grain distribution sketch (OD-2 exactness class:
 /// EXACT-AT-SEAL, per part-generation, mergeable): MCV top-k with exact
@@ -313,8 +319,19 @@ pub fn decode_stats_payload(
             at: "StatsPayload version",
         });
     }
-    let ncols = c.u32("StatsPayload")?;
-    let mut out = Vec::with_capacity(ncols as usize);
+    let ncols = c.u32("StatsPayload")? as usize;
+    // Bound the wire-claimed column count against the bytes actually
+    // remaining before reserving: each column record occupies at least
+    // STATS_COL_RECORD_MIN_LEN bytes, so a count claiming more records than
+    // could possibly fit is corruption — refuse it (typed) rather than let
+    // an untrusted length-prefix drive an infallible Vec::with_capacity into
+    // an uncatchable handle_alloc_error abort (CWE-789).
+    if ncols > c.remaining() / STATS_COL_RECORD_MIN_LEN {
+        return Err(FormatError::Corrupt {
+            at: "StatsPayload ncols vs length",
+        });
+    }
+    let mut out = Vec::with_capacity(ncols);
     for _ in 0..ncols {
         let attno = c.u32("StatsPayload col")?;
         let path_ord = c.u32("StatsPayload col")?;
@@ -367,4 +384,45 @@ pub fn decode_stats_payload(
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::put_u32;
+
+    /// A tiny payload claiming `ncols = u32::MAX` must be refused (typed)
+    /// before any allocation proportional to the claim — no infallible
+    /// Vec::with_capacity of 2^32 records (CWE-789).
+    #[test]
+    fn stats_payload_rejects_huge_ncols_without_allocating() {
+        let mut payload = Vec::new();
+        put_u32(&mut payload, STATS_PAYLOAD_VERSION);
+        put_u32(&mut payload, u32::MAX);
+        // No column records follow: remaining bytes cannot back the claim.
+        let err = decode_stats_payload(&payload).err().unwrap();
+        assert!(matches!(err, FormatError::Corrupt { .. }));
+    }
+
+    /// A valid round-trip still decodes: the bound preserves good sidecars.
+    #[test]
+    fn stats_payload_roundtrip() {
+        let cols = vec![
+            (
+                1u32,
+                0u32,
+                ColDistribution {
+                    nonnull: 10,
+                    ndv_eligible: 5,
+                    long_values: 1,
+                    mcv: vec![(b"abc".to_vec(), 4), (b"de".to_vec(), 2)],
+                    hist_bounds: vec![b"a".to_vec(), b"z".to_vec()],
+                },
+            ),
+            (2u32, 1u32, ColDistribution::default()),
+        ];
+        let payload = encode_stats_payload(&cols);
+        let got = decode_stats_payload(&payload).expect("valid payload decodes");
+        assert_eq!(got, cols);
+    }
 }

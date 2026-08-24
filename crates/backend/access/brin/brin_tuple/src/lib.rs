@@ -6,11 +6,14 @@ use ::datum::Datum;
 use ::mcx::{vec_append_bytes, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use ::types_brin::*;
 use ::types_core::BlockNumber;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use ::types_tuple::tupmacs::{
-    att_addlength_pointer, att_isnull, att_nominal_alignby, att_pointer_alignby, fetchatt,
+    att_isnull, att_nominal_alignby, att_pointer_alignby, fetchatt,
 };
-use ::types_tuple::varatt::{varatt_is_1b, varatt_is_1b_e, varsize_any};
+use ::types_tuple::varatt::{
+    varatt_is_1b, varatt_is_1b_e, varsize_1b, varsize_4b, varsize_any, varsize_external,
+    VARHDRSZ, VARHDRSZ_EXTERNAL,
+};
 use ::types_tuple::{bits8, TYPSTORAGE_EXTENDED, TYPSTORAGE_MAIN};
 
 // TOAST_INDEX_TARGET (heaptoast.h): MaxHeapTupleSize / 16.
@@ -310,7 +313,7 @@ pub fn brin_deform_tuple(
         bt_values,
         bt_allnulls,
         bt_hasnulls,
-    );
+    )?;
 
     let mcx = bt_context.mcx();
     let mut valueno = 0usize;
@@ -333,6 +336,63 @@ pub fn brin_deform_tuple(
     Ok(())
 }
 
+#[cold]
+#[inline(never)]
+fn corrupt_tuple() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "corrupted BRIN summary tuple: attribute extends past tuple data".to_string(),
+        )
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+// Validated on-disk byte length of the attribute stored at `tp[off..]`, ensuring
+// the whole value (and any varlena/cstring length header it declares) lies
+// within the tuple data area. C's brin_deconstruct_tuple trusts these lengths
+// (Assert-only) because it reads its own pages; on attacker-craftable on-disk
+// bytes we must reject an overrun with ERRCODE_DATA_CORRUPTED rather than walk
+// the raw pointer out of bounds.
+fn checked_attr_len(tp: &[u8], off: usize, attlen: i32) -> PgResult<usize> {
+    let len = if attlen > 0 {
+        attlen as usize
+    } else if attlen == -1 {
+        if off >= tp.len() {
+            return Err(corrupt_tuple());
+        }
+        // SAFETY: off < tp.len(), so the first header byte is readable; any read
+        // past it (2B external tag, 4B header) is bounds-checked against tp
+        // before the dereference.
+        unsafe {
+            let p = tp.as_ptr().add(off);
+            if varatt_is_1b_e(p) {
+                if off + VARHDRSZ_EXTERNAL > tp.len() {
+                    return Err(corrupt_tuple());
+                }
+                varsize_external(p)
+            } else if varatt_is_1b(p) {
+                varsize_1b(p)
+            } else {
+                if off + VARHDRSZ > tp.len() {
+                    return Err(corrupt_tuple());
+                }
+                varsize_4b(p)
+            }
+        }
+    } else {
+        debug_assert!(attlen == -2);
+        // cstring: bounded strlen; the terminating NUL must fall within tp.
+        match tp.get(off..).and_then(|s| s.iter().position(|&b| b == 0)) {
+            Some(idx) => idx + 1,
+            None => return Err(corrupt_tuple()),
+        }
+    };
+    if len == 0 || off + len > tp.len() {
+        return Err(corrupt_tuple());
+    }
+    Ok(len)
+}
+
 // brin_deconstruct_tuple: attribute extraction from the on-disk data area.
 // `tp` starts at the tuple's data offset; values point INTO tp (no copies).
 fn brin_deconstruct_tuple(
@@ -342,7 +402,7 @@ fn brin_deconstruct_tuple(
     values: &mut [Datum],
     allnulls: &mut [bool],
     hasnulls: &mut [bool],
-) {
+) -> PgResult<()> {
     let natts = bdesc.natts();
 
     // Reversed att_isnull sense: stored 1 means null (see brin_form_tuple).
@@ -373,18 +433,77 @@ fn brin_deconstruct_tuple(
         }
         for _ in 0..nstored {
             let thisatt = bdesc.bd_disktdesc.compact_attr(stored);
-            // SAFETY: offsets stay within the tuple data area laid out by
-            // heap_fill_tuple over the same descriptor.
-            unsafe {
-                if thisatt.attlen == -1 {
-                    off = att_pointer_alignby(off, thisatt.attalignby, -1, tp.as_ptr().add(off));
-                } else {
-                    off = att_nominal_alignby(off, thisatt.attalignby);
+            let attlen = thisatt.attlen as i32;
+
+            if attlen == -1 {
+                // The pad-byte peek in att_pointer_alignby reads tp[off]; bound
+                // it before deciding alignment.
+                if off >= tp.len() {
+                    return Err(corrupt_tuple());
                 }
-                values[stored] = fetchatt(thisatt, tp.as_ptr().add(off));
-                off = att_addlength_pointer(off, thisatt.attlen as i32, tp.as_ptr().add(off));
+                // SAFETY: off < tp.len().
+                off = unsafe {
+                    att_pointer_alignby(off, thisatt.attalignby, -1, tp.as_ptr().add(off))
+                };
+            } else {
+                off = att_nominal_alignby(off, thisatt.attalignby);
             }
+
+            // Validate the attribute's declared span before touching it, so both
+            // the fetchatt read here and the datum_copy in brin_deform_tuple stay
+            // inside tp.
+            let this_len = checked_attr_len(tp, off, attlen)?;
+
+            // SAFETY: checked_attr_len guarantees off + this_len <= tp.len(); a
+            // by-value fetch reads at most this_len bytes and a by-ref fetch only
+            // captures the (in-bounds) pointer.
+            values[stored] = unsafe { fetchatt(thisatt, tp.as_ptr().add(off)) };
+            off += this_len;
             stored += 1;
         }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_attr_len;
+
+    // A malformed 4B varlena header declaring ~256 MB inside an 8-byte tuple
+    // must be rejected, not walked out of bounds (idx-50 OOB read).
+    #[test]
+    fn oversized_varlena_is_rejected() {
+        // 4B varlena word: low 2 bits 00, size encoded as len << 2.
+        let word: u32 = 0x1000_0000u32 << 2; // declared VARSIZE = 256 MB
+        let mut tp = word.to_ne_bytes().to_vec();
+        tp.extend_from_slice(&[0u8; 4]); // 8-byte tuple data area
+        assert!(checked_attr_len(&tp, 0, -1).is_err());
+    }
+
+    #[test]
+    fn fixed_length_overrun_is_rejected() {
+        let tp = [0u8; 4];
+        // 8-byte fixed attr at offset 0 in a 4-byte area.
+        assert!(checked_attr_len(&tp, 0, 8).is_err());
+        // ...but a fitting one is accepted.
+        assert_eq!(checked_attr_len(&tp, 0, 4).unwrap(), 4);
+    }
+
+    #[test]
+    fn unterminated_cstring_is_rejected() {
+        let tp = [b'a', b'b', b'c'];
+        assert!(checked_attr_len(&tp, 0, -2).is_err());
+        let tp2 = [b'a', 0u8];
+        assert_eq!(checked_attr_len(&tp2, 0, -2).unwrap(), 2);
+    }
+
+    #[test]
+    fn well_formed_varlena_is_accepted() {
+        // VARSIZE = 8 (4B header + 4 payload) inside an 8-byte area.
+        let word: u32 = 8u32 << 2;
+        let mut tp = word.to_ne_bytes().to_vec();
+        tp.extend_from_slice(&[1u8; 4]);
+        assert_eq!(checked_attr_len(&tp, 0, -1).unwrap(), 8);
     }
 }

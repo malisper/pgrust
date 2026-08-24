@@ -486,7 +486,9 @@ pub fn BuildIndexValueDescription<'mcx>(
                 core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char)
             }
             .to_bytes();
-            buf.push_str(core::str::from_utf8(s).expect("type output is UTF-8"));
+            // Diagnostic detail (unique-violation key); a type's text output may
+            // be non-UTF-8 in a SQL_ASCII database. Use lossy, not a panic.
+            buf.push_str(&String::from_utf8_lossy(s));
         }
     }
     buf.push(')');

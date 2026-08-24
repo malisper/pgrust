@@ -146,6 +146,16 @@ fn flatten_unplanned_rtes<'mcx>(
                 }
                 return Ok(false);
             }
+            // C's flatten_rtes_walker handles Query nodes reached during the
+            // expression walk (SubLink subselects, CTE bodies); expression_tree_
+            // walker stops at T_Query (returns false), so route them through
+            // visit_query_ref, which swaps the rteperminfos context to the owning
+            // Query. Without this, relation RTEs inside a never-planned
+            // subquery's sublinks/CTEs never reach finalrtable and the executor
+            // skips their permission checks.
+            if let Some(q) = node.as_query() {
+                return self.visit_query_ref(q);
+            }
             nodes_core::expression_tree_walker(node, self)
         }
         fn visit_query_ref(

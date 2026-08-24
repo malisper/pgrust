@@ -174,6 +174,40 @@ fn pool_elem_to_scan(pool: &ElementPool<'_>, sc: &SearchCandidate) -> HnswScanEl
 // Approximate C tmpCtx accounting: element + candidate + hash entry bytes.
 const SCAN_TUPLE_MEM: usize = 200;
 
+// Reloption invariants the rest of the HNSW code assumes, matching pgvector's
+// limits (2 <= m <= HNSW_MAX_M, 4 <= ef_construction <= 1000). Meta-page fields
+// are read from block 0 on disk unvalidated, so a corrupt or crafted meta page
+// (e.g. m = 65535) could otherwise size multi-GB allocations and index fixed
+// buffers. entry_level is a level index (stored per-element as a u8, -1 means
+// "no entry"), so it is bounded to a small sane range as well.
+const HNSW_MIN_M: i32 = 2;
+const HNSW_MIN_EF_CONSTRUCTION: i32 = 4;
+const HNSW_MAX_EF_CONSTRUCTION: i32 = 1000;
+const HNSW_MIN_ENTRY_LEVEL: i32 = -1;
+const HNSW_MAX_ENTRY_LEVEL: i32 = 255;
+
+fn corrupt_meta(field: &str, value: i64) -> PgError {
+    PgError::error(format!(
+        "hnsw index metapage is corrupt: {field} = {value} is out of range"
+    ))
+    .with_sqlstate(types_error::ERRCODE_INDEX_CORRUPTED)
+}
+
+// Reject out-of-range meta-page fields as index corruption before any of them
+// size an allocation or index a fixed buffer.
+fn validate_meta_fields(m: i32, ef_construction: i32, entry_level: i32) -> PgResult<()> {
+    if !(HNSW_MIN_M..=HNSW_MAX_M).contains(&m) {
+        return Err(corrupt_meta("m", m as i64).into());
+    }
+    if !(HNSW_MIN_EF_CONSTRUCTION..=HNSW_MAX_EF_CONSTRUCTION).contains(&ef_construction) {
+        return Err(corrupt_meta("ef_construction", ef_construction as i64).into());
+    }
+    if !(HNSW_MIN_ENTRY_LEVEL..=HNSW_MAX_ENTRY_LEVEL).contains(&entry_level) {
+        return Err(corrupt_meta("entry_level", entry_level as i64).into());
+    }
+    Ok(())
+}
+
 // GetScanItems (algorithm 5).
 fn get_scan_items(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     let index = scan
@@ -186,6 +220,9 @@ fn get_scan_items(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         _ => unreachable!(),
     };
     let meta = read_meta(&index)?;
+    // Meta fields come from disk unvalidated; reject out-of-range values before
+    // they drive the hash preallocation and layer buffers below.
+    validate_meta_fields(meta.m as i32, meta.ef_construction as i32, meta.entry_level as i32)?;
     so.m = meta.m as i32;
     let q = so
         .value
@@ -225,13 +262,15 @@ fn get_scan_items(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     let iterative = guc_tables::vars::hnsw_iterative_scan.read() != HNSW_ITERATIVE_SCAN_OFF;
     let mut discarded = iterative.then(|| DiscardedHeap::new(tmcx));
 
-    // Layer-0 visited persists across iterations in so.visited.
+    // Layer-0 visited persists across iterations in so.visited. so.m is clamped
+    // to the reloption range by validate_meta_fields above, so this capacity is
+    // bounded; try_reserve keeps even a large ef_search from aborting on OOM.
+    let visited0_cap = (ef_search * so.m * 2).max(0) as usize;
     let mut visited0: Visited<'_> =
-        PgFxHashMap::with_capacity_and_hasher_in(
-            (ef_search * so.m * 2) as usize,
-            Default::default(),
-            tmcx,
-        );
+        PgFxHashMap::with_hasher_in(Default::default(), tmcx);
+    visited0
+        .try_reserve(visited0_cap)
+        .map_err(|_| tmcx.oom(visited0_cap))?;
     let mut tuples = so.tuples;
     let w = search_layer_disk(
         &mut pool,

@@ -35,3 +35,11 @@ CREATE FUNCTION injection_points_detach(IN point_name TEXT)
 RETURNS void
 AS 'MODULE_PATHNAME', 'injection_points_detach'
 LANGUAGE C STRICT PARALLEL UNSAFE;
+
+-- These functions alter global server behavior (they attach/detach/wake
+-- injection points process-wide), so they must not be callable by ordinary
+-- roles. Restrict EXECUTE to superusers, who bypass ACL checks; a non-superuser
+-- then gets a permission error instead of being able to steer the server.
+REVOKE ALL ON FUNCTION injection_points_attach(TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION injection_points_wakeup(TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION injection_points_detach(TEXT) FROM PUBLIC;

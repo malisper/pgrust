@@ -754,7 +754,8 @@ fn ReadReplicationSlot(mcx: mcx::Mcx<'_>, cmd: ReadReplicationSlotCmd) -> PgResu
     lwlock::LWLockAcquire(control, lwlock::LW_SHARED, init_small::globals::MyProcNumber())?;
     let slotname = cmd.slotname.as_deref().unwrap_or("");
     let slot = slot::SearchNamedReplicationSlot(slotname, false)?;
-    match slot.filter(|s| s.in_use.get()) {
+    // SAFETY: in_use read under ReplicationSlotControlLock (held above)
+    match slot.filter(|s| unsafe { s.in_use.get() }) {
         None => {
             lwlock::LWLockRelease(control)?;
         }
@@ -762,7 +763,8 @@ fn ReadReplicationSlot(mcx: mcx::Mcx<'_>, cmd: ReadReplicationSlotCmd) -> PgResu
             // Copy slot contents while holding spinlock, then release the
             // control lock (C copies the whole struct; we read the two fields).
             let (database, restart_lsn) = s.with_mutex(|| {
-                let d = s.data.get();
+                // SAFETY: data read under the slot spinlock mutex (with_mutex)
+                let d = unsafe { s.data.get() };
                 (d.database, d.restart_lsn)
             });
             lwlock::LWLockRelease(control)?;
@@ -1069,7 +1071,8 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
     }
 
     let slot_ref = slot::MyReplicationSlot().expect("CreateReplicationSlot: no slot acquired");
-    let d = slot_ref.data.get();
+    // SAFETY: MyReplicationSlot's data owned by this backend (slot spinlock)
+    let d = unsafe { slot_ref.data.get() };
     let xloc = format!("{:X}/{:X}", (d.confirmed_flush >> 32) as u32, d.confirmed_flush as u32);
     let slot_name = String::from_utf8_lossy(d.name.name_str()).into_owned();
 
@@ -1241,7 +1244,7 @@ fn HandleUploadManifestPacket(
     match mtype as u8 {
         b'd' => {
             /* CopyData */
-            ib.AppendIncrementalManifestData(buf.as_bytes());
+            ib.AppendIncrementalManifestData(buf.as_bytes())?;
             Ok(true)
         }
         b'c' => Ok(false), /* CopyDone */
@@ -1408,7 +1411,8 @@ pub(crate) fn PhysicalWakeupLogicalWalSnd() {
         return;
     }
 
-    let name = String::from_utf8_lossy(s.data.get().name.name_str()).into_owned();
+    // SAFETY: MyReplicationSlot's data owned by this backend (slot spinlock)
+    let name = String::from_utf8_lossy(unsafe { s.data.get() }.name.name_str()).into_owned();
     if slot::SlotExistsInSyncStandbySlots(&name) {
         condition_variable::ConditionVariableBroadcast(&WalSndCtl().wal_confirm_rcv_cv);
     }
@@ -1698,7 +1702,7 @@ mod tests {
         feed_msg(b'd', &C_FIXTURE[..128]);
         feed_msg(b'f', b"client bailed\0");
 
-        let err = exec_replication_command("UPLOAD_MANIFEST").unwrap_err();
+        let err = exec_replication_command("UPLOAD_MANIFEST").err().unwrap();
         assert_eq!(err.sqlstate(), types_error::ERRCODE_QUERY_CANCELED);
         assert_eq!(err.message(), "COPY from stdin failed: client bailed");
         assert!(!uploaded_manifest_exists(), "failed upload must not stash a manifest");

@@ -237,6 +237,20 @@ struct SealEntry {
     /// (the EnsureEntry ABA-guard rationale: never address by index/name).
     gen: u64,
     name: String,
+    /// The target's pg_database oid AS RESOLVED AND OWNER-CHECKED by the
+    /// backend at `pgrust_seal_template()` call time (the check-time
+    /// identity). The janitor's validation re-resolves `name` and REFUSES
+    /// unless it still points at this exact oid — closing the TOCTOU where a
+    /// caller renames their own owned database out of the name and a victim
+    /// database into it between the backend's ownercheck and the janitor's
+    /// superuser-privileged flip. InvalidOid only for the test-only
+    /// identity-less `post_seal` shim, which never reaches validation.
+    expected_oid: Oid,
+    /// The GetUserId() that PASSED the backend-side owner-or-superuser check.
+    /// The janitor re-runs `object_ownercheck(expected_oid, caller_role)`
+    /// under its own transaction before the flip, so an ownership change in
+    /// the check-to-flip window also refuses. InvalidOid for the shim.
+    caller_role: Oid,
     /// The target's pg_database oid, recorded by `begin_seal_vacuum` when
     /// the janitor validated the entry (InvalidOid while Pending): the
     /// vacuum worker fetches it by gen (`seal_vacuum_target`).
@@ -291,7 +305,14 @@ pub enum SealStatus {
 /// One unit of janitor-side seal work this pass (seal.rs drives these).
 pub(crate) enum SealWork {
     /// Pending entry: validate the target and launch the vacuum worker.
-    Validate { gen: u64, name: String },
+    /// `expected_oid`/`caller_role` are the backend's check-time identity,
+    /// re-validated by seal.rs before the privileged flip (the TOCTOU fix).
+    Validate {
+        gen: u64,
+        name: String,
+        expected_oid: Oid,
+        caller_role: Oid,
+    },
     /// Worker reported success: flip IS_TEMPLATE/ALLOW_CONNECTIONS.
     Flip { gen: u64, name: String, oid: Oid },
     /// Worker reported failure: fail the entry with its saved error.
@@ -513,12 +534,15 @@ pub fn wake_janitor() {
 /// residual: a post delayed past ENSURE_LINGER_NS after such a commit can
 /// still miss both terms — bounded and documented (M3 addendum item 8).
 /// Joining an existing entry is exempt from the cap: it creates no new
-/// database. The join is keyed by NAME ALONE, not owner: a different
-/// allowlisted role joining a same-name Pending entry attaches to a
-/// database owned by the FIRST poster (cross-role collision semantics,
-/// recorded in the M3 addendum — token collisions across roles are a
-/// harness misuse, and creation-owner-wins is the only serializable
-/// answer).
+/// database. The join is keyed by (NAME, owner_oid): a request only
+/// coalesces onto a Pending entry posted by the SAME role. A different
+/// allowlisted role connecting to a same-name token does NOT attach to
+/// the first poster's entry (which would silently hand it a database
+/// owned by that other role — the co-tenant name-squat authorization
+/// hole); it falls through to post its own correctly-owned request. If
+/// both entries then race to CREATE the same datname, the loser's mint
+/// fails loudly — the safe outcome — rather than the second role
+/// inheriting the wrong owner.
 #[allow(clippy::too_many_arguments)]
 pub fn post_ensure(
     name: &str,
@@ -537,11 +561,11 @@ pub fn post_ensure(
         // for every admitted post shape (Joined and Posted alike): both
         // mean a waiter is parked on dispatch latency right now.
         r.last_ensure_post_ns = pg_clock::mono_ns();
-        if let Some(e) = r
-            .ensures
-            .iter_mut()
-            .find(|e| e.name == name && matches!(e.outcome, EnsureOutcome::Pending))
-        {
+        if let Some(e) = r.ensures.iter_mut().find(|e| {
+            e.name == name
+                && e.owner_oid == owner_oid
+                && matches!(e.outcome, EnsureOutcome::Pending)
+        }) {
             if !e.waiters.contains(&waiter) {
                 e.waiters.push(waiter);
             }
@@ -704,13 +728,27 @@ pub fn gc_ensures(now_ns: u64) {
 // worker all mutate it under the one registry lock).
 // ---------------------------------------------------------------------------
 
-/// Post (or join) a seal request for the resolved datname `name`. One
-/// atomic sequence under the registry lock (the post_ensure shape):
-/// janitor-present check, same-name join, capacity, insert.
-/// The join is keyed by name over NON-TERMINAL entries only — a terminal
-/// (Done/Failed) entry lingering for its waiters must not absorb a fresh
-/// request, which legitimately re-seals after a manual unseal.
-pub fn post_seal(name: &str, waiter: ProcNumber) -> PostSeal {
+/// Post (or join) a seal request for the resolved datname `name`, carrying
+/// the backend's CHECK-TIME identity (`expected_oid` = the owner-checked
+/// pg_database oid, `caller_role` = the GetUserId() that passed the check).
+/// One atomic sequence under the registry lock (the post_ensure shape):
+/// janitor-present check, same-name join, capacity, insert. The join is
+/// keyed by name over NON-TERMINAL entries only — a terminal (Done/Failed)
+/// entry lingering for its waiters must not absorb a fresh request, which
+/// legitimately re-seals after a manual unseal.
+///
+/// The identity is re-validated janitor-side (seal.rs `validate_and_launch`)
+/// before the privileged flip: it closes the TOCTOU where the name is
+/// re-pointed at a database the caller does not own between this post and
+/// the flip. A join adopts the FIRST poster's identity — same name +
+/// non-terminal means the same in-flight seal of the same target; the
+/// re-validation guards it for all joined waiters alike.
+pub fn post_seal_checked(
+    name: &str,
+    expected_oid: Oid,
+    caller_role: Oid,
+    waiter: ProcNumber,
+) -> PostSeal {
     with_registry(|r| {
         if r.janitor_proc.is_none() {
             return PostSeal::JanitorAbsent;
@@ -733,12 +771,26 @@ pub fn post_seal(name: &str, waiter: ProcNumber) -> PostSeal {
         r.seals.push(SealEntry {
             gen,
             name: name.to_string(),
+            expected_oid,
+            caller_role,
             oid: InvalidOid,
             waiters: vec![waiter],
             state: SealState::Pending,
         });
         PostSeal::Posted(gen)
     })
+}
+
+/// Identity-less seal post for tests that exercise the queue/shield state
+/// machine, NOT the target validation (the pre-drop shield gate in
+/// main_loop and the registry's own state-machine test). Stamps InvalidOid
+/// for both identity fields; these entries never reach `validate_and_launch`
+/// (the tests drive them through `begin_seal_vacuum`/`complete_seal`
+/// directly), so the sentinel is never checked. Production posts ALWAYS go
+/// through `post_seal_checked`, which carries the real check-time identity.
+#[cfg(test)]
+pub fn post_seal(name: &str, waiter: ProcNumber) -> PostSeal {
+    post_seal_checked(name, InvalidOid, InvalidOid, waiter)
 }
 
 /// Waiter-side poll (Failed hands back a clone of the saved error).
@@ -773,6 +825,8 @@ pub(crate) fn seal_work(now_ns: u64) -> Vec<SealWork> {
                 SealState::Pending => Some(SealWork::Validate {
                     gen: e.gen,
                     name: e.name.clone(),
+                    expected_oid: e.expected_oid,
+                    caller_role: e.caller_role,
                 }),
                 SealState::Vacuuming { deadline_ns } if now_ns >= *deadline_ns => {
                     Some(SealWork::TimedOut {
@@ -1513,7 +1567,7 @@ mod tests {
         let work = seal_work(now);
         assert!(matches!(
             work.as_slice(),
-            [SealWork::Validate { gen, name }] if *gen == gen_a && name == "tv_s_a"
+            [SealWork::Validate { gen, name, .. }] if *gen == gen_a && name == "tv_s_a"
         ));
         assert!(begin_seal_vacuum(gen_a, 90601, now + 1_000));
         assert!(!begin_seal_vacuum(gen_a, 90601, now + 1_000), "not Pending anymore");

@@ -828,3 +828,79 @@ fn get_config_option_superuser_only_gate() {
     HAS_PRIVS.set(false);
     assert!(GetConfigOption("work_mem", false, true).unwrap().is_some());
 }
+
+// idx 114 regression: a reused pooled parallel-worker thread must not carry a
+// PRIOR session's client-startup / ALTER ROLE|DATABASE SET GUCs (sources <=
+// PGC_S_OVERRIDE) into another session's task. ResetAllOptions cannot evict
+// that class (it preserves those values and their reset_val stamps, by C
+// parity); reset_store_to_process_base scrubs the thread to the fresh-backend
+// baseline a C worker process would start from.
+#[test]
+fn reset_store_to_process_base_evicts_prior_session_low_source_gucs() {
+    setup();
+
+    let name = "maintenance_work_mem";
+    let boot = with_store(|reg| match reg.find_option(name).unwrap() {
+        GucVariable::Int(c) => c.boot_val,
+        _ => unreachable!(),
+    })
+    .unwrap();
+
+    let int_state = |name: &str| -> (i32, GucSource) {
+        with_store(|reg| {
+            let v = reg.find_option(name).unwrap();
+            let val = match v {
+                GucVariable::Int(c) => c.value.unwrap(),
+                _ => unreachable!(),
+            };
+            (val, v.gen().source)
+        })
+        .unwrap()
+    };
+
+    // A prior session installs a value at PGC_S_CLIENT (a client startup
+    // option). This is the make_default path: it also stamps reset_val.
+    let attacker = boot + 1024;
+    set_config_option_ext(
+        name,
+        Some(&attacker.to_string()),
+        PGC_USERSET,
+        PGC_S_CLIENT,
+        BOOTSTRAP_SUPERUSERID,
+        GUC_ACTION_SET,
+        true,
+        ErrorLevel(0),
+        false,
+    )
+    .unwrap();
+    assert_eq!(int_state(name).0, attacker);
+
+    // RESET ALL preserves it (source <= PGC_S_OVERRIDE) -- exactly why it is
+    // insufficient on a reused pooled thread.
+    crate::store::reset_all_options();
+    assert_eq!(
+        int_state(name).0,
+        attacker,
+        "ResetAllOptions must (C parity) keep a <= PGC_S_OVERRIDE value"
+    );
+
+    // The fix: scrub the reused thread to the session-neutral fresh baseline.
+    // (Exercise the registry-level scrub directly; the public
+    // reset_store_to_process_base wraps this and then re-overlays the
+    // process-global postmaster base, which is not deterministic under the
+    // shared test binary.)
+    with_store_mut(crate::registry::reset_session_options_to_boot).unwrap();
+
+    let (value, source) = int_state(name);
+    assert_eq!(value, boot, "scrub must return the value to its boot default");
+    assert_eq!(source, PGC_S_DEFAULT, "scrub must clear the per-session source");
+
+    // The poisoned reset_val stamp must be gone too, so a later RESET cannot
+    // resurrect the prior session's value.
+    let reset_val = with_store(|reg| match reg.find_option(name).unwrap() {
+        GucVariable::Int(c) => c.reset_val,
+        _ => unreachable!(),
+    })
+    .unwrap();
+    assert_eq!(reset_val, boot, "scrub must rebuild reset_val to boot");
+}

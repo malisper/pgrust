@@ -2,7 +2,7 @@
 
 use crate::*;
 use types_core::{BlockNumber, MaxBlockNumber, BTREE_AM_OID};
-use types_error::ERRCODE_WRONG_OBJECT_TYPE;
+use types_error::{ERRCODE_DATA_CORRUPTED, ERRCODE_WRONG_OBJECT_TYPE};
 use types_nbtree::page::{
     P_HAS_FULLXID, P_HIKEY, P_IGNORE, P_ISDELETED, P_ISLEAF, P_ISMETA, P_ISROOT, P_RIGHTMOST,
 };
@@ -298,6 +298,32 @@ fn bt_page_print_tuple(
     let is_pivot = unsafe { nbtree::itup::bt_tuple_is_pivot(itup) };
     if is_posting {
         let posting_off = unsafe { nbtree::itup::bt_tuple_get_posting_offset(itup) };
+        let nposting = unsafe { nbtree::itup::bt_tuple_get_nposting(itup) };
+        // posting_off (from t_tid's block id) and nposting (from its offset
+        // number) are decoded from attacker-controlled tuple bytes: a crafted
+        // bytea reaching bt_page_items_bytea can set nposting up to
+        // BT_OFFSET_MASK (4095), so nposting * sizeof(ItemPointerData) is
+        // ~24KB. Bound the whole posting-list byte extent within the tuple size
+        // (and thus the BLCKSZ page buffer, since pos + size <= b.len() is
+        // checked above) before any posting entry -- or the posting heap-TID
+        // metadata read via bt_tuple_get_heap_tid below, which decodes element 0
+        // -- is read out of bounds. C performs no such check; this is an
+        // engine-level guard for corrupt/crafted input.
+        let ip_size = core::mem::size_of::<types_tuple::itemptr::ItemPointerData>();
+        // At least one entry is always read (element 0, for the heap TID).
+        let extent = nposting.max(1).checked_mul(ip_size);
+        let posting_end = extent.and_then(|e| posting_off.checked_add(e));
+        match posting_end {
+            Some(end) if posting_off <= size && end <= size && pos + end <= b.len() => {}
+            _ => {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "invalid posting list for tuple at offset number {offnum}"
+                    ))
+                    .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+                ));
+            }
+        }
         dlen -= size as isize - posting_off as isize;
     } else if is_pivot && unsafe { nbtree::itup::bt_tuple_get_heap_tid(itup) }.is_some() {
         dlen -= 8; // MAXALIGN(sizeof(ItemPointerData))

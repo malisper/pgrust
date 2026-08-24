@@ -111,6 +111,19 @@ pub fn unsupported(what: &str) -> Box<PgError> {
     )
 }
 
+/// Typed data-corruption refusal, the ingest-boundary identity for an
+/// untrusted on-tuple image whose header cannot be honored (a varlena whose
+/// header claims more bytes than the materialized tuple actually backs, a
+/// by-reference datum pointing outside its tuple image). Mirrors the
+/// [`write_error`]/[`read_error`] `ERRCODE_DATA_CORRUPTED` mapping so a
+/// crafted heap page is refused loudly, never over-read.
+pub fn corrupt(what: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("pgrcolumnar2: {what}"))
+            .with_sqlstate(types_error::ERRCODE_DATA_CORRUPTED),
+    )
+}
+
 /// Map a writer error to a PgError with a class-honest sqlstate: refusals
 /// are 0A000, format/manifest damage is data corruption, I/O is io error.
 pub fn write_error(e: pgrc2_write::WriteError) -> Box<PgError> {

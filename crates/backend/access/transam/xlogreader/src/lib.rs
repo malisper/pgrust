@@ -472,14 +472,27 @@ pub struct XLogReaderState<'mcx> {
 }
 
 fn allocate_recordbuf(state: &mut XLogReaderState<'_>, reclength: u32) -> PgResult<()> {
-    let mut new_size = reclength;
-    new_size = new_size.wrapping_add(XLOG_BLCKSZ as u32 - (new_size % XLOG_BLCKSZ as u32));
-    new_size = new_size.max(5 * (BLCKSZ as u32).max(XLOG_BLCKSZ as u32));
+    // C computes `newSize` in `uint32`, which silently wraps when a hostile
+    // `xl_tot_len` sits in the top XLOG_BLCKSZ window (rounding up past
+    // u32::MAX to a tiny value) and would hand back a buffer far smaller than
+    // the record being reassembled. Widen the round-up to u64 so it can never
+    // wrap: an oversized request then flows to `vec_with_capacity_in`, whose
+    // MaxAllocSize admission rejects it through the normal error path (the
+    // caller maps the Err to "out of memory while reading WAL record"). This
+    // preserves valid behavior — records up to XLogRecordMaxSize (1020 MiB)
+    // still round up below the allocation cap and allocate as before.
+    let blcksz = XLOG_BLCKSZ as u64;
+    let mut new_size = reclength as u64;
+    new_size += blcksz - (new_size % blcksz);
+    new_size = new_size.max(5 * (BLCKSZ as u64).max(blcksz));
 
-    let mut buf: PgVec<'_, u8> = vec_with_capacity_in(state.mcx, new_size as usize)?;
-    buf.resize(new_size as usize, 0);
+    let new_size = usize::try_from(new_size).map_err(|_| state.mcx.oom(usize::MAX))?;
+    let mut buf: PgVec<'_, u8> = vec_with_capacity_in(state.mcx, new_size)?;
+    buf.resize(new_size, 0);
     state.read_record_buf = buf;
-    state.read_record_buf_size = new_size;
+    // Only reached on a successful allocation, so `new_size` is at most
+    // MaxAllocSize (< u32::MAX) and this cast never truncates.
+    state.read_record_buf_size = new_size as u32;
     Ok(())
 }
 
@@ -820,7 +833,35 @@ impl<'mcx> XLogReaderState<'mcx> {
             debug_assert!(page_header_size <= read_off as usize);
 
             let rec_off_in_page = (rec_ptr % XLOG_BLCKSZ as u64) as usize;
-            let total_len = read_u32(&self.read_buf, rec_off_in_page);
+
+            // The record pointer can originate from external recovery metadata
+            // (backup_label, pg_control, checkpoint redo fields), so it is not
+            // trustworthy.  Records are MAXALIGNed and xl_tot_len (the first 4
+            // bytes of the header) must lie on this page; an offset that is
+            // misaligned or within the last 3 bytes of the page would index
+            // past the fixed-size read buffer.  Validate before indexing --
+            // matching C's records-are-MAXALIGNed / XRecOffIsValid invariant --
+            // via a checked get(), so a bad pointer raises a catchable
+            // "invalid record offset" error instead of an out-of-bounds panic.
+            let total_len = match self
+                .read_buf
+                .get(rec_off_in_page..rec_off_in_page + core::mem::size_of::<u32>())
+            {
+                Some(b) if rec_off_in_page == MAXALIGN(rec_off_in_page) => {
+                    u32::from_ne_bytes([b[0], b[1], b[2], b[3]])
+                }
+                _ => {
+                    let (h, l) = lsn_fmt(rec_ptr);
+                    report_invalid!(
+                        self.err(),
+                        "invalid record offset at {:X}/{:X}: {} is misaligned or leaves no room for the record length",
+                        h,
+                        l,
+                        rec_off_in_page
+                    );
+                    return Ok(self.decode_err(assembled, rec_ptr, target_page_ptr));
+                }
+            };
 
             let mut record_hdr = XLogRecord::default();
             let mut got_header = false;

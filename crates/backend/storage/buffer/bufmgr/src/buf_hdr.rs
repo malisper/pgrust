@@ -50,6 +50,25 @@ impl BufferDesc {
         unsafe { *self.tag.get() }
     }
 
+    /// Racy, unlocked snapshot of the tag for whole-pool sweep prechecks
+    /// (DropRelationBuffers etc.), matching bufmgr.c's unlocked `&bufHdr->tag`
+    /// precheck before `LockBufHdr`. The authoritative test is always re-done
+    /// under the header lock; a torn or stale value here only costs (or skips)
+    /// one recheck and never decides anything.
+    ///
+    /// # Safety / concurrency
+    /// `read_volatile` of a `Copy` POD reads the bytes without ever forming a
+    /// `&buftag` reference over the `UnsafeCell`, so it does not conflict with
+    /// `set_tag`'s write in the C11/Rust reference model the way the plain
+    /// `tag()` accessor (which materializes `&buftag`) would. The read may be
+    /// torn or stale; that is the TOLERATED racy precheck, exactly as in C.
+    #[inline]
+    pub fn tag_racy_snapshot(&self) -> buftag {
+        // SAFETY: `tag` points at a live, aligned `buftag` for the process
+        // lifetime; volatile POD read, tearing/staleness tolerated per above.
+        unsafe { core::ptr::read_volatile(self.tag.get()) }
+    }
+
     /// # Safety: header lock held, no other pins.
     #[inline]
     pub(crate) unsafe fn set_tag(&self, tag: buftag) {

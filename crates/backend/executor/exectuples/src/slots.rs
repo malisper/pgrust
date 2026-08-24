@@ -10,13 +10,15 @@ use ::heaptuple::{
 };
 use ::mcx::{vec_with_capacity_in, Allocator, Mcx, PgVec};
 use ::types_core::{AttrNumber, Buffer, BufferIsValid, InvalidBuffer, TransactionId};
-use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_slot::{
     BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotBase, SlotData,
     TupleSlotKind, VirtualTupleTableSlot, TTS_FLAG_EMPTY, TTS_FLAG_FIXED, TTS_FLAG_SHOULDFREE,
 };
 use ::types_tuple::tupmacs::{att_addlength_datum, att_nominal_alignby};
-use ::types_tuple::varatt::varatt_is_external_expanded;
+use ::types_tuple::varatt::{
+    self, varatt_is_1b, varatt_is_1b_e, varatt_is_external_expanded, varsize_any,
+};
 use ::types_tuple::{
     heap_deform_tuple, HeapTupleData, HeapTupleHeaderData, ItemPointerData, MinimalTupleData,
     TupleDescData, MAXIMUM_ALIGNOF,
@@ -437,7 +439,100 @@ pub fn exec_store_pinned_buffer_heap_tuple<'mcx>(
     store_buffer(slot, mcx, tuple, buffer, true)
 }
 
-fn virtual_materialize<'mcx>(v: &mut VirtualTupleTableSlot<'mcx>, mcx: Mcx<'mcx>) -> PgResult<()> {
+#[cold]
+#[inline(never)]
+fn corrupt_datum(what: &'static str) -> alloc::boxed::Box<PgError> {
+    alloc::boxed::Box::new(PgError::error(what).with_sqlstate(ERRCODE_DATA_CORRUPTED))
+}
+
+/// Copy length (header included) for one by-reference datum during virtual-slot
+/// materialization, bounded against the source tuple image.
+///
+/// `src_image`, when `Some`, is the flat backing bytes of the MATERIALIZED
+/// source tuple the datum was deformed from (see [`slot_materialized_image`]):
+/// an INDEPENDENT readable-byte witness derived from the tuple's `t_len`, never
+/// from the varlena header itself. Every by-reference datum copied out of a
+/// heap/buffer/minimal source points INTO this image, so a crafted on-page
+/// varlena header claiming up to ~1 GiB is refused here (typed corruption
+/// error) instead of sizing an out-of-bounds read of the shared buffer pool.
+///
+/// `None` = a genuine in-memory datum (a Virtual source, or an
+/// expression-produced value): trust its header exactly as C's
+/// `tts_virtual_materialize` does.
+///
+/// # Safety
+/// `val` is a non-null by-reference datum pointing at a live field image whose
+/// header is readable (subject to the in-bounds bound enforced below when a
+/// witness is supplied).
+unsafe fn checked_byref_length(
+    val: Datum,
+    attlen: i32,
+    src_image: Option<&[u8]>,
+) -> PgResult<usize> {
+    let p = val.as_usize() as *const u8;
+    let Some(img) = src_image else {
+        // No witness: the datum is a trusted in-memory value (matches C).
+        return Ok(unsafe { att_addlength_datum(0, attlen, val) });
+    };
+    let base = img.as_ptr() as usize;
+    let end = base + img.len();
+    let pa = p as usize;
+    if pa < base || pa >= end {
+        return Err(corrupt_datum(
+            "by-reference datum points outside its tuple image",
+        ));
+    }
+    let avail = end - pa; // >= 1
+    if attlen != -1 {
+        // Fixed-length by-ref (attlen > 0): the catalog attlen sizes the read,
+        // but it must still fit the bytes the tuple actually backs.
+        // SAFETY: attlen > 0 reads no memory here; length is the catalog attlen.
+        let len = unsafe { att_addlength_datum(0, attlen, val) };
+        if len > avail {
+            return Err(corrupt_datum("fixed-length datum overruns its tuple image"));
+        }
+        return Ok(len);
+    }
+    // Varlena: read only the header bytes proven in-bounds, then bound the
+    // header-claimed total against the backed window. A witnessed (on-page)
+    // source never carries a legitimate expanded datum, so all inline/external
+    // forms are sized by their header and copied flat.
+    // SAFETY: avail >= 1, so the 1-byte header probe is in bounds.
+    let need_hdr = unsafe {
+        if varatt_is_1b_e(p) {
+            varatt::VARHDRSZ_EXTERNAL // external tag byte lives at offset 1
+        } else if varatt_is_1b(p) {
+            varatt::VARHDRSZ_SHORT
+        } else {
+            varatt::VARHDRSZ
+        }
+    };
+    if avail < need_hdr {
+        return Err(corrupt_datum(
+            "varlena header truncated within its tuple image",
+        ));
+    }
+    // SAFETY: the header bytes are backed (checked above).
+    let len = unsafe { varsize_any(p) };
+    if len == 0 || len > avail {
+        return Err(corrupt_datum(
+            "varlena length exceeds the bytes backed by its tuple image",
+        ));
+    }
+    Ok(len)
+}
+
+/// C `tts_virtual_materialize`. `src_image` is an optional readable-byte
+/// witness for the by-reference datums (see [`checked_byref_length`]): supplied
+/// when the datums were copied out of a bounded source tuple image (a
+/// heap/buffer/minimal source, e.g. [`exec_copy_slot`] into a Virtual dest),
+/// `None` for a genuine in-memory Virtual slot (matches C's unconditional
+/// trust).
+fn virtual_materialize<'mcx>(
+    v: &mut VirtualTupleTableSlot<'mcx>,
+    mcx: Mcx<'mcx>,
+    src_image: Option<&[u8]>,
+) -> PgResult<()> {
     if v.base.should_free() {
         return Ok(());
     }
@@ -467,15 +562,19 @@ fn virtual_materialize<'mcx>(v: &mut VirtualTupleTableSlot<'mcx>, mcx: Mcx<'mcx>
         // SAFETY: a non-null by-ref column datum points at a live field image.
         unsafe {
             sz = att_nominal_alignby(sz, att.attalignby);
-            if att.attlen == -1 && varatt_is_external_expanded(val.as_usize() as *const u8) {
+            if src_image.is_none()
+                && att.attlen == -1
+                && varatt_is_external_expanded(val.as_usize() as *const u8)
+            {
                 // C flattens the expanded value so the materialized slot
                 // doesn't depend on it (EOH_get_flat_size here,
-                // EOH_flatten_into in the copy pass below).
+                // EOH_flatten_into in the copy pass below). Expanded datums are
+                // in-memory only, never in a witnessed on-page source.
                 sz += ::datum::expandeddatum::eoh_get_flat_size(
                     ::datum::expandeddatum::datum_get_eohp(val),
                 );
             } else {
-                sz = att_addlength_datum(sz, att.attlen as i32, val);
+                sz += checked_byref_length(val, att.attlen as i32, src_image)?;
             }
         }
     }
@@ -506,7 +605,10 @@ fn virtual_materialize<'mcx>(v: &mut VirtualTupleTableSlot<'mcx>, mcx: Mcx<'mcx>
         // the live field image the datum points at.
         unsafe {
             off = att_nominal_alignby(off, att.attalignby);
-            if att.attlen == -1 && varatt_is_external_expanded(val.as_usize() as *const u8) {
+            if src_image.is_none()
+                && att.attlen == -1
+                && varatt_is_external_expanded(val.as_usize() as *const u8)
+            {
                 // EOH_flatten_into: write the flat image and point the
                 // column at it (C execTuples.c tts_virtual_materialize).
                 let eoh = ::datum::expandeddatum::datum_get_eohp(*val);
@@ -515,7 +617,9 @@ fn virtual_materialize<'mcx>(v: &mut VirtualTupleTableSlot<'mcx>, mcx: Mcx<'mcx>
                 *val = Datum::from_usize(dst0.add(off) as usize);
                 off += data_length;
             } else {
-                let data_length = att_addlength_datum(0, att.attlen as i32, *val);
+                // Re-derives the same length the size pass validated; a witness
+                // bounds it against the source tuple image (idempotent).
+                let data_length = checked_byref_length(*val, att.attlen as i32, src_image)?;
                 core::ptr::copy_nonoverlapping(
                     val.as_usize() as *const u8,
                     dst0.add(off),
@@ -620,9 +724,39 @@ fn buffer_materialize<'mcx>(
     Ok(())
 }
 
+/// The flat, contiguous backing bytes of the slot's MATERIALIZED physical
+/// tuple, or `None` when the slot has no single flat image (a Virtual slot,
+/// whose per-column datums point at scattered field images / its own
+/// materialize buffer).
+///
+/// After [`exec_materialize_slot`] + [`slot_getallattrs`], every by-reference
+/// datum of a heap/buffer/minimal slot points INTO this image, so a consumer
+/// can bound a datum's header-claimed length against the bytes that are
+/// actually backed here — the independent readable-byte witness needed to
+/// refuse a crafted on-tuple varlena header instead of over-reading process
+/// memory. Returns `None` before materialize (no owned image yet).
+pub fn slot_materialized_image<'a>(slot: &'a SlotData<'_>) -> Option<&'a [u8]> {
+    // SAFETY (heap/buffer): a stored HeapTupleData owns a live flat image of
+    // exactly `t_len` bytes (the SHOULDFREE allocation invariant). (minimal):
+    // a stored minimal tuple is a live flat image of `t_len` bytes.
+    match slot {
+        SlotData::Heap(h) => h
+            .tuple
+            .as_ref()
+            .map(|t| unsafe { core::slice::from_raw_parts(t.header_ptr(), t.t_len as usize) }),
+        SlotData::BufferHeap(b) => b
+            .base
+            .tuple
+            .as_ref()
+            .map(|t| unsafe { core::slice::from_raw_parts(t.header_ptr(), t.t_len as usize) }),
+        SlotData::Minimal(m) => m.mintuple.map(|p| unsafe { minimal_bytes(p) }),
+        SlotData::Virtual(_) => None,
+    }
+}
+
 pub fn exec_materialize_slot<'mcx>(slot: &mut SlotData<'mcx>, mcx: Mcx<'mcx>) -> PgResult<()> {
     match slot {
-        SlotData::Virtual(v) => virtual_materialize(v, mcx),
+        SlotData::Virtual(v) => virtual_materialize(v, mcx, None),
         SlotData::Heap(h) => heap_materialize(h, mcx),
         SlotData::Minimal(m) => minimal_materialize(m, mcx),
         SlotData::BufferHeap(b) => buffer_materialize(b, mcx),
@@ -856,7 +990,18 @@ pub fn exec_copy_slot<'mcx, 'src>(
             db.tts_isnull[..natts].copy_from_slice(&sb.tts_isnull[..natts]);
             db.tts_nvalid = natts as AttrNumber;
             db.tts_flags &= !TTS_FLAG_EMPTY;
-            exec_materialize_slot(dst, dst_mcx)
+            // The copied by-ref datums alias `src`'s storage. When `src` is a
+            // heap/buffer/minimal slot they point INTO its single flat tuple
+            // image (whose bytes may be raw, attacker-influenced on-page
+            // content): pass that image as the bounds witness so a crafted
+            // varlena header is refused, not over-read. A Virtual `src` has no
+            // flat image (None) — its datums are genuine in-memory values, and
+            // materialize trusts them exactly as C does.
+            let witness = slot_materialized_image(src);
+            let SlotData::Virtual(v) = dst else {
+                unreachable!("dst matched Virtual above")
+            };
+            virtual_materialize(v, dst_mcx, witness)
         }
         SlotData::Heap(_) => {
             let tuple = exec_copy_slot_heap_tuple(src, src_mcx, dst_mcx)?;

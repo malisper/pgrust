@@ -1868,7 +1868,32 @@ impl<'a> Estate<'a> {
         let s = unsafe {
             core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char)
         };
-        Ok(s.to_string_lossy().into_owned())
+        // Byte-faithful conversion, matching C's convert_value_to_string, which
+        // returns the type output function's server-encoding bytes verbatim.
+        // NEVER lossily substitute U+FFFD for non-UTF-8 bytes: the result feeds
+        // dynamic-SQL text (EXECUTE), RAISE messages, and USING-param formatting,
+        // and silent substitution would corrupt the executed statement. Valid
+        // bytes pass through unchanged; genuinely invalid input raises a
+        // catchable encoding error instead of being silently mangled.
+        let bytes = s.to_bytes();
+        match core::str::from_utf8(bytes) {
+            Ok(v) => Ok(v.to_owned()),
+            Err(e) => {
+                let start = e.valid_up_to();
+                let n = e.error_len().unwrap_or(bytes.len() - start).max(1);
+                let mut seq = String::new();
+                for b in &bytes[start..(start + n).min(bytes.len())] {
+                    if !seq.is_empty() {
+                        seq.push(' ');
+                    }
+                    seq.push_str(&format!("0x{b:02x}"));
+                }
+                Err(exec_err(
+                    types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE,
+                    format!("invalid byte sequence for encoding \"UTF8\": {seq}"),
+                ))
+            }
+        }
     }
 
     // appendStringInfoStringQuoted(-1) (stringinfo_mb.c): single-quote the
@@ -1884,15 +1909,41 @@ impl<'a> Estate<'a> {
         out.push('\'');
     }
 
+    // exec_eval_datum's reported type for a parameter datum: the datum's OWN
+    // current type, exactly as C's exec_eval_datum yields it. This is what
+    // format_expr_params must format each value with — NOT the type stored in
+    // the (mutable) EXPR_PLANS entry. The plan entry's argtypes can be swapped
+    // out from under an outer frame by a nested re-preparation whose estate
+    // holds a different type for the same dno (e.g. a RECORD field that is
+    // TEXTOID in the nested estate but int8 in the outer one). Formatting the
+    // outer datum with the plan's (now-wrong) type oid selects the wrong output
+    // function and dereferences the raw datum as the wrong type — a type
+    // confusion / arbitrary-read primitive. Deriving the type from the datum
+    // itself makes the output function always match the value.
+    fn param_datum_type(&mut self, dno: Dno) -> PgResult<Oid> {
+        let func = self.func;
+        match &func.datums[dno as usize] {
+            PlDatum::Var(_) => Ok(self.var_type(dno).typoid),
+            PlDatum::Rec(r) => Ok(self.rec_param_type_mod(r.dno)?.0),
+            PlDatum::RecField(f) => Ok(self
+                .recfield_type(f)?
+                .map(|(t, _, _)| t)
+                // datum_as_param resolves the same field just before this and
+                // errors if it is absent, so a value here implies Some.
+                .expect("recfield type resolvable after datum_as_param")),
+            _ => panic!("plpgsql: datum {dno} cannot be a parameter"),
+        }
+    }
+
     // format_expr_params (pl_exec.c); None when the expr takes no parameters.
     fn format_expr_params(&mut self, expr: &PlExpr) -> PgResult<Option<String>> {
         if !self.func.print_strict_params {
             return Ok(None);
         }
-        let (paramnos, argtypes) = EXPR_PLANS.with(|t| {
+        let paramnos = EXPR_PLANS.with(|t| {
             let t = t.borrow();
             let e = t.get(&expr.expr_id).expect("plan ensured");
-            (e.paramnos.clone(), e.argtypes.clone())
+            e.paramnos.clone()
         });
         if paramnos.is_empty() {
             return Ok(None);
@@ -1916,7 +1967,10 @@ impl<'a> Estate<'a> {
             if isnull {
                 out.push_str("NULL");
             } else {
-                let sv = self.convert_value_to_string(v, argtypes[dno as usize])?;
+                // C's format_expr_params types each value via exec_eval_datum,
+                // i.e. from the datum itself — never from the plan's argtypes.
+                let valtype = self.param_datum_type(dno)?;
+                let sv = self.convert_value_to_string(v, valtype)?;
                 Self::append_quoted(&mut out, &sv);
             }
         }
@@ -5085,7 +5139,7 @@ mod cfi_tests {
         assert_eq!(estate.exec_stmts(&[]).unwrap(), RC_OK, "no interrupt: RC_OK");
 
         init_small::globals::SetInterruptPending(true);
-        let err = estate.exec_stmts(&[]).unwrap_err();
+        let err = estate.exec_stmts(&[]).err().unwrap();
         init_small::globals::SetInterruptPending(false);
         assert_eq!(err.sqlstate, types_error::ERRCODE_QUERY_CANCELED);
     }
@@ -5106,7 +5160,7 @@ mod cfi_tests {
             params: Vec::new(),
             options: Vec::new(),
         };
-        let err = estate.exec_stmt_raise(&stmt).unwrap_err();
+        let err = estate.exec_stmt_raise(&stmt).err().unwrap();
         assert_eq!(err.message, "café % x");
         assert_eq!(err.sqlstate, types_error::ERRCODE_RAISE_EXCEPTION);
     }
@@ -5125,8 +5179,48 @@ mod cfi_tests {
             params: Vec::new(),
             options: Vec::new(),
         };
-        let err = estate.exec_stmt_raise(&stmt).unwrap_err();
+        let err = estate.exec_stmt_raise(&stmt).err().unwrap();
         assert_eq!(err.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
         assert_eq!(err.message, "unexpected RAISE parameter list length");
+    }
+
+    // Type-confusion guard (finding idx 83): format_expr_params must type each
+    // STRICT-error parameter from the DATUM's own declared type (C's
+    // exec_eval_datum), never from a re-fetched, swappable plan argtype. This
+    // witnesses that param_datum_type reports the Var's declared type — so a
+    // mutated EXPR_PLANS entry can never steer the output function onto a
+    // wrong-typed raw datum (textout on a by-value int8, etc.).
+    #[test]
+    fn param_datum_type_comes_from_datum_not_plan() {
+        const INT8OID: Oid = 20;
+        let plty = PlType {
+            typoid: INT8OID,
+            ttype: TypeKind::Scalar,
+            typlen: 8,
+            typbyval: true,
+            typtype: b'b' as i8,
+            collation: types_core::InvalidOid,
+            typisarray: false,
+            atttypmod: -1,
+            typinput: types_core::InvalidOid,
+            typioparam: types_core::InvalidOid,
+        };
+        let mut func = tiny_function();
+        func.datums.push(PlDatum::Var(PlVar {
+            dno: 0,
+            refname: "v".into(),
+            lineno: 1,
+            datatype: plty,
+            isconst: false,
+            notnull: false,
+            default_val: None,
+            promise: PROMISE_NONE,
+            cursor_explicit_expr: None,
+            cursor_explicit_argrow: -1,
+            cursor_options: 0,
+        }));
+
+        let mut estate = Estate::new(&func, false, true);
+        assert_eq!(estate.param_datum_type(0).unwrap(), INT8OID);
     }
 }

@@ -15,7 +15,7 @@ use condition_variable::{
 };
 use elog::{elog, ereport};
 use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
-use types_error::{PgResult, FATAL, LOG, WARNING};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, FATAL, LOG, WARNING};
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
@@ -258,21 +258,40 @@ fn ts_str(t: TimestampTz) -> String {
     timestamp_seams::timestamptz_to_str::call(t)
 }
 
-// xl_restore_point: rp_time i64 at 0, rp_name[MAXFNAMELEN] at 8.
-fn restore_point_name(data: &[u8]) -> String {
-    let raw = &data[8..8 + MAXFNAMELEN.min(data.len().saturating_sub(8))];
-    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-    String::from_utf8_lossy(&raw[..end]).into_owned()
+// A WAL record whose main_data is shorter than the rmgr struct the recovery
+// driver must read out of it is corrupt. Report it as ERRCODE_DATA_CORRUPTED
+// (matching the xlogprefetcher pattern) instead of slice-indexing past the
+// end, which would abort the startup process.
+fn short_main_data() -> Box<PgError> {
+    Box::new(
+        PgError::error("WAL record main_data shorter than the record struct it must hold")
+            .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
 }
 
-pub(crate) fn getRecordTimestamp(reader: &xlogreader::XLogReaderState<'_>) -> Option<TimestampTz> {
+// xl_restore_point: rp_time i64 at 0, rp_name[MAXFNAMELEN] at 8.
+fn restore_point_name(data: &[u8]) -> PgResult<String> {
+    if data.len() < 8 {
+        return Err(short_main_data());
+    }
+    let raw = &data[8..8 + MAXFNAMELEN.min(data.len() - 8)];
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    Ok(String::from_utf8_lossy(&raw[..end]).into_owned())
+}
+
+pub(crate) fn getRecordTimestamp(
+    reader: &xlogreader::XLogReaderState<'_>,
+) -> PgResult<Option<TimestampTz>> {
     let info = reader.XLogRecGetInfo() & !transam_xlog::XLR_INFO_MASK;
     let xact_info = info & xact::XLOG_XACT_OPMASK;
     let rmid = reader.XLogRecGetRmid();
 
     if rmid == transam_xlog::RM_XLOG_ID && info == transam_xlog::XLOG_RESTORE_POINT {
         let data = reader.XLogRecGetData();
-        return Some(i64::from_ne_bytes(data[..8].try_into().unwrap()));
+        if data.len() < 8 {
+            return Err(short_main_data());
+        }
+        return Ok(Some(i64::from_ne_bytes(data[..8].try_into().unwrap())));
     }
     // xl_xact_commit / xl_xact_abort both put xact_time at offset 0.
     if rmid == xact::RM_XACT_ID
@@ -285,9 +304,12 @@ pub(crate) fn getRecordTimestamp(reader: &xlogreader::XLogReaderState<'_>) -> Op
         )
     {
         let data = reader.XLogRecGetData();
-        return Some(i64::from_ne_bytes(data[..8].try_into().unwrap()));
+        if data.len() < 8 {
+            return Err(short_main_data());
+        }
+        return Ok(Some(i64::from_ne_bytes(data[..8].try_into().unwrap())));
     }
-    None
+    Ok(None)
 }
 
 fn record_end_xid(reader: &xlogreader::XLogReaderState<'_>, xact_info: u8) -> PgResult<TransactionId> {
@@ -352,7 +374,7 @@ pub(crate) fn recoveryStopsBefore(reader: &xlogreader::XLogReaderState<'_>) -> P
         stops_here = record_xid == recovery_target_xid();
     }
 
-    let record_xtime = getRecordTimestamp(reader);
+    let record_xtime = getRecordTimestamp(reader)?;
     if let Some(xtime) = record_xtime {
         if target == RecoveryTargetType::Time {
             stops_here = if recovery_target_inclusive() {
@@ -392,10 +414,10 @@ pub(crate) fn recoveryStopsAfter(reader: &xlogreader::XLogReaderState<'_>) -> Pg
         && rmid == transam_xlog::RM_XLOG_ID
         && info == transam_xlog::XLOG_RESTORE_POINT
     {
-        let rp_name = restore_point_name(reader.XLogRecGetData());
+        let rp_name = restore_point_name(reader.XLogRecGetData())?;
         if rp_name == recovery_target_name() {
             clear_stop(true);
-            let xtime = getRecordTimestamp(reader).unwrap_or(0);
+            let xtime = getRecordTimestamp(reader)?.unwrap_or(0);
             STOP_TIME.store(xtime, Relaxed);
             *STOP_NAME.lock().unwrap() = rp_name.clone();
             let _ = elog(
@@ -434,7 +456,7 @@ pub(crate) fn recoveryStopsAfter(reader: &xlogreader::XLogReaderState<'_>) -> Pg
                 | xact::XLOG_XACT_ABORT
                 | xact::XLOG_XACT_ABORT_PREPARED
         ) {
-            let record_xtime = getRecordTimestamp(reader);
+            let record_xtime = getRecordTimestamp(reader)?;
             if let Some(xtime) = record_xtime {
                 SetLatestXTime(xtime);
             }
@@ -546,7 +568,7 @@ pub(crate) fn recoveryApplyDelay(reader: &xlogreader::XLogReaderState<'_>) -> Pg
     if xact_info != xact::XLOG_XACT_COMMIT && xact_info != xact::XLOG_XACT_COMMIT_PREPARED {
         return Ok(false);
     }
-    let Some(xtime) = getRecordTimestamp(reader) else {
+    let Some(xtime) = getRecordTimestamp(reader)? else {
         return Ok(false);
     };
 
@@ -842,6 +864,37 @@ fn check_recovery_target_xid(
             }
         }
         Ok(true)
+    }
+}
+
+// A short (attacker-crafted) xl_restore_point main_data must yield a
+// catchable ERRCODE_DATA_CORRUPTED error rather than panicking the startup
+// process by slice-indexing past the end of main_data.
+#[cfg(test)]
+mod short_main_data_tests {
+    use super::*;
+
+    #[test]
+    fn restore_point_name_rejects_short_main_data() {
+        // main_data shorter than the 8-byte rp_time prefix would panic on the
+        // fixed-offset slice; it must now be a DATA_CORRUPTED error.
+        for len in 0..8usize {
+            let data = vec![0u8; len];
+            let err = restore_point_name(&data).err().unwrap();
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED, "len {len}");
+        }
+    }
+
+    #[test]
+    fn restore_point_name_reads_valid_record() {
+        // 8-byte rp_time, then a NUL-terminated rp_name.
+        let mut data = 123i64.to_ne_bytes().to_vec();
+        data.extend_from_slice(b"my_point\0");
+        assert_eq!(restore_point_name(&data).unwrap(), "my_point");
+
+        // rp_time only, empty name.
+        let data = 0i64.to_ne_bytes().to_vec();
+        assert_eq!(restore_point_name(&data).unwrap(), "");
     }
 }
 

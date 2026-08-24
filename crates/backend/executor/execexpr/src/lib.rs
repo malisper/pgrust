@@ -36,9 +36,11 @@ pub use compile::{
     exec_build_grouping_equal, exec_build_hash32_from_attrs, exec_build_hash32_from_exprs,
     exec_build_merge_projection_info_subplans, exec_build_projection_info,
     exec_build_projection_info_subplans, exec_build_window_projection_info,
-    exec_build_window_projection_info_subplans, exec_init_expr, exec_init_expr_subplans,
+    exec_build_window_projection_info_subplans, execute_acl_session_begin,
+    execute_acl_session_end, exec_init_expr, exec_init_expr_subplans,
     exec_init_expr_subplans_agg, exec_init_expr_with_case_test, exec_init_qual,
-    exec_init_qual_subplans, expr_type, lane_scan_qual, AggBind, AggOrderedSpec, AggTransSpec,
+    exec_init_qual_subplans, expr_type, lane_scan_qual, recheck_execute_acls, AggBind,
+    AggOrderedSpec, AggTransSpec,
     EconomyWindow, LaneBoolTest, LaneClause, LaneCmpClause, LaneCmpRhs, LaneQualShape, LaneSuffix,
     SubplanCompileEnv, WinBind, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };

@@ -1,10 +1,8 @@
-use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgVec};
 use typcache_seams::DomainCheckRow;
 use types_core::{Oid, CONSTRAINT_RELATION_ID};
 use types_error::PgResult;
 use types_rel::AccessShareLock;
-use types_tuple::NameData;
 
 const ConstraintTypidIndexId: Oid = 2666;
 const Anum_pg_constraint_conname: i32 = 2;
@@ -28,7 +26,7 @@ pub(crate) fn scan_domain_check_constraints<'mcx>(
         if crate::req(td, tup, Anum_pg_constraint_contype)?.as_i8() != CONSTRAINT_CHECK {
             continue;
         }
-        let conname = name_of(crate::req(td, tup, Anum_pg_constraint_conname)?);
+        let conname = crate::name_from(tup, crate::req(td, tup, Anum_pg_constraint_conname)?);
         let (conbin, isnull) = crate::getattr(td, tup, Anum_pg_constraint_conbin);
         if isnull {
             panic!(
@@ -44,15 +42,4 @@ pub(crate) fn scan_domain_check_constraints<'mcx>(
     genam::systable_endscan(smcx, scan)?;
     rel.close(AccessShareLock)?;
     Ok(out)
-}
-
-fn name_of(d: Datum) -> NameData {
-    let mut name = NameData::default();
-    let p = d.as_usize() as *const u8;
-    // SAFETY: d is a not-null pg_constraint.conname NameData column: 64
-    // NUL-padded bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(p, name.data.as_mut_ptr(), name.data.len());
-    }
-    name
 }

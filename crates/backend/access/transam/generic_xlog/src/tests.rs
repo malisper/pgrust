@@ -87,7 +87,7 @@ fn delta_round_trip_reproduces_target() {
     assert!(len > 0);
 
     let mut applied = cur.clone();
-    redo_page_transform(&mut applied, &delta[..len], 0x1122_3344_5566_7788);
+    redo_page_transform(&mut applied, &delta[..len], 0x1122_3344_5566_7788).unwrap();
     page_set_lsn(&mut tgt, 0x1122_3344_5566_7788);
     assert_eq!(applied, tgt);
 }
@@ -113,7 +113,49 @@ fn worst_case_delta_fits() {
     compute_delta(&mut delta, &mut len, &cur, &tgt);
     assert!(len <= MAX_DELTA_SIZE);
     let mut applied = cur.clone();
-    apply_page_redo(&mut applied, &delta[..len]);
+    apply_page_redo(&mut applied, &delta[..len]).unwrap();
     assert_eq!(applied[..4000], tgt[..4000]);
     assert_eq!(applied[4200..], tgt[4200..]);
+}
+
+// Untrusted WAL: malformed fragments must be rejected as ERRCODE_DATA_CORRUPTED
+// rather than panicking / writing out of bounds in the startup redo thread.
+#[test]
+fn malformed_fragments_rejected_as_corruption() {
+    let mut page = vec![0u8; BLCKSZ];
+
+    // offset + length exceeds BLCKSZ (offset=0x2000, length=0x2000).
+    let mut delta = Vec::new();
+    delta.extend_from_slice(&0x2000u16.to_ne_bytes());
+    delta.extend_from_slice(&0x2000u16.to_ne_bytes());
+    delta.resize(delta.len() + 0x2000, 0);
+    let err = apply_page_redo(&mut page, &delta).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+    // declared length runs past the end of the delta payload.
+    let mut delta = Vec::new();
+    delta.extend_from_slice(&0u16.to_ne_bytes());
+    delta.extend_from_slice(&16u16.to_ne_bytes());
+    delta.extend_from_slice(&[0u8; 4]); // only 4 bytes, not 16
+    let err = apply_page_redo(&mut page, &delta).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+    // truncated fragment header (< FRAGMENT_HEADER_SIZE trailing bytes).
+    let err = apply_page_redo(&mut page, &[0x00, 0x00, 0x01]).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+}
+
+// A crafted delta that writes an invalid pd_lower/pd_upper must not panic the
+// hole-fill; redo_page_transform reports corruption instead.
+#[test]
+fn invalid_hole_bounds_rejected_as_corruption() {
+    let mut page = vec![0u8; BLCKSZ];
+    // fragment writes pd_lower=0x2000 (> pd_upper=0) into the header at 12..16.
+    let mut delta = Vec::new();
+    delta.extend_from_slice(&12u16.to_ne_bytes()); // offset of pd_lower
+    delta.extend_from_slice(&4u16.to_ne_bytes()); // length: lower+upper
+    delta.extend_from_slice(&0x2000u16.to_ne_bytes()); // pd_lower
+    delta.extend_from_slice(&0u16.to_ne_bytes()); // pd_upper
+    let err = redo_page_transform(&mut page, &delta, 0).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
 }

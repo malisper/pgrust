@@ -8,7 +8,7 @@ use ::nbtree::itup::ItupBuf;
 use ::types_core::{
     BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, OffsetNumber, Oid, BLCKSZ,
 };
-use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::types_rel::Relation;
 use ::types_spgist::*;
 pub use ::types_spgist::{spgFormDeadTuple, SpGistInitPage};
@@ -72,6 +72,110 @@ pub fn tuple_state_error(tupstate: u8) -> ! {
 #[inline(never)]
 pub fn add_item_failed(size: usize) -> ! {
     panic!("failed to add item of size {size} to SPGiST index page")
+}
+
+#[cold]
+#[inline(never)]
+pub fn corrupt_leaf_chain(index: &Relation<'_>, blkno: BlockNumber) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "inconsistent tuple chain links in page {blkno} of index \"{}\"",
+            index.name()
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+/// Bounds a walk over a leaf-tuple `nextOffset` chain against crafted pages.
+///
+/// SP-GiST leaf tuples form singly linked chains via a 14-bit `nextOffset`
+/// field stored on-disk, which an attacker can craft (backup restore, hostile
+/// replica, direct file write with a recomputable checksum) to contain a cycle
+/// (e.g. two live tuples pointing at each other) or an out-of-range link. The
+/// insert (checkSplitConditions/moveLeafs/doPickSplit) and scan (spgWalk) chain
+/// walks otherwise follow these links unconditionally while holding a buffer
+/// content lock, so a cycle spins the backend forever without ever servicing an
+/// interrupt — an uninterruptible DoS that also grows per-step arena vectors
+/// toward OOM. A well-formed chain visits each of a page's `max` live offsets at
+/// most once, so more than `max` steps — or any link outside [First, max] —
+/// proves corruption. Mirrors the unique-predecessor/bounds validation the
+/// vacuum path (`vacuum_leaf_page`) already performs.
+pub struct LeafChainGuard {
+    max: OffsetNumber,
+    steps: u32,
+}
+
+impl LeafChainGuard {
+    #[inline]
+    pub fn new(max: OffsetNumber) -> Self {
+        LeafChainGuard { max, steps: 0 }
+    }
+
+    /// Validate the offset `off` about to be dereferenced as the next chain link.
+    /// Returns Err(ERRCODE_DATA_CORRUPTED) if the step count exceeds the page's
+    /// max offset (a cycle) or the offset lies outside [First, max].
+    #[inline]
+    pub fn visit(
+        &mut self,
+        off: OffsetNumber,
+        index: &Relation<'_>,
+        blkno: BlockNumber,
+    ) -> PgResult<()> {
+        if self.advance(off) {
+            Ok(())
+        } else {
+            Err(corrupt_leaf_chain(index, blkno))
+        }
+    }
+
+    /// Pure step check: counts the visit and returns false on overrun (cycle) or
+    /// an out-of-range link. Split out from `visit` so the bound is unit-testable
+    /// without a live `Relation`.
+    #[inline]
+    fn advance(&mut self, off: OffsetNumber) -> bool {
+        self.steps += 1;
+        self.steps <= self.max as u32 && off >= FirstOffsetNumber && off <= self.max
+    }
+}
+
+#[cfg(test)]
+mod leaf_chain_guard_tests {
+    use super::*;
+
+    // A well-formed chain of `max` distinct in-range offsets walks to completion.
+    #[test]
+    fn valid_chain_completes() {
+        let max: OffsetNumber = 5;
+        let mut guard = LeafChainGuard::new(max);
+        for off in FirstOffsetNumber..=max {
+            assert!(guard.advance(off), "valid offset {off} rejected");
+        }
+    }
+
+    // A 2-tuple cycle (A -> B -> A -> ...) is bounded rather than looping forever.
+    #[test]
+    fn two_cycle_is_bounded() {
+        let max: OffsetNumber = 4;
+        let mut guard = LeafChainGuard::new(max);
+        let cycle = [1u16, 2];
+        let mut caught = false;
+        for step in 0..1000 {
+            if !guard.advance(cycle[step % 2]) {
+                caught = true;
+                break;
+            }
+        }
+        assert!(caught, "cyclic chain was not bounded");
+    }
+
+    // An out-of-range link is rejected immediately.
+    #[test]
+    fn out_of_range_link_rejected() {
+        let mut guard = LeafChainGuard::new(3);
+        assert!(!guard.advance(0)); // below FirstOffsetNumber
+        let mut guard = LeafChainGuard::new(3);
+        assert!(!guard.advance(4)); // above max
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +680,91 @@ pub fn SpGistInitMetapage(pm: &mut PageMut<'_>) {
 // Inner-datum helpers + tuple builders
 // ---------------------------------------------------------------------------
 
+#[cold]
+#[inline(never)]
+fn corrupt_inline_datum() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "SP-GiST index tuple contains a datum whose declared length exceeds the tuple",
+        )
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+/// Validate that a by-reference datum stored inline at `off` within the bounded
+/// tuple image `tup` declares a length that lies entirely within the image.
+///
+/// SP-GiST stores key/prefix/label datums inline in index tuples, so a varlena
+/// datum's length word (or a fixed-length by-ref extent) lives on a page an
+/// attacker can craft (backup restore, hostile replica, direct file write with
+/// a recomputable checksum). `leaf_datum`/`inner_prefix_datum`/
+/// `node_label_datum` hand a raw in-tuple pointer to the opclass, which then
+/// materializes the value using that on-page length; without this check a
+/// declared length of up to ~1 GB would drive a read far past the 8 KB page
+/// (information disclosure of neighbouring buffers, or SIGSEGV). We surface the
+/// mismatch as a catchable data-corruption error instead of an OOB read.
+fn validate_inline_datum(tup: &[u8], off: usize, att: &SpGistTypeDesc) -> PgResult<()> {
+    use ::types_tuple::varatt;
+    if att.attbyval {
+        // by-value datums are read by fixed width, never dereferenced.
+        return Ok(());
+    }
+    if off > tup.len() {
+        return Err(corrupt_inline_datum());
+    }
+    let avail = tup.len() - off;
+    let need = match att.attlen {
+        -1 => {
+            // varlena: decode the on-page header, guarding every header read
+            // against the tuple bound before touching it.
+            if avail < 1 {
+                return Err(corrupt_inline_datum());
+            }
+            let p = tup[off..].as_ptr();
+            // SAFETY: `p` is in-bounds of `tup`; each branch below only reads
+            // header bytes it has first confirmed are available.
+            unsafe {
+                if varatt::varatt_is_1b_e(p) {
+                    // External/expanded TOAST pointer: a small, fixed on-page
+                    // extent. Validate the tag ourselves so a crafted tag byte
+                    // surfaces as a corruption error rather than a panic in
+                    // vartag_size.
+                    if avail < varatt::VARHDRSZ_EXTERNAL {
+                        return Err(corrupt_inline_datum());
+                    }
+                    match varatt::vartag_external(p) {
+                        varatt::VARTAG_INDIRECT
+                        | varatt::VARTAG_EXPANDED_RO
+                        | varatt::VARTAG_EXPANDED_RW
+                        | varatt::VARTAG_ONDISK => varatt::varsize_external(p),
+                        _ => return Err(corrupt_inline_datum()),
+                    }
+                } else if varatt::varatt_is_1b(p) {
+                    varatt::varsize_1b(p)
+                } else {
+                    if avail < varatt::VARHDRSZ {
+                        return Err(corrupt_inline_datum());
+                    }
+                    varatt::varsize_4b(p)
+                }
+            }
+        }
+        -2 => {
+            // cstring: needs a NUL terminator within the image.
+            match tup[off..].iter().position(|&b| b == 0) {
+                Some(n) => n + 1,
+                None => return Err(corrupt_inline_datum()),
+            }
+        }
+        n if n > 0 => n as usize,
+        _ => return Err(corrupt_inline_datum()),
+    };
+    if need > avail {
+        return Err(corrupt_inline_datum());
+    }
+    Ok(())
+}
+
 /// fetch_att over a leaf datum image (SGLTDATUM).
 #[inline]
 pub(crate) fn fetch_att(p: *const u8, attbyval: bool, attlen: i16) -> Datum {
@@ -839,15 +1028,18 @@ pub fn spgFormInnerTuple<'mcx>(
 
 /// SGLTDATUM over a raw leaf-tuple image.
 #[inline]
-pub(crate) fn leaf_datum(tup: &[u8], state: &SpGistState<'_>) -> Datum {
+pub(crate) fn leaf_datum(tup: &[u8], state: &SpGistState<'_>) -> PgResult<Datum> {
     let hdr = SpGistLeafTupleHeader::decode(tup);
     let off = SGLTHDRSZ(hdr.hasNullMask());
+    // Reject an on-page varlena whose declared length would read past the
+    // tuple image before the opclass ever dereferences it.
+    validate_inline_datum(tup, off, &state.attLeafType)?;
     // SAFETY: leaf tuple image extends past its header per its size field.
-    fetch_att(
+    Ok(fetch_att(
         tup[off..].as_ptr(),
         state.attLeafType.attbyval,
         state.attLeafType.attlen,
-    )
+    ))
 }
 
 /// spgDeformLeafTuple.
@@ -933,11 +1125,11 @@ pub fn spgExtractNodeLabels(
     state: &SpGistState<'_>,
     inner: &[u8],
     out: &mut Vec<Datum>,
-) -> bool {
+) -> PgResult<bool> {
     out.clear();
     let hdr = SpGistInnerTupleHeader::decode(inner);
     if hdr.nNodes == 0 {
-        return false;
+        return Ok(false);
     }
     let first_off = SGITHDRSZ + hdr.prefixSize as usize;
     if node_tuple_has_nulls(&inner[first_off..]) {
@@ -946,44 +1138,46 @@ pub fn spgExtractNodeLabels(
                 panic!("some but not all node labels are null in SPGiST inner tuple");
             }
         }
-        false
+        Ok(false)
     } else {
         for (_, off) in inner_tuple_nodes(inner) {
             let node = &inner[off..];
             if node_tuple_has_nulls(node) {
                 panic!("some but not all node labels are null in SPGiST inner tuple");
             }
-            out.push(node_label_datum(node, state));
+            out.push(node_label_datum(node, state)?);
         }
-        true
+        Ok(true)
     }
 }
 
 /// SGNTDATUM.
 #[inline]
-pub(crate) fn node_label_datum(node: &[u8], state: &SpGistState<'_>) -> Datum {
+pub(crate) fn node_label_datum(node: &[u8], state: &SpGistState<'_>) -> PgResult<Datum> {
     if state.attLabelType.attbyval {
-        Datum::from_u64(u64::from_ne_bytes(
+        Ok(Datum::from_u64(u64::from_ne_bytes(
             node[SGNTHDRSZ..SGNTHDRSZ + 8].try_into().expect("8 bytes"),
-        ))
+        )))
     } else {
-        Datum::from_usize(node[SGNTHDRSZ..].as_ptr() as usize)
+        validate_inline_datum(node, SGNTHDRSZ, &state.attLabelType)?;
+        Ok(Datum::from_usize(node[SGNTHDRSZ..].as_ptr() as usize))
     }
 }
 
 /// SGITDATUM.
 #[inline]
-pub(crate) fn inner_prefix_datum(inner: &[u8], state: &SpGistState<'_>) -> Datum {
+pub(crate) fn inner_prefix_datum(inner: &[u8], state: &SpGistState<'_>) -> PgResult<Datum> {
     let hdr = SpGistInnerTupleHeader::decode(inner);
     if hdr.prefixSize == 0 {
-        return Datum::null();
+        return Ok(Datum::null());
     }
     if state.attPrefixType.attbyval {
-        Datum::from_u64(u64::from_ne_bytes(
+        Ok(Datum::from_u64(u64::from_ne_bytes(
             inner[SGITHDRSZ..SGITHDRSZ + 8].try_into().expect("8 bytes"),
-        ))
+        )))
     } else {
-        Datum::from_usize(inner[SGITHDRSZ..].as_ptr() as usize)
+        validate_inline_datum(inner, SGITHDRSZ, &state.attPrefixType)?;
+        Ok(Datum::from_usize(inner[SGITHDRSZ..].as_ptr() as usize))
     }
 }
 
@@ -1074,5 +1268,67 @@ impl ItupExt for ::nbtree::itup::ItupBuf<'_> {
         let n = self.size();
         // SAFETY: as as_slice, exclusive borrow.
         unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), n) }
+    }
+}
+
+#[cfg(test)]
+mod inline_datum_tests {
+    use super::*;
+    use ::types_tuple::varatt::set_varsize_4b_word;
+
+    fn text_desc() -> SpGistTypeDesc {
+        // text: variable-length, by-reference.
+        SpGistTypeDesc {
+            type_: 25,
+            attlen: -1,
+            attbyval: false,
+            attalign: b'i' as i8,
+            attstorage: b'x' as i8,
+        }
+    }
+
+    // A 4-byte-header varlena image declaring `total` bytes, backed by
+    // `image_len` bytes of actual storage (image_len may be smaller than the
+    // declared length to simulate a crafted on-page header).
+    fn image(total: u32, image_len: usize) -> Vec<u8> {
+        let mut v = vec![0u8; image_len.max(4)];
+        v[..4].copy_from_slice(&set_varsize_4b_word(total).to_ne_bytes());
+        v
+    }
+
+    #[test]
+    fn accepts_datum_within_tuple() {
+        // 6-byte varlena (2 data bytes) fully contained in an 8-byte image.
+        let img = image(6, 8);
+        assert!(validate_inline_datum(&img, 0, &text_desc()).is_ok());
+    }
+
+    #[test]
+    fn rejects_declared_length_past_tuple() {
+        // Header claims ~1 GiB but only 8 bytes are backed by the tuple image.
+        let img = image(0x3FFF_FFFF, 8);
+        let err = validate_inline_datum(&img, 0, &text_desc()).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    #[test]
+    fn rejects_truncated_header() {
+        // Fewer than VARHDRSZ bytes available for a 4B header.
+        let img = vec![0u8; 2];
+        let err = validate_inline_datum(&img, 0, &text_desc()).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    #[test]
+    fn byval_datum_is_never_dereferenced() {
+        let desc = SpGistTypeDesc {
+            type_: 21,
+            attlen: 2,
+            attbyval: true,
+            attalign: b's' as i8,
+            attstorage: b'p' as i8,
+        };
+        // Empty image is fine: by-value datums are read by width, not pointer.
+        assert!(validate_inline_datum(&[], 0, &desc).is_ok());
     }
 }

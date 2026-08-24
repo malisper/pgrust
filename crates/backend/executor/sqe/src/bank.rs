@@ -250,27 +250,78 @@ impl Face {
 /// opener's placeholder (no bytes exist to mis-read).
 fn reconcile_classes(schema: &mut [ColMeta], parts: &[Arc<OpenPart>]) {
     use pgrc2_format::part::{StreamRole, STREAMF_SIGNED};
-    let Some(p0) = parts.first() else { return };
-    let Ok(dir) = p0.stream_directory() else { return };
+    if parts.is_empty() {
+        return;
+    }
     for c in schema.iter_mut() {
-        if let Some(ps) = dir.lookup(c.attno, 0, StreamRole::Values) {
+        // The catalog placeholder supplies the LOGICAL byval width the
+        // encoding-width entry cannot (delta streams narrow it, spec §6.3);
+        // capture it before any per-part reconcile mutates `c.class`.
+        let cat_class = c.class;
+        // [idx-211] The decode Face (value-vs-pointer interpretation of a
+        // decoded datum word) is a BANK-GRAIN fact, but decoding is PER
+        // PART: each StreamCursor resolves its kernel from its OWN part's
+        // sealed entry (byval word kernels write raw words into the datum
+        // lane; varlena kernels write validated arena/dict pointers). If the
+        // bank-grain class were reconciled from part 0 alone, a bank whose
+        // parts disagree on a column's class would marry word-producing
+        // decodes to pointer-consuming accessors — a type confusion feeding
+        // attacker-chosen words into scan.rs varlena/fixed payload derefs.
+        // So witness the class across EVERY part (the all-parts discipline
+        // `witness_packed_numeric_w` already applies to its face fact); a
+        // divergent part is corrupt/inconsistent on-disk input and must
+        // refuse loudly, never decode later parts under part 0's assumptions.
+        let per_part = parts.iter().enumerate().filter_map(|(pi, p)| {
+            let dir = p.stream_directory().ok()?;
+            let ps = dir.lookup(c.attno, 0, StreamRole::Values)?;
             let e = &ps.entry;
-            // NB StreamEntry.width is the ENCODING width (spec §6.3 —
-            // delta streams narrow it), so the LOGICAL byval width stays
-            // the catalog's; the sealed entry supplies the class id and
-            // the SIGNED flag (the bits TypMeta cannot know).
+            // The sealed entry supplies the class id and the SIGNED flag
+            // (the bits TypMeta cannot know).
             let signed = e.flags & STREAMF_SIGNED != 0;
-            let byval_width = match c.class {
+            let byval_width = match cat_class {
                 StorageClass::ByvalWord { width, .. } => width,
                 _ => e.width,
             };
-            if let Ok(class) =
-                StorageClass::from_parts(e.class, byval_width, signed, e.fixed_len)
-            {
-                c.class = class;
-            }
+            StorageClass::from_parts(e.class, byval_width, signed, e.fixed_len)
+                .ok()
+                .map(|class| (pi, class))
+        });
+        match reconcile_class_over_parts(per_part) {
+            Ok(Some(class)) => c.class = class,
+            // No part sealed a resolvable Values class: keep the opener's
+            // placeholder (zero rows to mis-read), matching the old part-0
+            // no-entry behaviour.
+            Ok(None) => {}
+            Err((pi, seen, expected)) => panic!(
+                "bank part {pi} sealed column attno {} as storage class {seen:?}, \
+                 disagreeing with the bank-grain class {expected:?} witnessed by an \
+                 earlier part — corrupt or inconsistent multi-part bank (refused \
+                 rather than decoding this part's datums under the wrong class)",
+                c.attno
+            ),
         }
     }
+}
+
+/// [idx-211] Reduce a column's per-part derived storage classes to the single
+/// bank-grain class, enforcing that EVERY part agrees. `Err((pi, seen,
+/// expected))` names the first part whose sealed class diverges from the class
+/// an earlier part witnessed, so the caller refuses typed rather than
+/// interpreting that part's datums under another part's storage/width. A
+/// column with no resolvable per-part class yields `Ok(None)` (nothing to
+/// mis-read).
+fn reconcile_class_over_parts(
+    per_part: impl IntoIterator<Item = (usize, StorageClass)>,
+) -> Result<Option<StorageClass>, (usize, StorageClass, StorageClass)> {
+    let mut reconciled: Option<StorageClass> = None;
+    for (pi, class) in per_part {
+        match reconciled {
+            None => reconciled = Some(class),
+            Some(prev) if prev != class => return Err((pi, class, prev)),
+            Some(_) => {}
+        }
+    }
+    Ok(reconciled)
 }
 
 /// [packednum] The PackedNumeric witness pass: for each NUMERIC-typed
@@ -479,6 +530,18 @@ pub struct OpenOpts {
     /// Part opens are independent four-pread validations; the opener
     /// passes its pool width so a many-part bank opens at meta width.
     pub threads: usize,
+}
+
+/// Stable, hashable data identity of an open bank: `(db, relfilenumber,
+/// gen)`. Uniquely names one relation's one committed data generation
+/// process-wide — the qualifier that scopes any bank-derived cross-query
+/// memo so entries from one relation/generation are unreachable from
+/// another. See [`Bank::ident`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BankIdent {
+    pub db: u32,
+    pub relfilenumber: u64,
+    pub gen: u64,
 }
 
 pub struct Bank {
@@ -800,6 +863,20 @@ impl Bank {
         self.open_width
     }
 
+    /// Stable data identity of THIS bank: `(db, relfilenumber, gen)` from
+    /// the effective manifest header — database oid, the relation's storage
+    /// identity, and the effective data generation. Two banks share an
+    /// identity iff they are the same relation's same committed generation
+    /// (byte-identical granule geometry and payloads). Any cross-query /
+    /// cross-session cache whose value is derived from a SPECIFIC bank's
+    /// data (survivor rowlists, packability proofs, dense prep) MUST carry
+    /// this in its key, so a fingerprint that collides across relations or
+    /// across generations cannot replay another bank's derivation.
+    pub fn ident(&self) -> BankIdent {
+        let h = &self.manifest.header;
+        BankIdent { db: h.db, relfilenumber: h.relfilenumber, gen: h.gen }
+    }
+
     /// Null-freedom proof for a column (lazy, cached per open). The
     /// lowering's admission fact: null-blind stencil shapes and dict
     /// lanes require it; the null-threaded shapes hoist it out of their
@@ -1048,6 +1125,42 @@ mod tests {
             vec![ColMeta::new(1, "n", TypMeta::NUMERIC)],
         );
         assert_eq!(b2.face(1), Face::Varlena);
+    }
+
+    #[test]
+    fn reconcile_class_all_parts_agreement_law() {
+        // [idx-211] The bank-grain storage class must be witnessed across
+        // EVERY part; a divergent part refuses (typed) rather than letting a
+        // later part's datums be decoded under an earlier part's class.
+        let varlena = StorageClass::VarlenaVerbatim;
+        let byval = StorageClass::ByvalWord { width: 8, signed: true };
+
+        // Consistent multi-part bank: one class witnessed, no refusal.
+        assert_eq!(
+            reconcile_class_over_parts([(0, varlena), (1, varlena), (2, varlena)]),
+            Ok(Some(varlena)),
+        );
+        // Empty / no resolvable class: placeholder kept.
+        assert_eq!(reconcile_class_over_parts([]), Ok(None));
+
+        // Divergent bank (part 0 VARLENA, part 1 BYVAL): the classic type
+        // confusion — must refuse, naming the offending part and both classes.
+        let (pi, seen, expected) =
+            reconcile_class_over_parts([(0, varlena), (1, byval)]).err().unwrap();
+        assert_eq!(pi, 1);
+        assert_eq!(seen, byval);
+        assert_eq!(expected, varlena);
+
+        // The reverse permutation (BYVAL then VARLENA) refuses just as loudly.
+        let (pi, seen, expected) =
+            reconcile_class_over_parts([(0, byval), (1, byval), (2, varlena)]).err().unwrap();
+        assert_eq!(pi, 2);
+        assert_eq!(seen, varlena);
+        assert_eq!(expected, byval);
+
+        // Fixed-vs-Varlena width divergence is likewise refused.
+        let fixed = StorageClass::Fixed { len: 16 };
+        assert!(reconcile_class_over_parts([(0, fixed), (1, varlena)]).is_err());
     }
 
     #[test]

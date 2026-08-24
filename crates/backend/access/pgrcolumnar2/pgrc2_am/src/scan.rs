@@ -39,6 +39,32 @@ use crate::probe::{ClogTxnProbe, SnapshotCommitCheck};
 use crate::read_error;
 use pgrc2_read::{CommitCheck, EffectiveManifest};
 
+/// Length-prefix trust: a granule's decode kernel writes exactly the
+/// per-granule value-count (`written`, an untrusted gcount taken from the
+/// part file) datums into the output buffer and returns that count, whereas
+/// the AM sizes its buffers by — and `store_row` later publishes —
+/// `expected` rows (the closed-form footer geometry, `rows_in_granule`).
+/// When `written < expected` the slots `[written..expected)` were never
+/// written for this granule and hold zero / stale / dangling datums from the
+/// reused `ColBuf`; publishing them discloses uninitialized or prior-row
+/// backend memory (and can NULL-deref pointer-class columns). Bind the served
+/// row count to the written witness: refuse with a catchable
+/// `ERRCODE_DATA_CORRUPTED` on ANY mismatch rather than publish unwritten
+/// datums. Valid parts (gcount == closed-form geometry) pass unchanged.
+fn check_decoded_count(attno: u32, g: u32, written: u32, expected: u32) -> PgResult<()> {
+    if written != expected {
+        return Err(Box::new(
+            PgError::error(format!(
+                "pgrcolumnar2: column {} granule {} value-count mismatch \
+                 (decoded {} of {} rows)",
+                attno, g, written, expected
+            ))
+            .with_sqlstate(types_error::ERRCODE_DATA_CORRUPTED),
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // the product codec binding (the lx_source `pgrc_codec_binding` shape,
 // mirrored: M3-C's full kernel registry + the LZ4 section unwrapper).
@@ -495,7 +521,20 @@ impl<'mcx> Pgrc2ScanDescData<'mcx> {
                     arena: ByteArena::new(arena_bytes),
                 };
                 match cursor.decode_full(g, &mut out) {
-                    Ok(_) => break,
+                    // Length-prefix trust: `decode_full` writes exactly the
+                    // granule's value-count (an untrusted per-granule gcount
+                    // from the part file) datums and returns that count, but we
+                    // sized `out.datums` by — and `store_row` later publishes —
+                    // `g_rows` (the closed-form footer geometry). If the kernel
+                    // wrote fewer than `g_rows`, slots [n..g_rows) were never
+                    // written this granule and hold zero/stale/dangling datums
+                    // from the reused ColBuf. Bind the served row count to the
+                    // written witness and refuse typed on any undercount rather
+                    // than publish unwritten memory as valid rows.
+                    Ok(n) => {
+                        check_decoded_count(schema.attno, g, n, g_rows)?;
+                        break;
+                    }
                     Err(ReadError::Format(pgrc2_format::FormatError::ArenaExhausted { .. }))
                         if arena_words * 8 < ARENA_MAX =>
                     {
@@ -797,4 +836,33 @@ pub fn open_engine_table_scan_cols(
         manifest,
         dir,
     }))
+}
+
+#[cfg(test)]
+mod value_count_tests {
+    use super::check_decoded_count;
+
+    #[test]
+    fn exact_written_count_is_accepted() {
+        // The valid scan: the kernel wrote exactly the closed-form geometry.
+        check_decoded_count(1, 0, 4096, 4096).expect("exact match must pass");
+        check_decoded_count(3, 7, 0, 0).expect("empty granule must pass");
+    }
+
+    #[test]
+    fn undercount_raises_data_corrupted() {
+        // The finding: a crafted gcount undercounts the granule, so the kernel
+        // wrote fewer datums than the AM publishes; slots [written..expected)
+        // would otherwise leak zero/stale/dangling datums.
+        let err = check_decoded_count(2, 5, 3, 4096).err().unwrap();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+    }
+
+    #[test]
+    fn overcount_also_refuses() {
+        // Symmetric guard: an over-write past the sized buffer geometry is
+        // equally a corruption signal (the buffer is sized by `expected`).
+        let err = check_decoded_count(4, 9, 5000, 4096).err().unwrap();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+    }
 }

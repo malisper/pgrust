@@ -5,7 +5,7 @@
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::mcx::{Mcx, PgVec};
 use ::nbtree::itup::ItupBuf;
-use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber, XLogRecPtr};
+use ::types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, OffsetNumber, XLogRecPtr};
 use ::types_error::PgResult;
 use ::types_gist::{
     page_opaque, page_opaque_update, GistBuildLSN, GistFollowRight, GistPageGetNSN,
@@ -19,7 +19,8 @@ use ::types_tuple::itemptr::ItemPointerData;
 use crate::split::{gistSplitByKey, GistSplitVector};
 use crate::state::GistState;
 use crate::util::{
-    copy_itup, gist_init_buffer, gist_tuple_is_invalid, gist_tuple_set_valid, gistGetFakeLSN,
+    copy_itup, copy_page_item, gist_init_buffer, gist_tuple_is_invalid, gist_tuple_set_valid,
+    gistGetFakeLSN,
     gistcheckpage, gistchoose, gistextractpage, gistfillbuffer, gistfillitupvec, gistfitpage,
     gistgetadjusted, gistnospace, gistNewBuffer, index_tuple_size, itup_block_number,
     itup_get_tid, itup_set_block_number, itup_slice, page_item, FirstOffsetNumber,
@@ -71,6 +72,44 @@ fn unlock(buffer: Buffer) -> PgResult<()> {
 
 fn lock(buffer: Buffer, mode: i32) -> PgResult<()> {
     bufmgr::lock_buffer::call(buffer, mode)
+}
+
+// Upper bound on how many times an insert-path traversal loop may iterate
+// before we conclude the on-disk page graph is corrupted (a downlink/rightlink
+// or NSN cycle that would otherwise spin forever). C gist.c trusts these
+// fields to describe a well-formed acyclic tree and loops without a bound; a
+// crafted index (checksums are computable, and gistcheckpage validates only
+// PageIsNew/pd_special) can therefore wedge the backend. Any legitimate
+// traversal visits far fewer than the number of blocks in the index — even
+// accounting for concurrent-split retries — so a generous multiple of the
+// relation's block count is a safe ceiling that never rejects a valid insert.
+fn gist_traversal_limit(r: &Relation<'_>) -> PgResult<u64> {
+    let nblocks =
+        bufmgr::relation_get_number_of_blocks_in_fork::call(r, ForkNumber::MAIN_FORKNUM)? as u64;
+    Ok(traversal_limit_from_nblocks(nblocks))
+}
+
+// Pure bound formula, factored out for testing. Saturating so an absurd block
+// count can never wrap the limit down to a small value that would reject valid
+// inserts.
+fn traversal_limit_from_nblocks(nblocks: u64) -> u64 {
+    nblocks.saturating_mul(4).saturating_add(1000)
+}
+
+// Raise a catchable "index corrupted" error (ERRCODE_INDEX_CORRUPTED) when an
+// insert-path loop exceeds its bound or detects a cycle. Unlike a panic this
+// aborts only the current statement, so a hostile index cannot take the
+// backend down.
+#[cold]
+fn gist_corruption_error<T>(r: &Relation<'_>, what: &str) -> PgResult<T> {
+    Err(Box::new(
+        ::types_error::PgError::error(format!(
+            "index \"{}\" contains corrupted page: {what}",
+            r.name()
+        ))
+        .with_sqlstate(::types_error::ERRCODE_INDEX_CORRUPTED)
+        .with_hint("Please REINDEX it."),
+    ))
 }
 
 // PageGetTempPageCopySpecial.
@@ -438,7 +477,22 @@ pub fn gistdoinsert<'mcx>(
     };
     let mut xlocked = false;
 
+    // Bound the descent against crafted downlink/rightlink/NSN cycles that
+    // would otherwise ping-pong forever between a page and its parent while
+    // growing `frames` without bound (gist.c's loop has no such guard).
+    let descent_limit = gist_traversal_limit(r)?;
+    let mut descent_iters: u64 = 0;
+
     loop {
+        crate::check_for_interrupts()?;
+        descent_iters += 1;
+        if descent_iters > descent_limit {
+            return gist_corruption_error(
+                r,
+                "insertion descent did not terminate (cyclic downlink/rightlink chain)",
+            );
+        }
+
         while state.frames[state.current].retry_from_parent {
             let cur = state.current;
             if xlocked {
@@ -647,7 +701,20 @@ fn gistFindPath(
     let mut fifo: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
     fifo.push_back(top0);
 
+    // A downlink cycle would re-enqueue nodes forever; a well-formed tree
+    // enqueues each block at most once, so cap the number of pages visited.
+    let visit_limit = gist_traversal_limit(state.r)?;
+    let mut visited: u64 = 0;
+
     while let Some(top) = fifo.pop_front() {
+        crate::check_for_interrupts()?;
+        visited += 1;
+        if visited > visit_limit {
+            return gist_corruption_error(
+                state.r,
+                "parent search visited too many pages (cyclic downlink chain)",
+            );
+        }
         let pin = BufferPin::adopt(bufmgr::read_buffer::call(state.r, state.frames[top].blkno)?)
             .expect("ReadBuffer");
         lock(pin.buffer(), GIST_SHARE)?;
@@ -743,8 +810,22 @@ fn gistFindCorrectParent(
         }
     }
 
-    // re-scan; follow rightlinks
+    // re-scan; follow rightlinks. A crafted parent-level rightlink cycle that
+    // never reaches InvalidBlockNumber (and never contains the child) would
+    // spin forever here; bound it. Each step unlocks the old page before
+    // locking the next, so a bound is sufficient (no lock is held across the
+    // move, hence no self-deadlock to detect).
+    let rescan_limit = gist_traversal_limit(state.r)?;
+    let mut rescan_iters: u64 = 0;
     loop {
+        crate::check_for_interrupts()?;
+        rescan_iters += 1;
+        if rescan_iters > rescan_limit {
+            return gist_corruption_error(
+                state.r,
+                "parent re-scan did not terminate (cyclic rightlink chain)",
+            );
+        }
         let found = {
             let pin = state.frames[parent].pin.as_ref().expect("pinned");
             let page = pin.page();
@@ -829,7 +910,7 @@ fn gistformdownlink<'mcx>(
         for offset in FirstOffsetNumber..=maxoff {
             let ituple = page_item(&page, offset);
             downlink = Some(match downlink {
-                None => copy_itup(mcx, ituple)?,
+                None => copy_page_item(mcx, &page, offset)?,
                 Some(dl) => {
                     match gistgetadjusted(mcx, state.r, dl.as_ptr(), ituple, giststate)? {
                         Some(new_dl) => new_dl,
@@ -855,7 +936,7 @@ fn gistformdownlink<'mcx>(
                 let pin = state.frames[parent].pin.as_ref().expect("pinned");
                 let page = pin.page();
                 let iid = state.frames[stack].downlinkoffnum;
-                copy_itup(mcx, page_item(&page, iid))?
+                copy_page_item(mcx, &page, iid)?
             };
             unlock(state.frames[parent].pin.as_ref().expect("pinned").buffer())?;
             d
@@ -881,9 +962,21 @@ fn gistfixsplit<'mcx>(
 
     let mut splitinfo: Vec<GISTPageSplitInfo<'mcx>> = Vec::new();
 
-    // walk the chain of split pages following rightlinks
+    // walk the chain of split pages following rightlinks. Unlike the other
+    // rightlink walks, this one keeps every page exclusively locked (their pins
+    // accumulate in `splitinfo`), so a crafted rightlink cycle would make us
+    // re-acquire a content lock we already hold — a permanent self-deadlock.
+    // Detect a revisited block before locking it and raise a catchable error
+    // instead. `visited` is seeded with the starting page's block.
+    let mut visited: Vec<BlockNumber> = vec![state
+        .frames[stack]
+        .pin
+        .as_ref()
+        .expect("pinned")
+        .block_number()];
     let mut cur: Option<BufferPin> = None;
     loop {
+        crate::check_for_interrupts()?;
         let (buf_id, pin_for_call): (Buffer, Option<&BufferPin>) = match cur.as_ref() {
             Some(p) => (p.buffer(), Some(p)),
             None => (
@@ -924,6 +1017,13 @@ fn gistfixsplit<'mcx>(
         }
 
         if follow_right {
+            if visited.contains(&rightlink) {
+                return gist_corruption_error(
+                    state.r,
+                    "incomplete-split rightlink chain forms a cycle",
+                );
+            }
+            visited.push(rightlink);
             let pin = BufferPin::adopt(bufmgr::read_buffer::call(state.r, rightlink)?)
                 .expect("ReadBuffer");
             lock(pin.buffer(), GIST_EXCLUSIVE)?;
@@ -1272,4 +1372,27 @@ const _: () = {
     let _ = itup_get_tid;
     let _ = ItemPointerData::invalid;
 };
+
+#[cfg(test)]
+mod insert_loop_bounds_tests {
+    use super::traversal_limit_from_nblocks;
+
+    #[test]
+    fn limit_is_generous_multiple_with_floor() {
+        // A small index still gets a healthy floor so ordinary descents and
+        // concurrent-split retries never trip the bound.
+        assert_eq!(traversal_limit_from_nblocks(0), 1000);
+        assert_eq!(traversal_limit_from_nblocks(1), 1004);
+        assert_eq!(traversal_limit_from_nblocks(1_000), 5_000);
+    }
+
+    #[test]
+    fn limit_saturates_and_never_wraps() {
+        // An attacker-influenced (or simply huge) block count must not wrap the
+        // limit down to a value that would reject a valid insert.
+        assert_eq!(traversal_limit_from_nblocks(u64::MAX), u64::MAX);
+        // The limit is monotonic in the block count.
+        assert!(traversal_limit_from_nblocks(10) < traversal_limit_from_nblocks(11));
+    }
+}
 

@@ -91,6 +91,43 @@ fn _hash_firstfreebit(map: u32) -> u32 {
     (!map).trailing_zeros()
 }
 
+/// Guard for a walk over on-disk page-chain links (`hasho_nextblkno` /
+/// `hasho_prevblkno`). These values come from untrusted on-disk bytes: a
+/// crafted index can point them into a cycle, and C's coupling walks over them
+/// have no bound, so a cycle would spin forever while holding buffer locks and
+/// wedge the backend. C tolerates this because it trusts its own on-disk state;
+/// pgrust cannot, since one such hang kills the whole cluster.
+///
+/// Called once per link followed, this services interrupts (so the walk stays
+/// cancellable) and bounds the walk against the relation's block count. A chain
+/// with no cycle visits only distinct blocks, so it can never exceed the block
+/// count; exceeding it proves a cycle, which we report as index corruption.
+/// Concurrent inserts may legitimately extend the chain, so on first overflow
+/// we re-read the current length before concluding corruption.
+fn chainwalk_step(
+    rel: &Relation<'_>,
+    visited: &mut BlockNumber,
+    nblocks: &mut BlockNumber,
+) -> PgResult<()> {
+    crate::check_for_interrupts()?;
+    *visited += 1;
+    if *visited > *nblocks {
+        *nblocks =
+            bm::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
+        if *visited > *nblocks {
+            return Err(crate::util::index_corrupted(
+                format!(
+                    "index \"{}\" contains corrupted page: overflow/sibling chain \
+                     exceeds relation size (cycle in on-disk page links)",
+                    rel.name()
+                ),
+                true,
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// _hash_addovflpage: add an overflow page to the bucket whose last page is
 /// `buf`. On entry `buf` is pinned, unlocked; returns the new overflow page
 /// pinned and write-locked.
@@ -104,6 +141,8 @@ pub(crate) fn _hash_addovflpage(
     crate::util::_hash_checkpage(rel, buf, LH_BUCKET_PAGE | LH_OVERFLOW_PAGE)?;
 
     // find the current tail page
+    let mut nblocks = bm::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
+    let mut nvisited: BlockNumber = 0;
     loop {
         // SAFETY: write lock held on buf.
         let opaque = page_opaque(&unsafe { page_ref(buf) });
@@ -119,6 +158,9 @@ pub(crate) fn _hash_addovflpage(
         }
         retain_pin = false;
         buf = _hash_getbuf(rel, nextblkno, HASH_WRITE, LH_OVERFLOW_PAGE)?;
+        // Untrusted hasho_nextblkno: keep this coupling walk interruptible and
+        // bounded so a crafted cycle can't wedge the backend holding locks.
+        chainwalk_step(rel, &mut nvisited, &mut nblocks)?;
     }
 
     bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_EXCLUSIVE)?;
@@ -159,7 +201,16 @@ pub(crate) fn _hash_addovflpage(
             break 'search;
         }
 
-        debug_assert!(i < nmaps);
+        // C only Asserts this; with an attacker-crafted metapage `i` (derived
+        // from hashm_firstfree/hashm_spares) could otherwise index hashm_mapp
+        // out of bounds. _hash_checkpage has bounded nmaps <= HASH_MAX_BITMAPS,
+        // so this guarantees the array access below stays in-page.
+        if i >= nmaps {
+            return Err(crate::util::index_corrupted(
+                format!("index \"{}\" has a corrupt hash metapage", rel.name()),
+                true,
+            ));
+        }
         let mapblkno = with_meta(metabuf, |m| m.hashm_mapp[i as usize]);
 
         let last_inpage = if i == last_page { last_bit } else { bmsize_bits - 1 };
@@ -426,7 +477,10 @@ pub(crate) fn _hash_freeovflpage(
         (m.hashm_nmaps, m.hashm_mapp.get(bitmappage as usize).copied().unwrap_or(0))
     });
     if bitmappage >= nmaps {
-        panic!("invalid overflow bit number {ovflbitno}");
+        return Err(crate::util::index_corrupted(
+            format!("invalid overflow bit number {ovflbitno} in index \"{}\"", rel.name()),
+            true,
+        ));
     }
 
     bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_UNLOCK)?;
@@ -655,6 +709,12 @@ pub(crate) fn _hash_squeezebucket(
     }
 
     // find the last page in the bucket chain
+    //
+    // Untrusted hasho_nextblkno/hasho_prevblkno links: bound every chain walk
+    // in this function against the relation size and keep it interruptible, so
+    // a crafted cycle can't spin forever holding buffer locks.
+    let mut nblocks = bm::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
+    let mut nvisited: BlockNumber = 0;
     let mut rbuf = InvalidBuffer;
     let mut ropaque = wopaque;
     let mut rblkno;
@@ -676,6 +736,7 @@ pub(crate) fn _hash_squeezebucket(
         if ropaque.hasho_nextblkno == InvalidBlockNumber {
             break;
         }
+        chainwalk_step(rel, &mut nvisited, &mut nblocks)?;
     }
 
     let mut tup_storage: Vec<u8> = Vec::with_capacity(BLCKSZ);
@@ -683,6 +744,11 @@ pub(crate) fn _hash_squeezebucket(
     let mut itup_offsets = [0 as OffsetNumber; MaxIndexTuplesPerPage];
     let mut deletable = [0 as OffsetNumber; MaxIndexTuplesPerPage];
 
+    // The read pointer walks backward (prevblkno) and the write pointer forward
+    // (nextblkno); together they traverse the chain once before meeting, so a
+    // shared bound against the relation size cannot false-positive on a valid
+    // bucket but still terminates a crafted link cycle.
+    nvisited = 0;
     loop {
         let mut ndeletable = 0usize;
         itups.clear();
@@ -830,6 +896,8 @@ pub(crate) fn _hash_squeezebucket(
                     wopaque = page_opaque(&unsafe { page_ref(wbuf) });
                     debug_assert!(wopaque.hasho_bucket == bucket);
                     retain_pin = false;
+                    // Bounded, interruptible walk over untrusted forward links.
+                    chainwalk_step(rel, &mut nvisited, &mut nblocks)?;
 
                     itups.clear();
                     tup_storage.clear();
@@ -891,5 +959,7 @@ pub(crate) fn _hash_squeezebucket(
         // SAFETY: write lock acquired above.
         ropaque = page_opaque(&unsafe { page_ref(rbuf) });
         debug_assert!(ropaque.hasho_bucket == bucket);
+        // Bounded, interruptible walk over untrusted backward links.
+        chainwalk_step(rel, &mut nvisited, &mut nblocks)?;
     }
 }

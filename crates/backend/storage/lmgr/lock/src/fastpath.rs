@@ -228,7 +228,8 @@ impl FpView<'_> {
     pub(crate) fn get_bits(&self, f: u32) -> u64 {
         let group = f / FP_LOCK_SLOTS_PER_GROUP as u32;
         let index = f % FP_LOCK_SLOTS_PER_GROUP as u32;
-        (self.bits[group as usize].get() >> (FAST_PATH_BITS_PER_SLOT * index)) & FAST_PATH_MASK
+        // SAFETY: [FPL] serialized by fpInfoLock
+        (unsafe { self.bits[group as usize].get() } >> (FAST_PATH_BITS_PER_SLOT * index)) & FAST_PATH_MASK
     }
 
     fn bit_position(f: u32, l: LOCKMODE) -> u64 {
@@ -240,39 +241,47 @@ impl FpView<'_> {
 
     fn set_lockmode(&self, f: u32, l: LOCKMODE) {
         let group = (f / FP_LOCK_SLOTS_PER_GROUP as u32) as usize;
-        self.bits[group].set(self.bits[group].get() | (1u64 << Self::bit_position(f, l)));
+        // SAFETY: [FPL] serialized by fpInfoLock
+        unsafe { self.bits[group].set(self.bits[group].get() | (1u64 << Self::bit_position(f, l))); }
     }
 
     fn clear_lockmode(&self, f: u32, l: LOCKMODE) {
         let group = (f / FP_LOCK_SLOTS_PER_GROUP as u32) as usize;
-        self.bits[group].set(self.bits[group].get() & !(1u64 << Self::bit_position(f, l)));
+        // SAFETY: [FPL] serialized by fpInfoLock
+        unsafe { self.bits[group].set(self.bits[group].get() & !(1u64 << Self::bit_position(f, l))); }
     }
 
     fn check_lockmode(&self, f: u32, l: LOCKMODE) -> bool {
         let group = (f / FP_LOCK_SLOTS_PER_GROUP as u32) as usize;
-        self.bits[group].get() & (1u64 << Self::bit_position(f, l)) != 0
+        // SAFETY: [FPL] serialized by fpInfoLock
+        (unsafe { self.bits[group].get() }) & (1u64 << Self::bit_position(f, l)) != 0
     }
 
     pub(crate) fn group_bits(&self, group: u32) -> u64 {
-        self.bits[group as usize].get()
+        // SAFETY: [FPL] serialized by fpInfoLock
+        unsafe { self.bits[group as usize].get() }
     }
 
     pub(crate) fn relid(&self, f: u32) -> Oid {
-        self.relids[f as usize].get()
+        // SAFETY: [FPL] serialized by fpInfoLock
+        unsafe { self.relids[f as usize].get() }
     }
 
     fn set_relid(&self, f: u32, relid: Oid) {
-        self.relids[f as usize].set(relid);
+        // SAFETY: [FPL] serialized by fpInfoLock
+        unsafe { self.relids[f as usize].set(relid); }
     }
 
     // Owner-only (writes require the owner holding fpInfoLock exclusive).
     fn bump_use_count(&self, group: u32) {
         let cell = &self.use_counts[group as usize];
-        cell.set(cell.get() + 1);
+        // SAFETY: [FPL] serialized by fpInfoLock
+        unsafe { cell.set(cell.get() + 1); }
     }
 
     fn set_use_count(&self, group: u32, v: i32) {
-        self.use_counts[group as usize].set(v);
+        // SAFETY: [FPL] serialized by fpInfoLock
+        unsafe { self.use_counts[group as usize].set(v); }
     }
 }
 

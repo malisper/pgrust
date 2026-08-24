@@ -1,0 +1,9 @@
+-- Finding (thermite idx 0): WindowAgg use-after-free — nodewindowagg fetched
+-- tuplestore slots with copy=false and retained them across a mid-partition
+-- spill, so a partition larger than work_mem read freed arena memory. A
+-- spilling window aggregate must still project correct running sums.
+SET work_mem = '64kB';
+SELECT sum(rs), count(*) FROM (
+  SELECT sum(g) OVER (ORDER BY g) AS rs FROM generate_series(1, 100000) g
+) w;
+RESET work_mem;

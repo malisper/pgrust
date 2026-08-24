@@ -111,7 +111,10 @@ fn fc_triggered_change_notification(
                     strcpy_quoted(&mut payload, val.unwrap_or(b""), b'\'');
                 }
 
-                let payload = String::from_utf8(payload).expect("PK payload is valid UTF-8");
+                // Names/key values may be non-UTF-8 in a SQL_ASCII database;
+                // C sends the raw payload bytes. Use lossy to avoid panicking
+                // the trigger (which fires on ordinary DML).
+                let payload = String::from_utf8_lossy(&payload).into_owned();
                 commands_async::Async_Notify(channel, Some(&payload))?;
             }
             break;

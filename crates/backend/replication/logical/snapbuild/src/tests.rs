@@ -433,6 +433,53 @@ fn serialize_then_restore_round_trips_through_disk() {
 }
 
 #[test]
+fn restore_out_of_range_state_is_catchable_error_not_panic() {
+    // Finding 205: a .snap file carrying a state value outside the
+    // SnapBuildState enum range (e.g. 3, above Consistent) must fail the
+    // decoding session with a catchable ERRCODE_DATA_CORRUPTED error, not
+    // panic and crash the cluster.
+    let _g = test_lock();
+    boot();
+
+    // Produce a valid, consistent, checksummed snapshot on disk.
+    let mut rb1 = rb();
+    let mut b1 = allocate_snapshot_builder(0, 0, false, false, 0);
+    b1.process_running_xacts(&mut rb1, 0x100, &running(8, 8, &[]))
+        .unwrap();
+    rb1.xid_set_catalog_changes(9, 0x150);
+    b1.commit_txn(&mut rb1, 0x200, 9, &[], 0).unwrap();
+
+    let lsn = 0x5000;
+    let path = ondisk::snapshot_path(lsn);
+    let _ = std::fs::remove_file(&path);
+    b1.serialization_point(&mut rb1, lsn).unwrap();
+
+    // Corrupt the on-disk state to an out-of-range value (3) and repair the
+    // checksum so the file passes CRC validation and reaches the state parse.
+    // File layout: [16-byte header][128-byte builder][committed][catchange];
+    // the checksum (header offset 4) covers everything from byte 8 onward, and
+    // the builder's state field sits at the start of the builder block.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let state_off = ondisk::SNAP_BUILD_ON_DISK_CONSTANT_SIZE; // OFF_STATE == 0
+    bytes[state_off..state_off + 4].copy_from_slice(&3i32.to_ne_bytes());
+    let crc = crc32c::fin_crc32c(crc32c::pg_comp_crc32c(
+        crc32c::CRC32C_INIT,
+        &bytes[ondisk::SNAP_BUILD_ON_DISK_NOT_CHECKSUMMED_SIZE..],
+    ));
+    bytes[4..8].copy_from_slice(&crc.to_ne_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let mut rb2 = rb();
+    let mut b2 = allocate_snapshot_builder(0, 0, false, false, 0);
+    let err = b2
+        .serialization_point(&mut rb2, lsn)
+        .expect_err("out-of-range state must be a clean error, not a panic");
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn restore_missing_file_is_not_interesting() {
     let _g = test_lock();
     boot();

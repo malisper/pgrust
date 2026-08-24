@@ -11,12 +11,20 @@
 //!    (`GUARD_CODE_BOUND` demotes the batch on violation — checked gather,
 //!    never an error);
 //! 2. [`ScanDictSpace::prepare_frames`] faults exactly the frames the
-//!    batch's codes address (typed errors surface HERE, before any
-//!    infallible face is reachable);
+//!    batch's codes address AND resolves each licensed entry, so any
+//!    index-entry inconsistency (a hostile-but-checksummed offset/length
+//!    that is in-range-by-code yet points out of range — finding idx 178)
+//!    surfaces as a typed corruption error HERE, before any infallible face
+//!    is reachable;
 //! 3. per-frame CRCs (SB-7) validate the faulted bytes.
 //!
-//! After 1+2, `entry_datum` on a published lane cannot fail: codes are
-//! bounded and their frames resident.
+//! The CRC in step 3 witnesses only that the faulted bytes are UNMODIFIED —
+//! it does not vouch for the honesty of a maliciously-authored index. That
+//! honesty is what step 2's per-entry resolution establishes: after 1+2,
+//! `entry_datum`/`byte_len` on a published lane cannot fail, because codes
+//! are bounded, their frames resident, and every entry the lane serves has
+//! already resolved cleanly (the same `entry(code)?` refusal the
+//! checked-gather demotion arm raises).
 
 use std::sync::Arc;
 
@@ -54,8 +62,20 @@ impl ScanDictSpace {
     }
 
     /// Fault the frames addressed by `codes` (frame-lazy: only touched
-    /// frames commit). MUST run before publishing a lane over these codes
-    /// — it is the fallible half of the infallible-face license.
+    /// frames commit) AND validate the honesty of every licensed entry.
+    /// MUST run before publishing a lane over these codes — it is the
+    /// fallible half of the infallible-face license.
+    ///
+    /// The max-code guard bounds the CODE and the frame fault establishes
+    /// residency, but neither validates that an entry's stored offset and
+    /// lengths are internally consistent (finding idx 178): a
+    /// hostile-but-checksummed dict index can pass both and still address
+    /// bytes out of range. Resolving each entry HERE turns any such
+    /// inconsistency into a typed `ReadError` (mapped to
+    /// `ERRCODE_DATA_CORRUPTED` at the AM layer) — the same refusal the
+    /// checked-gather demotion arm raises via `entry(code)?` — so the
+    /// published lane's infallible faces can never reach their `.expect()`
+    /// as a panic on malformed data.
     pub fn prepare_frames(&self, codes: &[u32]) -> ReadResult<()> {
         let mut last_frame = u32::MAX;
         for &c in codes {
@@ -64,6 +84,15 @@ impl ScanDictSpace {
                 self.handle.ensure_code(c)?;
                 last_frame = f;
             }
+            // Entry-honesty gate: resolve the entry out of its (now
+            // resident) frame and validate its stored byte_len/char_len.
+            // This is index-read + frame-slice only — no copy and no
+            // Option-C char-table build, so `byte_len` stays index-only for
+            // the hot StrView caller. `entry(c)?` succeeding licenses both
+            // the `entry_datum` face (same resolver) and the `byte_len`
+            // face (`byte_len_only` reads the very index field `entry`
+            // already validated).
+            let _ = self.handle.entry(c)?;
         }
         Ok(())
     }
@@ -110,7 +139,7 @@ impl DictSpace for ScanDictSpace {
         let e = self
             .handle
             .entry(code)
-            .expect("licensed at publish: max-code guard + prepare_frames");
+            .expect("licensed at publish: max-code guard + prepare_frames entry-honesty gate");
         Datum::from_u64(e.image.as_ptr() as u64)
     }
 
@@ -119,13 +148,18 @@ impl DictSpace for ScanDictSpace {
         // caller must never trigger the Option-C load-time char walk).
         self.handle
             .byte_len_only(code)
-            .expect("licensed at publish: max-code guard + resident index")
+            .expect("licensed at publish: max-code guard + prepare_frames entry-honesty gate")
     }
 
     fn char_len(&self, code: u32) -> u32 {
+        // Absolute/Delta forms are index-only and validated by the
+        // prepare_frames entry-honesty gate (the same fields/checked_sub
+        // `entry` resolves). The Option-C (`Absent`) form serves char_len
+        // from a load-time table whose build is the documented lazy
+        // deviation — outside this per-batch gate.
         self.handle
             .lengths(code)
-            .expect("licensed at publish: max-code guard + resident index")
+            .expect("licensed at publish: max-code guard + prepare_frames entry-honesty gate")
             .1
     }
 

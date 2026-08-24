@@ -20,13 +20,6 @@ const Anum_pg_policy_polwithcheck: i32 = 8;
 
 const OIDOID: Oid = 26;
 
-fn name_datum_str<'a>(d: datum::Datum) -> &'a str {
-    // SAFETY: a non-null pg_policy name column is a 64-byte NameData image.
-    let bytes = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, 64) };
-    let len = bytes.iter().position(|&b| b == 0).unwrap_or(64);
-    core::str::from_utf8(&bytes[..len]).expect("non-UTF-8 name in pg_policy")
-}
-
 fn opt_text_attr<'mcx>(
     mcx: Mcx<'mcx>,
     td: &TupleDescData<'_>,
@@ -105,8 +98,8 @@ pub(crate) fn scan_pg_policy<'mcx>(
         let td = rel.descr();
         rows.push(PgPolicyShape {
             polname: {
-                let s = name_datum_str(req(td, tup, Anum_pg_policy_polname)?);
-                let bytes = mcx::slice_borrow_in(mcx, s.as_bytes())?;
+                let name = crate::name_from(tup, req(td, tup, Anum_pg_policy_polname)?);
+                let bytes = mcx::slice_borrow_in(mcx, name.name_str())?;
                 core::str::from_utf8(bytes).expect("pg_policy name is UTF-8")
             },
             polcmd: req(td, tup, Anum_pg_policy_polcmd)?.as_u8(),

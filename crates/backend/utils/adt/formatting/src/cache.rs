@@ -110,6 +110,7 @@ fn dch_cache_getnew(st: &mut DchCacheState, str: &[u8], std: bool, format: Rc<[F
         let e = &mut st.cache[old_idx];
         e.valid = true;
         e.str = str.to_vec();
+        e.std = std;
         e.format = format;
         e.age = age;
     } else {

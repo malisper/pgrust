@@ -392,9 +392,27 @@ pub(crate) fn convert_result_row(
         let cell = row.get(j).cloned().flatten();
         let cstr = match &cell {
             None => None,
-            Some(bytes) => Some(CString::new(bytes.as_slice()).map_err(|_| {
-                Box::new(PgError::error("remote value contains embedded NUL byte"))
-            })?),
+            Some(bytes) => {
+                // The remote session runs with client_encoding set to our
+                // database encoding (C's configure_remote_session passes
+                // GetDatabaseEncodingName as the connection's client_encoding),
+                // so these bytes are only *claimed* to be in the database
+                // encoding; a malicious/compromised remote can ship bytes that
+                // are invalid in it. C tolerates the resulting mojibake because
+                // it stays byte-oriented, but this port has from_utf8_unchecked
+                // sinks that rely on the engine invariant that stored text is
+                // valid in the database encoding — feeding them invalid bytes
+                // is UB (unsound str). Verify here, before the value reaches an
+                // input function or becomes a Rust str, raising a catchable
+                // error under the column's conversion errcontext. SQL_ASCII
+                // accepts every byte, so valid behavior is preserved. This
+                // guards both the scan-batch and modify RETURNING paths.
+                mbutils::pg_verifymbstr(bytes, false)
+                    .map_err(|e| conversion_error(e, attin, i))?;
+                Some(CString::new(bytes.as_slice()).map_err(|_| {
+                    Box::new(PgError::error("remote value contains embedded NUL byte"))
+                })?)
+            }
         };
         if i == types_tuple::htup::SelfItemPointerAttributeNumber {
             // ctid arm: tidin over the non-NULL text (C skips NULLs).

@@ -274,7 +274,7 @@ fn decode_loop(
     )?;
 
     if !binary && ctx.opc().options.output_type != OutputPluginOutputType::Textual {
-        let plugin = String::from_utf8_lossy(ctx.slot.data.get().plugin.name_str()).into_owned();
+        let plugin = String::from_utf8_lossy(unsafe { ctx.slot.data.get() }.plugin.name_str()).into_owned();
         let procname = adt_regproc::format_procedure(p.mcx, flinfo.fn_oid)?;
         ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -294,7 +294,7 @@ fn decode_loop(
 
     ctx.opc().output_writer_private = p as *mut DecodingOutputState as usize;
 
-    let restart_lsn = ctx.slot.data.get().restart_lsn;
+    let restart_lsn = unsafe { ctx.slot.data.get() }.restart_lsn;
     ctx.reader.XLogBeginRead(restart_lsn);
 
     inval::local::InvalidateSystemCaches()?;

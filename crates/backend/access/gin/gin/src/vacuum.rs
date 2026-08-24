@@ -21,7 +21,7 @@ use ::xloginsert_seams::{XLogRegBuf, REGBUF_FORCE_IMAGE, REGBUF_STANDARD};
 
 use crate::datapage::{
     gin_data_leaf_page_is_empty, gin_page_delete_posting_item, ginVacuumPostingTreeLeaf,
-    posting_item_at,
+    nonleaf_maxoff_checked, posting_item_at,
 };
 use crate::entrypage::{
     gin_get_downlink, gin_get_nposting, gin_is_posting_tree, gintuple_get_attrnum,
@@ -244,9 +244,11 @@ fn ginScanToDelete(
         let mut i = FirstOffsetNumber;
         loop {
             // Re-read maxoff every iteration: deleting a child removes its
-            // posting item from this page.
+            // posting item from this page. Validate it before the raw
+            // posting_item_at below so a crafted maxoff cannot drive an
+            // out-of-bounds read on the vacuum descent.
             // SAFETY: as above.
-            let maxoff = { page_opaque(&unsafe { page_ref(buffer) }).maxoff };
+            let maxoff = { nonleaf_maxoff_checked(page_bytes(&unsafe { page_ref(buffer) }))? };
             if i > maxoff {
                 break;
             }

@@ -1,0 +1,7 @@
+-- Finding (thermite idx 248): unbounded lookaround-constraint indexes were
+-- packed into the i16 color space (LACON arc color = ncolors + index) with no
+-- bound, so a huge lookaround count truncated and corrupted the automaton.
+-- Compilation must fail cleanly ("too complex") past the limit, and patterns
+-- under the limit must still match.
+SELECT 'x' ~ (repeat('(?=ab)', 40000) || 'ab') AS should_error;
+SELECT 'ab' ~ (repeat('(?=ab)', 5) || 'ab') AS small_matches;

@@ -1631,15 +1631,22 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
         init_small::wretain::note_caches_tainted();
     }
 
-    // A retained thread keeps its previous task's session GUCs (a C worker
-    // is a fresh process; RestoreGUCState overlays postmaster state only);
-    // the transfer below only SETs, so a variable the new leader has at
-    // default would silently keep the old task's value — RESET ALL semantics
-    // (guc.c:2003) rolls them back first. Shipped instance: matview
-    // datafill's RestrictSearchPath search_path='' surviving into later
-    // tasks, breaking worker-side function name lookup.
+    // A retained thread keeps its previous task's session GUC store (a C
+    // worker is a fresh process; RestoreGUCState overlays postmaster state
+    // only). RESET ALL (guc.c:2003) is NOT enough here: by C parity it
+    // preserves every value sourced <= PGC_S_OVERRIDE (client startup options
+    // via PGOPTIONS, ALTER ROLE/DATABASE SET) and the reset_val stamps
+    // make_default bookkeeping wrote for them, so a PRIOR session's
+    // search_path/TimeZone/etc. would stay live under THIS (different-user)
+    // session's task — worker-side name resolution and PARALLEL SAFE function
+    // bodies follow this thread's search_path, so that is a cross-session
+    // privilege/behavior leak (idx 114). Shipped instance: matview datafill's
+    // RestrictSearchPath search_path='' surviving into later tasks, breaking
+    // worker-side function name lookup. Scrub the reused thread to the same
+    // session-neutral fresh-backend baseline a C worker process starts from,
+    // before applying the new leader's pin.
     if init_small::wretain::warm_claim() {
-        guc::ResetAllOptions();
+        guc::store::reset_store_to_process_base();
     }
     let _guc_binding = if let Some(pin) = shared.guc_pin.as_ref() {
         // Pin bind: leader-validated values + extras, assign hooks fire,

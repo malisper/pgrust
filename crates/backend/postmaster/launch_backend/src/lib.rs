@@ -188,7 +188,39 @@ fn sim_universe_adopt(id: Option<u64>) {
     }
 }
 
-fn reserve_child_pid() -> pid_t {
+// Synthetic child pids live in the strictly-positive range
+// [MIN_SYNTHETIC_PID, MAX_SYNTHETIC_PID]. Every reserved/sentinel value the
+// rest of the system relies on — 0 and -1 (fork/bgworker failure sentinels,
+// and procsignal's "pid <= 0 is unsignalable" rule) — sits BELOW this range,
+// so the counter (which wraps back to MIN_SYNTHETIC_PID, never into
+// zero/negatives) can never emit one, not even after a full 32-bit cycle.
+const MIN_SYNTHETIC_PID: pid_t = 1;
+const MAX_SYNTHETIC_PID: pid_t = pid_t::MAX;
+
+/// True if `pid` is currently owned by a live child thread this crate tracks.
+/// CHILD_THREADS is the authoritative live-child table (postmaster spawns,
+/// pooled standbys, runtime executors — each pushes its reserved pid here and
+/// removes it only at join). reserve_child_pid consults it so a counter wrap
+/// can never hand back a pid a still-live child holds.
+fn pid_is_live(pid: pid_t) -> bool {
+    CHILD_THREADS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|(p, _)| *p == pid)
+}
+
+/// Reserve a synthetic child pid. Guarantees the returned value is (a)
+/// strictly positive — never 0 or the -1 failure sentinel; (b) never the
+/// postmaster's real pid (the one OS pid this synthetic namespace shares — a
+/// collision hijacks the postmaster's wakeup-registry entry, see the note on
+/// NEXT_CHILD_PID above); and (c) not currently owned by a live child
+/// (CHILD_THREADS), so a full wrap of the 32-bit counter can never reuse a
+/// still-live child's pid and corrupt the reaper's bookkeeping. Returns None
+/// only when every value in the synthetic range is live/excluded — the caller
+/// then refuses the launch cleanly instead of returning a colliding/sentinel
+/// pid.
+fn reserve_child_pid() -> Option<pid_t> {
     // pgsync by crate law (permit-s5; test-only env-knob memo, hygiene —
     // the walreceiverfuncs cfg(test) Once precedent).
     static TEST_INIT: pgsync::OnceLock<()> = pgsync::OnceLock::new();
@@ -198,17 +230,47 @@ fn reserve_child_pid() -> pid_t {
             .and_then(|v| v.parse::<i32>().ok())
         {
             let start = init_small::globals::PostmasterPid() - n;
-            if start > 0 {
+            if start >= MIN_SYNTHETIC_PID {
                 NEXT_CHILD_PID.store(start, Ordering::Relaxed);
             }
         }
     });
-    loop {
-        let pid = NEXT_CHILD_PID.fetch_add(1, Ordering::Relaxed);
-        if pid != init_small::globals::PostmasterPid() {
-            return pid;
+    let postmaster_pid = init_small::globals::PostmasterPid();
+    // Bound the search to one full pass over the synthetic range: if every
+    // candidate is excluded/live the space is exhausted and we fail cleanly
+    // rather than spin forever or hand back a bad pid.
+    let mut remaining = (MAX_SYNTHETIC_PID as i64 - MIN_SYNTHETIC_PID as i64) + 1;
+    while remaining > 0 {
+        remaining -= 1;
+        // Atomically claim a candidate and advance the counter, wrapping at
+        // the top of the range back to MIN_SYNTHETIC_PID (never to
+        // 0/negative), normalizing any out-of-range value the same way.
+        let mut cur = NEXT_CHILD_PID.load(Ordering::Relaxed);
+        let candidate = loop {
+            let c = if cur < MIN_SYNTHETIC_PID || cur > MAX_SYNTHETIC_PID {
+                MIN_SYNTHETIC_PID
+            } else {
+                cur
+            };
+            let next = if c == MAX_SYNTHETIC_PID { MIN_SYNTHETIC_PID } else { c + 1 };
+            match NEXT_CHILD_PID.compare_exchange_weak(
+                cur,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break c,
+                Err(actual) => cur = actual,
+            }
+        };
+        // (a) positivity is structural (candidate is in [MIN, MAX]); (b) skip
+        // the postmaster pid; (c) skip any pid a live child still owns.
+        if candidate == postmaster_pid || pid_is_live(candidate) {
+            continue;
         }
+        return Some(candidate);
     }
+    None
 }
 
 // C waitpid reports a child only after the process is fully dead; announce
@@ -687,7 +749,12 @@ pub fn postmaster_child_launch(
         }
     };
 
-    let child_pid = reserve_child_pid();
+    let Some(child_pid) = reserve_child_pid() else {
+        // Synthetic pid space exhausted: refuse with the same -1 contract as a
+        // failed thread spawn (the postmaster closes the client socket and
+        // reclaims the slot) rather than return a colliding/sentinel pid.
+        return -1;
+    };
     // Pre-identity signal window: make the pid deliverable BEFORE the caller
     // publishes it (set_child_pid) — a fast-shutdown SIGTERM broadcast can
     // land before the child thread has run a single instruction. The child
@@ -1053,7 +1120,11 @@ pub mod wpool {
     }
 
     fn spawn_standby() -> bool {
-        let spawn_pid = super::reserve_child_pid();
+        let Some(spawn_pid) = super::reserve_child_pid() else {
+            // Synthetic pid space exhausted: stop replenishing rather than
+            // reserve a colliding/sentinel pid for the standby.
+            return false;
+        };
         let inherited = super::Inherited::capture();
         // Base share, same contract as postmaster_child_launch; wpool::flush
         // on reload still retires parked standbys so respawns pick up the
@@ -1389,7 +1460,15 @@ pub mod wpool {
             // Fresh per-task pid: the previous task's exit announce may still
             // be queued at the postmaster; reusing its pid would let the
             // reaper's cleanup land on the new task.
-            let task_pid = super::reserve_child_pid();
+            let Some(task_pid) = super::reserve_child_pid() else {
+                // Synthetic pid space exhausted: release the just-claimed slot,
+                // retire this standby (dropping it closes its channel), and
+                // fall back to the postmaster spawn path (0) rather than reuse
+                // a colliding/sentinel pid.
+                pmchild_seams::release_postmaster_child_slot::call(child_slot);
+                drop(sb);
+                return 0;
+            };
             // Pre-identity signal window (claim): between set_child_pid below
             // and the standby's per-task ProcSignalInit, a shutdown SIGTERM
             // targets task_pid — make it deliverable first (the standby
@@ -1938,7 +2017,13 @@ pub mod rtpool {
         ordinal: usize,
         body: Box<dyn FnOnce() + Send>,
     ) -> std::io::Result<std::thread::JoinHandle<()>> {
-        let pid: pid_t = super::reserve_child_pid();
+        let Some(pid) = super::reserve_child_pid() else {
+            // Synthetic pid space exhausted: fail the worker spawn cleanly.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "synthetic child pid space exhausted",
+            ));
+        };
         let inherited = super::Inherited::capture();
         // PERMIT-S5 (s2 §6 item 3 / review NB-1): the rtpool worker spawn
         // door — parent-side registration BEFORE the OS spawn, exactly the
@@ -2034,7 +2119,12 @@ pub mod rtpool {
         // is untouched).
         #[cfg(pgrust_sim)]
         let sim_sched_slot = {
-            let vpid = super::reserve_child_pid();
+            let Some(vpid) = super::reserve_child_pid() else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "synthetic child pid space exhausted",
+                ));
+            };
             pgsync::sim::spawn_door::register_child(
                 vpid as u32,
                 &format!("bgjobs-dispatcher:{vpid}"),
@@ -2105,7 +2195,9 @@ pub mod rtpool {
         // main_entry). Both are postmaster-thread idempotent.
         let rt = start_if_enabled()?;
         let dispatcher = bgjobs::start_if_enabled(rt, spawn_dispatcher)?;
-        let pid: pid_t = super::reserve_child_pid();
+        // Synthetic pid space exhausted: propagate None so the caller falls
+        // back to the (also cleanly-refusing) thread spawn path.
+        let pid: pid_t = super::reserve_child_pid()?;
         match child_type {
             types_core::BackendType::BgWriter => {
                 dispatcher.register(std::sync::Arc::new(bgwriter::job::new_bgwriter_job(
@@ -2265,7 +2357,10 @@ pub mod rtgang {
     /// at install.
     fn spawn_gang_worker(ordinal: usize) -> bool {
         let Some(boot) = BOOT.get() else { return false };
-        let child_pid: pid_t = super::reserve_child_pid();
+        let Some(child_pid) = super::reserve_child_pid() else {
+            // Synthetic pid space exhausted: report the spawn as failed.
+            return false;
+        };
         // PERMIT-S5 (s2 §6 item 3 / review NB-1): the rtgang spawn door —
         // parent-side registration keyed by the reserved pid, symbolic
         // watchdog naming ("rtgang<ordinal>:<vpid>"). The spawner may run on

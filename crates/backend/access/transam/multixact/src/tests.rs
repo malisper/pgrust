@@ -579,3 +579,49 @@ fn recovery_checkpoint_race_initializes_next_offsets_page() {
     assert!(SimpleLruDoesPhysicalPageExist(octl, 7).unwrap());
     assert_eq!(LAST_INITIALIZED_OFFSETS_PAGE.get(), 7);
 }
+
+// A crafted 2PC state file can present a TWOPHASE_RM_MULTIXACT_ID record whose
+// payload is not sizeof(MultiXactId). C only Asserts this (compiled out in
+// release), so a wrong length must surface as a typed ERRCODE_DATA_CORRUPTED
+// error here, never a panic.
+#[test]
+fn multixact_recdata_len_rejects_wrong_length() {
+    let expected = core::mem::size_of::<MultiXactId>();
+
+    // Valid length passes.
+    check_multixact_recdata_len(&vec![0u8; expected], "test").unwrap();
+
+    for bad_len in [0usize, 1, 3, 5, 8, 64] {
+        if bad_len == expected {
+            continue;
+        }
+        let err = check_multixact_recdata_len(&vec![0u8; bad_len], "test")
+            .err().expect("wrong-length payload must be rejected");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+    }
+}
+
+// GetMultiXactIdMembers derives the member count from two offset entries read
+// verbatim from the offsets SLRU (untrusted on-disk / WAL-replayed bytes). A
+// corrupt offset pair can yield a non-positive count (a >2^31 modular delta
+// reinterpreted as i32) or one far larger than any real multixact. Before this
+// fix that count drove an infallible reserve() that aborted the whole process
+// (thread-per-backend => full cluster crash) on requests above MaxAllocSize.
+// The count must now be classified as corrupt so the caller raises a catchable
+// error instead, matching C's palloc() MaxAllocSize behavior.
+#[test]
+fn corrupt_member_count_is_rejected() {
+    const MAX_MEMBERS: i32 =
+        (MAX_ALLOC_SIZE / core::mem::size_of::<MultiXactMember>()) as i32;
+
+    // Plausible counts for a real multixact are accepted.
+    for good in [1i32, 2, 100, MAX_MEMBERS] {
+        assert!(!member_count_is_corrupt(good), "count {good} should be valid");
+    }
+
+    // Zero/negative (>2^31 modular delta) and above-ceiling counts are rejected.
+    // 0x0800_0000 (~134M) * 8 bytes = 1GB, past MaxAllocSize.
+    for bad in [0i32, -1, i32::MIN, 0x0800_0000, 0x7FFF_FFFF, MAX_MEMBERS + 1] {
+        assert!(member_count_is_corrupt(bad), "count {bad} must be rejected");
+    }
+}

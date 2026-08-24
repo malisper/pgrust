@@ -615,3 +615,34 @@ fn restore_image_pglz_roundtrips() {
     assert!(matches!(err, RestoreErr::DecompressFailure));
     assert!(restore_err_msg(err, 0x1_0000_0000, 3).contains("could not decompress image"));
 }
+
+#[test]
+fn allocate_recordbuf_rejects_wrapping_xl_tot_len() {
+    let cx = MemoryContext::new("t");
+    let mut r = reader(&cx);
+    let baseline = r.read_record_buf_size;
+    assert!(baseline as usize >= XLOG_BLCKSZ * 2);
+
+    // A hostile xl_tot_len in the top XLOG_BLCKSZ window: the C-shaped uint32
+    // round-up would wrap past u32::MAX to a tiny value and hand back a buffer
+    // smaller than the record. The widened arithmetic must instead reject it
+    // cleanly (allocator MaxAllocSize admission) rather than wrap/over-alloc.
+    for &reclength in &[0xFFFF_E000u32, 0xFFFF_F000, 0xFFFF_FFFF] {
+        assert!(
+            allocate_recordbuf(&mut r, reclength).is_err(),
+            "reclength {reclength:#X} must fail, not wrap to a tiny buffer",
+        );
+        // The record buffer is left untouched (still large enough to be safe),
+        // never silently shrunk below the record it is supposed to hold.
+        assert_eq!(r.read_record_buf_size, baseline);
+        assert!(r.read_record_buf_size as usize >= XLOG_BLCKSZ * 2);
+    }
+
+    // Oversized-but-non-wrapping values also fail cleanly via the same cap.
+    assert!(allocate_recordbuf(&mut r, 0x8000_0000).is_err());
+
+    // A legitimately large record (below the allocation cap) still grows the
+    // buffer, preserving valid reassembly behavior.
+    assert!(allocate_recordbuf(&mut r, 16 * 1024 * 1024).is_ok());
+    assert!(r.read_record_buf_size >= 16 * 1024 * 1024);
+}

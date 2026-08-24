@@ -119,6 +119,24 @@ fn read_lconv(monetary: &str, numeric: &str) -> ::types_error::PgResult<PgLconv>
     let mon_c = cstring(monetary);
     let num_c = cstring(numeric);
 
+    // localeconv() returns a pointer to a process-global static struct (POSIX
+    // does not require it to be thread-safe, and glibc's is not). Even with the
+    // per-thread uselocale below, two backend threads that interleave here would
+    // race on that shared static — one thread's copy could observe another
+    // thread's locale, and freelocale() could run while another thread's read of
+    // the static still referenced it (cross-session corruption + use-after-free).
+    // Serialize the entire newlocale/uselocale/localeconv/copy/freelocale
+    // critical section under a process-global mutex, matching how other
+    // non-reentrant libc calls are wrapped in this codebase. The guard is held
+    // until the function returns, i.e. until every field has been copied out of
+    // the static and the locale object has been freed.
+    use pgsync::{Mutex, OnceLock};
+    static LOCALECONV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _localeconv_guard = LOCALECONV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("localeconv lock");
+
     // SAFETY: both buffers are NUL-terminated and outlive the newlocale calls.
     // The locale object is used only on this thread and freed before return.
     unsafe {

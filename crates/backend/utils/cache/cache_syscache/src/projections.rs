@@ -275,18 +275,12 @@ fn pg_index_indclass_element(index_oid: Oid, index: i32) -> PgResult<Option<Oid>
     };
     let t = tuple.tuple();
     let d = getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDCLASS);
-    // SAFETY: not-null plain-storage oidvector column of the held tuple
-    // (24-byte header, values in place); the seam's precondition bounds
-    // `index` under dim1.
-    let elem = unsafe {
-        let p = d.as_usize() as *const u8;
-        let dim1 = *(p.add(16) as *const i32);
-        debug_assert!(index >= 0 && index < dim1);
-        *(p.add(24) as *const Oid).add(index as usize)
-    };
+    // not-null plain-storage oidvector column of the held tuple; header, dim1,
+    // and `index` are bounded against the tuple image before the element read.
+    let elem = checked_vector_element::<Oid>(&t, d, index, "pg_index.indclass");
     drop(t);
     ReleaseSysCache(tuple);
-    Ok(Some(elem))
+    elem.map(Some)
 }
 
 fn pg_index_indoption_element(index_oid: Oid, index: i32) -> PgResult<Option<i16>> {
@@ -298,18 +292,12 @@ fn pg_index_indoption_element(index_oid: Oid, index: i32) -> PgResult<Option<i16
     };
     let t = tuple.tuple();
     let d = getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDOPTION);
-    // SAFETY: not-null plain-storage int2vector column of the held tuple
-    // (24-byte header, values in place); the seam's precondition bounds
-    // `index` under dim1.
-    let elem = unsafe {
-        let p = d.as_usize() as *const u8;
-        let dim1 = *(p.add(16) as *const i32);
-        debug_assert!(index >= 0 && index < dim1);
-        *(p.add(24) as *const i16).add(index as usize)
-    };
+    // not-null plain-storage int2vector column of the held tuple; header, dim1,
+    // and `index` are bounded against the tuple image before the element read.
+    let elem = checked_vector_element::<i16>(&t, d, index, "pg_index.indoption");
     drop(t);
     ReleaseSysCache(tuple);
-    Ok(Some(elem))
+    elem.map(Some)
 }
 
 fn pg_am_amtype_lookup(amoid: Oid) -> PgResult<Option<i8>> {
@@ -344,14 +332,19 @@ fn pg_am_amname_lookup(amoid: Oid) -> PgResult<Option<String>> {
     let t = tuple.tuple();
     let d = getattr(&t, AMOID, ANUM_PG_AM_AMNAME);
     // SAFETY: amname is a NameData column; the datum points at its
-    // NUL-terminated 64-byte buffer inside the pinned tuple image.
+    // NUL-terminated 64-byte buffer inside the pinned tuple image. The bytes are
+    // checked for valid UTF-8 (WAL-replayed/inherited pages or namein-clipped
+    // superuser writes can hold non-UTF-8) so no unsound str is built; invalid
+    // bytes raise a catchable ERRCODE_DATA_CORRUPTED.
     let name = unsafe {
         let p = d.as_usize() as *const u8;
         let mut len = 0usize;
         while len < 64 && *p.add(len) != 0 {
             len += 1;
         }
-        core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, len)).to_owned()
+        core::str::from_utf8(core::slice::from_raw_parts(p, len))
+            .map_err(|_| corrupt_attr_error("pg_am.amname is not valid UTF-8"))?
+            .to_owned()
     };
     drop(t);
     ReleaseSysCache(tuple);
@@ -729,14 +722,18 @@ fn lookup_authid_rolname<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Option<P
     };
     let d = getattr(&tuple.tuple(), AUTHOID, ANUM_PG_AUTHID_ROLNAME);
     // SAFETY: rolname is a NameData column; the datum points at its
-    // NUL-terminated 64-byte buffer inside the pinned tuple image.
+    // NUL-terminated 64-byte buffer inside the pinned tuple image. The bytes are
+    // checked for valid UTF-8 (WAL-replayed/inherited pages or namein-clipped
+    // superuser writes can hold non-UTF-8) so no unsound str is built; invalid
+    // bytes raise a catchable ERRCODE_DATA_CORRUPTED.
     let name = unsafe {
         let p = d.as_usize() as *const u8;
         let mut len = 0usize;
         while len < 64 && *p.add(len) != 0 {
             len += 1;
         }
-        core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, len))
+        core::str::from_utf8(core::slice::from_raw_parts(p, len))
+            .map_err(|_| corrupt_attr_error("pg_authid.rolname is not valid UTF-8"))?
     };
     let s = PgString::from_str_in(name, mcx)?;
     ReleaseSysCache(tuple);
@@ -1568,16 +1565,33 @@ fn lookup_pg_proc_secdef(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcS
             let mut out = Vec::with_capacity(elems.len());
             for e in elems.iter() {
                 let ep = e.as_usize() as *const u8;
+                // The element's self-declared varlena length is untrusted on-disk
+                // data: reject a length that underflows its own header (checked
+                // subtraction) or a header/payload that runs past the detoasted
+                // array image before forming the slice.
                 // SAFETY: by-ref text element datum inside the detoasted image.
-                let payload = unsafe {
+                let (hdr, raw) = unsafe {
                     if types_tuple::varatt::varatt_is_1b(ep) {
-                        let raw = types_tuple::varatt::varsize_1b(ep);
-                        core::slice::from_raw_parts(ep.add(1), raw - 1)
+                        (1usize, types_tuple::varatt::varsize_1b(ep))
                     } else {
-                        let raw = types_tuple::varatt::varsize_4b(ep);
-                        core::slice::from_raw_parts(ep.add(4), raw - 4)
+                        (4usize, types_tuple::varatt::varsize_4b(ep))
                     }
                 };
+                let payload_len = raw.checked_sub(hdr).ok_or_else(|| {
+                    corrupt_attr_error(
+                        "proconfig text element length underflows its varlena header",
+                    )
+                })?;
+                let off = (ep as usize).wrapping_sub(img.as_ptr() as usize);
+                if off > img.len() || raw > img.len() - off {
+                    return Err(corrupt_attr_error(
+                        "proconfig text element extends past its array image",
+                    ));
+                }
+                // SAFETY: `[ep, ep+raw)` lies inside the detoasted array image
+                // and `payload_len = raw - hdr` cannot underflow (checked above).
+                let payload =
+                    unsafe { core::slice::from_raw_parts(ep.add(hdr), payload_len) };
                 out.push(String::from_utf8_lossy(payload).into_owned());
             }
             Some(out)
@@ -1644,12 +1658,9 @@ fn lookup_pg_proc_name_candidates<'mcx>(
         let t = m.tuple();
         let pronargs = getattr(&t, PROCNAMEARGSNSP, ANUM_PG_PROC_PRONARGS).as_i16();
         let argv = getattr(&t, PROCNAMEARGSNSP, ANUM_PG_PROC_PROARGTYPES);
-        // SAFETY: proargtypes is a not-null plain-storage oidvector; values
-        // tail follows the 24-byte header in place, dim1 == pronargs.
-        let args = unsafe {
-            let p = argv.as_usize() as *const array::oidvector;
-            core::slice::from_raw_parts(p.add(1) as *const Oid, (*p).dim1 as usize)
-        };
+        // proargtypes is a not-null plain-storage oidvector; dim1 is bounded
+        // against the tuple image before the values slice is formed.
+        let args = checked_oidvector_slice(&t, argv)?;
         let mut proargtypes = mcx::vec_with_capacity_in(mcx, args.len())?;
         proargtypes.extend_from_slice(args);
         out.push(syscache_seams::PgProcCandidate {
@@ -1966,6 +1977,121 @@ fn pg_type_typanalyze(typid: Oid) -> PgResult<Oid> {
     Ok(out)
 }
 
+// Syscache projections form slices/indexed reads from on-disk catalog bytes
+// (varlena headers, oidvector/int2vector `dim1`, array-element headers) that an
+// attacker or corruption can craft. Every such length/count/index must be
+// bounded against the containing tuple image (or detoasted array image) BEFORE
+// a slice is formed or an element is indexed; a violation is a catchable
+// ERRCODE_DATA_CORRUPTED (matching validate_composite_datum_len above), never
+// UB. The next few helpers are the shared checked primitives used class-wide.
+
+// XX001 for an on-disk catalog attribute whose self-declared length/count/index
+// would drive an out-of-bounds slice or read.
+#[cold]
+fn corrupt_attr_error(msg: impl core::fmt::Display) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(msg.to_string())
+            .with_sqlstate(types_error::ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+// Bytes readable from `ptr` to the end of `tuple`'s on-disk image
+// (`[header_ptr, header_ptr + t_len)`); errors if `ptr` falls outside it. Every
+// slice built from an in-line attribute's self-declared length must be bounded
+// by this before it is formed.
+fn tuple_bytes_from(tuple: &HeapTupleData<'_>, ptr: *const u8) -> PgResult<usize> {
+    let base = tuple.header_ptr() as usize;
+    let end = base + tuple.t_len as usize;
+    let p = ptr as usize;
+    if p < base || p > end {
+        return Err(corrupt_attr_error(
+            "catalog attribute datum points outside its tuple image",
+        ));
+    }
+    Ok(end - p)
+}
+
+// Validate that a slice of `len` bytes starting at `ptr` lies fully inside
+// `tuple`'s on-disk image before it is formed.
+fn check_tuple_slice(tuple: &HeapTupleData<'_>, ptr: *const u8, len: usize) -> PgResult<()> {
+    if len > tuple_bytes_from(tuple, ptr)? {
+        return Err(corrupt_attr_error(
+            "catalog attribute length exceeds its tuple image",
+        ));
+    }
+    Ok(())
+}
+
+// Read element `index` of a not-null plain-storage int2vector/oidvector
+// attribute (24-byte vector header, `dim1` at offset 16, values from offset 24).
+// `dim1` and `index` are untrusted on-disk data, so the header, the element
+// count, and the element offset are all bounded against the containing tuple
+// image before the value is read (C bounds via VARSIZE/dim1; a debug_assert is
+// compiled out in release and cannot).
+fn checked_vector_element<T: Copy>(
+    tuple: &HeapTupleData<'_>,
+    datum: Datum,
+    index: i32,
+    what: &str,
+) -> PgResult<T> {
+    let p = datum.as_usize() as *const u8;
+    let avail = tuple_bytes_from(tuple, p)?;
+    if avail < array::VECTOR_HDRSZ {
+        return Err(corrupt_attr_error(format!(
+            "{what} vector header extends past tuple image"
+        )));
+    }
+    // SAFETY: avail >= 24, so the vector header (dim1 at +16) is in-bounds.
+    let dim1 = unsafe { *(p.add(16) as *const i32) };
+    if index < 0 || dim1 < 0 || index >= dim1 {
+        return Err(corrupt_attr_error(format!(
+            "{what} element index {index} out of range (dim1 {dim1})"
+        )));
+    }
+    // VECTOR_HDRSZ + (index + 1) * size_of::<T>() must fit the tuple image.
+    let need = (index as usize + 1)
+        .checked_mul(core::mem::size_of::<T>())
+        .and_then(|payload| payload.checked_add(array::VECTOR_HDRSZ))
+        .ok_or_else(|| corrupt_attr_error(format!("{what} element offset overflow")))?;
+    if need > avail {
+        return Err(corrupt_attr_error(format!(
+            "{what} element {index} extends past tuple image"
+        )));
+    }
+    // SAFETY: header, count, and element offset all validated against the tuple
+    // image; the values tail is naturally aligned for oid/int2 elements.
+    Ok(unsafe { *(p.add(array::VECTOR_HDRSZ) as *const T).add(index as usize) })
+}
+
+// Validate and borrow the values tail of a not-null plain-storage oidvector
+// attribute (proargtypes). `dim1` is untrusted on-disk data; the element count
+// is bounded against the containing tuple image before the slice is formed
+// (negative/oversized counts otherwise drive from_raw_parts past the image).
+fn checked_oidvector_slice<'t>(
+    tuple: &'t HeapTupleData<'_>,
+    datum: Datum,
+) -> PgResult<&'t [Oid]> {
+    let p = datum.as_usize() as *const u8;
+    let avail = tuple_bytes_from(tuple, p)?;
+    if avail < array::VECTOR_HDRSZ {
+        return Err(corrupt_attr_error(
+            "oidvector header extends past tuple image",
+        ));
+    }
+    // SAFETY: avail >= 24, so the vector header (dim1 at +16) is in-bounds.
+    let dim1 = unsafe { (*(p as *const array::oidvector)).dim1 };
+    if dim1 < 0 || !array::vector_dim1_fits(avail, dim1, core::mem::size_of::<Oid>()) {
+        return Err(corrupt_attr_error(format!(
+            "oidvector element count {dim1} exceeds tuple image"
+        )));
+    }
+    // SAFETY: dim1 >= 0 and VECTOR_HDRSZ + dim1*4 <= avail (fits the tuple
+    // image); the values tail is 4-byte aligned.
+    Ok(unsafe {
+        core::slice::from_raw_parts(p.add(array::VECTOR_HDRSZ) as *const Oid, dim1 as usize)
+    })
+}
+
 // Owned copy of a varlena attr's full image; None mirrors SQL NULL.
 fn varlena_image<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1977,20 +2103,40 @@ fn varlena_image<'mcx>(
         return Ok(None);
     };
     let p = d.as_usize() as *const u8;
-    // SAFETY: non-null varlena attr datum points into the live tuple; the
-    // image spans exactly its header-declared size (external = 2 + tag size,
-    // short = 7-bit length, else the 4-byte word).
-    let src = unsafe {
-        let b0 = *p;
-        let len = if b0 == 0x01 {
-            2 + types_tuple::varatt::vartag_size(*p.add(1))
-        } else if b0 & 0x01 != 0 {
-            (b0 as usize >> 1) & 0x7F
-        } else {
-            (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize
-        };
-        core::slice::from_raw_parts(p, len)
+    // The varlena header word must be readable inside the tuple image before its
+    // self-declared length is trusted (untrusted on-disk bytes).
+    let avail = tuple_bytes_from(tuple, p)?;
+    if avail < 1 {
+        return Err(corrupt_attr_error(
+            "varlena attribute header extends past tuple image",
+        ));
+    }
+    // SAFETY: avail >= 1, so the first header byte is inside the tuple image.
+    let b0 = unsafe { *p };
+    let len = if b0 == 0x01 {
+        // External TOAST pointer: 2-byte header + tag-sized pointer.
+        if avail < 2 {
+            return Err(corrupt_attr_error(
+                "external varlena tag byte extends past tuple image",
+            ));
+        }
+        // SAFETY: avail >= 2.
+        2 + types_tuple::varatt::vartag_size(unsafe { *p.add(1) })
+    } else if b0 & 0x01 != 0 {
+        (b0 as usize >> 1) & 0x7F
+    } else {
+        if avail < 4 {
+            return Err(corrupt_attr_error(
+                "varlena length word extends past tuple image",
+            ));
+        }
+        // SAFETY: avail >= 4.
+        (u32::from_ne_bytes(unsafe { *(p as *const [u8; 4]) }) >> 2) as usize
     };
+    // The full declared image must lie inside the tuple image before slicing.
+    check_tuple_slice(tuple, p, len)?;
+    // SAFETY: `[p, p+len)` validated against the tuple image above.
+    let src = unsafe { core::slice::from_raw_parts(p, len) };
     // PG_DETOAST_DATUM: fetch/decompress/unpack to a plain 4B-header image.
     Ok(Some(detoast::detoast_attr(mcx, src)?))
 }
@@ -2106,6 +2252,49 @@ fn statext_exprs_src<'mcx>(mcx: Mcx<'mcx>, statoid: Oid) -> PgResult<Option<PgSt
     Ok(out)
 }
 
+// Validate that the composite array element beginning at byte offset `off`
+// within the detoasted stxdexpr `img` is a plain 4-byte-header (uncompressed,
+// non-external) varlena whose declared datum length lies fully inside `img`,
+// returning that length (the embedded HeapTuple's t_len). ANALYZE's
+// serialize_expr_stats always writes plain 4B-header composite elements, so
+// legitimate data passes; corrupted/attacker-planted catalog bytes (a short
+// odd-byte header, a compressed/external header, or an oversized length word)
+// produce a catchable ERROR here rather than an out-of-bounds deform walk.
+fn validate_composite_datum_len(statoid: Oid, img: &[u8], off: usize) -> PgResult<u32> {
+    // The 4-byte varlena header itself must be in-bounds.
+    if off > img.len() || img.len() - off < 4 {
+        return Err(types_error::PgError::error(format!(
+            "corrupt extended statistics expression element for statistics object {statoid}: \
+             element header extends past stxdexpr image"
+        ))
+        .into());
+    }
+    let p = img[off..].as_ptr();
+    // Composite datums are stored as plain 4B-uncompressed varlenas; reject
+    // short (1-byte), compressed, and external (toast pointer) headers, which
+    // would otherwise make t_len an attacker-controlled 30-bit value.
+    // SAFETY: `off + 4 <= img.len()` checked above, so the header word is live.
+    if !unsafe { types_tuple::varatt::varatt_is_4b_u(p) } {
+        return Err(types_error::PgError::error(format!(
+            "corrupt extended statistics expression element for statistics object {statoid}: \
+             element is not a 4-byte-header varlena"
+        ))
+        .into());
+    }
+    // SAFETY: as above; reads the same 4-byte header word.
+    let t_len = unsafe { types_tuple::varatt::varsize_4b(p) };
+    // The datum length must cover at least its own header word and must not run
+    // past the end of the enclosing image.
+    if t_len < 4 || t_len > img.len() - off {
+        return Err(types_error::PgError::error(format!(
+            "corrupt extended statistics expression element for statistics object {statoid}: \
+             declared length {t_len} exceeds stxdexpr image bounds"
+        ))
+        .into());
+    }
+    Ok(t_len as u32)
+}
+
 fn statext_expressions_load<'mcx>(
     mcx: Mcx<'mcx>,
     statoid: Oid,
@@ -2119,12 +2308,27 @@ fn statext_expressions_load<'mcx>(
             )
         });
     let elems = datum::array_build::deconstruct_array_image(mcx, &img, -1, false, b'd')?;
+    if idx < 0 || (idx as usize) >= elems.len() {
+        return Err(types_error::PgError::error(format!(
+            "extended statistics expression index {idx} out of range for statistics object {statoid}"
+        ))
+        .into());
+    }
     let d = elems[idx as usize];
     let p = d.as_usize() as *const u8;
-    // SAFETY: composite datum inside the detoasted stxdexpr image; its
-    // varlena word (HeapTupleHeaderGetDatumLength) declares the image size.
+    // The composite element points into the detoasted stxdexpr image, and its
+    // varlena word declares the embedded tuple length (t_len =
+    // HeapTupleHeaderGetDatumLength). These bytes come from a catalog relation
+    // (pg_statistic_ext_data) that may be corrupted or attacker-planted, so the
+    // header form and declared length are validated against the enclosing image
+    // before HeapTupleData::from_raw_parts (whose contract requires t_len bytes
+    // to be readable). A short/compressed/external header or an out-of-range
+    // t_len yields a catchable ERROR instead of an out-of-bounds deform walk.
+    let off = (p as usize).wrapping_sub(img.as_ptr() as usize);
+    let t_len = validate_composite_datum_len(statoid, &img, off)?;
+    // SAFETY: validate_composite_datum_len guarantees `off + t_len <= img.len()`
+    // and that `p` addresses a plain 4B-uncompressed varlena header inside `img`.
     let tup = unsafe {
-        let t_len = u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2;
         types_tuple::HeapTupleData::from_raw_parts(
             p,
             t_len,
@@ -2317,6 +2521,14 @@ fn lookup_pg_statistic_slot_images<'mcx>(
         panic!("pg_statistic row ({relid},{attnum},{inh}) vanished between bundle probe and slot fetch")
     });
     let t = tuple.tuple();
+    // Read stakind/staop for slot `pos` from the SAME freshly-pinned tuple the
+    // arrays are read from, so images() can re-validate them against the
+    // kind/staop captured at bundle probe time (mirrors C's get_attstatsslot,
+    // which reads kind, staop and the arrays from one pinned statstuple). A
+    // concurrent ANALYZE swapping the row between the bundle probe and this
+    // re-fetch would otherwise let the arrays be decoded under a stale kind.
+    let stakind = getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STAKIND1 + pos).as_i16();
+    let staop = getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STAOP1 + pos).as_oid();
     let numbers_image = varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STANUMBERS1 + pos)?
         .unwrap_or(PgVec::new_in(mcx));
     let (values_image, valuetype) =
@@ -2329,7 +2541,7 @@ fn lookup_pg_statistic_slot_images<'mcx>(
         };
     drop(t);
     ReleaseSysCache(tuple);
-    Ok(syscache_seams::PgStatisticSlotImages { valuetype, values_image, numbers_image })
+    Ok(syscache_seams::PgStatisticSlotImages { valuetype, stakind, staop, values_image, numbers_image })
 }
 
 fn decode_pg_statistic_values<'mcx>(
@@ -2490,12 +2702,9 @@ fn lookup_pg_proc_signature<'mcx>(
     let t = tuple.tuple();
     let rettype = getattr(&t, PROCOID, ANUM_PG_PROC_PRORETTYPE).as_oid();
     let argv = getattr(&t, PROCOID, ANUM_PG_PROC_PROARGTYPES);
-    // SAFETY: proargtypes is a not-null plain-storage oidvector; values tail
-    // follows the 24-byte header in place, dim1 == pronargs.
-    let args = unsafe {
-        let p = argv.as_usize() as *const array::oidvector;
-        core::slice::from_raw_parts(p.add(1) as *const Oid, (*p).dim1 as usize)
-    };
+    // proargtypes is a not-null plain-storage oidvector; dim1 is bounded against
+    // the tuple image before the values slice is formed.
+    let args = checked_oidvector_slice(&t, argv)?;
     let mut proargtypes = mcx::vec_with_capacity_in(mcx, args.len())?;
     proargtypes.extend_from_slice(args);
     drop(t);
@@ -2645,17 +2854,29 @@ fn pg_attribute_attoptions<'mcx>(
     else {
         return Ok(None);
     };
-    let out = match getattr_nullable(&tuple.tuple(), ATTNUM, ANUM_PG_ATTRIBUTE_ATTOPTIONS) {
+    let t = tuple.tuple();
+    let out = match getattr_nullable(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTOPTIONS) {
         None => None,
         Some(d) => {
             let src = d.as_usize() as *const u8;
-            // SAFETY: non-null by-ref varlena datum inside the live tuple.
-            let bytes = unsafe {
-                core::slice::from_raw_parts(src, types_tuple::varatt::varsize_any(src))
-            };
+            // The datum's varlena header must be readable inside the tuple image
+            // before its self-declared length is trusted (untrusted on-disk
+            // bytes); then bound the full image against the tuple.
+            let avail = tuple_bytes_from(&t, src)?;
+            if avail < 1 {
+                return Err(corrupt_attr_error(
+                    "attoptions varlena header extends past tuple image",
+                ));
+            }
+            // SAFETY: avail >= 1, so the varlena header word is inside the image.
+            let len = unsafe { types_tuple::varatt::varsize_any(src) };
+            check_tuple_slice(&t, src, len)?;
+            // SAFETY: `[src, src+len)` validated against the tuple image above.
+            let bytes = unsafe { core::slice::from_raw_parts(src, len) };
             Some(Datum::from_usize(mcx::slice_in(mcx, bytes)?.leak().as_ptr() as usize))
         }
     };
+    drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(out))
 }
@@ -2916,10 +3137,20 @@ fn lookup_pg_ts_dict_shape<'mcx>(
         None => None,
         Some(d) => {
             let p = d.as_usize() as *const u8;
-            // SAFETY: non-null varlena attr datum inside the live tuple.
-            let src = unsafe {
-                core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p))
-            };
+            // The datum's varlena header must be readable inside the tuple image
+            // before its self-declared length is trusted (untrusted on-disk
+            // bytes); then bound the full image against the tuple.
+            let avail = tuple_bytes_from(&t, p)?;
+            if avail < 1 {
+                return Err(corrupt_attr_error(
+                    "dictinitoption varlena header extends past tuple image",
+                ));
+            }
+            // SAFETY: avail >= 1, so the varlena header word is inside the image.
+            let len = unsafe { types_tuple::varatt::varsize_any(p) };
+            check_tuple_slice(&t, p, len)?;
+            // SAFETY: `[p, p+len)` validated against the tuple image above.
+            let src = unsafe { core::slice::from_raw_parts(p, len) };
             let flat = detoast::detoast_attr(mcx, src)?;
             let mut out = mcx::vec_with_capacity_in(mcx, flat.len() - 4)?;
             out.extend_from_slice(&flat[4..]);
@@ -3020,4 +3251,67 @@ fn pg_ts_config_map_shapes<'mcx>(
     ReleaseSysCacheList(list);
     out.sort_unstable_by_key(|r| (r.maptokentype, r.mapseqno));
     Ok(out)
+}
+
+#[cfg(test)]
+mod validate_composite_datum_len_tests {
+    use super::validate_composite_datum_len;
+    use types_core::Oid;
+
+    const OID: Oid = 12345;
+
+    // Build a minimal detoasted stxdexpr-style image whose element at `off`
+    // begins with a 4B-uncompressed varlena header declaring `datum_len` bytes,
+    // padded so the image is `total` bytes long.
+    fn image_with_4b_element(off: usize, datum_len: u32, total: usize) -> Vec<u8> {
+        let mut img = vec![0u8; total];
+        // 4B-uncompressed header word (endian-correct via the crate helper).
+        let word = types_tuple::varatt::set_varsize_4b_word(datum_len);
+        img[off..off + 4].copy_from_slice(&word.to_ne_bytes());
+        img
+    }
+
+    #[test]
+    fn accepts_well_formed_4b_element() {
+        // Element occupies the whole image starting at offset 0.
+        let img = image_with_4b_element(0, 32, 32);
+        assert_eq!(validate_composite_datum_len(OID, &img, 0).unwrap(), 32);
+    }
+
+    #[test]
+    fn rejects_short_header_element() {
+        // Odd first byte => 1-byte short header, not a plain 4B varlena.
+        let mut img = vec![0u8; 32];
+        img[0] = 0x07; // low bit set: short header
+        validate_composite_datum_len(OID, &img, 0).err().unwrap();
+    }
+
+    #[test]
+    fn rejects_external_toast_pointer_element() {
+        // 0x01 first byte => external TOAST pointer (varatt_is_1b_e).
+        let mut img = vec![0u8; 32];
+        img[0] = 0x01;
+        validate_composite_datum_len(OID, &img, 0).err().unwrap();
+    }
+
+    #[test]
+    fn rejects_length_past_image_end() {
+        // Header declares 4096 bytes but the image is only 32 bytes long.
+        let img = image_with_4b_element(0, 4096, 32);
+        validate_composite_datum_len(OID, &img, 0).err().unwrap();
+    }
+
+    #[test]
+    fn rejects_length_shorter_than_header() {
+        // t_len must cover at least its own 4-byte header word.
+        let img = image_with_4b_element(0, 2, 32);
+        validate_composite_datum_len(OID, &img, 0).err().unwrap();
+    }
+
+    #[test]
+    fn rejects_header_extending_past_image() {
+        // Only 2 bytes remain from `off`, so the 4-byte header is out of bounds.
+        let img = vec![0u8; 32];
+        validate_composite_datum_len(OID, &img, 30).err().unwrap();
+    }
 }

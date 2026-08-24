@@ -793,6 +793,89 @@ fn oversized_incompressible_value_round_trips_externally() {
     assert_eq!(&slice[VARHDRSZ..], &payload[1990..2010]);
 }
 
+// A forged on-disk toast pointer whose va_toastrelid names a non-TOAST
+// relation must be rejected before any chunk is fetched, so it cannot be used
+// to steer the chunk fetch at an arbitrary relation (see open_toast_relation).
+#[test]
+fn forged_toastrelid_at_non_toast_relation_is_rejected() {
+    install_seams();
+    let _s = serial();
+    reset_tables();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = fixture_rel(mcx, MAIN_REL);
+
+    let payload = prng_bytes(6000);
+    let tid = insert_row(mcx, &rel, &[&payload]);
+    let attrs = stored_attrs(mcx, &rel, tid);
+    let pointer = &attrs[0];
+    assert!(toastdesc::varatt_is_external_ondisk(pointer));
+    let tp = toastdesc::VarattExternal::from_image(pointer).unwrap();
+    assert_eq!(tp.va_toastrelid, TOAST_REL);
+    rebuild_toast_index(mcx);
+
+    // Sanity: the honest pointer detoasts.
+    assert!(detoast::detoast_attr(mcx, pointer).is_ok());
+
+    // Forge va_toastrelid to name MAIN_REL, an ordinary (RELKIND_RELATION)
+    // relation rather than a TOAST relation.
+    let mut forged = tp;
+    forged.va_toastrelid = MAIN_REL;
+    let forged_image = forged.to_ondisk_image();
+
+    let err = detoast::detoast_attr(mcx, &forged_image).err().unwrap();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+
+    // The slice lane rejects it too.
+    let err = detoast::detoast_attr_slice(mcx, &forged_image, 0, 10).err().unwrap();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+}
+
+// Write-side sibling of the fetch check: a forged on-disk toast pointer whose
+// va_toastrelid names a non-TOAST relation must be rejected by
+// toast_delete_datum before any row is deleted, so a plain DELETE/UPDATE of an
+// attacker's row carrying the pointer cannot delete rows from an arbitrary
+// relation (see open_toast_relation).
+#[test]
+fn forged_toastrelid_in_delete_is_rejected() {
+    install_seams();
+    let _s = serial();
+    reset_tables();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = fixture_rel(mcx, MAIN_REL);
+
+    let payload = prng_bytes(6000);
+    let tid = insert_row(mcx, &rel, &[&payload]);
+    let attrs = stored_attrs(mcx, &rel, tid);
+    let pointer = &attrs[0];
+    assert!(toastdesc::varatt_is_external_ondisk(pointer));
+    let tp = toastdesc::VarattExternal::from_image(pointer).unwrap();
+    assert_eq!(tp.va_toastrelid, TOAST_REL);
+    rebuild_toast_index(mcx);
+
+    // Sanity: deleting the honest pointer's chunks succeeds on both paths.
+    crate::internals::toast_delete_datum(mcx, &rel, pointer, false).unwrap();
+
+    // Forge va_toastrelid to name MAIN_REL, an ordinary (RELKIND_RELATION)
+    // relation rather than a TOAST relation.
+    let mut forged = tp;
+    forged.va_toastrelid = MAIN_REL;
+    let forged_image = forged.to_ondisk_image();
+
+    // Normal delete path.
+    let err = crate::internals::toast_delete_datum(mcx, &rel, &forged_image, false)
+        .err()
+        .unwrap();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+
+    // Speculative-abort path.
+    let err = crate::internals::toast_delete_datum(mcx, &rel, &forged_image, true)
+        .err()
+        .unwrap();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+}
+
 #[test]
 fn oversized_compressible_value_round_trips_externally_compressed() {
     install_seams();

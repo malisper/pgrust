@@ -16,7 +16,10 @@ use types_rel::{
     STDRD_OPTION_VACUUM_INDEX_CLEANUP_ON, VIEW_OPTION_CHECK_OPTION_CASCADED,
     VIEW_OPTION_CHECK_OPTION_LOCAL, VIEW_OPTION_CHECK_OPTION_NOT_SET,
 };
-use types_tuple::{FormData_pg_attribute, NameData, TupleConstr};
+use types_tuple::{
+    FormData_pg_attribute, NameData, TupleConstr, TYPALIGN_CHAR, TYPALIGN_DOUBLE, TYPALIGN_INT,
+    TYPALIGN_SHORT,
+};
 
 use crate::schemapg::{
     ACCESS_METHOD_PROCEDURE_INDEX_ID, ACCESS_METHOD_PROCEDURE_RELATION_ID,
@@ -443,6 +446,56 @@ fn parse_attr(rd: &mut Rd<'_>) -> Option<FormData_pg_attribute> {
     })
 }
 
+/// Validate the physical-layout fields of an on-disk attribute before it is
+/// installed into a TupleDesc. The init file is untrusted on-disk bytes, and
+/// downstream unsafe deform (attlen/attbyval/attalign drive pointer
+/// arithmetic and by-value fetches); C largely trusts this file, but the
+/// port's unchecked deform makes validation mandatory. A tampered
+/// pg_internal.init otherwise drives OOB reads.
+///
+/// The rules mirror TypeCreate (catalog/pg_type.c): attlen must be a legal
+/// typlen (>0, or -1 varlena / -2 cstring); attbyval only for a fixed length
+/// that fetch_att()/store_att_byval() support (sizeof(char/int16/int32/Datum),
+/// Datum == 8 bytes here) with the matching alignment; varlena needs int/
+/// double alignment and cstring needs char alignment. attalign must be one of
+/// the four legal codes in every case (populate_compact_attribute otherwise
+/// panics on the compact-attr mapping).
+fn attr_layout_valid(a: &FormData_pg_attribute) -> bool {
+    // attalign must be a legal alignment code (c/s/i/d).
+    if !matches!(
+        a.attalign,
+        TYPALIGN_CHAR | TYPALIGN_SHORT | TYPALIGN_INT | TYPALIGN_DOUBLE
+    ) {
+        return false;
+    }
+    // attlen must be a legal typlen: positive fixed, -1 varlena, or -2 cstring.
+    if !(a.attlen > 0 || a.attlen == -1 || a.attlen == -2) {
+        return false;
+    }
+    if a.attbyval {
+        // Pass-by-value: fixed length supported by fetch_att/store_att_byval,
+        // with the alignment that agrees with that size.
+        match a.attlen {
+            1 => a.attalign == TYPALIGN_CHAR,
+            2 => a.attalign == TYPALIGN_SHORT,
+            4 => a.attalign == TYPALIGN_INT,
+            // SIZEOF_DATUM == 8 on this port (Datum is 8 bytes).
+            8 => a.attalign == TYPALIGN_DOUBLE,
+            _ => false,
+        }
+    } else {
+        // varlena types must have int alignment or better.
+        if a.attlen == -1 && !(a.attalign == TYPALIGN_INT || a.attalign == TYPALIGN_DOUBLE) {
+            return false;
+        }
+        // cstring must have char alignment.
+        if a.attlen == -2 && a.attalign != TYPALIGN_CHAR {
+            return false;
+        }
+        true
+    }
+}
+
 fn put_options(buf: &mut Buf<'_>, o: &Option<RdOptions>) {
     match o {
         None => put_u8(buf, 0),
@@ -790,6 +843,11 @@ fn parse_entry(rd: &mut Rd<'_>, mcx: Mcx<'static>) -> Option<(RelationData<'stat
     let mut has_not_null = false;
     for _ in 0..natts {
         let a = parse_attr(rd)?;
+        // Untrusted on-disk layout fields drive unsafe deform; reject the file
+        // (rebuild-from-catalogs) before installing a corrupt descriptor.
+        if !attr_layout_valid(&a) {
+            return None;
+        }
         has_not_null |= a.attnotnull;
         attrs.push(a);
     }

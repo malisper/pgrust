@@ -895,13 +895,30 @@ fn SlruPhysicalWritePage(
         }
     }
 
+    // The caller holds only this slot's buffer lock, not the bank lock. Under
+    // the write_ok=true design a concurrent backend may set transaction-status
+    // bits in these very page bytes (under the exclusive bank lock) while the
+    // write-out is in flight, so the bytes are NOT stable here. C's
+    // SlruPhysicalWritePage reads shared->page_buffer[slotno] straight into
+    // pg_pwrite and tolerates that race: each update is a byte-granular status
+    // write and a torn snapshot is harmless, because readers re-derive status
+    // once the I/O settles. Forming a safe shared &[u8] over concurrently
+    // written memory would be UB, so snapshot the page through relaxed atomic
+    // byte loads into a private buffer and write from that instead.
+    let mut page = [0u8; BLCKSZ];
+    let src = shared.pages.page_ptr(slotno);
+    for (i, dst) in page.iter_mut().enumerate() {
+        // SAFETY: `src` points at the slot's BLCKSZ live bytes; the relaxed
+        // atomic load makes the read of the concurrently-written status byte
+        // defined, matching the race C's plain read already tolerates.
+        *dst = unsafe {
+            (*src.add(i).cast::<core::sync::atomic::AtomicU8>()).load(Ordering::Relaxed)
+        };
+    }
+
     set_errno(0);
     waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_SLRU_WRITE);
-    // SAFETY: the slot's bytes are stable under the caller's buffer lock.
-    let page = unsafe {
-        core::slice::from_raw_parts(shared.pages.page_ptr(slotno).cast_const(), BLCKSZ)
-    };
-    let nwritten = vfs::pwrite(fd, page, offset as libc::off_t);
+    let nwritten = vfs::pwrite(fd, &page, offset as libc::off_t);
     if nwritten != BLCKSZ as isize {
         waitevent_seams::pgstat_report_wait_end::call();
         // If write didn't set errno, assume the problem is no disk space.

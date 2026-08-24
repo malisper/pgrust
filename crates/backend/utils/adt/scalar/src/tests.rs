@@ -125,6 +125,50 @@ mod oidvector_tests {
     }
 
     #[test]
+    fn dim1_out_of_bounds_rejected() {
+        let ctx = MemoryContext::new("t");
+
+        // A valid 3-element oidvector still passes and prints.
+        let valid = build(&[1, 2, 3]);
+        let out = call1(fc_oidvectorout, Datum::from_usize(valid.as_ptr() as usize), &ctx);
+        let bytes =
+            unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
+        assert_eq!(bytes.to_bytes(), b"1 2 3");
+
+        let call_err = |img: &[u8]| {
+            let mut fcinfo = LocalFcinfo::<1>::new(0);
+            fcinfo.set_arg(0, Datum::from_usize(img.as_ptr() as usize));
+            // SAFETY: ctx outlives the call.
+            unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+            fc_oidvectorout(None, &mut fcinfo).err().unwrap()
+        };
+
+        // Empty-array cast (ndim==0) must still yield the EXISTING structural
+        // error, unchanged in text and SQLSTATE (regression guard). Backed by a
+        // full 24-byte header so the header read stays in-bounds for the test.
+        let mut empty = Vec::from(::datum::set_varsize_4b(16));
+        empty.extend_from_slice(&0i32.to_ne_bytes()); // ndim = 0
+        empty.extend_from_slice(&0i32.to_ne_bytes()); // dataoffset
+        empty.extend_from_slice(&26u32.to_ne_bytes()); // elemtype OID
+        empty.extend_from_slice(&0i32.to_ne_bytes()); // dim1
+        empty.extend_from_slice(&0i32.to_ne_bytes()); // lbound1
+        let err = call_err(&empty);
+        assert_eq!(err.message(), "array is not a valid oidvector");
+
+        // Crafted image: structurally valid header (ndim==1) but dim1 claims far
+        // more Oids than VARSIZE can hold -> rejected before the values slice is
+        // formed, routed to the SAME error (no new "corrupt ..." message).
+        let mut crafted = Vec::from(::datum::set_varsize_4b(24)); // header only
+        crafted.extend_from_slice(&1i32.to_ne_bytes()); // ndim = 1
+        crafted.extend_from_slice(&0i32.to_ne_bytes()); // dataoffset
+        crafted.extend_from_slice(&26u32.to_ne_bytes()); // elemtype OID
+        crafted.extend_from_slice(&1000i32.to_ne_bytes()); // dim1 huge
+        crafted.extend_from_slice(&0i32.to_ne_bytes()); // lbound1
+        let err = call_err(&crafted);
+        assert_eq!(err.message(), "array is not a valid oidvector");
+    }
+
+    #[test]
     fn comparators() {
         let a = build(&[1, 2, 3]);
         let b = build(&[1, 2, 4]);

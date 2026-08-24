@@ -324,9 +324,12 @@ fn replorigin_state_clear(roident: RepOriginId, nowait: bool) -> PgResult<()> {
         lw(origin_lock(), LW_EXCLUSIVE)?;
 
         for state in replication_states() {
-            if state.roident.get() == roident {
-                if state.acquired_by.get() != 0 {
-                    let pid = state.acquired_by.get();
+            // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+            if unsafe { state.roident.get() } == roident {
+                // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+                if unsafe { state.acquired_by.get() } != 0 {
+                    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+                    let pid = unsafe { state.acquired_by.get() };
                     if nowait {
                         let r = ereport(ERROR)
                             .errcode(ERRCODE_OBJECT_IN_USE)
@@ -358,9 +361,12 @@ fn replorigin_state_clear(roident: RepOriginId, nowait: bool) -> PgResult<()> {
                     &[],
                 )?;
 
-                state.roident.set(InvalidRepOriginId);
-                state.remote_lsn.set(InvalidXLogRecPtr);
-                state.local_lsn.set(InvalidXLogRecPtr);
+                // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+                unsafe {
+                    state.roident.set(InvalidRepOriginId);
+                    state.remote_lsn.set(InvalidXLogRecPtr);
+                    state.local_lsn.set(InvalidXLogRecPtr);
+                }
                 break;
             }
         }
@@ -559,13 +565,16 @@ pub fn CheckPointReplicationOrigin() -> PgResult<()> {
     lw(origin_lock(), LW_SHARED)?;
 
     for state in replication_states() {
-        if state.roident.get() == InvalidRepOriginId {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        if unsafe { state.roident.get() } == InvalidRepOriginId {
             continue;
         }
 
         lw(&state.lock, LW_SHARED)?;
-        let disk = serialize_disk_state(state.roident.get(), state.remote_lsn.get());
-        let local_lsn = state.local_lsn.get();
+        // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+        let disk = unsafe { serialize_disk_state(state.roident.get(), state.remote_lsn.get()) };
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        let local_lsn = unsafe { state.local_lsn.get() };
         LWLockRelease(&state.lock)?;
 
         // Make sure we only write out a commit that's persistent.
@@ -703,8 +712,11 @@ pub fn StartupReplicationOrigin() -> PgResult<()> {
         // Copy data to the shared array.
         let roident = u16::from_ne_bytes(disk[0..2].try_into().expect("2 bytes"));
         let remote_lsn = u64::from_ne_bytes(disk[8..16].try_into().expect("8 bytes"));
-        states[last_state].roident.set(roident);
-        states[last_state].remote_lsn.set(remote_lsn);
+        // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+        unsafe {
+            states[last_state].roident.set(roident);
+            states[last_state].remote_lsn.set(remote_lsn);
+        }
         last_state += 1;
 
         let _ = elog(
@@ -743,6 +755,12 @@ pub fn StartupReplicationOrigin() -> PgResult<()> {
 // WAL: xl_replorigin_set / xl_replorigin_drop + redo
 // ---------------------------------------------------------------------------
 
+// Serialized/main-data sizes of the WAL structs, used to validate record
+// lengths during redo before any field access (matches sizeof(xl_replorigin_*)
+// read by XLogRecGetData in origin.c).
+const XL_REPLORIGIN_SET_SIZE: usize = 16;
+const XL_REPLORIGIN_DROP_SIZE: usize = 2;
+
 // xl_replorigin_set: remote_lsn u64 @0, node_id u16 @8, force bool @10 (16B).
 fn serialize_replorigin_set(node: RepOriginId, remote_lsn: XLogRecPtr, force: bool) -> [u8; 16] {
     let mut b = [0u8; 16];
@@ -757,6 +775,47 @@ fn serialize_replorigin_drop(node: RepOriginId) -> [u8; 2] {
     node.to_ne_bytes()
 }
 
+// Parse the main data of an XLOG_REPLORIGIN_SET record.
+//
+// C reads a fixed-size xl_replorigin_set struct via XLogRecGetData; validate the
+// main-data length before touching any field so a truncated/attacker-authored
+// record fails through the ordinary WAL-corruption error path instead of a
+// slice-out-of-bounds panic. Returns (node_id, remote_lsn, force).
+fn parse_replorigin_set(data: &[u8]) -> PgResult<(RepOriginId, XLogRecPtr, bool)> {
+    if data.len() < XL_REPLORIGIN_SET_SIZE {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "invalid xl_replorigin_set record length: got {}, expected at least {}",
+                data.len(),
+                XL_REPLORIGIN_SET_SIZE
+            ))
+            .finish(loc("replorigin_redo"))?;
+        unreachable!();
+    }
+    let remote_lsn = u64::from_ne_bytes(data[0..8].try_into().expect("checked length"));
+    let node_id = u16::from_ne_bytes(data[8..10].try_into().expect("checked length"));
+    let force = data[10] != 0;
+    Ok((node_id, remote_lsn, force))
+}
+
+// Parse the main data of an XLOG_REPLORIGIN_DROP record. See parse_replorigin_set
+// for why the length is validated up front. Returns node_id.
+fn parse_replorigin_drop(data: &[u8]) -> PgResult<RepOriginId> {
+    if data.len() < XL_REPLORIGIN_DROP_SIZE {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "invalid xl_replorigin_drop record length: got {}, expected at least {}",
+                data.len(),
+                XL_REPLORIGIN_DROP_SIZE
+            ))
+            .finish(loc("replorigin_redo"))?;
+        unreachable!();
+    }
+    Ok(u16::from_ne_bytes(data[0..2].try_into().expect("checked length")))
+}
+
 // replorigin_redo (origin.c).
 pub fn replorigin_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<()> {
     const XLR_INFO_MASK: u8 = 0x0F;
@@ -768,18 +827,20 @@ pub fn replorigin_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResu
 
     match info {
         XLOG_REPLORIGIN_SET => {
-            let remote_lsn = u64::from_ne_bytes(data[0..8].try_into().expect("short record"));
-            let node_id = u16::from_ne_bytes(data[8..10].try_into().expect("short record"));
-            let force = data[10] != 0;
+            let (node_id, remote_lsn, force) = parse_replorigin_set(data)?;
             replorigin_advance(node_id, remote_lsn, end_rec_ptr, force, false)?;
         }
         XLOG_REPLORIGIN_DROP => {
-            let node_id = u16::from_ne_bytes(data[0..2].try_into().expect("short record"));
+            let node_id = parse_replorigin_drop(data)?;
             for state in replication_states() {
-                if state.roident.get() == node_id {
-                    state.roident.set(InvalidRepOriginId);
-                    state.remote_lsn.set(InvalidXLogRecPtr);
-                    state.local_lsn.set(InvalidXLogRecPtr);
+                // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+                if unsafe { state.roident.get() } == node_id {
+                    // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+                    unsafe {
+                        state.roident.set(InvalidRepOriginId);
+                        state.remote_lsn.set(InvalidXLogRecPtr);
+                        state.local_lsn.set(InvalidXLogRecPtr);
+                    }
                     break;
                 }
             }
@@ -818,24 +879,29 @@ pub fn replorigin_advance(
     let mut free_state: Option<&'static ReplicationState> = None;
 
     for curstate in replication_states() {
-        if curstate.roident.get() == InvalidRepOriginId && free_state.is_none() {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        if unsafe { curstate.roident.get() } == InvalidRepOriginId && free_state.is_none() {
             free_state = Some(curstate);
             continue;
         }
-        if curstate.roident.get() != node {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        if unsafe { curstate.roident.get() } != node {
             continue;
         }
 
         lw(&curstate.lock, LW_EXCLUSIVE)?;
 
         // Make sure it's not used by somebody else.
-        if curstate.acquired_by.get() != 0 {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        if unsafe { curstate.acquired_by.get() } != 0 {
             let r = ereport(ERROR)
                 .errcode(ERRCODE_OBJECT_IN_USE)
                 .errmsg(format!(
                     "replication origin with ID {} is already active for PID {}",
-                    curstate.roident.get(),
-                    curstate.acquired_by.get()
+                    // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+                    unsafe { curstate.roident.get() },
+                    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+                    unsafe { curstate.acquired_by.get() }
                 ))
                 .finish(loc("replorigin_advance"));
             LWLockRelease(&curstate.lock)?;
@@ -865,14 +931,18 @@ pub fn replorigin_advance(
             // Initialize new slot.
             let s = free_state.expect("free slot checked above");
             lw(&s.lock, LW_EXCLUSIVE)?;
-            debug_assert!(s.remote_lsn.get() == InvalidXLogRecPtr);
-            debug_assert!(s.local_lsn.get() == InvalidXLogRecPtr);
-            s.roident.set(node);
+            // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+            debug_assert!(unsafe { s.remote_lsn.get() } == InvalidXLogRecPtr);
+            // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+            debug_assert!(unsafe { s.local_lsn.get() } == InvalidXLogRecPtr);
+            // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+            unsafe { s.roident.set(node) };
             s
         }
     };
 
-    debug_assert!(state.roident.get() != InvalidRepOriginId);
+    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    debug_assert!(unsafe { state.roident.get() } != InvalidRepOriginId);
 
     // If somebody "forcefully" sets this slot, WAL-log it so it's durable and
     // the standby gets the message. During WAL replay no logging is needed.
@@ -883,11 +953,15 @@ pub fn replorigin_advance(
 
     // Checkpoint races can present older values; don't go backward unless
     // asked to.
-    if go_backward || state.remote_lsn.get() < remote_commit {
-        state.remote_lsn.set(remote_commit);
+    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    if go_backward || unsafe { state.remote_lsn.get() } < remote_commit {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        unsafe { state.remote_lsn.set(remote_commit) };
     }
-    if local_commit != InvalidXLogRecPtr && (go_backward || state.local_lsn.get() < local_commit) {
-        state.local_lsn.set(local_commit);
+    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    if local_commit != InvalidXLogRecPtr && (go_backward || unsafe { state.local_lsn.get() } < local_commit) {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        unsafe { state.local_lsn.set(local_commit) };
     }
     LWLockRelease(&state.lock)?;
 
@@ -905,10 +979,14 @@ pub fn replorigin_get_progress(node: RepOriginId, flush: bool) -> PgResult<XLogR
     // Prevent slots from being concurrently dropped.
     lw(origin_lock(), LW_SHARED)?;
     for state in replication_states() {
-        if state.roident.get() == node {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        if unsafe { state.roident.get() } == node {
             lw(&state.lock, LW_SHARED)?;
-            remote_lsn = state.remote_lsn.get();
-            local_lsn = state.local_lsn.get();
+            // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+            unsafe {
+                remote_lsn = state.remote_lsn.get();
+                local_lsn = state.local_lsn.get();
+            }
             LWLockRelease(&state.lock)?;
             break;
         }
@@ -933,12 +1011,14 @@ fn ReplicationOriginExitCleanup(_code: i32, _arg: usize) {
     }
 
     let mut cv: Option<&'static ConditionVariable> = None;
-    if state.acquired_by.get() == init_small::globals::MyProcPid() {
+    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    if unsafe { state.acquired_by.get() } == init_small::globals::MyProcPid() {
         cv = Some(
             // SAFETY: states live for the process lifetime.
             unsafe { &*(&state.origin_cv as *const ConditionVariable) },
         );
-        state.acquired_by.set(0);
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        unsafe { state.acquired_by.set(0) };
         SESSION_REPLICATION_STATE.set(None);
     }
 
@@ -974,20 +1054,25 @@ pub fn replorigin_session_setup(node: RepOriginId, acquired_by: i32) -> PgResult
     let mut free_slot: Option<&'static ReplicationState> = None;
 
     for curstate in replication_states() {
-        if curstate.roident.get() == InvalidRepOriginId && free_slot.is_none() {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        if unsafe { curstate.roident.get() } == InvalidRepOriginId && free_slot.is_none() {
             free_slot = Some(curstate);
             continue;
         }
-        if curstate.roident.get() != node {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        if unsafe { curstate.roident.get() } != node {
             continue;
         }
-        if curstate.acquired_by.get() != 0 && acquired_by == 0 {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        if unsafe { curstate.acquired_by.get() } != 0 && acquired_by == 0 {
             let r = ereport(ERROR)
                 .errcode(ERRCODE_OBJECT_IN_USE)
                 .errmsg(format!(
                     "replication origin with ID {} is already active for PID {}",
-                    curstate.roident.get(),
-                    curstate.acquired_by.get()
+                    // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+                    unsafe { curstate.roident.get() },
+                    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+                    unsafe { curstate.acquired_by.get() }
                 ))
                 .finish(loc("replorigin_session_setup"));
             LWLockRelease(origin_lock())?;
@@ -1001,9 +1086,12 @@ pub fn replorigin_session_setup(node: RepOriginId, acquired_by: i32) -> PgResult
         (Some(s), _) => s,
         (None, Some(free)) => {
             // Initialize new slot.
-            debug_assert!(free.remote_lsn.get() == InvalidXLogRecPtr);
-            debug_assert!(free.local_lsn.get() == InvalidXLogRecPtr);
-            free.roident.set(node);
+            // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+            debug_assert!(unsafe { free.remote_lsn.get() } == InvalidXLogRecPtr);
+            // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+            debug_assert!(unsafe { free.local_lsn.get() } == InvalidXLogRecPtr);
+            // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+            unsafe { free.roident.set(node) };
             free
         }
         (None, None) => {
@@ -1019,11 +1107,14 @@ pub fn replorigin_session_setup(node: RepOriginId, acquired_by: i32) -> PgResult
         }
     };
 
-    debug_assert!(state.roident.get() != InvalidRepOriginId);
+    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    debug_assert!(unsafe { state.roident.get() } != InvalidRepOriginId);
 
     if acquired_by == 0 {
-        state.acquired_by.set(init_small::globals::MyProcPid());
-    } else if state.acquired_by.get() != acquired_by {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        unsafe { state.acquired_by.set(init_small::globals::MyProcPid()) };
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    } else if unsafe { state.acquired_by.get() } != acquired_by {
         let r = elog(
             ERROR,
             format!(
@@ -1057,7 +1148,8 @@ pub fn replorigin_session_reset() -> PgResult<()> {
     };
 
     lw(origin_lock(), LW_EXCLUSIVE)?;
-    state.acquired_by.set(0);
+    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    unsafe { state.acquired_by.set(0) };
     SESSION_REPLICATION_STATE.set(None);
     LWLockRelease(origin_lock())?;
 
@@ -1080,14 +1172,19 @@ pub fn replorigin_session_advance(
     let state = SESSION_REPLICATION_STATE
         .get()
         .expect("replorigin_session_advance without a session origin");
-    debug_assert!(state.roident.get() != InvalidRepOriginId);
+    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    debug_assert!(unsafe { state.roident.get() } != InvalidRepOriginId);
 
     lw(&state.lock, LW_EXCLUSIVE)?;
-    if state.local_lsn.get() < local_commit {
-        state.local_lsn.set(local_commit);
+    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    if unsafe { state.local_lsn.get() } < local_commit {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        unsafe { state.local_lsn.set(local_commit) };
     }
-    if state.remote_lsn.get() < remote_commit {
-        state.remote_lsn.set(remote_commit);
+    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    if unsafe { state.remote_lsn.get() } < remote_commit {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        unsafe { state.remote_lsn.set(remote_commit) };
     }
     LWLockRelease(&state.lock)?;
     Ok(())
@@ -1100,8 +1197,10 @@ pub fn replorigin_session_get_progress(flush: bool) -> PgResult<XLogRecPtr> {
         .expect("replorigin_session_get_progress without a session origin");
 
     lw(&state.lock, LW_SHARED)?;
-    let remote_lsn = state.remote_lsn.get();
-    let local_lsn = state.local_lsn.get();
+    // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+    let remote_lsn = unsafe { state.remote_lsn.get() };
+    // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+    let local_lsn = unsafe { state.local_lsn.get() };
     LWLockRelease(&state.lock)?;
 
     if flush && local_lsn != InvalidXLogRecPtr {
@@ -1115,11 +1214,13 @@ pub(crate) fn show_status_rows() -> PgResult<Vec<(RepOriginId, XLogRecPtr, XLogR
     let mut rows = Vec::new();
     lw(origin_lock(), LW_SHARED)?;
     for state in replication_states() {
-        if state.roident.get() == InvalidRepOriginId {
+        // SAFETY: ReplicationState field serialized by ReplicationOriginLock
+        if unsafe { state.roident.get() } == InvalidRepOriginId {
             continue;
         }
         lw(&state.lock, LW_SHARED)?;
-        rows.push((state.roident.get(), state.remote_lsn.get(), state.local_lsn.get()));
+        // SAFETY: ReplicationState fields serialized by ReplicationOriginLock
+        rows.push(unsafe { (state.roident.get(), state.remote_lsn.get(), state.local_lsn.get()) });
         LWLockRelease(&state.lock)?;
     }
     LWLockRelease(origin_lock())?;

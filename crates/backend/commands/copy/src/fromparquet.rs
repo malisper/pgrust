@@ -382,6 +382,7 @@ pub(crate) fn resolve_plan(
 /// bpchar(n): over-length values take the varchar blank-trim rule; shorter
 /// values are space-padded to exactly n characters (input-function parity).
 fn bpchar_datum<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8], maxlen: i32) -> PgResult<Datum> {
+    verify_text_bytes(bytes)?;
     if maxlen < 0 {
         return varlena_datum(mcx, bytes);
     }
@@ -491,9 +492,34 @@ fn varlena_datum(mcx: Mcx<'_>, bytes: &[u8]) -> PgResult<Datum> {
     Ok(types_fmgr::varlena_result(varlena::cstring_to_text(mcx, bytes)?))
 }
 
+/// Verify a decoded parquet string value against the database encoding before
+/// it becomes a text-class datum, matching how every other text input path in
+/// the engine funnels bytes through pg_verifymbstr (fromparse.rs on the
+/// text/CSV lane, pg_any_to_server on the protocol/binary lane).
+///
+/// Parquet strings are UTF-8 by definition and are UTF-8-validated at page
+/// decode, but plain UTF-8 validation (simdutf8) accepts an embedded 0x00,
+/// which the engine's verifier rejects (pg_utf8_verifychar returns -1 for
+/// b==0). Text-class datums must never contain NUL: countless consumers
+/// convert text to NUL-terminated C strings (output functions, COPY TO's
+/// CStr::from_ptr, logs, dump/replication) and would silently truncate at the
+/// first NUL while indexes/constraints see the full byte string. Reject such
+/// values here so the parquet lane cannot smuggle a NUL-bearing (or otherwise
+/// invalid) text datum into a table. bytea is exempt: it holds arbitrary
+/// bytes and never goes through this check.
+///
+/// The resolved plan already restricts text columns to UTF-8 databases, so
+/// this validates against the UTF-8 verifier (which is where the NUL
+/// rejection lives).
+fn verify_text_bytes(bytes: &[u8]) -> PgResult<()> {
+    mbutils::pg_verifymbstr(bytes, false)?;
+    Ok(())
+}
+
 /// varchar(n) length rule: values longer than n characters are accepted only
 /// when the excess is all spaces, which is trimmed (varchar input parity).
 fn varchar_datum<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8], maxlen: i32) -> PgResult<Datum> {
+    verify_text_bytes(bytes)?;
     let maxlen = maxlen.max(0) as usize;
     if bytes.len() <= maxlen {
         // chars <= bytes: within limit for sure.
@@ -724,7 +750,11 @@ pub(crate) fn convert_cell<'mcx>(
             }
             Datum::from_i64(us)
         }
-        Conv::Text => varlena_datum(mcx, batch.bytes_at(k))?,
+        Conv::Text => {
+            let b = batch.bytes_at(k);
+            verify_text_bytes(b)?;
+            varlena_datum(mcx, b)?
+        }
         Conv::VarcharN(maxlen) => varchar_datum(mcx, batch.bytes_at(k), maxlen)?,
         Conv::Bpchar(maxlen) => bpchar_datum(mcx, batch.bytes_at(k), maxlen)?,
         Conv::Bytea => varlena_datum(mcx, batch.bytes_at(k))?,
@@ -884,5 +914,44 @@ mod epoch_tests {
             resolve_conv(&annd, DATEOID, -1, "c", true),
             Ok(Conv::DateFromDays)
         ));
+    }
+}
+
+#[cfg(test)]
+mod text_nul_tests {
+    use super::*;
+    use mcx::MemoryContext;
+    use parquet_read::BatchData;
+
+    // Two rows: an embedded-NUL string and a clean one, laid out in the arena
+    // exactly as the batch reader would (ends[i] is the arena end of row i).
+    fn bytes_batch() -> ColumnBatch {
+        let arena = b"admin\0evilok".to_vec();
+        ColumnBatch {
+            nulls: vec![false, false],
+            data: BatchData::Bytes { ends: vec![10, 12], arena },
+        }
+    }
+
+    // Text-class conversions must reject an embedded NUL (and accept the clean
+    // value), matching pg_verifymbstr on the engine's other text input paths;
+    // bytea is exempt and keeps the raw bytes.
+    #[test]
+    fn embedded_nul_rejected_for_text_classes_but_not_bytea() {
+        mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
+        let ctx = MemoryContext::new("text-nul-test");
+        let mcx = ctx.mcx();
+        let b = bytes_batch();
+
+        for conv in [Conv::Text, Conv::VarcharN(64), Conv::Bpchar(64), Conv::Bpchar(-1)] {
+            // Row 0 carries "admin\0evil": rejected as an invalid byte sequence.
+            let err = convert_cell(mcx, conv, &b, 0).err().unwrap();
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE);
+            // Row 1 is clean and must convert.
+            assert!(convert_cell(mcx, conv, &b, 1).is_ok());
+        }
+
+        // bytea accepts arbitrary bytes, NUL included.
+        assert!(convert_cell(mcx, Conv::Bytea, &b, 0).is_ok());
     }
 }

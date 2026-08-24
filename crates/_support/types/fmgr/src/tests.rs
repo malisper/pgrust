@@ -105,14 +105,14 @@ fn pg_result_error_surface() {
         Datum::from_i32(i32::MAX),
         Datum::from_i32(1),
     )
-    .unwrap_err();
+    .err().unwrap();
     assert_eq!(err.message(), "integer out of range");
 }
 
 #[test]
 fn function_call_rejects_null_result() {
     let mut flinfo = FmgrInfo::new(always_null, 42, 1, false, false);
-    let err = function_call1_coll(&mut flinfo, 0, Datum::from_i32(0)).unwrap_err();
+    let err = function_call1_coll(&mut flinfo, 0, Datum::from_i32(0)).err().unwrap();
     assert_eq!(err.message(), "function 42 returned NULL");
 }
 
@@ -122,7 +122,7 @@ fn direct_function_call() {
         .expect("direct call ok");
     assert_eq!(r.as_i32(), 42);
     let err =
-        direct_function_call1_coll(always_null, 0, Datum::from_i32(0)).unwrap_err();
+        direct_function_call1_coll(always_null, 0, Datum::from_i32(0)).err().unwrap();
     assert!(err.message().ends_with("returned NULL"));
 }
 
@@ -221,6 +221,34 @@ mod byref {
         let mut fci = LocalFcinfo::<1>::new(0);
         fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
         let _ = unsafe { fci.arg_varlena_packed(0) };
+    }
+
+    #[test]
+    fn varlena_4b_header_below_hdrsz_is_data_corrupted() {
+        // A crafted/corrupt 4B-uncompressed header whose 30-bit length word
+        // decodes below VARHDRSZ (here: four zero bytes -> declared size 0).
+        // The previous code computed `varsize_4b - VARHDRSZ`, underflowing usize
+        // to ~2^64 and minting an out-of-bounds slice. It must now surface as a
+        // catchable ERRCODE_DATA_CORRUPTED, not UB.
+        for image in [[0u8; 4], [0x04, 0, 0, 0] /* size 1 */, [0x0C, 0, 0, 0] /* size 3 */] {
+            let mut fci = LocalFcinfo::<1>::new(0);
+            fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
+            let err = unsafe { fci.arg_varlena_packed(0) }.err().unwrap();
+            assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+        }
+    }
+
+    #[test]
+    fn packed_varlena_reader_cannot_over_read_short_4b_header() {
+        // Reader backstop: even when a PackedVarlena is built directly over a
+        // corrupt header via `from_ptr` (the lower-level lane used by many
+        // builtins), data()/size() must be structurally incapable of returning
+        // a slice longer than the declared image — never an OOB slice.
+        let image = [0u8; 4]; // 4B-U header declaring total size 0.
+        let v = unsafe { PackedVarlena::from_ptr(image.as_ptr()) };
+        assert_eq!(v.size(), 0);
+        assert_eq!(v.data().len(), 0);
+        assert_eq!(v.image().len(), 0);
     }
 
     #[test]
@@ -455,7 +483,7 @@ mod soft {
 
         let mut fl = FmgrInfo::new(const_seven, 42, 3, false, false);
         let (ok, _) = call(&mut fl, None, None);
-        let err = ok.unwrap_err();
+        let err = ok.err().unwrap();
         assert!(err.message().contains("returned non-NULL"), "{}", err.message());
     }
 
@@ -463,7 +491,7 @@ mod soft {
     fn null_result_for_present_input_is_a_hard_error() {
         let mut fl = strict_flinfo(null_returning);
         let (ok, _) = call(&mut fl, Some(c"1"), None);
-        let err = ok.unwrap_err();
+        let err = ok.err().unwrap();
         assert!(err.message().contains("returned NULL"), "{}", err.message());
     }
 

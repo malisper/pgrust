@@ -176,13 +176,24 @@ impl<T: Copy> SyncCell<T> {
         Self(UnsafeCell::new(value))
     }
 
-    pub fn get(&self) -> T {
-        // SAFETY: serialized by the field's documented lock.
+    /// Reads the cell's value.
+    ///
+    /// # Safety
+    /// The caller must hold the lock (or otherwise guarantee the exclusion)
+    /// named by this field's domain tag — the same serialization C relies on.
+    /// Concurrent unsynchronized access is a data race.
+    pub unsafe fn get(&self) -> T {
+        // SAFETY: serialized by the field's documented lock (caller-asserted).
         unsafe { *self.0.get() }
     }
 
-    pub fn set(&self, value: T) {
-        // SAFETY: as `get`.
+    /// Writes the cell's value.
+    ///
+    /// # Safety
+    /// As [`SyncCell::get`]: the caller must hold the governing lock (or
+    /// otherwise guarantee exclusion) named by this field's domain tag.
+    pub unsafe fn set(&self, value: T) {
+        // SAFETY: serialized by the field's documented lock (caller-asserted).
         unsafe { *self.0.get() = value }
     }
 }
@@ -195,7 +206,9 @@ impl<T> SyncCell<T> {
 
 impl<T: Copy + core::fmt::Debug> core::fmt::Debug for SyncCell<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.get().fmt(f)
+        // SAFETY: Debug is a best-effort snapshot; callers use it only in
+        // single-threaded diagnostic contexts where no concurrent writer exists.
+        unsafe { self.get() }.fmt(f)
     }
 }
 

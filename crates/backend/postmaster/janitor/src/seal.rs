@@ -44,10 +44,12 @@ use tableam_vocab::{
     VacOptValue, VacuumParams, VACOPT_ANALYZE, VACOPT_PROCESS_MAIN, VACOPT_PROCESS_TOAST,
     VACOPT_VACUUM,
 };
+use types_core::catalog::DATABASE_RELATION_ID;
 use types_core::{InvalidOid, Oid, ProcNumber};
 use types_error::{
     PgError, PgResult, ERRCODE_CANNOT_CONNECT_NOW, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
-    ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR, LOG,
+    ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    LOG,
 };
 use types_nodes::parsenodes::AlterDatabaseStmt;
 use types_nodes::NodeList;
@@ -77,16 +79,21 @@ const PG_WAIT_EXTENSION: u32 = 0x0700_0000;
 // ---------------------------------------------------------------------------
 
 /// Post the seal request and park until the janitor resolves it. `datname`
-/// is the RESOLVED catalog name (builtins.rs resolves + permission-checks
-/// first, the pin rationale). Errors are ERROR-level (they abort the
-/// caller's statement, not its connection — unlike the mint path's FATALs,
-/// which kill a connection attempt by design), with the mint taxonomy's
-/// sqlstates: 57P03 for the janitor's own operational states, the janitor's
-/// saved error otherwise.
-pub(crate) fn request_seal(datname: &str) -> PgResult<()> {
+/// is the RESOLVED catalog name and `expected_oid`/`caller_role` are the
+/// backend's CHECK-TIME identity (builtins.rs resolves + owner-checks first,
+/// the pin rationale): `expected_oid` is the owner-checked pg_database oid,
+/// `caller_role` the GetUserId() that passed the check. Both are carried to
+/// the janitor, which re-validates the name->oid binding and re-runs the
+/// ownercheck before the privileged flip (the TOCTOU fix — a caller cannot
+/// re-point the name at a database it does not own in the post-to-flip
+/// window). Errors are ERROR-level (they abort the caller's statement, not
+/// its connection — unlike the mint path's FATALs, which kill a connection
+/// attempt by design), with the mint taxonomy's sqlstates: 57P03 for the
+/// janitor's own operational states, the janitor's saved error otherwise.
+pub(crate) fn request_seal(datname: &str, expected_oid: Oid, caller_role: Oid) -> PgResult<()> {
     let my_procno: ProcNumber =
         lmgr_proc::MyProc().expect("pgrust_seal_template before InitProcess");
-    match registry::post_seal(datname, my_procno) {
+    match registry::post_seal_checked(datname, expected_oid, caller_role, my_procno) {
         PostSeal::JanitorAbsent => Err(ereport(ERROR)
             .errcode(ERRCODE_CANNOT_CONNECT_NOW)
             .errmsg(format!(
@@ -216,8 +223,13 @@ fn wait_for_seal(datname: &str, gen: u64, procno: ProcNumber) -> PgResult<()> {
 pub(crate) fn seal_pass() -> PgResult<()> {
     for w in registry::seal_work(pg_clock::mono_ns()) {
         match w {
-            SealWork::Validate { gen, name } => {
-                if let Err(e) = validate_and_launch(gen, &name) {
+            SealWork::Validate {
+                gen,
+                name,
+                expected_oid,
+                caller_role,
+            } => {
+                if let Err(e) = validate_and_launch(gen, &name, expected_oid, caller_role) {
                     let saved: Box<PgError> = Box::new((*e).clone());
                     crate::main_loop::contain(e, &format!("sealing database \"{name}\""))?;
                     let waiters = registry::complete_seal(gen, Err(saved));
@@ -279,6 +291,27 @@ pub(crate) fn seal_target_missing_error(name: &str) -> Box<PgError> {
         .into()
 }
 
+/// The name no longer resolves to the oid the backend owner-checked: it was
+/// renamed/re-created (possibly a victim swapped in) in the check-to-flip
+/// window. Refuse — the caller's ownership was verified against a DIFFERENT
+/// database. Undefined_database (the flip target the caller authorized is
+/// gone from under this name), with the retry hint.
+pub(crate) fn seal_identity_changed_error(name: &str) -> Box<PgError> {
+    ereport(ERROR)
+        .errcode(ERRCODE_UNDEFINED_DATABASE)
+        .errmsg(format!(
+            "database \"{name}\" no longer refers to the database whose ownership was checked \
+             when pgrust_seal_template() was called"
+        ))
+        .errhint(
+            "The database was renamed or re-created after the call; call \
+             pgrust_seal_template() again for the intended database."
+                .to_string(),
+        )
+        .into_error()
+        .into()
+}
+
 pub(crate) fn already_template_error(name: &str) -> Box<PgError> {
     ereport(ERROR)
         .errcode(ERRCODE_WRONG_OBJECT_TYPE)
@@ -295,13 +328,49 @@ pub(crate) fn already_template_error(name: &str) -> Box<PgError> {
 /// Pending entry: validate the target under a private transaction, then
 /// launch the one-shot vacuum worker. On Err the transaction is left for
 /// the caller's contain() to abort (the mint_one convention).
-fn validate_and_launch(gen: u64, name: &str) -> PgResult<()> {
+///
+/// `expected_oid`/`caller_role` are the backend's CHECK-TIME identity. The
+/// backend resolved the name and owner-checked it, but that all happened on
+/// the caller's thread; the flip runs HERE, superuser-privileged, an
+/// arbitrary interval later. Between the two, a caller can `ALTER DATABASE
+/// ... RENAME` their own owned database out of the name and a victim
+/// database into it, so re-resolving the name and flipping whatever it
+/// points at NOW would seal a database the caller never owned. Guard BOTH:
+/// (a) the name still resolves to `expected_oid`, and (b) `caller_role`
+/// still owns `expected_oid` — a rename attack fails (a), an ownership
+/// change fails (b). Only then is the flip on the caller's behalf legitimate.
+fn validate_and_launch(
+    gen: u64,
+    name: &str,
+    expected_oid: Oid,
+    caller_role: Oid,
+) -> PgResult<()> {
     let cx = mcx::MemoryContext::new("pgrust janitor seal validate");
     xact::StartTransactionCommand()?;
     let mcx = cx.mcx();
     let Some(db) = pg_database::get_database_tuple_by_name(mcx, name)? else {
         return Err(seal_target_missing_error(name));
     };
+    // (a) Check-time identity re-bind: the name must still point at the exact
+    // oid the backend owner-checked. A rename that swapped a victim database
+    // into this name (attacker renamed their own owned database out, victim
+    // in) resolves to a DIFFERENT oid here and is refused — the janitor never
+    // flips a database the caller did not own at check time.
+    if db.oid != expected_oid {
+        return Err(seal_identity_changed_error(name));
+    }
+    // (b) Re-run the owner-or-superuser check the backend ran, now against
+    // the STABLE oid (not the name) under the janitor's own transaction:
+    // ownership revoked in the check-to-flip window also refuses.
+    if !aclchk::object_ownercheck(DATABASE_RELATION_ID, expected_oid, caller_role)? {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg(format!(
+                "must be owner of database \"{name}\" or superuser to seal it"
+            ))
+            .into_error()
+            .into());
+    }
     // Observation-site discipline (the preflight/mint_one/handout clear
     // sites): this probe OBSERVES the target in a non-template state —
     // for a former template unsealed manually and now being re-sealed,

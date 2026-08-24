@@ -8,6 +8,8 @@
 use core::ffi::c_void;
 use std::ffi::CString;
 
+use pgsync::Mutex;
+
 use elog::{elog, ereport};
 use mcx::MemoryContext;
 use types_error::{ErrorLocation, PgResult, COMMERROR, DEBUG2, DEBUG4, DEBUG5, FATAL};
@@ -15,8 +17,8 @@ use types_startup::Port;
 
 use crate::gss_ffi::{
     self, gss_buffer_desc, gss_cred_id_t, gss_ctx_id_t, gss_key_value_element_desc,
-    gss_key_value_set_desc, gss_name_t, GssApi, GSS_C_DELEG_FLAG, GSS_C_GSS_CODE, GSS_C_INITIATE,
-    GSS_C_MECH_CODE, GSS_S_COMPLETE, GSS_S_CONTINUE_NEEDED,
+    gss_key_value_set_desc, gss_name_t, GssApi, GSS_C_ACCEPT, GSS_C_DELEG_FLAG, GSS_C_GSS_CODE,
+    GSS_C_INITIATE, GSS_C_MECH_CODE, GSS_S_COMPLETE, GSS_S_CONTINUE_NEEDED,
 };
 use crate::{
     loc, sendAuthRequest, set_authn_id, AUTH_REQ_GSS_CONT, PG_MAX_AUTH_TOKEN_LENGTH,
@@ -90,6 +92,26 @@ pub(crate) fn pg_GSS_error(errmsg: &str, maj_stat: u32, min_stat: u32) -> PgResu
 
 const GSS_MEMORY_CACHE: &str = "MEMORY:";
 
+// C PostgreSQL forks a private process per backend, so pointing libkrb5 at the
+// keytab/ccache with setenv is process-local and safe. pgrust runs every
+// backend as a thread in ONE process (launch_backend), where libc::setenv
+// mutates the shared environ array and races concurrent getenv traversals
+// (locale/getaddrinfo/libkrb5) — undefined behaviour / heap corruption. The
+// keytab is now selected through the thread-safe MIT credential-store API
+// (gss_acquire_cred_from), so no per-connection setenv runs on MIT builds. The
+// remaining env writes exist only on the Heimdal fallback / delegated-ccache
+// paths; this lock serializes them so two GSS backends never race the
+// environment against each other.
+static GSS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+// Thread-safety wrapper around libc::setenv for the GSS auth path. Returns the
+// setenv return value (0 == success). Held only for the duration of the write.
+fn gss_setenv(key: &std::ffi::CStr, val: &std::ffi::CStr) -> i32 {
+    let _guard = GSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: NUL-terminated strings; serialized against other GSS env writes.
+    unsafe { libc::setenv(key.as_ptr(), val.as_ptr(), 1) }
+}
+
 // be-gssapi-common.c pg_store_delegated_credential. Heimdal (macOS
 // GSS.framework) lacks gss_store_cred_into: that arm reports through
 // pg_GSS_error and the delegated credential is dropped.
@@ -131,8 +153,11 @@ fn pg_store_delegated_credential(api: &GssApi, mut cred: gss_cred_id_t) -> PgRes
         pg_GSS_error("gss_release_cred", major, minor)?;
     }
 
-    // SAFETY: NUL-terminated literals.
-    unsafe { libc::setenv(c"KRB5CCNAME".as_ptr(), value.as_ptr(), 1) };
+    // The delegated credential was stored into the in-memory ccache above via
+    // the credential-store extension; point libkrb5's default ccache at it.
+    // Serialized under GSS_ENV_LOCK so it never races another GSS backend's
+    // environment write (see GSS_ENV_LOCK).
+    gss_setenv(c"KRB5CCNAME", value.as_c_str());
     Ok(())
 }
 
@@ -142,6 +167,10 @@ struct GssState<'a> {
     api: &'static GssApi,
     ctx: gss_ctx_id_t,
     name: gss_name_t,
+    // Acceptor credential acquired from the configured keytab via the
+    // thread-safe credential-store API (GSS_C_NO_CREDENTIAL when the keytab is
+    // selected via the environment fallback instead). Released on drop.
+    acceptor_cred: gss_cred_id_t,
     outbuf: gss_buffer_desc,
     port: &'a Port,
 }
@@ -159,7 +188,57 @@ impl Drop for GssState<'_> {
             // SAFETY: live name from gss_accept_sec_context.
             unsafe { (self.api.gss_release_name)(&mut lmin_s, &mut self.name) };
         }
+        if !self.acceptor_cred.is_null() {
+            // SAFETY: live credential from gss_acquire_cred_from.
+            unsafe { (self.api.gss_release_cred)(&mut lmin_s, &mut self.acceptor_cred) };
+        }
     }
+}
+
+// Acquire the acceptor credential for the configured keytab through the
+// thread-safe MIT credential-store extension ({"keytab": keyfile}), avoiding
+// the process-global KRB5_KTNAME environment variable. Returns:
+//   Ok(Some(cred)) — credential acquired (pass to gss_accept_sec_context),
+//   Ok(None)       — extension unavailable (caller uses the env fallback),
+//   Err(_)         — acquisition attempted but failed (reported via ereport).
+fn acquire_keytab_cred(api: &GssApi, keyfile: &str) -> PgResult<Option<gss_cred_id_t>> {
+    let Some(acquire_cred_from) = api.gss_acquire_cred_from else {
+        return Ok(None);
+    };
+
+    let key = c"keytab";
+    let value = match CString::new(keyfile) {
+        Ok(v) => v,
+        // A NUL in the configured path can never name a real keytab; let the
+        // env fallback / default keytab handle it exactly as before.
+        Err(_) => return Ok(None),
+    };
+    let mut kt = gss_key_value_element_desc { key: key.as_ptr(), value: value.as_ptr() };
+    let ktset = gss_key_value_set_desc { count: 1, elements: &mut kt };
+
+    let mut minor: u32 = 0;
+    let mut cred: gss_cred_id_t = core::ptr::null_mut();
+    let mut actual_mechs: gss_ffi::gss_OID_set = core::ptr::null_mut();
+    // SAFETY: null desired_name/desired_mechs request the default acceptor
+    // identity for all mechs; ktset points at live data for the call.
+    let major = unsafe {
+        acquire_cred_from(
+            &mut minor,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+            GSS_C_ACCEPT,
+            &ktset,
+            &mut cred,
+            &mut actual_mechs,
+            core::ptr::null_mut(),
+        )
+    };
+    if major != GSS_S_COMPLETE {
+        pg_GSS_error("gss_acquire_cred_from", major, minor)?;
+        return Ok(Some(core::ptr::null_mut()));
+    }
+    Ok(Some(cred))
 }
 
 // auth.c pg_GSS_recvauth (auth.c:921).
@@ -177,20 +256,37 @@ pub(crate) fn pg_GSS_recvauth(port: &Port) -> PgResult<i32> {
         }
     };
 
+    // Use the configured keytab, if there is one. C sets KRB5_KTNAME in the
+    // per-backend process environment (auth.c:944); that is unsafe here because
+    // every backend is a thread in one shared process. Prefer the thread-safe
+    // MIT credential-store API to select the keytab per acceptor credential;
+    // only fall back to the (now serialized) environment variable when the
+    // extension is unavailable (e.g. Heimdal / macOS GSS.framework).
     let keyfile = guc_tables::vars::pg_krb_server_keyfile.read().unwrap_or_default();
+    let mut acceptor_cred: gss_cred_id_t = core::ptr::null_mut();
     if !keyfile.is_empty() {
-        let key = c"KRB5_KTNAME";
-        let val = CString::new(keyfile).unwrap_or_default();
-        // SAFETY: NUL-terminated strings.
-        if unsafe { libc::setenv(key.as_ptr(), val.as_ptr(), 1) } != 0 {
-            let errnum = elog::errno::current_errno();
-            // The only likely failure cause is OOM, so use that errcode.
-            return ereport(FATAL)
-                .with_saved_errno(errnum)
-                .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
-                .errmsg("could not set environment: %m")
-                .finish(loc(944, "pg_GSS_recvauth"))
-                .map(|()| STATUS_ERROR);
+        match acquire_keytab_cred(api, &keyfile)? {
+            Some(cred) => {
+                if cred.is_null() {
+                    // Acquisition failed; it was already reported via pg_GSS_error.
+                    return Ok(STATUS_ERROR);
+                }
+                acceptor_cred = cred;
+            }
+            None => {
+                let key = c"KRB5_KTNAME";
+                let val = CString::new(keyfile).unwrap_or_default();
+                if gss_setenv(key, val.as_c_str()) != 0 {
+                    let errnum = elog::errno::current_errno();
+                    // The only likely failure cause is OOM, so use that errcode.
+                    return ereport(FATAL)
+                        .with_saved_errno(errnum)
+                        .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+                        .errmsg("could not set environment: %m")
+                        .finish(loc(944, "pg_GSS_recvauth"))
+                        .map(|()| STATUS_ERROR);
+                }
+            }
         }
     }
 
@@ -198,6 +294,7 @@ pub(crate) fn pg_GSS_recvauth(port: &Port) -> PgResult<i32> {
         api,
         ctx: core::ptr::null_mut(),
         name: core::ptr::null_mut(),
+        acceptor_cred,
         outbuf: gss_buffer_desc::empty(),
         port,
     };
@@ -242,7 +339,7 @@ pub(crate) fn pg_GSS_recvauth(port: &Port) -> PgResult<i32> {
             (api.gss_accept_sec_context)(
                 &mut min_stat,
                 &mut state.ctx,
-                core::ptr::null_mut(),
+                state.acceptor_cred,
                 &mut gbuf,
                 core::ptr::null_mut(),
                 &mut state.name,
@@ -321,10 +418,25 @@ fn pg_GSS_checkauth(state: &mut GssState<'_>) -> PgResult<i32> {
     // SAFETY: gss_display_name returned length valid bytes.
     let princ_bytes =
         unsafe { core::slice::from_raw_parts(gbuf.value as *const u8, gbuf.length) };
+    // C copies gbuf by length into a NUL-terminated string (memcpy + trailing
+    // '\0'); an interior NUL survives that copy and later truncation-matches the
+    // realm/usermap via pg_strcasecmp/strcmp. Reject it here so the principal is
+    // a single, NUL-free value for realm matching, usermap matching, and the
+    // authenticated identity — matching how the cert DN/CN identity rejects
+    // embedded nulls before its C-string comparisons.
+    let has_interior_nul = princ_bytes.contains(&0);
     let princ = String::from_utf8_lossy(princ_bytes).into_owned();
     let mut lmin_s: u32 = 0;
     // SAFETY: gbuf came from gss_display_name.
     unsafe { (api.gss_release_buffer)(&mut lmin_s, &mut gbuf) };
+
+    if has_interior_nul {
+        ereport(COMMERROR)
+            .errcode(types_error::ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg("GSS authenticated name contains embedded null")
+            .finish(loc(1100, "pg_GSS_checkauth"))?;
+        return Ok(STATUS_ERROR);
+    }
 
     // The principal is our authenticated identity: set it before the usermap
     // check, because authentication has already succeeded.
@@ -398,7 +510,35 @@ fn map_principal<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::map_principal;
+    use super::{gss_setenv, map_principal};
+
+    // The keytab/ccache env writes on the GSS auth path must be serialized
+    // (GSS_ENV_LOCK) so two backend threads never race libc::setenv against
+    // each other (setenv may realloc environ and free the old array). Hammer
+    // gss_setenv from many threads: writer-vs-writer serialization must hold —
+    // no corruption, and the surviving value is always one that was written.
+    // (The primary keytab path no longer writes the environment at all; it goes
+    // through the credential store. This lock only guards the Heimdal fallback
+    // and the delegated-ccache write.)
+    #[test]
+    fn gss_setenv_is_serialized() {
+        let key = c"PGRUST_TEST_GSS_ENV";
+        let vals = [c"MEMORY:a", c"MEMORY:b", c"MEMORY:c"];
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for _ in 0..2000 {
+                        assert_eq!(gss_setenv(key, vals[t % vals.len()]), 0);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let final_val = std::env::var("PGRUST_TEST_GSS_ENV").unwrap();
+        assert!(["MEMORY:a", "MEMORY:b", "MEMORY:c"].contains(&final_val.as_str()));
+    }
 
     fn ok<'a>(r: Result<&'a str, super::RealmMismatch<'a>>) -> Option<&'a str> {
         r.ok()

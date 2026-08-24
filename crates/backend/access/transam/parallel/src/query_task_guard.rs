@@ -322,7 +322,17 @@ impl QueryTaskBindingGuard {
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindInvalidations)?;
 
-            guc::ResetAllOptions();
+            // Scrub to the session-neutral fresh-backend baseline, not just
+            // RESET ALL: a standing gang thread's between-serve baseline was
+            // stamped by the FIRST engagement's user (serve_ticket connects via
+            // BackgroundWorkerInitializeConnectionByOid outside
+            // INITIALIZING_PARALLEL_WORKER, so process_settings applies that
+            // user's ALTER ROLE/DATABASE SET values at sources <=
+            // PGC_S_OVERRIDE). ResetAllOptions preserves exactly that class, so
+            // for any variable the new pin omits, the first user's role/database
+            // GUCs would remain live under a later user's serve (idx 114).
+            // reset_store_to_process_base evicts them before the new pin applies.
+            guc::store::reset_store_to_process_base();
             // Composition (train-11): guc-snapshots replaced ParallelShared's
             // captured-session share (guc_bind) with the typed query pin
             // (guc_pin, populated iff session_guc_bind_enabled() at capture);

@@ -146,7 +146,8 @@ pub fn WaitEventCustomShmemResetAfterCrash() {
         dynahash::hash_reset_after_crash(t.by_info);
         dynahash::hash_reset_after_crash(t.by_name);
     }
-    t.counter.next_id.set(WAIT_EVENT_CUSTOM_INITIAL_ID);
+    // SAFETY: crash-cycle reset; children dead, postmaster thread only
+    unsafe { t.counter.next_id.set(WAIT_EVENT_CUSTOM_INITIAL_ID) };
     t.counter.mutex.unlock();
 }
 
@@ -210,9 +211,11 @@ pub fn WaitEventCustomNew(class_id: u32, wait_event_name: &str) -> PgResult<u32>
     }
 
     let next_id = with_spin(&tables.counter.mutex, || {
-        let id = tables.counter.next_id.get();
+        // SAFETY: serialized by WaitEventCustomLock (counter mutex held)
+        let id = unsafe { tables.counter.next_id.get() };
         if id < WAIT_EVENT_CUSTOM_HASH_MAX_SIZE {
-            tables.counter.next_id.set(id + 1);
+            // SAFETY: serialized by WaitEventCustomLock (counter mutex held)
+            unsafe { tables.counter.next_id.set(id + 1) };
         }
         id
     });

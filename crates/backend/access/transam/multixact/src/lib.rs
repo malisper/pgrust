@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use elog::{elog, ereport};
 use init_small::globals;
 use lwlock::{LWLockAcquire, LWLockRelease, LWLock, LW_EXCLUSIVE, LW_SHARED};
-use mcx::{MemoryContext, PgVec};
+use mcx::{oom_named, MemoryContext, PgVec};
 use pmsignal::{PMSignalReason, SendPostmasterSignal};
 use slru::{
     check_slru_buffers, LwGuard, SimpleLruDoesPhysicalPageExist, SimpleLruGetBankLock,
@@ -42,6 +42,10 @@ pub const FirstMultiXactId: MultiXactId = 1;
 pub const MaxMultiXactId: MultiXactId = 0xFFFF_FFFF;
 pub const MaxMultiXactOffset: MultiXactOffset = 0xFFFF_FFFF;
 
+/// C's `MaxAllocSize` (1 GB - 1): the ceiling `palloc` enforces on a single
+/// request. Used to bound member counts derived from untrusted SLRU offsets.
+const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
+
 pub const RM_MULTIXACT_ID: u8 = 6;
 pub const XLOG_MULTIXACT_ZERO_OFF_PAGE: u8 = 0x00;
 pub const XLOG_MULTIXACT_ZERO_MEM_PAGE: u8 = 0x10;
@@ -68,6 +72,18 @@ const MULTIXACT_MEMBERGROUPS_PER_PAGE: u32 = (BLCKSZ / MULTIXACT_MEMBERGROUP_SIZ
 pub const MULTIXACT_MEMBERS_PER_PAGE: u32 =
     MULTIXACT_MEMBERGROUPS_PER_PAGE * MULTIXACT_MEMBERS_PER_MEMBERGROUP;
 const MAX_MEMBERS_IN_LAST_MEMBERS_PAGE: u32 = (0xFFFF_FFFFu32 % MULTIXACT_MEMBERS_PER_PAGE) + 1;
+
+/// Highest SLRU page number a legitimate offsets/member record can reference.
+/// A valid page number always derives from a u32 MultiXactId / MultiXactOffset
+/// (see MultiXactIdToOffsetPage / MXOffsetToMemberPage), so anything outside
+/// `0..=MAX_*_PAGE` can only come from a corrupt or hostile WAL record. Bounding
+/// the value keeps a negative page from reaching `pageno % nbanks` in the SLRU
+/// layer, where it would wrap to a wild index and panic during recovery.
+const MAX_OFFSET_PAGE: i64 = (MaxMultiXactId / MULTIXACT_OFFSETS_PER_PAGE) as i64;
+const MAX_MEMBER_PAGE: i64 = (MaxMultiXactOffset / MULTIXACT_MEMBERS_PER_PAGE) as i64;
+/// Largest valid `MultiXactStatus` discriminant (MultiXactStatusUpdate == 5);
+/// `mxstatus_from_word` panics on anything larger.
+const MAX_MULTIXACT_STATUS: i32 = 5;
 
 const MULTIXACT_MEMBER_SAFE_THRESHOLD: MultiXactOffset = MaxMultiXactOffset / 2;
 const MULTIXACT_MEMBER_DANGER_THRESHOLD: MultiXactOffset =
@@ -1042,6 +1058,18 @@ pub fn GetMultiXactIdMembers(
     res
 }
 
+/// Reject a member count derived from untrusted SLRU offset entries. A valid
+/// multixact always has at least one member and never more than fit under
+/// `MaxAllocSize`. `length` is `next_offset - offset` reinterpreted as i32, so
+/// a corrupt offset pair whose modular delta exceeds 2^31 surfaces as a
+/// non-positive value; anything larger than the alloc ceiling is likewise
+/// impossible for a real multixact.
+#[inline]
+fn member_count_is_corrupt(length: i32) -> bool {
+    const MAX_MEMBERS: i32 = (MAX_ALLOC_SIZE / core::mem::size_of::<MultiXactMember>()) as i32;
+    length <= 0 || length > MAX_MEMBERS
+}
+
 fn get_members_into(
     multi: MultiXactId,
     is_lock_only: bool,
@@ -1131,8 +1159,33 @@ fn get_members_into(
 
     bank.release()?;
 
+    // `length` is the member count derived from two offset entries read
+    // verbatim from the offsets SLRU — untrusted bytes (on-disk corruption, or
+    // WAL CREATE_ID records a hostile primary controls when replayed on a
+    // standby). A corrupt offset pair can make it non-positive (a >2^31 modular
+    // delta reinterpreted as i32) or absurdly large. C bounds this implicitly:
+    // palloc(length * sizeof(MultiXactMember)) fails the MaxAllocSize check and
+    // raises a catchable "invalid memory alloc request size" ERROR. Here an
+    // infallible reserve() would instead hit handle_alloc_error and abort the
+    // whole process (thread-per-backend => full cluster crash), so validate the
+    // count against a MaxAllocSize-derived bound before allocating, and use a
+    // fallible reservation so even an in-range request degrades to a per-query
+    // error rather than a wild allocation.
+    if member_count_is_corrupt(length) {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!("MultiXact {multi} has invalid member count {length}"))
+            .finish(loc("GetMultiXactIdMembers"))?;
+        unreachable!("ERROR finish returned");
+    }
+
     out.clear();
-    out.reserve(length.max(0) as usize);
+    out.try_reserve(length as usize).map_err(|_| {
+        oom_named(
+            "GetMultiXactIdMembers",
+            length as usize * core::mem::size_of::<MultiXactMember>(),
+        )
+    })?;
 
     let mctl = MemberCtl();
     let mut mguard: Option<LwGuard> = None;
@@ -1253,13 +1306,34 @@ pub fn PostPrepare_MultiXact(xid: TransactionId) {
     cache_clear();
 }
 
+/// Validate the length of a `TWOPHASE_RM_MULTIXACT_ID` record payload.
+///
+/// C uses `Assert(len == sizeof(MultiXactId))`, which compiles out in release
+/// builds; a crafted 2PC state file could then pass an arbitrary-length payload
+/// and desync recovery. The record length is attacker-controlled, so treat a
+/// mismatch as data corruption and raise a typed error instead of asserting.
+fn check_multixact_recdata_len(recdata: &[u8], func: &'static str) -> PgResult<()> {
+    const EXPECTED: usize = core::mem::size_of::<MultiXactId>();
+    if recdata.len() != EXPECTED {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "corrupted two-phase multixact record: expected {EXPECTED} bytes, got {}",
+                recdata.len()
+            ))
+            .finish(loc(func))
+            .err().unwrap());
+    }
+    Ok(())
+}
+
 pub fn multixact_twophase_recover(
     xid: TransactionId,
     _info: u16,
     recdata: &[u8],
 ) -> PgResult<()> {
     let dummy = twophase_seams::two_phase_get_dummy_proc_number::call(xid, false)?;
-    assert_eq!(recdata.len(), 4);
+    check_multixact_recdata_len(recdata, "multixact_twophase_recover")?;
     let oldest_member = MultiXactId::from_ne_bytes(recdata.try_into().unwrap());
     set_oldest_member(prepared_xact_member_slot(dummy), oldest_member);
     Ok(())
@@ -1271,7 +1345,7 @@ pub fn multixact_twophase_postcommit(
     recdata: &[u8],
 ) -> PgResult<()> {
     let dummy = twophase_seams::two_phase_get_dummy_proc_number::call(xid, true)?;
-    assert_eq!(recdata.len(), 4);
+    check_multixact_recdata_len(recdata, "multixact_twophase_postcommit")?;
     set_oldest_member(prepared_xact_member_slot(dummy), InvalidMultiXactId);
     Ok(())
 }
@@ -1999,6 +2073,47 @@ fn WriteMZeroPageXlogRec(pageno: i64, info: u8) -> PgResult<()> {
     Ok(())
 }
 
+/// Raise a catchable data-corruption error for a malformed multixact WAL
+/// record instead of panicking during recovery.
+///
+/// A hostile primary (or a torn record) can make any redo record shorter than
+/// its fixed struct, or carry an out-of-range count/page/status. Every
+/// `multixact_redo` arm funnels those cases here so replay fails the record
+/// catchably (ERRCODE_DATA_CORRUPTED, "invalid multixact ... record") rather
+/// than slice-indexing, unwrapping, or hitting a panicking conversion in the
+/// recovery-critical startup path. Returns `PgResult<T>` so it can supply the
+/// value type of whatever expression it replaces; it is always `Err` at the
+/// ERROR level, so the trailing `unreachable!` never fires.
+#[track_caller]
+fn corrupt_multixact_record<T>(detail: String) -> PgResult<T> {
+    ereport(ERROR)
+        .errcode(ERRCODE_DATA_CORRUPTED)
+        .errmsg(detail)
+        .finish(loc("multixact_redo"))?;
+    unreachable!("ERROR finish returned")
+}
+
+/// Read a fixed-width native-endian field out of a WAL record's main data,
+/// bounds-checked. Uses `get(..)` (never direct indexing), so a record shorter
+/// than the field it claims to hold yields a catchable data-corruption error
+/// rather than a slice-index panic. `saturating_add` keeps the range
+/// computation itself from overflowing on an absurd offset.
+fn multixact_record_field<const N: usize>(
+    data: &[u8],
+    off: usize,
+    what: &str,
+) -> PgResult<[u8; N]> {
+    match data.get(off..off.saturating_add(N)) {
+        // The slice is exactly N bytes, so try_into cannot fail.
+        Some(slice) => Ok(slice.try_into().unwrap()),
+        None => corrupt_multixact_record(format!(
+            "invalid multixact {what} record: expected at least {} bytes, got {}",
+            off.saturating_add(N),
+            data.len(),
+        )),
+    }
+}
+
 pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let decoded = record
         .record
@@ -2012,7 +2127,13 @@ pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let data = unsafe { decoded.main_data_bytes() };
 
     if info == XLOG_MULTIXACT_ZERO_OFF_PAGE {
-        let pageno = i64::from_ne_bytes(data[..8].try_into().expect("short ZERO_OFF_PAGE record"));
+        let pageno =
+            i64::from_ne_bytes(multixact_record_field::<8>(data, 0, "zero offsets page")?);
+        if !(0..=MAX_OFFSET_PAGE).contains(&pageno) {
+            return corrupt_multixact_record(format!(
+                "invalid multixact zero offsets page record: page {pageno} out of range"
+            ));
+        }
 
         // Skip pages already initialized while replaying a CREATE record
         // from an older minor version.
@@ -2034,7 +2155,13 @@ pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
         PRE_INITIALIZED_OFFSETS_PAGE.set(-1);
         Ok(())
     } else if info == XLOG_MULTIXACT_ZERO_MEM_PAGE {
-        let pageno = i64::from_ne_bytes(data[..8].try_into().expect("short ZERO_MEM_PAGE record"));
+        let pageno =
+            i64::from_ne_bytes(multixact_record_field::<8>(data, 0, "zero members page")?);
+        if !(0..=MAX_MEMBER_PAGE).contains(&pageno) {
+            return corrupt_multixact_record(format!(
+                "invalid multixact zero members page record: page {pageno} out of range"
+            ));
+        }
 
         let mctl = MemberCtl();
         let mut bank = LwGuard::acquire(SimpleLruGetBankLock(mctl, pageno), LW_EXCLUSIVE)?;
@@ -2043,10 +2170,29 @@ pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
         debug_assert!(!mctl.page_dirty(slotno, &bank));
         bank.release()
     } else if info == XLOG_MULTIXACT_CREATE_ID {
-        let mid = MultiXactId::from_ne_bytes(data[0..4].try_into().expect("short CREATE record"));
+        let mid = MultiXactId::from_ne_bytes(multixact_record_field::<4>(data, 0, "create")?);
         let moff =
-            MultiXactOffset::from_ne_bytes(data[4..8].try_into().expect("short CREATE record"));
-        let nmembers = i32::from_ne_bytes(data[8..12].try_into().expect("short CREATE record"));
+            MultiXactOffset::from_ne_bytes(multixact_record_field::<4>(data, 4, "create")?);
+        let nmembers = i32::from_ne_bytes(multixact_record_field::<4>(data, 8, "create")?);
+
+        // nmembers is attacker-controlled: reject a negative count, and require
+        // the members array it claims to hold to actually fit within the record
+        // before iterating or reserving. checked_* keeps the size computation
+        // from overflowing; without this the per-member slicing below and the
+        // reserve() would panic / wild-allocate on a hostile record.
+        let members_bytes = (nmembers >= 0)
+            .then(|| nmembers as usize)
+            .and_then(|n| n.checked_mul(SIZE_OF_MULTIXACT_MEMBER))
+            .and_then(|m| m.checked_add(SIZE_OF_MULTIXACT_CREATE));
+        match members_bytes {
+            Some(needed) if needed <= data.len() => {}
+            _ => {
+                return corrupt_multixact_record(format!(
+                    "invalid multixact create record: {nmembers} members do not fit in {} bytes",
+                    data.len()
+                ));
+            }
+        }
 
         let pre = PRE_INITIALIZED_OFFSETS_PAGE.get();
         if pre != -1 {
@@ -2063,12 +2209,17 @@ pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
         let mut max_xid = record_xid;
         for i in 0..nmembers as usize {
             let base = SIZE_OF_MULTIXACT_CREATE + i * SIZE_OF_MULTIXACT_MEMBER;
-            let xid = TransactionId::from_ne_bytes(
-                data[base..base + 4].try_into().expect("short CREATE member"),
-            );
-            let status = i32::from_ne_bytes(
-                data[base + 4..base + 8].try_into().expect("short CREATE member"),
-            );
+            let xid =
+                TransactionId::from_ne_bytes(multixact_record_field::<4>(data, base, "create")?);
+            let status =
+                i32::from_ne_bytes(multixact_record_field::<4>(data, base + 4, "create")?);
+            // Validate the status word before mxstatus_from_word, which panics
+            // on an out-of-range discriminant.
+            if !(0..=MAX_MULTIXACT_STATUS).contains(&status) {
+                return corrupt_multixact_record(format!(
+                    "invalid multixact create record: member {i} has invalid status {status}"
+                ));
+            }
             members.push(MultiXactMember {
                 xid,
                 status: mxstatus_from_word(status as u32),
@@ -2085,17 +2236,24 @@ pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
         varsup_seams::advance_next_full_transaction_id_past_xid::call(max_xid)?;
         Ok(())
     } else if info == XLOG_MULTIXACT_TRUNCATE_ID {
-        debug_assert!(data.len() >= SIZE_OF_MULTIXACT_TRUNCATE);
+        // C memcpy's a fixed SizeOfMultiXactTruncate struct; require the record
+        // to carry the whole thing before reading any field.
+        if data.len() < SIZE_OF_MULTIXACT_TRUNCATE {
+            return corrupt_multixact_record(format!(
+                "invalid multixact truncate record: expected at least {SIZE_OF_MULTIXACT_TRUNCATE} bytes, got {}",
+                data.len()
+            ));
+        }
         let oldest_multi_db =
-            Oid::from(u32::from_ne_bytes(data[0..4].try_into().expect("short TRUNCATE record")));
+            Oid::from(u32::from_ne_bytes(multixact_record_field::<4>(data, 0, "truncate")?));
         let start_trunc_off =
-            MultiXactId::from_ne_bytes(data[4..8].try_into().expect("short TRUNCATE record"));
+            MultiXactId::from_ne_bytes(multixact_record_field::<4>(data, 4, "truncate")?);
         let end_trunc_off =
-            MultiXactId::from_ne_bytes(data[8..12].try_into().expect("short TRUNCATE record"));
+            MultiXactId::from_ne_bytes(multixact_record_field::<4>(data, 8, "truncate")?);
         let start_trunc_memb =
-            MultiXactOffset::from_ne_bytes(data[12..16].try_into().expect("short TRUNCATE record"));
+            MultiXactOffset::from_ne_bytes(multixact_record_field::<4>(data, 12, "truncate")?);
         let end_trunc_memb =
-            MultiXactOffset::from_ne_bytes(data[16..20].try_into().expect("short TRUNCATE record"));
+            MultiXactOffset::from_ne_bytes(multixact_record_field::<4>(data, 16, "truncate")?);
 
         dlog(
             DEBUG1,

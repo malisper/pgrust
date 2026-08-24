@@ -246,10 +246,23 @@ pub enum HeapDetail {
     /// method is not pglz (this build carries no LZ4, matching C without
     /// USE_LZ4).
     TextCompression,
+    /// [idx 5] A text byte lane met a corrupt varlena image: the declared
+    /// varlena length ran past the containing tuple's extent, undershot
+    /// its own header, or the inline-compressed stream failed to
+    /// decompress. Attacker-influenceable on-disk/catalog bytes — the
+    /// data-corruption class (ERRCODE_DATA_CORRUPTED), not a capability
+    /// gap, caught before any out-of-bounds read.
+    TextCorrupt,
     /// [joins] Typed residue at the recognized heap-join boundary (the
     /// charter list): the payload is the census key tail, e.g.
     /// "join-outer" / "join-non-equi" / "join-text" / "join-multiway".
     Join(&'static str),
+    /// A granule carried more rows than the fold's u16 selection-vector
+    /// ordinal domain can name (rows-1 > u16::MAX). The seam owes a split;
+    /// folding it would truncate the ordinal and silently address the
+    /// wrong rows, so we refuse loudly — an invariant breach, never a
+    /// capability gap.
+    RowOrdinalOverflow,
 }
 
 impl HeapDetail {
@@ -262,7 +275,9 @@ impl HeapDetail {
             HeapDetail::PerfUnadmitted => "perf-unadmitted",
             HeapDetail::TextOutOfLine => "text-out-of-line",
             HeapDetail::TextCompression => "text-compression",
+            HeapDetail::TextCorrupt => "text-corrupt",
             HeapDetail::Join(what) => what,
+            HeapDetail::RowOrdinalOverflow => "row-ordinal-overflow",
         }
     }
 }
@@ -616,9 +631,14 @@ impl RefuseCause {
             | RefuseCause::BindParams => types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
             // The cache law and a witness-cap breach are invariant
             // breaches (never a capability gap); the rest are 0A000.
-            RefuseCause::Heap(HeapDetail::CacheLaw | HeapDetail::GroupCap) => {
-                types_error::ERRCODE_INTERNAL_ERROR
-            }
+            RefuseCause::Heap(
+                HeapDetail::CacheLaw
+                | HeapDetail::GroupCap
+                | HeapDetail::RowOrdinalOverflow,
+            ) => types_error::ERRCODE_INTERNAL_ERROR,
+            // [idx 5] A corrupt on-disk varlena is the data-corruption
+            // class — a catchable XX001, not a capability gap.
+            RefuseCause::Heap(HeapDetail::TextCorrupt) => types_error::ERRCODE_DATA_CORRUPTED,
             RefuseCause::Heap(
                 HeapDetail::GroupCountUnwitnessed
                 | HeapDetail::Face

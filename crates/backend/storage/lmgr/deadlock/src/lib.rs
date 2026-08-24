@@ -124,11 +124,17 @@ pub fn InitDeadLockChecking() -> PgResult<()> {
         return Ok(());
     }
     let max_backends = MaxBackends() as usize;
+    // The wait-for graph can contain prepared-transaction dummy PGPROCs (up to
+    // max_prepared_xacts) in addition to the live backends, so the per-node
+    // arrays (visited procs and the deadlock-path detail) must be sized for the
+    // full proc set, not just MaxBackends — otherwise FindLockCycle overruns
+    // them (release-build panic) once prepared xacts are lock holders.
+    let max_procs = max_backends + twophase_config::max_prepared_xacts().max(0) as usize;
     let mcx = backend_mcx();
     let ws = Workspace {
-        visitedProcs: filled(mcx, max_backends),
+        visitedProcs: filled(mcx, max_procs),
         nVisitedProcs: 0,
-        deadlockDetails: filled(mcx, max_backends),
+        deadlockDetails: filled(mcx, max_procs),
         nDeadlockDetails: 0,
         beforeConstraints: filled(mcx, max_backends),
         afterConstraints: filled(mcx, max_backends),
@@ -157,7 +163,7 @@ fn leader_of(procno: ProcNumber) -> ProcNumber {
 
 fn is_waiting(procno: ProcNumber) -> bool {
     let proc = GetPGProcByNumber(procno);
-    !proc.links.get().is_detached() && !proc.waitLock.get().is_null()
+    !unsafe { proc.links.get() }.is_detached() && !unsafe { proc.waitLock.get() }.is_null()
 }
 
 /// Caller must hold all lock partition LWLocks (the CheckDeadLock contract).
@@ -307,14 +313,14 @@ fn FindLockCycleRecurse(
     for i in 0..ws.nVisitedProcs as usize {
         if ws.visitedProcs[i] == checkProc {
             if i == 0 {
-                debug_assert!(depth <= MaxBackends());
+                debug_assert!((depth as usize) <= ws.deadlockDetails.len());
                 ws.nDeadlockDetails = depth;
                 return true;
             }
             return false;
         }
     }
-    debug_assert!(ws.nVisitedProcs < MaxBackends());
+    debug_assert!((ws.nVisitedProcs as usize) < ws.visitedProcs.len());
     ws.visitedProcs[ws.nVisitedProcs as usize] = checkProc;
     ws.nVisitedProcs += 1;
 
@@ -347,8 +353,8 @@ fn FindLockCycleRecurseMember(
     nSoftEdges: &mut i32,
 ) -> bool {
     let proc = GetPGProcByNumber(checkProc);
-    let lock: *mut LOCK = proc.waitLock.get();
-    let waitLockMode = proc.waitLockMode.get();
+    let lock: *mut LOCK = unsafe { proc.waitLock.get() };
+    let waitLockMode = unsafe { proc.waitLockMode.get() };
 
     // SAFETY: all lock partition LWLocks held for the whole check; the shared
     // lock table cannot change under us.
@@ -537,7 +543,7 @@ fn TopoSort(ws: &mut Workspace, lock: *mut LOCK, nConstraints: usize, ordering_o
         for j in (0..queue_size).rev() {
             let w = ws.visitedProcs[j];
             if w == waiter || GetPGProcByNumber(w).lockGroupLeader.load(Relaxed) == waiter {
-                debug_assert!(GetPGProcByNumber(w).waitLock.get() == lock);
+                debug_assert!(unsafe { GetPGProcByNumber(w).waitLock.get() } == lock);
                 if jj == -1 {
                     jj = j as i32;
                 } else {
@@ -557,7 +563,7 @@ fn TopoSort(ws: &mut Workspace, lock: *mut LOCK, nConstraints: usize, ordering_o
         for k in (0..queue_size).rev() {
             let b = ws.visitedProcs[k];
             if b == blocker || GetPGProcByNumber(b).lockGroupLeader.load(Relaxed) == blocker {
-                debug_assert!(GetPGProcByNumber(b).waitLock.get() == lock);
+                debug_assert!(unsafe { GetPGProcByNumber(b).waitLock.get() } == lock);
                 if kk == -1 {
                     kk = k as i32;
                 } else {
@@ -694,7 +700,7 @@ pub fn RememberSimpleDeadLock(
         let blocker_tag = unsafe { (*bproc.waitLock.get()).tag };
         ws.deadlockDetails[1] = DeadLockInfo {
             locktag: blocker_tag,
-            lockmode: bproc.waitLockMode.get(),
+            lockmode: unsafe { bproc.waitLockMode.get() },
             pid: bproc.pid.load(Relaxed),
         };
         ws.nDeadlockDetails = 2;

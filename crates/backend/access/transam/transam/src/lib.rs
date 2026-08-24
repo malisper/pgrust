@@ -10,7 +10,7 @@ use types_core::xact::{
     TRANSACTION_STATUS_IN_PROGRESS, TRANSACTION_STATUS_SUB_COMMITTED,
 };
 use types_core::{BootstrapTransactionId, FrozenTransactionId, InvalidTransactionId, TransactionId, XLogRecPtr};
-use types_error::{PgResult, WARNING};
+use types_error::{PgResult, ERROR, WARNING};
 
 pub use types_core::{
     TransactionIdEquals, TransactionIdFollows, TransactionIdFollowsOrEquals,
@@ -55,57 +55,97 @@ fn TransactionLogFetch(transactionId: TransactionId) -> PgResult<XidStatus> {
 }
 
 pub fn TransactionIdDidCommit(transactionId: TransactionId) -> PgResult<bool> {
-    let xidstatus = TransactionLogFetch(transactionId)?;
+    // Resolve the sub-committed parent chain iteratively. C recurses here
+    // (transam.c TransactionIdDidCommit) and relies on the compiler's tail
+    // call; Rust guarantees no TCO, so a deep or cyclic pg_subtrans chain
+    // (reconstructible from untrusted WAL on a standby) would overflow the
+    // stack. Walk it as a loop bounded by the same strictly-decreasing parent
+    // invariant SubTransGetTopmostTransaction enforces, so corruption fails
+    // as a data error instead of exhausting the stack or hanging.
+    let mut currentXid = transactionId;
+    loop {
+        let xidstatus = TransactionLogFetch(currentXid)?;
 
-    if xidstatus == TRANSACTION_STATUS_COMMITTED {
-        return Ok(true);
-    }
-
-    // Subcommitted: resolve through the parent. Below TransactionXmin
-    // pg_subtrans may be truncated (treat as crashed parent); a missing
-    // entry above xmin is a startup-window artifact -> WARN, per C.
-    if xidstatus == TRANSACTION_STATUS_SUB_COMMITTED {
-        if TransactionIdPrecedes(transactionId, TransactionXmin()) {
-            return Ok(false);
+        if xidstatus == TRANSACTION_STATUS_COMMITTED {
+            return Ok(true);
         }
-        let parentXid = subtrans::SubTransGetParent(transactionId)?;
-        if !TransactionIdIsValid(parentXid) {
-            elog(
-                WARNING,
-                format!("no pg_subtrans entry for subcommitted XID {transactionId}"),
-            )?;
-            return Ok(false);
-        }
-        return TransactionIdDidCommit(parentXid);
-    }
 
-    Ok(false)
+        // Subcommitted: resolve through the parent. Below TransactionXmin
+        // pg_subtrans may be truncated (treat as crashed parent); a missing
+        // entry above xmin is a startup-window artifact -> WARN, per C.
+        if xidstatus == TRANSACTION_STATUS_SUB_COMMITTED {
+            if TransactionIdPrecedes(currentXid, TransactionXmin()) {
+                return Ok(false);
+            }
+            let parentXid = subtrans::SubTransGetParent(currentXid)?;
+            if !TransactionIdIsValid(parentXid) {
+                elog(
+                    WARNING,
+                    format!("no pg_subtrans entry for subcommitted XID {currentXid}"),
+                )?;
+                return Ok(false);
+            }
+            // A parent is always allocated before its child, so the chain must
+            // strictly decrease. A non-decreasing pointer means a corrupted or
+            // maliciously crafted structure (e.g. an A->B->A cycle) that would
+            // otherwise loop forever; reject it as a data error, matching
+            // SubTransGetTopmostTransaction.
+            if !TransactionIdPrecedes(parentXid, currentXid) {
+                elog(
+                    ERROR,
+                    format!(
+                        "pg_subtrans contains invalid entry: xid {currentXid} points to parent xid {parentXid}"
+                    ),
+                )?;
+            }
+            currentXid = parentXid;
+            continue;
+        }
+
+        return Ok(false);
+    }
 }
 
 // True only for explicit aborts: crash-implicit aborts read as in-progress.
 pub fn TransactionIdDidAbort(transactionId: TransactionId) -> PgResult<bool> {
-    let xidstatus = TransactionLogFetch(transactionId)?;
+    // Iterative for the same reason as TransactionIdDidCommit: never recurse
+    // on an untrusted pg_subtrans parent chain.
+    let mut currentXid = transactionId;
+    loop {
+        let xidstatus = TransactionLogFetch(currentXid)?;
 
-    if xidstatus == TRANSACTION_STATUS_ABORTED {
-        return Ok(true);
-    }
-
-    if xidstatus == TRANSACTION_STATUS_SUB_COMMITTED {
-        if TransactionIdPrecedes(transactionId, TransactionXmin()) {
+        if xidstatus == TRANSACTION_STATUS_ABORTED {
             return Ok(true);
         }
-        let parentXid = subtrans::SubTransGetParent(transactionId)?;
-        if !TransactionIdIsValid(parentXid) {
-            elog(
-                WARNING,
-                format!("no pg_subtrans entry for subcommitted XID {transactionId}"),
-            )?;
-            return Ok(true);
-        }
-        return TransactionIdDidAbort(parentXid);
-    }
 
-    Ok(false)
+        if xidstatus == TRANSACTION_STATUS_SUB_COMMITTED {
+            if TransactionIdPrecedes(currentXid, TransactionXmin()) {
+                return Ok(true);
+            }
+            let parentXid = subtrans::SubTransGetParent(currentXid)?;
+            if !TransactionIdIsValid(parentXid) {
+                elog(
+                    WARNING,
+                    format!("no pg_subtrans entry for subcommitted XID {currentXid}"),
+                )?;
+                return Ok(true);
+            }
+            // See TransactionIdDidCommit: strictly-decreasing parents bound the
+            // walk; anything else is corruption, not an infinite loop.
+            if !TransactionIdPrecedes(parentXid, currentXid) {
+                elog(
+                    ERROR,
+                    format!(
+                        "pg_subtrans contains invalid entry: xid {currentXid} points to parent xid {parentXid}"
+                    ),
+                )?;
+            }
+            currentXid = parentXid;
+            continue;
+        }
+
+        return Ok(false);
+    }
 }
 
 pub fn TransactionIdCommitTree(xid: TransactionId, xids: &[TransactionId]) -> PgResult<()> {

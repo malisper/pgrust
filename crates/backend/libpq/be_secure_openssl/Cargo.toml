@@ -15,6 +15,7 @@ fd = { path = "../../storage/file/fd" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 latch_seams = { path = "../../storage/ipc/latch_seams" }
 pg_string = { path = "../../../common/string" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 pqcomm = { path = "../pqcomm" }
 types_error = { path = "../../../_support/types/types_error" }
 types_storage = { path = "../../../_support/types/types_storage" }

@@ -3,6 +3,7 @@
 //! the C boot state, so the logging path never panics with no provider.
 
 use std::cell::Cell;
+use std::marker::PhantomData;
 
 use ::types_error::PgError;
 
@@ -146,41 +147,135 @@ pub(crate) fn call_frontend_redirect(error: &PgError) -> bool {
 // `const char *` armed by exec_simple_query / exec_parse_message /
 // exec_bind_message / exec_execute_message and cleared when the statement
 // frame ends (tail assignment, plus the sigsetjmp `debug_query_string =
-// NULL` on error recovery); current_query() reads it. The (ptr, len) pair
-// here carries the identical lifetime contract, made structural by the RAII
-// scope: armed from a &str that outlives the statement frame, restored to
-// the previous value when the frame drops — Err-unwind included.
+// NULL` on error recovery); current_query() reads it.
+//
+// Here the value is a raw (ptr, len) pair, but soundness is made structural
+// by the RAII guard rather than left to a comment-level contract:
+//
+//   * `DebugQueryStringScope<'a>` borrows the query for its whole life
+//     (`PhantomData<&'a str>`), so safe code cannot free or reallocate the
+//     backing buffer while the pair is armed — dropping the string before the
+//     guard is a compile error.
+//   * The armed pairs live on a per-thread stack keyed by a unique id, and a
+//     guard's Drop removes *its own* entry wherever it sits in the stack. So
+//     every entry still present belongs to a live guard (hence a live `&str`),
+//     even if guards drop out of LIFO order. The reader observes the top
+//     entry, which is therefore never dangling. This is strictly stronger than
+//     C's single-slot save/restore, which cannot survive out-of-order teardown.
 // ---------------------------------------------------------------------------
 thread_local! {
-    static DEBUG_QUERY_STRING: Cell<Option<(*const u8, usize)>> = const { Cell::new(None) };
+    // Stack of currently-armed queries: (unique id, ptr, len). Depth equals the
+    // number of live guards on this thread (typically 0 or 1), so the Vec stays
+    // tiny and its scan/retain is effectively O(1).
+    static DEBUG_QUERY_STACK: std::cell::RefCell<Vec<(u64, *const u8, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static DEBUG_QUERY_NEXT_ID: Cell<u64> = const { Cell::new(0) };
 }
 
-pub struct DebugQueryStringScope {
-    prev: Option<(*const u8, usize)>,
+/// RAII guard for the `debug_query_string` TLS slot (C: the `debug_query_string`
+/// global). The `'a` lifetime ties the guard to the borrowed query for the
+/// guard's entire life: the backing `&'a str` provably outlives the guard, so
+/// safe code cannot free (or reallocate) the buffer while the raw (ptr, len)
+/// pair is still armed. Dropping the string before the guard is a compile error
+/// — see the `compile_fail` doctest on [`debug_query_string_scope`].
+pub struct DebugQueryStringScope<'a> {
+    // Unique id of this guard's entry on the per-thread stack; Drop removes it.
+    id: u64,
+    // Borrow the query for the whole life of the guard: makes it impossible for
+    // safe code to drop the backing storage while the TLS pointer is armed.
+    _borrow: PhantomData<&'a str>,
 }
 
-pub fn debug_query_string_scope(query: &str) -> DebugQueryStringScope {
-    let prev =
-        DEBUG_QUERY_STRING.with(|c| c.replace(Some((query.as_ptr(), query.len()))));
-    DebugQueryStringScope { prev }
+/// Arm the `debug_query_string` TLS slot with `query` for the life of the
+/// returned guard (C: `debug_query_string = query;`). The guard borrows `query`
+/// for its whole life, so the backing storage cannot be freed while the slot is
+/// armed.
+///
+/// Dropping the backing string before the guard fails to compile:
+///
+/// ```compile_fail
+/// let s = String::from("SELECT 1");
+/// let guard = elog::debug_query_string_scope(&s);
+/// drop(s); // error[E0505]: cannot move out of `s` because it is borrowed
+/// drop(guard);
+/// ```
+pub fn debug_query_string_scope(query: &str) -> DebugQueryStringScope<'_> {
+    let id = DEBUG_QUERY_NEXT_ID.with(|c| {
+        let id = c.get();
+        c.set(id.wrapping_add(1));
+        id
+    });
+    DEBUG_QUERY_STACK.with(|s| s.borrow_mut().push((id, query.as_ptr(), query.len())));
+    DebugQueryStringScope {
+        id,
+        _borrow: PhantomData,
+    }
 }
 
-impl Drop for DebugQueryStringScope {
+impl Drop for DebugQueryStringScope<'_> {
     fn drop(&mut self) {
-        DEBUG_QUERY_STRING.with(|c| c.set(self.prev));
+        // Remove *this* guard's entry wherever it sits — the common LIFO case
+        // pops the tail; an out-of-order drop removes from the middle. Either
+        // way every remaining entry still belongs to a live guard, so the stack
+        // can never retain a pointer into freed storage.
+        DEBUG_QUERY_STACK.with(|s| s.borrow_mut().retain(|&(id, _, _)| id != self.id));
     }
 }
 
 // current_query()'s read: the borrowed text is handed to `f` so the raw
 // parts never escape this module.
 pub fn with_debug_query_string<R>(f: impl FnOnce(Option<&str>) -> R) -> R {
-    match DEBUG_QUERY_STRING.with(Cell::get) {
-        // SAFETY: scope contract above — a Some slot points at a live str
-        // (its owning frame encloses every reader's frame on this thread)
-        // minted from a valid &str, so the bytes are utf8.
+    let armed = DEBUG_QUERY_STACK.with(|s| s.borrow().last().map(|&(_, p, len)| (p, len)));
+    match armed {
+        // SAFETY: the top entry belongs to a live guard (Drop removes an entry
+        // the instant its guard dies), and that guard borrows its `&str` for
+        // its whole life, so the buffer is live and the bytes are valid utf8.
         Some((p, len)) => f(Some(unsafe {
             core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, len))
         })),
         None => f(None),
+    }
+}
+
+#[cfg(test)]
+mod debug_query_string_tests {
+    use super::*;
+
+    #[test]
+    fn arms_and_restores_lifo() {
+        with_debug_query_string(|q| assert_eq!(q, None));
+        let outer = String::from("SELECT outer");
+        {
+            let _g = debug_query_string_scope(&outer);
+            with_debug_query_string(|q| assert_eq!(q, Some("SELECT outer")));
+            let inner = String::from("SELECT inner");
+            {
+                let _g2 = debug_query_string_scope(&inner);
+                with_debug_query_string(|q| assert_eq!(q, Some("SELECT inner")));
+            }
+            // inner guard dropped: back to outer.
+            with_debug_query_string(|q| assert_eq!(q, Some("SELECT outer")));
+        }
+        with_debug_query_string(|q| assert_eq!(q, None));
+    }
+
+    #[test]
+    fn out_of_lifo_drop_does_not_clobber_live_pointer() {
+        // Both strings outlive both guards (required by the borrow checker /
+        // the guard's lifetime). Drop the *inner-armed* guard first: it must
+        // not clobber the still-armed later pointer, and the reader must never
+        // observe a dangling slot.
+        let a = String::from("SELECT a");
+        let b = String::from("SELECT b");
+        let ga = debug_query_string_scope(&a);
+        let gb = debug_query_string_scope(&b);
+        with_debug_query_string(|q| assert_eq!(q, Some("SELECT b")));
+        // Out-of-LIFO drop of the earlier-armed guard: slot still points at b,
+        // so ga's drop leaves it untouched (rather than restoring its stale
+        // prev over gb's live pointer).
+        drop(ga);
+        with_debug_query_string(|q| assert_eq!(q, Some("SELECT b")));
+        drop(gb);
+        with_debug_query_string(|q| assert_eq!(q, None));
     }
 }

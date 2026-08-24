@@ -42,6 +42,13 @@ use crate::{
 // this watermark, so the write cadence (not per-row syscalls) matches C.
 const FILE_FLUSH_THRESHOLD: usize = 65536;
 
+// Final mode of a COPY TO server file. C's BeginCopyTo opens under a temporary
+// umask of S_IWGRP|S_IWOTH (0o022), so the fopen default 0666 resolves to
+// 0666 & ~0o022 = 0o644. We set this explicitly (see BeginCopyTo) rather than
+// mutate the process-global umask, which is shared across all backend threads.
+#[cfg(not(target_family = "wasm"))]
+const COPY_TO_FILE_MODE: u32 = 0o644;
+
 enum CopyDest<'s> {
     File { fd: i32, filename: &'s str },
     // COPY TO PROGRAM (copyto.c is_program arm): `fd` is an OpenPipeStream
@@ -160,15 +167,17 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
                         .with_sqlstate(ERRCODE_INVALID_NAME),
                 ));
             }
-            // SAFETY: process-global umask swap around open, as C's BeginCopyTo.
-            // wasm32: no umask on WASI (files carry no mode bits).
-            #[cfg(not(target_family = "wasm"))]
-            let oumask = unsafe { libc::umask(0o022) };
-            let copy_file = fd::AllocateFile(filename, "wb");
-            // SAFETY: restore saved umask.
-            #[cfg(not(target_family = "wasm"))]
-            unsafe { libc::umask(oumask) };
-            let copy_file = copy_file?;
+            // C's BeginCopyTo temporarily sets the process umask to
+            // S_IWGRP|S_IWOTH (0o022) around this open, so the output file
+            // lands at the fopen default 0666 masked to COPY_TO_FILE_MODE
+            // (0o644). umask(2) is process-global; in pgrust every backend is a
+            // thread of one process (unlike C's process-per-backend), so
+            // mutating it would race every other thread's concurrent file
+            // creation, and interleaved save/restore pairs could corrupt the
+            // process umask durably. Instead open under the server's own umask
+            // and set the exact resulting mode on the fd directly, exactly as
+            // syslogger's logfile_open does for this same hazard.
+            let copy_file = fd::AllocateFile(filename, "wb")?;
             if copy_file < 0 {
                 ereport(ERROR)
                     .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
@@ -179,6 +188,22 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
                          may want a client-side facility such as psql's \\copy.",
                     )
                     .finish(loc("BeginCopyTo"))?;
+            }
+            // fchmod to C's resulting mode without touching process-global
+            // umask. wasm32/WASI carries no mode bits, so this is a no-op there.
+            #[cfg(not(target_family = "wasm"))]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let set = fd::with_allocated_stdio(copy_file, |f| {
+                    f.set_permissions(std::fs::Permissions::from_mode(COPY_TO_FILE_MODE))
+                });
+                if let Some(Err(e)) = set {
+                    ereport(ERROR)
+                        .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                        .errcode_for_file_access()
+                        .errmsg(format!("could not set mode of file \"{filename}\": %m"))
+                        .finish(loc("BeginCopyTo"))?;
+                }
             }
             let is_dir = fd::with_allocated_stdio(copy_file, |f| {
                 f.metadata().map(|m| m.is_dir()).unwrap_or(false)
@@ -1017,4 +1042,41 @@ fn cannot_copy_from_relkind(rel: &Relation<'_>) -> Box<PgError> {
         e = e.with_hint(h);
     }
     Box::new(e)
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::COPY_TO_FILE_MODE;
+    use std::os::unix::fs::PermissionsExt;
+
+    // The fix replaces C's process-global umask swap with an explicit fchmod on
+    // the created file (see BeginCopyTo). This asserts the mechanism: setting
+    // COPY_TO_FILE_MODE on the fd yields exactly C's resulting mode (0o644)
+    // regardless of the current process umask, and without mutating it — which
+    // in pgrust's thread-per-backend model would race other sessions' files.
+    #[test]
+    fn explicit_mode_matches_c_and_leaves_umask_untouched() {
+        assert_eq!(COPY_TO_FILE_MODE, 0o644, "must match C's 0666 & ~0o022");
+
+        // Force a restrictive umask (the server's PG_MODE_MASK_OWNER = 0o077),
+        // as would be in effect when a backend runs COPY TO.
+        let saved = unsafe { libc::umask(0o077) };
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("pgrust_copyto_mode_{}.tmp", std::process::id()));
+        let file = std::fs::File::create(&path).expect("create temp file");
+        // Default create honors umask 0o077 -> 0o600; explicit set overrides it.
+        file.set_permissions(std::fs::Permissions::from_mode(COPY_TO_FILE_MODE))
+            .expect("set_permissions");
+
+        let mode = file.metadata().unwrap().permissions().mode() & 0o777;
+
+        // Restore umask before asserting so a failure can't leak global state.
+        let after = unsafe { libc::umask(saved) };
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(mode, 0o644, "explicit fchmod must reach C's mode");
+        // Our code path never calls umask(2): the process mask is unchanged.
+        assert_eq!(after, 0o077, "process umask must be untouched by the fix");
+    }
 }

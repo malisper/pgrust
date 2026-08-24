@@ -10,12 +10,16 @@
 //! and the requal tail re-runs per surviving row either way).
 //!
 //! KEY: (PartIdent, qual fingerprint, row group, window width).
-//!   - PartIdent = (st_dev, st_ino, st_size, footer_off) captured at Part
-//!     open — the part-cache staleness probe's exact vocabulary. pgrcolumnar
-//!     parts are immutable once sealed: every COPY publish grows
-//!     len/footer_off, every DROP/TRUNCATE/reingest recreates the inode, so
-//!     a stale bitmap is unreachable through a live Part (its identity names
-//!     content that no longer exists under any current identity).
+//!   - PartIdent = (st_dev, st_ino, st_size, footer_off, st_mtime) captured
+//!     at Part open. pgrcolumnar parts are immutable once sealed: every COPY
+//!     publish grows len/footer_off. A DROP/TRUNCATE/reingest recreates the
+//!     part, but the (dev, ino, len, footer_off) tuple can REPEAT — the
+//!     unlinked inode number is reusable and a reingest of the same fixed-width
+//!     row count lands on the same size/footer_off — so the mtime is carried
+//!     as a non-recyclable generation stamp: a recreate always rewrites the
+//!     file with a fresh mtime, so a stale bitmap is unreachable through a live
+//!     Part (its identity names content that no longer exists under any current
+//!     identity).
 //!   - fingerprint = laneexec's canonical 128-bit prefix hash (operator fn
 //!     oid, commutation, collation, column, const value bytes; see
 //!     translate::fingerprint_prefix). Volatile/param/subplan quals never
@@ -38,12 +42,29 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// Immutable part identity (see module doc). The all-zero identity is the
 /// "unknown" sentinel — `get_or_insert` refuses to key on it.
+///
+/// `(dev, ino, len, footer_off)` alone is NOT unique across part recreations:
+/// after a part file is unlinked (DROP/TRUNCATE/reingest) the filesystem is
+/// free to reassign its inode number to a new file, and a reingest of the same
+/// row count of fixed-width data lands on the same `len`/`footer_off` — so the
+/// tuple can repeat across byte-different content. `mtime_sec`/`mtime_nsec`
+/// (captured in the same stat) are the non-recyclable generation component:
+/// every recreate rewrites the part and stamps a fresh modification time, so a
+/// recycled inode with a coincident size no longer aliases a dead part's cached
+/// qual verdicts. Genuinely-identical parts (same file, unchanged since open)
+/// keep the same identity and still hit the cache.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct PartIdent {
     pub dev: u64,
     pub ino: u64,
     pub len: u64,
     pub footer_off: u64,
+    /// Modification time (seconds), from the open-time stat — the generation
+    /// component that survives inode recycling.
+    pub mtime_sec: i64,
+    /// Modification time (nanoseconds) — sub-second discrimination for parts
+    /// recreated within the same wall-clock second.
+    pub mtime_nsec: i64,
 }
 
 impl PartIdent {
@@ -282,7 +303,7 @@ mod tests {
     use super::*;
 
     fn ident(i: u64) -> PartIdent {
-        PartIdent { dev: 1, ino: i, len: 4096, footer_off: 64 }
+        PartIdent { dev: 1, ino: i, len: 4096, footer_off: 64, mtime_sec: 1000, mtime_nsec: 0 }
     }
 
     // The capacity knob and counters are process-global: tests that set or
@@ -326,6 +347,32 @@ mod tests {
         ] {
             assert!(!Arc::ptr_eq(&a, &other));
         }
+    }
+
+    #[test]
+    fn recycled_inode_with_coincident_size_does_not_alias() {
+        // A recreated part (DROP/TRUNCATE/reingest) can reuse the unlinked
+        // inode number and, for a reingest of the same fixed-width row count,
+        // land on an identical (dev, ino, len, footer_off). Only the mtime
+        // generation stamp keeps the two identities distinct — otherwise the
+        // new content would inherit the dead part's cached qual verdicts.
+        let dead = PartIdent { dev: 1, ino: 42, len: 4096, footer_off: 64, mtime_sec: 1000, mtime_nsec: 0 };
+        let recreated = PartIdent { mtime_sec: 1001, ..dead };
+        assert_ne!(dead, recreated, "recreate with a fresh mtime must not alias");
+        // Sub-second recreate is still distinct via the nanosecond field.
+        let recreated_fast = PartIdent { mtime_nsec: 7, ..dead };
+        assert_ne!(dead, recreated_fast, "same-second recreate stays distinct");
+        // The cache keys distinctly too: same (dev, ino, len, footer_off) and
+        // same qual fingerprint/rg/window, different mtime => separate entries,
+        // so a scan of the recreated part MISSES the dead part's bitmaps.
+        let _g = capacity_lock();
+        set_capacity(100 * 1024 * 1024);
+        let a = get_or_insert(dead, 42, 0, 256, 8192);
+        let b = get_or_insert(recreated, 42, 0, 256, 8192);
+        assert!(!Arc::ptr_eq(&a, &b), "recycled-inode recreate must not share the cache entry");
+        // Genuinely-identical parts (unchanged mtime) still hit.
+        let a2 = get_or_insert(dead, 42, 0, 256, 8192);
+        assert!(Arc::ptr_eq(&a, &a2), "identical part still shares its entry");
     }
 
     #[test]
@@ -384,8 +431,8 @@ mod tests {
         let b = get_or_insert(ident(9001), 5, 0, 256, 8192);
         assert!(!Arc::ptr_eq(&a, &b), "over-budget entries are scan-local");
         set_capacity(100 * 1024 * 1024);
-        let n1 = get_or_insert(PartIdent { dev: 0, ino: 0, len: 0, footer_off: 0 }, 5, 0, 256, 64);
-        let n2 = get_or_insert(PartIdent { dev: 0, ino: 0, len: 0, footer_off: 0 }, 5, 0, 256, 64);
+        let n1 = get_or_insert(PartIdent { dev: 0, ino: 0, len: 0, footer_off: 0, mtime_sec: 0, mtime_nsec: 0 }, 5, 0, 256, 64);
+        let n2 = get_or_insert(PartIdent { dev: 0, ino: 0, len: 0, footer_off: 0, mtime_sec: 0, mtime_nsec: 0 }, 5, 0, 256, 64);
         assert!(!Arc::ptr_eq(&n1, &n2), "null part identity never keys the cache");
     }
 }

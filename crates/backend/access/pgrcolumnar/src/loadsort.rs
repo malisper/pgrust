@@ -184,6 +184,17 @@ impl RowCodec {
                             .try_into()
                             .unwrap(),
                     ) as usize;
+                    // Reject a payload length that cannot be represented in
+                    // the 4B varlena header built below (`((len + 4) as u32)
+                    // << 2`): for len + 4 > 0x3FFFFFFF the shift silently
+                    // drops the top bits, yielding an under-claiming header
+                    // and silent truncation of a crafted value.
+                    if len + 4 > (u32::MAX as usize >> 2) {
+                        return Err(Box::new(PgError::error(format!(
+                            "parallel load-sort corrupt run: text payload length {len} \
+                             exceeds representable varlena size"
+                        ))));
+                    }
                     off += 4 + len;
                     text_total += 4 + len;
                 }
@@ -362,6 +373,14 @@ const RUN_CHUNK: usize = 512 << 10;
 /// Corruption guard: no sane frame exceeds this (chunks are ~512 KB plus
 /// one row; rows are bounded by the varlena cap long before this).
 const RUN_FRAME_CAP: usize = 1 << 30;
+/// Corruption guard for a single raw-format run entry's `rowlen` prefix.
+/// A legitimate row is bounded far below this (batch budget default
+/// 256 MB; each varlena payload under the 1 GB varlena cap). The raw
+/// entry reader validates the on-disk length against this bound BEFORE
+/// allocating, mirroring the RUN_FRAME_CAP guard the lz4 path already
+/// enforces — a corrupt/swapped run file can no longer force a
+/// multi-GiB allocation from a tiny header.
+const RUN_ROW_CAP: usize = 1 << 30;
 
 /// Compress + write `chunk` as one frame, clearing it; returns file bytes.
 /// Empty chunk = no frame (0 bytes). Generic over the sink so the same
@@ -997,6 +1016,16 @@ impl RunReader {
         let mut lenb = [0u8; 4];
         self.r.read_exact(&mut lenb).map_err(|e| io_err("run read", e))?;
         let rowlen = u32::from_le_bytes(lenb) as usize;
+        // Validate the untrusted on-disk length BEFORE allocating: a
+        // corrupt/swapped run file can otherwise claim rowlen up to
+        // u32::MAX (~4 GiB) and force that allocation per reader from a
+        // ~100-byte file, aborting the whole process on alloc failure.
+        // The lz4 path already caps its frame lengths this way.
+        if rowlen > RUN_ROW_CAP {
+            return Err(Box::new(PgError::error(format!(
+                "parallel load-sort corrupt run: row length {rowlen} exceeds cap {RUN_ROW_CAP}"
+            ))));
+        }
         self.row.resize(rowlen, 0);
         self.r.read_exact(&mut self.row).map_err(|e| io_err("run read", e))?;
         self.live = true;
@@ -1767,6 +1796,50 @@ mod tests {
             ));
         }
         assert_eq!(got, vec![(3, 2, b"beta".to_vec()), (7, 1, b"alpha".to_vec())]);
+    }
+
+    /// A run file whose raw entry claims a huge `rowlen` must be rejected
+    /// with a catchable corruption error BEFORE the reader allocates the
+    /// claimed bytes — a ~100-byte crafted file otherwise forces a ~4 GiB
+    /// allocation per reader (idx 179, CWE-789).
+    #[test]
+    fn corrupt_run_rowlen_rejected_without_huge_alloc() {
+        let dir = tmpdir("corrupt-rowlen");
+        let keys = [(0u16, CbSortKeyKind::Int32)];
+        let kw = fixed_key_width(&keys).unwrap();
+        // [key: kw zero bytes][rowlen = u32::MAX le] — no payload follows.
+        let mut bytes = vec![0u8; kw];
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        let p = dir.join("run-corrupt");
+        write_file(&p, &bytes);
+
+        // RunMerge::open advances each reader immediately, so the corrupt
+        // length is hit at open. It must be a caught error, not an abort.
+        let err = RunMerge::open(&[p], kw).err().unwrap();
+        assert!(
+            err.to_string().contains("corrupt run"),
+            "expected corrupt-run error, got: {err}"
+        );
+    }
+
+    /// A crafted run row whose text payload length is too large to encode
+    /// in the 4B varlena header must error, not silently truncate via the
+    /// `<< 2` wrap (idx 179 secondary).
+    #[test]
+    fn deserialize_row_rejects_unrepresentable_text_len() {
+        let codec = RowCodec::new(vec![ColType::Text]);
+        // Header claims a payload one past the representable varlena size;
+        // no need to supply the bytes — the length is rejected in pre-scan.
+        let bad_len = (u32::MAX >> 2) as usize - 4 + 1;
+        let mut row = Vec::new();
+        row.extend_from_slice(&(bad_len as u32).to_le_bytes());
+        let mut arena = Vec::new();
+        let mut vals = vec![Datum::null(); 1];
+        let err = codec.deserialize_row(&row, &mut arena, &mut vals).err().unwrap();
+        assert!(
+            err.to_string().contains("representable varlena"),
+            "expected varlena-size error, got: {err}"
+        );
     }
 
     #[test]

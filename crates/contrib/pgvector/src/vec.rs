@@ -19,8 +19,22 @@ impl<'a> VecView<'a> {
         if data.len() < VECTOR_PAYLOAD_HDR {
             return Err(PgError::error("corrupt vector datum").into());
         }
+        // Validate the raw stored dimension *before* any widening. The on-disk
+        // dim is an i16, so a negative value (e.g. bytes FF FF = -1) would
+        // sign-extend to a huge usize in dim(); reject it here so it can never
+        // reach the unsafe distance kernels. A valid image always carries a
+        // dim in 1..=VECTOR_MAX_DIM (all SQL constructors enforce that).
+        let raw_dim = i16::from_ne_bytes([data[0], data[1]]);
+        if raw_dim < 1 || raw_dim as usize > VECTOR_MAX_DIM {
+            return Err(PgError::error("corrupt vector datum").into());
+        }
         let v = VecView { data };
-        let want = VECTOR_PAYLOAD_HDR + v.dim() * 4;
+        // Checked arithmetic so no dim can make `want` wrap to a value smaller
+        // than the true element-array span and slip past the length check.
+        let want = (v.dim())
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(VECTOR_PAYLOAD_HDR))
+            .ok_or_else(|| -> Box<PgError> { PgError::error("corrupt vector datum").into() })?;
         if data.len() < want {
             return Err(PgError::error("corrupt vector datum").into());
         }
@@ -539,14 +553,50 @@ mod tests {
 
     #[test]
     fn parse_errors() {
-        assert!(parse("[hello,1]").unwrap_err().contains("invalid input syntax"));
-        assert!(parse("[NaN,1]").unwrap_err().contains("NaN not allowed"));
-        assert!(parse("[Infinity,1]").unwrap_err().contains("infinite value not allowed"));
-        assert!(parse("[4e38,1]").unwrap_err().contains("\"4e38\" is out of range"));
-        assert!(parse("[]").unwrap_err().contains("at least 1 dimension"));
-        assert!(parse("[1,2,3").unwrap_err().contains("invalid input syntax"));
-        assert!(parse("[1,2,3]x").unwrap_err().contains("invalid input syntax"));
-        assert!(parse("1,2,3").unwrap_err().contains("invalid input syntax"));
+        assert!(parse("[hello,1]").err().unwrap().contains("invalid input syntax"));
+        assert!(parse("[NaN,1]").err().unwrap().contains("NaN not allowed"));
+        assert!(parse("[Infinity,1]").err().unwrap().contains("infinite value not allowed"));
+        assert!(parse("[4e38,1]").err().unwrap().contains("\"4e38\" is out of range"));
+        assert!(parse("[]").err().unwrap().contains("at least 1 dimension"));
+        assert!(parse("[1,2,3").err().unwrap().contains("invalid input syntax"));
+        assert!(parse("[1,2,3]x").err().unwrap().contains("invalid input syntax"));
+        assert!(parse("1,2,3").err().unwrap().contains("invalid input syntax"));
+    }
+
+    #[test]
+    fn from_payload_rejects_negative_and_oversized_dim() {
+        // Negative stored dim (bytes FF FF = i16 -1). Before the fix this
+        // sign-extended to ~2^64 and the wrapped length check let it through,
+        // handing the unsafe kernels a bogus dim() for OOB reads.
+        let mut buf = vec![0u8; VECTOR_PAYLOAD_HDR];
+        buf[0] = 0xFF;
+        buf[1] = 0xFF;
+        let e = VecView::from_payload(&buf).err().unwrap();
+        assert!(e.message().contains("corrupt vector datum"));
+
+        // Zero dim is also invalid (a valid vector has >= 1 dimension).
+        let zero = vec![0u8; VECTOR_PAYLOAD_HDR];
+        let e = VecView::from_payload(&zero).err().unwrap();
+        assert!(e.message().contains("corrupt vector datum"));
+
+        // dim larger than VECTOR_MAX_DIM is rejected even with a large buffer.
+        let big = (VECTOR_MAX_DIM as i16).wrapping_add(1);
+        let mut buf = vec![0u8; VECTOR_PAYLOAD_HDR + (big as usize) * 4];
+        buf[..2].copy_from_slice(&big.to_ne_bytes());
+        let e = VecView::from_payload(&buf).err().unwrap();
+        assert!(e.message().contains("corrupt vector datum"));
+
+        // A truncated payload whose header claims more elements than present.
+        let mut buf = vec![0u8; VECTOR_PAYLOAD_HDR + 4]; // room for 1 element
+        buf[..2].copy_from_slice(&3i16.to_ne_bytes()); // but claims 3
+        let e = VecView::from_payload(&buf).err().unwrap();
+        assert!(e.message().contains("corrupt vector datum"));
+
+        // A well-formed 2-element image is still accepted.
+        let mut ok = vec![0u8; VECTOR_PAYLOAD_HDR + 2 * 4];
+        ok[..2].copy_from_slice(&2i16.to_ne_bytes());
+        let v = VecView::from_payload(&ok).unwrap();
+        assert_eq!(v.dim(), 2);
     }
 
     #[test]

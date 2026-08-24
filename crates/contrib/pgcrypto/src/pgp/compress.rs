@@ -48,17 +48,35 @@ pub fn deflate_zlib(data: &[u8], level: i32) -> Vec<u8> {
     deflate(data, level, true)
 }
 
-fn inflate(data: &[u8], zlib_header: bool) -> Result<Vec<u8>, ()> {
+/// Upper bound on the total decompressed output of a single PGP compressed
+/// packet. This mirrors upstream pgcrypto: `mbuf.c`'s `decompress_read` streams
+/// inflate output into an `MBuf` whose `prepare_room`/`repalloc` growth is
+/// capped at `MaxAllocSize`, so an over-large expansion fails cleanly with a
+/// catchable "invalid memory alloc request size" ERROR rather than exhausting
+/// memory. Our port grows a plain `Vec` on the global allocator, which would
+/// otherwise `handle_alloc_error`/abort the whole (single-process) server, so
+/// we enforce the same bound explicitly. A decompression bomb — a small DEFLATE
+/// stream that inflates to gigabytes — hits this cap and is rejected via the
+/// pgcrypto error path instead of allocating without limit.
+const MAX_DECOMPRESSED: usize = ::mcx::MAX_ALLOC_SIZE;
+
+fn inflate_bounded(data: &[u8], zlib_header: bool, max_output: usize) -> Result<Vec<u8>, ()> {
     let mut inf = DecompressorOxide::new();
     let mut flags = inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
     if zlib_header {
         flags |= inflate_flags::TINFL_FLAG_PARSE_ZLIB_HEADER;
     }
-    let mut out: Vec<u8> = Vec::with_capacity(data.len() * 4 + 256);
+    let mut out: Vec<u8> = Vec::with_capacity((data.len() * 4 + 256).min(max_output.max(1)));
     let mut in_pos = 0usize;
     loop {
         let out_len = out.len();
-        let target = out.capacity().max(out_len + 256);
+        // Never let the output buffer grow past the cap. If the decompressor
+        // still wants to emit more once we are at the ceiling, the input is a
+        // decompression bomb: bail out via the (catchable) error path.
+        if out_len >= max_output {
+            return Err(());
+        }
+        let target = out.capacity().max(out_len + 256).min(max_output);
         out.resize(target, 0);
         let (status, consumed, written) =
             decompress(&mut inf, &data[in_pos..], &mut out, out_len, flags);
@@ -67,13 +85,21 @@ fn inflate(data: &[u8], zlib_header: bool) -> Result<Vec<u8>, ()> {
         match status {
             TINFLStatus::Done => return Ok(out),
             TINFLStatus::HasMoreOutput => {
+                if out.len() >= max_output {
+                    return Err(());
+                }
                 let cap = out.capacity();
-                out.reserve(cap.max(256));
+                let want = cap.max(256).min(max_output - out.len());
+                out.reserve(want);
             }
             TINFLStatus::NeedsMoreInput => return Err(()),
             _ => return Err(()),
         }
     }
+}
+
+fn inflate(data: &[u8], zlib_header: bool) -> Result<Vec<u8>, ()> {
+    inflate_bounded(data, zlib_header, MAX_DECOMPRESSED)
 }
 
 pub fn inflate_raw(data: &[u8]) -> Result<Vec<u8>, ()> {
@@ -82,4 +108,32 @@ pub fn inflate_raw(data: &[u8]) -> Result<Vec<u8>, ()> {
 
 pub fn inflate_zlib(data: &[u8]) -> Result<Vec<u8>, ()> {
     inflate(data, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legitimate_message_round_trips() {
+        // A moderately large, highly compressible payload must still inflate
+        // fully — the cap only rejects abusive expansion, not valid data.
+        let plain = vec![0x5au8; 4 * 1024 * 1024];
+        let comp = deflate_raw(&plain, 6);
+        assert!(comp.len() < plain.len());
+        let back = inflate_raw(&comp).expect("valid stream must decompress");
+        assert_eq!(back, plain);
+    }
+
+    #[test]
+    fn decompression_bomb_is_rejected() {
+        // 8 MiB of zeros deflate to a tiny stream but inflate far past a small
+        // cap. With the bound in place the inflate must error rather than
+        // allocate without limit.
+        let plain = vec![0u8; 8 * 1024 * 1024];
+        let comp = deflate_raw(&plain, 6);
+        assert!(comp.len() < 64 * 1024);
+        // Cap the output well below the true inflated size.
+        inflate_bounded(&comp, false, 64 * 1024).err().unwrap();
+    }
 }

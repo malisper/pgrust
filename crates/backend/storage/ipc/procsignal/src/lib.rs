@@ -354,8 +354,10 @@ pub fn ProcSignalShmemResetAfterCrash() {
     header.psh_barrierGeneration.store(0, Relaxed);
     for slot in header.psh_slot {
         slot.pss_pid.store(0, Relaxed);
-        slot.pss_cancel_key_len.set(0);
-        slot.pss_cancel_key.set([0; MAX_CANCEL_KEY_LENGTH]);
+        // SAFETY: crash-cycle reset; postmaster thread only, all children dead
+        unsafe { slot.pss_cancel_key_len.set(0) };
+        // SAFETY: crash-cycle reset; postmaster thread only, all children dead
+        unsafe { slot.pss_cancel_key.set([0; MAX_CANCEL_KEY_LENGTH]) };
         for flag in &slot.pss_signalFlags {
             flag.store(false, Relaxed);
         }
@@ -422,11 +424,14 @@ fn proc_signal_init_internal(cancel_key: &[u8], register_cleanup: bool) -> PgRes
     let barrier_generation = header.psh_barrierGeneration.load(Relaxed);
     slot.pss_barrierGeneration.store(barrier_generation, Relaxed);
     if !cancel_key.is_empty() {
-        let mut key = slot.pss_cancel_key.get();
+        // SAFETY: serialized by the ProcSignalSlot pss_mutex spinlock
+        let mut key = unsafe { slot.pss_cancel_key.get() };
         key[..cancel_key.len()].copy_from_slice(cancel_key);
-        slot.pss_cancel_key.set(key);
+        // SAFETY: serialized by the ProcSignalSlot pss_mutex spinlock
+        unsafe { slot.pss_cancel_key.set(key) };
     }
-    slot.pss_cancel_key_len.set(cancel_key.len() as i32);
+    // SAFETY: serialized by the ProcSignalSlot pss_mutex spinlock
+    unsafe { slot.pss_cancel_key_len.set(cancel_key.len() as i32) };
     slot.pss_pid.store(g::MyProcPid(), Relaxed);
     slot.pss_mutex.unlock();
 
@@ -603,6 +608,69 @@ pub fn SendThreadKill(pid: i32) -> i32 {
     deliver_thread_signal(pid, thread_signal_bit(SIGKILL))
 }
 
+// Slot-hit body of thread-signal delivery: pend `bit` on psh_slot[i] and wake
+// its owner, but only if the slot still carries `pid` (the stale-slot /
+// self-terminated-before-kill re-check — C signalfuncs.c:105-112, and the
+// pss_pid re-check every ProcSignal scan makes under the mutex). Returns true
+// on delivery, false if the slot no longer matches `pid`. Shared by the
+// by-pid reverse scan (deliver_thread_signal) and the by-ProcNumber entry
+// (SendThreadSignalByProcNumber) so the two agree bit-for-bit.
+fn deliver_thread_signal_to_slot(i: usize, pid: i32, bit: u32) -> bool {
+    let slot = &proc_signal().psh_slot[i];
+    spin_acquire(&slot.pss_mutex);
+    if slot.pss_pid.load(Relaxed) != pid {
+        slot.pss_mutex.unlock();
+        return false;
+    }
+    slot.pss_pendingThreadSignals.fetch_or(bit, SeqCst);
+    let flag = slot.pss_interruptFlag.load(Relaxed);
+    if !flag.is_null() {
+        // SAFETY: only ever a Box::leak'd 'static (never freed).
+        unsafe { &*flag }.store(true, SeqCst);
+    }
+    slot.pss_mutex.unlock();
+    latch::set_latch(&lmgr_proc::GetPGProcByNumber(i as ProcNumber).procLatch);
+    // C's handler runs at delivery and may set further latches itself
+    // (startup: WakeupRecovery()); the target's registered extra wake latch is
+    // that handler-side wakeup, without which a thread sleeping on a non-proc
+    // latch never reaches a drain point (048 reload; 030/032/033 shutdown
+    // wedges).
+    if slot.pss_hasExtraWakeLatch.load(Acquire) {
+        latch::SetLatch(types_storage::latch::LatchHandle::from_raw(
+            slot.pss_extraWakeLatch.load(Relaxed),
+        ));
+    }
+    true
+}
+
+/// By-ProcNumber thread-signal delivery: signal the single slot the caller
+/// already resolved, rather than re-scanning by pid. signalfuncs
+/// pg_signal_backend authorizes against a specific PGPROC (its roleId gates the
+/// privilege checks); delivering by that proc's ProcNumber guarantees the
+/// checked principal and the signaled principal are the SAME slot by
+/// construction, so colliding synthetic pids across live backends can no longer
+/// let authorization and delivery resolve to different backends. The
+/// pss_pid == pid re-check guards the stale-slot / self-terminated-before-kill
+/// case (C signalfuncs.c:105-112). Preserves the -1/ESRCH return contract.
+pub fn SendThreadSignalByProcNumber(procNumber: ProcNumber, pid: i32, signo: i32) -> i32 {
+    if signo == SIGSTOP {
+        panic!("SendThreadSignalByProcNumber: SIGSTOP has no thread rendering");
+    }
+    let header = proc_signal();
+    if pid <= 0 || procNumber < 0 || procNumber as usize >= header.psh_slot.len() {
+        set_errno(libc::ESRCH);
+        return -1;
+    }
+    // SIGKILL renders as the kill9 bit here exactly as SendThreadKill does;
+    // thread_signal_bit(SIGKILL) is that same bit, so no special-casing.
+    if deliver_thread_signal_to_slot(procNumber as usize, pid, thread_signal_bit(signo)) {
+        0
+    } else {
+        set_errno(libc::ESRCH);
+        -1
+    }
+}
+
 fn deliver_thread_signal(pid: i32, bit: u32) -> i32 {
     if pid <= 0 {
         // kill(-pid) process-group fanout: callers signal each member.
@@ -610,40 +678,28 @@ fn deliver_thread_signal(pid: i32, bit: u32) -> i32 {
         return -1;
     }
     let header = proc_signal();
-    for i in (0..header.psh_slot.len()).rev() {
-        let slot = &header.psh_slot[i];
-        if slot.pss_pid.load(Relaxed) == pid {
-            spin_acquire(&slot.pss_mutex);
-            if slot.pss_pid.load(Relaxed) == pid {
-                slot.pss_pendingThreadSignals.fetch_or(bit, SeqCst);
-                let flag = slot.pss_interruptFlag.load(Relaxed);
-                if !flag.is_null() {
-                    // SAFETY: only ever a Box::leak'd 'static (never freed).
-                    unsafe { &*flag }.store(true, SeqCst);
-                }
-                slot.pss_mutex.unlock();
-                latch::set_latch(&lmgr_proc::GetPGProcByNumber(i as ProcNumber).procLatch);
-                // C's handler runs at delivery and may set further latches
-                // itself (startup: WakeupRecovery()); the target's registered
-                // extra wake latch is that handler-side wakeup, without which
-                // a thread sleeping on a non-proc latch never reaches a drain
-                // point (048 reload; 030/032/033 shutdown wedges).
-                if slot.pss_hasExtraWakeLatch.load(Acquire) {
-                    latch::SetLatch(types_storage::latch::LatchHandle::from_raw(
-                        slot.pss_extraWakeLatch.load(Relaxed),
-                    ));
-                }
-                return 0;
-            }
-            slot.pss_mutex.unlock();
-        }
-    }
-    // Pre-identity fallback (see PRE_IDENTITY_TARGETS): the target has no
-    // ProcSignal slot yet but the launcher made its pid deliverable. Pend
-    // the bit on the shared word and wake whatever the child has bound so
-    // far; an unadopted entry has no latch, and that is fine — the child is
-    // still running its prelude and drains the word at its first drain
-    // point before it can park.
+
+    // Two-channel handoff, checked in the OPPOSITE order to the publisher so a
+    // delivery can never miss both channels (lost wakeup). The publisher
+    // (proc_signal_init_internal) publishes the ProcSignal slot pid FIRST and
+    // takes down the pre-identity entry SECOND; both the takedown and this
+    // check acquire PRE_IDENTITY_TARGETS' lock, so we MUST check the
+    // pre-identity registry BEFORE scanning the slots. Then the shared lock's
+    // release/acquire synchronizes-with the publisher's takedown: if we miss
+    // the pre-identity entry here (the publisher already removed it), the
+    // publisher's earlier pss_pid store is guaranteed visible to the slot scan
+    // below, so we find the slot. If instead we hit the pre-identity entry, the
+    // publisher's take_pre_identity_registration migrates our OR'd bit into the
+    // freshly-published slot. Scanning slots first (the reverse of the
+    // publisher) can observe neither channel — slot not yet published AND
+    // registry already torn down — and silently drop the bit.
+    //
+    // Pre-identity channel (see PRE_IDENTITY_TARGETS): the target has no
+    // ProcSignal slot yet but the launcher made its pid deliverable. Pend the
+    // bit on the shared word and wake whatever the child has bound so far; an
+    // unadopted entry has no latch, and that is fine — the child is still
+    // running its prelude and drains the word at its first drain point before
+    // it can park.
     let found = {
         let v = pre_identity_targets();
         v.iter().find(|e| e.pid == pid).map(|e| {
@@ -661,6 +717,20 @@ fn deliver_thread_signal(pid: i32, bit: u32) -> i32 {
             latch::SetLatch(types_storage::latch::LatchHandle::from_raw(latch_word));
         }
         return 0;
+    }
+
+    // No pre-identity entry: the target's identity is published (or the pid is
+    // unknown). Scan the slots; the shared lock acquired above ordered a
+    // registry miss ahead of these reads, so a concurrently-published slot is
+    // visible here.
+    for i in (0..header.psh_slot.len()).rev() {
+        // Fast-path filter before locking; the shared body re-checks under the
+        // mutex.
+        if header.psh_slot[i].pss_pid.load(Relaxed) == pid
+            && deliver_thread_signal_to_slot(i, pid, bit)
+        {
+            return 0;
+        }
     }
     set_errno(libc::ESRCH);
     -1
@@ -731,7 +801,8 @@ fn CleanupProcSignalState(_code: i32, _arg: usize) {
         return;
     }
     slot.pss_pid.store(0, Relaxed);
-    slot.pss_cancel_key_len.set(0);
+    // SAFETY: serialized by the ProcSignalSlot pss_mutex spinlock
+    unsafe { slot.pss_cancel_key_len.set(0) };
     slot.pss_interruptFlag.store(std::ptr::null_mut(), Relaxed);
     slot.pss_hasExtraWakeLatch.store(false, Relaxed);
     // Look absorbed-of-everything so no barrier wait blocks on this slot.
@@ -1049,8 +1120,10 @@ pub fn SendCancelRequest(backend_pid: i32, cancel_key: &[u8]) {
             slot.pss_mutex.unlock();
             continue;
         }
-        let key_len = slot.pss_cancel_key_len.get();
-        let key = slot.pss_cancel_key.get();
+        // SAFETY: serialized by the ProcSignalSlot pss_mutex spinlock
+        let key_len = unsafe { slot.pss_cancel_key_len.get() };
+        // SAFETY: serialized by the ProcSignalSlot pss_mutex spinlock
+        let key = unsafe { slot.pss_cancel_key.get() };
         slot.pss_mutex.unlock();
         let matched = key_len == cancel_key.len() as i32
             && timingsafe_bcmp(&key[..cancel_key.len()], cancel_key) == 0;

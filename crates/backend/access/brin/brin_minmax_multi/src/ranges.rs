@@ -3,8 +3,11 @@ use ::fmgr::{function_call2_coll_in, FmgrInfo};
 use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_brin::{BrinDesc, MinMaxMultiRanges};
 use ::types_core::Oid;
-use ::types_error::PgResult;
-use ::types_tuple::varatt::varsize_any;
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+use ::types_tuple::varatt::{
+    varatt_is_1b, varatt_is_1b_e, varsize_1b, varsize_4b, varsize_any, varsize_external, VARHDRSZ,
+    VARHDRSZ_EXTERNAL,
+};
 
 use ::pg_qsort::pg_qsort_arg;
 use crate::{
@@ -158,6 +161,59 @@ unsafe fn cstring_len(p: *const u8) -> usize {
     n + 1
 }
 
+#[cold]
+#[inline(never)]
+fn corrupt_range() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "corrupted BRIN minmax-multi summary: value extends past range image".to_string(),
+        )
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+// Validated on-disk byte length of the serialized value at `data[p..]`, bounding
+// every header/length read (and cstring strlen) by `data`. The C deserializer
+// trusts these lengths (Assert-only); on attacker-craftable images we must
+// reject an overrun with ERRCODE_DATA_CORRUPTED rather than read/copy OOB.
+fn checked_value_len(data: &[u8], p: usize, typlen: i16) -> PgResult<usize> {
+    let len = if typlen > 0 {
+        typlen as usize
+    } else if typlen == -1 {
+        if p >= data.len() {
+            return Err(corrupt_range());
+        }
+        // SAFETY: p < data.len(); reads past the first header byte are
+        // bounds-checked against data before dereferencing.
+        unsafe {
+            let ptr = data.as_ptr().add(p);
+            if varatt_is_1b_e(ptr) {
+                if p + VARHDRSZ_EXTERNAL > data.len() {
+                    return Err(corrupt_range());
+                }
+                varsize_external(ptr)
+            } else if varatt_is_1b(ptr) {
+                varsize_1b(ptr)
+            } else {
+                if p + VARHDRSZ > data.len() {
+                    return Err(corrupt_range());
+                }
+                varsize_4b(ptr)
+            }
+        }
+    } else {
+        debug_assert!(typlen == -2);
+        match data.get(p..).and_then(|s| s.iter().position(|&b| b == 0)) {
+            Some(idx) => idx + 1,
+            None => return Err(corrupt_range()),
+        }
+    };
+    if len == 0 || p + len > data.len() {
+        return Err(corrupt_range());
+    }
+    Ok(len)
+}
+
 /// brin_range_serialize: build the on-disk varlena image; the returned Datum
 /// points at an `mcx` allocation.
 pub fn brin_range_serialize<'mcx>(
@@ -250,12 +306,23 @@ pub fn brin_range_deserialize<'mcx>(
     maxvalues: i32,
     image: &[u8],
 ) -> PgResult<MinMaxMultiRanges> {
+    // The header itself must be present before we trust any of its counts.
+    if image.len() < SERIALIZED_HEADER {
+        return Err(corrupt_range());
+    }
     let hdr = read_serialized_header(image);
-    debug_assert!(hdr.nranges >= 0 && hdr.nvalues >= 0 && hdr.maxvalues > 0);
 
-    let nvalues = (2 * hdr.nranges + hdr.nvalues) as usize;
-    debug_assert!(nvalues as i32 <= hdr.maxvalues);
-    debug_assert!(hdr.maxvalues <= maxvalues);
+    // nranges/nvalues/maxvalues come from the (attacker-craftable) image. Reject
+    // negatives, count the total in i64 so 2*nranges+nvalues cannot wrap i32, and
+    // require it to fit the allocated values array (target_maxvalues <= maxvalues).
+    if hdr.nranges < 0 || hdr.nvalues < 0 || hdr.maxvalues <= 0 {
+        return Err(corrupt_range());
+    }
+    let total = 2i64 * hdr.nranges as i64 + hdr.nvalues as i64;
+    if total > hdr.maxvalues as i64 || hdr.maxvalues > maxvalues {
+        return Err(corrupt_range());
+    }
+    let nvalues = total as usize;
 
     let mut range = minmax_multi_init(maxvalues);
     range.nranges = hdr.nranges;
@@ -273,16 +340,7 @@ pub fn brin_range_deserialize<'mcx>(
     if !typbyval {
         let mut p = 0usize;
         for _ in 0..nvalues {
-            let sz = if typlen > 0 {
-                typlen as usize
-            } else if typlen == -1 {
-                // SAFETY: value image lies inside `data`.
-                unsafe { varsize_any(data.as_ptr().add(p)) }
-            } else {
-                debug_assert!(typlen == -2);
-                // SAFETY: as above; NUL-terminated within data.
-                unsafe { cstring_len(data.as_ptr().add(p)) }
-            };
+            let sz = checked_value_len(data, p, typlen)?;
             datalen += maxalign(sz);
             p += sz;
         }
@@ -299,19 +357,17 @@ pub fn brin_range_deserialize<'mcx>(
     let mut dataoff = 0usize;
     for i in 0..nvalues {
         if typbyval {
+            // Bound the fixed-width by-value read against the image.
+            if typlen <= 0 || p + typlen as usize > data.len() {
+                return Err(corrupt_range());
+            }
             range.values[i] = fetch_byval(&data[p..], typlen);
             p += typlen as usize;
         } else {
-            let sz = if typlen > 0 {
-                typlen as usize
-            } else if typlen == -1 {
-                // SAFETY: value image lies inside `data`.
-                unsafe { varsize_any(data.as_ptr().add(p)) }
-            } else {
-                // SAFETY: as above.
-                unsafe { cstring_len(data.as_ptr().add(p)) }
-            };
-            // SAFETY: chunk has datalen MAXALIGNed bytes; sz bytes from data.
+            let sz = checked_value_len(data, p, typlen)?;
+            // SAFETY: checked_value_len guarantees p + sz <= data.len(); the
+            // pre-scan computed datalen from the same sequence of sizes, so
+            // dataoff + sz <= datalen bytes of chunk.
             unsafe {
                 let dst = chunk.add(dataoff);
                 core::ptr::copy_nonoverlapping(data.as_ptr().add(p), dst, sz);
@@ -320,9 +376,7 @@ pub fn brin_range_deserialize<'mcx>(
             dataoff += maxalign(sz);
             p += sz;
         }
-        debug_assert!(p <= data.len());
     }
-    debug_assert!(p == data.len());
 
     Ok(range)
 }
@@ -910,4 +964,42 @@ pub fn assert_check_expanded_ranges(
         debug_assert!(call_bool(mcx, &lt, colloid, eranges[i - 1].maxval, eranges[i].minval)?);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod deserialize_tests {
+    use super::checked_value_len;
+
+    // A crafted 4B varlena declaring ~256 MB inside a tiny image must be
+    // rejected rather than driving an OOB read/copy (idx-50).
+    #[test]
+    fn oversized_varlena_is_rejected() {
+        let word: u32 = 0x1000_0000u32 << 2; // declared VARSIZE = 256 MB
+        let mut data = word.to_ne_bytes().to_vec();
+        data.extend_from_slice(&[0u8; 4]);
+        assert!(checked_value_len(&data, 0, -1).is_err());
+    }
+
+    #[test]
+    fn fixed_length_overrun_is_rejected() {
+        let data = [0u8; 4];
+        assert!(checked_value_len(&data, 0, 8).is_err());
+        assert_eq!(checked_value_len(&data, 0, 4).unwrap(), 4);
+    }
+
+    #[test]
+    fn unterminated_cstring_is_rejected() {
+        let data = [b'x', b'y'];
+        assert!(checked_value_len(&data, 0, -2).is_err());
+        let ok = [b'x', 0u8];
+        assert_eq!(checked_value_len(&ok, 0, -2).unwrap(), 2);
+    }
+
+    #[test]
+    fn well_formed_varlena_is_accepted() {
+        let word: u32 = 8u32 << 2; // VARSIZE = 8
+        let mut data = word.to_ne_bytes().to_vec();
+        data.extend_from_slice(&[1u8; 4]);
+        assert_eq!(checked_value_len(&data, 0, -1).unwrap(), 8);
+    }
 }

@@ -57,7 +57,13 @@ fn topk_consider(top: &mut Vec<Row>, k: usize, cand: Row) {
 
 struct OaSoA {
     keys: Vec<u128>,
-    cnt: Vec<u32>,
+    /// u64 per-group row counter: group cardinality is bounded only by the
+    /// bank row total (a u64 fact), so a single hot key with >=2^32 rows
+    /// would wrap a u32 lane silently (release builds have no overflow
+    /// checks) — corrupting COUNT(*) and the AVG denominator. Matches the
+    /// non-sqe aggregate path (int8/u64) and the dense_direct arm's u64
+    /// counters below.
+    cnt: Vec<u64>,
     /// u64: generic SUM accumulator (the hot-shape shape's {0,1} inputs fit u32,
     /// but a mid-NDV group over a u16-range column overflows it — sqe-m4).
     srs: Vec<u64>,
@@ -167,9 +173,9 @@ pub const SCATTER_ROW_BYTES: u64 = 28;
 /// Sorted-run record, bytes/group: key u128 + count u64 + two u64 partials.
 const RUN_REC_BYTES: usize = 40;
 
-/// Pass-2 table bytes per capped entry: 2x pow2 slots per entry, 36 B/slot
-/// (u128 key + u32 cnt + 2xu64 partials).
-const OA_ENTRY_BYTES: u64 = 72;
+/// Pass-2 table bytes per capped entry: 2x pow2 slots per entry, 40 B/slot
+/// (u128 key + u64 cnt + 2xu64 partials).
+const OA_ENTRY_BYTES: u64 = 80;
 
 /// Spill engagement census (rig visibility: gates prove the spill legs
 /// actually ran — a vacuously green identity is worthless).
@@ -670,7 +676,7 @@ impl P2Sp {
             if oa.keys[s] != EMPTY {
                 self.tmp.push(Row {
                     key: oa.keys[s],
-                    c: oa.cnt[s] as u64,
+                    c: oa.cnt[s],
                     sr: oa.srs[s],
                     sw: oa.sws[s],
                 });
@@ -706,7 +712,7 @@ fn merge_runs(oa: &mut OaSoA, ps: &mut P2Sp, rows: &mut Vec<Row>, kk: usize, sha
     tmp.clear();
     for s in 0..=oa.mask {
         if oa.keys[s] != EMPTY {
-            tmp.push(Row { key: oa.keys[s], c: oa.cnt[s] as u64, sr: oa.srs[s], sw: oa.sws[s] });
+            tmp.push(Row { key: oa.keys[s], c: oa.cnt[s], sr: oa.srs[s], sw: oa.sws[s] });
         }
     }
     tmp.sort_unstable_by(|a, b| a.key.cmp(&b.key));
@@ -1432,7 +1438,7 @@ pub fn run_hash_plane_owned_group(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                     if oa.keys[s] != EMPTY {
                         let cand = Row {
                             key: oa.keys[s],
-                            c: oa.cnt[s] as u64,
+                            c: oa.cnt[s],
                             sr: oa.srs[s],
                             sw: oa.sws[s],
                         };
@@ -1458,7 +1464,7 @@ pub fn run_hash_plane_owned_group(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
         for (rows, oa, _ps) in owned {
             all.extend(rows);
             let b = oa.keys.capacity() * 16
-                + oa.cnt.capacity() * 4
+                + oa.cnt.capacity() * 8
                 + oa.srs.capacity() * 8
                 + oa.sws.capacity() * 8;
             // [sqe-park-knobs] plain-data advisor: keys/cnt/srs/sws are
@@ -3400,4 +3406,29 @@ fn frame_owned_u128(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
     a.note = Some(crate::render::footer_groups(groups as u64, total_rows as u64));
     crate::engine::phn(node, "pass2_render", t_p2);
     a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [idx-139] A single group with >=2^32 rows must not wrap its counter.
+    /// The per-group `cnt` lane is u64 (group cardinality is bounded only by
+    /// the bank row total, a u64 fact), so priming a slot at u32::MAX and
+    /// adding once more crosses the 32-bit boundary cleanly instead of
+    /// wrapping to zero (which a u32 lane would, silently corrupting COUNT).
+    #[test]
+    fn oa_group_counter_does_not_wrap_past_u32() {
+        let mut oa = OaSoA::new(4);
+        let key: u128 = 0x1234_5678_9abc;
+        let slot0 = hash128(key) as usize;
+        oa.add(slot0, key, 0, 0); // seed the slot (cnt == 1)
+        // Locate the live slot and prime it just below the u32 boundary.
+        let slot = (0..=oa.mask).find(|&s| oa.keys[s] == key).unwrap();
+        oa.cnt[slot] = u32::MAX as u64;
+        oa.add(slot0, key, 0, 0); // the 2^32-th row
+        assert_eq!(oa.cnt[slot], u32::MAX as u64 + 1);
+        // A u32 lane would have wrapped to zero here.
+        assert_ne!(oa.cnt[slot], 0);
+    }
 }

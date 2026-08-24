@@ -442,6 +442,17 @@ pub fn DropRelationFiles(delrels: &[RelFileLocator], is_redo: bool) -> PgResult<
     for locator in delrels {
         let key = RelFileLocatorBackend { locator: *locator, backend: INVALID_PROC_NUMBER };
         smgr::smgropen(key.locator, key.backend)?;
+        // During redo, forget any invalid-page table entries recorded earlier
+        // in replay for every fork of this relation. Matches C DropRelationFiles
+        // (md.c): the record dropping the file legitimizes the missing file, so
+        // its invalid-page entries must be cleared before XLogCheckInvalidPages
+        // runs at the consistency point.
+        if is_redo {
+            for fork in 0..=(MAX_FORKNUM as i32) {
+                let fork = ForkNumber::from_i32(fork).expect("fork in [0, MAX_FORKNUM]");
+                xlogutils::XLogDropRelation(*locator, fork)?;
+            }
+        }
         srels.push(key);
     }
     smgr::smgrdounlinkall(&srels, is_redo)?;

@@ -32,6 +32,14 @@ unsafe fn arg_oidvector<'a>(fcinfo: &Fcinfo, i: usize) -> PgResult<(&'a oidvecto
     let p = fcinfo.arg(i).as_usize() as *const oidvector;
     let v = unsafe { &*p };
     crate::check_valid_oidvector(v)?;
+    // After the structural check dim1 is a genuine vector-header field; reject a
+    // crafted dim1 that claims more Oids than VARSIZE can hold before forming
+    // the values slice (OOB read). Routed to the SAME error as check_valid.
+    // SAFETY: 4B-U plain-storage oidvector datum; header readable for VARSIZE.
+    let varsize = unsafe { ::datum::varlena::VarlenaRef::from_ptr(p as *const u8) }.varsize();
+    if !::array::vector_dim1_fits(varsize, v.dim1, core::mem::size_of::<Oid>()) {
+        return Err(crate::not_valid_oidvector());
+    }
     let values =
         unsafe { core::slice::from_raw_parts(p.add(1) as *const Oid, v.dim1.max(0) as usize) };
     Ok((v, values))

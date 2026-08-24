@@ -51,3 +51,6 @@ catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 genam = { path = "../../backend/access/index/genam" }
 table = { path = "../../backend/access/table/table" }
 spi = { path = "../../backend/executor/spi" }
+
+[dev-dependencies]
+wchar = { path = "../../common/wchar" }

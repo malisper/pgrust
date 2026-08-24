@@ -164,11 +164,27 @@ fn check_ident_usermap_regexp(
                 .finish(crate::loc(2884, "check_ident_usermap"))?;
             return Ok((false, true));
         }
-        // C slices the byte string with the wchar match offsets (single-byte
-        // and ASCII coincide; mirror the C behavior).
-        let cap = &system_user[matches[1].rm_so as usize..matches[1].rm_eo as usize];
-        let expanded_str = pg_tok.string.replacen("\\1", cap, 1);
-        expanded = make_auth_token(expanded_str.as_bytes(), true);
+        // C copies the byte string at the wchar match offsets (single-byte and
+        // ASCII coincide pre-auth, so the offsets are byte positions). Rust
+        // &str range indexing would PANIC if an offset lands inside a multibyte
+        // character, so operate on the byte slice and bounds-check the range;
+        // an out-of-range capture is treated as no match rather than a panic.
+        let sys_bytes = system_user.as_bytes();
+        let so = matches[1].rm_so as usize;
+        let eo = matches[1].rm_eo as usize;
+        if so > eo || eo > sys_bytes.len() {
+            return Ok((false, false));
+        }
+        let cap = &sys_bytes[so..eo];
+        // Substitute the first "\\1" in pg_user with the captured bytes,
+        // mirroring C's memcpy-based expansion at the byte level.
+        let ofs = pg_tok.string.find("\\1").unwrap();
+        let hay = pg_tok.string.as_bytes();
+        let mut expanded_bytes = Vec::with_capacity(hay.len() - 2 + cap.len());
+        expanded_bytes.extend_from_slice(&hay[..ofs]);
+        expanded_bytes.extend_from_slice(cap);
+        expanded_bytes.extend_from_slice(&hay[ofs + 2..]);
+        expanded = make_auth_token(&expanded_bytes, true);
         &expanded
     } else {
         pg_tok

@@ -511,15 +511,15 @@ pub fn ProcArrayApplyRecoveryInfo(running: &RunningTransactionsData<'_>) -> PgRe
         if running.subxid_status == SUBXIDS_MISSING {
             xlogutils::set_standby_state(STANDBY_SNAPSHOT_PENDING);
             STANDBY_SNAPSHOT_PENDING_XMIN.set(latest);
-            procArray().lastOverflowedXid.set(latest);
+            unsafe { procArray().lastOverflowedXid.set(latest); }
         } else {
             xlogutils::set_standby_state(STANDBY_SNAPSHOT_READY);
             STANDBY_SNAPSHOT_PENDING_XMIN.set(InvalidTransactionId);
             if running.subxid_status == SUBXIDS_IN_SUBTRANS {
-                procArray().lastOverflowedXid.set(latest);
+                unsafe { procArray().lastOverflowedXid.set(latest); }
             } else {
                 debug_assert_eq!(running.subxid_status, SUBXIDS_IN_ARRAY);
-                procArray().lastOverflowedXid.set(InvalidTransactionId);
+                unsafe { procArray().lastOverflowedXid.set(InvalidTransactionId); }
             }
         }
 
@@ -568,8 +568,8 @@ pub fn ProcArrayApplyXidAssignment(
     let locked = (|| -> PgResult<()> {
         KnownAssignedXidsRemoveTree(InvalidTransactionId, subxids)?;
         let pa = procArray();
-        if TransactionIdPrecedes(pa.lastOverflowedXid.get(), max_xid) {
-            pa.lastOverflowedXid.set(max_xid);
+        if TransactionIdPrecedes(unsafe { pa.lastOverflowedXid.get() }, max_xid) {
+            unsafe { pa.lastOverflowedXid.set(max_xid); }
         }
         Ok(())
     })();
@@ -642,7 +642,7 @@ pub fn ExpireAllKnownAssignedTransactionIds() -> PgResult<()> {
 
         increment_xact_completion_count();
 
-        procArray().lastOverflowedXid.set(InvalidTransactionId);
+        unsafe { procArray().lastOverflowedXid.set(InvalidTransactionId); }
         Ok(())
     })();
     LWLockRelease(ProcArrayLock())?;
@@ -658,8 +658,8 @@ pub fn ExpireOldKnownAssignedTransactionIds(xid: TransactionId) -> PgResult<()> 
         increment_xact_completion_count();
 
         let pa = procArray();
-        if TransactionIdPrecedes(pa.lastOverflowedXid.get(), xid) {
-            pa.lastOverflowedXid.set(InvalidTransactionId);
+        if TransactionIdPrecedes(unsafe { pa.lastOverflowedXid.get() }, xid) {
+            unsafe { pa.lastOverflowedXid.set(InvalidTransactionId); }
         }
         KnownAssignedXidsRemovePreceding(xid)
     })();
@@ -690,7 +690,7 @@ pub(crate) mod test_support {
         pa.numKnownAssignedXids.store(0, Relaxed);
         pa.tailKnownAssignedXids.store(0, Relaxed);
         pa.headKnownAssignedXids.store(0, Relaxed);
-        pa.lastOverflowedXid.set(InvalidTransactionId);
+        unsafe { pa.lastOverflowedXid.set(InvalidTransactionId); }
         for v in pa.knownAssignedXidsValid.iter() {
             v.store(false, Relaxed);
         }
@@ -711,11 +711,11 @@ pub(crate) mod test_support {
     }
 
     pub fn last_overflowed_xid() -> TransactionId {
-        procArray().lastOverflowedXid.get()
+        unsafe { procArray().lastOverflowedXid.get() }
     }
 
     pub fn set_last_overflowed_xid(xid: TransactionId) {
-        procArray().lastOverflowedXid.set(xid);
+        unsafe { procArray().lastOverflowedXid.set(xid); }
     }
 
     pub fn remove(xid: TransactionId) {

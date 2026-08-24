@@ -44,14 +44,38 @@ fn tsquerysel(mcx: mcx::Mcx<'_>, vardata: &VariableStatData<'_>, constval: Datum
     }
     match &vardata.stats {
         Some(stats) => {
+            // The MCELEM stavalues for a tsvector column are TEXT lexemes, and the
+            // walk below reads each datum as a text varlena (text_exhdr ->
+            // varlena_image dereferences the datum as a pointer and slices a
+            // header-derived length). decode_pg_statistic_values honours the
+            // element type embedded in the stored stavalues array, not the column
+            // type, so a crafted pg_statistic row can declare a by-value elemtype
+            // (float8[] -> datum word is an arbitrary address) or a fixed-length
+            // by-ref elemtype (uuid[]/name[] -> datum bytes read as a bogus varlena
+            // header), turning the decoded Datums into type-confused / wild-pointer
+            // reads. Gate on the slot's element type being TEXT before touching the
+            // datums, else fall back to the no-stats estimate.
             let selec = match vardata.slot(STATISTIC_KIND_MCELEM, 0) {
-                Some(slot) => mcelem_tsquery_selec(query, slot.values()?, slot.numbers()?)?,
-                None => tsquery_opr_selec(query, 0, None, 0.0)?,
+                Some(slot) if mcelem_valuetype_ok(slot.valuetype()?) => {
+                    mcelem_tsquery_selec(query, slot.values()?, slot.numbers()?)?
+                }
+                _ => tsquery_opr_selec(query, 0, None, 0.0)?,
             };
             Ok(selec * (1.0 - stats.stanullfrac as f64))
         }
         None => tsquery_opr_selec(query, 0, None, 0.0),
     }
+}
+
+/// Gate for interpreting a tsvector MCELEM slot's stavalues datums. The array
+/// image's self-declared element type (decode_pg_statistic_values honours the
+/// elemtype embedded in the stored array, not the column type) must be TEXT —
+/// the type the MCELEM walk treats each datum as. On mismatch the caller falls
+/// back to the no-stats estimate rather than dereferencing type-confused Datums.
+/// Mirrors rangetypes_selfuncs::hist_elemtype_matches.
+#[inline]
+fn mcelem_valuetype_ok(valuetype: types_core::Oid) -> bool {
+    valuetype == types_core::TEXTOID
 }
 
 fn mcelem_tsquery_selec(
@@ -141,4 +165,27 @@ fn tsquery_opr_selec(
     };
 
     Ok(clamp_probability(selec))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A crafted MCELEM slot can declare any stavalues element type; only a TEXT
+    // slot may be walked as text lexemes. Anything else (by-value float8, by-ref
+    // uuid/name, etc.) must be rejected so the MCELEM datums are never
+    // dereferenced as text varlenas (type confusion / wild pointer read).
+    #[test]
+    fn mcelem_valuetype_gate_accepts_only_text() {
+        const TEXTOID: types_core::Oid = 25;
+        const FLOAT8OID: types_core::Oid = 701;
+        const UUIDOID: types_core::Oid = 2950;
+        const NAMEOID: types_core::Oid = 19;
+
+        assert!(mcelem_valuetype_ok(TEXTOID));
+        assert!(!mcelem_valuetype_ok(FLOAT8OID));
+        assert!(!mcelem_valuetype_ok(UUIDOID));
+        assert!(!mcelem_valuetype_ok(NAMEOID));
+        assert!(!mcelem_valuetype_ok(0));
+    }
 }

@@ -8,3 +8,4 @@ publish.workspace = true
 mcx = { path = "../../_support/mcx" }
 types_error = { path = "../../_support/types/types_error" }
 wchar = { path = "../wchar" }
+secure_zero = { path = "../../_support/secure_zero" }

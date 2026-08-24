@@ -468,7 +468,7 @@ fn spg_leaf_test(
             traversalValue: item.traversalValue,
             level: item.level,
             returnData: so.want_itup,
-            leafDatum: leaf_datum(leaf_tuple, &so.state),
+            leafDatum: leaf_datum(leaf_tuple, &so.state)?,
         };
         let mut leaf_out = spgLeafConsistentOut::default();
 
@@ -581,7 +581,7 @@ fn spg_inner_test(
 
     if !isnull {
         let mut labels_scratch: Vec<Datum> = Vec::new();
-        let has_labels = spgExtractNodeLabels(&so.state, inner_tuple, &mut labels_scratch);
+        let has_labels = spgExtractNodeLabels(&so.state, inner_tuple, &mut labels_scratch)?;
 
         let traversal_mcx = so.traversalCxt.mcx();
         let inner_in = spgInnerConsistentIn {
@@ -596,7 +596,7 @@ fn spg_inner_test(
             returnData: so.want_itup,
             allTheSame: hdr.allTheSame,
             hasPrefix: hdr.prefixSize > 0,
-            prefixDatum: inner_prefix_datum(inner_tuple, &so.state),
+            prefixDatum: inner_prefix_datum(inner_tuple, &so.state)?,
             nNodes: hdr.nNodes as i32,
             nodeLabels: if has_labels {
                 labels_scratch.as_ptr()
@@ -857,8 +857,10 @@ fn spg_walk(
                     }
                 } else {
                     let mut redirected = false;
+                    let mut guard = LeafChainGuard::new(max);
                     while offset != InvalidOffsetNumber {
-                        debug_assert!(offset >= FirstOffsetNumber && offset <= max);
+                        crate::check_for_interrupts()?;
+                        guard.visit(offset, &rel, buffer_blkno)?;
                         offset = spg_test_leaf_tuple(
                             so,
                             &mut dest,

@@ -8,12 +8,12 @@ use types_error::{PgResult, ERRCODE_DATA_CORRUPTED, ERROR};
 use types_storage::{RelFileLocator, SharedInvalidationMessage};
 
 use crate::codec::{
-    BufferLayout, TwoPhaseFileHeader, SIZEOF_REL_FILE_LOCATOR, SIZEOF_SHARED_INVAL_MSG,
+    TwoPhaseFileHeader, SIZEOF_REL_FILE_LOCATOR, SIZEOF_SHARED_INVAL_MSG,
     SIZEOF_XL_XACT_STATS_ITEM,
 };
 use crate::core::{
-    corrupt_guard, lock_gxact, process_records, remove_gxact, xlog_read_twophase_data,
-    DO_NOT_REPLICATE_ID,
+    buffer_layout, corrupt_guard, lock_gxact, process_records, remove_gxact,
+    xlog_read_twophase_data, DO_NOT_REPLICATE_ID,
 };
 use crate::files;
 use crate::here;
@@ -73,18 +73,18 @@ pub fn FinishPreparedTransaction(gid: &str, is_commit: bool) -> PgResult<()> {
     let idx = lock_gxact(gid, miscinit::GetUserId())?;
     let st = TwoPhaseState();
     let g = st.gxact(idx);
-    let pgprocno = g.pgprocno.get();
-    let xid = g.xid.get();
+    let pgprocno = unsafe { g.pgprocno.get() };
+    let xid = unsafe { g.xid.get() };
 
-    let buf = if g.ondisk.get() {
+    let buf = if unsafe { g.ondisk.get() } {
         files::read_twophase_file(xid, false)?.expect("two-phase state file disappeared")
     } else {
-        xlog_read_twophase_data(g.prepare_start_lsn.get())?
+        xlog_read_twophase_data(unsafe { g.prepare_start_lsn.get() })?
     };
 
     let hdr = corrupt_guard(TwoPhaseFileHeader::from_bytes(&buf), "FinishPreparedTransaction")?;
     debug_assert_eq!(hdr.xid, xid);
-    let layout = BufferLayout::of(&hdr);
+    let layout = buffer_layout(&hdr, &buf, "FinishPreparedTransaction")?;
     let children: Vec<TransactionId> = {
         let mut v = Vec::with_capacity(hdr.nsubxacts as usize);
         for i in 0..hdr.nsubxacts as usize {
@@ -124,7 +124,7 @@ pub fn FinishPreparedTransaction(gid: &str, is_commit: bool) -> PgResult<()> {
     // If the callbacks fail, the gxact must not look committable again; it is
     // still locked by us so it can't be recycled underneath us. C does this
     // unlocked too.
-    g.valid.set(false);
+    unsafe { g.valid.set(false) };
 
     let delrels = if is_commit { &commitrels } else { &abortrels };
     catalog_storage::DropRelationFiles(delrels, false)?;
@@ -157,7 +157,7 @@ pub fn FinishPreparedTransaction(gid: &str, is_commit: bool) -> PgResult<()> {
     let cb_result = process_records(&buf, layout.records, xid, callbacks)
         .and_then(|()| predicate::PredicateLockTwoPhaseFinish(xid, is_commit));
 
-    let ondisk = g.ondisk.get();
+    let ondisk = unsafe { g.ondisk.get() };
     remove_gxact(idx);
 
     unlock_twophase_state();
@@ -316,17 +316,17 @@ pub fn LookupGXact(
     let mut found = false;
     lock_twophase_state(lwlock::LW_SHARED);
     let inner = (|| -> PgResult<()> {
-        for i in 0..st.num_prep_xacts.get() {
+        for i in 0..unsafe { st.num_prep_xacts.get() } {
             let g = st.gxact(st.prep_xact(i));
-            if !g.valid.get() || g.gid.get().as_str() != gid {
+            if !unsafe { g.valid.get() } || unsafe { g.gid.get() }.as_str() != gid {
                 continue;
             }
-            let buf = if g.ondisk.get() {
-                files::read_twophase_file(g.xid.get(), false)?
+            let buf = if unsafe { g.ondisk.get() } {
+                files::read_twophase_file(unsafe { g.xid.get() }, false)?
                     .expect("two-phase state file disappeared")
             } else {
-                debug_assert!(g.prepare_start_lsn.get() != 0);
-                xlog_read_twophase_data(g.prepare_start_lsn.get())?
+                debug_assert!(unsafe { g.prepare_start_lsn.get() } != 0);
+                xlog_read_twophase_data(unsafe { g.prepare_start_lsn.get() })?
             };
             let hdr = corrupt_guard(TwoPhaseFileHeader::from_bytes(&buf), "LookupGXact")?;
             if hdr.origin_lsn == prepare_end_lsn
@@ -358,17 +358,17 @@ pub(crate) fn prepared_xact_rows() -> Vec<PreparedXactRow> {
     let st = TwoPhaseState();
     let mut rows = Vec::new();
     lock_twophase_state(lwlock::LW_SHARED);
-    for i in 0..st.num_prep_xacts.get() {
+    for i in 0..unsafe { st.num_prep_xacts.get() } {
         let g = st.gxact(st.prep_xact(i));
-        if !g.valid.get() {
+        if !unsafe { g.valid.get() } {
             continue;
         }
-        let proc = lmgr_proc::GetPGProcByNumber(g.pgprocno.get());
+        let proc = lmgr_proc::GetPGProcByNumber(unsafe { g.pgprocno.get() });
         rows.push(PreparedXactRow {
             transaction: proc.xid.read(),
-            gid: g.gid.get().as_str().to_owned(),
-            prepared: g.prepared_at.get(),
-            ownerid: g.owner.get(),
+            gid: unsafe { g.gid.get() }.as_str().to_owned(),
+            prepared: unsafe { g.prepared_at.get() },
+            ownerid: unsafe { g.owner.get() },
             dbid: proc.databaseId.load(Relaxed),
         });
     }

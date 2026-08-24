@@ -172,13 +172,21 @@ impl ShredLaneSource for JsonbShredSource {
 }
 
 /// Render a shred path for the part-level PathTable (spec §6.5 pins only
-/// the framing; the vendored dotted grammar is the string form).
+/// the framing; the string form is the canonical, INJECTIVE encoding both
+/// sides speak — [`pgrc2_format::shredlane::encode_shred_path`]). The read
+/// side binds lanes by plain string equality over these strings, so the
+/// separator (and the escape byte) MUST be escaped inside each key
+/// segment: a raw `join(".")` here lets a literal key `"a.b"` collide with
+/// the nested chain `a`→`b` on disk (the encoding-confusion aliasing —
+/// distinct jsonb structures forging one lane column). Escaping keeps the
+/// map injective; dot-free keys are unchanged.
 fn dotted(p: &JsonPath) -> String {
-    p.segments()
+    let segs: Vec<std::borrow::Cow<'_, str>> = p
+        .segments()
         .iter()
-        .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect::<Vec<String>>()
-        .join(".")
+        .map(|s| String::from_utf8_lossy(s))
+        .collect();
+    pgrc2_format::shredlane::encode_shred_path(segs.iter().map(|s| s.as_ref()))
 }
 
 /// The per-lane column descriptor: a typed lane's semantics are its OWN
@@ -250,4 +258,27 @@ fn lane_to_colbuffer(
         });
     }
     Ok(col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dotted;
+    use adt_jsonb_shred::JsonPath;
+
+    /// The PathTable string a literal dotted key seals to can NEVER equal
+    /// the string a nested chain seals to (the encoding-confusion fix): the
+    /// read side binds lanes by string equality, so distinct jsonb
+    /// structures must render to distinct strings. Dot-free keys stay
+    /// verbatim so ordinary lanes keep resolving.
+    #[test]
+    fn dotted_key_never_aliases_nested_path() {
+        let literal = dotted(&JsonPath::new(vec![b"a.b".to_vec()])); // key "a.b"
+        let nested = dotted(&JsonPath::new(vec![b"a".to_vec(), b"b".to_vec()])); // a -> b
+        assert_ne!(literal, nested, "dotted key must not alias the nested path");
+        assert_eq!(nested, "a.b", "dot-free chain unchanged");
+        assert_eq!(literal, "a\\.b", "separator escaped inside the key");
+
+        // Ordinary keys are byte-for-byte unchanged.
+        assert_eq!(dotted(&JsonPath::new(vec![b"name".to_vec()])), "name");
+    }
 }

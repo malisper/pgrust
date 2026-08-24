@@ -2,7 +2,8 @@
 
 use crate::*;
 use types_core::{BlockNumber, MaxBlockNumber, HASH_AM_OID};
-use types_error::{ERRCODE_INDEX_CORRUPTED, ERRCODE_WRONG_OBJECT_TYPE};
+use nbtree::itup::{index_info_find_data_offset, INDEX_TUPLE_HEADER_SIZE};
+use types_error::{ERRCODE_DATA_CORRUPTED, ERRCODE_INDEX_CORRUPTED, ERRCODE_WRONG_OBJECT_TYPE};
 use types_hash::hashpage::{
     HashMetaPageData, HashPageOpaqueData, HASH_MAGIC, HASH_MAX_BITMAPS, HASH_MAX_SPLITPOINTS,
     HASH_VERSION, LH_BITMAP_PAGE, LH_BUCKET_PAGE, LH_META_PAGE, LH_OVERFLOW_PAGE, LH_PAGE_TYPE,
@@ -215,10 +216,29 @@ pub(crate) fn fc_hash_page_items(
                 return Err(Box::new(PgError::error("invalid ItemId")));
             }
             let pos = id.off as usize;
-            if pos + 12 > b.len() {
-                return Err(Box::new(PgError::error("invalid ItemId")));
+            // The IndexTupleData header (t_tid + t_info, 8 bytes) must lie within
+            // the page image before t_info can be trusted; tid_datum below also
+            // reads t_tid from these bytes.
+            if pos + INDEX_TUPLE_HEADER_SIZE > b.len() {
+                return Err(Box::new(
+                    PgError::error("invalid ItemId").with_sqlstate(ERRCODE_DATA_CORRUPTED),
+                ));
             }
-            // SAFETY: hashkey sits at the tuple data offset, bounded above.
+            // _hash_get_indextuple_hashkey reads the hashkey at the tuple's data
+            // offset (IndexInfoFindDataOffset), which shifts from 8 to 16 when
+            // t_info declares a null bitmap. Bound the ACTUAL read offset,
+            // derived from the attacker-controlled t_info exactly as the read
+            // does, before touching the page (idx 250).
+            // SAFETY: pos + 8 <= b.len() (checked above), so t_info at pos+6..+8
+            // is in bounds.
+            let t_info = unsafe { nbtree::itup::t_info(b.as_ptr().add(pos)) };
+            let data_off = index_info_find_data_offset(t_info);
+            if pos + data_off + core::mem::size_of::<u32>() > b.len() {
+                return Err(Box::new(
+                    PgError::error("invalid ItemId").with_sqlstate(ERRCODE_DATA_CORRUPTED),
+                ));
+            }
+            // SAFETY: hashkey read at pos+data_off..+4 is bounded above.
             let hashkey = unsafe { hash::util::_hash_get_indextuple_hashkey(b.as_ptr().add(pos)) };
 
             let values = [

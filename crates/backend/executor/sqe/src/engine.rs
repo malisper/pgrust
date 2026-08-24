@@ -149,6 +149,22 @@ pub struct SqeConfig {
     /// the effective value; GUC plumbing at the pool/guc seam's lane,
     /// per the grouped-budget precedent.
     pub answer_budget_override: Option<u64>,
+    /// [xquery-bound, CWE-770] Entry-count cap for the cross-query caches
+    /// on the shared per-relation `Faces` whose keys embed attacker-chosen
+    /// query constants (`cond`, `verdict_words`, `frames`, and the
+    /// `touch`/`vw_touch` recurrence witnesses). Without a bound these grow
+    /// linearly with the number of distinct predicate constants any client
+    /// issues, so a stream of distinct-constant queries drives process
+    /// memory to OOM (the caches are process-global, shared across all
+    /// sessions, and survive disconnect). Each cache independently enforces
+    /// this cap: when it is full and a new key arrives, it is cleared
+    /// (clear-on-pressure) before the insert. Every entry is recomputable
+    /// on the next miss, so eviction is a pure performance event — never a
+    /// correctness one. Resident memory attributable to these caches is
+    /// therefore O(cap) regardless of the distinct-constant stream length.
+    /// Provenance: PGRUST_SQE_XQUERY_CACHE_MAX (entries) — a work_mem-class
+    /// input per the budget-tunable discipline; 0 disables the cap.
+    pub xquery_cache_max_entries: usize,
     /// [scan-cap-retire] Serve UNWITNESSED unbounded row-returning scans
     /// under the answer-face law (the q1/q5 idiom, extending the RULED
     /// cap-retire posture to the scan face): admission no longer demands
@@ -251,6 +267,10 @@ impl Default for SqeConfig {
             answer_budget_override: std::env::var("PGRUST_SQE_ANSWER_BUDGET")
                 .ok()
                 .and_then(|v| v.parse().ok()),
+            xquery_cache_max_entries: std::env::var("PGRUST_SQE_XQUERY_CACHE_MAX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8192),
             scan_cap_retire: env_not_disabled("PGRUST_SQE_SCAN_CAP_RETIRE"),
             scan_answer_cap_override: std::env::var("PGRUST_SQE_SCAN_ANSWER_CAP")
                 .ok()
@@ -410,11 +430,52 @@ impl<K: std::hash::Hash + Eq + Clone, V> Memo<K, V> {
         let _permit = FacePermit::acquire();
         cell.get_or_init(|| Arc::new(build())).clone()
     }
+    /// [xquery-bound, CWE-770] Entry-capped variant of `get_or_build` for a
+    /// memo whose key embeds attacker-chosen query constants (`frames`).
+    /// When the map already holds `cap` distinct keys and `k` is new, it is
+    /// cleared (clear-on-pressure) before the cell is created, so resident
+    /// entries never exceed `cap`. Every value is recomputable on the next
+    /// miss, so eviction is a pure performance event. `cap == 0` disables
+    /// the bound (identical to `get_or_build`).
+    pub fn get_or_build_bounded(&self, k: K, cap: usize, build: impl FnOnce() -> V) -> Arc<V> {
+        let cell = {
+            let mut m = self.m.lock().unwrap();
+            if cap != 0 && m.len() >= cap && !m.contains_key(&k) {
+                m.clear();
+            }
+            m.entry(k).or_default().clone()
+        };
+        if let Some(v) = cell.get() {
+            return v.clone();
+        }
+        let _permit = FacePermit::acquire();
+        cell.get_or_init(|| Arc::new(build())).clone()
+    }
     pub fn contains(&self, k: &K) -> bool {
         self.m.lock().unwrap().get(k).map(|c| c.get().is_some()).unwrap_or(false)
     }
     pub fn clear(&self) {
         self.m.lock().unwrap().clear();
+    }
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.m.lock().unwrap().len()
+    }
+}
+
+/// [xquery-bound, CWE-770] Entry-count bound for a cross-query `Faces`
+/// cache whose key embeds attacker-chosen query constants. Call while
+/// holding the map lock, immediately BEFORE inserting `k`: when the map is
+/// already at `cap` and does not hold `k`, it is cleared (clear-on-
+/// pressure) so resident entries never exceed `cap`. Every entry these
+/// maps hold is recomputable on the next miss, so eviction is a pure
+/// performance event, never a correctness one — this bounds resident
+/// memory at O(cap) regardless of how many distinct predicate constants a
+/// client issues. `cap == 0` disables the bound.
+#[inline]
+fn bound_xquery_cache<K: std::hash::Hash + Eq, V>(m: &mut HashMap<K, V>, k: &K, cap: usize) {
+    if cap != 0 && m.len() >= cap && !m.contains_key(k) {
+        m.clear();
     }
 }
 
@@ -513,28 +574,30 @@ fn par_parts_w<T: Send>(threads: usize, n: usize, f: impl Fn(usize) -> T + Sync,
     // builds permit-free (a worker waiting on a permit held by the outer
     // builder that joins on it would deadlock). On the resident pool the
     // permit-free window is per-item (workers outlive this fan-out).
-    let per: Vec<Vec<(usize, T)>> = if let Some(pool) = crate::pool::scoped() {
-        pool.run_capped(
-            n,
-            t,
-            |_| Vec::new(),
-            |acc, i| {
-                let held = HOLDS_PERMIT.with(|h| h.replace(true));
-                acc.push((i, f(i)));
-                HOLDS_PERMIT.with(|h| h.set(held));
-            },
-        )
-    } else {
-        crate::scan::par_range(
-            n,
-            t,
-            |_| {
-                HOLDS_PERMIT.with(|h| h.set(true));
-                Vec::new()
-            },
-            |acc, i| acc.push((i, f(i))),
-        )
-    };
+    let per: Vec<Vec<(usize, T)>> = crate::pool::with_scoped(|pool| {
+        if let Some(pool) = pool {
+            pool.run_capped(
+                n,
+                t,
+                |_| Vec::new(),
+                |acc, i| {
+                    let held = HOLDS_PERMIT.with(|h| h.replace(true));
+                    acc.push((i, f(i)));
+                    HOLDS_PERMIT.with(|h| h.set(held));
+                },
+            )
+        } else {
+            crate::scan::par_range(
+                n,
+                t,
+                |_| {
+                    HOLDS_PERMIT.with(|h| h.set(true));
+                    Vec::new()
+                },
+                |acc, i| acc.push((i, f(i))),
+            )
+        }
+    });
     let mut all: Vec<(usize, T)> = per.into_iter().flatten().collect();
     all.sort_by_key(|(i, _)| *i);
     all.into_iter().map(|(_, t)| t).collect()
@@ -601,12 +664,21 @@ pub struct Faces {
     /// Text registries (famA): (attno, kind) -> TextReg.
     regs: Mutex<HashMap<(u32, u8), Arc<crate::grouped::TextReg>>>,
     /// [rehomed, risks.md §1] the hot-shape shared frame memo — was a
-    /// bank-blind global in kernels_f6; keyed by (counter, dlo, dhi).
-    /// The frame is "a cached verdict at rowlist grain" (PLANNER-SPEC
+    /// bank-blind global in kernels_f6; keyed by (cid, edt, counter, dlo,
+    /// dhi). The frame is "a cached verdict at rowlist grain" (PLANNER-SPEC
     /// §2.6) — condition-cache-class state, so like `cond` it SURVIVES
     /// reset_per_query (the PoC behavior of record: FRAME_MEMO was only
     /// cleared between banks).
-    pub frames: Memo<(i64, i64, i64), crate::kernels_f6::Frame>,
+    ///
+    /// [cache-identity] The key carries the predicate's eq/range COLUMN
+    /// attnos (cid, edt) alongside the three constants. The frame is the
+    /// per-granule survivor rowlists of `cid = counter AND dlo <= edt <=
+    /// dhi`; the columns are as much a semantic input as the constants, so
+    /// two queries sharing (counter, dlo, dhi) but built over different
+    /// columns MUST NOT collide (the same rule ConjFp follows). Omitting
+    /// them let a query on (a, b) poison the cached rowlists a query on
+    /// (c, d) would then reuse.
+    pub frames: Memo<(u32, u32, i64, i64, i64), crate::kernels_f6::Frame>,
     /// [rehomed, risks.md §1] the ord-remap memo — was attno-keyed global
     /// in kernels_g2.
     pub ord_remaps: Memo<u32, crate::kernels_g2::OrdRemap>,
@@ -843,8 +915,10 @@ impl Faces {
         // populate rung (cfg.populate).
         let store = {
             let n = {
+                let key = (attno, fingerprint.clone());
                 let mut g = self.vw_touch.lock().unwrap();
-                let e = g.entry((attno, fingerprint.clone())).or_insert(0);
+                bound_xquery_cache(&mut g, &key, self.cfg.xquery_cache_max_entries);
+                let e = g.entry(key).or_insert(0);
                 *e += 1;
                 *e
             };
@@ -887,12 +961,10 @@ impl Faces {
                 sk.insert((attno, fingerprint.clone()), term.clone());
             }
         }
-        self.verdict_words
-            .lock()
-            .unwrap()
-            .entry((attno, fingerprint.clone()))
-            .or_insert(vw)
-            .clone()
+        let key = (attno, fingerprint.clone());
+        let mut g = self.verdict_words.lock().unwrap();
+        bound_xquery_cache(&mut g, &key, self.cfg.xquery_cache_max_entries);
+        g.entry(key).or_insert(vw).clone()
     }
 
     pub fn word_col(&self, bank: &Bank, pi: usize, attno: u32) -> Arc<Option<crate::fused::WordCol>> {
@@ -933,10 +1005,9 @@ impl Faces {
                 pc.skey
             );
         }
-        self.cond
-            .lock()
-            .unwrap()
-            .entry(fingerprint.clone())
+        let mut g = self.cond.lock().unwrap();
+        bound_xquery_cache(&mut g, fingerprint, self.cfg.xquery_cache_max_entries);
+        g.entry(fingerprint.clone())
             .or_insert_with(|| Arc::new(pc))
             .clone()
     }
@@ -945,6 +1016,7 @@ impl Faces {
     /// count including this one.
     pub fn touch_bump(&self, fingerprint: &ConjFp) -> u32 {
         let mut g = self.touch.lock().unwrap();
+        bound_xquery_cache(&mut g, fingerprint, self.cfg.xquery_cache_max_entries);
         let e = g.entry(fingerprint.clone()).or_insert(0);
         *e += 1;
         *e
@@ -1122,5 +1194,78 @@ impl Engine {
     }
     pub fn run(&self, node: &crate::ir::PlanNode) -> AnswerSet {
         crate::exec::run_node(&self.ctx(), node)
+    }
+}
+
+#[cfg(test)]
+mod xquery_bound_tests {
+    //! [xquery-bound, CWE-770] The cross-query condition/frame caches on the
+    //! process-global per-relation `Faces` are keyed by attacker-chosen query
+    //! constants. These tests pin the engine-level bounds that keep their
+    //! resident memory O(cap) no matter how many distinct constants a client
+    //! issues, and that eviction is clear-on-pressure (recomputable on miss).
+    use super::*;
+
+    #[test]
+    fn hashmap_cache_plateaus_at_cap() {
+        // Simulate an attacker streaming an unbounded number of distinct
+        // fingerprints into a cross-query HashMap cache: with the bound the
+        // resident entry count never exceeds `cap`.
+        let cap = 8usize;
+        let mut m: HashMap<u64, u64> = HashMap::new();
+        for k in 0..10_000u64 {
+            bound_xquery_cache(&mut m, &k, cap);
+            m.insert(k, k);
+            assert!(m.len() <= cap, "resident entries {} exceeded cap {}", m.len(), cap);
+        }
+        assert!(m.len() <= cap);
+    }
+
+    #[test]
+    fn hashmap_cache_no_evict_on_existing_key() {
+        // Re-touching a resident key must never trigger a clear (a hit is not
+        // pressure): a full cache that keeps seeing the same keys stays warm.
+        let cap = 4usize;
+        let mut m: HashMap<u64, u64> = HashMap::new();
+        for k in 0..cap as u64 {
+            bound_xquery_cache(&mut m, &k, cap);
+            m.insert(k, k);
+        }
+        assert_eq!(m.len(), cap);
+        for _ in 0..1000 {
+            let k = 2u64; // already resident
+            bound_xquery_cache(&mut m, &k, cap);
+            m.insert(k, k);
+            assert_eq!(m.len(), cap, "hit on a resident key must not evict");
+        }
+    }
+
+    #[test]
+    fn hashmap_cache_cap_zero_disables_bound() {
+        // cap == 0 is the opt-out (env PGRUST_SQE_XQUERY_CACHE_MAX=0):
+        // behavior identical to the pre-bound unbounded map.
+        let mut m: HashMap<u64, u64> = HashMap::new();
+        for k in 0..1000u64 {
+            bound_xquery_cache(&mut m, &k, 0);
+            m.insert(k, k);
+        }
+        assert_eq!(m.len(), 1000);
+    }
+
+    #[test]
+    fn memo_bounded_plateaus_and_recomputes() {
+        // The `frames`-class memo bound: resident keys plateau at `cap`, and a
+        // key evicted under pressure is rebuilt (a miss just recomputes — the
+        // correctness invariant of the whole cache class).
+        let cap = 4usize;
+        let memo: Memo<u64, u64> = Memo::default();
+        for k in 0..1000u64 {
+            let v = memo.get_or_build_bounded(k, cap, || k * 10);
+            assert_eq!(*v, k * 10);
+            assert!(memo.len() <= cap, "resident memo entries {} exceeded cap {}", memo.len(), cap);
+        }
+        // Key 0 was long since evicted; requesting it recomputes correctly.
+        let rebuilt = memo.get_or_build_bounded(0, cap, || 0u64);
+        assert_eq!(*rebuilt, 0);
     }
 }

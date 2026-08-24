@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 mcx = { path = "../../../../_support/mcx" }
+pgsync = { path = "../../../../_support/pgsync" }
 datum = { path = "../../../../_support/types/datum" }
 gin_vocab = { path = "../gin_vocab" }
 types_core = { path = "../../../../_support/types/types_core" }

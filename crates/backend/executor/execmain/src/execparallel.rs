@@ -334,7 +334,9 @@ pub(crate) fn build_worker_pstmt<'mcx>(
     }
     let pstmt = PlannedStmt {
         commandType: CmdType::CMD_SELECT,
-        queryId: ::types_nodes::SyncCell::new(leader.queryId.get()),
+        // SAFETY: PlannedStmt.queryId is owned by a single backend's plan tree
+        // (no cross-thread sharing), matching C's in-place scribble discipline.
+        queryId: ::types_nodes::SyncCell::new(unsafe { leader.queryId.get() }),
         planId: leader.planId,
         hasReturning: false,
         hasModifyingCTE: false,

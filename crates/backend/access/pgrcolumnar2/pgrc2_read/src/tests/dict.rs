@@ -466,6 +466,81 @@ fn code_bounds_and_corrupt_index_are_typed() {
 }
 
 #[test]
+fn in_range_code_with_out_of_range_offset_is_typed_not_panic() {
+    // Finding idx 178: a hostile-but-checksummed dict index whose stored
+    // payload OFFSET is in-range-by-code (code 3 < ncodes 64) yet points out
+    // of range must refuse TYPED — never `.expect()`-panic when the scan
+    // lane consumes it. This is the honesty the `ScanDictSpace`
+    // prepare_frames entry-honesty gate leans on: it resolves every licensed
+    // code via this same `entry(code)?`, so a corrupt offset surfaces as a
+    // catchable corruption error at the fallible gate, not a panic in an
+    // infallible face. (CRC-fix sequence mirrors
+    // `code_bounds_and_corrupt_index_are_typed`.)
+    let b = dict_part(64, false);
+    let mut bytes = b.bytes.clone();
+    let idx_sec = b
+        .find_stream_section(1, 0, StreamRole::DictIndex)
+        .expect("index section");
+    let s = b.sections[idx_sec];
+    // Entry 3's payload offset lives at section payload + 3*12 + 0; payload
+    // starts at the 32-B stream-section header. Point it far out of range.
+    let field = s.off as usize + 32 + 3 * 12;
+    bytes[field..field + 4].copy_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
+    // Fix the section CRC in the section table + chain (mirrors refusal.rs).
+    let fo = b.footer_off as usize;
+    let st_off = u64::from_le_bytes(bytes[fo + 32..fo + 40].try_into().expect("8")) as usize;
+    let e = st_off + idx_sec * 32;
+    let crc = crc32c(&bytes[s.off as usize..(s.off + s.len) as usize]);
+    bytes[e + 28..e + 32].copy_from_slice(&crc.to_le_bytes());
+    let count = u32::from_le_bytes(bytes[fo + 24..fo + 28].try_into().expect("4")) as usize;
+    let st_crc = crc32c(&bytes[st_off..st_off + count * 32]);
+    bytes[fo + 40..fo + 44].copy_from_slice(&st_crc.to_le_bytes());
+    let f_crc = crc32c(&bytes[fo..fo + 92]);
+    bytes[fo + 92..fo + 96].copy_from_slice(&f_crc.to_le_bytes());
+    // The extent record CRC (inside StreamDir) also covers this section;
+    // patch it too so the corruption is CRC-consistent and only the SEMANTIC
+    // bounds check can catch it.
+    let sd = b
+        .find_section(SectionKind::StreamDir, 0, 0)
+        .expect("stream dir");
+    let sd_info = b.sections[sd];
+    let sd_bytes_start = sd_info.off as usize;
+    let mut fixed_extent = false;
+    let mut off = sd_bytes_start;
+    while off + 40 <= (sd_info.off + sd_info.len) as usize {
+        let fo64 = u64::from_le_bytes(bytes[off..off + 8].try_into().expect("8"));
+        let len64 = u64::from_le_bytes(bytes[off + 8..off + 16].try_into().expect("8"));
+        if fo64 == s.off && len64 == s.len {
+            bytes[off + 32..off + 36].copy_from_slice(&crc.to_le_bytes());
+            fixed_extent = true;
+        }
+        off += 4;
+    }
+    assert!(fixed_extent, "patched the extent record crc");
+    let sd_crc = crc32c(&bytes[sd_bytes_start..(sd_info.off + sd_info.len) as usize]);
+    let esd = st_off + sd * 32;
+    bytes[esd + 28..esd + 32].copy_from_slice(&sd_crc.to_le_bytes());
+    let st_crc = crc32c(&bytes[st_off..st_off + count * 32]);
+    bytes[fo + 40..fo + 44].copy_from_slice(&st_crc.to_le_bytes());
+    let f_crc = crc32c(&bytes[fo..fo + 92]);
+    bytes[fo + 92..fo + 96].copy_from_slice(&f_crc.to_le_bytes());
+
+    let part = std::sync::Arc::new(
+        OpenPart::open(
+            Box::new(crate::io::MemPartIo::new(bytes, 9, 10)),
+            &PartExpect::none(),
+        )
+        .expect("open"),
+    );
+    let h = DictHandle::open(part, None, &[], 1, 0).expect("handle");
+    // The code is in range (below ncodes) yet its entry is dishonest: the
+    // resolver must refuse TYPED, not panic.
+    assert!(h.ncodes() > 3, "code 3 is in range");
+    let err = h.entry(3).expect_err("out-of-range offset must refuse typed");
+    assert!(matches!(err, ReadError::Format(_)), "typed corruption: {err}");
+}
+
+#[test]
 fn pinned_handle_composes_with_the_registry() {
     let b = dict_part(64, false);
     let reg = PartRegistry::new(u64::MAX);

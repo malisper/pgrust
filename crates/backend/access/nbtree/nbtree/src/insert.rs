@@ -513,6 +513,20 @@ unsafe fn bt_swap_posting<'mcx>(
 
     let mut nposting = copy_index_tuple(mcx, oposting)?;
     let postoff = bt_tuple_get_posting_offset(nposting.as_ptr());
+    // The posting offset is a raw 32-bit value packed into the on-disk tuple's
+    // block-id field; on a crafted/corrupt page it is fully attacker-controlled.
+    // C trusts it (pages come from a trusted source); pgrust treats on-disk bytes
+    // as untrusted, so bound the TID-array span against the tuple image before any
+    // raw pointer arithmetic to avoid an out-of-bounds write. The last write lands
+    // at postoff + nhtids*IPD_SIZE (gap fill + shifted TIDs); require it to lie
+    // within the tuple, mirroring the corruption ERROR raised just above.
+    let tuple_size = index_tuple_size(nposting.as_ptr());
+    let tid_span_end = postoff
+        .checked_add((nhtids as usize).checked_mul(IPD_SIZE).unwrap_or(usize::MAX))
+        .unwrap_or(usize::MAX);
+    if postoff < INDEX_TUPLE_HEADER_SIZE || tid_span_end > tuple_size {
+        return Err(posting_offset_corrupt(postoff, nhtids, tuple_size));
+    }
     let replacepos = nposting.as_mut_ptr().add(postoff + postingoff as usize * IPD_SIZE);
     let replaceposright = replacepos.add(IPD_SIZE);
     let nmovebytes = (nhtids - postingoff - 1) as usize * IPD_SIZE;
@@ -558,6 +572,18 @@ fn posting_split_failed(nhtids: i32, postingoff: i32) -> Box<PgError> {
     Box::new(PgError::error(format!(
         "posting list tuple with {nhtids} items cannot be split at offset {postingoff}"
     )))
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn posting_offset_corrupt(postoff: usize, nhtids: i32, tuple_size: usize) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "posting list tuple of size {tuple_size} has corrupt posting offset {postoff} for {nhtids} items"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_INDEX_CORRUPTED),
+    )
 }
 
 #[track_caller]
@@ -2191,4 +2217,94 @@ pub unsafe fn bt_rootdescend<'mcx>(
 
     bt_relbuf(rel, insertstate.buf.take().expect("pinned leaf"))?;
     Ok(exists)
+}
+
+#[cfg(test)]
+mod swap_posting_tests {
+    use super::*;
+    use ::mcx::MemoryContext;
+    use ::types_tuple::itemptr::ItemPointerData;
+
+    fn tid(blk: u32, pos: u16) -> ItemPointerData {
+        ItemPointerData::new(blk, pos)
+    }
+
+    // A crafted posting tuple whose posting offset is an attacker-chosen 32-bit
+    // value must be rejected with an index-corruption error rather than driving a
+    // wild pointer write. Regression guard for the OOB write in _bt_swap_posting.
+    #[test]
+    fn swap_posting_rejects_out_of_range_offset() {
+        const ALT_TID: u16 = 0x2000; // INDEX_ALT_TID_MASK
+        const IS_POSTING: u16 = 0x2000; // BT_IS_POSTING
+        let cx = MemoryContext::new("swap");
+
+        // 32-byte posting tuple, nposting = 2, but posting offset = 0xFFFF0000.
+        let mut oposting = [0u8; 32];
+        let t_info: u16 = 32 | ALT_TID;
+        oposting[6..8].copy_from_slice(&t_info.to_ne_bytes());
+        let tid0 = ItemPointerData::new(0xFFFF_0000, IS_POSTING | 2);
+        // 16-byte plain (non-pivot, non-posting) newitem with a heap TID.
+        let mut newitem = [0u8; 16];
+        newitem[6..8].copy_from_slice(&16u16.to_ne_bytes());
+
+        // SAFETY: owned aligned images; writes stay within bounds.
+        unsafe {
+            oposting
+                .as_mut_ptr()
+                .cast::<ItemPointerData>()
+                .write_unaligned(tid0);
+            newitem
+                .as_mut_ptr()
+                .cast::<ItemPointerData>()
+                .write_unaligned(tid(8, 1));
+
+            let res = bt_swap_posting(cx.mcx(), newitem.as_mut_ptr(), oposting.as_ptr(), 1);
+            let err = res.err().expect("crafted posting offset must be rejected");
+            assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INDEX_CORRUPTED);
+        }
+    }
+
+    // A well-formed posting tuple still splits successfully (valid behavior preserved).
+    #[test]
+    fn swap_posting_accepts_valid_offset() {
+        const ALT_TID: u16 = 0x2000;
+        const IS_POSTING: u16 = 0x2000;
+        let cx = MemoryContext::new("swap");
+
+        let mut oposting = [0u8; 32];
+        let t_info: u16 = 32 | ALT_TID;
+        oposting[6..8].copy_from_slice(&t_info.to_ne_bytes());
+        let tid0 = ItemPointerData::new(16, IS_POSTING | 2);
+        let mut newitem = [0u8; 16];
+        newitem[6..8].copy_from_slice(&16u16.to_ne_bytes());
+
+        // SAFETY: owned aligned images; posting offset 16 + 2 TIDs fit in 32 bytes.
+        unsafe {
+            oposting
+                .as_mut_ptr()
+                .cast::<ItemPointerData>()
+                .write_unaligned(tid0);
+            oposting
+                .as_mut_ptr()
+                .add(16)
+                .cast::<ItemPointerData>()
+                .write_unaligned(tid(7, 1));
+            oposting
+                .as_mut_ptr()
+                .add(22)
+                .cast::<ItemPointerData>()
+                .write_unaligned(tid(9, 2));
+            newitem
+                .as_mut_ptr()
+                .cast::<ItemPointerData>()
+                .write_unaligned(tid(8, 1));
+
+            let nposting = bt_swap_posting(cx.mcx(), newitem.as_mut_ptr(), oposting.as_ptr(), 1)
+                .expect("valid posting split must succeed");
+            // newitem takes oposting's rightmost/max TID.
+            assert_eq!(t_tid(newitem.as_ptr()), tid(9, 2));
+            // The gap at postingoff was filled with newitem's original TID.
+            assert_eq!(bt_tuple_get_posting_n(nposting.as_ptr(), 1), tid(8, 1));
+        }
+    }
 }

@@ -1,7 +1,9 @@
 //! rangetypes_selfuncs.c: rangesel + the bound/length-histogram machinery
 //! (shared with multirangetypes_selfuncs.rs, whose C copy is line-identical).
 
-use adt_rangetypes::{range_cmp_bounds, range_deserialize, RangeBound, RangeInfo};
+use adt_rangetypes::{
+    range_cmp_bounds, range_deserialize, range_deserialize_checked, RangeBound, RangeInfo,
+};
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
@@ -67,6 +69,20 @@ pub(crate) fn varlena_image<'a>(d: Datum) -> &'a [u8] {
         assert_eq!(*p & 0x03, 0, "packed varlena in range selectivity; detoast lane");
         core::slice::from_raw_parts(p, adt_rangetypes::varsize_4b(p))
     }
+}
+
+/// Gate for interpreting a stats histogram slot's stavalues datums. The array
+/// image's self-declared element type (decode_pg_statistic_values honours the
+/// elemtype embedded in the stored array, not the column type) must match the
+/// type the walk will treat the datums as — the column's range type for the
+/// bounds histogram, float8 for the length histogram. A crafted pg_statistic
+/// row can otherwise declare a by-value or by-ref elemtype, turning the decoded
+/// Datums into arbitrary words that varlena_image / range_deserialize / as_f64
+/// would dereference (type confusion / wild pointer read). On mismatch callers
+/// fall back to no histogram stats.
+#[inline]
+pub(crate) fn hist_elemtype_matches(actual: Oid, expected: Oid) -> bool {
+    actual == expected
 }
 
 fn default_range_selectivity(operator: Oid) -> f64 {
@@ -231,6 +247,17 @@ fn calc_hist_selectivity<'mcx>(
     let Some(hslot) = vardata.slot(STATISTIC_KIND_BOUNDS_HISTOGRAM, 0) else {
         return Ok(-1.0);
     };
+    // The stavalues element type is dictated by the stored array image
+    // (decode_pg_statistic_values honours the elemtype embedded in the array),
+    // not by the column type. A crafted pg_statistic row could declare a
+    // by-value or fixed-length elemtype so the decoded Datums are not range
+    // pointers — feeding them to varlena_image/range_deserialize would be a
+    // type confusion / wild pointer dereference. Confirm the histogram's
+    // element type is the column's range type before treating its datums as
+    // serialized ranges; on mismatch fall back to no histogram stats.
+    if !hist_elemtype_matches(hslot.valuetype()?, ctx.ri.rngtypid) {
+        return Ok(-1.0);
+    }
     let hvalues = hslot.values()?;
     if hvalues.len() < 2 {
         return Ok(-1.0);
@@ -239,7 +266,10 @@ fn calc_hist_selectivity<'mcx>(
     let mut hist_lower: PgVec<'mcx, RangeBound> = mcx::vec_with_capacity_in(run.mcx, nhist)?;
     let mut hist_upper: PgVec<'mcx, RangeBound> = mcx::vec_with_capacity_in(run.mcx, nhist)?;
     for &v in hvalues {
-        let (lo, up, empty) = range_deserialize(&ctx.ri.elem, varlena_image(v));
+        // Stats-sourced image: validate every offset/length against the slice
+        // before dereferencing (crafted pg_statistic could otherwise drive an
+        // out-of-bounds read through the bound fetch).
+        let (lo, up, empty) = range_deserialize_checked(&ctx.ri.elem, varlena_image(v))?;
         if empty {
             // C: elog(ERROR) — degenerate stats content aborts the
             // statement, never the backend.
@@ -256,6 +286,13 @@ fn calc_hist_selectivity<'mcx>(
             let Some(lslot) = vardata.slot(STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM, 0) else {
                 return Ok(-1.0);
             };
+            // Length-histogram datums are read as float8 (Datum::as_f64). A
+            // crafted stats row could declare a by-ref elemtype, turning those
+            // reinterpreted words into out-of-bounds pointer reads downstream;
+            // require float8 or fall back to no histogram stats.
+            if !hist_elemtype_matches(lslot.valuetype()?, types_core::FLOAT8OID) {
+                return Ok(-1.0);
+            }
             let lvalues = lslot.values()?;
             if lvalues.len() < 2 {
                 return Ok(-1.0);
@@ -656,4 +693,34 @@ pub(crate) fn calc_hist_selectivity_contains(
     }
 
     Ok(sum_frac)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The histogram walk must only interpret stavalues datums as range images /
+    // float8 when the slot's decoded element type actually matches. A crafted
+    // pg_statistic row declaring float8[] (by-value) or uuid[]/name[] (by-ref,
+    // non-varlena) on a range column must be rejected before any datum is
+    // dereferenced. hist_elemtype_matches is the gate both the bounds- and
+    // length-histogram fetch sites consult; a false result routes them to the
+    // -1.0 no-histogram fallback rather than into varlena_image / as_f64.
+    #[test]
+    fn elemtype_gate_rejects_mismatched_stats_slots() {
+        const INT4RANGE: Oid = 3904; // a plausible column range type oid
+        const FLOAT8: Oid = types_core::FLOAT8OID;
+        const UUID: Oid = 2950;
+
+        // Bounds histogram: only the column's own range type is accepted.
+        assert!(hist_elemtype_matches(INT4RANGE, INT4RANGE));
+        // Attacker-declared by-value float8[] on a range column -> rejected.
+        assert!(!hist_elemtype_matches(FLOAT8, INT4RANGE));
+        // Attacker-declared fixed-length by-ref uuid[] -> rejected.
+        assert!(!hist_elemtype_matches(UUID, INT4RANGE));
+
+        // Length histogram: only float8 is accepted.
+        assert!(hist_elemtype_matches(FLOAT8, FLOAT8));
+        assert!(!hist_elemtype_matches(INT4RANGE, FLOAT8));
+    }
 }

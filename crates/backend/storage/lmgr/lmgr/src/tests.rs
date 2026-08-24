@@ -620,7 +620,7 @@ fn wait_for_lockers_progress_protocol() {
 
     install();
     let (be, _slot_guard) = progress_beentry();
-    let param = |i: usize| be.st_progress_param[i].get();
+    let param = |i: usize| unsafe { be.st_progress_param[i].get() };
 
     let mc = mcx::MemoryContext::new("waitfor-test");
     let mcx = mc.mcx();
@@ -702,7 +702,7 @@ fn wait_for_lockers_no_progress_and_empty_tags() {
         |_| unreachable!("nothing to wait for"),
     )
     .unwrap();
-    assert_eq!(be.st_progress_param[PROGRESS_WAITFOR_TOTAL].get(), 7);
+    assert_eq!(unsafe { be.st_progress_param[PROGRESS_WAITFOR_TOTAL].get() }, 7);
 
     // progress=false leaves the params untouched.
     let mc = mcx::MemoryContext::new("waitfor-test2");
@@ -720,6 +720,6 @@ fn wait_for_lockers_no_progress_and_empty_tags() {
         |_| Ok(()),
     )
     .unwrap();
-    assert_eq!(be.st_progress_param[PROGRESS_WAITFOR_TOTAL].get(), 7, "no progress writes");
+    assert_eq!(unsafe { be.st_progress_param[PROGRESS_WAITFOR_TOTAL].get() }, 7, "no progress writes");
     backend_progress::pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, 0);
 }

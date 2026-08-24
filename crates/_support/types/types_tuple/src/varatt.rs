@@ -177,3 +177,40 @@ pub unsafe fn varsize_any(p: *const u8) -> usize {
         varsize_4b(p)
     }
 }
+
+/// Length of the varlena at `p`, bounded so no header byte is read past
+/// `avail`. Reads only byte 0 to classify, then the extra header bytes each
+/// form guarantees (1 more for external, 3 more for a 4-byte header). Returns
+/// `None` when the header or the declared body would run past `avail`.
+///
+/// The bounded twin of [`varsize_any`]: deform walks over untrusted on-disk
+/// tuples advance by the stored varlena length, so the header (up to 2^30-1
+/// from a 4-byte word) must be validated against the containing tuple's extent
+/// before it moves the walk cursor. A well-formed tuple never exceeds `avail`,
+/// so this only turns an out-of-bounds read into a caller-detectable `None`.
+///
+/// # Safety
+/// `p` points to a live image readable for at least `avail` bytes.
+#[inline]
+pub unsafe fn varsize_bounded(p: *const u8, avail: usize) -> Option<usize> {
+    if avail == 0 {
+        return None;
+    }
+    // SAFETY: avail >= 1, so byte 0 is in range for the tag classification.
+    let sz = unsafe {
+        if varatt_is_1b_e(p) {
+            if avail < VARHDRSZ_EXTERNAL {
+                return None;
+            }
+            varsize_external(p)
+        } else if varatt_is_1b(p) {
+            varsize_1b(p)
+        } else {
+            if avail < VARHDRSZ {
+                return None;
+            }
+            varsize_4b(p)
+        }
+    };
+    (sz <= avail).then_some(sz)
+}

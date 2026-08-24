@@ -51,3 +51,30 @@ fn checkpoint_image_crc_convention() {
     }
     assert_eq!(crc, crc32c::fin_crc32c(rcrc));
 }
+
+#[test]
+fn replorigin_redo_parse_rejects_truncated_records() {
+    // Truncated / attacker-authored REPLORIGIN WAL must fail through the
+    // ordinary corruption error path, not panic with a slice-out-of-bounds.
+
+    // Valid full-size records still parse exactly as before.
+    let set = serialize_replorigin_set(7, 0xDEAD_BEEF, true);
+    assert_eq!(parse_replorigin_set(&set).unwrap(), (7, 0xDEAD_BEEF, true));
+    let drop = serialize_replorigin_drop(9);
+    assert_eq!(parse_replorigin_drop(&drop).unwrap(), 9);
+
+    // Every truncation of a SET record (including empty) returns Err, no panic.
+    for len in 0..XL_REPLORIGIN_SET_SIZE {
+        assert!(
+            parse_replorigin_set(&set[..len]).is_err(),
+            "SET len {len} should be rejected"
+        );
+    }
+    // Same for DROP.
+    for len in 0..XL_REPLORIGIN_DROP_SIZE {
+        assert!(
+            parse_replorigin_drop(&drop[..len]).is_err(),
+            "DROP len {len} should be rejected"
+        );
+    }
+}

@@ -440,12 +440,37 @@ unsafe fn oidvector_bytes(fcinfo: &Fcinfo, i: usize) -> PgResult<&[u8]> {
     // ereports. A debug_assert here left release builds hashing vectors C
     // refuses (proofs finding: release-effective gate owed).
     ::nbt_compare::check_valid_oidvector(v)?;
+    // After the structural check the header is a genuine 1-D oidvector, so
+    // dim1 is a real field. Reject a crafted dim1 that claims more Oids than
+    // the datum's varlena size can hold before forming the values slice.
+    oidvector_dim1_in_bounds(p, v)?;
     Ok(unsafe {
         core::slice::from_raw_parts(
             p.add(1) as *const u8,
             (v.dim1.max(0) as usize) * core::mem::size_of::<Oid>(),
         )
     })
+}
+
+// Harden the flexible values tail against a crafted image: an on-image dim1
+// that claims more Oids than VARSIZE can hold would drive the values slice
+// past the buffer (OOB read). C trusts dim1 because oidvectorin validated it;
+// we re-derive the bound from VARSIZE. MUST run only AFTER
+// check_valid_oidvector (ndim==1/dataoffset==0/elemtype==OID), which
+// guarantees dim1 is a genuine vector-header field and the empty/invalid-array
+// cast has already taken the existing "array is not a valid oidvector" path. A
+// valid dim1==0 vector fits and passes. Routes to the SAME error (text and
+// SQLSTATE) as the structural check, not a new "corrupt ..." message.
+fn oidvector_dim1_in_bounds(
+    p: *const ::array::oidvector,
+    v: &::array::oidvector,
+) -> PgResult<()> {
+    // SAFETY: 4B-U plain-storage oidvector datum; header readable for VARSIZE.
+    let varsize = unsafe { ::datum::varlena::VarlenaRef::from_ptr(p as *const u8) }.varsize();
+    if !::array::vector_dim1_fits(varsize, v.dim1, core::mem::size_of::<Oid>()) {
+        return Err(::nbt_compare::not_valid_oidvector());
+    }
+    Ok(())
 }
 
 pub fn fc_hashoidvector(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -486,6 +511,9 @@ unsafe fn arg_oidvector_checked<'a>(
     let p = fcinfo.arg(i).as_usize() as *const ::array::oidvector;
     let v = unsafe { &*p };
     ::nbt_compare::check_valid_oidvector(v)?;
+    // See oidvector_dim1_in_bounds: reject a crafted dim1 too large for the
+    // buffer, only after the structural check has passed.
+    oidvector_dim1_in_bounds(p, v)?;
     let values =
         unsafe { core::slice::from_raw_parts(p.add(1) as *const Oid, v.dim1.max(0) as usize) };
     Ok((v, values))

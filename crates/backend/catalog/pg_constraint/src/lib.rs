@@ -322,7 +322,12 @@ pub struct NotNullConTup {
 impl NotNullConTup {
     pub fn name_str(&self) -> &str {
         let len = self.conname.iter().position(|&b| b == 0).unwrap_or(64);
-        core::str::from_utf8(&self.conname[..len]).expect("conname UTF-8")
+        // Never panic on a non-UTF-8 catalog name (foreign/standby data dir):
+        // return the well-formed prefix; C treats these bytes as opaque.
+        match core::str::from_utf8(&self.conname[..len]) {
+            Ok(s) => s,
+            Err(e) => core::str::from_utf8(&self.conname[..e.valid_up_to()]).unwrap(),
+        }
     }
 }
 
@@ -432,7 +437,12 @@ pub struct ConShape {
 impl ConShape {
     pub fn name_str(&self) -> &str {
         let len = self.conname.iter().position(|&b| b == 0).unwrap_or(64);
-        core::str::from_utf8(&self.conname[..len]).expect("conname UTF-8")
+        // Never panic on a non-UTF-8 catalog name (foreign/standby data dir):
+        // return the well-formed prefix; C treats these bytes as opaque.
+        match core::str::from_utf8(&self.conname[..len]) {
+            Ok(s) => s,
+            Err(e) => core::str::from_utf8(&self.conname[..e.valid_up_to()]).unwrap(),
+        }
     }
 }
 
@@ -1023,9 +1033,14 @@ fn name_str<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<&'mcx str> {
     // SAFETY: NOT NULL name column; 64-byte NameData in the live tuple.
     let bytes = unsafe { core::slice::from_raw_parts(p, NAMEDATALEN as usize) };
     let len = bytes.iter().position(|&b| b == 0).unwrap_or(NAMEDATALEN as usize);
-    let mut v: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, len)?;
-    mcx::vec_append_bytes(&mut v, &bytes[..len])?;
-    Ok(core::str::from_utf8(v.leak()).expect("conname UTF-8"))
+    // Catalog NameData may hold non-UTF-8 bytes (foreign/standby data dir under
+    // a single-byte server encoding); decode lossy so a poisoned row cannot
+    // panic readers (C treats these bytes as opaque).
+    let lossy = String::from_utf8_lossy(&bytes[..len]);
+    let mut v: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, lossy.len())?;
+    mcx::vec_append_bytes(&mut v, lossy.as_bytes())?;
+    // SAFETY: from_utf8_lossy output is guaranteed valid UTF-8.
+    Ok(unsafe { core::str::from_utf8_unchecked(v.leak()) })
 }
 
 // extractNotNullColumn (pg_constraint.c): conkey[0] of a not-null row.
@@ -1078,9 +1093,11 @@ pub fn RelationGetNotNullConstraints<'mcx>(
         let att = rel.rd_att.attr(colnum as usize - 1);
         let colname = {
             let raw = att.attname.name_str();
-            let mut v: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, raw.len())?;
-            mcx::vec_append_bytes(&mut v, raw)?;
-            core::str::from_utf8(v.leak()).expect("attname UTF-8")
+            let lossy = String::from_utf8_lossy(raw);
+            let mut v: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, lossy.len())?;
+            mcx::vec_append_bytes(&mut v, lossy.as_bytes())?;
+            // SAFETY: from_utf8_lossy output is guaranteed valid UTF-8.
+            unsafe { core::str::from_utf8_unchecked(v.leak()) }
         };
         let keys1 = types_nodes::NodeList::make1(
             mcx,

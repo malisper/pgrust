@@ -2705,6 +2705,55 @@ fn replace_vars_in_query_value<'mcx>(
         newq.windowClause = new_wcs;
     }
 
+    // C query_tree_mutator walks cteList: each CTE body is a subquery one level
+    // deeper (like RTE_SUBQUERY above, su + 1). Omitting it left correlated
+    // references inside a nested WITH body pointing at the pulled-up RTE
+    // unsubstituted, so the planner later hit "qual outside qualscope" /
+    // mis-routed Vars. query_cells_copy shares the CTE nodes, so a hit rebuilds
+    // that list cell with a fresh CommonTableExpr.
+    let mut new_ctes = NodeList::nil();
+    let mut cte_changed = false;
+    for cte_node in &newq.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        let mut replacement: Option<Node<'mcx>> = None;
+        if let Some(cq_node) = cte.ctequery {
+            if let Some(inner) = cq_node.as_query() {
+                if let Some(q2) =
+                    replace_vars_in_query_value(mcx, inner, varno, tlist, lateral, ph, su + 1)?
+                {
+                    let newq_node = Node::mk(mcx, q2)?;
+                    let newcte = types_nodes::parsenodes::CommonTableExpr {
+                        ctename: cte.ctename,
+                        aliascolnames: cte.aliascolnames.clone_in(mcx)?,
+                        ctematerialized: cte.ctematerialized,
+                        ctequery: Some(newq_node),
+                        search_clause: cte.search_clause,
+                        cycle_clause: cte.cycle_clause,
+                        location: cte.location,
+                        cterecursive: cte.cterecursive,
+                        cterefcount: cte.cterefcount,
+                        ctecolnames: cte.ctecolnames.clone_in(mcx)?,
+                        ctecoltypes: cte.ctecoltypes.clone_in(mcx)?,
+                        ctecoltypmods: cte.ctecoltypmods.clone_in(mcx)?,
+                        ctecolcollations: cte.ctecolcollations.clone_in(mcx)?,
+                    };
+                    replacement = Some(Node::mk(mcx, newcte)?);
+                }
+            }
+        }
+        match replacement {
+            Some(n) => {
+                cte_changed = true;
+                new_ctes.lappend(mcx, n)?;
+            }
+            None => new_ctes.lappend(mcx, cte_node)?,
+        }
+    }
+    if cte_changed {
+        changed = true;
+        newq.cteList = new_ctes;
+    }
+
     if !changed {
         return Ok(None);
     }

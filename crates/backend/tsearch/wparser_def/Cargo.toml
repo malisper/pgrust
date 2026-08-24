@@ -27,6 +27,7 @@ ts_cache = { path = "../../utils/cache/ts_cache" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 libc = "0.2"
 
 [dev-dependencies]

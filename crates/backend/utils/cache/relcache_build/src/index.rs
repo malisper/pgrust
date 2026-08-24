@@ -10,7 +10,8 @@ use relcache::schemapg::{
 };
 use relcache_build_seams::{IndexAccessInfo, PgIndexListShape};
 use types_core::{AttrNumber, InvalidOid, Oid, INDEX_RELATION_ID};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR};
+use types_tuple::HeapTupleData;
 use types_rel::{AccessShareLock, FormData_pg_class, FormData_pg_index};
 
 use crate::{int2vector_values, oid_key, oidvector_values, req};
@@ -172,11 +173,23 @@ pub(crate) fn relation_init_index_access_info(
         has_indpred: !SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indpred)?.1,
         indexprs_src: {
             let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indexprs)?;
-            if isnull { None } else { Some(crate::attrs::text_str(mcx, mcx, d)?) }
+            if isnull {
+                None
+            } else {
+                // Bound the pg_node_tree varlena against the cached tuple's
+                // extent before text_str dereferences its (untrusted) header.
+                checked_varlena_size(&tup.tuple(), d)?;
+                Some(crate::attrs::text_str(mcx, mcx, d)?)
+            }
         },
         indpred_src: {
             let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indpred)?;
-            if isnull { None } else { Some(crate::attrs::text_str(mcx, mcx, d)?) }
+            if isnull {
+                None
+            } else {
+                checked_varlena_size(&tup.tuple(), d)?;
+                Some(crate::attrs::text_str(mcx, mcx, d)?)
+            }
         },
     };
     ReleaseSysCache(tup);
@@ -371,6 +384,37 @@ fn opclass_not_found(opc: Oid) -> Box<PgError> {
     )
 }
 
+// Validate an untrusted catalog varlena datum against the extent of the tuple
+// image that backs it, returning its header-declared byte size. `d` is a
+// not-null by-ref datum fetched from `tuple`, so its pointer lands inside the
+// tuple image; a forged 4-byte header can otherwise declare up to ~1 GiB and
+// drive an out-of-bounds slice. Mirrors the detoast/bounds check committed for
+// the pg_trigger varlenas: a length that runs past the tuple's end becomes a
+// catchable corruption error rather than a read past the live allocation.
+fn checked_varlena_size(tuple: &HeapTupleData<'_>, d: Datum) -> PgResult<usize> {
+    let p = d.as_usize() as *const u8;
+    let start = tuple.header_ptr();
+    let end = start.wrapping_add(tuple.t_len as usize);
+    // The by-ref datum must point within the tuple image that holds it.
+    if p < start || p > end {
+        return Err(corrupt_varlena());
+    }
+    let avail = (end as usize) - (p as usize);
+    // SAFETY: p lies within the live [start, end) image, so at least `avail`
+    // bytes are readable; varsize_bounded reads no header byte past `avail`.
+    unsafe { types_tuple::varatt::varsize_bounded(p, avail) }.ok_or_else(corrupt_varlena)
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn corrupt_varlena() -> Box<PgError> {
+    Box::new(
+        PgError::error("catalog varlena length exceeds tuple extent".to_string())
+            .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
 const CONSTRAINT_RELATION_ID: Oid = 2606;
 const CONSTRAINT_RELID_TYPID_NAME_INDEX_ID: Oid = 2665;
 const Anum_pg_constraint_contype: i32 = 4;
@@ -419,10 +463,14 @@ pub(crate) fn scan_exclusion_ops<'mcx>(
         );
         let (d, isnull) = crate::getattr(td, tup, Anum_pg_constraint_conexclop);
         assert!(!isnull, "null conexclop for rel {index_relid}");
+        // The oid[] varlena header comes off the (possibly crafted) catalog
+        // tuple; bound its declared length against the tuple extent so a forged
+        // header raises a catchable error instead of reading past the image.
+        let size = checked_varlena_size(tup, d)?;
         let p = d.as_usize() as *const u8;
-        // SAFETY: live oid[] varlena image through its extent.
-        let image =
-            unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        // SAFETY: checked_varlena_size confirmed `size` bytes are inside the
+        // live tuple image backing this by-ref datum.
+        let image = unsafe { core::slice::from_raw_parts(p, size) };
         let payload = varlena::open_image(smcx, image)?;
         let body = payload.as_bytes();
         let total = body.len() + 4;
@@ -440,4 +488,56 @@ pub(crate) fn scan_exclusion_ops<'mcx>(
     rel.close(AccessShareLock)?;
     Ok(out
         .unwrap_or_else(|| panic!("exclusion constraint record missing for rel {index_relid}")))
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+    use types_tuple::ItemPointerData;
+
+    // A forged 4-byte varlena header on a catalog column must be rejected
+    // against the tuple extent instead of driving an out-of-bounds read.
+    #[test]
+    fn forged_varlena_length_is_caught() {
+        let mut image = [0u8; 32];
+        // 4-byte header at offset 24 declaring the ~1 GiB max varlena length.
+        let forged = types_tuple::varatt::set_varsize_4b_word(0x3FFF_FFFF).to_ne_bytes();
+        image[24..28].copy_from_slice(&forged);
+        let base = image.as_ptr();
+        // SAFETY: 32-byte live image; checked_varlena_size only reads
+        // header_ptr()/t_len, never the tuple header struct itself.
+        let tuple = unsafe {
+            HeapTupleData::from_raw_parts(
+                base,
+                image.len() as u32,
+                ItemPointerData::default(),
+                InvalidOid,
+            )
+        };
+        // SAFETY: offset 24 is within the 32-byte image.
+        let d = Datum::from_usize(unsafe { base.add(24) } as usize);
+        let err = checked_varlena_size(&tuple, d).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    // A well-formed short (1-byte header) varlena within the tuple is accepted.
+    #[test]
+    fn inbounds_varlena_length_is_accepted() {
+        let mut image = [0u8; 32];
+        // 1-byte header at offset 24: 4-byte total (header + 3 payload bytes).
+        let off = 24usize;
+        // SAFETY: offset 24 is within the 32-byte image.
+        unsafe { types_tuple::varatt::set_varsize_short(image.as_mut_ptr().add(off), 4) };
+        let base = image.as_ptr();
+        let tuple = unsafe {
+            HeapTupleData::from_raw_parts(
+                base,
+                image.len() as u32,
+                ItemPointerData::default(),
+                InvalidOid,
+            )
+        };
+        let d = Datum::from_usize(unsafe { base.add(off) } as usize);
+        assert_eq!(checked_varlena_size(&tuple, d).ok().unwrap(), 4);
+    }
 }

@@ -1,6 +1,27 @@
 //! spgxlog.h record codecs; byte layouts are the C struct images (WAL parity
 //! is gated byte-for-byte).
 use ::types_core::{OffsetNumber, TransactionId};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+
+/// An SP-GiST WAL record's `main_data` length is attacker-declared (0 is legal
+/// and passes all xlogreader validation — only fragment lengths and the
+/// secret-less CRC are checked), so every fixed-offset decode below must confirm
+/// the payload is long enough before indexing. Raising a catchable
+/// `ERRCODE_DATA_CORRUPTED` error (rather than panicking on an out-of-bounds
+/// index) keeps a malformed record from crash-looping the startup redo thread.
+/// C reads the struct straight out of the decode buffer (spgxlog.c); a short
+/// record reads garbage there but does not crash — this restores that property
+/// while surfacing the corruption instead of silently trusting garbage.
+#[cold]
+#[inline(never)]
+fn short_record_err(what: &str, need: usize, got: usize) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "SP-GiST redo: {what} record too short: need {need} bytes, got {got}"
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
 
 pub const XLOG_SPGIST_ADD_LEAF: u8 = 0x10;
 pub const XLOG_SPGIST_MOVE_LEAFS: u8 = 0x20;
@@ -62,15 +83,18 @@ impl spgxlogAddLeaf {
         b
     }
 
-    pub fn decode(b: &[u8]) -> Self {
-        spgxlogAddLeaf {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfSpgxlogAddLeaf {
+            return Err(short_record_err("spgxlogAddLeaf", SizeOfSpgxlogAddLeaf, b.len()));
+        }
+        Ok(spgxlogAddLeaf {
             newPage: b[0] != 0,
             storesNulls: b[1] != 0,
             offnumLeaf: u16_at(b, 2),
             offnumHeadLeaf: u16_at(b, 4),
             offnumParent: u16_at(b, 6),
             nodeI: u16_at(b, 8),
-        }
+        })
     }
 }
 
@@ -101,8 +125,11 @@ impl spgxlogMoveLeafs {
         b
     }
 
-    pub fn decode(b: &[u8]) -> Self {
-        spgxlogMoveLeafs {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfSpgxlogMoveLeafs {
+            return Err(short_record_err("spgxlogMoveLeafs", SizeOfSpgxlogMoveLeafs, b.len()));
+        }
+        Ok(spgxlogMoveLeafs {
             nMoves: u16_at(b, 0),
             newPage: b[2] != 0,
             replaceDead: b[3] != 0,
@@ -110,7 +137,7 @@ impl spgxlogMoveLeafs {
             offnumParent: u16_at(b, 6),
             nodeI: u16_at(b, 8),
             stateSrc: spgxlogState::decode_from(&b[12..20]),
-        }
+        })
     }
 }
 
@@ -141,8 +168,11 @@ impl spgxlogAddNode {
         b
     }
 
-    pub fn decode(b: &[u8]) -> Self {
-        spgxlogAddNode {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfSpgxlogAddNode {
+            return Err(short_record_err("spgxlogAddNode", SizeOfSpgxlogAddNode, b.len()));
+        }
+        Ok(spgxlogAddNode {
             offnum: u16_at(b, 0),
             offnumNew: u16_at(b, 2),
             newPage: b[4] != 0,
@@ -150,7 +180,7 @@ impl spgxlogAddNode {
             offnumParent: u16_at(b, 6),
             nodeI: u16_at(b, 8),
             stateSrc: spgxlogState::decode_from(&b[12..20]),
-        }
+        })
     }
 }
 
@@ -175,13 +205,16 @@ impl spgxlogSplitTuple {
         b
     }
 
-    pub fn decode(b: &[u8]) -> Self {
-        spgxlogSplitTuple {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfSpgxlogSplitTuple {
+            return Err(short_record_err("spgxlogSplitTuple", SizeOfSpgxlogSplitTuple, b.len()));
+        }
+        Ok(spgxlogSplitTuple {
             offnumPrefix: u16_at(b, 0),
             offnumPostfix: u16_at(b, 2),
             newPage: b[4] != 0,
             postfixBlkSame: b[5] != 0,
-        }
+        })
     }
 }
 
@@ -222,8 +255,11 @@ impl spgxlogPickSplit {
         b
     }
 
-    pub fn decode(b: &[u8]) -> Self {
-        spgxlogPickSplit {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfSpgxlogPickSplit {
+            return Err(short_record_err("spgxlogPickSplit", SizeOfSpgxlogPickSplit, b.len()));
+        }
+        Ok(spgxlogPickSplit {
             isRootSplit: b[0] != 0,
             nDelete: u16_at(b, 2),
             nInsert: u16_at(b, 4),
@@ -236,7 +272,7 @@ impl spgxlogPickSplit {
             offnumParent: u16_at(b, 14),
             nodeI: u16_at(b, 16),
             stateSrc: spgxlogState::decode_from(&b[20..28]),
-        }
+        })
     }
 }
 
@@ -263,14 +299,17 @@ impl spgxlogVacuumLeaf {
         b
     }
 
-    pub fn decode(b: &[u8]) -> Self {
-        spgxlogVacuumLeaf {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfSpgxlogVacuumLeaf {
+            return Err(short_record_err("spgxlogVacuumLeaf", SizeOfSpgxlogVacuumLeaf, b.len()));
+        }
+        Ok(spgxlogVacuumLeaf {
             nDead: u16_at(b, 0),
             nPlaceholder: u16_at(b, 2),
             nMove: u16_at(b, 4),
             nChain: u16_at(b, 6),
             stateSrc: spgxlogState::decode_from(&b[8..16]),
-        }
+        })
     }
 }
 
@@ -291,11 +330,14 @@ impl spgxlogVacuumRoot {
         b
     }
 
-    pub fn decode(b: &[u8]) -> Self {
-        spgxlogVacuumRoot {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfSpgxlogVacuumRoot {
+            return Err(short_record_err("spgxlogVacuumRoot", SizeOfSpgxlogVacuumRoot, b.len()));
+        }
+        Ok(spgxlogVacuumRoot {
             nDelete: u16_at(b, 0),
             stateSrc: spgxlogState::decode_from(&b[4..12]),
-        }
+        })
     }
 }
 
@@ -320,12 +362,72 @@ impl spgxlogVacuumRedirect {
         b
     }
 
-    pub fn decode(b: &[u8]) -> Self {
-        spgxlogVacuumRedirect {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfSpgxlogVacuumRedirect {
+            return Err(short_record_err("spgxlogVacuumRedirect", SizeOfSpgxlogVacuumRedirect, b.len()));
+        }
+        Ok(spgxlogVacuumRedirect {
             nToPlaceholder: u16_at(b, 0),
             firstPlaceholder: u16_at(b, 2),
             snapshotConflictHorizon: TransactionId::from_ne_bytes([b[4], b[5], b[6], b[7]]),
             isCatalogRel: b[8] != 0,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A hostile/truncated SP-GiST WAL record with main_data shorter than the
+    // fixed struct must decode to a catchable ERRCODE_DATA_CORRUPTED error, never
+    // an out-of-bounds index panic in the startup redo thread.
+    #[test]
+    fn short_main_data_decodes_to_data_corruption_not_panic() {
+        for len in 0..SizeOfSpgxlogAddLeaf {
+            let e = spgxlogAddLeaf::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
         }
+        for len in 0..SizeOfSpgxlogMoveLeafs {
+            let e = spgxlogMoveLeafs::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        for len in 0..SizeOfSpgxlogAddNode {
+            let e = spgxlogAddNode::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        for len in 0..SizeOfSpgxlogSplitTuple {
+            let e = spgxlogSplitTuple::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        for len in 0..SizeOfSpgxlogPickSplit {
+            let e = spgxlogPickSplit::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        for len in 0..SizeOfSpgxlogVacuumLeaf {
+            let e = spgxlogVacuumLeaf::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        for len in 0..SizeOfSpgxlogVacuumRoot {
+            let e = spgxlogVacuumRoot::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        for len in 0..SizeOfSpgxlogVacuumRedirect {
+            let e = spgxlogVacuumRedirect::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+    }
+
+    // Exact-length payloads still decode successfully (round-trip via encode).
+    #[test]
+    fn exact_length_main_data_decodes_ok() {
+        assert!(spgxlogAddLeaf::decode(&spgxlogAddLeaf::default().encode()).is_ok());
+        assert!(spgxlogMoveLeafs::decode(&spgxlogMoveLeafs::default().encode()).is_ok());
+        assert!(spgxlogAddNode::decode(&spgxlogAddNode::default().encode()).is_ok());
+        assert!(spgxlogSplitTuple::decode(&spgxlogSplitTuple::default().encode()).is_ok());
+        assert!(spgxlogPickSplit::decode(&spgxlogPickSplit::default().encode()).is_ok());
+        assert!(spgxlogVacuumLeaf::decode(&spgxlogVacuumLeaf::default().encode()).is_ok());
+        assert!(spgxlogVacuumRoot::decode(&spgxlogVacuumRoot::default().encode()).is_ok());
+        assert!(spgxlogVacuumRedirect::decode(&spgxlogVacuumRedirect::default().encode()).is_ok());
     }
 }

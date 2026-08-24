@@ -663,7 +663,7 @@ fn lifecycle_semantics() {
     participant.complete().expect("drained participant completes");
 
     // Drain retires the generation and surfaces the FIRST recorded error.
-    let err = task.close_and_wait().expect_err("abort error must surface");
+    let err = task.close_and_wait().err().expect("abort error must surface");
     assert_eq!(err.message(), "test abort");
     assert!(handle.lifecycle().retired());
 
@@ -3591,7 +3591,7 @@ mod ledger_tests {
             .drive_with_duty(&rt, &h, &mut || {
                 Err(PgError::new(ERROR, "duty interrupt").into())
             })
-            .expect_err("failing duty must surface");
+            .err().expect("failing duty must surface");
         assert_eq!(err.message(), "duty interrupt");
         assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted), "drained before returning");
         assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "aborted RGs skip finalize");
@@ -3726,7 +3726,7 @@ mod caller_c2_tests {
                 &mut || true,
                 &mut || Err(PgError::new(ERROR, "latch cancel").into()),
             )
-            .expect_err("failing park must surface");
+            .err().expect("failing park must surface");
         assert_eq!(err.message(), "latch cancel");
         assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted), "drained before returning");
         assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "aborted RGs skip finalize");
@@ -3870,7 +3870,7 @@ mod caller_c2_tests {
                 &mut || true,
                 &mut || Err(PgError::new(ERROR, "latch cancel").into()),
             )
-            .expect_err("failing park must surface");
+            .err().expect("failing park must surface");
         assert_eq!(err.message(), "latch cancel");
         assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted), "drained before returning");
         assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "aborted RGs skip finalize");
@@ -5119,4 +5119,102 @@ mod q2_bounded_drive_tests {
         assert!(work.claims.lock().unwrap().is_empty());
         assert_eq!(work.finalizes.load(Ordering::SeqCst), 0);
     }
+}
+
+/// Poll a waiter to completion under a deadline. The H-74 wedge (pre-fix)
+/// parked the waiter forever; polling with a bound makes a regression FAIL
+/// rather than hang the suite.
+fn wait_bounded(
+    waiter: &CompletionWaiter,
+    timeout: std::time::Duration,
+) -> Option<RgOutcome> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(o) = waiter.try_wait() {
+            return Some(o);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Regression for H-74 (idx 74, "Improper cleanup on thrown exception"): an
+/// unwind — a panic, or the exit-committed rethrow (FATAL/proc_exit) that
+/// parallel vacuum/COPY/nbtsort deliberately resume through the runtime — up
+/// through a morsel task frame must not strand the finalization protocol.
+///
+/// Before the RAII guards (PinSettleGuard / ActiveWorkerGuard /
+/// LedgerLeaveGuard in sched.rs), the pin-board settle, the `active_workers`
+/// decrement and the ledger `leave` were straight-line code AFTER the task
+/// body. An unwind skipped them: the panicking worker's pin stayed PINNED
+/// forever, so `fin_counter` never reached zero, `last_out` never ran, the
+/// slot stayed owned and the RG (plus every CompletionWaiter on it) wedged —
+/// permanently, and process-globally across all sessions. This test forces
+/// one such unwind and requires (a) the panicking RG to still complete
+/// (Aborted, via the ordinary drain) and (b) the scheduler to keep admitting
+/// and completing fresh work.
+#[test]
+fn unwind_through_morsel_frame_does_not_wedge_finalization() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 4,
+        standbys: 1,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+
+    struct PanicWork {
+        panicked: AtomicBool,
+    }
+    impl TaskSetWork for PanicWork {
+        fn run_morsel(&self, _w: usize, _r: MorselRange) {
+            // Exactly one worker unwinds through its task frame; the others
+            // keep the slot active so the abort is coordinated normally.
+            if self
+                .panicked
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                panic!("injected unwind through a morsel task frame (H-74)");
+            }
+            std::thread::sleep(std::time::Duration::from_micros(20));
+        }
+        fn finalize(&self) {}
+    }
+
+    let work = Arc::new(PanicWork { panicked: AtomicBool::new(false) });
+    let (_h, waiter) = rt.submit(QuerySpec {
+        query_id: 74,
+        tasksets: vec![TaskSetSpec {
+            source: Arc::new(SyntheticMorselSource::new(1 << 20)),
+            work: work.clone() as Arc<dyn TaskSetWork>,
+            deps: vec![],
+        }],
+    });
+
+    // The wedge (pre-fix) would hang here forever.
+    let outcome = wait_bounded(&waiter, std::time::Duration::from_secs(10));
+    assert_eq!(
+        outcome,
+        Some(RgOutcome::Aborted),
+        "an unwind through the morsel frame wedged the finalization protocol"
+    );
+
+    // Cross-session damage check: the scheduler must still admit and finish
+    // fresh work (permits/slots/pins not corrupted by the unwind).
+    let clean = SyntheticWork::new(256, None, 0);
+    let (_h2, w2) =
+        rt.submit(spec_one(&clean, Arc::new(SyntheticMorselSource::new(256))));
+    let outcome2 = wait_bounded(&w2, std::time::Duration::from_secs(10));
+    assert_eq!(
+        outcome2,
+        Some(RgOutcome::Completed),
+        "runtime wedged for subsequent work after an unwind"
+    );
+    clean.assert_all_executed_once();
+
+    pool.shutdown();
 }

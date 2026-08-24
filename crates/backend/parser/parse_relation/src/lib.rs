@@ -2122,6 +2122,13 @@ fn expandJoin<'mcx>(
     let mut colnames = NodeList::nil();
     let mut colvars = NodeList::nil();
     for (i, (colname, avar)) in eref.colnames.iter().zip(rte.joinaliasvars.iter()).enumerate() {
+        // C parse_relation.c: a dropped join column is a NULL cell; this port
+        // marks it with a null Const (AcquireRewriteLocks). Omit dropped columns
+        // (the include_dropped=false behavior used by "join.*" expansion) rather
+        // than mis-emitting a merged-USING-column Var for the sentinel.
+        if matches!(avar.as_const(), Some(c) if c.constisnull) {
+            continue;
+        }
         colnames.lappend(mcx, colname)?;
         let varnode = if let Some(v) = avar.as_var() {
             Var {

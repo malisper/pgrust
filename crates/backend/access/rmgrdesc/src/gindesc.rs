@@ -13,25 +13,29 @@ const GIN_META_PAGE_SIZE: usize = core::mem::size_of::<GinMetaPageData>();
 const ITEM_POINTER_SIZE: usize = 6;
 
 fn desc_recompress_leaf(buf: &mut StringInfo<'_>, insert_data: &[u8]) -> PgResult<()> {
-    let nactions = u16::from_ne_bytes(insert_data[0..2].try_into().unwrap()) as usize;
-    let mut walbuf = &insert_data[2..];
+    // ginxlogRecompressDataLeaf: nactions (uint16) followed by the walbuf stream.
+    let rec = Rec(insert_data);
+    let nactions = rec.u16(0, "ginxlogRecompressDataLeaf")? as usize;
+    // Cursor into insert_data, mirroring C's advancing `walbuf` pointer.
+    let mut pos = 2usize;
 
     appendf!(buf, " {nactions} segments:")?;
 
     for _ in 0..nactions {
-        let a_segno = walbuf[0];
-        let a_action = walbuf[1];
-        walbuf = &walbuf[2..];
+        let a_segno = rec.u8(pos, "ginxlogRecompressDataLeaf")?;
+        let a_action = rec.u8(pos + 1, "ginxlogRecompressDataLeaf")?;
+        pos += 2;
 
         if a_action == GIN_SEGMENT_INSERT || a_action == GIN_SEGMENT_REPLACE {
-            let nbytes = u16::from_ne_bytes(walbuf[6..8].try_into().unwrap()) as usize;
-            walbuf = &walbuf[SHORTALIGN(size_of_gin_posting_list(nbytes))..];
+            // GinPostingList: nbytes is a uint16 at offset 6 of the posting list.
+            let nbytes = rec.u16(pos + 6, "ginxlogRecompressDataLeaf")? as usize;
+            pos += SHORTALIGN(size_of_gin_posting_list(nbytes));
         }
 
         let mut nitems = 0u16;
         if a_action == GIN_SEGMENT_ADDITEMS {
-            nitems = u16::from_ne_bytes(walbuf[0..2].try_into().unwrap());
-            walbuf = &walbuf[2 + nitems as usize * ITEM_POINTER_SIZE..];
+            nitems = rec.u16(pos, "ginxlogRecompressDataLeaf")?;
+            pos += 2 + nitems as usize * ITEM_POINTER_SIZE;
         }
 
         match a_action {
@@ -86,10 +90,11 @@ pub fn gin_desc(buf: &mut StringInfo<'_>, record: &XLogReaderState) -> PgResult<
                 let payload = block_data(record, 0);
                 if flags & GIN_INSERT_ISDATA == 0 {
                     // ginxlogInsertEntry: offset 0, isDelete 2.
+                    let is_delete = Rec(payload).u8(2, "ginxlogInsertEntry")?;
                     appendf!(
                         buf,
                         " isdelete: {}",
-                        if payload[2] != 0 { 'T' } else { 'F' }
+                        if is_delete != 0 { 'T' } else { 'F' }
                     )?;
                 } else if flags & GIN_INSERT_ISLEAF != 0 {
                     desc_recompress_leaf(buf, payload)?;

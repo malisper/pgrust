@@ -12,31 +12,69 @@ use ::types_fmgr::{
 
 use crate::parser::{self, TParser};
 
+use ::std::cell::Cell;
+use ::std::rc::Rc;
+
 // pg_ts_parser.dat: the 'default' parser row.
 pub const DEFAULT_PARSER_OID: ::types_core::Oid = 3722;
 
+// Owns the parser handed across the fmgr boundary plus its wide-char buffers
+// (the TParser's Drop frees them). In C the TParser lives in
+// CurrentMemoryContext, so an ERROR between prsd_start and prsd_end resets that
+// context and reclaims it; here the Box would instead leak because error
+// unwinding skips prsd_end. `armed` — shared with the reset callback that
+// prsd_start registers on that same context — makes reclamation happen on
+// EVERY exit path: whichever of prsd_end or the context reset runs first claims
+// the flag (replace(false)) and frees the Box exactly once; the other becomes a
+// no-op. The flag is an Rc, so it outlives the Box and is safe to consult from
+// the reset callback even after prsd_end has freed the parser.
+struct ParserHandle {
+    armed: Rc<Cell<bool>>,
+    parser: TParser,
+}
+
 // Internal-arg contract (mirrors the C fmgr shapes; callers are ts_parse /
-// ts_cache resolving these by OID):
-//   prsd_start(str *const u8, len i32) -> *mut TParser, Box-allocated; the
-//     input buffer is borrowed and must outlive the parser.
-//   prsd_nexttoken(*mut TParser, t *mut *const u8, len *mut i32) -> i32 type
-//     (0 = done); *t points into the input buffer.
-//   prsd_end(*mut TParser) frees it (Box::from_raw).
+// ts_cache resolving these by OID). The returned pointer is opaque to callers,
+// who only hand it back to prsd_nexttoken/prsd_end:
+//   prsd_start(str *const u8, len i32) -> *mut ParserHandle, Box-allocated and
+//     tied to the result memory context (freed on context reset if prsd_end is
+//     skipped by error unwinding); the input buffer is borrowed and must
+//     outlive the parser.
+//   prsd_nexttoken(*mut ParserHandle, t *mut *const u8, len *mut i32) -> i32
+//     type (0 = done); *t points into the input buffer.
+//   prsd_end(*mut ParserHandle) frees it eagerly (Box::from_raw).
 //   prsd_lextype(_) -> *mut Vec<ts_locale::LexDescr>; caller takes ownership.
 pub fn fc_prsd_start(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let str_ptr = fcinfo.arg(0).as_usize() as *const u8;
     let len = fcinfo.arg(1).as_i32();
-    let prs = parser::tparser_init(fcinfo.result_mcx(), str_ptr, len.max(0) as usize)?;
-    Ok(Datum::from_usize(Box::into_raw(Box::new(prs)) as usize))
+    let mcx = fcinfo.result_mcx();
+    let parser = parser::tparser_init(mcx, str_ptr, len.max(0) as usize)?;
+    let armed = Rc::new(Cell::new(true));
+    let raw = Box::into_raw(Box::new(ParserHandle {
+        armed: Rc::clone(&armed),
+        parser,
+    }));
+    // C's error cleanup resets CurrentMemoryContext, which reclaims the parser;
+    // reproduce that here by reclaiming the Box on context reset unless prsd_end
+    // already claimed it. prsd_end only runs before any reset on the normal
+    // path, so the freed `raw` is never revisited.
+    mcx.context().register_reset_callback(move || {
+        if armed.replace(false) {
+            // SAFETY: armed was true, so prsd_end did not run; `raw` is the live
+            // Box allocated above and is reclaimed exactly once here.
+            drop(unsafe { Box::from_raw(raw) });
+        }
+    });
+    Ok(Datum::from_usize(raw as usize))
 }
 
 pub fn fc_prsd_nexttoken(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let prs_ptr = fcinfo.arg(0).as_usize() as *mut TParser;
+    let handle_ptr = fcinfo.arg(0).as_usize() as *mut ParserHandle;
     let t = fcinfo.arg(1).as_usize() as *mut *const u8;
     let len = fcinfo.arg(2).as_usize() as *mut i32;
     // SAFETY: internal-arg contract above; pointers come from prsd_start and
     // the caller's out-params.
-    let prs = unsafe { &mut *prs_ptr };
+    let prs = unsafe { &mut (*handle_ptr).parser };
     if !parser::tparser_get(prs)? {
         return Ok(Datum::from_i32(0));
     }
@@ -49,9 +87,15 @@ pub fn fc_prsd_nexttoken(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 }
 
 pub fn fc_prsd_end(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let prs_ptr = fcinfo.arg(0).as_usize() as *mut TParser;
-    // SAFETY: internal-arg contract; pointer originates from prsd_start.
-    drop(unsafe { Box::from_raw(prs_ptr) });
+    let handle_ptr = fcinfo.arg(0).as_usize() as *mut ParserHandle;
+    // SAFETY: internal-arg contract; pointer originates from prsd_start and, on
+    // the normal path, prsd_end runs before any context reset, so the handle is
+    // live. Claim the flag so the reset callback won't also free it.
+    let armed = unsafe { (*handle_ptr).armed.replace(false) };
+    if armed {
+        // SAFETY: we claimed the parser, so this reclaims the Box exactly once.
+        drop(unsafe { Box::from_raw(handle_ptr) });
+    }
     Ok(Datum::null())
 }
 

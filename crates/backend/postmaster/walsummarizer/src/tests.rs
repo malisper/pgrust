@@ -25,6 +25,25 @@ fn wal_summary_filename_rejects_noise() {
 }
 
 #[test]
+fn require_record_len_rejects_short_payloads() {
+    // A short/empty untrusted WAL payload must produce a catchable
+    // ERRCODE_DATA_CORRUPTED error rather than a slice-OOB panic.
+    let err = require_record_len(&[], 4, "XLOG_CHECKPOINT_REDO", "test").err().unwrap();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+
+    let err = require_record_len(&[0u8; 3], 4, "XLOG_CHECKPOINT_REDO", "test").err().unwrap();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+
+    // ntablespaces-driven size: 8-byte header claiming one tablespace needs 12.
+    let err = require_record_len(&[0u8; 8], 8 + 4, "XLOG_DBASE_DROP", "test").err().unwrap();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+
+    // Exactly enough, and more than enough, both pass.
+    assert!(require_record_len(&[0u8; 4], 4, "XLOG_CHECKPOINT_REDO", "test").is_ok());
+    assert!(require_record_len(&[0u8; 88], 4, "XLOG_CHECKPOINT_REDO", "test").is_ok());
+}
+
+#[test]
 fn diff_ms_rounds_up_and_clamps() {
     assert_eq!(diff_ms(0, 0), 0);
     assert_eq!(diff_ms(10, 5), 0);
@@ -254,7 +273,7 @@ mod contents_rows {
     fn contents_rows_missing_file_is_c_open_error() {
         fd_setup();
         let dir = scratch_summaries_dir();
-        let err = wal_summary_contents_rows_in(&dir, 7, 0x7000, 0x8000).unwrap_err();
+        let err = wal_summary_contents_rows_in(&dir, 7, 0x7000, 0x8000).err().unwrap();
         assert!(
             err.message().starts_with("could not open file \""),
             "{}",

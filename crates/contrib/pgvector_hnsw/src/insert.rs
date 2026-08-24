@@ -209,7 +209,29 @@ fn add_element_on_disk(
     let npage: *mut u8;
     let mut state: Option<PgBox<'_, GenericXLogState>> = None;
 
+    // The page-chain walk below follows on-disk `nextblkno` links, which are
+    // untrusted (a hostile/corrupt page image can point them into a cycle).
+    // Bound the walk by the relation's block count: a cycle-free chain visits
+    // only distinct existing blocks, so more than `max_blocks` iterations
+    // proves the chain does not terminate. Each iteration also services
+    // pending interrupts so a long (or cyclic) walk stays cancellable, and a
+    // bound overrun raises a catchable index-corruption error rather than
+    // spinning INSERT forever.
+    let max_blocks = bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)?;
+    let mut walked: BlockNumber = 0;
+
     loop {
+        postgres_seams::check_for_interrupts::call()?;
+        if walked >= max_blocks {
+            return Err(PgError::error(format!(
+                "hnsw index \"{}\" page chain does not terminate (cycle detected)",
+                index.name()
+            ))
+            .with_sqlstate(types_error::ERRCODE_INDEX_CORRUPTED)
+            .into());
+        }
+        walked += 1;
+
         buf = bufmgr::ReadBuffer(index, current_page)?;
         LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE)?;
 

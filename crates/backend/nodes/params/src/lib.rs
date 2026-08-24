@@ -116,7 +116,13 @@ pub fn build_param_log_string<'mcx>(
             // SAFETY: out functions return a NUL-terminated cstring datum,
             // consumed before finfo scratch dies.
             let s = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
-            conv::append_string_info_string_quoted(&mut buf, s.to_str().expect("non-UTF-8 output"), maxlen)?;
+            // Parameter-log detail (STATEMENT/DETAIL); a type's text output may
+            // be non-UTF-8 in a SQL_ASCII database. Use lossy, not a panic.
+            conv::append_string_info_string_quoted(
+                &mut buf,
+                &String::from_utf8_lossy(s.to_bytes()),
+                maxlen,
+            )?;
         }
     }
     Ok(Some(buf))

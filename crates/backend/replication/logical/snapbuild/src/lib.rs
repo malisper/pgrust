@@ -18,7 +18,9 @@ use types_core::{
     TransactionIdIsValid, TransactionIdPrecedes, TransactionIdPrecedesOrEquals, XLogRecPtr,
 };
 use xact::XACT_XINFO_HAS_INVALS;
-use types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG2, DEBUG3, ERROR, LOG};
+use types_error::{
+    ErrorLocation, PgResult, DEBUG1, DEBUG2, DEBUG3, ERRCODE_DATA_CORRUPTED, ERROR, LOG,
+};
 use types_snapshot::{SnapshotData, SNAPSHOT_HISTORIC_MVCC};
 
 pub use ondisk::{
@@ -982,7 +984,24 @@ impl SnapBuild {
             return Ok(false);
         };
 
-        if ondisk.state < Consistent as i32 {
+        // The on-disk state is a file-controlled i32; validate it exhaustively
+        // before trusting it. A corrupt/truncated .snap file can carry any
+        // value, including ones outside the SnapBuildState enum range. Raise a
+        // catchable corruption ERROR (as C does for other on-disk fields)
+        // rather than panicking, so only this decoding session fails.
+        let Some(ondisk_state) = SnapBuildState::from_i32(ondisk.state) else {
+            return ereport(ERROR)
+                .errcode(ERRCODE_DATA_CORRUPTED)
+                .errmsg(format!(
+                    "snapbuild state file \"{}\" has invalid state value: {}",
+                    ondisk::snapshot_path(lsn),
+                    ondisk.state
+                ))
+                .finish(loc("SnapBuildRestore"))
+                .map(|_| false);
+        };
+
+        if ondisk_state < Consistent {
             return Ok(false);
         }
 
@@ -995,7 +1014,7 @@ impl SnapBuild {
 
         self.xmin = ondisk.xmin;
         self.xmax = ondisk.xmax;
-        self.state = SnapBuildState::from_i32(ondisk.state).expect("state validated above");
+        self.state = ondisk_state;
 
         if !ondisk.committed.is_empty() {
             self.committed_xcnt_space = ondisk.committed.len();

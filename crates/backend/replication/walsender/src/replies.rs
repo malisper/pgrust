@@ -208,10 +208,10 @@ fn PhysicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
     let s = slot::MyReplicationSlot().expect("PhysicalConfirmReceivedLocation: no slot");
 
     let changed = s.with_mutex(|| {
-        let mut d = s.data.get();
+        let mut d = unsafe { s.data.get() };
         if d.restart_lsn != lsn {
             d.restart_lsn = lsn;
-            s.data.set(d);
+            unsafe { s.data.set(d) };
             true
         } else {
             false
@@ -244,7 +244,7 @@ fn PhysicalReplicationSlotNewXmin(
     let normal = |x: types_core::TransactionId| x >= FirstNormalTransactionId;
     let changed = slot.with_mutex(|| {
         my_proc().xmin.value.store(InvalidTransactionId, std::sync::atomic::Ordering::Relaxed);
-        let mut data = slot.data.get();
+        let mut data = unsafe { slot.data.get() };
         let mut changed = false;
         // Physical replication doesn't need the xmin/effective_xmin
         // interlock (missed increases only cost query cancellations):
@@ -254,16 +254,16 @@ fn PhysicalReplicationSlotNewXmin(
         {
             changed = true;
             data.xmin = feedback_xmin;
-            slot.effective_xmin.set(feedback_xmin);
+            unsafe { slot.effective_xmin.set(feedback_xmin) };
         }
         if !normal(data.catalog_xmin) || !normal(feedback_catalog_xmin)
             || TransactionIdPrecedes(data.catalog_xmin, feedback_catalog_xmin)
         {
             changed = true;
             data.catalog_xmin = feedback_catalog_xmin;
-            slot.effective_catalog_xmin.set(feedback_catalog_xmin);
+            unsafe { slot.effective_catalog_xmin.set(feedback_catalog_xmin) };
         }
-        slot.data.set(data);
+        unsafe { slot.data.set(data) };
         changed
     });
 

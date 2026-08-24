@@ -4,6 +4,7 @@
 //! repr(C), layout-pinned in `tests/layout.rs`); all integers LE.
 
 use crate::enc::Wrapper;
+use crate::rowid::MAX_GRANULES_PER_PART;
 use crate::wire::{crc32c, put_bytes, put_u16, put_u32, put_u64, put_u8, Cur};
 use crate::{FormatError, FormatResult, FORMAT_VERSION};
 
@@ -423,8 +424,25 @@ impl FooterFixed {
         // The grain must sit on the SB-10 ladder, and the geometry echoes
         // must agree with the grain-parameterized closed forms (spec §5.3).
         let grain = crate::geom::GranuleGrain::from_rows(granule_rows)?;
-        if granule_count != crate::geom::granule_count_at(rows, grain)
-            || band_count != crate::geom::band_count_at(rows, grain)
+        // The granule ordinal is a 19-bit rowid field (rowid §10): a part may
+        // address at most MAX_GRANULES_PER_PART granules regardless of grain.
+        // Enforcing this on the read side keeps an out-of-range granule_count
+        // from surviving to pack time, where pack_rowid would overflow the
+        // granule field into the neighboring part's rowid space.
+        // Grain-independent: the field width never moves.
+        if granule_count > MAX_GRANULES_PER_PART {
+            return Err(FormatError::Corrupt {
+                at: "FooterFixed granule_count > MAX_GRANULES_PER_PART",
+            });
+        }
+        // Compare in u64: the closed forms are untruncated (geom §), so a
+        // hostile footer storing the mod-2^32 residue of an inconsistent
+        // (rows, granule_count/band_count) can no longer alias the true value
+        // (idx 253). Widening the stored u32 also rejects any true count that
+        // does not fit u32 — band_count in particular is not bounded by the
+        // MAX_GRANULES_PER_PART reject above.
+        if (granule_count as u64) != crate::geom::granule_count_at(rows, grain)
+            || (band_count as u64) != crate::geom::band_count_at(rows, grain)
         {
             return Err(FormatError::Corrupt {
                 at: "FooterFixed geometry echo",

@@ -572,6 +572,18 @@ impl<'mcx> Bitmapset<'mcx> {
         if self.is_empty() || prevbit == 0 {
             return -2;
         }
+        // C's bms_prev_member documents (but cannot enforce) that `prevbit` is
+        // in [-1, nwords*BITS_PER_BITMAPWORD]: -1 restarts reverse iteration and
+        // the upper bound is one past the highest representable bit. Since this
+        // is a *safe* fn, enforce that contract here instead of relying on the
+        // caller: any out-of-range value would make wordnum(prevbit) index past
+        // the words buffer in the raw reads below. Out-of-range inputs (e.g.
+        // negative values other than -1, which wrap to a huge usize in wordnum,
+        // or values above the buffer) yield the exhausted sentinel -2.
+        let nbits = self.nwords as i64 * BITS_PER_BITMAPWORD as i64;
+        if prevbit < -1 || prevbit as i64 > nbits {
+            return -2;
+        }
         let prevbit = if prevbit == -1 {
             self.nwords * BITS_PER_BITMAPWORD as i32 - 1
         } else {

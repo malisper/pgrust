@@ -69,6 +69,20 @@ fn truncate_roundtrip() {
 }
 
 #[test]
+fn truncate_rejects_lying_relid_count_without_huge_alloc() {
+    // A tiny hostile message declaring nrelids = u32::MAX with an empty relid
+    // body must error out (insufficient data) rather than pre-allocating ~16
+    // GiB. The capacity is bounded by the remaining bytes, so this returns a
+    // catchable protocol error, not an OOM abort.
+    let mut body = Vec::new();
+    send_int32(&mut body, u32::MAX); // nrelids
+    send_int8(&mut body, 0); // flags, no relids follow
+    let mut r = Reader::new(&body);
+    let err = logicalrep_read_truncate(&mut r).err().unwrap();
+    let _ = err;
+}
+
+#[test]
 fn message_wire_layout() {
     let mut out = Vec::new();
     logicalrep_write_message(&mut out, InvalidTransactionId, 0x10, true, "pfx", b"payload");

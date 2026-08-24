@@ -12,7 +12,7 @@
 //! fingerprint — hot-shape SHARE this entry); warm replays them.
 
 use crate::answer::{AnswerCol, AnswerSet, BytesBuild};
-use crate::bank::Bank;
+use crate::bank::{Bank, BankIdent};
 use crate::engine::{CVerdict, DictFace, SqeCtx};
 use crate::exec::{publish_cache, replay_cache};
 use crate::ir::*;
@@ -61,7 +61,18 @@ fn fg_of(cache: &crate::engine::PredCache, ui: usize) -> Option<FG> {
 /// per fingerprint (a standing face: planes are immutable and first-
 /// publish-wins, so the expansion is derived data — rebuilding it was a
 /// measured ~0.8-1.4ms tax on every hot-shape replay).
-static FG_MEMO: std::sync::Mutex<Option<HashMap<ConjFp, Arc<Vec<FG>>>>> =
+///
+/// [race-118] The key carries the BANK IDENTITY, not just the predicate
+/// fingerprint. The memoized value is the survivor granule/rowlist set of a
+/// predicate evaluated over a SPECIFIC bank; a `ConjFp`-only key let a
+/// concurrent session's entry, produced from a DIFFERENT relation whose
+/// column shapes yield the same structural fingerprint (or the same
+/// relation at a different data generation), be replayed as this
+/// statement's survivors — cross-session wrong results / data exposure,
+/// since the query-boundary clear (`clear_fg_memo`) is not exclusive in the
+/// thread-per-session process. `(BankIdent, ConjFp)` makes another bank's
+/// entries unreachable while preserving legitimate same-bank reuse.
+static FG_MEMO: std::sync::Mutex<Option<HashMap<(BankIdent, ConjFp), Arc<Vec<FG>>>>> =
     std::sync::Mutex::new(None);
 
 /// [ruling] the plane EXPANSION is derived data — per-query-run.
@@ -71,10 +82,20 @@ pub fn clear_fg_memo() {
     }
 }
 
-fn fg_from_cache(pool: &Pool, fp: &ConjFp, cache: &crate::engine::PredCache) -> Arc<Vec<FG>> {
+fn fg_from_cache(
+    bank: &Bank,
+    pool: &Pool,
+    fp: &ConjFp,
+    cache: &crate::engine::PredCache,
+) -> Arc<Vec<FG>> {
+    // [race-118] Qualify the fingerprint with the bank's data identity so a
+    // colliding fingerprint from another relation/generation (possibly a
+    // concurrent session's entry) can never be replayed as this bank's
+    // survivors.
+    let key = (bank.ident(), fp.clone());
     {
         let m = FG_MEMO.lock().unwrap();
-        if let Some(v) = m.as_ref().and_then(|m| m.get(fp)) {
+        if let Some(v) = m.as_ref().and_then(|m| m.get(&key)) {
             return v.clone();
         }
     }
@@ -95,7 +116,7 @@ fn fg_from_cache(pool: &Pool, fp: &ConjFp, cache: &crate::engine::PredCache) -> 
     FG_MEMO.lock()
         .unwrap()
         .get_or_insert_with(HashMap::new)
-        .entry(fp.clone())
+        .entry(key)
         .or_insert_with(|| out.clone())
         .clone()
 }
@@ -113,7 +134,7 @@ pub(crate) fn final_granules(
         return None;
     }
     let cache = crate::exec::replay_cache_at(ctx, node, &full)?;
-    Some(fg_from_cache(ctx.pool, &full, &cache))
+    Some(fg_from_cache(ctx.bank, ctx.pool, &full, &cache))
 }
 
 /// [sqe-m2] Publish the FINAL survivor plane (post-residue rowlists,
@@ -156,7 +177,7 @@ pub(crate) fn frame_granules(
         pred.frame().iter().map(|t| super::col_width(bank, t.col)).collect();
 
     if let Some(cache) = replay_cache(ctx, node) {
-        return fg_from_cache(pool, &pred.frame_fingerprint(), &cache);
+        return fg_from_cache(bank, pool, &pred.frame_fingerprint(), &cache);
     }
 
     // COLD: flat-SMA zone consult per frame term, decode + filter the
@@ -947,6 +968,37 @@ pub(crate) fn render_bytes(map: &FxBytesMap, node: &PlanNode) -> AnswerSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [race-118] The FG_MEMO key must carry the bank's data identity, not
+    /// the predicate fingerprint alone. Two banks with an IDENTICAL
+    /// structural fingerprint (a colliding predicate on a different relation,
+    /// or the same relation at a different data generation) must occupy
+    /// DISTINCT memo slots, so one session's survivor expansion can never be
+    /// replayed as another's. A same-identity + same-fingerprint probe must
+    /// still hit (legitimate hot-shape reuse preserved).
+    #[test]
+    fn fg_memo_key_scoped_by_bank_identity() {
+        let fp = ConjFp::default();
+        let mut memo: HashMap<(BankIdent, ConjFp), u32> = HashMap::new();
+
+        let bank_a = BankIdent { db: 5, relfilenumber: 100, gen: 1 };
+        // Same relation, NEXT data generation — must not alias bank_a.
+        let bank_a_next = BankIdent { db: 5, relfilenumber: 100, gen: 2 };
+        // Different relation, SAME structural fingerprint — the attacker's
+        // colliding table.
+        let bank_b = BankIdent { db: 5, relfilenumber: 200, gen: 1 };
+
+        memo.insert((bank_a, fp.clone()), 1);
+        memo.insert((bank_a_next, fp.clone()), 2);
+        memo.insert((bank_b, fp.clone()), 3);
+
+        assert_eq!(memo.len(), 3, "identical fingerprint must not collapse across bank identities");
+        assert_eq!(memo.get(&(bank_a, fp.clone())), Some(&1));
+        assert_eq!(memo.get(&(bank_a_next, fp.clone())), Some(&2));
+        assert_eq!(memo.get(&(bank_b, fp.clone())), Some(&3));
+        // Legitimate reuse: the same identity + fingerprint hits its own slot.
+        assert_eq!(memo.get(&(bank_a, fp)), Some(&1));
+    }
 
     /// [emitcap-audit] `render_bytes` under the SERVER posture for a pushed
     /// bound — `order = None` + a NATIVE (count DESC) `params.topk` — must

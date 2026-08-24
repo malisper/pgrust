@@ -6,7 +6,7 @@ use ::bufmgr_seams::BufferPin;
 use ::types_core::xact::InvalidTransactionId;
 use ::types_core::xact::TransactionIdIsValid;
 use ::types_core::{GlobalVisStateHandle, TransactionId};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use ::types_rel::RelationData;
 use ::types_snapshot::SnapshotData;
 use ::types_storage::bufpage::ItemIdData;
@@ -16,8 +16,17 @@ use ::types_tuple::{
     ItemPointerIsValid, ItemPointerSetOffsetNumber, HEAP_XMAX_INVALID,
 };
 
-use crate::{HeapCheckForSerializableConflictOut, HeapTupleHeaderGetUpdateXid};
+use crate::{check_for_interrupts, HeapCheckForSerializableConflictOut, HeapTupleHeaderGetUpdateXid};
 use heapam_visibility_seams as hv_seam;
+
+/// Raise a catchable data-corruption error (ERRCODE_DATA_CORRUPTED).
+#[cold]
+#[inline(never)]
+fn data_corrupted<T>(msg: String) -> PgResult<T> {
+    let mut e = PgError::error(msg);
+    e.sqlstate = ERRCODE_DATA_CORRUPTED;
+    Err(Box::new(e))
+}
 
 pub struct HeapFetchResult {
     pub found: bool,
@@ -208,8 +217,28 @@ pub fn heap_hot_search_buffer<'p, 'mcx>(
     let page = pin.page();
     let mut result_tid = tid;
 
+    // A HOT chain lives entirely within one page, so a valid chain visits each
+    // line pointer at most once: it can never have more members than the page
+    // has offsets (plus the one leading redirect follow at chain start). A
+    // crafted page with a t_ctid cycle would otherwise spin here forever while
+    // holding the buffer pin/share lock, so bound the walk and raise a
+    // catchable corruption error on overrun rather than looping (CWE-835).
+    let maxoff = page.max_offset_number();
+    let mut nvisited: usize = 0;
+
     loop {
-        if offnum < FirstOffsetNumber || offnum > page.max_offset_number() {
+        // Keep long / adversarial walks cancellable (pg_cancel_backend etc.).
+        check_for_interrupts()?;
+
+        nvisited += 1;
+        if nvisited > maxoff as usize + 1 {
+            return data_corrupted(format!(
+                "circular HOT chain detected in block {} of relation {}",
+                blkno, relation.rd_id
+            ));
+        }
+
+        if offnum < FirstOffsetNumber || offnum > maxoff {
             break;
         }
 
@@ -321,6 +350,10 @@ pub fn heap_get_latest_tid<'mcx>(
     let mut prior_xmax: TransactionId = InvalidTransactionId; // cannot check first XMIN
 
     loop {
+        // t_ctid links span pages, so no single-page bound applies here; keep
+        // the walk cancellable in case a crafted chain never terminates.
+        check_for_interrupts()?;
+
         let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(
             relation,
             ItemPointerGetBlockNumber(&ctid),

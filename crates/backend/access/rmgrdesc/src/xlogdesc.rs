@@ -68,7 +68,14 @@ pub fn xlog_desc(buf: &mut StringInfo<'_>, record: &XLogReaderState) -> PgResult
     let info = rec_info(record) & !XLR_INFO_MASK;
 
     if info == XLOG_CHECKPOINT_SHUTDOWN || info == XLOG_CHECKPOINT_ONLINE {
-        let checkpoint = controldata_utils::CheckPoint::from_bytes(rec.0);
+        // CheckPoint::from_bytes indexes the payload unchecked, so bound the
+        // slice to exactly SIZEOF_CHECKPOINT bytes first and surface
+        // record_truncated on a short record instead of panicking.
+        let cp_bytes = rec
+            .0
+            .get(..controldata_utils::SIZEOF_CHECKPOINT)
+            .ok_or_else(|| crate::record_truncated("CheckPoint"))?;
+        let checkpoint = controldata_utils::CheckPoint::from_bytes(cp_bytes);
         appendf!(
             buf,
             "redo {:X}/{:X}; \

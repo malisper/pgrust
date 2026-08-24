@@ -36,7 +36,14 @@ pub fn guc_name_hash(name: &str) -> u32 {
 }
 
 pub fn fold_name(name: &str) -> String {
-    name.bytes().map(|b| b.to_ascii_lowercase() as char).collect()
+    // ASCII-only case fold, preserving non-ASCII bytes exactly (parity with C's
+    // per-byte tolower). The old `name.bytes().map(|b| b as char)` reinterpreted
+    // each >=0x80 continuation byte as a U+0080..U+00FF code point and re-encoded
+    // it, so the folded insert key diverged from find_index's raw lookup for
+    // legal non-ASCII custom GUC names — every SET leaked a fresh placeholder.
+    name.chars()
+        .map(|c| if c.is_ascii() { c.to_ascii_lowercase() } else { c })
+        .collect()
 }
 
 pub fn convert_guc_name_for_parameter_acl(name: &str) -> String {

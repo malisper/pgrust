@@ -106,10 +106,10 @@ fn setup() {
 fn freelist_len(id: FreeListId) -> i32 {
     let hdr = ProcGlobal();
     let mut n = 0;
-    let mut cur = freelist(hdr, id).get().head;
+    let mut cur = unsafe { freelist(hdr, id).get() }.head;
     while cur != INVALID_PROC_NUMBER {
         n += 1;
-        cur = hdr.allProcs[cur as usize].links.get().next;
+        cur = unsafe { hdr.allProcs[cur as usize].links.get() }.next;
     }
     n
 }
@@ -127,7 +127,7 @@ fn init_proc_global_shapes() {
     assert_eq!(hdr.subxidStates.len(), hdr.allProcs.len());
     assert_eq!(hdr.statusFlags.len(), hdr.allProcs.len());
     assert_eq!(hdr.fpLockGroupsPerBackend, 1);
-    assert_eq!(hdr.spins_per_delay.get(), DEFAULT_SPINS_PER_DELAY);
+    assert_eq!(unsafe { hdr.spins_per_delay.get() }, DEFAULT_SPINS_PER_DELAY);
     assert_eq!(hdr.startupBufferPinWaitBufId.load(SeqCst), -1);
     assert_eq!(SEMA_CREATED.load(SeqCst), (MAX_BACKENDS + NUM_AUXILIARY_PROCS) as usize);
 
@@ -135,12 +135,12 @@ fn init_proc_global_shapes() {
     assert_eq!(PreparedXactProcsBase(), MAX_BACKENDS + NUM_AUXILIARY_PROCS);
     for i in 0..NUM_AUXILIARY_PROCS {
         let aux = GetPGProcByNumber(AuxiliaryProcsBase() + i);
-        assert!(aux.procgloballist.get().is_none());
+        assert!(unsafe { aux.procgloballist.get() }.is_none());
         assert!(aux.procLatch.is_shared.load(SeqCst));
     }
     let prepared = GetPGProcByNumber(PreparedXactProcsBase());
     assert!(!prepared.procLatch.is_shared.load(SeqCst));
-    assert!(!GetPGProcByNumber(0).fpLockBits.get().is_null());
+    assert!(!unsafe { GetPGProcByNumber(0).fpLockBits.get() }.is_null());
     assert_eq!(GetPGProcByNumber(0).fpInfoLock.tranche, LWTRANCHE_LOCK_FASTPATH as u16);
 
     assert_eq!(
@@ -171,7 +171,7 @@ fn backend_lifecycle_and_lock_groups() {
     assert_eq!(proc.pid.load(SeqCst), 101);
     assert!(proc.isRegularBackend.load(SeqCst));
     assert_eq!(proc.vxid.procNumber.load(SeqCst), procno);
-    assert!(proc.links.get().is_detached());
+    assert!(unsafe { proc.links.get() }.is_detached());
     assert_eq!(
         InitProcess(BackendType::Backend).unwrap_err().message(),
         "you already exist"
@@ -187,7 +187,7 @@ fn backend_lifecycle_and_lock_groups() {
         thread_globals(102);
         InitProcess(BackendType::BgWorker).unwrap();
         let me = MyProc().unwrap();
-        assert!(GetPGProcByNumber(me).procgloballist.get() == Some(FreeListId::Bgworker));
+        assert!(unsafe { GetPGProcByNumber(me).procgloballist.get() } == Some(FreeListId::Bgworker));
         assert!(BecomeLockGroupMember(leader_no, 101).unwrap());
         assert_eq!(GetPGProcByNumber(me).lockGroupLeader.load(SeqCst), leader_no);
         ProcKill(0, 0);

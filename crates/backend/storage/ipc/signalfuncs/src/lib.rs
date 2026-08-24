@@ -37,10 +37,14 @@ fn pg_signal_backend(pid: i32, sig: i32) -> PgResult<i32> {
         return Ok(SIGNAL_BACKEND_ERROR);
     };
 
+    // Resolve the target slot ONCE from the authorized proc; authorization
+    // (proc.roleId, below) and delivery must be the SAME slot. Delivering by
+    // this ProcNumber instead of re-scanning by pid closes the window where
+    // colliding synthetic pids let the two resolve to different backends.
+    let procno = get_number_from_pgproc(proc);
     let role_id = proc.roleId.load(Relaxed);
     let user_id = miscinit_seams::get_user_id::call();
     if role_id == InvalidOid || superuser_seams::superuser_arg::call(role_id)? {
-        let procno = get_number_from_pgproc(proc);
         let backend_type = backend_status::pgstat_get_backend_type_by_proc_number(procno);
         if backend_type == BackendType::AutovacWorker {
             if !acl_seams::has_privs_of_role::call(user_id, ROLE_PG_SIGNAL_AUTOVACUUM_WORKER)? {
@@ -55,7 +59,7 @@ fn pg_signal_backend(pid: i32, sig: i32) -> PgResult<i32> {
         return Ok(SIGNAL_BACKEND_NOPERMISSION);
     }
 
-    if procsignal::SendThreadSignal(pid, sig) != 0 {
+    if procsignal::SendThreadSignalByProcNumber(procno, pid, sig) != 0 {
         warn(format!("could not send signal to process {pid}: No such process"))?;
         return Ok(SIGNAL_BACKEND_ERROR);
     }

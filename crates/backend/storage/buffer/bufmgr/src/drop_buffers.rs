@@ -62,8 +62,9 @@ pub fn DropRelationBuffers(
     for i in 0..NBuffersInited() {
         let desc = GetBufferDescriptor(i);
         // Unlocked precheck, safe as in C (both tag halves change under the
-        // mapping lock; a false miss here was concurrently invalidated).
-        if !tag_matches(&desc.tag(), &rlocator.locator) {
+        // mapping lock; a false miss here was concurrently invalidated). Racy
+        // snapshot read: the authoritative test is re-done under LockBufHdr.
+        if !tag_matches(&desc.tag_racy_snapshot(), &rlocator.locator) {
             continue;
         }
         let buf_state = LockBufHdr(desc);
@@ -211,8 +212,9 @@ pub fn DropDatabaseBuffers(dbid: types_core::Oid) -> PgResult<()> {
     smgr_seams::smgr_nblocks_cache_purge_db::call(dbid);
     for i in 0..NBuffersInited() {
         let desc = GetBufferDescriptor(i);
-        // Unlocked precheck, safe as in DropRelationBuffers (C comment).
-        if desc.tag().dbOid != dbid {
+        // Unlocked precheck, safe as in DropRelationBuffers (C comment). Racy
+        // snapshot read: the authoritative test is re-done under LockBufHdr.
+        if desc.tag_racy_snapshot().dbOid != dbid {
             continue;
         }
         let buf_state = LockBufHdr(desc);
@@ -282,7 +284,9 @@ pub fn DropRelationsAllBuffers(smgr_reln: &[RelFileLocatorBackend]) -> PgResult<
 
     for i in 0..NBuffersInited() {
         let desc = GetBufferDescriptor(i);
-        let tag = desc.tag();
+        // Unlocked precheck, safe as in DropRelationBuffers (C comment). Racy
+        // snapshot read; the authoritative tag test is re-done under LockBufHdr.
+        let tag = desc.tag_racy_snapshot();
         let rlocator = if use_bsearch {
             let probe = RelFileLocator::new(tag.spcOid, tag.dbOid, tag.relNumber);
             locators

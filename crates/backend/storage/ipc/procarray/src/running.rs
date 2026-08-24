@@ -64,7 +64,7 @@ pub fn GetRunningTransactionData<R>(
         let mut oldest_database_running_xid = next_xid;
         let mut suboverflowed = false;
 
-        let num_procs = arrayP.numProcs.get() as usize;
+        let num_procs = unsafe { arrayP.numProcs.get() } as usize;
         for index in 0..num_procs {
             // Fetch xid just once - see GetNewTransactionId.
             let xid = hdr.xids[index].read();
@@ -76,14 +76,14 @@ pub fn GetRunningTransactionData<R>(
                 oldest_running_xid = xid;
             }
             if TransactionIdPrecedes(xid, oldest_database_running_xid) {
-                let pgprocno = arrayP.pgprocnos[index].get();
+                let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
                 let proc = &hdr.allProcs[pgprocno as usize];
                 if proc.databaseId.load(Relaxed) == my_database_id {
                     oldest_database_running_xid = xid;
                 }
             }
 
-            if hdr.subxidStates[index].get().overflowed {
+            if unsafe { hdr.subxidStates[index].get() }.overflowed {
                 suboverflowed = true;
             }
 
@@ -95,9 +95,9 @@ pub fn GetRunningTransactionData<R>(
         if !suboverflowed {
             for index in 0..num_procs {
                 // Owners can't add or remove entries while XidGenLock is held.
-                let nsubxids = hdr.subxidStates[index].get().count as usize;
+                let nsubxids = unsafe { hdr.subxidStates[index].get() }.count as usize;
                 if nsubxids > 0 {
-                    let pgprocno = arrayP.pgprocnos[index].get();
+                    let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
                     let proc = &hdr.allProcs[pgprocno as usize];
                     fence(Ordering::Acquire); // pairs with GetNewTransactionId
                     xids.reserve(nsubxids);

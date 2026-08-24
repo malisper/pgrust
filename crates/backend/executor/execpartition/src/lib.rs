@@ -820,7 +820,9 @@ fn no_partition_error(
             let s = unsafe {
                 core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char)
             };
-            Ok(core::str::from_utf8(s.to_bytes()).expect("type output is UTF-8").to_string())
+            // Diagnostic detail (no-partition-found key); a type's text output
+            // may be non-UTF-8 in a SQL_ASCII database. Use lossy, not a panic.
+            Ok(String::from_utf8_lossy(s.to_bytes()).into_owned())
         })()
         .unwrap_or_default();
         keydesc.push_str(&out);

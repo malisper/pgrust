@@ -22,31 +22,31 @@ fn kvpairs_extract_auth() {
 #[test]
 fn kvpairs_malformed() {
     assert_eq!(
-        kv_auth(b"auth=Bearer tok\x01").unwrap_err(),
+        kv_auth(b"auth=Bearer tok\x01").err().unwrap(),
         "Message did not contain a final terminator."
     );
     assert_eq!(
-        kv_auth(b"auth=Bearer tok").unwrap_err(),
+        kv_auth(b"auth=Bearer tok").err().unwrap(),
         "Message contains an unterminated key/value pair."
     );
     assert_eq!(
-        kv_auth(b"noequals\x01\x01").unwrap_err(),
+        kv_auth(b"noequals\x01\x01").err().unwrap(),
         "Message contains a key without a value."
     );
     assert_eq!(
-        kv_auth(b"auth=a\x01auth=b\x01\x01").unwrap_err(),
+        kv_auth(b"auth=a\x01auth=b\x01\x01").err().unwrap(),
         "Message contains multiple auth values."
     );
     assert_eq!(
-        kv_auth(b"au7th=a\x01\x01").unwrap_err(),
+        kv_auth(b"au7th=a\x01\x01").err().unwrap(),
         "Message contains an invalid key name."
     );
     assert_eq!(
-        kv_auth(b"=a\x01\x01").unwrap_err(),
+        kv_auth(b"=a\x01\x01").err().unwrap(),
         "Message contains an empty key name."
     );
     assert_eq!(
-        kv_auth(b"auth=a\x7fb\x01\x01").unwrap_err(),
+        kv_auth(b"auth=a\x7fb\x01\x01").err().unwrap(),
         "Message contains an invalid value."
     );
 }
@@ -97,6 +97,24 @@ fn registry_miss_is_file_error() {
         err.message(),
         "could not access file \"no_such_validator\": No such file or directory"
     );
+}
+
+// Security posture guard (finding idx 93 / CWE-489): the forgeable test
+// validator must exist ONLY in test builds. Its definition, its constant, and
+// its registration in init_seams() are all #[cfg(test)]-gated, so a production
+// binary (built without cfg(test)) contains no builtin validator at all and any
+// validator name — including "oauth_test_validator" — misses the registry and
+// raises 58P01, matching C's dlopen stat miss. This test can only run under
+// cfg(test), where init_seams() DOES register it; it asserts the wiring stays
+// consistent and that unrelated names still miss (the production parity).
+#[test]
+fn test_validator_gated_to_test_builds() {
+    super::init_seams();
+    // In this (test) build the gated validator resolves.
+    assert!(load_validator_library(TEST_VALIDATOR_NAME).is_ok());
+    // Any other name misses the registry exactly as every name would in a
+    // production binary, where no builtin validator is registered.
+    assert!(load_validator_library("some_production_validator").is_err());
 }
 
 #[test]

@@ -131,6 +131,53 @@ pub fn numeric_lane_scale(flags: u16, aux32: u32) -> Result<i32, &'static str> {
     Ok(aux32 as i32)
 }
 
+/// Canonical PathTable STRING form for a shred path (segment chain), the
+/// ONE authority both the writer (`pgrc2_write::shred_jsonb`) and every
+/// read-side path builder (the executor's `->>`/containment recognizers,
+/// the scan lane resolver) speak, since the read side binds lanes by plain
+/// string equality over these strings.
+///
+/// The separator is `.`. A jsonb object key is arbitrary bytes and may
+/// itself contain `.` (or the escape byte), so each segment is escaped
+/// before joining: `\` → `\\`, `.` → `\.`. The map is therefore INJECTIVE
+/// — distinct segment chains never render to the same string. In
+/// particular the single literal key `"a.b"` renders `a\.b` while the
+/// nested chain `a`→`b` renders `a.b`, so a dotted key can never alias a
+/// nested path in the string-equality lane binding (the encoding-confusion
+/// class). Segments free of `.` and `\` render verbatim, so ordinary keys
+/// are byte-for-byte unchanged and existing lanes keep resolving.
+///
+/// Both sides MUST route through this function; a raw `join(".")` on either
+/// side reintroduces the aliasing.
+pub fn encode_shred_path<'a, I>(segs: I) -> String
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut out = String::new();
+    for (i, seg) in segs.into_iter().enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        push_shred_segment(seg, &mut out);
+    }
+    out
+}
+
+/// Append one already-`.`-separated segment to an encoded path, escaping
+/// the separator and the escape byte. Callers that build a path
+/// incrementally (a running prefix + one more key) push `.` themselves
+/// between segments and then call this — the result is byte-identical to
+/// [`encode_shred_path`] over the full chain.
+pub fn push_shred_segment(seg: &str, out: &mut String) {
+    for ch in seg.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '.' => out.push_str("\\."),
+            c => out.push(c),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +213,36 @@ mod tests {
         assert!(numeric_lane_scale(0, 2).is_err(), "flag-absent refuses at any aux32");
         assert_eq!(numeric_lane_scale(STREAMF_LANE_SCALE, 0), Ok(0));
         assert_eq!(numeric_lane_scale(STREAMF_LANE_SCALE, 2), Ok(2));
+    }
+
+    /// The PathTable string form is INJECTIVE across the separator: a
+    /// literal dotted key never renders to the same string as the nested
+    /// chain it would otherwise alias (the encoding-confusion fix), while
+    /// separator-free keys stay verbatim so existing lanes keep resolving.
+    #[test]
+    fn encode_shred_path_disambiguates_dotted_keys() {
+        // Ordinary keys: verbatim, so already-sealed lanes are unchanged.
+        assert_eq!(encode_shred_path(["a"]), "a");
+        assert_eq!(encode_shred_path(["a", "b"]), "a.b");
+        assert_eq!(encode_shred_path(["user", "name"]), "user.name");
+
+        // The aliasing pair now maps to DISTINCT strings.
+        let literal = encode_shred_path(["a.b"]); // single key "a.b"
+        let nested = encode_shred_path(["a", "b"]); // chain a -> b
+        assert_ne!(literal, nested);
+        assert_eq!(literal, "a\\.b");
+        assert_eq!(nested, "a.b");
+
+        // The escape byte itself is escaped, keeping the map injective
+        // even for keys that contain a backslash.
+        assert_eq!(encode_shred_path(["a\\.b"]), "a\\\\\\.b");
+        assert_ne!(encode_shred_path(["a\\", "b"]), encode_shred_path(["a", "b"]));
+
+        // Incremental (prefix + key) building matches the whole-chain form.
+        let mut inc = encode_shred_path(["a"]);
+        inc.push('.');
+        push_shred_segment("b.c", &mut inc);
+        assert_eq!(inc, encode_shred_path(["a", "b.c"]));
     }
 
     /// Non-lane classes classify to None (the refusal direction).

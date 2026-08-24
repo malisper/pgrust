@@ -94,17 +94,21 @@ impl ReplicationSlot {
 }
 
 pub fn SlotIsPhysical(slot: &ReplicationSlot) -> bool {
-    slot.data.get().database == InvalidOid
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.data.get() }.database == InvalidOid
 }
 
 pub fn SlotIsLogical(slot: &ReplicationSlot) -> bool {
-    slot.data.get().database != InvalidOid
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.data.get() }.database != InvalidOid
 }
 
 pub fn ReplicationSlotSetInactiveSince(s: &ReplicationSlot, ts: TimestampTz, acquire_lock: bool) {
     let set = || {
-        if s.data.get().invalidated == RS_INVAL_NONE {
-            s.inactive_since.set(ts);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if unsafe { s.data.get() }.invalidated == RS_INVAL_NONE {
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            unsafe { s.inactive_since.set(ts) };
         }
     };
     if acquire_lock {
@@ -353,13 +357,15 @@ pub fn ReplicationSlotCreate(
     lw(control_lock(), LW_SHARED)?;
     let mut slot: Option<&'static ReplicationSlot> = None;
     for s in ReplicationSlotCtl() {
-        if s.in_use.get() && s.data.get().name.name_str() == name.as_bytes() {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if unsafe { s.in_use.get() } && unsafe { s.data.get() }.name.name_str() == name.as_bytes() {
             return ereport(ERROR)
                 .errcode(ERRCODE_DUPLICATE_OBJECT)
                 .errmsg(format!("replication slot \"{name}\" already exists"))
                 .finish(loc("ReplicationSlotCreate"));
         }
-        if !s.in_use.get() && slot.is_none() {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if !unsafe { s.in_use.get() } && slot.is_none() {
             slot = Some(s);
         }
     }
@@ -373,8 +379,10 @@ pub fn ReplicationSlotCreate(
             .finish(loc("ReplicationSlotCreate"));
     };
 
-    assert!(!slot.in_use.get());
-    assert!(slot.active_pid.get() == 0);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    assert!(!unsafe { slot.in_use.get() });
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    assert!(unsafe { slot.active_pid.get() } == 0);
 
     let mut d = ReplicationSlotPersistentData::default();
     d.name.namestrcpy(name);
@@ -384,27 +392,42 @@ pub fn ReplicationSlotCreate(
     d.two_phase_at = InvalidXLogRecPtr;
     d.failover = failover;
     d.synced = synced as u8;
-    slot.data.set(d);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.data.set(d) };
 
-    slot.just_dirtied.set(false);
-    slot.dirty.set(false);
-    slot.effective_xmin.set(InvalidTransactionId);
-    slot.effective_catalog_xmin.set(InvalidTransactionId);
-    slot.candidate_catalog_xmin.set(InvalidTransactionId);
-    slot.candidate_xmin_lsn.set(InvalidXLogRecPtr);
-    slot.candidate_restart_valid.set(InvalidXLogRecPtr);
-    slot.candidate_restart_lsn.set(InvalidXLogRecPtr);
-    slot.last_saved_confirmed_flush.set(InvalidXLogRecPtr);
-    slot.last_saved_restart_lsn.set(InvalidXLogRecPtr);
-    slot.inactive_since.set(0);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.just_dirtied.set(false) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.dirty.set(false) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.effective_xmin.set(InvalidTransactionId) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.effective_catalog_xmin.set(InvalidTransactionId) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.candidate_catalog_xmin.set(InvalidTransactionId) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.candidate_xmin_lsn.set(InvalidXLogRecPtr) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.candidate_restart_valid.set(InvalidXLogRecPtr) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.candidate_restart_lsn.set(InvalidXLogRecPtr) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.last_saved_confirmed_flush.set(InvalidXLogRecPtr) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.last_saved_restart_lsn.set(InvalidXLogRecPtr) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.inactive_since.set(0) };
 
     CreateSlotOnDisk(slot)?;
 
     lw(control_lock(), LW_EXCLUSIVE)?;
-    slot.in_use.set(true);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.in_use.set(true) };
     slot.with_mutex(|| {
-        assert!(slot.active_pid.get() == 0);
-        slot.active_pid.set(g::MyProcPid());
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        assert!(unsafe { slot.active_pid.get() } == 0);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.active_pid.set(g::MyProcPid()) };
     });
     SetMyReplicationSlot(Some(slot));
     LWLockRelease(control_lock())?;
@@ -428,7 +451,8 @@ pub fn SearchNamedReplicationSlot(
     }
     let mut slot = None;
     for s in ReplicationSlotCtl() {
-        if s.in_use.get() && s.data.get().name.name_str() == name.as_bytes() {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if unsafe { s.in_use.get() } && unsafe { s.data.get() }.name.name_str() == name.as_bytes() {
             slot = Some(s);
             break;
         }
@@ -450,8 +474,10 @@ pub fn ReplicationSlotIndex(slot: &ReplicationSlot) -> i32 {
 pub fn ReplicationSlotName(index: i32) -> PgResult<Option<NameData>> {
     let slot = &ReplicationSlotCtl()[index as usize];
     lw(control_lock(), LW_SHARED)?;
-    let found = if slot.in_use.get() {
-        Some(slot.data.get().name)
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    let found = if unsafe { slot.in_use.get() } {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        Some(unsafe { slot.data.get() }.name)
     } else {
         None
     };
@@ -465,7 +491,8 @@ pub fn ReplicationSlotAcquire(name: &str, nowait: bool, error_if_invalid: bool) 
 
         lw(control_lock(), LW_SHARED)?;
         let s = SearchNamedReplicationSlot(name, false)?;
-        let Some(s) = s.filter(|s| s.in_use.get()) else {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        let Some(s) = s.filter(|s| unsafe { s.in_use.get() }) else {
             LWLockRelease(control_lock())?;
             return ereport(ERROR)
                 .errcode(ERRCODE_UNDEFINED_OBJECT)
@@ -479,14 +506,18 @@ pub fn ReplicationSlotAcquire(name: &str, nowait: bool, error_if_invalid: bool) 
                 ConditionVariablePrepareToSleep(&s.active_cv);
             }
             active_pid = s.with_mutex(|| {
-                if s.active_pid.get() == 0 {
-                    s.active_pid.set(g::MyProcPid());
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                if unsafe { s.active_pid.get() } == 0 {
+                    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                    unsafe { s.active_pid.set(g::MyProcPid()) };
                 }
                 ReplicationSlotSetInactiveSince(s, 0, false);
-                s.active_pid.get()
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { s.active_pid.get() }
             });
         } else {
-            s.active_pid.set(g::MyProcPid());
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            unsafe { s.active_pid.set(g::MyProcPid()) };
             active_pid = g::MyProcPid();
             ReplicationSlotSetInactiveSince(s, 0, true);
         }
@@ -502,7 +533,8 @@ pub fn ReplicationSlotAcquire(name: &str, nowait: bool, error_if_invalid: bool) 
                 .errcode(ERRCODE_OBJECT_IN_USE)
                 .errmsg(format!(
                     "replication slot \"{}\" is active for PID {active_pid}",
-                    name_string(&s.data.get().name)
+                    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                    name_string(&unsafe { s.data.get() }.name)
                 ))
                 .finish(loc("ReplicationSlotAcquire"));
         } else if !nowait {
@@ -511,13 +543,15 @@ pub fn ReplicationSlotAcquire(name: &str, nowait: bool, error_if_invalid: bool) 
 
         SetMyReplicationSlot(Some(s));
 
-        let invalidated = s.data.get().invalidated;
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        let invalidated = unsafe { s.data.get() }.invalidated;
         if error_if_invalid && invalidated != RS_INVAL_NONE {
             return ereport(ERROR)
                 .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                 .errmsg(format!(
                     "can no longer access replication slot \"{}\"",
-                    name_string(&s.data.get().name)
+                    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                    name_string(&unsafe { s.data.get() }.name)
                 ))
                 .errdetail(format!(
                     "This replication slot has been invalidated due to \"{}\".",
@@ -539,7 +573,8 @@ pub fn ReplicationSlotAcquire(name: &str, nowait: bool, error_if_invalid: bool) 
                 .errmsg(walsender_slot_log_message(
                     true,
                     SlotIsLogical(s),
-                    &name_string(&s.data.get().name),
+                    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                    &name_string(&unsafe { s.data.get() }.name),
                 ))
                 .finish(loc("ReplicationSlotAcquire"));
         }
@@ -550,32 +585,40 @@ pub fn ReplicationSlotAcquire(name: &str, nowait: bool, error_if_invalid: bool) 
 
 pub fn ReplicationSlotRelease() -> PgResult<()> {
     let slot = MyReplicationSlot().expect("ReplicationSlotRelease: no slot acquired");
-    assert!(slot.active_pid.get() != 0);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    assert!(unsafe { slot.active_pid.get() } != 0);
 
     // C captures the name/kind up front: an ephemeral slot's storage is gone
     // by the log point below.
     let walsender_log = if walsender_seams::am_walsender() {
-        Some((name_string(&slot.data.get().name), SlotIsLogical(slot)))
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        Some((name_string(&unsafe { slot.data.get() }.name), SlotIsLogical(slot)))
     } else {
         None
     };
 
-    if slot.data.get().persistency == RS_EPHEMERAL {
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    if unsafe { slot.data.get() }.persistency == RS_EPHEMERAL {
         ReplicationSlotDropAcquired()?;
     }
 
-    if !TransactionIdIsValid(slot.data.get().xmin)
-        && TransactionIdIsValid(slot.effective_xmin.get())
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    if !TransactionIdIsValid(unsafe { slot.data.get() }.xmin)
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        && TransactionIdIsValid(unsafe { slot.effective_xmin.get() })
     {
-        slot.with_mutex(|| slot.effective_xmin.set(InvalidTransactionId));
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        slot.with_mutex(|| unsafe { slot.effective_xmin.set(InvalidTransactionId) });
         ReplicationSlotsComputeRequiredXmin(false)?;
     }
 
     let now = GetCurrentTimestamp();
 
-    if slot.data.get().persistency == RS_PERSISTENT {
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    if unsafe { slot.data.get() }.persistency == RS_PERSISTENT {
         slot.with_mutex(|| {
-            slot.active_pid.set(0);
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            unsafe { slot.active_pid.set(0) };
             ReplicationSlotSetInactiveSince(slot, now, false);
         });
         ConditionVariableBroadcast(&slot.active_cv);
@@ -628,14 +671,17 @@ pub fn ReplicationSlotCleanup(synced_only: bool) -> PgResult<()> {
     'restart: loop {
         lw(control_lock(), LW_SHARED)?;
         for s in ReplicationSlotCtl() {
-            if !s.in_use.get() {
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            if !unsafe { s.in_use.get() } {
                 continue;
             }
             let drop_it = s.with_mutex(|| {
-                s.active_pid.get() == g::MyProcPid() && (!synced_only || s.data.get().synced != 0)
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                (unsafe { s.active_pid.get() }) == g::MyProcPid() && (!synced_only || unsafe { s.data.get() }.synced != 0)
             });
             if drop_it {
-                assert!(s.data.get().persistency == RS_TEMPORARY);
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                assert!(unsafe { s.data.get() }.persistency == RS_TEMPORARY);
                 LWLockRelease(control_lock())?;
                 ReplicationSlotDropPtr(s)?;
                 ConditionVariableBroadcast(&s.active_cv);
@@ -652,7 +698,8 @@ pub fn ReplicationSlotDrop(name: &str, nowait: bool) -> PgResult<()> {
 
     ReplicationSlotAcquire(name, nowait, false)?;
 
-    if transam_xlog::RecoveryInProgress() && MyReplicationSlot().unwrap().data.get().synced != 0 {
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    if transam_xlog::RecoveryInProgress() && unsafe { MyReplicationSlot().unwrap().data.get() }.synced != 0 {
         return ereport(ERROR)
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg(format!("cannot drop replication slot \"{name}\""))
@@ -682,7 +729,8 @@ pub fn ReplicationSlotAlter(
     }
 
     if transam_xlog::RecoveryInProgress() {
-        if slot.data.get().synced != 0 {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if unsafe { slot.data.get() }.synced != 0 {
             return ereport(ERROR)
                 .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                 .errmsg(format!("cannot alter replication slot \"{name}\""))
@@ -699,28 +747,35 @@ pub fn ReplicationSlotAlter(
 
     let mut update_slot = false;
     if let Some(failover) = failover {
-        if failover && slot.data.get().persistency == RS_TEMPORARY {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if failover && unsafe { slot.data.get() }.persistency == RS_TEMPORARY {
             return ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("cannot enable failover for a temporary replication slot")
                 .finish(loc("ReplicationSlotAlter"));
         }
-        if slot.data.get().failover != failover {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if unsafe { slot.data.get() }.failover != failover {
             slot.with_mutex(|| {
-                let mut d = slot.data.get();
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                let mut d = unsafe { slot.data.get() };
                 d.failover = failover;
-                slot.data.set(d);
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { slot.data.set(d) };
             });
             update_slot = true;
         }
     }
 
     if let Some(two_phase) = two_phase {
-        if slot.data.get().two_phase != two_phase {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if unsafe { slot.data.get() }.two_phase != two_phase {
             slot.with_mutex(|| {
-                let mut d = slot.data.get();
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                let mut d = unsafe { slot.data.get() };
                 d.two_phase = two_phase;
-                slot.data.set(d);
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { slot.data.set(d) };
             });
             update_slot = true;
         }
@@ -743,7 +798,8 @@ pub fn ReplicationSlotDropAcquired() -> PgResult<()> {
 fn ReplicationSlotDropPtr(slot: &'static ReplicationSlot) -> PgResult<()> {
     lw(allocation_lock(), LW_EXCLUSIVE)?;
 
-    let name = name_string(&slot.data.get().name);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    let name = name_string(&unsafe { slot.data.get() }.name);
     let path = format!("{PG_REPLSLOT_DIR}/{name}");
     let tmppath = format!("{PG_REPLSLOT_DIR}/{name}.tmp");
 
@@ -754,8 +810,10 @@ fn ReplicationSlotDropPtr(slot: &'static ReplicationSlot) -> PgResult<()> {
         g::EndCriticalSection();
     } else {
         let save_errno = errno::current_errno();
-        let fail_softly = slot.data.get().persistency != RS_PERSISTENT;
-        slot.with_mutex(|| slot.active_pid.set(0));
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        let fail_softly = unsafe { slot.data.get() }.persistency != RS_PERSISTENT;
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        slot.with_mutex(|| unsafe { slot.active_pid.set(0) });
         ConditionVariableBroadcast(&slot.active_cv);
         ereport(if fail_softly { WARNING } else { ERROR })
             .with_saved_errno(save_errno)
@@ -765,8 +823,10 @@ fn ReplicationSlotDropPtr(slot: &'static ReplicationSlot) -> PgResult<()> {
     }
 
     lw(control_lock(), LW_EXCLUSIVE)?;
-    slot.active_pid.set(0);
-    slot.in_use.set(false);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.active_pid.set(0) };
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.in_use.set(false) };
     LWLockRelease(control_lock())?;
     ConditionVariableBroadcast(&slot.active_cv);
 
@@ -791,26 +851,32 @@ fn ReplicationSlotDropPtr(slot: &'static ReplicationSlot) -> PgResult<()> {
 
 pub fn ReplicationSlotSave() -> PgResult<()> {
     let slot = MyReplicationSlot().expect("ReplicationSlotSave: no slot acquired");
-    let path = format!("{PG_REPLSLOT_DIR}/{}", name_string(&slot.data.get().name));
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    let path = format!("{PG_REPLSLOT_DIR}/{}", name_string(&unsafe { slot.data.get() }.name));
     SaveSlotToPath(slot, &path, ERROR)
 }
 
 pub fn ReplicationSlotMarkDirty() {
     let slot = MyReplicationSlot().expect("ReplicationSlotMarkDirty: no slot acquired");
     slot.with_mutex(|| {
-        slot.just_dirtied.set(true);
-        slot.dirty.set(true);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.just_dirtied.set(true) };
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.dirty.set(true) };
     });
 }
 
 pub fn ReplicationSlotPersist() -> PgResult<()> {
     let slot = MyReplicationSlot().expect("ReplicationSlotPersist: no slot acquired");
-    assert!(slot.data.get().persistency != RS_PERSISTENT);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    assert!(unsafe { slot.data.get() }.persistency != RS_PERSISTENT);
 
     slot.with_mutex(|| {
-        let mut d = slot.data.get();
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        let mut d = unsafe { slot.data.get() };
         d.persistency = RS_PERSISTENT;
-        slot.data.set(d);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.data.set(d) };
     });
 
     ReplicationSlotMarkDirty();
@@ -826,14 +892,18 @@ pub fn ReplicationSlotsComputeRequiredXmin(already_locked: bool) -> PgResult<()>
     }
 
     for s in ReplicationSlotCtl() {
-        if !s.in_use.get() {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if !unsafe { s.in_use.get() } {
             continue;
         }
         let (effective_xmin, effective_catalog_xmin, invalidated) = s.with_mutex(|| {
             (
-                s.effective_xmin.get(),
-                s.effective_catalog_xmin.get(),
-                s.data.get().invalidated != RS_INVAL_NONE,
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { s.effective_xmin.get() },
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { s.effective_catalog_xmin.get() },
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { s.data.get() }.invalidated != RS_INVAL_NONE,
             )
         });
         if invalidated {
@@ -877,16 +947,19 @@ pub fn ReplicationSlotsComputeRequiredLSN() -> PgResult<()> {
 
     lw(control_lock(), LW_SHARED)?;
     for s in ReplicationSlotCtl() {
-        if !s.in_use.get() {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if !unsafe { s.in_use.get() } {
             continue;
         }
         let (persistency, mut restart_lsn, invalidated, last_saved_restart_lsn) = s.with_mutex(|| {
-            let d = s.data.get();
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            let d = unsafe { s.data.get() };
             (
                 d.persistency,
                 d.restart_lsn,
                 d.invalidated != RS_INVAL_NONE,
-                s.last_saved_restart_lsn.get(),
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { s.last_saved_restart_lsn.get() },
             )
         });
         if invalidated {
@@ -919,16 +992,19 @@ pub fn ReplicationSlotsComputeLogicalRestartLSN() -> PgResult<XLogRecPtr> {
 
     lw(control_lock(), LW_SHARED)?;
     for s in ReplicationSlotCtl() {
-        if !s.in_use.get() || !SlotIsLogical(s) {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if !unsafe { s.in_use.get() } || !SlotIsLogical(s) {
             continue;
         }
         let (persistency, mut restart_lsn, invalidated, last_saved_restart_lsn) = s.with_mutex(|| {
-            let d = s.data.get();
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            let d = unsafe { s.data.get() };
             (
                 d.persistency,
                 d.restart_lsn,
                 d.invalidated != RS_INVAL_NONE,
-                s.last_saved_restart_lsn.get(),
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { s.last_saved_restart_lsn.get() },
             )
         });
         if invalidated {
@@ -962,12 +1038,14 @@ pub fn ReplicationSlotsCountDBSlots(dboid: Oid) -> PgResult<(bool, i32, i32)> {
 
     lw(control_lock(), LW_SHARED)?;
     for s in ReplicationSlotCtl() {
-        if !s.in_use.get() || !SlotIsLogical(s) || s.data.get().database != dboid {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if !unsafe { s.in_use.get() } || !SlotIsLogical(s) || unsafe { s.data.get() }.database != dboid {
             continue;
         }
         s.with_mutex(|| {
             nslots += 1;
-            if s.active_pid.get() != 0 {
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            if unsafe { s.active_pid.get() } != 0 {
                 nactive += 1;
             }
         });
@@ -985,15 +1063,19 @@ pub fn ReplicationSlotsDropDBSlots(dboid: Oid) -> PgResult<()> {
     'restart: loop {
         lw(control_lock(), LW_SHARED)?;
         for s in ReplicationSlotCtl() {
-            if !s.in_use.get() || !SlotIsLogical(s) || s.data.get().database != dboid {
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            if !unsafe { s.in_use.get() } || !SlotIsLogical(s) || unsafe { s.data.get() }.database != dboid {
                 continue;
             }
-            let slotname = name_string(&s.data.get().name);
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            let slotname = name_string(&unsafe { s.data.get() }.name);
             let active_pid = s.with_mutex(|| {
-                let pid = s.active_pid.get();
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                let pid = unsafe { s.active_pid.get() };
                 if pid == 0 {
                     SetMyReplicationSlot(Some(s));
-                    s.active_pid.set(g::MyProcPid());
+                    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                    unsafe { s.active_pid.set(g::MyProcPid()) };
                 }
                 pid
             });
@@ -1043,8 +1125,10 @@ pub fn CheckSlotPermissions() -> PgResult<()> {
 
 pub fn ReplicationSlotReserveWal() -> PgResult<()> {
     let slot = MyReplicationSlot().expect("ReplicationSlotReserveWal: no slot acquired");
-    assert!(slot.data.get().restart_lsn == InvalidXLogRecPtr);
-    assert!(slot.last_saved_restart_lsn.get() == InvalidXLogRecPtr);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    assert!(unsafe { slot.data.get() }.restart_lsn == InvalidXLogRecPtr);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    assert!(unsafe { slot.last_saved_restart_lsn.get() } == InvalidXLogRecPtr);
 
     lw(allocation_lock(), LW_EXCLUSIVE)?;
 
@@ -1057,21 +1141,25 @@ pub fn ReplicationSlotReserveWal() -> PgResult<()> {
     };
 
     slot.with_mutex(|| {
-        let mut d = slot.data.get();
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        let mut d = unsafe { slot.data.get() };
         d.restart_lsn = restart_lsn;
-        slot.data.set(d);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.data.set(d) };
     });
 
     ReplicationSlotsComputeRequiredLSN()?;
 
     let segno =
-        transam_xlog::XLByteToSeg(slot.data.get().restart_lsn, transam_xlog::wal_segment_size());
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        transam_xlog::XLByteToSeg(unsafe { slot.data.get() }.restart_lsn, transam_xlog::wal_segment_size());
     if XLogGetLastRemovedSegno() >= segno {
         return elog(
             ERROR,
             format!(
                 "WAL required by replication slot {} has been removed concurrently",
-                name_string(&slot.data.get().name)
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                name_string(&unsafe { slot.data.get() }.name)
             ),
         );
     }
@@ -1088,9 +1176,12 @@ pub fn ReplicationSlotReserveWal() -> PgResult<()> {
 // CanInvalidateIdleSlot (slot.c:1722).
 fn CanInvalidateIdleSlot(s: &ReplicationSlot) -> bool {
     idle_replication_slot_timeout_secs() != 0
-        && !XLogRecPtrIsInvalid(s.data.get().restart_lsn)
-        && s.inactive_since.get() > 0
-        && !(transam_xlog::RecoveryInProgress() && s.data.get().synced != 0)
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        && !XLogRecPtrIsInvalid(unsafe { s.data.get() }.restart_lsn)
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        && unsafe { s.inactive_since.get() } > 0
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        && !(transam_xlog::RecoveryInProgress() && unsafe { s.data.get() }.synced != 0)
 }
 
 // DetermineSlotInvalidationCause (slot.c:1740). Sequentially checks the
@@ -1108,7 +1199,8 @@ fn DetermineSlotInvalidationCause(
     debug_assert!(possible_causes != RS_INVAL_NONE.0 as u32);
 
     if possible_causes & RS_INVAL_WAL_REMOVED.0 as u32 != 0 {
-        let restart_lsn = s.data.get().restart_lsn;
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        let restart_lsn = unsafe { s.data.get() }.restart_lsn;
         if restart_lsn != InvalidXLogRecPtr && restart_lsn < oldest_lsn {
             return RS_INVAL_WAL_REMOVED;
         }
@@ -1116,9 +1208,12 @@ fn DetermineSlotInvalidationCause(
 
     if possible_causes & RS_INVAL_HORIZON.0 as u32 != 0 {
         // invalid DB oid signals a shared relation
-        if SlotIsLogical(s) && (dboid == InvalidOid || dboid == s.data.get().database) {
-            let effective_xmin = s.effective_xmin.get();
-            let catalog_effective_xmin = s.effective_catalog_xmin.get();
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if SlotIsLogical(s) && (dboid == InvalidOid || dboid == unsafe { s.data.get() }.database) {
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            let effective_xmin = unsafe { s.effective_xmin.get() };
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            let catalog_effective_xmin = unsafe { s.effective_catalog_xmin.get() };
             if TransactionIdIsValid(effective_xmin)
                 && types_core::TransactionIdPrecedesOrEquals(
                     effective_xmin,
@@ -1151,11 +1246,13 @@ fn DetermineSlotInvalidationCause(
                 return RS_INVAL_IDLE_TIMEOUT;
             }
             if adt_timestamp::TimestampDifferenceExceedsSeconds(
-                s.inactive_since.get(),
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { s.inactive_since.get() },
                 now,
                 idle_replication_slot_timeout_secs(),
             ) {
-                *inactive_since = s.inactive_since.get();
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                *inactive_since = unsafe { s.inactive_since.get() };
                 return RS_INVAL_IDLE_TIMEOUT;
             }
         }
@@ -1238,7 +1335,8 @@ fn InvalidatePossiblyObsoleteSlot(
     let mut inactive_since: TimestampTz = 0;
 
     loop {
-        if !s.in_use.get() {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if !unsafe { s.in_use.get() } {
             if released_lock {
                 LWLockRelease(control_lock())?;
             }
@@ -1257,10 +1355,12 @@ fn InvalidatePossiblyObsoleteSlot(
         let mut slotname = NameData::default();
         let mut active_pid = 0;
         s.with_mutex(|| {
-            restart_lsn = s.data.get().restart_lsn;
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            restart_lsn = unsafe { s.data.get() }.restart_lsn;
 
             // we do nothing if the slot is already invalid
-            if s.data.get().invalidated == RS_INVAL_NONE {
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            if unsafe { s.data.get() }.invalidated == RS_INVAL_NONE {
                 invalidation_cause = DetermineSlotInvalidationCause(
                     possible_causes,
                     s,
@@ -1275,22 +1375,28 @@ fn InvalidatePossiblyObsoleteSlot(
                 return;
             }
 
-            slotname = s.data.get().name;
-            active_pid = s.active_pid.get();
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            slotname = unsafe { s.data.get() }.name;
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            active_pid = unsafe { s.active_pid.get() };
 
             // If the slot can be acquired, do so and mark it invalidated
             // immediately. Otherwise we'll signal the owning process, below,
             // and retry.
             if active_pid == 0 {
                 SetMyReplicationSlot(Some(s));
-                s.active_pid.set(g::MyProcPid());
-                let mut d = s.data.get();
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { s.active_pid.set(g::MyProcPid()) };
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                let mut d = unsafe { s.data.get() };
                 d.invalidated = invalidation_cause;
                 if invalidation_cause == RS_INVAL_WAL_REMOVED {
                     d.restart_lsn = InvalidXLogRecPtr;
-                    s.last_saved_restart_lsn.set(InvalidXLogRecPtr);
+                    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                    unsafe { s.last_saved_restart_lsn.set(InvalidXLogRecPtr) };
                 }
-                s.data.set(d);
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { s.data.set(d) };
                 *invalidated = true;
             }
         });
@@ -1407,7 +1513,8 @@ pub fn InvalidateObsoleteReplicationSlots(
     'restart: loop {
         lw(control_lock(), LW_SHARED)?;
         for s in ReplicationSlotCtl() {
-            if !s.in_use.get() {
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            if !unsafe { s.in_use.get() } {
                 continue;
             }
             // Prevent invalidation of logical slots during binary upgrade.
@@ -1444,24 +1551,31 @@ pub fn CheckPointReplicationSlots(is_shutdown: bool) -> PgResult<()> {
 
     lw(allocation_lock(), LW_SHARED)?;
     for s in ReplicationSlotCtl() {
-        if !s.in_use.get() {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if !unsafe { s.in_use.get() } {
             continue;
         }
-        let path = format!("{PG_REPLSLOT_DIR}/{}", name_string(&s.data.get().name));
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        let path = format!("{PG_REPLSLOT_DIR}/{}", name_string(&unsafe { s.data.get() }.name));
 
         if is_shutdown && SlotIsLogical(s) {
             s.with_mutex(|| {
-                let d = s.data.get();
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                let d = unsafe { s.data.get() };
                 if d.invalidated == RS_INVAL_NONE
-                    && d.confirmed_flush > s.last_saved_confirmed_flush.get()
+                    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                    && d.confirmed_flush > unsafe { s.last_saved_confirmed_flush.get() }
                 {
-                    s.just_dirtied.set(true);
-                    s.dirty.set(true);
+                    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                    unsafe { s.just_dirtied.set(true) };
+                    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                    unsafe { s.dirty.set(true) };
                 }
             });
         }
 
-        if s.last_saved_restart_lsn.get() != s.data.get().restart_lsn {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if unsafe { s.last_saved_restart_lsn.get() } != unsafe { s.data.get() }.restart_lsn {
             last_saved_restart_lsn_updated = true;
         }
 
@@ -1523,7 +1637,8 @@ pub fn StartupReplicationSlots() -> PgResult<()> {
 }
 
 fn CreateSlotOnDisk(slot: &'static ReplicationSlot) -> PgResult<()> {
-    let name = name_string(&slot.data.get().name);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    let name = name_string(&unsafe { slot.data.get() }.name);
     let path = format!("{PG_REPLSLOT_DIR}/{name}");
     let tmppath = format!("{PG_REPLSLOT_DIR}/{name}.tmp");
 
@@ -1540,7 +1655,8 @@ fn CreateSlotOnDisk(slot: &'static ReplicationSlot) -> PgResult<()> {
     }
     fd::fsync_fname(&tmppath, true)?;
 
-    slot.dirty.set(true);
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    unsafe { slot.dirty.set(true) };
     SaveSlotToPath(slot, &tmppath, ERROR)?;
 
     if c_rename(&tmppath, &path) != 0 {
@@ -1560,8 +1676,10 @@ fn CreateSlotOnDisk(slot: &'static ReplicationSlot) -> PgResult<()> {
 
 fn SaveSlotToPath(slot: &'static ReplicationSlot, dir: &str, elevel: ErrorLevel) -> PgResult<()> {
     let was_dirty = slot.with_mutex(|| {
-        let was_dirty = slot.dirty.get();
-        slot.just_dirtied.set(false);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        let was_dirty = unsafe { slot.dirty.get() };
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.just_dirtied.set(false) };
         was_dirty
     });
     if !was_dirty {
@@ -1585,7 +1703,8 @@ fn SaveSlotToPath(slot: &'static ReplicationSlot, dir: &str, elevel: ErrorLevel)
         return Ok(());
     }
 
-    let slotdata = slot.with_mutex(|| slot.data.get());
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    let slotdata = slot.with_mutex(|| unsafe { slot.data.get() });
     let image = ondisk::serialize_state_file(&slotdata);
 
     // SAFETY: image is a live readable buffer of ON_DISK_SIZE bytes.
@@ -1649,11 +1768,15 @@ fn SaveSlotToPath(slot: &'static ReplicationSlot, dir: &str, elevel: ErrorLevel)
     g::EndCriticalSection();
 
     slot.with_mutex(|| {
-        if !slot.just_dirtied.get() {
-            slot.dirty.set(false);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if !unsafe { slot.just_dirtied.get() } {
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            unsafe { slot.dirty.set(false) };
         }
-        slot.last_saved_confirmed_flush.set(slotdata.confirmed_flush);
-        slot.last_saved_restart_lsn.set(slotdata.restart_lsn);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.last_saved_confirmed_flush.set(slotdata.confirmed_flush) };
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.last_saved_restart_lsn.set(slotdata.restart_lsn) };
     });
 
     LWLockRelease(&slot.io_in_progress_lock)?;
@@ -1661,6 +1784,16 @@ fn SaveSlotToPath(slot: &'static ReplicationSlot, dir: &str, elevel: ErrorLevel)
 }
 
 fn RestoreSlotFromDisk(name: &str) -> PgResult<()> {
+    // Defense in depth: the slot name comes from an on-disk directory entry and
+    // is interpolated into pg_replslot/... paths below (temp-file unlink, state
+    // read, recursive rmtree). A crafted name (e.g. containing "/" or "..")
+    // could therefore escape the pg_replslot directory. Validate it with the
+    // same check applied to names arriving from SQL before it touches any path.
+    // (C trusts these names; the port's path interpolation makes this
+    // necessary.) A name failing validation raises a catchable error rather
+    // than being used in a path operation.
+    ReplicationSlotValidateName(name, ERROR)?;
+
     let slotdir = format!("{PG_REPLSLOT_DIR}/{name}");
     let tmppath = format!("{slotdir}/state.tmp");
 
@@ -1840,23 +1973,35 @@ fn RestoreSlotFromDisk(name: &str) -> PgResult<()> {
     let mut now: TimestampTz = 0;
     let mut restored = false;
     for slot in ReplicationSlotCtl() {
-        if slot.in_use.get() {
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if unsafe { slot.in_use.get() } {
             continue;
         }
-        slot.data.set(slotdata);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.data.set(slotdata) };
 
-        slot.effective_xmin.set(slotdata.xmin);
-        slot.effective_catalog_xmin.set(slotdata.catalog_xmin);
-        slot.last_saved_confirmed_flush.set(slotdata.confirmed_flush);
-        slot.last_saved_restart_lsn.set(slotdata.restart_lsn);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.effective_xmin.set(slotdata.xmin) };
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.effective_catalog_xmin.set(slotdata.catalog_xmin) };
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.last_saved_confirmed_flush.set(slotdata.confirmed_flush) };
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.last_saved_restart_lsn.set(slotdata.restart_lsn) };
 
-        slot.candidate_catalog_xmin.set(InvalidTransactionId);
-        slot.candidate_xmin_lsn.set(InvalidXLogRecPtr);
-        slot.candidate_restart_lsn.set(InvalidXLogRecPtr);
-        slot.candidate_restart_valid.set(InvalidXLogRecPtr);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.candidate_catalog_xmin.set(InvalidTransactionId) };
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.candidate_xmin_lsn.set(InvalidXLogRecPtr) };
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.candidate_restart_lsn.set(InvalidXLogRecPtr) };
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.candidate_restart_valid.set(InvalidXLogRecPtr) };
 
-        slot.in_use.set(true);
-        slot.active_pid.set(0);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.in_use.set(true) };
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        unsafe { slot.active_pid.set(0) };
 
         if now == 0 {
             now = GetCurrentTimestamp();
@@ -2051,11 +2196,13 @@ pub fn StandbySlotsHaveCaughtup(wait_for_lsn: XLogRecPtr, elevel: ErrorLevel) ->
                 break;
             }
             let (restart_lsn, invalidated, inactive) = slot.with_mutex(|| {
-                let d = slot.data.get();
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                let d = unsafe { slot.data.get() };
                 (
                     d.restart_lsn,
                     d.invalidated != RS_INVAL_NONE,
-                    slot.active_pid.get() == 0,
+                    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                    unsafe { slot.active_pid.get() } == 0,
                 )
             });
             if invalidated {
@@ -2115,11 +2262,14 @@ pub fn StandbySlotsHaveCaughtup(wait_for_lsn: XLogRecPtr, elevel: ErrorLevel) ->
 }
 
 pub fn WaitForStandbyConfirmation(wait_for_lsn: XLogRecPtr) -> PgResult<()> {
-    let failover = MyReplicationSlot()
-        .expect("WaitForStandbyConfirmation: no slot acquired")
-        .data
-        .get()
-        .failover;
+    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+    let failover = unsafe {
+        MyReplicationSlot()
+            .expect("WaitForStandbyConfirmation: no slot acquired")
+            .data
+            .get()
+    }
+    .failover;
     let has_config = SYNCHRONIZED_STANDBY_SLOTS_CONFIG.with(|c| c.borrow().is_some());
     if !failover || !has_config {
         return Ok(());

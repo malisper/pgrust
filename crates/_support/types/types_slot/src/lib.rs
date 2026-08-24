@@ -156,12 +156,14 @@ impl<'mcx> TupleTableSlot<'mcx> {
         debug_assert!(attnum > 0);
         self.slot_getsomeattrs(attnum, getsomeattrs_int);
         let i = (attnum - 1) as usize;
-        // SAFETY: attnum <= tts_nvalid <= len by the struct invariant plus the
-        // getsomeattrs_int postcondition (debug-asserted above).
-        unsafe {
-            *isnull = *self.tts_isnull.get_unchecked(i);
-            *self.tts_values.get_unchecked(i)
-        }
+        // Checked indexing: the bounding invariant (attnum <= tts_nvalid <= len)
+        // lives in pub fields and a caller-supplied closure postcondition, so a
+        // buggy safe caller could desync it. A single bounds check per access
+        // turns any violation into a deterministic panic instead of a
+        // release-build out-of-bounds read (UB). Matches C's Assert-in-debug +
+        // defined-behavior-in-release contract.
+        *isnull = self.tts_isnull[i];
+        self.tts_values[i]
     }
 
     #[inline]
@@ -172,8 +174,9 @@ impl<'mcx> TupleTableSlot<'mcx> {
     ) -> bool {
         debug_assert!(attnum > 0);
         self.slot_getsomeattrs(attnum, getsomeattrs_int);
-        // SAFETY: as in slot_getattr.
-        unsafe { *self.tts_isnull.get_unchecked((attnum - 1) as usize) }
+        // Checked indexing, as in slot_getattr: a desynced tts_nvalid must
+        // panic deterministically, never read out of bounds in release builds.
+        self.tts_isnull[(attnum - 1) as usize]
     }
 }
 
@@ -366,6 +369,37 @@ mod tests {
             s.tts_nvalid = 3;
         });
         assert_eq!(slot.tts_nvalid, 3);
+    }
+
+    // A safe caller that desyncs tts_nvalid past the actual vector length must
+    // cause a deterministic panic on the getattr lane, not a release-build
+    // out-of-bounds read. Miri-clean: checked indexing performs no UB.
+    #[test]
+    #[should_panic]
+    fn getattr_panics_when_nvalid_exceeds_values_len() {
+        let ctx = MemoryContext::new("test");
+        let mut slot = TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::Virtual);
+        slot.set_descriptor(ctx.mcx(), desc_with_natts(ctx.mcx(), 1));
+        slot.mark_not_empty();
+        // Desync: claim two valid attrs while the vectors hold only one. The
+        // hit path (attnum <= tts_nvalid) skips the deform closure, so the
+        // bad index reaches the vector directly.
+        slot.tts_nvalid = 2;
+
+        let mut isnull = false;
+        // attnum 2 -> index 1, out of range of the length-1 vectors.
+        let _ = slot.slot_getattr(2, &mut isnull, |_, _| panic!("hit path must not deform"));
+    }
+
+    #[test]
+    #[should_panic]
+    fn attisnull_panics_when_nvalid_exceeds_isnull_len() {
+        let ctx = MemoryContext::new("test");
+        let mut slot = TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::Virtual);
+        slot.set_descriptor(ctx.mcx(), desc_with_natts(ctx.mcx(), 1));
+        slot.mark_not_empty();
+        slot.tts_nvalid = 2;
+        let _ = slot.slot_attisnull(2, |_, _| panic!("hit path must not deform"));
     }
 
     #[test]

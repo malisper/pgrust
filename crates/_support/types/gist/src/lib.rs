@@ -6,6 +6,7 @@
 
 use ::datum::Datum;
 use ::types_core::xact::FullTransactionId;
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use ::types_core::{
     uint16, BlockNumber, OffsetNumber, Oid, TransactionId, XLogRecPtr, BLCKSZ,
 };
@@ -212,6 +213,25 @@ pub const XLOG_GIST_PAGE_SPLIT: u8 = 0x30;
 pub const XLOG_GIST_PAGE_DELETE: u8 = 0x60;
 pub const XLOG_GIST_ASSIGN_LSN: u8 = 0x70;
 
+/// A GiST WAL record's `main_data` length is attacker-declared (0 is legal and
+/// passes all xlogreader validation), so every fixed-offset decode below must
+/// confirm the payload is long enough before slicing. Raising a catchable
+/// `ERRCODE_DATA_CORRUPTED` error (rather than panicking on an out-of-bounds
+/// index) keeps a malformed record from crash-looping the startup redo thread.
+/// C reads the struct straight out of the decode buffer (gistxlog.c); a short
+/// record reads garbage there but does not crash — this restores that property
+/// while surfacing the corruption instead of silently trusting garbage.
+#[cold]
+#[inline(never)]
+fn short_record_err(what: &str, need: usize, got: usize) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "GiST redo: {what} record too short: need {need} bytes, got {got}"
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
 pub const SizeOfGistxlogPageUpdate: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -229,11 +249,18 @@ impl GistxlogPageUpdate {
         b
     }
     #[inline]
-    pub fn decode(b: &[u8]) -> Self {
-        Self {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfGistxlogPageUpdate {
+            return Err(short_record_err(
+                "GistxlogPageUpdate",
+                SizeOfGistxlogPageUpdate,
+                b.len(),
+            ));
+        }
+        Ok(Self {
             ntodelete: u16::from_ne_bytes([b[0], b[1]]),
             ntoinsert: u16::from_ne_bytes([b[2], b[3]]),
-        }
+        })
     }
 }
 
@@ -256,12 +283,19 @@ impl GistxlogDelete {
         b
     }
     #[inline]
-    pub fn decode(b: &[u8]) -> Self {
-        Self {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfGistxlogDelete {
+            return Err(short_record_err(
+                "GistxlogDelete",
+                SizeOfGistxlogDelete,
+                b.len(),
+            ));
+        }
+        Ok(Self {
             snapshotConflictHorizon: TransactionId::from_ne_bytes([b[0], b[1], b[2], b[3]]),
             ntodelete: u16::from_ne_bytes([b[4], b[5]]),
             isCatalogRel: b[6] != 0,
-        }
+        })
     }
 }
 
@@ -288,8 +322,15 @@ impl GistxlogPageSplit {
         b
     }
     #[inline]
-    pub fn decode(b: &[u8]) -> Self {
-        Self {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfGistxlogPageSplit {
+            return Err(short_record_err(
+                "GistxlogPageSplit",
+                SizeOfGistxlogPageSplit,
+                b.len(),
+            ));
+        }
+        Ok(Self {
             origrlink: BlockNumber::from_ne_bytes([b[0], b[1], b[2], b[3]]),
             orignsn: GistNSN::from_ne_bytes([
                 b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
@@ -297,7 +338,7 @@ impl GistxlogPageSplit {
             origleaf: b[16] != 0,
             npage: u16::from_ne_bytes([b[18], b[19]]),
             markfollowright: b[20] != 0,
-        }
+        })
     }
 }
 
@@ -318,13 +359,20 @@ impl GistxlogPageDelete {
         b
     }
     #[inline]
-    pub fn decode(b: &[u8]) -> Self {
-        Self {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfGistxlogPageDelete {
+            return Err(short_record_err(
+                "GistxlogPageDelete",
+                SizeOfGistxlogPageDelete,
+                b.len(),
+            ));
+        }
+        Ok(Self {
             deleteXid: FullTransactionId::from_u64(u64::from_ne_bytes([
                 b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
             ])),
             downlinkOffset: OffsetNumber::from_ne_bytes([b[8], b[9]]),
-        }
+        })
     }
 }
 
@@ -347,11 +395,14 @@ impl gistxlogPage {
         b
     }
     #[inline]
-    pub fn decode(b: &[u8]) -> Self {
-        Self {
+    pub fn decode(b: &[u8]) -> PgResult<Self> {
+        if b.len() < SizeOfGistxlogPage {
+            return Err(short_record_err("gistxlogPage", SizeOfGistxlogPage, b.len()));
+        }
+        Ok(Self {
             blkno: BlockNumber::from_ne_bytes([b[0], b[1], b[2], b[3]]),
             num: i32::from_ne_bytes([b[4], b[5], b[6], b[7]]),
-        }
+        })
     }
 }
 
@@ -448,5 +499,45 @@ mod tests {
         assert_eq!(GiSTPageSize, 8192 - 24 - 16);
         assert_eq!(GISTMaxIndexTupleSize, 2032);
         assert_eq!(GISTMaxIndexKeySize, 2024);
+    }
+
+    // A hostile/truncated GiST WAL record with main_data shorter than the fixed
+    // struct must decode to a catchable ERRCODE_DATA_CORRUPTED error, never an
+    // out-of-bounds slice panic in the startup redo thread.
+    #[test]
+    fn short_main_data_decodes_to_data_corruption_not_panic() {
+        for len in 0..SizeOfGistxlogPageUpdate {
+            let err = GistxlogPageUpdate::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        for len in 0..SizeOfGistxlogDelete {
+            let err = GistxlogDelete::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        for len in 0..SizeOfGistxlogPageSplit {
+            let err = GistxlogPageSplit::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        for len in 0..SizeOfGistxlogPageDelete {
+            let err = GistxlogPageDelete::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+        for len in 0..SizeOfGistxlogPage {
+            let err = gistxlogPage::decode(&vec![0u8; len]).unwrap_err();
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        }
+    }
+
+    // Exactly-sized (and longer) records still decode cleanly: the length guard
+    // must not regress valid-input replay.
+    #[test]
+    fn exact_length_main_data_decodes_ok() {
+        GistxlogPageUpdate::decode(&[0u8; SizeOfGistxlogPageUpdate]).unwrap();
+        GistxlogDelete::decode(&[0u8; SizeOfGistxlogDelete]).unwrap();
+        GistxlogPageSplit::decode(&[0u8; SizeOfGistxlogPageSplit]).unwrap();
+        GistxlogPageDelete::decode(&[0u8; SizeOfGistxlogPageDelete]).unwrap();
+        gistxlogPage::decode(&[0u8; SizeOfGistxlogPage]).unwrap();
+        // Trailing bytes (e.g. the offsets/tuple stream) are tolerated.
+        GistxlogDelete::decode(&[0u8; SizeOfGistxlogDelete + 16]).unwrap();
     }
 }

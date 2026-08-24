@@ -156,7 +156,7 @@ fn no_pg_constraint_entry_is_ereport_42p17() {
 
 #[test]
 fn ri_check_trigger_wrong_timing_is_ereport_39p01() {
-    let e = ri_CheckTrigger("RI_FKey_check_ins", RI_TRIGTYPE_INSERT, 0).unwrap_err();
+    let e = ri_CheckTrigger("RI_FKey_check_ins", RI_TRIGTYPE_INSERT, 0).err().unwrap();
     assert_eq!(e.sqlstate(), types_error::ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED);
     assert_eq!(
         e.message(),
@@ -166,7 +166,7 @@ fn ri_check_trigger_wrong_timing_is_ereport_39p01() {
 
 #[test]
 fn ri_check_trigger_wrong_event_is_ereport_39p01() {
-    let e = ri_CheckTrigger("RI_FKey_check_ins", RI_TRIGTYPE_INSERT, 0x5).unwrap_err();
+    let e = ri_CheckTrigger("RI_FKey_check_ins", RI_TRIGTYPE_INSERT, 0x5).err().unwrap();
     assert_eq!(e.sqlstate(), types_error::ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED);
     assert_eq!(
         e.message(),
@@ -200,4 +200,62 @@ fn rls_owner_bypass_matches_c() {
 #[test]
 fn ri_builtin_rows_match_canonical() {
     fmgr_core::assert_rows_match_canonical(crate::RI_TRIGGERS_BUILTINS);
+}
+
+// datum_image_eq bounds every by-ref key comparison by the extent of the tuple
+// image the datum was fetched from, so a forged varlena header on a crafted PK
+// heap page can no longer drive an out-of-bounds read (idx 8 / CWE-125).
+
+// Build a 4-byte-header varlena whose declared size matches its buffer.
+fn mk_varlena(content: &[u8]) -> Vec<u8> {
+    let total = content.len() + 4;
+    let mut buf = vec![0u8; total];
+    let word = types_tuple::varatt::set_varsize_4b_word(total as u32);
+    buf[..4].copy_from_slice(&word.to_ne_bytes());
+    buf[4..].copy_from_slice(content);
+    buf
+}
+
+#[test]
+fn datum_image_eq_varlena_equal_and_unequal() {
+    let a = mk_varlena(b"hello");
+    let b = mk_varlena(b"hello");
+    let c = mk_varlena(b"world");
+    let d = mk_varlena(b"hell"); // different length
+
+    let da = Datum::from_usize(a.as_ptr() as usize);
+    let db = Datum::from_usize(b.as_ptr() as usize);
+    let dc = Datum::from_usize(c.as_ptr() as usize);
+    let dd = Datum::from_usize(d.as_ptr() as usize);
+
+    assert!(datum_image_eq(da, db, false, -1, a.len(), b.len()));
+    assert!(!datum_image_eq(da, dc, false, -1, a.len(), c.len()));
+    // Different lengths short-circuit before any slice is formed.
+    assert!(!datum_image_eq(da, dd, false, -1, a.len(), d.len()));
+}
+
+#[test]
+fn datum_image_eq_byval_widths() {
+    let a = Datum::from_i32(0x0102_0304);
+    let b = Datum::from_i32(0x0102_0304);
+    let c = Datum::from_i32(0x0506_0708);
+    assert!(datum_image_eq(a, b, true, 4, 0, 0));
+    assert!(!datum_image_eq(a, c, true, 4, 0, 0));
+}
+
+#[test]
+#[should_panic(expected = "corrupt")]
+fn datum_image_eq_forged_varlena_length_is_rejected() {
+    // A crafted PK datum: the 4-byte header declares a huge length while the
+    // real image (and the `avail` bound) is tiny. Without the bound this drove
+    // slice::from_raw_parts past the tuple/page; now it is a clean corruption
+    // error before any byte is compared.
+    let mut buf = vec![0u8; 8];
+    let forged = types_tuple::varatt::set_varsize_4b_word(4096);
+    buf[..4].copy_from_slice(&forged.to_ne_bytes());
+    let good = mk_varlena(&[0u8; 4]); // total 8, honest header
+    let da = Datum::from_usize(buf.as_ptr() as usize);
+    let db = Datum::from_usize(good.as_ptr() as usize);
+    // avail bounds both datums to their real 8-byte buffers.
+    let _ = datum_image_eq(da, db, false, -1, buf.len(), good.len());
 }

@@ -214,6 +214,20 @@ pub(crate) fn handle_count() -> usize {
     HANDLE_COUNT.load(Ordering::Relaxed) as usize
 }
 
+pub(crate) fn backend_count() -> usize {
+    BACKEND_COUNT.load(Ordering::Relaxed) as usize
+}
+
+/// Immutable per-backend handle count, fixed at AioShmemInit from the boot-time
+/// table geometry. Unlike the live io_max_concurrency GUC (which child-launch
+/// republication can clobber back to its -1 sentinel), this is the true length
+/// of each backend's handle range and is safe to use as a scan bound.
+pub(crate) fn io_handles_per_backend() -> usize {
+    let procs = backend_count();
+    debug_assert!(procs > 0, "AioShmemInit must run before io_handles_per_backend");
+    handle_count() / procs
+}
+
 pub(crate) fn ioh(index: u32) -> &'static PgAioHandle {
     debug_assert!((index as usize) < handle_count());
     // SAFETY: AioShmemInit published a table of handle_count() initialized

@@ -1202,13 +1202,27 @@ pub fn tblspc_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<(
     let data = unsafe { decoded.main_data_bytes() };
 
     if info == XLOG_TBLSPC_CREATE {
-        let ts_id = u32::from_ne_bytes(data[0..4].try_into().expect("short tblspc create rec"));
+        if data.len() < 4 {
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "tblspc_redo: XLOG_TBLSPC_CREATE record too short".to_string(),
+            )));
+        }
+        let ts_id = u32::from_ne_bytes(data[0..4].try_into().unwrap());
         let path = &data[4..];
         let path = &path[..path.iter().position(|&b| b == 0).unwrap_or(path.len())];
-        let location = std::str::from_utf8(path).expect("tablespace path is not UTF-8");
-        create_tablespace_directories(location, ts_id)?;
+        // SQL_ASCII tablespace paths are opaque bytes in C; avoid panicking on
+        // non-UTF-8 by lossily decoding for the &str-based directory helpers.
+        let location = String::from_utf8_lossy(path);
+        create_tablespace_directories(&location, ts_id)?;
     } else if info == XLOG_TBLSPC_DROP {
-        let ts_id = u32::from_ne_bytes(data[0..4].try_into().expect("short tblspc drop rec"));
+        if data.len() < 4 {
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "tblspc_redo: XLOG_TBLSPC_DROP record too short".to_string(),
+            )));
+        }
+        let ts_id = u32::from_ne_bytes(data[0..4].try_into().unwrap());
 
         let gen = procsignal::EmitProcSignalBarrier(
             ProcSignalBarrierType::PROCSIGNAL_BARRIER_SMGRRELEASE,

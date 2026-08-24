@@ -56,14 +56,31 @@ pub fn value_base(hdr: &StreamSectionHdr, section: &[u8], g: u32) -> FormatResul
 /// Frames before granule `g` in this extent (granule-major frame numbering,
 /// at the frame grain the ENCODER marked — spec §6.4's uniform mechanism).
 pub fn frame_base(hdr: &StreamSectionHdr, section: &[u8], g: u32) -> FormatResult<u32> {
-    if hdr.gcount_table_off == 0 {
-        return Ok(g * FRAMES_PER_GRANULE);
+    // Accumulate in u64 so a crafted gcount table (or granule ordinal) can
+    // never wrap the frame index into an in-bounds-but-wrong frame-table slot
+    // (spec §1 typed-ref invariant). The true, unwrapped base is then
+    // range-checked against the frame-table length (`frame_count`, the exact
+    // entry count `StreamSectionHdr::frame_table` materializes): anything past
+    // it is refused as corruption — a wrapping u32 sum would instead alias a
+    // real slot and serve wrong granule data. Callers add a small per-granule
+    // `fbase + f` (f < frames-in-granule) before `frame_start`, whose bounds
+    // check validates the final index; a base bounded by `frame_count` keeps
+    // that addition in range.
+    let base: u64 = if hdr.gcount_table_off == 0 {
+        g as u64 * FRAMES_PER_GRANULE as u64
+    } else {
+        let mut sum = 0u64;
+        for i in 0..g {
+            sum += gcount(hdr, section, i)?.div_ceil(FRAME_VALUES) as u64;
+        }
+        sum
+    };
+    if base > hdr.frame_count as u64 {
+        return Err(FormatError::Corrupt {
+            at: "frame_base out of range",
+        });
     }
-    let mut sum = 0u32;
-    for i in 0..g {
-        sum += gcount(hdr, section, i)?.div_ceil(FRAME_VALUES);
-    }
-    Ok(sum)
+    Ok(base as u32)
 }
 
 /// Granule-per-frame variant of [`frame_base`] for encodings that mark ONE

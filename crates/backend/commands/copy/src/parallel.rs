@@ -124,6 +124,33 @@ fn window(k: i32) -> u64 {
     req.unwrap_or((2 * k as u64) + 4).max(2)
 }
 
+/// Leader-buffered raw-input ceiling (PGRUST_PARALLEL_COPY_MAX_CHUNK_BYTES,
+/// MB; default 1024 = 1 GiB, the serial path's per-line MaxAllocSize; floor 1
+/// for the segmentator battery's multi-chunk coverage).
+///
+/// The segmentator retains raw input in refcounted blocks until it can cut a
+/// whole-RG chunk (RG_ROWS row boundaries). The read-ahead window bounds the
+/// COUNT of published-but-uncommitted chunks, but NOT the bytes of the
+/// in-progress chunk: adversarial input with no unescaped terminator (never a
+/// row boundary, so never a cut) — or legitimately colossal rows — would grow
+/// `Segmentator::segs` to the whole stream size and, through the infallible
+/// global allocator, abort the process on OOM instead of failing the one
+/// statement. This caps the in-progress chunk's buffered bytes; crossing it
+/// raises a catchable ERROR (serial's over-long-line discipline), so peak
+/// leader memory is bounded by roughly this ceiling x (window + 1) regardless
+/// of input shape. Normal COPY (chunks well under the cap) is untouched.
+fn max_chunk_bytes() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_MAX_CHUNK_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1024)
+            .max(1)
+            * (1 << 20)
+    })
+}
+
 /// Sort-merge encode threads (PGRUST_PARALLEL_COPY_SORT_ENCODERS,
 /// default = the COPY dop).
 fn sort_encoders(rt: &runtime::Runtime) -> usize {
@@ -562,6 +589,14 @@ struct Segmentator {
     detect_esc: bool,
     /// End-of-copy marker seen: stop segmenting.
     eoc: bool,
+    /// Bytes of raw input currently retained in `segs` for the in-progress
+    /// (not-yet-cut) chunk. Reset to 0 whenever a chunk is cut.
+    buffered_bytes: u64,
+    /// Ceiling on `buffered_bytes` (resolved once from the env knob at
+    /// construction so it is deterministic for the whole statement and
+    /// overridable per-instance in tests). Crossing it raises a catchable
+    /// ERROR instead of letting the in-progress chunk grow without bound.
+    max_buffered: u64,
 }
 
 impl Segmentator {
@@ -581,6 +616,8 @@ impl Segmentator {
             prev_ended_cr: false,
             detect_esc: false,
             eoc: false,
+            buffered_bytes: 0,
+            max_buffered: max_chunk_bytes(),
         }
     }
 
@@ -629,7 +666,7 @@ impl Segmentator {
     /// descriptors into `out`. Returns the number of bytes CONSUMED — less
     /// than `len` only when the end-of-copy marker line ended inside the
     /// buffer (the rest of the stream is not COPY data).
-    fn feed(&mut self, buf: &Arc<Vec<u8>>, len: usize, out: &mut Vec<ChunkDesc>) -> usize {
+    fn feed(&mut self, buf: &Arc<Vec<u8>>, len: usize, out: &mut Vec<ChunkDesc>) -> PgResult<usize> {
         assert!(!self.eoc, "feed after the end-of-copy marker");
         let data = &buf[..len];
         // Start of the not-yet-chunked region of THIS buffer.
@@ -649,7 +686,7 @@ impl Segmentator {
             }
             // The \r (+\n) terminated a row.
             if self.row_boundary(buf, data, &mut chunk_start, i, &mut line_start, out) {
-                return i;
+                return Ok(i);
             }
         } else if self.prev_ended_cr && self.eol == SegEol::Crnl && data.first() == Some(&b'\n')
         {
@@ -657,7 +694,7 @@ impl Segmentator {
             self.prev_ended_cr = false;
             i = 1;
             if self.row_boundary(buf, data, &mut chunk_start, i, &mut line_start, out) {
-                return i;
+                return Ok(i);
             }
         }
         self.prev_ended_cr = false;
@@ -682,7 +719,7 @@ impl Segmentator {
                             self.eol = SegEol::Nl;
                             i += 1;
                             if self.row_boundary(buf, data, &mut chunk_start, i, &mut line_start, out) {
-                                return i;
+                                return Ok(i);
                             }
                         }
                         b'\r' => {
@@ -691,7 +728,7 @@ impl Segmentator {
                                     if data[i + 1] == b'\n' { SegEol::Crnl } else { SegEol::Cr };
                                 i += if self.eol == SegEol::Crnl { 2 } else { 1 };
                                 if self.row_boundary(buf, data, &mut chunk_start, i, &mut line_start, out) {
-                                    return i;
+                                    return Ok(i);
                                 }
                             } else {
                                 // Buffer edge: defer the Cr/Crnl decision.
@@ -728,7 +765,7 @@ impl Segmentator {
                     if boundary
                         && self.row_boundary(buf, data, &mut chunk_start, i, &mut line_start, out)
                     {
-                        return i;
+                        return Ok(i);
                     }
                 }
                 SegEol::Cr => {
@@ -740,7 +777,7 @@ impl Segmentator {
                     if self.bs_parity_even(data, 0, pos)
                         && self.row_boundary(buf, data, &mut chunk_start, i, &mut line_start, out)
                     {
-                        return i;
+                        return Ok(i);
                     }
                 }
             }
@@ -749,6 +786,7 @@ impl Segmentator {
         // Buffer exhausted: carry the tail into the current chunk + state.
         if chunk_start < len {
             self.segs.push(ChunkSeg { buf: Arc::clone(buf), start: chunk_start, end: len });
+            self.buffered_bytes += (len - chunk_start) as u64;
         }
         // Trailing backslash run (for parity across the edge). The detect
         // phase tracks escapes itself; boundary modes use run parity.
@@ -773,7 +811,23 @@ impl Segmentator {
             idx += 1;
         }
         self.line_len += (len - line_start) as u64;
-        len
+        // Bound the in-progress chunk: input that never yields a row boundary
+        // (no unescaped terminator) or a single colossal row would otherwise
+        // grow `segs` to the whole stream and OOM-abort the process through the
+        // infallible global allocator. Raise the serial path's over-long-line
+        // ERROR (catchable — fails only this statement) instead.
+        if self.buffered_bytes > self.max_buffered {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "parallel COPY leader buffer exceeded {} bytes before a row \
+                     boundary (over-long line or row); reduce row size or run \
+                     with PGRUST_PARALLEL_COPY unset",
+                    self.max_buffered
+                ))
+                .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            ));
+        }
+        Ok(len)
     }
 
     /// A row boundary just closed at `end` (exclusive, includes its EOL
@@ -817,6 +871,10 @@ impl Segmentator {
     }
 
     fn cut_chunk(&mut self, out: &mut Vec<ChunkDesc>) {
+        // The in-progress chunk's retained bytes leave the segmentator here
+        // (either taken into a ChunkDesc or already empty), so the buffer
+        // accounting resets to zero for the next chunk.
+        self.buffered_bytes = 0;
         if self.segs.is_empty() {
             self.rows = 0;
             self.first_lineno = self.rows_total + 1;
@@ -2704,7 +2762,7 @@ fn ceremony(
                     buf.truncate(n);
                     let abuf = Arc::new(buf);
                     let ts = std::time::Instant::now();
-                    let consumed = seg.feed(&abuf, n, &mut ready);
+                    let consumed = seg.feed(&abuf, n, &mut ready)?;
                     t_seg += ts.elapsed();
                     if seg.eoc {
                         // End-of-copy marker: never segment past it. A
@@ -2898,7 +2956,7 @@ mod segmentator_tests {
             let hi = (off + block).min(input.len());
             let buf = Arc::new(input[off..hi].to_vec());
             let n = buf.len();
-            seg.feed(&buf, n, &mut out);
+            seg.feed(&buf, n, &mut out).expect("feed within buffer ceiling");
             off = hi;
         }
         if !seg.eoc {
@@ -3037,5 +3095,57 @@ mod segmentator_tests {
         let (chunks, _) = segment(&input, 40, 17);
         let joined: Vec<u8> = chunks.iter().flat_map(|c| chunk_bytes(c)).collect();
         assert_eq!(joined, input);
+    }
+
+    /// Terminator-free input (never a row boundary, so `segs` accumulates
+    /// forever) must raise a catchable ERROR at the buffer ceiling instead of
+    /// growing without bound — the fix for the unbounded-leader-buffer OOM.
+    #[test]
+    fn terminator_free_input_hits_buffer_ceiling() {
+        let mut seg = Segmentator::new(pgrcolumnar::format::RG_ROWS as u32);
+        seg.max_buffered = 64; // tiny cap for the test
+        let mut out = Vec::new();
+        // Blocks with no unescaped terminator: `published` would stay 0 and the
+        // leader would read the whole stream. Feed until the cap trips.
+        let block = Arc::new(vec![b'x'; 32]);
+        seg.feed(&block, block.len(), &mut out).expect("first block under cap");
+        seg.feed(&block, block.len(), &mut out).expect("second block at cap");
+        let err = seg
+            .feed(&block, block.len(), &mut out)
+            .err().expect("third block must exceed the 64-byte ceiling");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert!(out.is_empty(), "no chunk was ever cut (no row boundary)");
+    }
+
+    /// A single colossal row (valid bytes, one boundary far past the ceiling)
+    /// is likewise bounded: the in-progress chunk trips the cap before the
+    /// terminator arrives.
+    #[test]
+    fn oversized_single_row_hits_buffer_ceiling() {
+        let mut seg = Segmentator::new(pgrcolumnar::format::RG_ROWS as u32);
+        seg.max_buffered = 100;
+        let mut out = Vec::new();
+        let block = Arc::new(vec![b'a'; 200]); // 200 data bytes, no '\n'
+        let err = seg
+            .feed(&block, block.len(), &mut out)
+            .err().expect("200-byte partial row exceeds the 100-byte ceiling");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    }
+
+    /// Normal input well under the ceiling is untouched: chunks cut on row
+    /// boundaries and `buffered_bytes` resets each cut, so throughput is
+    /// preserved (regression guard for the cap).
+    #[test]
+    fn buffer_accounting_resets_on_cut() {
+        let mut seg = Segmentator::new(2);
+        seg.max_buffered = 1 << 20;
+        let mut out = Vec::new();
+        let input = b"aaaa\nbbbb\ncccc\ndddd\n";
+        let block = Arc::new(input.to_vec());
+        seg.feed(&block, block.len(), &mut out).expect("well under cap");
+        seg.finish(&mut out);
+        assert_eq!(seg.rows_total, 4);
+        assert_eq!(seg.buffered_bytes, 0, "cut/finish drain the buffer accounting");
+        assert_eq!(out.len(), 2, "two 2-row chunks");
     }
 }

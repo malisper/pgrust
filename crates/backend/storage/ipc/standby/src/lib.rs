@@ -18,7 +18,7 @@ pub use recovery::{
 
 use elog::elog;
 use types_core::{Oid, XLogRecPtr, XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK};
-use types_error::{PgResult, DEBUG2};
+use types_error::{PgError, PgResult, DEBUG2, ERRCODE_DATA_CORRUPTED, ERROR};
 use types_storage::sinval::{SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
 use types_storage::storage::{xl_standby_lock, SUBXIDS_IN_ARRAY, SUBXIDS_MISSING};
 
@@ -199,6 +199,63 @@ pub fn LogStandbyInvalidations(
     Ok(())
 }
 
+/// Build a catchable WAL-corruption error. standby_redo runs on the
+/// startup/redo thread, so a panic (slice-OOB, capacity overflow, arithmetic
+/// overflow) would unwind that thread and wedge the standby in a crash loop as
+/// the offending record re-replays. Surface malformed records as
+/// ERRCODE_DATA_CORRUPTED, which recovery reports and handles.
+fn corrupt_record(msg: String) -> Box<PgError> {
+    Box::new(PgError::new(ERROR, msg).with_sqlstate(ERRCODE_DATA_CORRUPTED))
+}
+
+/// Reject a main-data slice shorter than a record type's fixed header before
+/// any fixed-offset read of that header.
+fn require_len(data: &[u8], min_len: usize, what: &str) -> PgResult<()> {
+    if data.len() < min_len {
+        return Err(corrupt_record(format!(
+            "invalid {what} record: main data is {} bytes, expected at least {}",
+            data.len(),
+            min_len
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a declared element count read from an attacker-controllable WAL
+/// record: it must be non-negative and `header + count * elem_size` must fit
+/// inside the record's actual main-data length, with no arithmetic overflow.
+/// C's redo loops are signed, so a negative count is a harmless no-op and an
+/// oversized one a silent over-read of the (large) decode buffer; the Rust
+/// port's `as usize` casts plus slice indexing/allocation would instead turn
+/// every mismatch into a deterministic panic. Returns the validated count as a
+/// usize safe to use as a loop bound and allocation size.
+fn validate_count(
+    data_len: usize,
+    header: usize,
+    count: i32,
+    elem_size: usize,
+    what: &str,
+) -> PgResult<usize> {
+    if count < 0 {
+        return Err(corrupt_record(format!(
+            "invalid {what} record: negative count {count}"
+        )));
+    }
+    let count = count as usize;
+    let need = count
+        .checked_mul(elem_size)
+        .and_then(|body| header.checked_add(body))
+        .ok_or_else(|| {
+            corrupt_record(format!("invalid {what} record: count {count} overflows record length"))
+        })?;
+    if data_len < need {
+        return Err(corrupt_record(format!(
+            "invalid {what} record: main data is {data_len} bytes, need {need} for {count} entries"
+        )));
+    }
+    Ok(count)
+}
+
 pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<()> {
     let decoded = record
         .record
@@ -214,7 +271,14 @@ pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<
     let data: &[u8] = unsafe { decoded.main_data_bytes() };
     match info {
         XLOG_STANDBY_LOCK => {
-            let nlocks = i32::from_ne_bytes(data[0..4].try_into().unwrap()) as usize;
+            require_len(data, OFFSET_OF_XL_STANDBY_LOCKS_LOCKS, "xl_standby_locks")?;
+            let nlocks = validate_count(
+                data.len(),
+                OFFSET_OF_XL_STANDBY_LOCKS_LOCKS,
+                i32::from_ne_bytes(data[0..4].try_into().unwrap()),
+                SIZE_OF_XL_STANDBY_LOCK,
+                "xl_standby_locks",
+            )?;
             for i in 0..nlocks {
                 let base = OFFSET_OF_XL_STANDBY_LOCKS_LOCKS + i * SIZE_OF_XL_STANDBY_LOCK;
                 let xid = u32::from_ne_bytes(data[base..base + 4].try_into().unwrap());
@@ -225,6 +289,7 @@ pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<
             Ok(())
         }
         XLOG_RUNNING_XACTS => {
+            require_len(data, MIN_SIZE_OF_XACT_RUNNING_XACTS, "xl_running_xacts")?;
             let xcnt = i32::from_ne_bytes(data[0..4].try_into().unwrap());
             let subxcnt = i32::from_ne_bytes(data[4..8].try_into().unwrap());
             let subxid_overflow = data[8] != 0;
@@ -232,8 +297,28 @@ pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<
             let oldest_running_xid = u32::from_ne_bytes(data[16..20].try_into().unwrap());
             let latest_completed_xid = u32::from_ne_bytes(data[20..24].try_into().unwrap());
 
+            // xcnt and subxcnt are each attacker-controllable i32s: validate
+            // both non-negative and that (xcnt + subxcnt) TransactionIds are
+            // actually backed by the record, avoiding the i32-add overflow and
+            // unbacked-index/oversized-capacity panics.
+            if xcnt < 0 || subxcnt < 0 {
+                return Err(corrupt_record(format!(
+                    "invalid xl_running_xacts record: negative counts xcnt {xcnt} subxcnt {subxcnt}"
+                )));
+            }
+            let total = validate_count(
+                data.len(),
+                MIN_SIZE_OF_XACT_RUNNING_XACTS,
+                xcnt.checked_add(subxcnt).ok_or_else(|| {
+                    corrupt_record(
+                        "invalid xl_running_xacts record: xcnt + subxcnt overflows".to_string(),
+                    )
+                })?,
+                4,
+                "xl_running_xacts",
+            )?;
+
             let cx = mcx::MemoryContext::new("RunningXactsRedo");
-            let total = (xcnt + subxcnt) as usize;
             let mut xids = mcx::vec_with_capacity_in(cx.mcx(), total)?;
             for i in 0..total {
                 let base = MIN_SIZE_OF_XACT_RUNNING_XACTS + i * 4;
@@ -253,10 +338,17 @@ pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<
             procarray::ProcArrayApplyRecoveryInfo(&running)
         }
         XLOG_INVALIDATIONS => {
+            require_len(data, MIN_SIZE_OF_INVALIDATIONS, "xl_invalidations")?;
             let dbId = u32::from_ne_bytes(data[0..4].try_into().unwrap());
             let tsId = u32::from_ne_bytes(data[4..8].try_into().unwrap());
             let relcacheInitFileInval = data[8] != 0;
-            let nmsgs = i32::from_ne_bytes(data[12..16].try_into().unwrap()) as usize;
+            let nmsgs = validate_count(
+                data.len(),
+                MIN_SIZE_OF_INVALIDATIONS,
+                i32::from_ne_bytes(data[12..16].try_into().unwrap()),
+                SHARED_INVALIDATION_MESSAGE_SIZE,
+                "xl_invalidations",
+            )?;
             let mut msgs = Vec::with_capacity(nmsgs);
             for i in 0..nmsgs {
                 let base = MIN_SIZE_OF_INVALIDATIONS + i * SHARED_INVALIDATION_MESSAGE_SIZE;
@@ -264,7 +356,12 @@ pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<
                     SharedInvalidationMessage::from_wire_bytes(
                         data[base..base + SHARED_INVALIDATION_MESSAGE_SIZE].try_into().unwrap(),
                     )
-                    .expect("standby_redo: unrecognized sinval message id"),
+                    .ok_or_else(|| {
+                        corrupt_record(
+                            "invalid xl_invalidations record: unrecognized sinval message id"
+                                .to_string(),
+                        )
+                    })?,
                 );
             }
             inval::eoxact::ProcessCommittedInvalidationMessages(

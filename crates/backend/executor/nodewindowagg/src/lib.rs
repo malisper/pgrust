@@ -1638,12 +1638,13 @@ impl<'mcx> WindowAggStateData<'mcx> {
         Ok(r)
     }
 
-    // window_gettupleslot over (readptr, seekpos): borrowed fetches
-    // (copy=false) are sound because tuplestore_trim is unported (in-mem
-    // tuples live until clear/end) and the spilled arm ALWAYS returns fresh
-    // copies (gettupleslot's StoreTuple::File arm — C copies to survive
-    // both). (STALE-NOTE FIX, wave-3 WS-R: the old "the store never spills"
-    // claim was wrong; spill works — see the spool_tuples note above.)
+    // window_gettupleslot over (readptr, seekpos): fetches use copy=true, matching
+    // upstream nodeWindowAgg.c. A borrowed (copy=false) slot points into the
+    // tuplestore's bump arena, which puttuple_common resets on the in-mem->spill
+    // transition (and after every append once spilled); since scan_slot/
+    // framehead_slot/frametail_slot are retained across later spool_tuples appends
+    // to the same store, copy=false was a use-after-free once a partition crossed
+    // work_mem. copy=true gives the slot its own storage that survives store writes.
     fn gettupleslot_at<F>(
         &mut self,
         estate: &mut EStateData<'mcx>,
@@ -1696,12 +1697,12 @@ impl<'mcx> WindowAggStateData<'mcx> {
             WhichSlot::Temp2 => &mut self.temp_slot_2,
         };
         if seekpos > pos {
-            if !buffer.gettupleslot(false, false, slot, mcx)? {
+            if !buffer.gettupleslot(false, true,slot, mcx)? {
                 panic!("unexpected end of tuplestore");
             }
             seekpos -= 1;
         } else {
-            if !buffer.gettupleslot(true, false, slot, mcx)? {
+            if !buffer.gettupleslot(true, true,slot, mcx)? {
                 panic!("unexpected end of tuplestore");
             }
             seekpos += 1;
@@ -1828,7 +1829,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         *self;
                     let buffer = buffer.as_mut().unwrap();
                     buffer.select_read_pointer(framehead_ptr)?;
-                    if !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
+                    if !buffer.gettupleslot(true, true,framehead_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
                 }
@@ -1859,7 +1860,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         *self;
                     let buffer = buffer.as_mut().unwrap();
                     buffer.select_read_pointer(framehead_ptr)?;
-                    if !more_rows || !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
+                    if !more_rows || !buffer.gettupleslot(true, true,framehead_slot, mcx)? {
                         exectuples::exec_clear_tuple(framehead_slot, mcx);
                         break;
                     }
@@ -1898,7 +1899,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         *self;
                     let buffer = buffer.as_mut().unwrap();
                     buffer.select_read_pointer(framehead_ptr)?;
-                    if !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
+                    if !buffer.gettupleslot(true, true,framehead_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
                 }
@@ -1948,7 +1949,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         *self;
                     let buffer = buffer.as_mut().unwrap();
                     buffer.select_read_pointer(framehead_ptr)?;
-                    if !more_rows || !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
+                    if !more_rows || !buffer.gettupleslot(true, true,framehead_slot, mcx)? {
                         exectuples::exec_clear_tuple(framehead_slot, mcx);
                         break;
                     }
@@ -1969,7 +1970,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         *self;
                     let buffer = buffer.as_mut().unwrap();
                     buffer.select_read_pointer(framehead_ptr)?;
-                    if !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
+                    if !buffer.gettupleslot(true, true,framehead_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
                 }
@@ -1989,7 +1990,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                             *self;
                         let buffer = buffer.as_mut().unwrap();
                         buffer.select_read_pointer(framehead_ptr)?;
-                        more_rows && buffer.gettupleslot(true, false, framehead_slot, mcx)?
+                        more_rows && buffer.gettupleslot(true, true,framehead_slot, mcx)?
                     };
                     if !fetched {
                         exectuples::exec_clear_tuple(&mut self.framehead_slot, mcx);
@@ -2059,7 +2060,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         *self;
                     let buffer = buffer.as_mut().unwrap();
                     buffer.select_read_pointer(frametail_ptr)?;
-                    if !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
+                    if !buffer.gettupleslot(true, true,frametail_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
                 }
@@ -2092,7 +2093,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         *self;
                     let buffer = buffer.as_mut().unwrap();
                     buffer.select_read_pointer(frametail_ptr)?;
-                    if !more_rows || !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
+                    if !more_rows || !buffer.gettupleslot(true, true,frametail_slot, mcx)? {
                         exectuples::exec_clear_tuple(frametail_slot, mcx);
                         break;
                     }
@@ -2135,7 +2136,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         *self;
                     let buffer = buffer.as_mut().unwrap();
                     buffer.select_read_pointer(frametail_ptr)?;
-                    if !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
+                    if !buffer.gettupleslot(true, true,frametail_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
                 }
@@ -2185,7 +2186,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         *self;
                     let buffer = buffer.as_mut().unwrap();
                     buffer.select_read_pointer(frametail_ptr)?;
-                    if !more_rows || !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
+                    if !more_rows || !buffer.gettupleslot(true, true,frametail_slot, mcx)? {
                         exectuples::exec_clear_tuple(frametail_slot, mcx);
                         break;
                     }
@@ -2206,7 +2207,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                         *self;
                     let buffer = buffer.as_mut().unwrap();
                     buffer.select_read_pointer(frametail_ptr)?;
-                    if !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
+                    if !buffer.gettupleslot(true, true,frametail_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
                 }
@@ -2226,7 +2227,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                             *self;
                         let buffer = buffer.as_mut().unwrap();
                         buffer.select_read_pointer(frametail_ptr)?;
-                        more_rows && buffer.gettupleslot(true, false, frametail_slot, mcx)?
+                        more_rows && buffer.gettupleslot(true, true,frametail_slot, mcx)?
                     };
                     if !fetched {
                         exectuples::exec_clear_tuple(&mut self.frametail_slot, mcx);
@@ -2287,7 +2288,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             self.spool_tuples(estate, fetch, self.grouptailpos)?;
             let fetched = {
                 let Self { ref mut buffer, ref mut temp_slot_2, .. } = *self;
-                buffer.as_mut().unwrap().gettupleslot(true, false, temp_slot_2, mcx)?
+                buffer.as_mut().unwrap().gettupleslot(true, true,temp_slot_2, mcx)?
             };
             if !fetched {
                 break;
@@ -3560,7 +3561,7 @@ where
                 {
                     let buffer = state.buffer.as_mut().unwrap();
                     buffer.select_read_pointer(0)?;
-                    if !buffer.gettupleslot(true, false, &mut state.scan_slot, mcx)? {
+                    if !buffer.gettupleslot(true, true,&mut state.scan_slot, mcx)? {
                         panic!("unexpected end of tuplestore");
                     }
                 }
@@ -3589,7 +3590,7 @@ where
             } else {
                 let buffer = state.buffer.as_mut().unwrap();
                 buffer.select_read_pointer(0)?;
-                if !buffer.gettupleslot(true, false, &mut state.scan_slot, mcx)? {
+                if !buffer.gettupleslot(true, true,&mut state.scan_slot, mcx)? {
                     panic!("unexpected end of tuplestore");
                 }
             }

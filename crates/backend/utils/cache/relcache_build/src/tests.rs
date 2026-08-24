@@ -241,7 +241,7 @@ struct FakeInt2Vector {
 fn vector_decoders_read_inline_values() {
     let ov = FakeOidVector {
         hdr: array::oidvector {
-            vl_len_: 0,
+            vl_len_: varlena_len(core::mem::size_of::<FakeOidVector>()),
             ndim: 1,
             dataoffset: 0,
             elemtype: 26,
@@ -256,7 +256,7 @@ fn vector_decoders_read_inline_values() {
 
     let iv = FakeInt2Vector {
         hdr: array::int2vector {
-            vl_len_: 0,
+            vl_len_: varlena_len(core::mem::size_of::<FakeInt2Vector>()),
             ndim: 1,
             dataoffset: 0,
             elemtype: 21,
@@ -268,4 +268,66 @@ fn vector_decoders_read_inline_values() {
     let d = Datum::from_usize(&iv as *const _ as usize);
     // SAFETY: as above.
     assert_eq!(unsafe { int2vector_values(d) }, &[1, -2, 3]);
+}
+
+// Encode a 4B varlena length word (matches the on-image header the decoders
+// read via VarlenaRef::varsize).
+fn varlena_len(bytes: usize) -> i32 {
+    i32::from_ne_bytes(datum::set_varsize_4b(bytes))
+}
+
+// A crafted pg_index vector whose on-image dim1 lies about how many elements
+// follow must never drive the values slice past the tuple image: the decoded
+// length is clamped to what the varlena length word can actually hold.
+#[test]
+fn vector_decoders_clamp_forged_dim1() {
+    // dim1 inflated far past the 3 real elements -> clamped to what fits.
+    let ov = FakeOidVector {
+        hdr: array::oidvector {
+            vl_len_: varlena_len(core::mem::size_of::<FakeOidVector>()),
+            ndim: 1,
+            dataoffset: 0,
+            elemtype: 26,
+            dim1: 1000,
+            lbound1: 0,
+        },
+        values: [1981, 1979, 10],
+    };
+    let d = Datum::from_usize(&ov as *const _ as usize);
+    // SAFETY: image is valid; only dim1 is forged. The decoder must not read
+    // past the image.
+    let got = unsafe { oidvector_values(d) };
+    assert!(got.len() <= 3, "forged dim1 must be clamped, got {}", got.len());
+
+    // Negative dim1 (sign-extends to a huge usize in the naive path) -> empty.
+    let iv = FakeInt2Vector {
+        hdr: array::int2vector {
+            vl_len_: varlena_len(core::mem::size_of::<FakeInt2Vector>()),
+            ndim: 1,
+            dataoffset: 0,
+            elemtype: 21,
+            dim1: -5,
+            lbound1: 0,
+        },
+        values: [1, -2, 3],
+    };
+    let d = Datum::from_usize(&iv as *const _ as usize);
+    // SAFETY: as above.
+    assert_eq!(unsafe { int2vector_values(d) }, &[] as &[i16]);
+}
+
+#[test]
+fn vector_fit_len_clamps_to_varlena_extent() {
+    let elemsz = core::mem::size_of::<Oid>();
+    // Header + 3 elements: an honest dim1 of 3 is returned unchanged.
+    let varsize = array::VECTOR_HDRSZ + 3 * elemsz;
+    assert_eq!(crate::vector_fit_len(varsize, 3, elemsz), 3);
+    // Inflated dim1 is clamped to the number the varlena can hold.
+    assert_eq!(crate::vector_fit_len(varsize, 1000, elemsz), 3);
+    // Negative dim1 decodes to zero elements (never a huge usize).
+    assert_eq!(crate::vector_fit_len(varsize, -1, elemsz), 0);
+    // i32::MAX cannot overflow past the extent.
+    assert_eq!(crate::vector_fit_len(varsize, i32::MAX, elemsz), 3);
+    // A header-only image with a claimed element yields nothing.
+    assert_eq!(crate::vector_fit_len(array::VECTOR_HDRSZ, 1, elemsz), 0);
 }

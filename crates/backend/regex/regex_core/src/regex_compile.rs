@@ -1709,6 +1709,13 @@ pub fn newlacon(v: &mut Vars, begin: StateId, end: StateId, latype: u8) -> RegRe
         v.lacons.push(blank_subre());
     }
     v.nlacons = n + 1;
+    // The lookaround index is later packed into the i16 color space (LACON arcs
+    // use color = ncolors + index at compaction). Reject before the caller's
+    // `n as color` cast can truncate a pathological count; C fails REG_ETOOBIG.
+    if n > crate::regguts::MAX_COLOR as i32 {
+        v.seterr(REG_ETOOBIG);
+        return Err(RegError(REG_ETOOBIG));
+    }
     let sub = &mut v.lacons[n as usize];
     sub.begin = Some(begin);
     sub.end = Some(end);

@@ -350,6 +350,42 @@ fn startup_and_trim_zero_page_tail() {
     assert_eq!(status_of(xid + 1), TRANSACTION_STATUS_IN_PROGRESS);
 }
 
+// A crafted CRC-valid RM_CLOG record can carry fewer main-data bytes than the
+// arm reads, or a negative int64 pageno. C memcpy's fixed sizes and does
+// `pageno % nbanks` without a sign check, so it never faults; the Rust startup
+// redo thread must reject both as a typed ERRCODE_DATA_CORRUPTED, never a
+// slice/index panic.
+#[test]
+fn clog_redo_pageno_rejects_short_and_negative() {
+    // Valid ZEROPAGE payload (8-byte non-negative pageno) passes.
+    let mut ok = [0u8; 8];
+    ok.copy_from_slice(&5i64.to_ne_bytes());
+    assert_eq!(clog_redo_pageno(&ok, SIZEOF_CLOG_ZEROPAGE, "CLOG_ZEROPAGE").unwrap(), 5);
+
+    // Valid TRUNCATE payload (16 bytes) passes.
+    let mut trunc = [0u8; SIZEOF_XL_CLOG_TRUNCATE];
+    trunc[..8].copy_from_slice(&9i64.to_ne_bytes());
+    assert_eq!(
+        clog_redo_pageno(&trunc, SIZEOF_XL_CLOG_TRUNCATE, "CLOG_TRUNCATE").unwrap(),
+        9
+    );
+
+    // Short payloads for either op yield a typed error, not a panic.
+    for &need in &[SIZEOF_CLOG_ZEROPAGE, SIZEOF_XL_CLOG_TRUNCATE] {
+        for bad_len in 0..need {
+            let err = clog_redo_pageno(&vec![0u8; bad_len], need, "test")
+                .expect_err("short record must be rejected");
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+        }
+    }
+
+    // Negative pageno (well-formed 8-byte payload) is rejected before SLRU.
+    let neg = (-1i64).to_ne_bytes();
+    let err = clog_redo_pageno(&neg, SIZEOF_CLOG_ZEROPAGE, "CLOG_ZEROPAGE")
+        .expect_err("negative pageno must be rejected");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+}
+
 #[test]
 fn checkpoint_writes_dirty_pages() {
     let _l = test_lock();

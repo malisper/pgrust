@@ -247,6 +247,66 @@ fn seam_install_and_external_fetch_arm() {
     assert_eq!(&out[VARHDRSZ..], &input[..]);
 }
 
+// A well-formed external image carrying an in-memory-only pointer tag plus a
+// bogus (never-dereferenced) embedded pointer. `varsize_any` for these tags is
+// VARHDRSZ_EXTERNAL + 8, so the image length matches what an attacker-supplied
+// heap/index/bytea value would present.
+fn pointer_form_image(tag: u8) -> Vec<u8> {
+    let mut image = vec![0x01u8, tag];
+    image.extend_from_slice(&0xDEAD_BEEF_usize.to_ne_bytes());
+    image
+}
+
+#[test]
+fn reject_in_memory_pointer_form_gates_only_indirect_and_expanded() {
+    // In-memory-only pointer forms are rejected with a catchable error.
+    for tag in [VARTAG_INDIRECT, 2 /* EXPANDED_RO */, 3 /* EXPANDED_RW */] {
+        let image = pointer_form_image(tag);
+        let err = reject_in_memory_pointer_form(&image).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED, "tag={tag}");
+    }
+    // Every trustworthy form passes the gate untouched.
+    assert!(reject_in_memory_pointer_form(&plain_image(b"plain")).is_ok());
+    assert!(reject_in_memory_pointer_form(&short_image(b"short")).is_ok());
+    assert!(reject_in_memory_pointer_form(&compress_image(&sample(200), TOAST_PGLZ_COMPRESSION_ID)).is_ok());
+    assert!(reject_in_memory_pointer_form(&ondisk_image(304, 250, TOAST_PGLZ_COMPRESSION_ID)).is_ok());
+}
+
+#[test]
+fn checked_detoast_rejects_pointer_forms_without_dereferencing() {
+    // The embedded pointer (0xDEADBEEF) is never mapped; the checked entry
+    // points must return a catchable error rather than dereference it. If any
+    // arm dereferenced the pointer this test would fault instead of asserting.
+    let ctx = MemoryContext::new("t");
+    for tag in [VARTAG_INDIRECT, 2 /* EXPANDED_RO */, 3 /* EXPANDED_RW */] {
+        let image = pointer_form_image(tag);
+
+        let err = detoast_attr_checked(ctx.mcx(), &image).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED, "detoast_attr_checked tag={tag}");
+
+        let err = detoast_external_attr_checked(ctx.mcx(), &image).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED, "external tag={tag}");
+
+        let err = detoast_attr_slice_checked(ctx.mcx(), &image, 0, -1).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED, "slice tag={tag}");
+    }
+}
+
+#[test]
+fn checked_detoast_passes_through_trustworthy_forms() {
+    let ctx = MemoryContext::new("t");
+    let plain = plain_image(b"plain value");
+    assert_eq!(&detoast_attr_checked(ctx.mcx(), &plain).unwrap()[..], &plain[..]);
+
+    let input = sample(1500);
+    let compressed = compress_image(&input, TOAST_PGLZ_COMPRESSION_ID);
+    let out = detoast_attr_checked(ctx.mcx(), &compressed).unwrap();
+    assert_eq!(&out[VARHDRSZ..], &input[..]);
+
+    let out = detoast_attr_slice_checked(ctx.mcx(), &compressed, 100, 50).unwrap();
+    assert_eq!(&out[VARHDRSZ..], &input[100..150]);
+}
+
 #[repr(C)]
 struct FakeExpanded {
     hdr: datum::ExpandedObjectHeader,

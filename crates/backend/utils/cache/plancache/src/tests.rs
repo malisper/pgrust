@@ -15,6 +15,7 @@ use super::*;
 
 const TEST_RELID: Oid = 50001;
 const ONCONFLICT_RELID: Oid = 50002;
+const CALL_RELID: Oid = 50003;
 // A funcid the generic plan depends on (setrefs would key its PlanInvalItem on
 // PROCOID); the hash value the object-inval message carries.
 const TEST_FUNC_HASH: u32 = 0x00AB_CDEF;
@@ -473,7 +474,7 @@ fn post_rewrite_hook_error_leaves_source_invalid() {
     ReleaseCachedPlan(p1);
     PlanCacheSysCallback(Datum::from_oid(InvalidOid), NAMESPACEOID, 0);
     let err = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL)
-        .expect_err("the hook's error must reach the caller");
+        .err().expect("the hook's error must reach the caller");
     assert!(err.message().contains("post-rewrite refusal"), "{:?}", err.message());
     assert!(!CachedPlanIsValid(h));
     DropCachedPlan(h);
@@ -841,5 +842,73 @@ fn replan_without_pin_reclaims_old_query_arena_eagerly() {
     let p2 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
     assert_eq!(pending(h), 0, "no pin: the old arena frees at the replan tail");
     ReleaseCachedPlan(p2);
+    DropCachedPlan(h);
+}
+
+// A CMD_UTILITY Query wrapping a CALL whose transformed funcexpr carries a
+// regclass Const argument (relation dependency). canSetTag=false keeps result
+// desc on PORTAL_MULTI_QUERY so no utility tupdesc seam is needed.
+fn call_stmt_query_with_regclass_arg<'m>(mcx: mcx::Mcx<'m>) -> Query<'m> {
+    let regclass_const = Node::mk(
+        mcx,
+        Const {
+            consttype: super::REGCLASSOID,
+            consttypmod: -1,
+            constcollid: types_core::InvalidOid,
+            constlen: 4,
+            constvalue: datum::Datum::from_oid(CALL_RELID),
+            constisnull: false,
+            constbyval: true,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let mut fe = Node::build::<types_nodes::primnodes::FuncExpr>(mcx).unwrap();
+    fe.funcid = types_core::InvalidOid;
+    fe.args.lappend(mcx, regclass_const).unwrap();
+    let funcexpr = fe.seal_ref();
+    let callstmt = Node::mk(
+        mcx,
+        types_nodes::rawnodes::CallStmt {
+            funccall: None,
+            funcexpr: Some(funcexpr),
+            outargs: types_nodes::list::NodeList::nil(),
+        },
+    )
+    .unwrap();
+    Query {
+        commandType: CmdType::CMD_UTILITY,
+        canSetTag: false,
+        utilityStmt: Some(callstmt),
+        ..Query::default()
+    }
+}
+
+// Regression: extract_query_dependencies' CMD_UTILITY/CallStmt arm must record
+// the CALL's transformed-arg relation deps. Without it the plansource carries
+// no relation_oids and survives DDL, re-planning a stale analyzed tree
+// (type-confusion sink via the planner's selectivity path).
+#[test]
+fn call_stmt_transformed_arg_relation_is_a_source_dependency() {
+    install();
+    push_snapshot();
+    let scratch = test_mcx();
+    let raw = select_raw(scratch);
+    let h = CreateCachedPlan(Some(&raw), "CALL p(...)", CommandTag::SELECT).unwrap();
+    let qmcx = SourceQueryMcx(h);
+    let mut qlist = PgVec::new_in(qmcx);
+    qlist.push(call_stmt_query_with_regclass_arg(qmcx));
+    CompleteCachedPlan(h, qlist, &[], types_portal::CURSOR_OPT_PARALLEL_OK, true).unwrap();
+    SaveCachedPlan(h).unwrap();
+    assert!(CachedPlanIsValid(h));
+
+    PlanCacheRelCallback(Datum::from_oid(InvalidOid), CALL_RELID + 1);
+    assert!(CachedPlanIsValid(h), "unrelated relid must not invalidate");
+
+    PlanCacheRelCallback(Datum::from_oid(InvalidOid), CALL_RELID);
+    assert!(
+        !CachedPlanIsValid(h),
+        "DDL on a CALL argument's relation must invalidate the cached utility statement"
+    );
     DropCachedPlan(h);
 }

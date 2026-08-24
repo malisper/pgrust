@@ -1,9 +1,13 @@
 //! BTDedupStateData (nbtree.h) shared by _bt_dedup_pass (nbtree), _bt_load
 //! dedup (nbtsort), btree_xlog_dedup redo (nbtree_xlog). Raw tuple images.
 
+use alloc::boxed::Box;
+use alloc::format;
+
 use crate::page::BTMaxItemSize;
 use crate::vacuum::BTDedupInterval;
 use crate::{BT_IS_POSTING, BT_OFFSET_MASK, INDEX_ALT_TID_MASK};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use types_core::{OffsetNumber, Size, BLCKSZ};
 use types_storage::bufpage::{ItemIdData, PageMut, SizeOfPageHeaderData};
 use types_tuple::itemptr::{ItemPointerData, InvalidOffsetNumber};
@@ -60,6 +64,16 @@ pub unsafe fn itup_posting_offset(itup: *const u8) -> usize {
     (hi << 16 | lo) as usize
 }
 
+#[cold]
+fn corrupt_posting(nposting: usize, posting_offset: usize, tupsize: usize) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "corrupted posting list: {nposting} TIDs at offset {posting_offset} in {tupsize}-byte index tuple"
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    )
+}
+
 pub struct BTDedupState {
     pub deduplicate: bool,
     pub nmaxitems: i32,
@@ -91,7 +105,7 @@ impl BTDedupState {
     /// _bt_dedup_start_pending.
     /// # Safety
     /// `base`: live non-pivot tuple, valid until the next `finish_pending`.
-    pub unsafe fn start_pending(&mut self, base: *const u8, baseoff: OffsetNumber) {
+    pub unsafe fn start_pending(&mut self, base: *const u8, baseoff: OffsetNumber) -> PgResult<()> {
         debug_assert!(self.nhtids == 0);
         debug_assert!(self.nitems == 0);
         debug_assert!(!itup_is_pivot(base));
@@ -102,14 +116,32 @@ impl BTDedupState {
             self.basetupsize = itup_size(base);
         } else {
             let nposting = itup_nposting(base);
-            let src = base.add(itup_posting_offset(base));
+            let posting_offset = itup_posting_offset(base);
+            let tupsize = itup_size(base);
+            // C reads the posting count/offset straight from the tuple and
+            // memcpy's into state->htids (palloc'd at maxpostingsize),
+            // trusting the page to be well-formed. A memory-safe port must
+            // validate the attacker-controllable on-disk posting metadata
+            // before copying: nposting is a 12-bit field (up to 4095) and
+            // posting_offset a 32-bit field, either of which could push the
+            // copy past the fixed htids array or read past the tuple image.
+            // A legitimate posting list keeps its TIDs inside the tuple and
+            // never exceeds MAX_HTIDS.
+            if nposting == 0
+                || nposting > MAX_HTIDS
+                || posting_offset > tupsize
+                || IPD_SIZE * nposting > tupsize - posting_offset
+            {
+                return Err(corrupt_posting(nposting, posting_offset, tupsize));
+            }
+            let src = base.add(posting_offset);
             core::ptr::copy_nonoverlapping(
                 src,
                 self.htids.as_mut_ptr().cast::<u8>(),
                 IPD_SIZE * nposting,
             );
             self.nhtids = nposting;
-            self.basetupsize = itup_posting_offset(base);
+            self.basetupsize = posting_offset;
         }
 
         self.nitems = 1;
@@ -117,6 +149,7 @@ impl BTDedupState {
         self.baseoff = baseoff;
         self.phystupsize = maxalign(itup_size(base)) + core::mem::size_of::<ItemIdData>();
         self.intervals[self.nintervals].baseoff = self.baseoff;
+        Ok(())
     }
 
     /// _bt_dedup_save_htid.
@@ -254,5 +287,65 @@ impl BTDedupState {
                 self.nintervals * core::mem::size_of::<BTDedupInterval>(),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::page::BTMaxItemSize;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// Build a raw posting-tuple header: `posting_offset` in the alt-TID
+    /// blkid, `nposting | BT_IS_POSTING` in the posid, `size | ALT_TID` in
+    /// t_info. The buffer is padded to `buflen` so a valid copy has room.
+    fn posting_tuple(nposting: usize, posting_offset: usize, size: usize, buflen: usize) -> Vec<u8> {
+        let mut b = vec![0u8; buflen];
+        b[0..2].copy_from_slice(&((posting_offset >> 16) as u16).to_ne_bytes());
+        b[2..4].copy_from_slice(&((posting_offset & 0xffff) as u16).to_ne_bytes());
+        b[4..6].copy_from_slice(&((nposting as u16) | BT_IS_POSTING).to_ne_bytes());
+        b[6..8].copy_from_slice(&((size as u16) | INDEX_ALT_TID_MASK).to_ne_bytes());
+        b
+    }
+
+    #[test]
+    fn start_pending_rejects_oversized_posting_list() {
+        // Attacker-crafted: claims 4095 TIDs (the 12-bit max) at a small
+        // offset inside a 16-byte tuple. Copying 4095*6 = 24570 bytes would
+        // overrun the fixed htids array; the check must reject it instead.
+        let buf = posting_tuple(BT_OFFSET_MASK as usize, 8, 16, 32);
+        let mut state = BTDedupState::new(BTMaxItemSize);
+        let res = unsafe { state.start_pending(buf.as_ptr(), 1) };
+        let err = res.expect_err("oversized posting list must be rejected");
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+        // nothing was copied
+        assert_eq!(state.nhtids, 0);
+        assert_eq!(state.nitems, 0);
+    }
+
+    #[test]
+    fn start_pending_rejects_out_of_range_posting_offset() {
+        // Offset points past the tuple end: OOB read source.
+        let buf = posting_tuple(2, 40, 16, 64);
+        let mut state = BTDedupState::new(BTMaxItemSize);
+        let res = unsafe { state.start_pending(buf.as_ptr(), 1) };
+        let err = res.expect_err("out-of-range posting offset must be rejected");
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    #[test]
+    fn start_pending_accepts_well_formed_posting_list() {
+        // keysize 16, 3 TIDs, tuple size maxalign(16 + 3*6) = 40.
+        let nposting = 3usize;
+        let keysize = 16usize;
+        let size = maxalign(keysize + nposting * IPD_SIZE);
+        let buf = posting_tuple(nposting, keysize, size, size + IPD_SIZE);
+        let mut state = BTDedupState::new(BTMaxItemSize);
+        let res = unsafe { state.start_pending(buf.as_ptr(), 1) };
+        assert!(res.is_ok());
+        assert_eq!(state.nhtids, nposting);
+        assert_eq!(state.basetupsize, keysize);
+        assert_eq!(state.nitems, 1);
     }
 }

@@ -904,6 +904,25 @@ fn accept_failure_report(err: &openssl::ssl::Error) -> PgResult<()> {
     }
 }
 
+// Post-wait drain for the pre-auth TLS handshake loop. On a latch wake the
+// latch must be reset (or FeBeWaitSet busy-spins), and the cooperative
+// interrupt sources drained so authentication_timeout (STARTUP_PACKET_TIMEOUT)
+// and the pre-auth SIGTERM disposition can fire against a stalled handshake —
+// the same drain secure_read/secure_write perform at their wait points
+// (be_secure::secure_read). An elapsed timeout or a pending die comes back as
+// the Err (ereport FATAL / proc_exit), tearing the connection down.
+fn drain_handshake_wait(events: u32, want_read: bool) -> PgResult<()> {
+    if events & WL_LATCH_SET != 0 {
+        latch_seams::reset_latch_my_latch::call();
+        if want_read {
+            postgres_seams::process_client_read_interrupt::call(true)?;
+        } else {
+            postgres_seams::process_client_write_interrupt::call(true)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn be_tls_open_server(sock: i32, raw_buf: Vec<u8>) -> PgResult<TlsOpen> {
     assert!(CONN.with(|c| c.borrow().is_none()));
 
@@ -945,7 +964,8 @@ pub fn be_tls_open_server(sock: i32, raw_buf: Vec<u8>) -> PgResult<TlsOpen> {
         match result {
             Ok(s) => break s,
             Err(HandshakeError::WouldBlock(mid)) => {
-                let waitfor = if mid.error().code() == ErrorCode::WANT_READ {
+                let want_read = mid.error().code() == ErrorCode::WANT_READ;
+                let waitfor = if want_read {
                     WL_SOCKET_READABLE
                 } else {
                     WL_SOCKET_WRITEABLE
@@ -955,10 +975,25 @@ pub fn be_tls_open_server(sock: i32, raw_buf: Vec<u8>) -> PgResult<TlsOpen> {
                 // C waits with WaitLatchOrSocket(NULL latch, ...): the latch is
                 // not in its set. FeBeWaitSet has it, so a set latch must be
                 // consumed or this wait returns immediately forever (busy
-                // spin); no interrupt processing is needed pre-auth, as C notes.
-                if events & WL_LATCH_SET != 0 {
-                    latch_seams::reset_latch_my_latch::call();
-                }
+                // spin).
+                //
+                // C's comment "No need to care about timeouts/interrupts here"
+                // holds only because its StartupPacketTimeoutHandler fires
+                // asynchronously off SIGALRM and directly _exit(1)s the child.
+                // The thread-per-backend model has no such asynchronous exit:
+                // the timer thread and the pre-auth SIGTERM disposition only
+                // set InterruptPending + the latch, and their handlers
+                // (authentication_timeout's STARTUP_PACKET_TIMEOUT ->
+                // proc_exit(1), and fast-shutdown's process_startup_packet_die)
+                // run ONLY when this backend drains at a client-IO interrupt
+                // point. Without a drain here, a client that stalls the TLS
+                // handshake wakes the backend via the latch, which merely
+                // resets it and re-parks — pinning the backend forever and
+                // making authentication_timeout inert against half-open
+                // pre-auth connections. Drain exactly as secure_read/write do
+                // at their own wait points so a stalled handshake is torn down
+                // at the timeout / fast shutdown.
+                drain_handshake_wait(events, want_read)?;
                 clear_err_queue();
                 result = mid.handshake();
             }
@@ -1355,4 +1390,44 @@ pub fn be_tls_get_certificate_hash() -> PgResult<Option<Vec<u8>>> {
                 .map(|()| None),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as O};
+
+    static READ_DRAINS: AtomicUsize = AtomicUsize::new(0);
+
+    // Stands in for ProcessClientReadInterrupt: records that the drain ran and
+    // returns the Err a fired authentication_timeout / pre-auth SIGTERM would
+    // produce (the seam's documented ereport(FATAL) "terminating connection"
+    // path).
+    fn read_interrupt_stub(_blocked: bool) -> PgResult<()> {
+        READ_DRAINS.fetch_add(1, O::SeqCst);
+        Err(ereport(FATAL)
+            .errmsg_internal("terminating connection due to authentication timeout")
+            .into_error()
+            .into())
+    }
+
+    // A latch wake mid-handshake must reset the latch AND drain the cooperative
+    // interrupts, so a stalled pre-auth client is torn down at the timeout
+    // instead of pinning the backend; a pure socket-readiness wake must do
+    // neither (the handshake simply retries).
+    #[test]
+    fn handshake_wait_drains_interrupts_on_latch_wake() {
+        latch_seams::reset_latch_my_latch::set(|| {});
+        postgres_seams::process_client_read_interrupt::set(read_interrupt_stub);
+
+        // Socket-only wake: no drain, no seam calls, retry the handshake.
+        assert!(drain_handshake_wait(WL_SOCKET_READABLE, true).is_ok());
+        assert_eq!(READ_DRAINS.load(O::SeqCst), 0);
+
+        // Latch wake: the drain runs and the fired timeout/SIGTERM propagates
+        // as the Err that terminates the parked backend.
+        let r = drain_handshake_wait(WL_LATCH_SET | WL_SOCKET_READABLE, true);
+        assert!(r.is_err());
+        assert_eq!(READ_DRAINS.load(O::SeqCst), 1);
+    }
 }

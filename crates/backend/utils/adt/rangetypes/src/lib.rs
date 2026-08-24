@@ -232,6 +232,144 @@ pub fn range_deserialize_into(
     flags & RANGE_EMPTY != 0
 }
 
+#[cold]
+fn malformed_range_image() -> Box<PgError> {
+    Box::new(
+        PgError::error("malformed range value in statistics".to_string())
+            .with_sqlstate(ERRCODE_DATA_EXCEPTION),
+    )
+}
+
+/// Bounds-checked counterpart of [`range_deserialize`] for range images that
+/// arrive from an untrusted source (a crafted `pg_statistic` BOUNDS_HISTOGRAM
+/// stavalues element, a restored/altered catalog page, etc.).
+///
+/// [`range_deserialize_into`] trusts every offset and length embedded in the
+/// image — correct for an image `range_serialize` just built, but a serialized
+/// range coming out of the catalog is attacker-influenced. C's
+/// `range_deserialize` (rangetypes.c) has the same trust assumption, which is
+/// safe in C only because the planner never feeds it a value it did not just
+/// build; pgrust's stats lane can. This validates that every byte read while
+/// walking the bounds — the trailing flag byte, each bound's fetch_att read,
+/// the inner varlena header/extent, and the alignment probe — stays inside
+/// `range` before dereferencing, raising a catchable statement error instead of
+/// reading out of bounds.
+pub fn range_deserialize_checked(
+    elem: &ElemInfo,
+    range: &[u8],
+) -> PgResult<(RangeBound, RangeBound, bool)> {
+    // Need the range header plus the trailing flag byte at a minimum.
+    if range.len() < RANGE_HDRSZ + 1 {
+        return Err(malformed_range_image());
+    }
+    let flags = range[range.len() - 1];
+    // Bound payload lives strictly before the flag byte.
+    let data_end = range.len() - 1;
+    let typlen = elem.typlen as i32;
+    let base = range.as_ptr();
+    let mut off = RANGE_HDRSZ;
+
+    let mut lower =
+        RangeBound { val: Datum::from_usize(0), infinite: false, inclusive: false, lower: true };
+    let mut upper =
+        RangeBound { val: Datum::from_usize(0), infinite: false, inclusive: false, lower: false };
+
+    if range_has_lbound(flags) {
+        let consumed = checked_bound_len(range, off, data_end, elem)?;
+        // SAFETY: checked_bound_len proved [off, off+consumed) ⊆ range[..data_end].
+        lower.val = fetch_att(unsafe { base.add(off) }, elem.typbyval, typlen);
+        off += consumed;
+    }
+    lower.infinite = flags & RANGE_LB_INF != 0;
+    lower.inclusive = flags & RANGE_LB_INC != 0;
+
+    if range_has_ubound(flags) {
+        off = checked_att_align_ptr(range, off, data_end, elem.typalign, elem.typlen)?;
+        // Validate the upper bound's full extent stays in bounds before fetch.
+        checked_bound_len(range, off, data_end, elem)?;
+        // SAFETY: alignment probe and extent both proved in bounds above.
+        upper.val = fetch_att(unsafe { base.add(off) }, elem.typbyval, typlen);
+    }
+    upper.infinite = flags & RANGE_UB_INF != 0;
+    upper.inclusive = flags & RANGE_UB_INC != 0;
+
+    Ok((lower, upper, flags & RANGE_EMPTY != 0))
+}
+
+/// Validate — and return — the byte length the bound at `off` occupies, mirroring
+/// `att_addlength_pointer`/`fetch_att` but proving every read stays within
+/// `range[off..data_end]`. Errors (never panics or reads OOB) on any bound whose
+/// declared extent would leave the image slice.
+fn checked_bound_len(
+    range: &[u8],
+    off: usize,
+    data_end: usize,
+    elem: &ElemInfo,
+) -> PgResult<usize> {
+    if off > data_end {
+        return Err(malformed_range_image());
+    }
+    let avail = data_end - off;
+    let typlen = elem.typlen;
+    let len = if typlen > 0 {
+        // Fixed-length by-value/by-ref: fetch_att reads `typlen` bytes.
+        typlen as usize
+    } else if typlen == -1 {
+        // Varlena: need at least one header byte to classify it.
+        if avail < 1 {
+            return Err(malformed_range_image());
+        }
+        let b0 = range[off];
+        if b0 & 0x01 == 0x01 {
+            if b0 == 0x01 {
+                // 1B_E toast pointer: never legal inside a serialized range.
+                return Err(malformed_range_image());
+            }
+            // Short 1-byte header: length is the header's own count.
+            (b0 as usize >> 1) & 0x7F
+        } else {
+            // 4-byte header: all four header bytes must be present.
+            if avail < 4 {
+                return Err(malformed_range_image());
+            }
+            (u32::from_ne_bytes(range[off..off + 4].try_into().unwrap()) >> 2) as usize
+        }
+    } else if typlen == -2 {
+        // cstring: length runs to the NUL terminator, which must be present.
+        match range[off..data_end].iter().position(|&b| b == 0) {
+            Some(n) => n + 1,
+            None => return Err(malformed_range_image()),
+        }
+    } else {
+        return Err(malformed_range_image());
+    };
+    if len == 0 || len > avail {
+        return Err(malformed_range_image());
+    }
+    Ok(len)
+}
+
+/// Bounds-checked `att_align_ptr`: an already-started short varlena takes no
+/// padding, otherwise nominal alignment is applied. The one-byte probe of the
+/// current position is validated before the read.
+fn checked_att_align_ptr(
+    range: &[u8],
+    cur: usize,
+    data_end: usize,
+    typalign: u8,
+    typlen: i16,
+) -> PgResult<usize> {
+    if typlen == -1 {
+        if cur >= data_end {
+            return Err(malformed_range_image());
+        }
+        if range[cur] != 0 {
+            return Ok(cur);
+        }
+    }
+    Ok(att_align_nominal(cur, typalign))
+}
+
 // att_align_pointer: no padding before an already-started short varlena.
 #[inline]
 fn att_align_ptr(base: *const u8, cur: usize, typalign: u8, typlen: i16) -> usize {

@@ -1638,6 +1638,7 @@ dependencies = [
  "pg_md5",
  "pg_strong_random",
  "pgstat_seams",
+ "pgsync",
  "postgres_seams",
  "pqcomm",
  "pqcomm_seams",
@@ -2201,6 +2202,7 @@ dependencies = [
  "openssl",
  "openssl-sys",
  "pg_string",
+ "postgres_seams",
  "pqcomm",
  "types_error",
  "types_storage",
@@ -3284,6 +3286,7 @@ dependencies = [
  "seam_core",
  "table",
  "tupdesc",
+ "types_array",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -5040,6 +5043,7 @@ dependencies = [
  "types_tuple",
  "varlena",
  "waitevent",
+ "wchar",
 ]
 
 [[package]]
@@ -5086,6 +5090,7 @@ dependencies = [
  "lock",
  "mcx",
  "pgstat",
+ "twophase_config",
  "types_core",
  "types_error",
  "types_storage",
@@ -6830,6 +6835,7 @@ dependencies = [
  "nbtree",
  "pg_prng",
  "pglz",
+ "pgsync",
  "postgres_seams",
  "predicate_seams",
  "procarray_seams",
@@ -8004,6 +8010,7 @@ dependencies = [
  "datum",
  "dfmgr",
  "injection_point",
+ "superuser_seams",
  "types_error",
  "types_fmgr",
 ]
@@ -8953,6 +8960,7 @@ dependencies = [
 name = "logicalworker"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
  "adt_int",
  "adt_timestamp",
  "bgworker",
@@ -8985,7 +8993,9 @@ dependencies = [
  "logicalproto",
  "logicalrelation",
  "lsyscache",
+ "mbutils",
  "mcx",
+ "miscinit",
  "nodemodifytable",
  "nodes_core",
  "origin",
@@ -8996,6 +9006,7 @@ dependencies = [
  "procsignal",
  "relcache",
  "rewrite_handler",
+ "rls",
  "shm_mq",
  "snapmgr",
  "stringinfo",
@@ -9022,6 +9033,7 @@ dependencies = [
  "types_trigger",
  "types_tuple",
  "walreceiver",
+ "wchar",
  "xact",
 ]
 
@@ -12231,6 +12243,7 @@ name = "pg_hmac"
 version = "0.1.0"
 dependencies = [
  "pg_sha2",
+ "secure_zero",
 ]
 
 [[package]]
@@ -13091,6 +13104,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "varsup_seams",
  "vfs",
  "wchar",
  "xact",
@@ -15212,11 +15226,13 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "regex_core"
 version = "0.0.0"
 dependencies = [
+ "init_small",
  "locale",
  "mbutils_seams",
  "mcx",
  "pg_locale",
  "pg_locale_seams",
+ "postgres_seams",
  "regex",
  "regex_core_seams",
  "seam_core",
@@ -16140,6 +16156,7 @@ dependencies = [
  "genam",
  "genam_seams",
  "guc",
+ "guc_tables",
  "indexcmds_seams",
  "lsyscache",
  "mbutils",
@@ -16262,6 +16279,7 @@ name = "saslprep"
 version = "0.1.0"
 dependencies = [
  "mcx",
+ "secure_zero",
  "types_error",
  "unicode_norm",
  "wchar",
@@ -16343,6 +16361,7 @@ dependencies = [
  "pg_hmac",
  "pg_sha2",
  "postgres_seams",
+ "secure_zero",
  "types_error",
 ]
 
@@ -16729,6 +16748,10 @@ dependencies = [
  "types_tuple",
  "varlena",
 ]
+
+[[package]]
+name = "secure_zero"
+version = "0.1.0"
 
 [[package]]
 name = "semver"
@@ -18105,6 +18128,7 @@ dependencies = [
 name = "storage_xlog"
 version = "0.1.0"
 dependencies = [
+ "elog",
  "freespace",
  "init_small",
  "smgr",
@@ -20144,6 +20168,7 @@ name = "unicode_norm"
 version = "0.1.0"
 dependencies = [
  "mcx",
+ "secure_zero",
  "types_error",
  "wchar",
 ]
@@ -21033,6 +21058,7 @@ dependencies = [
  "namespace_seams",
  "numutils",
  "pg_locale",
+ "postgres_seams",
  "stack_depth",
  "syscache_seams",
  "ts_cache",

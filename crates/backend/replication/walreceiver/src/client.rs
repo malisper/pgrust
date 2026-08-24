@@ -67,10 +67,10 @@ pub fn connect(conninfo: &str, appname: &str) -> PgResult<Result<PgConn, String>
 // replication (replication=true, database "replication"), logical replication
 // (replication=database + the subscriber's dbname + forced GUC options, as
 // pg_dump forces them), or a plain SQL connection (tablesync catalog reads).
-// must_use_password renders libpqrcv_check_conninfo's recheck: the conninfo
-// itself must carry a password (recorded divergence: C additionally checks
-// PQconnectionUsedPassword after connecting — server-side auth-method
-// awareness this client does not track).
+// must_use_password renders libpqrcv_check_conninfo's recheck (the conninfo
+// itself must carry a password) AND, like C, verifies post-connect via
+// PQconnectionUsedPassword that the server actually demanded the credential,
+// so a non-superuser subscription can't ride ambient trust/peer/ident auth.
 pub fn connect_extended(
     conninfo: &str,
     replication: bool,
@@ -126,6 +126,27 @@ pub fn connect_extended(
         Ok(c) => c,
         Err(e) => return Ok(Err(e)),
     };
+
+    // The conninfo-syntax recheck above cannot tell whether the server
+    // actually demanded the password: a trust/peer/ident HBA line lets the
+    // connection succeed without ever consuming the supplied credential. So
+    // when must_use_password is set, verify post-connect that the password was
+    // really used (PQconnectionUsedPassword); otherwise a non-superuser-owned
+    // subscription could ride the server's ambient authentication. Close the
+    // connection and ereport (matching libpqrcv_connect).
+    if must_use_password && !conn.used_password() {
+        conn.terminate();
+        return throw(
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED)
+                .errmsg("password is required")
+                .errdetail("Non-superuser cannot connect if the server does not request a password.")
+                .errhint(
+                    "Target server's authentication method must be changed, or set password_required=false in the subscription parameters.",
+                )
+                .finish(loc("libpqrcv_connect")),
+        );
+    }
 
     // Set always-secure search path for connections that run SQL queries, so
     // malicious users can't redirect user code, e.g. operators
@@ -464,8 +485,8 @@ mod tests {
             conn_err("port=1foo"),
             "invalid integer value \"1foo\" for connection option \"port\""
         );
-        // must_use_password recheck still precedes everything (C checks it
-        // post-connect; recorded divergence — see connect_extended).
+        // must_use_password's conninfo recheck still precedes everything (the
+        // PQconnectionUsedPassword post-connect check happens after connecting).
         match connect_extended("port=-1", true, false, true, "t") {
             Err(e) => assert!(e.message().contains("password is required")),
             Ok(_) => panic!("expected password-required ereport"),

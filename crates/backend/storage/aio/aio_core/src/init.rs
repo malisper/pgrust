@@ -159,7 +159,7 @@ pub fn AioShmemResetAfterCrash() -> PgResult<()> {
     // Table geometry from the STORED counts, never the live GUC: per-child
     // base-snapshot stamping can rewrite io_max_concurrency (=-1) after the
     // boot-time auto-tune (CI cluster crash-smoke finding, job -47a8).
-    let imc = crate::handle_count() / procs;
+    let imc = crate::io_handles_per_backend();
 
     for procno in 0..procs {
         let slot = backend_slot(procno as i32);

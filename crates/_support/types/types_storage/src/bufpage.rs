@@ -254,12 +254,19 @@ impl<'a> PageRef<'a> {
     /// # Safety
     /// `offnum >= 1` and `SizeOfPageHeaderData + offnum * 4 <= BLCKSZ`: any
     /// `offnum <= max_offset_number()` after ONE per-page `pd_lower` check.
+    ///
+    /// The line-pointer array offset is release-asserted (not just
+    /// `debug_assert!`) so a crafted on-disk/WAL page can never make this read
+    /// the ItemIdData slot outside the `BLCKSZ` image; C relies on the page
+    /// invariant, but pgrust hardens hostile input into a deterministic
+    /// "corrupt line pointer" bounds-check instead of a silent OOB read.
     #[inline]
     pub unsafe fn item_id_unchecked(&self, offnum: OffsetNumber) -> ItemIdData {
         let offnum = offnum as usize;
-        debug_assert!(
+        assert!(
             offnum >= 1
-                && SizeOfPageHeaderData + offnum * core::mem::size_of::<ItemIdData>() <= BLCKSZ
+                && SizeOfPageHeaderData + offnum * core::mem::size_of::<ItemIdData>() <= BLCKSZ,
+            "corrupt line pointer offset"
         );
         let off = SizeOfPageHeaderData + (offnum - 1) * core::mem::size_of::<ItemIdData>();
         // SAFETY: in-bounds (caller contract), 4-aligned (header is MAXALIGNed).
@@ -276,19 +283,29 @@ impl<'a> PageRef<'a> {
         unsafe { self.item_raw_unchecked(id) }
     }
 
-    /// C's `PageGetItem`: no per-tuple bounds re-check.
+    /// C's `PageGetItem`.
     /// # Safety
-    /// `id` came from THIS page with its item within the image — the page
-    /// invariant every writer keeps and C reads unchecked (LP_NORMAL).
+    /// `id` came from THIS page — the page invariant every writer keeps and C
+    /// reads unchecked (LP_NORMAL).
+    ///
+    /// Unlike C's `PageGetItem` (which only `Assert`s and is otherwise
+    /// unchecked), the `[lp_off, lp_off+lp_len)` extent is release-asserted
+    /// against the `BLCKSZ` image. The 15-bit `lp_off`/`lp_len` fields are read
+    /// straight from the page, so a page crafted on disk or restored from a WAL
+    /// full-page image can forge them; without a release check the returned
+    /// `(ptr, len)` would let scan/prune/vacuum paths read — and hint-bit
+    /// writes clobber — adjacent buffer-pool memory. This turns hostile input
+    /// into a deterministic "corrupt line pointer" bounds-check with no access
+    /// outside the page image.
     #[inline]
     pub unsafe fn item_raw_unchecked(&self, id: ItemIdData) -> (*const u8, u32) {
         let off = id.lp_off() as usize;
         let len = id.lp_len() as usize;
-        debug_assert!(
+        assert!(
             off >= SizeOfPageHeaderData && off + len <= BLCKSZ,
             "corrupt line pointer"
         );
-        // SAFETY: in-bounds (caller contract: page invariant).
+        // SAFETY: bounds asserted above; base is 4-aligned (header MAXALIGNed).
         (unsafe { self.ptr.as_ptr().add(off) }, len as u32)
     }
 
@@ -755,6 +772,18 @@ impl<'a> PageMut<'a> {
         );
 
         let nline = r.max_offset_number();
+        // Bound the untrusted line-pointer count (derived from pd_lower) against
+        // the fixed itemidbase capacity before collecting live items. nstorage is
+        // indexed up to nline, so a corrupted pd_lower yielding nline beyond
+        // MaxHeapTuplesPerPage (the hard limit on heap line pointers) would
+        // overrun the scratch array and panic. Reject it as data corruption
+        // instead. C relies on the MaxHeapTuplesPerPage invariant here (see the
+        // "too many line pointers" note in bufpage.c); we make that invariant an
+        // explicit, catchable check.
+        assert!(
+            (nline as usize) <= MaxHeapTuplesPerPage,
+            "corrupted line pointer count: nline = {nline}, max = {MaxHeapTuplesPerPage}"
+        );
         let mut itemidbase = [ItemIdCompact::ZERO; MaxHeapTuplesPerPage];
         let mut nstorage = 0usize;
         let mut nunused = 0usize;
@@ -774,11 +803,25 @@ impl<'a> PageMut<'a> {
                     } else {
                         presorted = false;
                     }
-                    assert!(
-                        itemoff >= pd_upper && itemoff < pd_special,
-                        "corrupted line pointer: {itemoff}"
-                    );
                     let alignedlen = (lp.lp_len() as usize + 7) & !7;
+                    // Validate both the offset and the item's full extent:
+                    // itemoff must lie within [pd_upper, pd_special) and the
+                    // aligned tuple must end at or before pd_special. Checking
+                    // only the offset (as C's PageRepairFragmentation does)
+                    // leaves each item's length unchecked, so a single crafted
+                    // line pointer with itemoff + MAXALIGN(lp_len) > pd_special
+                    // would drive compactify_tuples' raw copies past the page
+                    // image (OOB read into the adjacent buffer, or OOB write
+                    // past the scratch buffer). Bound the extent here, mirroring
+                    // the per-item offset + size <= pd_special check that
+                    // PageIndexMultiDelete already performs.
+                    assert!(
+                        itemoff >= pd_upper
+                            && itemoff < pd_special
+                            && itemoff + alignedlen <= pd_special,
+                        "corrupted line pointer: offset = {itemoff}, size = {}",
+                        lp.lp_len()
+                    );
                     itemidbase[nstorage] = ItemIdCompact {
                         offsetindex: i - 1,
                         itemoff: itemoff as u16,
@@ -955,6 +998,17 @@ impl<'a> PageMut<'a> {
         );
 
         let nline = r.max_offset_number();
+        // Bound the untrusted line-pointer count (derived from pd_lower) against
+        // the fixed itemidbase/newitemids capacity before collecting kept items.
+        // nused is indexed up to nline, so a corrupted pd_lower yielding nline
+        // beyond MaxIndexTuplesPerPage (the hard limit on index line pointers)
+        // would overrun the scratch arrays and panic. Reject it as data
+        // corruption instead, mirroring C's reliance on the MaxIndexTuplesPerPage
+        // invariant in PageIndexMultiDelete (bufpage.c).
+        assert!(
+            (nline as usize) <= MaxIndexTuplesPerPage,
+            "corrupted line pointer count: nline = {nline}, max = {MaxIndexTuplesPerPage}"
+        );
         let mut itemidbase = [ItemIdCompact::ZERO; MaxIndexTuplesPerPage];
         let mut newitemids = [ItemIdData::default(); MaxIndexTuplesPerPage];
         let mut totallen = 0usize;
@@ -1487,6 +1541,70 @@ mod tests {
         assert_eq!(r.pd_upper() as usize, BLCKSZ);
         assert_eq!(r.max_offset_number(), 0);
         assert!(!r.has_free_line_pointers());
+    }
+
+    #[test]
+    #[should_panic(expected = "corrupted line pointer")]
+    fn repair_fragmentation_rejects_overlong_item() {
+        // A crafted line pointer whose itemoff is in-range but whose
+        // itemoff + MAXALIGN(lp_len) runs past pd_special must be rejected
+        // before compactify_tuples performs any raw copy. Without the extent
+        // check this would drive an OOB read past the page image.
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        add_n(&mut pm, 2, 28);
+        // Item 1 sits at a valid offset near pd_special; overwrite its length
+        // so the aligned tuple extends well beyond pd_special (BLCKSZ here).
+        let id = pm.as_ref().item_id(1);
+        let itemoff = id.lp_off();
+        assert!((itemoff as usize) < BLCKSZ);
+        pm.set_item_id(1, ItemIdData::new(itemoff, LP_NORMAL, 4000));
+        // Free item 2 so a compaction is actually attempted.
+        let mut lp2 = pm.as_ref().item_id(2);
+        lp2.set_unused();
+        pm.set_item_id(2, lp2);
+        pm.repair_fragmentation();
+    }
+
+    #[test]
+    #[should_panic(expected = "corrupt line pointer")]
+    fn item_raw_unchecked_rejects_forged_extent() {
+        // A heap scan reaches item_raw_unchecked for every line pointer. A page
+        // crafted on disk / restored from a WAL full-page image can forge the
+        // 15-bit lp_off/lp_len fields. With only a debug_assert! this drove a
+        // cross-buffer OOB read (and hint-bit OOB write) in release builds; the
+        // release-mode extent check must reject it with a corruption error and
+        // touch nothing outside the BLCKSZ image.
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        add_n(&mut pm, 1, 28);
+        // Forge lp_off/lp_len to their 15-bit maxima (0x7fff, ~3 pages past
+        // this 8KB image in the contiguous buffer pool).
+        pm.set_item_id(1, ItemIdData::new(0x7fff, LP_NORMAL, 0x7fff));
+        let r = pm.as_ref();
+        // SAFETY: exercising the malformed path; the release assert must fire
+        // before any pointer arithmetic dereferences out-of-page memory.
+        let _ = unsafe {
+            let id = r.item_id_unchecked(1);
+            r.item_raw_unchecked(id)
+        };
+    }
+
+    #[test]
+    #[should_panic(expected = "corrupt line pointer offset")]
+    fn item_id_unchecked_rejects_out_of_page_offnum() {
+        // A forged pd_lower can make max_offset_number report more line
+        // pointers than fit; item_id_unchecked must not read the ItemIdData
+        // slot past the page image.
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        let r = pm.as_ref();
+        let bad = (BLCKSZ / core::mem::size_of::<ItemIdData>()) as OffsetNumber + 1;
+        // SAFETY: exercising the malformed path; the release assert must fire.
+        let _ = unsafe { r.item_id_unchecked(bad) };
     }
 
     fn fill_index_page(pm: &mut PageMut<'_>, n: usize) -> alloc::vec::Vec<[u8; 16]> {

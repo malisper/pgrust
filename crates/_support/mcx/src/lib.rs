@@ -87,12 +87,27 @@ impl DropList {
         DropList { entries: alloc::vec::Vec::new() }
     }
 
-    // Pop-before-run: a panicking destructor leaks unrun entries, never double-runs.
-    fn run(&mut self) {
-        while let Some(entry) = self.entries.pop() {
-            // SAFETY: live leaked value of glue's type, Drop suppressed; sole drop, before arena reset.
-            unsafe { (entry.glue)(entry.addr) };
-        }
+    // Pop the most-recently-registered pending entry, leaving the rest in place.
+    // Callers (run_drop_glue) pop under a brief scoped borrow and run the entry
+    // with NO borrow held, so user drop glue — arbitrary safe code that can
+    // re-enter this same context (allocate/reset, or register another drop) —
+    // cannot alias the exclusive borrow (UB in reset_noncore's get_mut) or
+    // double-borrow (MemoryContext::drop). Because un-run entries stay in the
+    // list, a panicking destructor leaves the remainder for the next reset/drop
+    // (they are never double-run, since each is removed before it runs).
+    fn pop(&mut self) -> Option<DropEntry> {
+        self.entries.pop()
+    }
+}
+
+// Run all pending drop glue, popping each entry under a fresh scoped borrow via
+// `next` (borrow released before the entry runs) so re-entrancy is safe, and a
+// panicking destructor leaves the not-yet-popped remainder in the DropList for
+// a subsequent reset/drop rather than losing or double-running them.
+fn run_drop_glue(mut next: impl FnMut() -> Option<DropEntry>) {
+    while let Some(entry) = next() {
+        // SAFETY: live leaked value of glue's type, Drop suppressed; sole drop, before arena reset.
+        unsafe { (entry.glue)(entry.addr) };
     }
 }
 
@@ -883,11 +898,24 @@ pub fn register_session_cleanup_phase(phase: SessionCleanupPhase, f: SessionClea
 
 /// Session-lifetime root context: the `Box::leak(Box::new(MemoryContext))`
 /// shape (stable `&'static` handle, no TLS dtor state machine) plus a
-/// registered teardown that frees the context — and everything in it,
-/// wholesale, without running per-entry drop glue — when the session ends.
-/// Holders are per-thread statics that are never touched after teardown (the
-/// thread is exiting), so the dangling `&'static` is unreachable by
-/// construction.
+/// registered teardown that reclaims the context's arena — and everything in
+/// it, wholesale — when the session ends.
+///
+/// The shell struct itself is deliberately **never freed**: at teardown it is
+/// reset (arena bulk released, destructors run) and poisoned, but left
+/// allocated, so the handed-out `&'static` can never become dangling. Any
+/// stray post-teardown *access* (alloc/reset/free through the retired context)
+/// then fails closed with a deterministic panic in debug builds instead of
+/// reading freed memory — see [`MemoryContext::check_live`]. The residual
+/// leak is bounded (one shell + its keeper block per session root), matching
+/// the crate's pre-existing "leak at thread exit" fallback.
+std::thread_local! {
+    /// Set while a `session_root*` context is being retired at teardown, so
+    /// `reset_noncore` skips its mid-life exact-accounting leak-check for the
+    /// final wholesale arena release (see `retire_session_root`).
+    static SESSION_ROOT_RETIRING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
 pub fn session_root(name: &'static str) -> &'static MemoryContext {
     session_root_from(MemoryContext::new(name))
 }
@@ -909,13 +937,19 @@ pub fn session_root_mut(ctx: MemoryContext) -> &'static mut MemoryContext {
     register_session_cleanup_phase(
         SessionCleanupPhase::Roots,
         alloc::boxed::Box::new(move || {
-            // SAFETY: sole owner (from Box::into_raw above); runs at most
-            // once, on the owning thread, after which nothing dereferences
-            // the handle.
-            drop(unsafe { alloc::boxed::Box::from_raw(addr as *mut MemoryContext) });
+            // SAFETY: `addr` is the leaked shell from `Box::into_raw` above.
+            // The closure runs at most once, on the owning thread, at
+            // teardown. We do NOT reconstruct+drop the Box: freeing the shell
+            // would leave the handed-out `&'static` dangling. Instead we
+            // retire it in place — release the arena bulk and poison the shell
+            // — so the reference stays valid (poisoned) forever and any later
+            // access fails closed via `check_live`.
+            let shell = unsafe { &mut *(addr as *mut MemoryContext) };
+            shell.retire_session_root();
         }),
     );
-    // SAFETY: heap allocation, freed only by the closure above.
+    // SAFETY: heap allocation; retired-but-never-freed by the closure above,
+    // so the reference is valid for the process lifetime.
     unsafe { &mut *raw }
 }
 
@@ -976,6 +1010,15 @@ pub struct MemoryContext {
     // C's isReset: cleared on every allocate/grow/register; reset() early-exits
     // on it (per-row ResetExprContext is 2 loads, not the arena walk).
     is_reset: Cell<bool>,
+    // Retirement tripwire for `session_root*` shells: set true at session
+    // teardown (see `session_root_mut`). The shell is deliberately kept alive
+    // (never freed) after teardown so the handed-out `&'static` can never
+    // dangle; this flag turns any post-teardown *access* into a deterministic,
+    // fail-closed panic in debug builds instead of a silent read of a retired
+    // context. Always false for ordinary (dropped) contexts. Read only under
+    // `debug_assertions` (see `check_live`); maintained in every build.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    poisoned: Cell<bool>,
 }
 
 impl MemoryContext {
@@ -1124,6 +1167,51 @@ impl MemoryContext {
             backend,
             reset_cbs: RefCell::new(alloc::vec::Vec::new()),
             is_reset: Cell::new(true),
+            poisoned: Cell::new(false),
+        }
+    }
+
+    /// Retire this context as part of `session_root*` teardown: free the arena
+    /// bulk (reset frees blocks and runs destructors) and mark the shell
+    /// poisoned so any later access fails closed. The shell itself is
+    /// intentionally leaked by the caller so the handed-out `&'static` stays
+    /// valid forever (poisoned, not freed) rather than dangling.
+    fn retire_session_root(&mut self) {
+        // Final teardown: release the arena wholesale, like C freeing
+        // TopMemoryContext at proc_exit — which never asserts "no bytes still
+        // charged". reset_noncore's exact-accounting leak-check targets
+        // MID-LIFE resets (where surviving charged bytes signal a bug); a
+        // session-root retirement legitimately discards transient charged data
+        // (e.g. "PgStat Pending" holding unflushed pending stats, which C also
+        // drops at exit). Suppress the leak-check for this path only, so the
+        // RSS-reclaiming reset doesn't trip it. Restores the pre-retire
+        // observable behavior (these roots were formerly leaked-at-exit, never
+        // leak-checked) while keeping the arena reclaim.
+        // Clear the flag on every exit path, including a panic unwinding out of
+        // reset(), via a Drop guard — no catch_unwind (keeps the unwind policy
+        // clean; a panicking reset still propagates unchanged).
+        struct RetireFlagGuard;
+        impl Drop for RetireFlagGuard {
+            fn drop(&mut self) {
+                SESSION_ROOT_RETIRING.with(|r| r.set(false));
+            }
+        }
+        SESSION_ROOT_RETIRING.with(|r| r.set(true));
+        let _guard = RetireFlagGuard;
+        self.reset();
+        self.poisoned.set(true);
+    }
+
+    /// Post-teardown tripwire. Ordinary contexts are never poisoned, so this is
+    /// a no-op there. For a retired `session_root` shell it converts a
+    /// use-after-teardown into a deterministic panic in debug builds instead of
+    /// a silent access to a retired context. Kept out of release builds so the
+    /// allocation hot path carries no extra load.
+    #[inline(always)]
+    fn check_live(&self) {
+        #[cfg(debug_assertions)]
+        if self.poisoned.get() {
+            poisoned_access(self.acct.name.get());
         }
     }
 
@@ -1191,6 +1279,7 @@ impl MemoryContext {
     // resets ride the plain-Bump arm; every other backend is out of line.
     #[inline]
     pub fn reset(&mut self) {
+        self.check_live();
         if *self.is_reset.get_mut() {
             return;
         }
@@ -1224,8 +1313,12 @@ impl MemoryContext {
     #[cold]
     #[inline(never)]
     fn reset_noncore(&mut self) {
-        // Leak check only for exact-accounting backends (bump charges release wholesale here).
-        if !self.acct.is_bump {
+        // Leak check only for exact-accounting backends (bump charges release
+        // wholesale here), and never during a session-root retirement — that is
+        // a final wholesale teardown (C frees TopMemoryContext at proc_exit
+        // without such a check), where transient charged data is discarded by
+        // design, not leaked.
+        if !self.acct.is_bump && !SESSION_ROOT_RETIRING.with(core::cell::Cell::get) {
             debug_assert_eq!(
                 self.acct.self_used.get(),
                 0,
@@ -1250,7 +1343,11 @@ impl MemoryContext {
             Backend::Bump(_) | Backend::BumpForget(_) => unreachable!("handled in reset()"),
             Backend::BumpDrop(a, droplist) => {
                 // Run destructors BEFORE the bytes are reclaimed (order load-bearing).
-                droplist.get_mut().run();
+                // Pop each entry under a fresh scoped borrow and run it with the
+                // exclusive borrow released, so a re-entrant callback cannot alias
+                // the DropList and a panicking destructor leaves the remainder for
+                // the next reset (never double-run).
+                run_drop_glue(|| droplist.get_mut().pop());
                 let a = a.get_mut();
                 a.reset();
                 let footprint = a.footprint();
@@ -1388,11 +1485,26 @@ pub fn oom_named(context_name: &str, request: usize) -> PgError {
         ))
 }
 
+#[cfg(debug_assertions)]
+#[cold]
+#[inline(never)]
+fn poisoned_access(name: &str) -> ! {
+    panic!(
+        "mcx: access to session-root context {name:?} after session teardown \
+         (use-after-teardown)"
+    );
+}
+
 impl Drop for MemoryContext {
     fn drop(&mut self) {
         self.fire_reset_callbacks();
         if let Backend::BumpDrop(_, droplist) = &self.backend {
-            droplist.borrow_mut().run();
+            // Pop each entry under a short scoped borrow, dropping the borrow_mut
+            // guard before running any user drop glue, so a re-entrant
+            // register_drop/reset from a destructor cannot double-borrow or alias
+            // the DropList, and a panicking destructor leaves the remainder for a
+            // subsequent drop (never double-run).
+            run_drop_glue(|| droplist.borrow_mut().pop());
         }
         self.acct.ident.borrow_mut().take();
         self.acct.self_used.set(0);
@@ -1562,6 +1674,7 @@ unsafe impl Allocator for Mcx<'_> {
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        self.0.check_live();
         match &self.0.backend {
             Backend::Aset(set) => {
                 self.0.uncharge(layout.size());
@@ -1599,6 +1712,7 @@ unsafe impl Allocator for Mcx<'_> {
         if new_layout.size() > MAX_ALLOC_SIZE {
             return Err(alloc_ceiling_exceeded());
         }
+        self.0.check_live();
         self.0.is_reset.set(false);
         match &self.0.backend {
             Backend::Aset(set) => {
@@ -1647,6 +1761,7 @@ unsafe impl Allocator for Mcx<'_> {
         old_layout: Layout,
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
+        self.0.check_live();
         match &self.0.backend {
             Backend::Aset(set) => {
                 // SAFETY: single-statement borrow, never re-entered (aset_mut).
@@ -1724,6 +1839,7 @@ impl Mcx<'_> {
     /// `MAX_ALLOC_HUGE_SIZE` instead.
     #[inline(always)]
     fn allocate_unchecked(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.0.check_live();
         self.0.is_reset.set(false);
         match &self.0.backend {
             Backend::Aset(set) => {
@@ -1916,7 +2032,23 @@ pub fn box_into_inner_leak<'mcx, T>(b: PgBox<'mcx, T>) -> T {
 }
 
 /// Sized -> unsized `PgBox` coercion; caller supplies the thin->fat cast.
-pub fn box_unsize_dyn<'mcx, P, U>(
+///
+/// # Safety
+///
+/// `coerce` MUST return the genuine unsizing coercion of the pointer it is
+/// handed and nothing else — i.e. the same allocation, same address, only a
+/// pointer-metadata (vtable / slice-length) attachment, exactly what
+/// `|p| p as *mut dyn Trait` or `|p| p as *mut [T]` produce. The returned
+/// pointer is fed to `Box::from_raw_in` with the allocator just decomposed, so
+/// any other pointer (null, dangling, an interior offset, a foreign or
+/// integer-cast address, or forged slice metadata) makes the reconstructed
+/// `PgBox` own memory it does not back — a later use or drop then dereferences
+/// and frees that bogus address through the context allocator (heap
+/// corruption). This is why the function is `unsafe`: the signature alone
+/// (`FnOnce(*mut P) -> *mut U`, with `U: ?Sized` admitting even `Sized` `U`)
+/// cannot express or check the derived-pointer precondition, so the caller
+/// must uphold it.
+pub unsafe fn box_unsize_dyn<'mcx, P, U>(
     sized: PgBox<'mcx, P>,
     coerce: impl FnOnce(*mut P) -> *mut U,
 ) -> PgBox<'mcx, U>
@@ -1926,7 +2058,9 @@ where
 {
     let (raw, alloc) = allocator_api2::boxed::Box::into_raw_with_allocator(sized);
     let fat: *mut U = coerce(raw);
-    // SAFETY: the exact pointer+allocator just decomposed; unsizing only attaches a vtable.
+    // SAFETY: by this fn's contract `coerce` returns the unsizing coercion of
+    // `raw` (same allocation+address, metadata only), and `alloc` is the exact
+    // allocator just decomposed from `sized`.
     unsafe { allocator_api2::boxed::Box::from_raw_in(fat, alloc) }
 }
 

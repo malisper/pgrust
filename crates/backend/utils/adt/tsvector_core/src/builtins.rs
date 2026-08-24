@@ -6,7 +6,7 @@ use ::types_core::{
 };
 use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
-    ERRCODE_ZERO_LENGTH_CHARACTER_STRING,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_ZERO_LENGTH_CHARACTER_STRING,
 };
 use ::types_fmgr::{
     byref_result, cstring_result, varlena_result, FmgrBuiltin, FmgrInfo,
@@ -14,7 +14,7 @@ use ::types_fmgr::{
 };
 
 use crate::io::{tsvector_in_core, tsvector_out_core, tsvector_recv_core, tsvector_send_core};
-use crate::layout::{wep_getpos, wep_getweight, TsVec};
+use crate::layout::{wep_getpos, wep_getweight, TsVec, MAXSTRLEN, MAXSTRPOS};
 use crate::op::*;
 use crate::query::TsQueryRef;
 
@@ -281,6 +281,27 @@ pub fn fc_array_to_tsvector(
     let datalen: usize = lexemes.iter().map(|l| l.len()).sum();
     let mut b = crate::layout::TsVecBuilder::with_capacity(mcx, lexemes.len(), datalen)?;
     for lex in &lexemes {
+        // Enforce the bit-packed WordEntry limits before packing each entry,
+        // matching tsvectorin: len is 11 bits (< MAXSTRLEN) and pos is 20 bits
+        // (<= MAXSTRPOS). Without these, a long lexeme or large cumulative
+        // offset would silently overflow the packed len/pos fields.
+        if lex.len() >= MAXSTRLEN {
+            return Err(PgError::error(format!(
+                "word is too long ({} bytes, max {} bytes)",
+                lex.len(),
+                MAXSTRLEN - 1
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .into());
+        }
+        if b.cur_off() > MAXSTRPOS {
+            return Err(PgError::error(format!(
+                "string is too long for tsvector ({} bytes, max {MAXSTRPOS} bytes)",
+                b.cur_off()
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .into());
+        }
         b.push(lex, &[])?;
     }
     Ok(image_result(b.finish(mcx)?))

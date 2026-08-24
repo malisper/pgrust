@@ -84,12 +84,15 @@ impl PgBackendSSLStatus {
     }
 
     fn reset(&self) {
-        self.ssl_bits.set(0);
-        self.ssl_version.set([0; NAMELEN]);
-        self.ssl_cipher.set([0; NAMELEN]);
-        self.ssl_client_dn.set([0; NAMELEN]);
-        self.ssl_client_serial.set([0; NAMELEN]);
-        self.ssl_issuer_dn.set([0; NAMELEN]);
+        // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+        unsafe {
+            self.ssl_bits.set(0);
+            self.ssl_version.set([0; NAMELEN]);
+            self.ssl_cipher.set([0; NAMELEN]);
+            self.ssl_client_dn.set([0; NAMELEN]);
+            self.ssl_client_serial.set([0; NAMELEN]);
+            self.ssl_issuer_dn.set([0; NAMELEN]);
+        }
     }
 }
 
@@ -304,28 +307,38 @@ pub fn BackendStatusShmemResetAfterCrash() {
         .unwrap_or_else(|| panic!("BackendStatusShmemInit has not run"));
     for e in array {
         e.st_changecount.store(0, Relaxed);
-        e.st_procpid.set(0);
-        e.st_backendType.set(BackendType::Invalid);
-        e.st_proc_start_timestamp.set(0);
-        e.st_xact_start_timestamp.set(0);
-        e.st_activity_start_timestamp.set(0);
-        e.st_state_start_timestamp.set(0);
-        e.st_databaseid.set(InvalidOid);
-        e.st_userid.set(InvalidOid);
-        e.st_clientaddr.set(SockAddr::zeroed());
-        e.st_clienthostname.set([0; NAMELEN]);
-        e.st_ssl.set(false);
-        e.st_sslstatus.reset();
-        e.st_gss.set(false);
-        e.st_state.set(BackendState::STATE_UNDEFINED);
-        e.st_appname.set([0; NAMELEN]);
-        e.st_progress_command.set(PROGRESS_COMMAND_INVALID);
-        e.st_progress_command_target.set(InvalidOid);
-        for p in &e.st_progress_param {
-            p.set(0);
+        // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+        unsafe {
+            e.st_procpid.set(0);
+            e.st_backendType.set(BackendType::Invalid);
+            e.st_proc_start_timestamp.set(0);
+            e.st_xact_start_timestamp.set(0);
+            e.st_activity_start_timestamp.set(0);
+            e.st_state_start_timestamp.set(0);
+            e.st_databaseid.set(InvalidOid);
+            e.st_userid.set(InvalidOid);
+            e.st_clientaddr.set(SockAddr::zeroed());
+            e.st_clienthostname.set([0; NAMELEN]);
+            e.st_ssl.set(false);
         }
-        e.st_query_id.set(0);
-        e.st_plan_id.set(0);
+        e.st_sslstatus.reset();
+        // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+        unsafe {
+            e.st_gss.set(false);
+            e.st_state.set(BackendState::STATE_UNDEFINED);
+            e.st_appname.set([0; NAMELEN]);
+            e.st_progress_command.set(PROGRESS_COMMAND_INVALID);
+            e.st_progress_command_target.set(InvalidOid);
+        }
+        for p in &e.st_progress_param {
+            // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+            unsafe { p.set(0) };
+        }
+        // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+        unsafe {
+            e.st_query_id.set(0);
+            e.st_plan_id.set(0);
+        }
     }
     // SAFETY: buf spans `total` bytes; exclusive access per the fn contract.
     unsafe { std::ptr::write_bytes(buf.base, 0, buf.total) };
@@ -370,25 +383,28 @@ pub fn pgstat_bestart_initial() -> PgResult<()> {
     };
 
     begin_write_activity(beentry);
-    beentry.st_procpid.set(g::MyProcPid());
-    beentry.st_backendType.set(miscinit::GetMyBackendType());
-    beentry.st_proc_start_timestamp.set(g::MyStartTimestamp());
-    beentry.st_activity_start_timestamp.set(0);
-    beentry.st_state_start_timestamp.set(0);
-    beentry.st_xact_start_timestamp.set(0);
-    beentry.st_databaseid.set(InvalidOid);
-    beentry.st_userid.set(InvalidOid);
-    beentry.st_clientaddr.set(clientaddr);
-    beentry.st_ssl.set(false);
-    beentry.st_gss.set(false);
-    beentry.st_state.set(BackendState::STATE_STARTING);
-    beentry.st_progress_command.set(PROGRESS_COMMAND_INVALID);
-    beentry.st_progress_command_target.set(InvalidOid);
-    beentry.st_query_id.set(0);
-    beentry.st_plan_id.set(0);
-    // st_progress_param stays unzeroed as in C.
-    beentry.st_appname.set([0; NAMELEN]);
-    beentry.st_clienthostname.set(clienthostname);
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe {
+        beentry.st_procpid.set(g::MyProcPid());
+        beentry.st_backendType.set(miscinit::GetMyBackendType());
+        beentry.st_proc_start_timestamp.set(g::MyStartTimestamp());
+        beentry.st_activity_start_timestamp.set(0);
+        beentry.st_state_start_timestamp.set(0);
+        beentry.st_xact_start_timestamp.set(0);
+        beentry.st_databaseid.set(InvalidOid);
+        beentry.st_userid.set(InvalidOid);
+        beentry.st_clientaddr.set(clientaddr);
+        beentry.st_ssl.set(false);
+        beentry.st_gss.set(false);
+        beentry.st_state.set(BackendState::STATE_STARTING);
+        beentry.st_progress_command.set(PROGRESS_COMMAND_INVALID);
+        beentry.st_progress_command_target.set(InvalidOid);
+        beentry.st_query_id.set(0);
+        beentry.st_plan_id.set(0);
+        // st_progress_param stays unzeroed as in C.
+        beentry.st_appname.set([0; NAMELEN]);
+        beentry.st_clienthostname.set(clienthostname);
+    }
     write_activity(beentry.slot, b"");
     end_write_activity(beentry);
     Ok(())
@@ -404,20 +420,23 @@ fn read_ssl_status() -> (bool, PgBackendSSLStatus) {
     let lssl = PgBackendSSLStatus::zeroed();
     if g::WithMyProcPort(|p| p.ssl_in_use) {
         ssl = true;
-        lssl.ssl_bits.set(be_secure_openssl::be_tls_get_cipher_bits());
-        lssl.ssl_version
-            .set(str_to_name(&be_secure_openssl::be_tls_get_version().unwrap_or_default()));
-        lssl.ssl_cipher
-            .set(str_to_name(&be_secure_openssl::be_tls_get_cipher().unwrap_or_default()));
-        lssl.ssl_client_dn.set(str_to_name(
-            &be_secure_openssl::be_tls_get_peer_subject_name().unwrap_or_default(),
-        ));
-        lssl.ssl_client_serial.set(str_to_name(
-            &be_secure_openssl::be_tls_get_peer_serial().unwrap_or_default(),
-        ));
-        lssl.ssl_issuer_dn.set(str_to_name(
-            &be_secure_openssl::be_tls_get_peer_issuer_name().unwrap_or_default(),
-        ));
+        // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+        unsafe {
+            lssl.ssl_bits.set(be_secure_openssl::be_tls_get_cipher_bits());
+            lssl.ssl_version
+                .set(str_to_name(&be_secure_openssl::be_tls_get_version().unwrap_or_default()));
+            lssl.ssl_cipher
+                .set(str_to_name(&be_secure_openssl::be_tls_get_cipher().unwrap_or_default()));
+            lssl.ssl_client_dn.set(str_to_name(
+                &be_secure_openssl::be_tls_get_peer_subject_name().unwrap_or_default(),
+            ));
+            lssl.ssl_client_serial.set(str_to_name(
+                &be_secure_openssl::be_tls_get_peer_serial().unwrap_or_default(),
+            ));
+            lssl.ssl_issuer_dn.set(str_to_name(
+                &be_secure_openssl::be_tls_get_peer_issuer_name().unwrap_or_default(),
+            ));
+        }
     }
     (ssl, lssl)
 }
@@ -436,14 +455,17 @@ pub fn pgstat_bestart_security() -> PgResult<()> {
     let (ssl, lssl) = read_ssl_status();
 
     begin_write_activity(beentry);
-    beentry.st_ssl.set(ssl);
-    beentry.st_gss.set(false);
-    beentry.st_sslstatus.ssl_bits.set(lssl.ssl_bits.get());
-    beentry.st_sslstatus.ssl_version.set(lssl.ssl_version.get());
-    beentry.st_sslstatus.ssl_cipher.set(lssl.ssl_cipher.get());
-    beentry.st_sslstatus.ssl_client_dn.set(lssl.ssl_client_dn.get());
-    beentry.st_sslstatus.ssl_client_serial.set(lssl.ssl_client_serial.get());
-    beentry.st_sslstatus.ssl_issuer_dn.set(lssl.ssl_issuer_dn.get());
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe {
+        beentry.st_ssl.set(ssl);
+        beentry.st_gss.set(false);
+        beentry.st_sslstatus.ssl_bits.set(lssl.ssl_bits.get());
+        beentry.st_sslstatus.ssl_version.set(lssl.ssl_version.get());
+        beentry.st_sslstatus.ssl_cipher.set(lssl.ssl_cipher.get());
+        beentry.st_sslstatus.ssl_client_dn.set(lssl.ssl_client_dn.get());
+        beentry.st_sslstatus.ssl_client_serial.set(lssl.ssl_client_serial.get());
+        beentry.st_sslstatus.ssl_issuer_dn.set(lssl.ssl_issuer_dn.get());
+    }
     end_write_activity(beentry);
     Ok(())
 }
@@ -462,9 +484,12 @@ pub fn pgstat_bestart_final() -> PgResult<()> {
     };
 
     begin_write_activity(beentry);
-    beentry.st_databaseid.set(g::MyDatabaseId());
-    beentry.st_userid.set(userid);
-    beentry.st_state.set(BackendState::STATE_UNDEFINED);
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe {
+        beentry.st_databaseid.set(g::MyDatabaseId());
+        beentry.st_userid.set(userid);
+        beentry.st_state.set(BackendState::STATE_UNDEFINED);
+    }
     end_write_activity(beentry);
 
     if pgstat::backend::pgstat_tracks_backend_bktype(btype) {
@@ -482,7 +507,8 @@ pub fn pgstat_bestart_final() -> PgResult<()> {
 fn pgstat_beshutdown_hook(_code: i32, _arg: usize) {
     let Some(beentry) = MY_BE_ENTRY.get() else { return };
     begin_write_activity(beentry);
-    beentry.st_procpid.set(0);
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe { beentry.st_procpid.set(0) };
     end_write_activity(beentry);
     MY_BE_ENTRY.set(None);
 }
@@ -491,15 +517,22 @@ pub fn pgstat_report_activity(state: BackendState, cmd_str: Option<&str>) {
     let Some(beentry) = MY_BE_ENTRY.get() else { return };
 
     if !track_activities() {
-        if beentry.st_state.get() != BackendState::STATE_DISABLED {
+        // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+        if unsafe { beentry.st_state.get() } != BackendState::STATE_DISABLED {
             begin_write_activity(beentry);
-            beentry.st_state.set(BackendState::STATE_DISABLED);
-            beentry.st_state_start_timestamp.set(0);
+            // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+            unsafe {
+                beentry.st_state.set(BackendState::STATE_DISABLED);
+                beentry.st_state_start_timestamp.set(0);
+            }
             write_activity(beentry.slot, b"");
-            beentry.st_activity_start_timestamp.set(0);
-            beentry.st_xact_start_timestamp.set(0);
-            beentry.st_query_id.set(0);
-            beentry.st_plan_id.set(0);
+            // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+            unsafe {
+                beentry.st_activity_start_timestamp.set(0);
+                beentry.st_xact_start_timestamp.set(0);
+                beentry.st_query_id.set(0);
+                beentry.st_plan_id.set(0);
+            }
             if let Some(procno) = lmgr_proc::MyProc() {
                 lmgr_proc::GetPGProcByNumber(procno).wait_event_info.store(0, Relaxed);
             }
@@ -511,15 +544,19 @@ pub fn pgstat_report_activity(state: BackendState, cmd_str: Option<&str>) {
     let start_timestamp = xact::GetCurrentStatementStartTimestamp();
     let current_timestamp = adt_timestamp::GetCurrentTimestamp();
 
-    let prev_state = beentry.st_state.get();
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    let prev_state = unsafe { beentry.st_state.get() };
     if (prev_state == BackendState::STATE_RUNNING
         || prev_state == BackendState::STATE_FASTPATH
         || prev_state == BackendState::STATE_IDLEINTRANSACTION
         || prev_state == BackendState::STATE_IDLEINTRANSACTION_ABORTED)
         && state != prev_state
     {
-        let (secs, usecs) =
-            adt_timestamp::TimestampDifference(beentry.st_state_start_timestamp.get(), current_timestamp);
+        // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+        let (secs, usecs) = adt_timestamp::TimestampDifference(
+            unsafe { beentry.st_state_start_timestamp.get() },
+            current_timestamp,
+        );
         let micros = secs * 1_000_000 + usecs as i64;
         if prev_state == BackendState::STATE_RUNNING || prev_state == BackendState::STATE_FASTPATH {
             pgstat::database::pgstat_count_conn_active_time(micros);
@@ -529,18 +566,25 @@ pub fn pgstat_report_activity(state: BackendState, cmd_str: Option<&str>) {
     }
 
     begin_write_activity(beentry);
-    beentry.st_state.set(state);
-    beentry.st_state_start_timestamp.set(current_timestamp);
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe {
+        beentry.st_state.set(state);
+        beentry.st_state_start_timestamp.set(current_timestamp);
+    }
 
     // A new query resets the ids: only known after parse analysis.
     if state == BackendState::STATE_RUNNING {
-        beentry.st_query_id.set(0);
-        beentry.st_plan_id.set(0);
+        // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+        unsafe {
+            beentry.st_query_id.set(0);
+            beentry.st_plan_id.set(0);
+        }
     }
 
     if let Some(cmd) = cmd_str {
         write_activity(beentry.slot, cmd.as_bytes());
-        beentry.st_activity_start_timestamp.set(start_timestamp);
+        // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+        unsafe { beentry.st_activity_start_timestamp.set(start_timestamp) };
     }
     end_write_activity(beentry);
 }
@@ -551,11 +595,13 @@ pub fn pgstat_report_query_id(query_id: i64, force: bool) {
         return;
     }
     // Top-level ids only: nonzero saved id = nested command, unless forced.
-    if beentry.st_query_id.get() != 0 && !force {
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    if unsafe { beentry.st_query_id.get() } != 0 && !force {
         return;
     }
     begin_write_activity(beentry);
-    beentry.st_query_id.set(query_id);
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe { beentry.st_query_id.set(query_id) };
     end_write_activity(beentry);
 }
 
@@ -564,11 +610,13 @@ pub fn pgstat_report_plan_id(plan_id: i64, force: bool) {
     if !track_activities() {
         return;
     }
-    if beentry.st_plan_id.get() != 0 && !force {
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    if unsafe { beentry.st_plan_id.get() } != 0 && !force {
         return;
     }
     begin_write_activity(beentry);
-    beentry.st_plan_id.set(plan_id);
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe { beentry.st_plan_id.set(plan_id) };
     end_write_activity(beentry);
 }
 
@@ -579,7 +627,8 @@ pub fn pgstat_report_appname(appname: &str) {
     name[..len as usize].copy_from_slice(&appname.as_bytes()[..len as usize]);
 
     begin_write_activity(beentry);
-    beentry.st_appname.set(name);
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe { beentry.st_appname.set(name) };
     end_write_activity(beentry);
 }
 
@@ -589,20 +638,24 @@ pub fn pgstat_report_xact_timestamp(tstamp: TimestampTz) {
         return;
     }
     begin_write_activity(beentry);
-    beentry.st_xact_start_timestamp.set(tstamp);
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe { beentry.st_xact_start_timestamp.set(tstamp) };
     end_write_activity(beentry);
 }
 
 pub fn pgstat_get_my_query_id() -> i64 {
-    MY_BE_ENTRY.get().map_or(0, |e| e.st_query_id.get())
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    MY_BE_ENTRY.get().map_or(0, |e| unsafe { e.st_query_id.get() })
 }
 
 pub fn pgstat_get_my_plan_id() -> i64 {
-    MY_BE_ENTRY.get().map_or(0, |e| e.st_plan_id.get())
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    MY_BE_ENTRY.get().map_or(0, |e| unsafe { e.st_plan_id.get() })
 }
 
 pub fn pgstat_get_backend_type_by_proc_number(procNumber: ProcNumber) -> BackendType {
-    backend_status_array()[procNumber as usize].st_backendType.get()
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe { backend_status_array()[procNumber as usize].st_backendType.get() }
 }
 
 pub fn pgstat_get_backend_current_activity(pid: i32, check_user: bool) -> PgResult<String> {
@@ -610,7 +663,8 @@ pub fn pgstat_get_backend_current_activity(pid: i32, check_user: bool) -> PgResu
     for beentry in array.iter().take(g::MaxBackends() as usize) {
         let found = loop {
             let before = begin_read_activity(beentry);
-            let found = beentry.st_procpid.get() == pid;
+            // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+            let found = unsafe { beentry.st_procpid.get() } == pid;
             let after = end_read_activity(beentry);
             if read_activity_complete(before, after) {
                 break found;
@@ -619,9 +673,10 @@ pub fn pgstat_get_backend_current_activity(pid: i32, check_user: bool) -> PgResu
         };
 
         if found {
+            // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
             if check_user
                 && !superuser_seams::superuser::call()?
-                && beentry.st_userid.get() != miscinit::GetUserId()
+                && unsafe { beentry.st_userid.get() } != miscinit::GetUserId()
             {
                 return Ok("<insufficient privilege>".into());
             }
@@ -638,7 +693,8 @@ pub fn pgstat_get_backend_current_activity(pid: i32, check_user: bool) -> PgResu
 pub fn pgstat_get_crashed_backend_activity(pid: i32) -> Option<String> {
     let array = BACKEND_STATUS_ARRAY.get()?;
     for beentry in array.iter().take(g::MaxBackends() as usize) {
-        if beentry.st_procpid.get() == pid {
+        // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+        if unsafe { beentry.st_procpid.get() } == pid {
             let raw = read_activity(beentry.slot);
             if raw.is_empty() {
                 return None;
@@ -657,12 +713,18 @@ pub fn pgstat_get_crashed_backend_activity(pid: i32) -> Option<String> {
 pub fn pgstat_clip_activity(raw_activity: &[u8]) -> String {
     let limit = (query_size() - 1).min(raw_activity.len());
     let raw = &raw_activity[..limit];
-    let cliplen = mbutils::pg_mbcliplen(raw, raw.len() as i32, (query_size() - 1) as i32);
-    String::from_utf8_lossy(&raw[..cliplen as usize]).into_owned()
+    // The clip must never exceed the actual buffer: pass raw.len() as the limit
+    // (C limits by rawlen) and clamp, so a torn read ending mid-multibyte-char
+    // (where pg_mbcliplen over-adds the final char's declared length) can never
+    // produce an out-of-bounds slice bound.
+    let cliplen = (mbutils::pg_mbcliplen(raw, raw.len() as i32, raw.len() as i32) as usize)
+        .min(raw.len());
+    String::from_utf8_lossy(&raw[..cliplen]).into_owned()
 }
 
 pub fn appname_of(beentry: &PgBackendStatus) -> String {
-    name_to_string(&beentry.st_appname.get())
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    name_to_string(&unsafe { beentry.st_appname.get() })
 }
 
 #[derive(Clone)]
@@ -718,42 +780,46 @@ fn pgstat_read_current_status() {
     for (slot, beentry) in array.iter().enumerate() {
         let entry = loop {
             let before = begin_read_activity(beentry);
-            let procpid = beentry.st_procpid.get();
+            // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+            let procpid = unsafe { beentry.st_procpid.get() };
             // Skip the copy work if the entry is not in use, but still
             // validate the changecount bracket, as C does.
-            let entry = (procpid > 0).then(|| LocalPgBackendStatus {
-                st_procpid: procpid,
-                st_backendType: beentry.st_backendType.get(),
-                st_proc_start_timestamp: beentry.st_proc_start_timestamp.get(),
-                st_xact_start_timestamp: beentry.st_xact_start_timestamp.get(),
-                st_activity_start_timestamp: beentry.st_activity_start_timestamp.get(),
-                st_state_start_timestamp: beentry.st_state_start_timestamp.get(),
-                st_databaseid: beentry.st_databaseid.get(),
-                st_userid: beentry.st_userid.get(),
-                st_clientaddr: beentry.st_clientaddr.get(),
-                st_clienthostname: name_to_string(&beentry.st_clienthostname.get()),
-                st_ssl: beentry.st_ssl.get(),
-                st_ssl_bits: beentry.st_sslstatus.ssl_bits.get(),
-                st_ssl_version: name_to_string(&beentry.st_sslstatus.ssl_version.get()),
-                st_ssl_cipher: name_to_string(&beentry.st_sslstatus.ssl_cipher.get()),
-                st_ssl_client_dn: name_to_string(&beentry.st_sslstatus.ssl_client_dn.get()),
-                st_ssl_client_serial: name_to_string(&beentry.st_sslstatus.ssl_client_serial.get()),
-                st_ssl_issuer_dn: name_to_string(&beentry.st_sslstatus.ssl_issuer_dn.get()),
-                st_gss: beentry.st_gss.get(),
-                st_state: beentry.st_state.get(),
-                st_appname: name_to_string(&beentry.st_appname.get()),
-                st_activity_raw: String::from_utf8_lossy(&read_activity(beentry.slot))
-                    .into_owned(),
-                st_progress_command: beentry.st_progress_command.get(),
-                st_progress_command_target: beentry.st_progress_command_target.get(),
-                st_progress_param: std::array::from_fn(|i| beentry.st_progress_param[i].get()),
-                st_query_id: beentry.st_query_id.get(),
-                st_plan_id: beentry.st_plan_id.get(),
-                proc_number: slot as ProcNumber,
-                backend_xid: InvalidTransactionId,
-                backend_xmin: InvalidTransactionId,
-                backend_subxact_count: 0,
-                backend_subxact_overflowed: false,
+            // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+            let entry = (procpid > 0).then(|| unsafe {
+                LocalPgBackendStatus {
+                    st_procpid: procpid,
+                    st_backendType: beentry.st_backendType.get(),
+                    st_proc_start_timestamp: beentry.st_proc_start_timestamp.get(),
+                    st_xact_start_timestamp: beentry.st_xact_start_timestamp.get(),
+                    st_activity_start_timestamp: beentry.st_activity_start_timestamp.get(),
+                    st_state_start_timestamp: beentry.st_state_start_timestamp.get(),
+                    st_databaseid: beentry.st_databaseid.get(),
+                    st_userid: beentry.st_userid.get(),
+                    st_clientaddr: beentry.st_clientaddr.get(),
+                    st_clienthostname: name_to_string(&beentry.st_clienthostname.get()),
+                    st_ssl: beentry.st_ssl.get(),
+                    st_ssl_bits: beentry.st_sslstatus.ssl_bits.get(),
+                    st_ssl_version: name_to_string(&beentry.st_sslstatus.ssl_version.get()),
+                    st_ssl_cipher: name_to_string(&beentry.st_sslstatus.ssl_cipher.get()),
+                    st_ssl_client_dn: name_to_string(&beentry.st_sslstatus.ssl_client_dn.get()),
+                    st_ssl_client_serial: name_to_string(&beentry.st_sslstatus.ssl_client_serial.get()),
+                    st_ssl_issuer_dn: name_to_string(&beentry.st_sslstatus.ssl_issuer_dn.get()),
+                    st_gss: beentry.st_gss.get(),
+                    st_state: beentry.st_state.get(),
+                    st_appname: name_to_string(&beentry.st_appname.get()),
+                    st_activity_raw: String::from_utf8_lossy(&read_activity(beentry.slot))
+                        .into_owned(),
+                    st_progress_command: beentry.st_progress_command.get(),
+                    st_progress_command_target: beentry.st_progress_command_target.get(),
+                    st_progress_param: std::array::from_fn(|i| beentry.st_progress_param[i].get()),
+                    st_query_id: beentry.st_query_id.get(),
+                    st_plan_id: beentry.st_plan_id.get(),
+                    proc_number: slot as ProcNumber,
+                    backend_xid: InvalidTransactionId,
+                    backend_xmin: InvalidTransactionId,
+                    backend_subxact_count: 0,
+                    backend_subxact_overflowed: false,
+                }
             });
             let after = end_read_activity(beentry);
             if read_activity_complete(before, after) {

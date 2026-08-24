@@ -42,23 +42,23 @@ fn io_boundaries_match_c() {
 
 #[test]
 fn in_error_surface_matches_c() {
-    let err = int4in("2147483648", None).unwrap_err();
+    let err = int4in("2147483648", None).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
     assert_eq!(
         err.message(),
         "value \"2147483648\" is out of range for type integer"
     );
-    let err = int4in("-2147483649", None).unwrap_err();
+    let err = int4in("-2147483649", None).err().unwrap();
     assert_eq!(
         err.message(),
         "value \"-2147483649\" is out of range for type integer"
     );
-    let err = int4in("xyz", None).unwrap_err();
+    let err = int4in("xyz", None).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
     assert_eq!(err.message(), "invalid input syntax for type integer: \"xyz\"");
-    let err = int4in("", None).unwrap_err();
+    let err = int4in("", None).err().unwrap();
     assert_eq!(err.message(), "invalid input syntax for type integer: \"\"");
-    let err = int2in("32768", None).unwrap_err();
+    let err = int2in("32768", None).err().unwrap();
     assert_eq!(
         err.message(),
         "value \"32768\" is out of range for type smallint"
@@ -73,7 +73,7 @@ fn in_error_surface_matches_c() {
 #[test]
 fn arithmetic_overflow_boundaries() {
     assert_eq!(int4pl(i32::MAX - 1, 1).unwrap(), i32::MAX);
-    let err = int4pl(i32::MAX, 1).unwrap_err();
+    let err = int4pl(i32::MAX, 1).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
     assert_eq!(err.message(), "integer out of range");
     assert!(int4mi(i32::MIN, 1).is_err());
@@ -82,7 +82,7 @@ fn arithmetic_overflow_boundaries() {
     assert_eq!(int4mi(i32::MIN + 1, 1).unwrap(), i32::MIN);
 
     assert!(int2pl(i16::MAX, 1).is_err());
-    assert_eq!(int2pl(i16::MAX, 1).unwrap_err().message(), "smallint out of range");
+    assert_eq!(int2pl(i16::MAX, 1).err().unwrap().message(), "smallint out of range");
     assert!(int2mi(i16::MIN, 1).is_err());
     assert!(int2mul(i16::MAX, 2).is_err());
 
@@ -93,7 +93,7 @@ fn arithmetic_overflow_boundaries() {
 
 #[test]
 fn division_semantics() {
-    let err = int4div(1, 0).unwrap_err();
+    let err = int4div(1, 0).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_DIVISION_BY_ZERO);
     assert_eq!(err.message(), "division by zero");
     assert!(int2div(1, 0).is_err());
@@ -103,9 +103,9 @@ fn division_semantics() {
     assert!(int2mod(1, 0).is_err());
 
     // MIN / -1 is the overflow error; MIN % -1 is zero.
-    assert_eq!(int4div(i32::MIN, -1).unwrap_err().message(), "integer out of range");
-    assert_eq!(int2div(i16::MIN, -1).unwrap_err().message(), "smallint out of range");
-    assert_eq!(int42div(i32::MIN, -1).unwrap_err().message(), "integer out of range");
+    assert_eq!(int4div(i32::MIN, -1).err().unwrap().message(), "integer out of range");
+    assert_eq!(int2div(i16::MIN, -1).err().unwrap().message(), "smallint out of range");
+    assert_eq!(int42div(i32::MIN, -1).err().unwrap().message(), "integer out of range");
     assert_eq!(int4mod(i32::MIN, -1).unwrap(), 0);
     assert_eq!(int2mod(i16::MIN, -1).unwrap(), 0);
     assert_eq!(int4div(7, -2).unwrap(), -3);
@@ -171,7 +171,7 @@ fn bit_ops_and_shifts() {
 
 #[test]
 fn in_range_branches() {
-    let err = in_range_int4_int4(0, 0, -1, false, true).unwrap_err();
+    let err = in_range_int4_int4(0, 0, -1, false, true).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE);
     assert_eq!(
         err.message(),
@@ -207,7 +207,7 @@ fn series_step_and_rows() {
         core::iter::from_fn(|| g.next()).collect::<Vec<_>>(),
         [i32::MAX - 1, i32::MAX]
     );
-    let err = GenerateSeriesInt4::new(1, 10, 0).unwrap_err();
+    let err = GenerateSeriesInt4::new(1, 10, 0).err().unwrap();
     assert_eq!(err.message(), "step size cannot equal zero");
     assert_eq!(generate_series_int4_rows(1.0, 10.0, 1.0), Some(10.0));
     assert_eq!(generate_series_int4_rows(1.0, 10.0, 0.0), None);
@@ -235,21 +235,21 @@ fn int2vector_image_and_io() {
     let out = int2vectorout(mcx, 1, 0, INT2OID, &[1, -2, 32767]).unwrap();
     assert_eq!(core::str::from_utf8(&out).unwrap(), "1 -2 32767");
 
-    let err = int2vectorin(mcx, "1 abc", None).unwrap_err();
+    let err = int2vectorin(mcx, "1 abc", None).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
     assert_eq!(
         err.message(),
         "invalid input syntax for type smallint: \"abc\""
     );
-    let err = int2vectorin(mcx, "99999", None).unwrap_err();
+    let err = int2vectorin(mcx, "99999", None).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
     assert_eq!(
         err.message(),
         "value \"99999\" is out of range for type smallint"
     );
-    let err = int2vectorin(mcx, "1x", None).unwrap_err();
+    let err = int2vectorin(mcx, "1x", None).err().unwrap();
     assert_eq!(err.message(), "invalid input syntax for type smallint: \"1x\"");
-    let err = int2vectorout(mcx, 2, 0, INT2OID, &[]).unwrap_err();
+    let err = int2vectorout(mcx, 2, 0, INT2OID, &[]).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_DATATYPE_MISMATCH);
     assert_eq!(err.message(), "array is not a valid int2vector");
 
@@ -257,6 +257,53 @@ fn int2vector_image_and_io() {
     let r = int2vectorin(mcx, "bogus", None.or(Some(&mut soft))).unwrap();
     assert!(r.is_none());
     assert!(soft.error_occurred());
+}
+
+#[test]
+fn int2vectorout_rejects_dim1_out_of_bounds() {
+    let m = mcx::MemoryContext::new("t");
+    let ctx = m.mcx();
+
+    fn img(varsize: usize, ndim: i32, dim1: i32, vals: &[i16]) -> Vec<u8> {
+        let mut v = Vec::from(::datum::varlena::set_varsize_4b(varsize));
+        v.extend_from_slice(&ndim.to_ne_bytes());
+        v.extend_from_slice(&0i32.to_ne_bytes()); // dataoffset
+        v.extend_from_slice(&(INT2OID as u32).to_ne_bytes()); // elemtype
+        v.extend_from_slice(&dim1.to_ne_bytes());
+        v.extend_from_slice(&0i32.to_ne_bytes()); // lbound1
+        for &x in vals {
+            v.extend_from_slice(&x.to_ne_bytes());
+        }
+        v
+    }
+
+    let call = |image: &[u8]| {
+        let mut fci = LocalFcinfo::<1>::new(0);
+        fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
+        // SAFETY: ctx outlives the call.
+        unsafe { fci.set_result_mcx(ctx) };
+        fc_int2vectorout(None, &mut fci)
+    };
+
+    // A valid 3-element int2vector still passes and prints.
+    let valid = img(INT2VECTOR_HDRSZ + 6, 1, 3, &[1, -2, 32767]);
+    let d = call(&valid).unwrap();
+    let s = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
+    assert_eq!(s.to_bytes(), b"1 -2 32767");
+
+    // Empty-array cast (ndim==0) must still yield the EXISTING structural error,
+    // unchanged in text and SQLSTATE (regression guard).
+    let empty = img(16, 0, 0, &[]);
+    let err = call(&empty).err().unwrap();
+    assert_eq!(err.sqlstate(), ERRCODE_DATATYPE_MISMATCH);
+    assert_eq!(err.message(), "array is not a valid int2vector");
+
+    // Crafted: structurally valid header (ndim==1) but dim1 claims far more
+    // int2s than VARSIZE can hold -> rejected before the values slice forms,
+    // routed to the SAME error (no new "corrupt ..." message).
+    let crafted = img(INT2VECTOR_HDRSZ, 1, 1000, &[]);
+    let err = call(&crafted).err().unwrap();
+    assert_eq!(err.message(), "array is not a valid int2vector");
 }
 
 #[test]
@@ -268,7 +315,7 @@ fn fmgr_wrappers_and_table() {
     assert_eq!(flinfo.invoke(&mut fci).unwrap().as_i32(), 42);
     fci.set_arg(0, Datum::from_i32(i32::MAX));
     fci.set_arg(1, Datum::from_i32(1));
-    let err = flinfo.invoke(&mut fci).unwrap_err();
+    let err = flinfo.invoke(&mut fci).err().unwrap();
     assert_eq!(err.message(), "integer out of range");
 
     let mut fci = LocalFcinfo::<2>::new(0);
@@ -346,7 +393,7 @@ fn generate_series_srf_value_per_call() {
     fci3.set_arg(1, Datum::from_i32(3));
     fci3.set_arg(2, Datum::from_i32(0));
     let mut flinfo3 = FmgrInfo::new(fc_generate_series_step_int4, 1066, 3, true, true);
-    let err = flinfo3.invoke(&mut fci3).unwrap_err();
+    let err = flinfo3.invoke(&mut fci3).err().unwrap();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
     assert!(err.message().contains("step size cannot equal zero"));
 }

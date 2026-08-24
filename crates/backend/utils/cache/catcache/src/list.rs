@@ -2,7 +2,7 @@ use core::ptr::NonNull;
 
 use datum::Datum;
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_tuple::{HeapTupleData, ItemPointerData};
 
 use crate::compute::{compute_hash_value, hash_index, CatCKey, CCFastKind};
@@ -313,7 +313,7 @@ fn reuse_or_create_member(cache_id: i32, ntp: &HeapTupleData<'_>) -> PgResult<Op
     let found = with_state(|st| {
         let cache = st.cache(cache_id);
         let tupdesc = cache.cc_tupdesc.expect("list build before phase-2 init");
-        let hv = compute_tuple_hash_value(&cache.cc_kind, cache.cc_nkeys, &cache.cc_keyno, tupdesc, ntp);
+        let hv = compute_tuple_hash_value(&cache.cc_kind, cache.cc_nkeys, &cache.cc_keyno, tupdesc, ntp)?;
         let bi = hash_index(hv, cache.cc_nbuckets);
         let mut cur = cache.cc_bucket[bi];
         while cur != NONE {
@@ -324,12 +324,12 @@ fn reuse_or_create_member(cache_id: i32, ntp: &HeapTupleData<'_>) -> PgResult<Op
                 && ct.t_self == ntp.t_self
                 && ct.c_list == NONE
             {
-                return (hv, Some(cur));
+                return Ok((hv, Some(cur)));
             }
             cur = ct.next;
         }
-        (hv, None)
-    });
+        Ok::<_, Box<PgError>>((hv, None))
+    })?;
     let slot = match found {
         (_, Some(slot)) => slot,
         (hv, None) => match create_entry_from_scan(cache_id, ntp, hv)? {

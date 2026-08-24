@@ -525,8 +525,16 @@ fn pgoutput_startup(opc: &mut OutputPluginContext, is_init: bool) -> PgResult<()
                 publication_invalidation_cb,
                 Datum::from_usize(0),
             )?;
-            // C 18 also registers a RelSync callback here; the relcache
-            // callback in init_rel_sync_cache covers those invalidations.
+            // C 18 (pgoutput.c:564) also registers a RelSync callback here:
+            // publication changes (e.g. a rename) emit RelSync invalidations,
+            // dispatched separately from relcache flushes, so without this the
+            // RelationSyncCache would keep stale publish decisions (pubactions,
+            // row filter, column list, publish_as_relid) and a subscriber would
+            // keep receiving revoked data.
+            inval::invalidate::CacheRegisterRelSyncCallback(
+                rel_sync_cache_relation_cb,
+                Datum::from_usize(0),
+            )?;
             PUBLICATION_CALLBACK_REGISTERED.with(|c| c.set(true));
         }
 

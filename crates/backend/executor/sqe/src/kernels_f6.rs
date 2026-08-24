@@ -115,11 +115,11 @@ pub struct Frame {
     pub cells_touched: u64,
     pub build_ms: f64,
     /// [oracle, ruling Q4] The FULL structural key this frame was built
-    /// from: (cid, edt, counter, dlo, dhi). The memo key on `faces.frames`
-    /// is only (counter, dlo, dhi) — the column attnos are an ENCODER
-    /// OMISSION by construction (sound today because the hot shape fixes
-    /// cid/edt); oracle/CI builds verify them on every hit. Absent in
-    /// production builds.
+    /// from: (cid, edt, counter, dlo, dhi). This is now exactly the memo
+    /// key on `faces.frames` (see [cache-identity] there): the column
+    /// attnos are part of the key, so a hit can never cross column pairs.
+    /// Oracle/CI builds still verify the full structure on every hit as a
+    /// belt-and-braces check. Absent in production builds.
     #[cfg(feature = "oracle")]
     pub skey: (u32, u32, i64, i64, i64),
 }
@@ -267,7 +267,13 @@ pub fn shared_frame(
     dlo: i64,
     dhi: i64,
 ) -> Arc<Frame> {
-    let f = faces.frames.get_or_build((counter, dlo, dhi), || {
+    // [cache-identity] The memo key includes the eq/range column attnos
+    // (cid, edt), not just the three constants: the frame stores the
+    // survivor rowlists of `cid = counter AND dlo <= edt <= dhi`, so the
+    // columns are a semantic input to the cached computation. Keying by
+    // constants alone let a query over one column pair poison the rowlists
+    // a query over a different pair (with the same constants) would reuse.
+    let f = faces.frames.get_or_build_bounded((cid, edt, counter, dlo, dhi), faces.cfg.xquery_cache_max_entries, || {
         let t0 = std::time::Instant::now();
         let (p_cid, p_edt) = (faces.psma(bank, cid), faces.psma(bank, edt));
         let f = build_frame(bank, cid, edt, counter, dlo, dhi, p_cid.as_deref(), p_edt.as_deref());
@@ -297,6 +303,48 @@ pub fn shared_frame(
         );
     }
     f
+}
+
+#[cfg(test)]
+mod frame_memo_key_tests {
+    use crate::engine::Memo;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // [cache-identity] The shared-frame memo key is
+    // (cid, edt, counter, dlo, dhi). Two logically-different frames — same
+    // constants (counter, dlo, dhi) but DIFFERENT eq/range columns — must
+    // land on distinct entries and each run its own build, while a genuine
+    // repeat of the identical (columns + constants) must hit the memo.
+    #[test]
+    fn distinct_columns_same_constants_do_not_collide() {
+        let memo: Memo<(u32, u32, i64, i64, i64), usize> = Memo::default();
+        let builds = AtomicUsize::new(0);
+        let (counter, dlo, dhi) = (42i64, 100i64, 200i64);
+
+        // Query 1: predicate over columns (cid=3, edt=4).
+        let a = memo.get_or_build((3, 4, counter, dlo, dhi), || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            10
+        });
+        // Query 2: SAME constants, DIFFERENT columns (cid=5, edt=6).
+        // Before the fix this collided with query 1 and returned its frame.
+        let b = memo.get_or_build((5, 6, counter, dlo, dhi), || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            20
+        });
+
+        assert_eq!(builds.load(Ordering::SeqCst), 2, "different column pairs must build independent frames");
+        assert_eq!(*a, 10);
+        assert_eq!(*b, 20, "query on different columns must not reuse the other query's frame");
+
+        // Genuinely-identical computation (same columns + constants) hits.
+        let c = memo.get_or_build((3, 4, counter, dlo, dhi), || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            99
+        });
+        assert_eq!(builds.load(Ordering::SeqCst), 2, "identical computation must reuse the cached frame");
+        assert_eq!(*c, 10);
+    }
 }
 
 #[cfg(test)]

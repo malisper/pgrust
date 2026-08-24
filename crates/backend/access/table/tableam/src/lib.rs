@@ -244,8 +244,14 @@ mod cb2 {
         // slots arrive with tts_nvalid == 0).
         exectuples::exec_materialize_slot(slot, mcx)?;
         exectuples::slot_getallattrs(slot);
+        // The flat backing bytes of the just-materialized tuple: the
+        // independent readable-byte witness that lets `ingest_row`/`raw_row`
+        // bound each by-reference datum's header-claimed size against the
+        // bytes the tuple actually backs (never trusting an on-tuple varlena
+        // header to size a read — the OOB/info-leak class).
+        let image = exectuples::slot_materialized_image(slot);
         let base = slot.base();
-        ::pgrc2_am::ingest::ingest_row(rel, &base.tts_values, &base.tts_isnull)
+        ::pgrc2_am::ingest::ingest_row(rel, &base.tts_values, &base.tts_isnull, image)
     }
 }
 
@@ -2767,6 +2773,46 @@ pub fn table_relation_set_new_filelocator(
             Ok(ret)
         }
     }
+}
+
+/// The pgrcolumnar2 O-7 table directory a DROP of `rel` must schedule for
+/// delete-at-commit, or `None` for any AM whose data lives entirely in the
+/// smgr forks. Split out (and free of I/O) so the DROP wiring is unit
+/// testable without touching smgr/xact state.
+pub(crate) fn pgrc2_drop_dir(rel: &Relation<'_>) -> Option<String> {
+    match TableAm::of(rel) {
+        Some(TableAm::Pgrcolumnar2) => Some(::pgrc2_am::dirpath::table_dir_path(
+            rel.rd_locator.get(),
+            rel.rd_backend,
+        )),
+        _ => None,
+    }
+}
+
+/// Drop the relation's physical storage at transaction commit.
+///
+/// C's `heap_drop_with_catalog` calls `RelationDropStorage` directly because
+/// every C table AM keeps its data in the smgr forks, which that call
+/// schedules for delete-at-commit. pgrcolumnar2 instead stores all table data
+/// in a per-table O-7 directory (`pgrc2_<relfilenumber>`, a sibling of the
+/// main-fork path), so a DROP of a columnar relation must ALSO schedule that
+/// directory for removal — using the same transactional discipline as the
+/// TRUNCATE / SET ACCESS METHOD locator-swap arm of
+/// [`table_relation_set_new_filelocator`]: unlink once the dropping
+/// transaction commits, cancel on abort. Without this the directory (sealed
+/// parts + committed manifest chain) is orphaned forever and, after
+/// relfilenumber reuse, resurrectable by a new relation.
+pub fn table_relation_drop_storage(rel: &Relation<'_>) -> PgResult<()> {
+    // AM-independent: schedule the main-fork smgr unlink at commit.
+    catalog_storage::RelationDropStorage(rel)?;
+    if let Some(dir) = pgrc2_drop_dir(rel) {
+        // A columnar table that never ingested has no directory yet; only
+        // schedule one that actually exists (the SET-AM arm's precedent).
+        if ::pgrc2_am::dirpath::dir_exists(&dir)? {
+            ::pgrc2_am::session::schedule_dir_delete_at_commit(dir);
+        }
+    }
+    Ok(())
 }
 
 pub fn table_relation_copy_data(rel: &Relation<'_>, newrlocator: &RelFileLocator) -> PgResult<()> {

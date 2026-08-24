@@ -607,65 +607,12 @@ fn dispatch_switch<'mcx>(
             event_trigger::AlterEventTrigger(mcx, stmt)?;
         }
 
-        T_CreatePublicationStmt => {
-            let stmt = parsetree
-                .as_variant::<types_nodes::parsenodes::CreatePublicationStmt>()
-                .expect("CreatePublicationStmt");
-            // Retention contract as unify_stmt_lifetime.
-            let stmt = unsafe {
-                core::mem::transmute::<
-                    &types_nodes::parsenodes::CreatePublicationStmt<'_>,
-                    &types_nodes::parsenodes::CreatePublicationStmt<'mcx>,
-                >(stmt)
-            };
-            commands_publicationcmds::CreatePublication(mcx, stmt, source_text)?;
-        }
-        T_AlterPublicationStmt => {
-            let stmt = parsetree
-                .as_variant::<types_nodes::parsenodes::AlterPublicationStmt>()
-                .expect("AlterPublicationStmt");
-            // Retention contract as unify_stmt_lifetime.
-            let stmt = unsafe {
-                core::mem::transmute::<
-                    &types_nodes::parsenodes::AlterPublicationStmt<'_>,
-                    &types_nodes::parsenodes::AlterPublicationStmt<'mcx>,
-                >(stmt)
-            };
-            commands_publicationcmds::AlterPublication(mcx, stmt, source_text)?;
-        }
-
-        T_CreateSubscriptionStmt => {
-            let stmt = parsetree
-                .as_variant::<types_nodes::parsenodes::CreateSubscriptionStmt>()
-                .expect("CreateSubscriptionStmt");
-            // Retention contract as unify_stmt_lifetime.
-            let stmt = unsafe {
-                core::mem::transmute::<
-                    &types_nodes::parsenodes::CreateSubscriptionStmt<'_>,
-                    &types_nodes::parsenodes::CreateSubscriptionStmt<'mcx>,
-                >(stmt)
-            };
-            subscriptioncmds::CreateSubscription(mcx, stmt, is_top_level)?;
-        }
-        T_AlterSubscriptionStmt => {
-            let stmt = parsetree
-                .as_variant::<types_nodes::parsenodes::AlterSubscriptionStmt>()
-                .expect("AlterSubscriptionStmt");
-            // Retention contract as unify_stmt_lifetime.
-            let stmt = unsafe {
-                core::mem::transmute::<
-                    &types_nodes::parsenodes::AlterSubscriptionStmt<'_>,
-                    &types_nodes::parsenodes::AlterSubscriptionStmt<'mcx>,
-                >(stmt)
-            };
-            subscriptioncmds::AlterSubscription(mcx, stmt, is_top_level)?;
-        }
-        T_DropSubscriptionStmt => {
-            let stmt = parsetree
-                .as_variant::<types_nodes::parsenodes::DropSubscriptionStmt>()
-                .expect("DropSubscriptionStmt");
-            subscriptioncmds::DropSubscription(mcx, stmt, is_top_level)?;
-        }
+        // Publication/subscription DDL is NOT fast-pathed: C's
+        // standard_ProcessUtility has no case for these tags, so they fall
+        // into its `default:` arm and go to ProcessUtilitySlow. Routing them
+        // through process_utility_slow here (via the `_` arm below) keeps the
+        // event-trigger fence intact — ddl_command_start/end and sql_drop
+        // fire, and the commands are collected. See slow_switch.
 
         T_CreateRoleStmt => {
             let stmt = parsetree.as_create_role_stmt().unwrap();
@@ -1588,8 +1535,11 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::parsenodes::AlterDomainStmt>()
                 .expect("AlterDomainStmt");
-            typecmds::AlterDomain(mcx, stmt)?;
-            Ok(None)
+            // C ProcessUtilitySlow: `address` is the per-subtype AlterDomain*
+            // return, collected by the shared EventTriggerCollectSimpleCommand
+            // tail (commandCollected stays false).
+            let address = typecmds::AlterDomain(mcx, stmt)?;
+            Ok(Some(address))
         }
         T_AlterObjectDependsStmt => {
             // Retention contract as unify_stmt_lifetime.
@@ -1921,6 +1871,79 @@ fn slow_switch<'mcx>(
             }
         }
 
+        T_CreatePublicationStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::CreatePublicationStmt>()
+                .expect("CreatePublicationStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreatePublicationStmt<'_>,
+                    &types_nodes::parsenodes::CreatePublicationStmt<'mcx>,
+                >(stmt)
+            };
+            // C: address = CreatePublication(...), collected by the shared
+            // tail. pgrust's CreatePublication returns (), so no address is
+            // available to stash from here (see publicationcmds).
+            commands_publicationcmds::CreatePublication(mcx, stmt, source_text)?;
+            Ok(None)
+        }
+        T_AlterPublicationStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterPublicationStmt>()
+                .expect("AlterPublicationStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterPublicationStmt<'_>,
+                    &types_nodes::parsenodes::AlterPublicationStmt<'mcx>,
+                >(stmt)
+            };
+            // C: AlterPublication calls EventTriggerCollectSimpleCommand
+            // directly (commandCollected = true), so the tail must not collect.
+            commands_publicationcmds::AlterPublication(mcx, stmt, source_text)?;
+            Ok(None)
+        }
+        T_CreateSubscriptionStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::CreateSubscriptionStmt>()
+                .expect("CreateSubscriptionStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreateSubscriptionStmt<'_>,
+                    &types_nodes::parsenodes::CreateSubscriptionStmt<'mcx>,
+                >(stmt)
+            };
+            // C: address = CreateSubscription(...), collected by the shared tail.
+            let address = subscriptioncmds::CreateSubscription(mcx, stmt, is_top_level)?;
+            Ok(Some(address))
+        }
+        T_AlterSubscriptionStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterSubscriptionStmt>()
+                .expect("AlterSubscriptionStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterSubscriptionStmt<'_>,
+                    &types_nodes::parsenodes::AlterSubscriptionStmt<'mcx>,
+                >(stmt)
+            };
+            // C: address = AlterSubscription(...), collected by the shared tail.
+            let address = subscriptioncmds::AlterSubscription(mcx, stmt, is_top_level)?;
+            Ok(Some(address))
+        }
+        T_DropSubscriptionStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::DropSubscriptionStmt>()
+                .expect("DropSubscriptionStmt");
+            // C: DropSubscription(...); no commands stashed for DROP
+            // (commandCollected = true).
+            subscriptioncmds::DropSubscription(mcx, stmt, is_top_level)?;
+            Ok(None)
+        }
+
         // unported: utility statement tags with no ProcessUtilitySlow lane
         // yet — clean 0A000 (was a user-reachable panic).
         other => Err(handler_unsupported(&format!(
@@ -1933,13 +1956,14 @@ const NAMESPACE_RELATION_ID: types_core::Oid = 2615;
 
 // ImportForeignSchema's back half (foreigncmds.c:1529-1603): each generated
 // command runs as a subcommand, skipping analysis/rewrite/planning as C does.
-// DIVERGENCE: C overwrites relation->schemaname with local_schema post-parse;
-// nodes are immutable here, so the provider emits the qualified name instead.
+// C overwrites relation->schemaname with local_schema post-parse so the
+// FDW-returned command text cannot redirect the object elsewhere; we do the
+// same in place through the just-parsed node (see the loop below).
 #[cold]
 #[inline(never)]
 fn exec_import_foreign_schema_commands<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &types_nodes::rawnodes::ImportForeignSchemaStmt<'_>,
+    stmt: &types_nodes::rawnodes::ImportForeignSchemaStmt<'mcx>,
     commands: &[&str],
 ) -> PgResult<()> {
     let mut dest = tcop_dest::CreateDestReceiver(types_dest::CommandDest::None);
@@ -1959,14 +1983,42 @@ fn exec_import_foreign_schema_commands<'mcx>(
                     node.node_tag()
                 ))));
             };
-            let relname = cstmt
+            let relation = cstmt
                 .base
                 .relation
-                .and_then(|r| r.relname)
+                .expect("CreateForeignTableStmt without relation");
+            let relname = relation
+                .relname
                 .expect("CreateForeignTableStmt.relation.relname");
             if !foreigncmds::IsImportableForeignTable(relname, stmt) {
                 continue;
             }
+            // C foreigncmds.c:1582 — force the creation schema to the IMPORT
+            // statement's local_schema so the FDW-returned command text cannot
+            // redirect the new object into another (permission-unchecked)
+            // schema. C mutates cstmt->base.relation->schemaname in place; we
+            // swap the relation for a copy carrying local_schema, applied to the
+            // just-parsed node exactly as C's in-place overwrite would.
+            let local_relation = mcx::alloc_leak_in(
+                mcx,
+                types_nodes::primnodes::RangeVar {
+                    schemaname: stmt.local_schema,
+                    ..*relation
+                },
+            )?;
+            // SAFETY: `node` was just parsed from `cmd`; nothing else references
+            // it. The refs derived from it above (`cstmt`, `relation`, `relname`)
+            // are not used after this call — `relname` is re-derived below.
+            unsafe {
+                node.with_mut::<types_nodes::rawnodes::CreateForeignTableStmt, _>(|c| {
+                    c.base.relation = Some(local_relation);
+                });
+            }
+            let relname = node
+                .as_variant::<types_nodes::rawnodes::CreateForeignTableStmt>()
+                .and_then(|c| c.base.relation)
+                .and_then(|r| r.relname)
+                .expect("CreateForeignTableStmt.relation.relname");
             let pstmt = PlannedStmt {
                 commandType: CmdType::CMD_UTILITY,
                 canSetTag: false,
