@@ -2647,7 +2647,53 @@ fn replace_vars_in_query_value<'mcx>(
                     }
                 }
             }
+            RTEKind::RTE_JOIN => {
+                // range_table_mutator's RTE_JOIN leg (nodeFuncs.c):
+                // replace_rte_variables runs with flags 0, so joinaliasvars
+                // are mutated too (QTW_IGNORE_JOINALIASES unset).
+                if let Some(l) = clauses::walker::mutate_list(mcx, &srte.joinaliasvars, &mut |n| {
+                    replace_var_expr_su(mcx, n, varno, tlist, lateral, ph, su)
+                })? {
+                    let copy = rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?;
+                    // SAFETY: as above.
+                    unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.joinaliasvars = l) };
+                    replacement = Some(copy);
+                }
+            }
+            RTEKind::RTE_GROUP => {
+                // range_table_mutator's RTE_GROUP leg (nodeFuncs.c): a GROUP BY
+                // over a lateral reference stores the uplevel Var only in the
+                // group RTE's groupexprs (the tlist junk entry points at the
+                // group RTE instead). Missing this leg left a level-su Var
+                // naming the pulled-up rel, which later failed find_base_rel.
+                if let Some(l) = clauses::walker::mutate_list(mcx, &srte.groupexprs, &mut |n| {
+                    replace_var_expr_su(mcx, n, varno, tlist, lateral, ph, su)
+                })? {
+                    let copy = rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?;
+                    // SAFETY: as above.
+                    unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.groupexprs = l) };
+                    replacement = Some(copy);
+                }
+            }
             _ => {}
+        }
+        // range_table_mutator tail (nodeFuncs.c): securityQuals are mutated
+        // for every RTE kind.
+        if !srte.securityQuals.is_nil() {
+            if let Some(l) = clauses::walker::mutate_list(mcx, &srte.securityQuals, &mut |n| {
+                replace_var_expr_su(mcx, n, varno, tlist, lateral, ph, su)
+            })? {
+                let copy = match replacement {
+                    Some(c) => c,
+                    None => {
+                        let c = rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?;
+                        replacement = Some(c);
+                        c
+                    }
+                };
+                // SAFETY: as above.
+                unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.securityQuals = l) };
+            }
         }
         match replacement {
             Some(copy) => {

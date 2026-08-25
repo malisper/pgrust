@@ -7347,6 +7347,310 @@ mod lateral_pullup {
         )
         .unwrap();
     }
+
+    // --- lateral references into a pulled-up sibling, RTE_GROUP legs ---
+    // Distilled from listmonk queries/users.sql: `... LEFT JOIN (SELECT ...) s
+    // ON ... LEFT JOIN LATERAL (SELECT count(*) FROM t2 WHERE t2.id = s.id
+    // GROUP BY s.id) lp ON TRUE` failed 'no relation entry for relid N
+    // (find_base_rel)'. In PG 18 a GROUP BY expression lives (only) in the
+    // grouping step's RTE_GROUP groupexprs; C's replace_rte_variables reaches
+    // it through range_table_mutator's RTE_GROUP leg (nodeFuncs.c, flags 0).
+
+    const COUNT_STAR: u32 = 2803;
+    const INT8OID: u32 = 20;
+
+    fn int4eq<'mcx>(mcx: Mcx<'mcx>, l: Node<'mcx>, r: Node<'mcx>) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno: INT4EQ_OP,
+                opfuncid: INT4EQ_PROC,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, l, r).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    // `SELECT b.pk AS x FROM t b` — the pullable sibling.
+    fn simple_sibling_query(mcx: Mcx<'_>) -> Query<'_> {
+        let rtable = NodeList::make1(mcx, rel_rte(mcx)).unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr {
+                fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+                quals: None,
+            },
+        )
+        .unwrap();
+        let pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, pk, 1, Some("x"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            ..Query::default()
+        }
+    }
+
+    // The analyzer's output for `SELECT count(*) FROM t b [WHERE b.pk = s.x]
+    // GROUP BY s.x`: rtable = [b, *GROUP*], the uplevel s.x lives in the
+    // RTE_GROUP's groupexprs, and the GROUP BY junk tlist entry references
+    // the group RTE (varno 2), not s.
+    fn grouped_lateral_query(mcx: Mcx<'_>, with_where: bool) -> Query<'_> {
+        use types_nodes::parsenodes::SortGroupClause;
+        let mut rtable = NodeList::make1(mcx, rel_rte(mcx)).unwrap();
+        let s_x_up = Node::mk_var(mcx, 1, 1, 23, -1, 0, 1).unwrap();
+        {
+            let colname = Node::mk_string(mcx, "x").unwrap();
+            let eref = alloc_leak_in(
+                mcx,
+                types_nodes::primnodes::Alias {
+                    aliasname: Some("*GROUP*"),
+                    colnames: NodeList::make1(mcx, colname).unwrap(),
+                },
+            )
+            .unwrap();
+            let mut grte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+            grte.rtekind = RTEKind::RTE_GROUP;
+            grte.groupexprs = NodeList::make1(mcx, s_x_up).unwrap();
+            grte.eref = Some(eref);
+            rtable.lappend(mcx, grte.seal()).unwrap();
+        }
+        let quals = if with_where {
+            let b_pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+            let s_x_up2 = Node::mk_var(mcx, 1, 1, 23, -1, 0, 1).unwrap();
+            Some(int4eq(mcx, b_pk, s_x_up2))
+        } else {
+            None
+        };
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr {
+                fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+                quals,
+            },
+        )
+        .unwrap();
+        let agg = Node::mk(
+            mcx,
+            types_nodes::primnodes::Aggref {
+                aggfnoid: COUNT_STAR,
+                aggtype: INT8OID,
+                aggstar: true,
+                ..types_nodes::primnodes::Aggref::default()
+            },
+        )
+        .unwrap();
+        let mut tlist =
+            NodeList::make1(mcx, Node::mk_target_entry(mcx, agg, 1, Some("c"), false).unwrap())
+                .unwrap();
+        let group_var = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+        let junk = Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: group_var,
+                resno: 2,
+                resname: Some("x"),
+                ressortgroupref: 1,
+                resorigtbl: 0,
+                resorigcol: 0,
+                resjunk: true,
+            },
+        )
+        .unwrap();
+        tlist.lappend(mcx, junk).unwrap();
+        let group_clause = NodeList::make1(
+            mcx,
+            Node::mk(
+                mcx,
+                SortGroupClause {
+                    tleSortGroupRef: 1,
+                    eqop: INT4EQ_OP,
+                    sortop: INT4_LT_OP,
+                    reverse_sort: false,
+                    nulls_first: false,
+                    hashable: true,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            jointree: Some(jointree),
+            rtable,
+            targetList: tlist,
+            groupClause: group_clause,
+            hasAggs: true,
+            hasGroupRTE: true,
+            ..Query::default()
+        }
+    }
+
+    fn plan_lateral_over_sibling<'mcx>(
+        mcx: Mcx<'mcx>,
+        s: Query<'mcx>,
+        lp: Query<'mcx>,
+        sql: &'static str,
+    ) {
+        let mut rtable = NodeList::make1(mcx, subquery_rte(mcx, s, "s", &["x"], false)).unwrap();
+        rtable.lappend(mcx, subquery_rte(mcx, lp, "lp", &["c"], true)).unwrap();
+        let mut fromlist = NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap();
+        fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, 2).unwrap()).unwrap();
+        let jointree = alloc_leak_in(mcx, FromExpr { fromlist, quals: None }).unwrap();
+        let c = Node::mk_var(mcx, 2, 1, INT8OID, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, c, 1, Some("c"), false).unwrap();
+        let parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: sql.len() as i32,
+            ..Query::default()
+        };
+        planner(mcx, leak_q(mcx, parse), sql, CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
+            .unwrap();
+    }
+
+    // The repro class: GROUP BY over a lateral reference to a pulled-up
+    // sibling (WHERE also references it).
+    #[test]
+    fn lateral_group_by_ref_survives_sibling_pullup() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        plan_lateral_over_sibling(
+            mcx,
+            simple_sibling_query(mcx),
+            grouped_lateral_query(mcx, true),
+            "SELECT lp.c FROM (SELECT b.pk AS x FROM t b) s, \
+             LATERAL (SELECT count(*) c FROM t b2 WHERE b2.pk = s.x GROUP BY s.x) lp",
+        );
+    }
+
+    // GROUP BY-only lateral reference: the uplevel Var exists solely in the
+    // RTE_GROUP's groupexprs.
+    #[test]
+    fn lateral_group_by_only_ref_survives_sibling_pullup() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        plan_lateral_over_sibling(
+            mcx,
+            simple_sibling_query(mcx),
+            grouped_lateral_query(mcx, false),
+            "SELECT lp.c FROM (SELECT b.pk AS x FROM t b) s, \
+             LATERAL (SELECT count(*) c FROM t b2 GROUP BY s.x) lp",
+        );
+    }
+
+    // WHERE-only lateral reference (no grouping): guards the jointree-quals
+    // replacement leg.
+    #[test]
+    fn lateral_where_ref_survives_sibling_pullup() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let lp = {
+            let rtable = NodeList::make1(mcx, rel_rte(mcx)).unwrap();
+            let b_pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+            let s_x_up = Node::mk_var(mcx, 1, 1, 23, -1, 0, 1).unwrap();
+            let jointree = alloc_leak_in(
+                mcx,
+                FromExpr {
+                    fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap())
+                        .unwrap(),
+                    quals: Some(int4eq(mcx, b_pk, s_x_up)),
+                },
+            )
+            .unwrap();
+            let agg = Node::mk(
+                mcx,
+                types_nodes::primnodes::Aggref {
+                    aggfnoid: COUNT_STAR,
+                    aggtype: INT8OID,
+                    aggstar: true,
+                    ..types_nodes::primnodes::Aggref::default()
+                },
+            )
+            .unwrap();
+            let tle = Node::mk_target_entry(mcx, agg, 1, Some("c"), false).unwrap();
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                jointree: Some(jointree),
+                rtable,
+                targetList: NodeList::make1(mcx, tle).unwrap(),
+                hasAggs: true,
+                ..Query::default()
+            }
+        };
+        plan_lateral_over_sibling(
+            mcx,
+            simple_sibling_query(mcx),
+            lp,
+            "SELECT lp.c FROM (SELECT b.pk AS x FROM t b) s, \
+             LATERAL (SELECT count(*) c FROM t b2 WHERE b2.pk = s.x) lp",
+        );
+    }
+
+    // Nested pull-up: the sibling itself wraps another pullable subquery, so
+    // the lateral GROUP BY reference is rewritten across a recursive pull-up.
+    #[test]
+    fn lateral_group_by_ref_survives_nested_sibling_pullup() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let s = {
+            let inner = simple_sibling_query(mcx);
+            let rtable =
+                NodeList::make1(mcx, subquery_rte(mcx, inner, "inner_s", &["x"], false)).unwrap();
+            let jointree = alloc_leak_in(
+                mcx,
+                FromExpr {
+                    fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap())
+                        .unwrap(),
+                    quals: None,
+                },
+            )
+            .unwrap();
+            let x = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+            let tle = Node::mk_target_entry(mcx, x, 1, Some("x"), false).unwrap();
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                jointree: Some(jointree),
+                rtable,
+                targetList: NodeList::make1(mcx, tle).unwrap(),
+                ..Query::default()
+            }
+        };
+        plan_lateral_over_sibling(
+            mcx,
+            s,
+            grouped_lateral_query(mcx, true),
+            "SELECT lp.c FROM (SELECT x FROM (SELECT b.pk AS x FROM t b) inner_s) s, \
+             LATERAL (SELECT count(*) c FROM t b2 WHERE b2.pk = s.x GROUP BY s.x) lp",
+        );
+    }
 }
 
 
