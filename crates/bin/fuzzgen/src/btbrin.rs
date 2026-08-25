@@ -563,13 +563,34 @@ fn gen_brinup(g: &mut Gen) -> Vec<StmtKind> {
         ],
     ));
     v.extend(raws(&[
-        // Oversized BRIN index row: 1200 chained md5s (~38kB, hex —
-        // beyond compression rescue) must raise the program-limit
-        // ereport identically on both engines.
-        "INSERT INTO fz_bb_bu SELECT 800001, string_agg(md5(i::text), ''), 'p' \
-         FROM generate_series(1, 1200) i;",
         "SELECT count(*)::int8 FROM fz_bb_bu;",
         "DROP TABLE fz_bb_bu;",
+        // Oversized BRIN index row (program-limit 54000 arm), on an
+        // isolated single-page table instead of the churned fz_bb_bu
+        // heap. On the churned heap the outcome was placement-dependent:
+        // the 1200-chained-md5 value (~38kB hex, beyond compression
+        // rescue) only errors when the FSM steers the row into a range
+        // whose summary must widen, and post-VACUUM free space is
+        // visibility-horizon-sensitive — ANY concurrent session whose
+        // snapshot spans the churn->VACUUM window blocks reaping on
+        // exactly one engine's timeline and flips its placement, so the
+        // arm A/B-diverged under concurrent load with both engines
+        // C-parity on identical state (a fuzzing round/9/10 RB-3;
+        // engine mechanism fixed by #1546, residual nondeterminism is
+        // this fixture's). Here range 0 is the only range, it is
+        // summarized ('seed'), and the value must widen its minmax
+        // ('c4ca...' < 'seed'), so the identical ereport fires on both
+        // engines regardless of any concurrent activity.
+        "CREATE TABLE fz_bb_ov (pk int4 PRIMARY KEY, t text) \
+         WITH (autovacuum_enabled = off);",
+        "INSERT INTO fz_bb_ov VALUES (1, 'seed');",
+        "CREATE INDEX fz_bb_ov_brin ON fz_bb_ov USING brin (t) \
+         WITH (pages_per_range = 1);",
+        "SELECT brin_summarize_new_values('fz_bb_ov_brin')::int8 >= 0;",
+        "INSERT INTO fz_bb_ov SELECT 2, string_agg(md5(i::text), '') \
+         FROM generate_series(1, 1200) i;",
+        "SELECT count(*)::int8 FROM fz_bb_ov;",
+        "DROP TABLE fz_bb_ov;",
     ]));
     v
 }
@@ -927,6 +948,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn oversized_brin_arm_is_isolated_and_placement_independent() {
+        // RB-3-recur regression (Antithesis rounds 7/9/10): the 54000
+        // program-limit arm must be deterministic under concurrent load.
+        // (a) The oversized chained-md5 insert only ever targets the
+        //     dedicated single-page fz_bb_ov table — never the churned
+        //     fz_bb_bu heap, where the outcome depended on FSM placement
+        //     and thus on the visibility horizon at VACUUM time.
+        // (b) Whenever the arm appears, range 0 is summarized before the
+        //     oversized insert (summarize precedes it in the group), so
+        //     the widen — and the identical ereport on both engines — is
+        //     unconditional.
+        let mut saw_arm = false;
+        for group in gen_groups(7, 300) {
+            for (i, sql) in group.iter().enumerate() {
+                if sql.contains("string_agg(md5(i::text), '')") {
+                    assert!(
+                        sql.contains("INSERT INTO fz_bb_ov"),
+                        "oversized BRIN insert targets a churned heap: {sql}"
+                    );
+                    saw_arm = true;
+                    let before = &group[..i];
+                    assert!(
+                        before.iter().any(|s| s
+                            .contains("brin_summarize_new_values('fz_bb_ov_brin')")),
+                        "oversized insert not preceded by fz_bb_ov summarize"
+                    );
+                    assert!(
+                        before
+                            .iter()
+                            .any(|s| s.contains("INSERT INTO fz_bb_ov VALUES (1, 'seed');")),
+                        "fz_bb_ov seed row missing before oversized insert"
+                    );
+                }
+            }
+        }
+        assert!(saw_arm, "oversized BRIN program-limit arm never generated");
     }
 
     #[test]
