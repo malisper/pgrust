@@ -5860,3 +5860,92 @@ fn deep_expression_inits_within_c_parity_stack_budget() {
         start_and_end(mk_deep_pstmt(mcx, 0, Some(qual)));
     });
 }
+
+// RB-13 (covdiff seeds 404/505): the run seam must arm the §4.2 capture row
+// loop from the RECEIVER's sidecar. PR #1527's lane deletion (p72 D-5)
+// hardcoded the run-seam sidecar read to None, so a store-armed
+// (implicit-SCROLL, non-FOR-UPDATE) cursor filled its row store but never
+// its tid sidecar — and every WHERE CURRENT OF over it then resolved
+// through exec_current_of's shortfall arm into a spurious 24000
+// `cursor "c" is not a simply updatable scan of table "t"` where C
+// succeeds (pg_regress portals pins the end-to-end surface; this pins the
+// seam contract the fix restored). A capture-armed tuplestore receiver
+// gets EXACTLY one sidecar identity row per emitted row — a scanless
+// Result plan captures the (0, 0) inactive placeholder, the point being
+// that a row IS appended — and an unarmed receiver's run leaves the
+// sidecar untouched.
+#[test]
+fn executor_run_arms_capture_sidecar_from_receiver() {
+    install_seams();
+    let mcx = leaked_mcx();
+    let mk_store =
+        || ::tuplestore::hold::register(::tuplestore::Tuplestore::begin_heap(true, false, 1024));
+
+    // Capture-armed receiver: one identity row per emitted row.
+    let pstmt = mk_select1_pstmt(mcx, None);
+    let qd = execmain_seams::create_query_desc::call(
+        pstmt,
+        "SELECT 1",
+        None,
+        None,
+        CommandDest::None,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    execmain_seams::executor_start::call(qd, 0).unwrap();
+    let store = mk_store();
+    let sidecar = mk_store();
+    let mut dest = ::tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
+    ::tcop_dest::SetTuplestoreDestReceiverParams(&mut dest, store, false);
+    ::tcop_dest::SetTuplestoreCaptureSidecar(&mut dest, sidecar);
+    execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap();
+    assert_eq!(execmain_seams::query_desc_es_processed::call(qd), 1);
+    assert_eq!(
+        ::tuplestore::hold::with_store(store, |s| s.tuple_count()),
+        1,
+        "the fill's row store gets the emitted row"
+    );
+    assert_eq!(
+        ::tuplestore::hold::tidstore_get(sidecar, 0).unwrap(),
+        Some((0, 0)),
+        "capture-armed run appends one identity row per emitted row \
+         (RB-13: a None here is the starved-sidecar regression)"
+    );
+    assert_eq!(::tuplestore::hold::tidstore_get(sidecar, 1).unwrap(), None);
+    execmain_seams::executor_finish::call(qd).unwrap();
+    execmain_seams::executor_end::call(qd).unwrap();
+    execmain_seams::free_query_desc::call(qd);
+
+    // Unarmed receiver: same plan, no sidecar — the plain loop runs and the
+    // sidecar (a bystander store here) stays empty.
+    let pstmt2 = mk_select1_pstmt(mcx, None);
+    let qd2 = execmain_seams::create_query_desc::call(
+        pstmt2,
+        "SELECT 1",
+        None,
+        None,
+        CommandDest::None,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    execmain_seams::executor_start::call(qd2, 0).unwrap();
+    let store2 = mk_store();
+    let bystander = mk_store();
+    let mut dest2 = ::tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
+    ::tcop_dest::SetTuplestoreDestReceiverParams(&mut dest2, store2, false);
+    execmain_seams::executor_run::call(qd2, ForwardScanDirection, 0, &mut dest2).unwrap();
+    assert_eq!(execmain_seams::query_desc_es_processed::call(qd2), 1);
+    assert_eq!(::tuplestore::hold::with_store(store2, |s| s.tuple_count()), 1);
+    assert_eq!(::tuplestore::hold::tidstore_get(bystander, 0).unwrap(), None);
+    execmain_seams::executor_finish::call(qd2).unwrap();
+    execmain_seams::executor_end::call(qd2).unwrap();
+    execmain_seams::free_query_desc::call(qd2);
+
+    for h in [store, sidecar, store2, bystander] {
+        ::tuplestore::hold::end(h);
+    }
+}

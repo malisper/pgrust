@@ -1367,7 +1367,18 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // === end sqe P2-1 dispatch slot =====================================
     // p72 D-5: the lane batch store fill deleted with the body; every run
     // takes the per-tuple loop (the disarmed-tip path, byte-identically).
-    let cursor_capture_sidecar: Option<::types_portal::TuplestoreHandle> = None;
+    //
+    // RB-13: the sidecar read survives the D-5 deletion — a capture-armed
+    // cursor-store fill (fill_portal_store_to's eligible arm) still arms the
+    // tuplestore receiver with the §4.2 row-identity sidecar, and the
+    // capture row loop below is what appends to it now that the batch sink
+    // is gone. Hardcoding None here starved the sidecar, so every
+    // store-armed (implicit-SCROLL, non-FOR-UPDATE) cursor resolved
+    // WHERE CURRENT OF through the shortfall arm — a spurious 24000
+    // "not a simply updatable scan" where C succeeds. Non-tuplestore
+    // receivers and unarmed fills read None (one load per RUN).
+    let cursor_capture_sidecar: Option<::types_portal::TuplestoreHandle> =
+        dest.tuplestore_capture_sidecar();
     let cursor_fill_engaged = false;
     // --- end WS-CB wave-10 ----------------------------------------------------------
     // --- WS-CC wave-10 sub-region (reserved) ------------------------------------
