@@ -495,6 +495,11 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 args = a;
             }
             if let Some(simple) = simple {
+                // C: args = list_make3(simple, <typioparam>, <-1>); if the
+                // input function then declines to fold (e.g. a stable input
+                // fn such as timetz_in), the rebuilt CoerceViaIO's arg is
+                // linitial(args) — the folded cstring Const — not the
+                // original argument.
                 let mut inargs = NodeList::make1(cx.mcx, simple)?;
                 inargs.lappend(
                     cx.mcx,
@@ -528,18 +533,22 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                         },
                     )?,
                 )?;
-                let (simple, _) = simplify_function(
+                args = inargs;
+                let (simple, new_args) = simplify_function(
                     cx,
                     infunc,
                     e.resulttype,
                     -1,
                     e.resultcollid,
                     InvalidOid,
-                    &inargs,
+                    &args,
                     false,
                     false,
                     true,
                 )?;
+                if let Some(a) = new_args {
+                    args = a;
+                }
                 if simple.is_some() {
                     return Ok(simple);
                 }

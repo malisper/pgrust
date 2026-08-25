@@ -30,6 +30,19 @@ const OP_FAKE_GT: u32 = 9904;
 const F_TEXTREGEXEQ_SUPPORT: u32 = 1364;
 const F_FAKE_SQL_INLINE: u32 = 9995;
 const F_FAKE_SQL_REC: u32 = 9996;
+// CoerceViaIO fixtures: a fake immutable output fn (text -> cstring) and two
+// fake input fns, one stable (declines const-fold, like timetz_in/interval_in
+// whose results depend on GUCs) and one immutable (folds fully).
+const F_FAKE_TEXTOUT: u32 = 9980;
+const F_FAKE_STABLE_IN: u32 = 9981;
+const F_FAKE_IMM_IN: u32 = 9982;
+const TEXTOID: u32 = 25;
+const CSTRINGOID: u32 = 2275;
+const T_FAKE_STABLE: u32 = 9801;
+const T_FAKE_IMM: u32 = 9802;
+static CSTR_X: [u8; 2] = *b"x\0";
+// (result_type, result_typmod) pairs handed to the evaluate_expr fixture.
+static EVAL_EXPR_SEEN: std::sync::Mutex<Vec<(u32, i32)>> = std::sync::Mutex::new(Vec::new());
 
 fn shape(provolatile: u8, proparallel: u8, strict: bool, rettype: u32) -> PgProcShape {
     PgProcShape {
@@ -78,6 +91,21 @@ fn install_fixtures() {
                     sh.pronargs = 1;
                     Some(sh)
                 }
+                F_FAKE_TEXTOUT => {
+                    let mut sh = shape(b'i', b's', true, CSTRINGOID);
+                    sh.pronargs = 1;
+                    Some(sh)
+                }
+                F_FAKE_STABLE_IN => {
+                    let mut sh = shape(b's', b's', true, T_FAKE_STABLE);
+                    sh.pronargs = 3;
+                    Some(sh)
+                }
+                F_FAKE_IMM_IN => {
+                    let mut sh = shape(b'i', b's', true, T_FAKE_IMM);
+                    sh.pronargs = 3;
+                    Some(sh)
+                }
                 _ => None,
             })
         });
@@ -119,6 +147,55 @@ fn install_fixtures() {
                 }
                 _ => None,
             })
+        });
+        syscache_seams::pg_type_io_shape::set(|typid| {
+            let io = |typinput, typoutput, typlen: i16, typbyval| syscache_seams::PgTypeIoShape {
+                oid: typid,
+                typinput,
+                typoutput,
+                typreceive: 0,
+                typsend: 0,
+                typmodin: 0,
+                typmodout: 0,
+                typelem: 0,
+                typlen,
+                typbyval,
+                typalign: b'i' as i8,
+                typdelim: b',' as i8,
+                typisdefined: true,
+            };
+            Ok(match typid {
+                TEXTOID => Some(io(0, F_FAKE_TEXTOUT, -1, false)),
+                T_FAKE_STABLE => Some(io(F_FAKE_STABLE_IN, 0, 12, false)),
+                T_FAKE_IMM => Some(io(F_FAKE_IMM_IN, 0, 8, true)),
+                _ => None,
+            })
+        });
+        // Process-global set-once slot: this is the binary's ONE evaluate_expr
+        // installation. It records (type, typmod) for the minmax typmod test,
+        // folds the fake CoerceViaIO out/in fns, and panics with the
+        // uninstalled-seam message for everything else so the
+        // `defers_to_evaluate_expr_seam` should-panic tests keep passing.
+        clauses_seams::evaluate_expr::set(|mcx, expr, ty, tm, _coll| {
+            EVAL_EXPR_SEEN.lock().unwrap().push((ty, tm));
+            match expr.as_func_expr().map(|f| f.funcid) {
+                Some(F_FAKE_TEXTOUT) => Node::mk_const(
+                    mcx,
+                    CSTRINGOID,
+                    -1,
+                    0,
+                    -2,
+                    Datum::from_usize(CSTR_X.as_ptr() as usize),
+                    false,
+                    false,
+                ),
+                Some(F_FAKE_IMM_IN) => {
+                    Node::mk_const(mcx, T_FAKE_IMM, -1, 0, 8, Datum::from_i32(42), false, true)
+                }
+                _ => panic!(
+                    "seam not installed: clauses_seams::evaluate_expr (fixture declines funcid)"
+                ),
+            }
         });
         var_seams::contain_var_clause::set(fixture_contain_var_clause);
         typcache_seams::type_cache_cmp_proc::set(|typid| {
@@ -821,15 +898,9 @@ fn eval_const_minmax_folds_with_agreed_typmod() {
     // C ece_evaluate_expr hands evaluate_expr exprTypmod(node): all-const
     // GREATEST over numeric(10,2) folds with typmod 655366, not -1
     // (wire-metadata workflow finding minmax-constfold-typmod).
-    use std::sync::Mutex;
-    static SEEN: Mutex<Vec<(u32, i32)>> = Mutex::new(Vec::new());
-    // record the (type, typmod) the fold hands over, then panic with the
-    // uninstalled-seam message so the sibling `defers_to_..._seam`
-    // should-panic tests keep passing (seam slots are process-global).
-    clauses_seams::evaluate_expr::set(|_mcx, _expr, ty, tm, _coll| {
-        SEEN.lock().unwrap().push((ty, tm));
-        panic!("seam not installed: clauses_seams::evaluate_expr (recording test stub)");
-    });
+    // The shared install_fixtures evaluate_expr records the (type, typmod)
+    // the fold hands over (and panics with the uninstalled-seam message for
+    // this non-fake funcid, which catch_unwind below absorbs).
     let ctx = cx();
     let mcx = ctx.mcx();
     const NUMERICOID: u32 = 1700;
@@ -871,7 +942,7 @@ fn eval_const_minmax_folds_with_agreed_typmod() {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = eval_const_expressions(mcx, agree);
     }));
-    assert!(SEEN.lock().unwrap().contains(&(NUMERICOID, 655366)));
+    assert!(EVAL_EXPR_SEEN.lock().unwrap().contains(&(NUMERICOID, 655366)));
     // disagreeing typmods -> C exprTypmod says -1
     let disagree = minmax(mcx, false, &[num_const(655366), num_const(786440)]);
     let disagree = {
@@ -893,7 +964,76 @@ fn eval_const_minmax_folds_with_agreed_typmod() {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = eval_const_expressions(mcx, disagree);
     }));
-    assert!(SEEN.lock().unwrap().contains(&(NUMERICOID, -1)));
+    assert!(EVAL_EXPR_SEEN.lock().unwrap().contains(&(NUMERICOID, -1)));
+}
+
+fn coerce_via_io<'mcx>(mcx: Mcx<'mcx>, arg: Node<'mcx>, resulttype: u32) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::CoerceViaIO {
+            arg,
+            resulttype,
+            resultcollid: 0,
+            coerceformat: types_nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CAST,
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+fn text_const(mcx: Mcx<'_>) -> Node<'_> {
+    // Value is never dereferenced: the evaluate_expr fixture ignores args.
+    Node::mk_const(mcx, TEXTOID, -1, 0, -1, Datum::from_usize(CSTR_X.as_ptr() as usize), false, false)
+        .unwrap()
+}
+
+// C clauses.c T_CoerceViaIO arm: after the (immutable) output fn folds, C sets
+// args = list_make3(simple, typioparam, -1); when the input fn then declines
+// (stable, e.g. timetz_in/interval_in/time_in), the rebuilt CoerceViaIO's arg
+// is linitial(args) — the folded cstring Const. Deparse then prints
+// ('...'::cstring)::<type>, which is what real PG shows in EXPLAIN
+// (antithesis RB-4).
+#[test]
+fn eval_const_coerce_via_io_stable_input_fn_keeps_cast_over_cstring_const() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let folded =
+        eval_const_expressions(mcx, coerce_via_io(mcx, text_const(mcx), T_FAKE_STABLE)).unwrap();
+    let cv = folded.as_coerce_via_io().expect("stable input fn: cast node survives");
+    assert_eq!(cv.resulttype, T_FAKE_STABLE);
+    let c = cv.arg.as_const().expect("arg rewritten to the folded output-fn Const");
+    assert_eq!(c.consttype, CSTRINGOID, "C leaves linitial(args): a cstring Const, not text");
+    assert_eq!(c.constlen, -2);
+    assert!(!c.constbyval);
+}
+
+// Immutable input fn: the whole cast folds to a Const of the result type,
+// exactly like C (both simplify_function calls succeed).
+#[test]
+fn eval_const_coerce_via_io_immutable_input_fn_folds_fully() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let folded =
+        eval_const_expressions(mcx, coerce_via_io(mcx, text_const(mcx), T_FAKE_IMM)).unwrap();
+    let c = folded.as_const().expect("immutable input fn: folds to Const");
+    assert_eq!(c.consttype, T_FAKE_IMM);
+    assert!(!c.constisnull);
+    // the input-fn evaluation was handed the cast's result type
+    assert!(EVAL_EXPR_SEEN.lock().unwrap().contains(&(T_FAKE_IMM, -1)));
+}
+
+// Non-Const argument: neither IO fn can fold; the CoerceViaIO is rebuilt over
+// the (simplified) original argument.
+#[test]
+fn eval_const_coerce_via_io_nonconst_arg_passthrough() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, TEXTOID, -1, 0, 0).unwrap();
+    let folded = eval_const_expressions(mcx, coerce_via_io(mcx, var, T_FAKE_STABLE)).unwrap();
+    let cv = folded.as_coerce_via_io().expect("non-const arg: cast node survives");
+    assert_eq!(cv.resulttype, T_FAKE_STABLE);
+    let v = cv.arg.as_var().expect("arg passes through untouched");
+    assert_eq!(v.vartype, TEXTOID);
 }
 
 fn saop<'mcx>(
