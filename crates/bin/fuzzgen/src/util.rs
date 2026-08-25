@@ -99,8 +99,13 @@ const SHAPES: &[&str] = &[
 const SYSVIEW_PROBES: &[(&str, &str)] = &[
     // A session scanning pg_locks always holds at least its own lock.
     ("locks_any", "SELECT count(*) > 0 FROM pg_locks;"),
-    // Single-session harness: nothing is ever waiting.
-    ("locks_ungranted", "SELECT count(*) FROM pg_locks WHERE NOT granted;"),
+    // FP-10 (round-10): pg_locks is CLUSTER-global — a concurrent driver
+    // batch's ungranted lock appears on one side only, so the raw count
+    // is not cross-engine comparable (run f13de995...-59-13 saw A=[0]
+    // with an unmatched B row). Existence-only projection, per the
+    // round-9/10 hba/progress-view precedent; the classifier's
+    // instance-config net covers gramwalk-derived raw references.
+    ("locks_ungranted", "SELECT count(*) >= 0 FROM pg_locks WHERE NOT granted;"),
     // The scan itself guarantees a relation-lock row; DISTINCT + the
     // equality filter pins the output to exactly one stable value.
     (
@@ -383,6 +388,20 @@ mod tests {
             prods.iter().any(|p| p == "util:sysview:stat_table"),
             "per-table stat probe never fired"
         );
+        // FP-10 (round-10): pg_locks / pg_stat_activity row COUNTS are
+        // cluster-global live state (a concurrent batch's lock or
+        // session lands on one side only), so a bare `count(*)` select
+        // list over them is never cross-engine comparable — every count
+        // must be folded into a boolean existence shape.
+        for (name, s) in SYSVIEW_PROBES {
+            if s.contains("pg_locks") || s.contains("pg_stat_activity") {
+                let list = &s["SELECT ".len()..s.find(" FROM ").unwrap()];
+                assert!(
+                    list != "count(*)",
+                    "probe {name} projects a raw cluster-global count: {s}"
+                );
+            }
+        }
         // Only pg_locks / pg_stat_* views are touched.
         for sql in &seen {
             let from = &sql[sql.find(" FROM ").unwrap() + 6..];

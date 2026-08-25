@@ -91,10 +91,25 @@ pub enum RuledPattern {
     /// pg_hba.conf files (row count 6 vs 7, run b627b97f...-59-13).
     /// FP-9b widens the family to live-state views (pg_stat_progress_*
     /// by prefix, pg_stat_activity): concurrent sessions' in-flight
-    /// commands legitimately appear on one cluster only. The generators
-    /// emit only existence shapes there; this class catches
-    /// gramwalk-derived references. Error outcomes still compare strictly.
+    /// commands legitimately appear on one cluster only. Round-10 FP-10
+    /// adds pg_locks — cluster-global live lock state, same mechanism
+    /// (a concurrent batch's ungranted lock showed up on one side only).
+    /// The generators emit only existence shapes there; this class
+    /// catches gramwalk-derived references. Error outcomes still compare
+    /// strictly.
     InstanceConfig,
+    /// B refused a statement with pgrust's ratified UTF-8-only
+    /// server-encoding carve message (round-10 FP-11): only UTF8 and
+    /// SQL_ASCII server encodings are accepted (RATIFIED 2026-08-18 by
+    /// Michael, docs/design/carve-ratifications.md §11; gates:
+    /// createdb.rs server_encoding_gate, postinit
+    /// check_database_encoding_supported). C has no such carve, so it
+    /// succeeds or fails for its own reasons (e.g. 22023 encoding-vs-
+    /// locale mismatch) — either way the pair carries no conformance
+    /// signal. Emitted only on the exact B-side 0A000 carve-citation
+    /// message; any other encoding error still escalates, as does an
+    /// A-side XX000.
+    EncodingCarve,
     /// Rowset diff on a statement calling a backup-control function
     /// (pg_backup_start/stop, pg_switch_wal, pg_create_restore_point):
     /// their LSN/label results are cluster-local WAL positions (round-9
@@ -204,11 +219,27 @@ pub fn default_table() -> Vec<RuledEntry> {
                      instance (config files, shmem layout), not the \
                      schema, and the two clusters are provisioned \
                      independently; pg_stat_progress_* / pg_stat_activity \
-                     are live instance state (concurrent sessions' \
-                     commands appear on one side only) — rowset shape \
-                     only, error outcomes still compare strictly \
-                     (notes/antithesis/round9-triage-2026-08-24.md)",
+                     / pg_locks (round-10 FP-10) are live instance state \
+                     (concurrent sessions' commands and locks appear on \
+                     one side only) — rowset shape only, error outcomes \
+                     still compare strictly \
+                     (notes/antithesis/round9-triage-2026-08-24.md, \
+                     round10-60m-classification.md FP-10)",
             pattern: RuledPattern::InstanceConfig,
+        },
+        RuledEntry {
+            id: "encoding-carve",
+            ruling: "UTF-8-only server-encoding carve ruling (round-10 \
+                     FP-11): only UTF8 and SQL_ASCII server encodings are \
+                     accepted by pgrust — RATIFIED 2026-08-18 by Michael, \
+                     docs/design/carve-ratifications.md §11 (gates: \
+                     createdb.rs server_encoding_gate, postinit \
+                     check_database_encoding_supported). A B-side 0A000 \
+                     refusal carrying the carve citation is the carve \
+                     operating as ratified and carries no oracle signal \
+                     whatever C did with the same statement; exact-message \
+                     scope, every other encoding error still escalates",
+            pattern: RuledPattern::EncodingCarve,
         },
         RuledEntry {
             id: "instance-lsn",
@@ -364,6 +395,12 @@ fn matches(entry: &RuledEntry, candidate: &str, sql: &str) -> bool {
         RuledPattern::InstanceLsn => {
             candidate == "instance-lsn" && crate::diff::calls_backup_control(sql)
         }
+        // Emitted only on the exact B-side 0A000 carve-citation message
+        // (round-10 FP-11); the message signature is the refinement, and
+        // the carve is reachable without the token "encoding" in the SQL
+        // (gramwalk numeric encoding operands), so no text refinement is
+        // reliable.
+        RuledPattern::EncodingCarve => candidate == "encoding-carve",
         // Emitted only on the exact A-side no-lz4 0A000 message signature
         // (build-config family; same emission-scoped rule as xml-config).
         RuledPattern::Lz4Config => candidate == "lz4-config",
@@ -549,6 +586,8 @@ mod tests {
             "SELECT count(*) FROM pg_stat_progress_analyze;",
             "select phase from PG_STAT_PROGRESS_VACUUM ;",
             "SELECT state FROM pg_stat_activity;",
+            // FP-10 (round-10) live lock state.
+            "SELECT count(*) FROM pg_locks WHERE NOT granted;",
         ] {
             let out = apply_ruled(&default_table(), sql, candidate("instance-config"));
             assert_eq!(out.class, DiffClass::Ruled("instance-config".to_string()), "{sql}");
@@ -593,6 +632,26 @@ mod tests {
         assert_eq!(apply_ruled(&[], "x;", candidate("lz4-config")).class, DiffClass::RowsetDiff);
         assert_eq!(
             apply_ruled(&[], "x;", candidate("tid-input-upstream")).class,
+            DiffClass::RowsetDiff
+        );
+    }
+
+    #[test]
+    fn encoding_carve_candidate_resolves_with_charter_citation() {
+        // Emission-scoped (like xml-config/lz4-config): the classifier
+        // only emits the candidate on the exact B-side carve message,
+        // so the entry matches on any SQL.
+        let out = apply_ruled(
+            &default_table(),
+            "create database fuzz_gramwalk_210_1_json WITH encoding + 2 ;",
+            candidate("encoding-carve"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("encoding-carve".to_string()));
+        assert!(out.detail.contains("carve-ratifications.md"), "{}", out.detail);
+        assert!(out.detail.contains("2026-08-18"), "{}", out.detail);
+        // Without the table entry the candidate escalates — nothing silent.
+        assert_eq!(
+            apply_ruled(&[], "x;", candidate("encoding-carve")).class,
             DiffClass::RowsetDiff
         );
     }

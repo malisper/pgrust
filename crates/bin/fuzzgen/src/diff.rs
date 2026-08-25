@@ -584,6 +584,24 @@ fn is_no_lz4_error(message: &str) -> bool {
     message == "compression method lz4 not supported"
 }
 
+/// pgrust's ratified UTF-8-only server-encoding carve refusal
+/// (docs/design/carve-ratifications.md §11, RATIFIED 2026-08-18 by
+/// Michael): only UTF8 and SQL_ASCII server encodings are accepted, and
+/// both engine gates — createdb.rs `server_encoding_gate` (0A000 at
+/// CREATE DATABASE) and postinit `check_database_encoding_supported`
+/// (FATAL 0A000 at connect) — cite the carve doc verbatim in their
+/// message. Signature scope is the citation suffix, unique to those two
+/// gates; any OTHER encoding-related error (including pgrust bugs
+/// raising different text) does not qualify and still escalates.
+fn is_encoding_carve_refusal(sqlstate: &str, message: &str) -> bool {
+    sqlstate == "0A000"
+        && message.ends_with(
+            "is not supported by pgrust; only \"UTF8\" and \"SQL_ASCII\" server \
+             encodings are accepted (UTF-8-only carve, \
+             docs/design/carve-ratifications.md)",
+        )
+}
+
 /// Instance-config introspection views (round-9 FP-9): these views
 /// reflect the INSTANCE — config files on disk (pg_hba_file_rules,
 /// pg_ident_file_mappings, pg_file_settings) or the shared-memory layout
@@ -601,6 +619,18 @@ fn is_no_lz4_error(message: &str) -> bool {
 /// (existence shapes only); this predicate is the defensive net for
 /// gramwalk-derived references. Error outcomes on these statements
 /// still compare strictly.
+///
+/// Round-10 FP-10 extends the live-state family with pg_locks: the lock
+/// table is cluster-global live instance state exactly like
+/// pg_stat_activity (a concurrent driver batch's ungranted lock showed
+/// up on one side only: `SELECT count(*) FROM pg_locks WHERE NOT
+/// granted;` → unmatched B row, run f13de995...-59-13, seeds
+/// 1341620565954279792 / 3898244892804067832). Of the sibling live
+/// views only pg_locks is emitted by the curated pools (util sysview /
+/// lockcursor / adtmisc / obs); pg_prepared_statements is SESSION-local
+/// and deterministic (plancache probes compare it deliberately), and
+/// pg_cursors / pg_prepared_xacts are never emitted, so none of them
+/// belongs here.
 pub fn is_instance_config_stmt(sql: &str) -> bool {
     let lower = sql.to_ascii_lowercase();
     [
@@ -611,6 +641,8 @@ pub fn is_instance_config_stmt(sql: &str) -> bool {
         // FP-9b: whole pg_stat_progress_* family by prefix.
         "pg_stat_progress_",
         "pg_stat_activity",
+        // FP-10 (round-10): cluster-global live lock state.
+        "pg_locks",
     ]
     .iter()
     .any(|v| lower.contains(v))
@@ -1369,6 +1401,22 @@ pub fn classify(input: &DiffInput) -> Classified {
                          lz4 not supported; B (lz4 build) errored {sb} ({mb})"
                     ),
                 }
+            } else if is_encoding_carve_refusal(sb, mb) && sa != "XX000" {
+                // Round-10 FP-11: pgrust refused the statement per the
+                // ratified UTF-8-only server-encoding carve
+                // (docs/design/carve-ratifications.md §11) while C, which
+                // has no such carve, failed differently (e.g. 22023
+                // encoding-vs-locale mismatch on `CREATE DATABASE ...
+                // ENCODING 'EUC_CN'`). The refusal is the carve operating
+                // as ratified, so the pair carries no conformance signal.
+                // An A-side XX000 (oracle panic) still escalates.
+                Classified {
+                    class: DiffClass::Ruled("encoding-carve".to_string()),
+                    detail: format!(
+                        "B refused per the UTF-8-only server-encoding carve: \
+                         {sb} ({mb}); A: {sa} ({ma})"
+                    ),
+                }
             } else if is_shared_catalog_stmt(sql)
                 && (is_tuple_concurrency_error(sa, ma) || is_tuple_concurrency_error(sb, mb))
             {
@@ -1420,6 +1468,20 @@ pub fn classify(input: &DiffInput) -> Classified {
                 return Classified {
                     class: DiffClass::Ruled("shared-catalog-tcu".to_string()),
                     detail: format!("A succeeded; B errored {sqlstate} ({message})"),
+                };
+            }
+            // Round-10 FP-11: pgrust's ratified UTF-8-only server-encoding
+            // carve refusal (docs/design/carve-ratifications.md §11) where
+            // C — which has no such carve — accepted the statement is the
+            // carve operating as ratified, not a conformance gap.
+            // Signature scope: only the exact carve-citation message.
+            if is_encoding_carve_refusal(sqlstate, message) {
+                return Classified {
+                    class: DiffClass::Ruled("encoding-carve".to_string()),
+                    detail: format!(
+                        "A succeeded; B refused per the UTF-8-only \
+                         server-encoding carve: {sqlstate} ({message})"
+                    ),
                 };
             }
             // FP-4 (round-7): Antithesis thread-pauses the instrumented
@@ -1883,6 +1945,61 @@ mod tests {
         assert_eq!(c.class, DiffClass::ErrorDiff);
     }
 
+    /// Round-10 FP-11: a B-side refusal carrying the ratified UTF-8-only
+    /// server-encoding carve citation (docs/design/carve-ratifications.md
+    /// §11) is the encoding-carve candidate whether A errored differently
+    /// or succeeded; any other encoding error and an A-side oracle panic
+    /// still escalate.
+    #[test]
+    fn b_side_encoding_carve_refusal_is_ruled_candidate() {
+        let carve = StmtOutcome::Error {
+            sqlstate: "0A000".to_string(),
+            message: "server encoding \"EUC_CN\" is not supported by pgrust; \
+                      only \"UTF8\" and \"SQL_ASCII\" server encodings are \
+                      accepted (UTF-8-only carve, \
+                      docs/design/carve-ratifications.md)"
+                .to_string(),
+        };
+        let sql = "create database fuzz_gramwalk_210_1_json WITH encoding + 2 ;";
+        // Both-error, differing SQLSTATEs (the observed round-10 shape:
+        // A 22023 encoding-vs-locale mismatch vs the B carve refusal).
+        let a = StmtOutcome::Error {
+            sqlstate: "22023".to_string(),
+            message: "encoding \"EUC_CN\" does not match locale \"C.UTF-8\"".to_string(),
+        };
+        let c = classify_sql(sql, &a, &carve);
+        assert_eq!(c.class, DiffClass::Ruled("encoding-carve".to_string()));
+        assert!(c.detail.contains("carve"), "{}", c.detail);
+        // A succeeded (a C oracle with a matching locale would create the
+        // database): the carve refusal is still the candidate.
+        let ok = StmtOutcome::Command { tag: "CREATE DATABASE".to_string(), affected: None };
+        let c = classify_sql(sql, &ok, &carve);
+        assert_eq!(c.class, DiffClass::Ruled("encoding-carve".to_string()));
+        // Any OTHER B-side 0A000 — even encoding-flavored — escalates.
+        let other = StmtOutcome::Error {
+            sqlstate: "0A000".to_string(),
+            message: "encoding conversion from EUC_CN to UTF8 not supported".to_string(),
+        };
+        assert_eq!(classify_sql(sql, &a, &other).class, DiffClass::ErrorDiff);
+        assert_eq!(classify_sql(sql, &ok, &other).class, DiffClass::ErrorDiff);
+        // The carve message under a different SQLSTATE escalates too.
+        let StmtOutcome::Error { message, .. } = &carve else { unreachable!() };
+        let wrong_state = StmtOutcome::Error {
+            sqlstate: "22023".to_string(),
+            message: message.clone(),
+        };
+        assert_eq!(classify_sql(sql, &ok, &wrong_state).class, DiffClass::ErrorDiff);
+        // An A-side oracle panic is never absorbed.
+        let panic = StmtOutcome::Error {
+            sqlstate: "XX000".to_string(),
+            message: "panicked at ...".to_string(),
+        };
+        assert_eq!(classify_sql(sql, &panic, &carve).class, DiffClass::ErrorDiff);
+        // The A-side carrying the carve message is NOT the candidate
+        // (only pgrust's own refusal qualifies).
+        assert_eq!(classify_sql(sql, &carve, &a).class, DiffClass::ErrorDiff);
+    }
+
     /// Round-9 covdiff: B-only 22P02 on tid input where A succeeded is
     /// the tid-input-upstream candidate (pgrust matches the upstream
     /// FIXED strict behavior); any other 22P02 still escalates.
@@ -1945,6 +2062,11 @@ mod tests {
         );
         assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
         let c = classify_sql("SELECT state FROM pg_stat_activity;", &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
+        // FP-10 (round-10): pg_locks is the same cluster-global live
+        // state — a concurrent batch's ungranted lock appears on one
+        // side only.
+        let c = classify_sql("SELECT count(*) FROM pg_locks WHERE NOT granted;", &a, &b);
         assert_eq!(c.class, DiffClass::Ruled("instance-config".to_string()));
         // Same shape elsewhere escalates.
         let c = classify_sql("SELECT t FROM fz_rich;", &a, &b);

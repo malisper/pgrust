@@ -603,13 +603,23 @@ fn run() -> Result<ExitCode, String> {
                             // applies to the WHOLE stream (pg_* built-ins
                             // and quoted material excepted); helper_diffrun
                             // reclaims {db}_* tablespaces at batch cleanup.
+                            // FP-12 (round-10): roles are the same
+                            // cluster-global hazard (pg_authid) — the
+                            // aclrls module's fixed fz_acl_* role deck
+                            // raced concurrent batches' DROP/CREATE
+                            // brackets (42704/2BP01 one-sided errors),
+                            // so its whole module-owned namespace is
+                            // rebased into {db}_fz_acl_*; helper_diffrun
+                            // reclaims {db}_* roles at batch cleanup.
                             sql: {
                                 let sql = if is_gramwalk {
                                     fuzzgen::gramwalk::rebase_database_names(&s.sql, &args.db)
                                 } else {
                                     s.sql.clone()
                                 };
-                                fuzzgen::gramwalk::rebase_tablespace_names(&sql, &args.db)
+                                let sql =
+                                    fuzzgen::gramwalk::rebase_tablespace_names(&sql, &args.db);
+                                fuzzgen::aclrls::rebase_role_names(&sql, &args.db)
                             },
                             soft_float_cols: s.soft_float_cols.clone(),
                             // Opt-in H1 mask: gramwalk derives raw EXPLAIN

@@ -43,7 +43,16 @@
 //!     dependency-error DETAIL, current_user inside a policy) is identical
 //!     across engines; role/object *oids* differ across engines and are
 //!     NEVER emitted — oid-bearing outputs (relacl, aclexplode grantor/
-//!     grantee) are always cast through `::regrole::text` and ordered;
+//!     grantee) are always cast through `::regrole::text` and ordered.
+//!     FP-12 (round-10): roles are CLUSTER-global (pg_authid), so the
+//!     fixed names raced concurrent driver instances' DROP/CREATE brackets
+//!     (42704 `role "fz_acl_ud1" does not exist` on one side of a GRANT,
+//!     2BP01 on the other side's DROP ROLE — the FP-1/RB-9 shared-namespace
+//!     bleed, now on roles). The diffrunner therefore rewrites the whole
+//!     module-owned `fz_acl_` namespace into the batch-unique
+//!     `{db}_fz_acl_` prefix via [`rebase_role_names`] — identically on
+//!     both sides, so name identity across engines is preserved —
+//!     and helper_diffrun's teardown reclaims `{db}_`-prefixed roles;
 //!   - the bootstrap superuser is named `postgres` on both engines (the
 //!     REASSIGN OWNED / owner-restore target), matching the standing
 //!     adtmisc assumption;
@@ -70,6 +79,39 @@
 //!     both-sides-error per the findings-budget rule.
 
 use crate::stmt::{Gen, StmtKind};
+
+/// FP-12 (round-10): rewrite the module-owned `fz_acl_` namespace into
+/// the batch-unique `{tag}_fz_acl_` namespace (tag = the batch's private
+/// scratch-db name, exactly as gramwalk's FP-1 database rebase and the
+/// RB-9 tablespace rebase). Roles live in the cluster-global pg_authid,
+/// so two concurrent driver batches running this module's DROP/CREATE
+/// brackets under fixed names race each other and the A/B interleavings
+/// differ (observed as `A succeeded; B errored 42704 (role "fz_acl_ud1"
+/// does not exist)` on a GRANT and the mirrored 2BP01 on a DROP ROLE,
+/// run f13de995...-59-13, seeds 1357452453456421209 /
+/// 3889503843230171335).
+///
+/// Unlike the tablespace rebase this is a PLAIN textual prefix rewrite,
+/// deliberately including quoted material: the module embeds its role
+/// names inside aclitem string literals (`aclitemin('"fz_acl_q1"=r*w/
+/// postgres')`) and catalog-probe literals (`WHERE tablename =
+/// 'fz_acl_rls_d'`), which must move with the identifiers to stay
+/// coherent. The prefix is module-owned and collision-free by
+/// convention, every occurrence is rewritten, and the statement TEXT
+/// stays identical on both sides, so differential parity is untouched.
+/// Module tables (also `fz_acl_`-prefixed) are db-local and need no
+/// rebase, but ride along harmlessly and consistently. Names stay well
+/// under the 63-byte identifier bound (tag <= ~30 bytes per
+/// helper_diffrun, longest suffix ~12). Applied by the runner to the
+/// WHOLE statement stream; helper_diffrun reclaims `{tag}_`-prefixed
+/// roles at batch cleanup (DROP OWNED BY, then DROP ROLE).
+pub fn rebase_role_names(sql: &str, tag: &str) -> String {
+    const PREFIX: &str = "fz_acl_";
+    if !sql.contains(PREFIX) {
+        return sql.to_string();
+    }
+    sql.replace(PREFIX, &format!("{tag}_{PREFIX}"))
+}
 
 /// Top-level shape selection (registered in weights::PROD_WEIGHTS).
 const SHAPES: &[&str] = &[
@@ -733,4 +775,62 @@ fn gen_aclitem(g: &mut Gen) -> Vec<StmtKind> {
         }
     };
     raw(vec![sql])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FP-12 (round-10): every module-owned `fz_acl_` name — identifiers,
+    /// quoted identifiers, aclitem string literals, catalog-probe string
+    /// literals — moves into the batch-unique `{tag}_fz_acl_` namespace;
+    /// everything else is untouched.
+    #[test]
+    fn rebase_role_names_rewrites_the_whole_module_namespace() {
+        let t = "fuzz_mixed_123_1";
+        assert_eq!(
+            rebase_role_names("GRANT SELECT ON fz_acl_rls_d TO fz_acl_ud1, fz_acl_ud2;", t),
+            "GRANT SELECT ON fuzz_mixed_123_1_fz_acl_rls_d \
+             TO fuzz_mixed_123_1_fz_acl_ud1, fuzz_mixed_123_1_fz_acl_ud2;"
+        );
+        assert_eq!(
+            rebase_role_names("DROP ROLE fz_acl_ud1;", t),
+            "DROP ROLE fuzz_mixed_123_1_fz_acl_ud1;"
+        );
+        // Quoted identifiers and aclitem literals move too (they must stay
+        // coherent with the CREATE ROLE they reference).
+        assert_eq!(
+            rebase_role_names("SELECT aclitemin('\"fz_acl_q1\"=r*w/postgres')::text;", t),
+            "SELECT aclitemin('\"fuzz_mixed_123_1_fz_acl_q1\"=r*w/postgres')::text;"
+        );
+        assert_eq!(
+            rebase_role_names(
+                "SELECT policyname FROM pg_policies WHERE tablename = 'fz_acl_rls_d' ORDER BY policyname;",
+                t
+            ),
+            "SELECT policyname FROM pg_policies \
+             WHERE tablename = 'fuzz_mixed_123_1_fz_acl_rls_d' ORDER BY policyname;"
+        );
+        // Non-module statements pass through byte-identical.
+        for sql in [
+            "SELECT 1;",
+            "CREATE ROLE other_role NOLOGIN;",
+            "SELECT aclitemin('postgres=arwdDxtm/postgres')::text;",
+        ] {
+            assert_eq!(rebase_role_names(sql, t), sql);
+        }
+    }
+
+    /// The longest module name under a helper_diffrun-shaped tag stays
+    /// inside the 63-byte identifier bound (no silent truncation split
+    /// between CREATE and later references).
+    #[test]
+    fn rebase_role_names_stays_under_identifier_bound() {
+        // Worst realistic tag: fuzz_{label<=10}_{pid<=7}_{seq}.
+        let t = "fuzz_downgrade_9999999_9999";
+        let rebased = rebase_role_names("DROP TABLE IF EXISTS fz_acl_rls_d CASCADE;", t);
+        for word in rebased.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            assert!(word.len() < 64, "identifier over NAMEDATALEN: {word}");
+        }
+    }
 }
