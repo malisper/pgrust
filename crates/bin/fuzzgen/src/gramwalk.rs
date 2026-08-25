@@ -615,6 +615,121 @@ pub fn rebase_tablespace_names(sql: &str, tag: &str) -> String {
     out
 }
 
+/// Round-10 RB-14: `ALTER SYSTEM SET/RESET` on a custom GUC name with 3+
+/// dot-separated components, or with `$` inside a segment, POISONS the
+/// instance. PostgreSQL 18 (and pgrust, bug-for-bug conformant — see PR
+/// #1553's conformance tests) accepts such names at SET time and writes
+/// them to postgresql.auto.conf UNQUOTED, but guc-file.l's QUALIFIED_ID
+/// pattern re-parses exactly two components and no `$` — so the server can
+/// never re-read its own file again: every later ALTER SYSTEM (any GUC)
+/// errors F0000 "could not parse contents of file postgresql.auto.conf",
+/// and a restart FATALs during startup config load. gramwalk derives these
+/// names straight from the grammar (`alter system reset flag . fz_scalar
+/// . trim ;`), and under Antithesis fault injection a poisoned side WILL
+/// be restarted — the instance never comes back and the whole history
+/// wedges. PR #1553 rules the resulting one-sided diff noise as
+/// `autoconf-shared-race` (detection side); this pass is the prevention
+/// side: stop writing the poison at generation time.
+///
+/// Rewrite the GUC-name operand of a statement that IS an `ALTER SYSTEM
+/// SET` / `ALTER SYSTEM RESET` (case-insensitive, whitespace-tolerant;
+/// `RESET ALL` has no name and passes through): if the name has 3+
+/// dot-separated components, keep the first and join the trailing
+/// components with `_` so exactly two remain — the legal custom-GUC
+/// two-component shape stays exercised — and replace `$` with `_` in
+/// every segment (accepted at SET time, poison on re-parse). One- and
+/// two-component `$`-free names, and everything else in the statement,
+/// are untouched; the rewritten TEXT is identical on both engines, so
+/// differential parity is unaffected. Applied by the runner to gramwalk
+/// statements only; no other module emits ALTER SYSTEM.
+pub fn sanitize_alter_system_guc_names(sql: &str) -> String {
+    let b = sql.as_bytes();
+    let is_word_start = |c: u8| c.is_ascii_alphabetic() || c == b'_';
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let mut i = 0usize;
+    // Lex one unquoted word starting at/after whitespace; returns
+    // (start, end) or None if the next non-space char is not a word start.
+    let mut next_word = |i: &mut usize| -> Option<(usize, usize)> {
+        while *i < b.len() && b[*i].is_ascii_whitespace() {
+            *i += 1;
+        }
+        if *i >= b.len() || !is_word_start(b[*i]) {
+            return None;
+        }
+        let start = *i;
+        while *i < b.len() && is_word(b[*i]) {
+            *i += 1;
+        }
+        Some((start, *i))
+    };
+    // Statement must open with ALTER SYSTEM SET|RESET.
+    for expect in ["alter", "system"] {
+        match next_word(&mut i) {
+            Some((s, e)) if sql[s..e].eq_ignore_ascii_case(expect) => {}
+            _ => return sql.to_string(),
+        }
+    }
+    match next_word(&mut i) {
+        Some((s, e))
+            if sql[s..e].eq_ignore_ascii_case("set")
+                || sql[s..e].eq_ignore_ascii_case("reset") => {}
+        _ => return sql.to_string(),
+    }
+    // Parse the dotted GUC name: word (. word)*, spaces optional around
+    // dots (gramwalk emits `flag . fz_scalar . trim`; handle `a.b.c` too).
+    let mut comps: Vec<(usize, usize)> = Vec::new();
+    let Some(first) = next_word(&mut i) else {
+        return sql.to_string(); // no operand (e.g. `alter system reset ;`)
+    };
+    comps.push(first);
+    loop {
+        let mut j = i;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j >= b.len() || b[j] != b'.' {
+            break;
+        }
+        let mut k = j + 1;
+        match next_word(&mut k) {
+            Some(w) => {
+                comps.push(w);
+                i = k;
+            }
+            None => break, // trailing dot without a word: leave it alone
+        }
+    }
+    let name_start = comps[0].0;
+    let name_end = comps[comps.len() - 1].1;
+    let dollar_free = comps.iter().all(|&(s, e)| !sql[s..e].contains('$'));
+    if comps.len() <= 2 && dollar_free {
+        return sql.to_string();
+    }
+    let clean = |&(s, e): &(usize, usize)| sql[s..e].replace('$', "_");
+    let rebuilt = if comps.len() >= 3 {
+        // Keep the first component and its original separator text (the
+        // dot plus whatever whitespace surrounded it), then collapse the
+        // trailing components into one `_`-joined identifier.
+        let sep = &sql[comps[0].1..comps[1].0];
+        let mut tail = comps[1..].iter().map(clean).collect::<Vec<_>>().join("_");
+        tail.truncate(63);
+        format!("{}{}{}", clean(&comps[0]), sep, tail)
+    } else {
+        // 1-2 components, `$` somewhere: fix the segments in place,
+        // preserving the original separator text.
+        match comps.len() {
+            1 => clean(&comps[0]),
+            _ => format!(
+                "{}{}{}",
+                clean(&comps[0]),
+                &sql[comps[0].1..comps[1].0],
+                clean(&comps[1])
+            ),
+        }
+    };
+    format!("{}{}{}", &sql[..name_start], rebuilt, &sql[name_end..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +943,98 @@ mod tests {
         );
         let name = long.split_whitespace().nth(2).unwrap();
         assert!(name.len() <= 63, "{name}");
+    }
+
+    /// RB-14: ALTER SYSTEM GUC-name operands are collapsed to at most two
+    /// `$`-free components; everything else passes through verbatim.
+    #[test]
+    fn sanitize_alter_system_guc_names_rewrites_poison_names_only() {
+        let f = sanitize_alter_system_guc_names;
+        // 3 components (gramwalk's spaced-dot rendering): trailing pair
+        // joins, first component and separator style survive.
+        assert_eq!(
+            f("alter system reset flag . fz_scalar . trim ;"),
+            "alter system reset flag . fz_scalar_trim ;"
+        );
+        // 4 components, non-spaced form, SET with a value.
+        assert_eq!(
+            f("ALTER SYSTEM SET a.b.c.d = 'x' ;"),
+            "ALTER SYSTEM SET a.b_c_d = 'x' ;"
+        );
+        assert_eq!(
+            f("alter system set gw_a . gw_b . gw_c to 42 ;"),
+            "alter system set gw_a . gw_b_gw_c to 42 ;"
+        );
+        // `$` in a segment poisons even at 1-2 components.
+        assert_eq!(f("alter system reset gw$a ;"), "alter system reset gw_a ;");
+        assert_eq!(
+            f("alter system set flag . gw$b = on ;"),
+            "alter system set flag . gw_b = on ;"
+        );
+        // Legal 1- and 2-component `$`-free names are untouched.
+        let s = "alter system set work_mem = '64MB' ;";
+        assert_eq!(f(s), s.to_string());
+        let s = "alter system reset flag . fz_scalar ;";
+        assert_eq!(f(s), s.to_string());
+        // Keyword segments stay as-is when the name is already legal.
+        let s = "alter system reset flag . trim ;";
+        assert_eq!(f(s), s.to_string());
+        let s = "ALTER SYSTEM SET xmlparse . gw_a TO DEFAULT ;";
+        assert_eq!(f(s), s.to_string());
+        // RESET ALL has no name operand.
+        let s = "alter system reset all ;";
+        assert_eq!(f(s), s.to_string());
+        // No operand at all (derivation closed early): untouched.
+        let s = "alter system reset ;";
+        assert_eq!(f(s), s.to_string());
+        // Non-ALTER-SYSTEM statements never change, dotted names included.
+        let s = "select k_int from gw_a . gw_b . gw_c ;";
+        assert_eq!(f(s), s.to_string());
+        let s = "set search_path = a . b . c ;";
+        assert_eq!(f(s), s.to_string());
+        let s = "alter table fz_scalar set ( fillfactor = 70 ) ;";
+        assert_eq!(f(s), s.to_string());
+    }
+
+    /// RB-14 invariant: after the runner-applied sanitize pass, NO gramwalk
+    /// ALTER SYSTEM statement carries a GUC name postgresql.auto.conf
+    /// cannot re-parse (3+ dot components, or `$` in a segment) — the
+    /// poison shape can never reach an instance.
+    #[test]
+    fn sanitized_stream_never_poisons_autoconf() {
+        for sql in statements(0xA17E5, 3000) {
+            let sql = sanitize_alter_system_guc_names(&sql);
+            let toks: Vec<&str> = sql.split_whitespace().collect();
+            let is_alter_system = toks.len() >= 3
+                && toks[0].eq_ignore_ascii_case("alter")
+                && toks[1].eq_ignore_ascii_case("system")
+                && (toks[2].eq_ignore_ascii_case("set")
+                    || toks[2].eq_ignore_ascii_case("reset"));
+            if !is_alter_system {
+                continue;
+            }
+            // Re-derive the name operand with an independent tokenizer:
+            // words chained by dots starting at token 3.
+            let mut comps = 0usize;
+            let mut rest = sql.splitn(4, char::is_whitespace).nth(3).unwrap_or("");
+            loop {
+                rest = rest.trim_start();
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+                    .unwrap_or(rest.len());
+                if end == 0 {
+                    break;
+                }
+                assert!(!rest[..end].contains('$'), "poison `$` survived: {sql}");
+                comps += 1;
+                rest = rest[end..].trim_start();
+                match rest.strip_prefix('.') {
+                    Some(r) => rest = r,
+                    None => break,
+                }
+            }
+            assert!(comps <= 2, "poison {comps}-component GUC name survived: {sql}");
+        }
     }
 
     /// Textual stream invariants the rig relies on (single line, terminated,

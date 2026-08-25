@@ -611,9 +611,23 @@ fn run() -> Result<ExitCode, String> {
                             // so its whole module-owned namespace is
                             // rebased into {db}_fz_acl_*; helper_diffrun
                             // reclaims {db}_* roles at batch cleanup.
+                            // RB-14 (round-10): gramwalk-derived ALTER
+                            // SYSTEM SET/RESET on a 3+-component or
+                            // `$`-bearing custom GUC name writes an
+                            // unquoted line postgresql.auto.conf can
+                            // never re-parse (guc-file.l QUALIFIED_ID is
+                            // exactly two components) — every later
+                            // ALTER SYSTEM errors F0000 and a restart
+                            // FATALs, wedging the history under fault
+                            // injection. PR #1553 rules the diff noise
+                            // (autoconf-shared-race); this pass prevents
+                            // the poison at generation time.
                             sql: {
                                 let sql = if is_gramwalk {
-                                    fuzzgen::gramwalk::rebase_database_names(&s.sql, &args.db)
+                                    let sql = fuzzgen::gramwalk::rebase_database_names(
+                                        &s.sql, &args.db,
+                                    );
+                                    fuzzgen::gramwalk::sanitize_alter_system_guc_names(&sql)
                                 } else {
                                     s.sql.clone()
                                 };
