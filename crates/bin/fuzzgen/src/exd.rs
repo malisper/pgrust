@@ -371,7 +371,18 @@ fn setop(g: &mut Gen) -> Vec<StmtKind> {
 fn modify(g: &mut Gen) -> Vec<StmtKind> {
     let n = "fz_xd_m";
     let mut v = vec![
-        raw(format!("CREATE TABLE {n} (pk int PRIMARY KEY, a int, v int);")),
+        // autovacuum_enabled = off (round-10 RB-15): the ANALYZE-DML
+        // brackets below abort ~300 tuples on this 300-row table — past
+        // the autovacuum thresholds — and an autovacuum/autoanalyze landing
+        // on exactly one engine before the later instrumented UPDATE/DELETE
+        // flips that scan's shape (Seq / Index / Bitmap sit within 0.6%
+        // cost of each other on this fixture). Same discipline as the
+        // btbrin fixtures: fixture stats must change only via the batch's
+        // own ANALYZE.
+        raw(format!(
+            "CREATE TABLE {n} (pk int PRIMARY KEY, a int, v int) \
+             WITH (autovacuum_enabled = off);"
+        )),
         raw(format!(
             "INSERT INTO {n} SELECT i, (i*3)%50, i FROM generate_series(1,300) i;"
         )),
@@ -697,11 +708,19 @@ fn partition(g: &mut Gen) -> Vec<StmtKind> {
     let fmt = pick_fmt(g, "exd:partition");
     vec![
         raw(format!("CREATE TABLE {n} (pk int, a int) PARTITION BY RANGE (pk);")),
+        // autovacuum_enabled = off on the partitions (RB-15 — see
+        // modify()): the bracketed ANALYZE UPDATE below aborts 100+ tuples
+        // per partition, past the autoanalyze threshold, and later compared
+        // EXPLAINs would otherwise race one engine's autovacuum. The
+        // reloption lives on the partitions: a partitioned parent has no
+        // storage and rejects it.
         raw(format!(
-            "CREATE TABLE {n}1 PARTITION OF {n} FOR VALUES FROM (0) TO (100);"
+            "CREATE TABLE {n}1 PARTITION OF {n} FOR VALUES FROM (0) TO (100) \
+             WITH (autovacuum_enabled = off);"
         )),
         raw(format!(
-            "CREATE TABLE {n}2 PARTITION OF {n} FOR VALUES FROM (100) TO (200);"
+            "CREATE TABLE {n}2 PARTITION OF {n} FOR VALUES FROM (100) TO (200) \
+             WITH (autovacuum_enabled = off);"
         )),
         raw(format!(
             "INSERT INTO {n} SELECT i, i%7 FROM generate_series(0,199) i;"
@@ -998,6 +1017,94 @@ mod tests {
                 assert!(!up.contains("JSON_TABLE"), "LD4-F2 surface: {sql}");
             }
             assert!(!up.contains("SETTINGS"), "LD4-F4 surface: {sql}");
+        }
+    }
+
+    /// Round-10 RB-15 (explain-analyze-update-planshape): a fixture that is
+    /// ANALYZE'd and then receives executed DML (bare, or instrumented via
+    /// EXPLAIN ANALYZE — aborted brackets still create dead tuples and bump
+    /// n_mod_since_analyze) can cross the autovacuum thresholds mid-batch.
+    /// An autovacuum/autoanalyze then lands on exactly ONE engine at an
+    /// arbitrary point, changing relpages/reltuples/stats, and any later
+    /// compared EXPLAIN of that table flips scan shape (on fz_xd_m the Seq /
+    /// Index / Bitmap plans sit within 0.6% cost of each other; C-vs-C
+    /// diverges 3/7 iterations locally). Such fixtures must pin
+    /// autovacuum_enabled = off so fixture stats change only via the batch's
+    /// own ANALYZE.
+    #[test]
+    fn post_analyze_dml_fixtures_pin_autovacuum_off() {
+        // Target table of an executed DML statement, given uppercase SQL
+        // with any `EXPLAIN (...)` prefix already stripped.
+        fn dml_target(up: &str) -> Option<String> {
+            let t = up.trim_start();
+            let rest = t
+                .strip_prefix("INSERT INTO ")
+                .or_else(|| t.strip_prefix("UPDATE "))
+                .or_else(|| t.strip_prefix("DELETE FROM "))
+                .or_else(|| t.strip_prefix("MERGE INTO "))?;
+            Some(
+                rest.split([' ', '(', ';'])
+                    .next()
+                    .unwrap()
+                    .to_string(),
+            )
+        }
+        let (groups, _) = gen_groups(0x8B15, 400, &WeightTable::defaults());
+        for grp in &groups {
+            let up: Vec<String> = grp.iter().map(|s| s.to_ascii_uppercase()).collect();
+            // Storage-bearing creates per family root: partitions attach to
+            // their parent's name so DML on the parent checks the children.
+            let mut creates: Vec<(String, String, usize)> = Vec::new(); // (family, stmt, idx)
+            for (i, s) in up.iter().enumerate() {
+                let Some(rest) = s.trim_start().strip_prefix("CREATE TABLE ") else {
+                    continue;
+                };
+                let rest = rest.strip_prefix("IF NOT EXISTS ").unwrap_or(rest);
+                let name = rest.split([' ', '(', ';']).next().unwrap().to_string();
+                if s.contains(" PARTITION BY ") {
+                    continue; // no storage; reloption is rejected there
+                }
+                let family = match s.split(" PARTITION OF ").nth(1) {
+                    Some(after) => after.split([' ', ';']).next().unwrap().to_string(),
+                    None => name,
+                };
+                creates.push((family, s.clone(), i));
+            }
+            let mut analyzed: Vec<String> = Vec::new();
+            for (i, s) in up.iter().enumerate() {
+                let t = s.trim_start();
+                if let Some(rest) = t.strip_prefix("ANALYZE ") {
+                    analyzed.push(rest.split([' ', ';']).next().unwrap().to_string());
+                    continue;
+                }
+                // Executed DML: bare, or instrumented EXPLAIN ANALYZE
+                // (plain EXPLAIN never executes).
+                let body = if t.starts_with("EXPLAIN") {
+                    if !t.contains("ANALYZE") {
+                        continue;
+                    }
+                    match t.split_once(") ") {
+                        Some((_, tail)) => tail,
+                        None => continue,
+                    }
+                } else {
+                    t
+                };
+                let Some(target) = dml_target(body) else { continue };
+                if !analyzed.contains(&target) {
+                    continue; // never-ANALYZE'd fixtures stay on default stats
+                }
+                for (family, create, ci) in &creates {
+                    if *family == target && *ci < i {
+                        assert!(
+                            create.contains("AUTOVACUUM_ENABLED = OFF"),
+                            "RB-15: ANALYZE'd fixture {target} receives executed DML \
+                             (`{}`) but its CREATE does not pin autovacuum off: `{create}`",
+                            grp[i],
+                        );
+                    }
+                }
+            }
         }
     }
 
