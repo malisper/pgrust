@@ -415,11 +415,14 @@ fn aggregates_match_live_pg() {
     for (y, x) in [(1.0, 2.0), (2.5, 4.1), (4.25, 7.9), (-3.5, -6.0)] {
         r = float8_regr_accum(r, y, x).unwrap();
     }
-    assert_eq!(out8(float8_corr(r).unwrap()), "0.9986369273154668");
-    assert_eq!(out8(float8_regr_slope(r).unwrap()), "0.5650552218562294");
-    assert_eq!(out8(float8_regr_intercept(r).unwrap()), "-0.06761044371245872");
-    assert_eq!(out8(float8_regr_r2(r).unwrap()), "0.997275712598077");
-    assert_eq!(out8(float8_covar_pop(r).unwrap()), "14.581249999999999");
+    // Pinned to x86-64 (SSE2, unfused) PostgreSQL 18 — the C-parity
+    // reference. An FMA-contracted build (e.g. Homebrew arm64) is 1 ulp off
+    // on several of these; see RB-6.
+    assert_eq!(out8(float8_corr(r).unwrap()), "0.9986369273154669");
+    assert_eq!(out8(float8_regr_slope(r).unwrap()), "0.5650552218562295");
+    assert_eq!(out8(float8_regr_intercept(r).unwrap()), "-0.06761044371245895");
+    assert_eq!(out8(float8_regr_r2(r).unwrap()), "0.9972757125980773");
+    assert_eq!(out8(float8_covar_pop(r).unwrap()), "14.58125");
     assert_eq!(out8(float8_covar_samp(r).unwrap()), "19.441666666666666");
     assert_eq!(float8_corr([0.0; 6]), None);
 
@@ -441,6 +444,86 @@ fn aggregates_match_live_pg() {
     let t = float8_accum([2.0, 3.0, 1.0], f64::INFINITY).unwrap();
     assert!(t[1].is_infinite() && t[2].is_nan());
     assert!(float8_accum([1.0, f64::MAX, 0.0], f64::MAX).is_err());
+}
+
+// RB-6 (a fuzzing round): corr() was 1 ulp off C PostgreSQL because the
+// accumulator used f64::mul_add (FMA contraction). The parity reference —
+// PostgreSQL built for x86-64 SSE2, which cannot fuse — rounds every C
+// operation separately: tmpX = fl(fl(newvalX*N) - Sx), then
+// S += fl(fl(tmpX*tmpX) * scale). All expected bits below verified against
+// x86-64 PostgreSQL 18 (Debian, gcc 14, SSE2).
+#[test]
+fn rb6_regr_family_c_bit_parity() {
+    // SELECT corr(y,x), ... FROM (VALUES (1,2),(2,4),(3,7),(4,11)) v(x,y)
+    // → accum args (Y=y, X=x).
+    let rows: [(f64, f64); 4] = [(1.0, 2.0), (2.0, 4.0), (3.0, 7.0), (4.0, 11.0)];
+    let mut r = [0.0f64; 6];
+    for (x, y) in rows {
+        r = float8_regr_accum(r, y, x).unwrap();
+    }
+    // Transition state [N, Sx, Sxx, Sy, Syy, Sxy]. Syy is the sensitive one:
+    // C gives 0x4046FFFFFFFFFFFF (45.99999999999999); the old FMA path gave
+    // exactly 46.0, shifting corr by 1 ulp.
+    let expect_bits: [u64; 6] = [
+        0x4010000000000000, // N   = 4
+        0x4024000000000000, // Sx  = 10
+        0x4014000000000000, // Sxx = 5
+        0x4038000000000000, // Sy  = 24
+        0x4046FFFFFFFFFFFF, // Syy = 45.99999999999999
+        0x402E000000000000, // Sxy = 15
+    ];
+    assert_eq!(r.map(f64::to_bits), expect_bits);
+
+    // Finals, pinned to C bit patterns / float8out text.
+    let corr = float8_corr(r).unwrap();
+    assert_eq!(corr.to_bits(), 0x3FEFA6779E291558); // 0.9890707100936806
+    assert_eq!(out8(corr), "0.9890707100936806");
+    assert_eq!(out8(float8_regr_r2(r).unwrap()), "0.9782608695652175");
+    assert_eq!(out8(float8_regr_slope(r).unwrap()), "3");
+    assert_eq!(out8(float8_regr_intercept(r).unwrap()), "-1.5");
+    assert_eq!(out8(float8_covar_pop(r).unwrap()), "3.75");
+    assert_eq!(out8(float8_covar_samp(r).unwrap()), "5");
+    assert_eq!(out8(float8_regr_sxx(r).unwrap()), "5");
+    assert_eq!(out8(float8_regr_syy(r).unwrap()), "45.99999999999999");
+    assert_eq!(out8(float8_regr_sxy(r).unwrap()), "15");
+
+    // Moving/parallel path: float8_regr_combine over the two halves must use
+    // C's combine formula (Sxx1 + Sxx2 + N1*N2*tmp*tmp/N, left-to-right).
+    // Note the combine path legitimately lands on Syy = 46.0 exactly (and so
+    // corr ...805) — real PostgreSQL's parallel plan differs from its serial
+    // plan by the same ulp; parity is per-formula, not serial-vs-parallel.
+    let mut a = [0.0f64; 6];
+    let mut b = [0.0f64; 6];
+    for (x, y) in &rows[..2] {
+        a = float8_regr_accum(a, *y, *x).unwrap();
+    }
+    for (x, y) in &rows[2..] {
+        b = float8_regr_accum(b, *y, *x).unwrap();
+    }
+    let c = float8_regr_combine(a, b).unwrap();
+    let expect_combined: [u64; 6] = [
+        0x4010000000000000, // N   = 4
+        0x4024000000000000, // Sx  = 10
+        0x4014000000000000, // Sxx = 5
+        0x4038000000000000, // Sy  = 24
+        0x4047000000000000, // Syy = 46 (combine formula's own rounding)
+        0x402E000000000000, // Sxy = 15
+    ];
+    assert_eq!(c.map(f64::to_bits), expect_combined);
+    assert_eq!(float8_corr(c).unwrap().to_bits(), 0x3FEFA6779E291557);
+
+    // float8_accum shares the tmp = newval*N - Sx pattern; pin its unfused
+    // Sxx bits on the same x column (stddev family flows through this).
+    let mut t = [0.0f64; 3];
+    for (x, _) in rows {
+        t = float8_accum(t, x).unwrap();
+    }
+    assert_eq!(t.map(f64::to_bits), [
+        0x4010000000000000,                        // N = 4
+        0x4024000000000000,                        // Sx = 10
+        0x4014000000000000,                        // Sxx = 5
+    ]);
+    assert_eq!(out8(float8_stddev_samp(t).unwrap()), "1.2909944487358056");
 }
 
 #[test]
@@ -631,8 +714,8 @@ fn float_agg_fmgr_frames() {
         fci.set_arg(0, Datum::from_usize(rp));
         out8(f(None, &mut fci).unwrap().as_f64())
     };
-    assert_eq!(final6(fc_float8_regr_slope), "0.5650552218562294");
-    assert_eq!(final6(fc_float8_corr), "0.9986369273154668");
+    assert_eq!(final6(fc_float8_regr_slope), "0.5650552218562295");
+    assert_eq!(final6(fc_float8_corr), "0.9986369273154669");
     assert_eq!(final6(fc_float8_covar_samp), "19.441666666666666");
 
     // Wrong-shape transarray: C's elog text.

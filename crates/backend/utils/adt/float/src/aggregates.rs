@@ -93,8 +93,11 @@ fn accum_kernel(trans: [f64; 3], newval: f64) -> PgResult<[f64; 3]> {
     let sx = sx0 + newval;
     let mut sxx = sxx0;
     if n0 > 0.0 {
-        // fp-contract parity with the compiled C (see float8_regr_accum).
-        let tmp = f64::mul_add(newval, n, -sx);
+        // C parity (float.c float8_accum): plain per-operation rounding, no
+        // FMA contraction. The reference x86-64 SSE2 build cannot fuse, so
+        // `tmp = newval*N - Sx` must round the product before the subtract
+        // (see float8_regr_accum for the RB-6 divergence this caused).
+        let tmp = newval * n - sx;
         sxx += tmp * tmp / (n * n0);
 
         if sx.is_infinite() || sxx.is_infinite() {
@@ -170,14 +173,20 @@ pub fn float8_regr_accum(trans: [f64; 6], newval_y: f64, newval_x: f64) -> PgRes
     let mut sxy = sxy0;
 
     if n0 > 0.0 {
-        // mul_add mirrors clang/gcc default fp-contract on `S += t*t*scale`
-        // (compiled C emits FMA; without it the last bit diverges from PG).
-        let tmp_x = f64::mul_add(newval_x, n, -sx);
-        let tmp_y = f64::mul_add(newval_y, n, -sy);
+        // C parity (float.c float8_regr_accum), RB-6: NO fma contraction.
+        // The parity reference is PostgreSQL built for x86-64 SSE2, which
+        // cannot fuse, so every operation of the C source rounds separately:
+        //   tmpX = fl(fl(newvalX*N) - Sx)
+        //   Sxx += fl(fl(tmpX*tmpX) * scale)
+        // The previous mul_add version (fma(t*t, scale, S)) made Syy land on
+        // 46.0 instead of 0x4046FFFFFFFFFFFF for the round-9 repro input,
+        // shifting corr() by 1 ulp.
+        let tmp_x = newval_x * n - sx;
+        let tmp_y = newval_y * n - sy;
         let scale = 1.0 / (n * n0);
-        sxx = f64::mul_add(tmp_x * tmp_x, scale, sxx);
-        syy = f64::mul_add(tmp_y * tmp_y, scale, syy);
-        sxy = f64::mul_add(tmp_x * tmp_y, scale, sxy);
+        sxx += tmp_x * tmp_x * scale;
+        syy += tmp_y * tmp_y * scale;
+        sxy += tmp_x * tmp_y * scale;
 
         if sx.is_infinite()
             || sxx.is_infinite()
