@@ -1356,8 +1356,34 @@ pub mod wpool {
     // MyProcNumber, which KillRetainedProc clears, so it runs first.
     fn release_retained_identity(park_epoch: u64) {
         if CRASH_EPOCH.load(Relaxed) == park_epoch && lmgr_proc::MyProc().is_some() {
-            sinval::CleanupInvalidationState()
-                .expect("CleanupInvalidationState failed releasing retained identity");
+            // GL-CONNSLOT-1: a sinval-cleanup failure must not skip
+            // KillRetainedProc — unwinding here left the retained PGPROC
+            // (and, via the deferred-return arbitration, possibly a dead
+            // leader's Regular slot) off the freelists forever. Contain
+            // generic panics and errors; KillRetainedProc's own containment
+            // covers the rest.
+            // unwind-ok: log-then-die (slot-release containment; exit-committed unwinds re-raised after KillRetainedProc)
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sinval::CleanupInvalidationState()
+                    .expect("CleanupInvalidationState failed releasing retained identity");
+            }));
+            if let Err(payload) = r {
+                let exit_committed = payload.is::<ipc::ProcExitThread>()
+                    || payload.is::<types_error::PanicExitThread>()
+                    || payload.is::<ipc::KilledBySignal>();
+                let _ = elog::elog(
+                    types_error::WARNING,
+                    "CleanupInvalidationState failed releasing retained identity; \
+                     continuing so the PGPROC is still returned"
+                        .to_string(),
+                );
+                lmgr_proc::KillRetainedProc();
+                init_small::wretain::clear_identity();
+                if exit_committed {
+                    std::panic::resume_unwind(payload);
+                }
+                return;
+            }
             lmgr_proc::KillRetainedProc();
         }
         init_small::wretain::clear_identity();

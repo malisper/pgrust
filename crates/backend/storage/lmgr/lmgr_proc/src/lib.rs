@@ -1003,8 +1003,36 @@ pub fn KillRetainedProc() {
     // LWLock the killed thread was still holding; ProcKill likewise runs
     // LWLockReleaseAll before touching any partition lock. No-op on the healthy
     // parked path: the park arm already released all of this, so nothing is held.
-    lwlock::LWLockReleaseAll().expect("LWLockReleaseAll failed in KillRetainedProc");
-    ProcReleaseLocks(false).expect("ProcReleaseLocks failed in KillRetainedProc");
+    // GL-CONNSLOT-1: every pre-release step CONTAINED (see run_release_step)
+    // — this runs from a dying pool thread's exit drain, whose panics are
+    // swallowed upstream; an unwind past the freelist push permanently
+    // leaked BOTH this worker's slot AND (via the deferred-return
+    // arbitration inside LeaveLockGroup) a dead leader's Regular slot.
+    let mut deferred_unwind: Option<Box<dyn std::any::Any + Send>> = None;
+    let mut cleanup_failed = false;
+
+    if let Some(p) = run_release_step("LWLockReleaseAll in KillRetainedProc", || {
+        lwlock::LWLockReleaseAll().expect("LWLockReleaseAll failed in KillRetainedProc");
+    }) {
+        cleanup_failed = true;
+        if let Some(u) = p.exit_unwind {
+            deferred_unwind.get_or_insert(u);
+        }
+    }
+    if let Some(p) = run_release_step("ProcReleaseLocks in KillRetainedProc", || {
+        ProcReleaseLocks(false).expect("ProcReleaseLocks failed in KillRetainedProc");
+    }) {
+        cleanup_failed = true;
+        // ProcReleaseLocks acquires partition LWLocks; a panic inside can
+        // leave one held. Drop it before the group detach below re-acquires.
+        let _ = run_release_step("LWLockReleaseAll after failed ProcReleaseLocks", || {
+            lwlock::LWLockReleaseAll()
+                .expect("LWLockReleaseAll failed after ProcReleaseLocks panic");
+        });
+        if let Some(u) = p.exit_unwind {
+            deferred_unwind.get_or_insert(u);
+        }
+    }
 
     // Kill-path detach (see above). Ordered BEFORE the MY_PROC clear because
     // LeaveLockGroup re-reads MyProc. A group LEADER cannot reach here with
@@ -1013,7 +1041,18 @@ pub fn KillRetainedProc() {
     if proc.lockGroupLeader.load(Relaxed) != INVALID_PROC_NUMBER
         && proc.lockGroupLeader.load(Relaxed) != procno
     {
-        LeaveLockGroup();
+        if let Some(p) = run_release_step("LeaveLockGroup in KillRetainedProc", || {
+            LeaveLockGroup();
+        }) {
+            cleanup_failed = true;
+            let _ = run_release_step("LWLockReleaseAll after failed LeaveLockGroup", || {
+                lwlock::LWLockReleaseAll()
+                    .expect("LWLockReleaseAll failed after LeaveLockGroup panic");
+            });
+            if let Some(u) = p.exit_unwind {
+                deferred_unwind.get_or_insert(u);
+            }
+        }
     }
     debug_assert_eq!(proc.lockGroupLeader.load(Relaxed), INVALID_PROC_NUMBER);
     debug_assert!(plist_is_empty(&proc.lockGroupMembers));
@@ -1021,18 +1060,125 @@ pub fn KillRetainedProc() {
     MY_PROC.set(INVALID_PROC_NUMBER);
     g::SetMyProcNumber(INVALID_PROC_NUMBER);
 
+    // Push gate (mirrors ProcKill's tail): a proc still linked into a lock
+    // group after a FAILED detach must not be freelisted — a linked slot
+    // handed to a new backend corrupts the group list. Loud, attributable
+    // leak instead (report_unreturned_proc).
+    let still_grouped = proc.lockGroupLeader.load(Relaxed) != INVALID_PROC_NUMBER;
+
     proc.pid.store(0, Relaxed);
     proc.vxid.procNumber.store(INVALID_PROC_NUMBER, Relaxed);
     proc.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
 
-    // SAFETY: [PSL] procgloballist fixed at InitProcGlobal.
-    let list = unsafe { proc.procgloballist.get() }.expect("proc freelist");
-    spin_acquire(&ProcStructLock);
-    plist_push_tail(hdr, freelist(hdr, list), procno, links_of);
-    ProcStructLock.unlock();
-    if list == FreeListId::Regular {
-        connqueue::slot_released();
+    if still_grouped {
+        report_unreturned_proc("KillRetainedProc", procno);
+    } else {
+        // SAFETY: [PSL] procgloballist fixed at InitProcGlobal.
+        let list = unsafe { proc.procgloballist.get() }.expect("proc freelist");
+        spin_acquire(&ProcStructLock);
+        plist_push_tail(hdr, freelist(hdr, list), procno, links_of);
+        ProcStructLock.unlock();
+        if list == FreeListId::Regular {
+            connqueue::slot_released();
+        }
     }
+
+    if cleanup_failed && !still_grouped {
+        // The slot was recovered despite the cleanup failure — the exact
+        // case this fix exists for; leave a positive trace for triage.
+        let _ = elog::elog(
+            types_error::LOG,
+            format!(
+                "KillRetainedProc: PGPROC slot {procno} recovered to its freelist \
+                 despite a cleanup failure"
+            ),
+        );
+    }
+    if let Some(u) = deferred_unwind {
+        std::panic::resume_unwind(u);
+    }
+}
+
+/// GL-CONNSLOT-1 (round-10 Antithesis DL-connslot-exhaustion): the PGPROC
+/// freelist return must be UNCONDITIONAL. ProcKill/KillRetainedProc run as
+/// exit callbacks whose panics are swallowed by the guarded callback drain
+/// (`ipc::run_callback_guarded` degrades them to a WARNING, deliberately —
+/// no crash cascade). Pre-fix, any panic in a pre-release cleanup step
+/// (syncrep cleanup, LWLockReleaseAll, lock release, the lock-group detach
+/// with its partition-lock `.expect`s) unwound past the freelist push, and
+/// with no crash reset to rebuild the freelists the slot was SILENTLY gone
+/// until process restart. max_connections such losses are a permanent
+/// `FATAL: sorry, too many clients already` storm.
+///
+/// This helper contains ONE cleanup step: a generic panic is logged and
+/// dropped (the release tail is the part that must not be lost); an
+/// exit-committed unwind (FATAL's ProcExitThread / PanicExitThread /
+/// crash-injected KilledBySignal — the `standing::is_exit_unwind` set) is
+/// RETURNED so the caller can re-raise it AFTER the slot is back on its
+/// freelist. Zero-cost on the healthy path beyond the catch_unwind frame.
+struct ReleaseStepPanic {
+    /// Present iff the payload is exit-committed and must be re-raised
+    /// once the slot is safely back on its freelist.
+    exit_unwind: Option<Box<dyn std::any::Any + Send>>,
+}
+
+fn run_release_step(what: &str, f: impl FnOnce()) -> Option<ReleaseStepPanic> {
+    // unwind-ok: log-then-die (slot-release containment; exit-committed unwinds re-raised after the freelist push)
+    let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) else {
+        return None;
+    };
+    let exit_committed = payload.is::<ipc::ProcExitThread>()
+        || payload.is::<types_error::PanicExitThread>()
+        || payload.is::<ipc::KilledBySignal>();
+    let msg = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .or_else(|| {
+            payload
+                .downcast_ref::<PgError>()
+                .map(|e| e.message().to_string())
+        })
+        .unwrap_or_else(|| {
+            if exit_committed {
+                "exit-committed unwind".to_string()
+            } else {
+                "unknown panic".to_string()
+            }
+        });
+    // unwind-ok: log-then-die (never let logging skip the release)
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = elog::elog(
+            types_error::WARNING,
+            format!(
+                "{what} failed during PGPROC release ({msg}); continuing so the \
+                 connection slot is still returned"
+            ),
+        );
+    }));
+    Some(ReleaseStepPanic {
+        exit_unwind: exit_committed.then_some(payload),
+    })
+}
+
+/// The loud half of GL-CONNSLOT-1: when the lock-group detach could not
+/// complete, the freelist push gate may legitimately block the self-push
+/// (the proc may still be linked into a lock group — pushing a linked slot
+/// would corrupt the group list). That converts the silent leak into an
+/// attributable one: name the slot in the log so a `too many clients`
+/// storm can be traced here instead of being invisible.
+fn report_unreturned_proc(who: &str, procno: ProcNumber) {
+    // unwind-ok: log-then-die (log only; release already handled)
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = elog::elog(
+            types_error::LOG,
+            format!(
+                "{who}: PGPROC slot {procno} NOT returned to its freelist \
+                 (lock-group detach incomplete after a cleanup failure); \
+                 this slot is leaked until restart"
+            ),
+        );
+    }));
 }
 
 pub fn RemoveProcFromArray(_code: i32, _arg: usize) {
@@ -1052,9 +1198,22 @@ pub fn ProcKill(_code: i32, _arg: usize) {
         panic!("ProcKill() called in child process");
     }
 
+    // GL-CONNSLOT-1: every pre-release step below runs CONTAINED so that no
+    // cleanup failure can unwind past the freelist push at the tail (see
+    // run_release_step). The first exit-committed payload is re-raised after
+    // the push.
+    let mut deferred_unwind: Option<Box<dyn std::any::Any + Send>> = None;
+    let mut detach_failed = false;
+
     // No walsender/syncrep queue entry can exist while syncrep is unported; guarded.
     if syncrep_seams::sync_rep_cleanup_at_proc_exit::is_installed() {
-        syncrep_seams::sync_rep_cleanup_at_proc_exit::call();
+        if let Some(p) = run_release_step("syncrep cleanup in ProcKill", || {
+            syncrep_seams::sync_rep_cleanup_at_proc_exit::call()
+        }) {
+            if let Some(u) = p.exit_unwind {
+                deferred_unwind.get_or_insert(u);
+            }
+        }
     }
 
     for i in 0..NUM_LOCK_PARTITIONS as usize {
@@ -1062,13 +1221,31 @@ pub fn ProcKill(_code: i32, _arg: usize) {
         debug_assert!(unsafe { proc.myProcLocks[i].get() }.head.next.is_none());
     }
 
-    lwlock::LWLockReleaseAll().expect("LWLockReleaseAll failed in ProcKill");
+    if let Some(p) = run_release_step("LWLockReleaseAll in ProcKill", || {
+        lwlock::LWLockReleaseAll().expect("LWLockReleaseAll failed in ProcKill");
+    }) {
+        if let Some(u) = p.exit_unwind {
+            deferred_unwind.get_or_insert(u);
+        }
+    }
     if condition_variable_seams::condition_variable_cancel_sleep::is_installed() {
-        condition_variable_seams::condition_variable_cancel_sleep::call();
+        if let Some(p) = run_release_step("condition-variable cancel in ProcKill", || {
+            condition_variable_seams::condition_variable_cancel_sleep::call();
+        }) {
+            if let Some(u) = p.exit_unwind {
+                deferred_unwind.get_or_insert(u);
+            }
+        }
     }
 
     let leader_no = proc.lockGroupLeader.load(Relaxed);
     if leader_no != INVALID_PROC_NUMBER {
+        // GL-CONNSLOT-1: contained as one step. A panic mid-detach leaves
+        // the group state (and possibly a partition LWLock) inconsistent;
+        // the recovery below drops any LWLock the panic left held and lets
+        // the push gate decide (a still-set lockGroupLeader legally blocks
+        // the self-push — reported loudly instead of leaking silently).
+        let detach = run_release_step("lock-group detach in ProcKill", || {
         let leader = GetPGProcByNumber(leader_no);
         let leader_lwlock = LockHashPartitionLockByProc(leader_no);
         lwlock::LWLockAcquire(leader_lwlock, lwlock::LW_EXCLUSIVE, procno)
@@ -1150,10 +1327,31 @@ pub fn ProcKill(_code: i32, _arg: usize) {
             proc.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
         }
         lwlock::LWLockRelease(leader_lwlock).expect("partition unlock in ProcKill");
+        });
+        if let Some(p) = detach {
+            detach_failed = true;
+            // A panic between the partition-lock acquire and its release
+            // leaves that LWLock held by this dying thread — the round-32
+            // "leaked the partition forever" wedge shape. Drop everything
+            // we still hold before touching the freelist.
+            let _ = run_release_step("LWLockReleaseAll after failed detach", || {
+                lwlock::LWLockReleaseAll()
+                    .expect("LWLockReleaseAll failed after ProcKill detach panic");
+            });
+            if let Some(u) = p.exit_unwind {
+                deferred_unwind.get_or_insert(u);
+            }
+        }
     }
 
-    miscinit_seams::switch_back_to_local_latch::call();
-    waitevent_seams::pgstat_reset_wait_event_storage::call();
+    if let Some(p) = run_release_step("latch/wait-event teardown in ProcKill", || {
+        miscinit_seams::switch_back_to_local_latch::call();
+        waitevent_seams::pgstat_reset_wait_event_storage::call();
+    }) {
+        if let Some(u) = p.exit_unwind {
+            deferred_unwind.get_or_insert(u);
+        }
+    }
 
     if init_small::wretain::parking() {
         // Retention park (wretain): session-scoped state above is released
@@ -1163,6 +1361,9 @@ pub fn ProcKill(_code: i32, _arg: usize) {
         latch_seams::disown_latch::call(&proc.procLatch);
         proc.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
         init_small::wretain::note_proc_retained();
+        if let Some(u) = deferred_unwind {
+            std::panic::resume_unwind(u);
+        }
         return;
     }
 
@@ -1213,6 +1414,15 @@ pub fn ProcKill(_code: i32, _arg: usize) {
     // AutoVacLauncherMain is unported; guarded.
     if autovacuum_seams::wake_autovacuum_launcher::is_installed() {
         autovacuum_seams::wake_autovacuum_launcher::call();
+    }
+
+    // GL-CONNSLOT-1: an incomplete detach that (legally) blocked the
+    // self-push is a real slot loss — make it attributable.
+    if detach_failed && !pushed {
+        report_unreturned_proc("ProcKill", procno);
+    }
+    if let Some(u) = deferred_unwind {
+        std::panic::resume_unwind(u);
     }
 }
 

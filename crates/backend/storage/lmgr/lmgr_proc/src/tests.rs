@@ -15,6 +15,11 @@ const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_S
 
 static SEMA_CREATED: AtomicUsize = AtomicUsize::new(0);
 
+// GL-CONNSLOT-1 injection flags: arm to make the corresponding seam panic
+// ONCE (swap-consumed) inside a PGPROC-release path.
+static SYNCREP_PANIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LOCKRELEASE_PANIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn semas() -> &'static (Mutex<HashMap<ProcNumber, i32>>, Condvar) {
     static SEMS: OnceLock<(Mutex<HashMap<ProcNumber, i32>>, Condvar)> = OnceLock::new();
     SEMS.get_or_init(|| (Mutex::new(HashMap::new()), Condvar::new()))
@@ -83,12 +88,21 @@ fn setup() {
         pmsignal_seams::register_postmaster_child_active::set(|| {});
         procarray_seams::proc_array_add::set(|_| Ok(()));
         procarray_seams::proc_array_remove::set(|_, _| Ok(()));
-        syncrep_seams::sync_rep_cleanup_at_proc_exit::set(|| {});
+        syncrep_seams::sync_rep_cleanup_at_proc_exit::set(|| {
+            if SYNCREP_PANIC.swap(false, SeqCst) {
+                panic!("injected syncrep cleanup panic");
+            }
+        });
         condition_variable_seams::condition_variable_cancel_sleep::set(|| false);
         autovacuum_seams::wake_autovacuum_launcher::set(|| {});
         lock_seams::abort_strong_lock_acquire::set(|| {});
         lock_seams::get_awaited_lock_hashcode::set(|| None);
-        lock_seams::lock_release_all::set(|_, _| Ok(()));
+        lock_seams::lock_release_all::set(|_, _| {
+            if LOCKRELEASE_PANIC.swap(false, SeqCst) {
+                panic!("injected lock release panic");
+            }
+            Ok(())
+        });
         timeout_seams::disable_timeouts::set(|_| {});
 
         shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).expect("size overflow")));
@@ -403,6 +417,90 @@ fn guc_storage_and_installed_seams() {
     // The sema delegate reaches the pg_sema owner: unlock then lock returns.
     lmgr_proc_seams::pg_semaphore_unlock::call(0);
     lmgr_proc_seams::pg_semaphore_lock::call(0);
+}
+
+#[test]
+fn prockill_releases_slot_despite_cleanup_panic() {
+    // GL-CONNSLOT-1 regression (round-10 Antithesis DL-connslot-exhaustion):
+    // ProcKill runs inside the guarded exit-callback drain, which swallows
+    // panics — before the fix, a panic in any pre-release cleanup step
+    // unwound past the freelist push and permanently leaked the Regular
+    // slot (a forever "sorry, too many clients already" storm at scale).
+    // The release must survive an injected cleanup panic.
+    setup();
+    let _guard = freelist_guard();
+    let free_before = freelist_len(FreeListId::Regular);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            thread_globals(301);
+            InitProcess(BackendType::Backend).unwrap();
+            let procno = MyProc().unwrap();
+            SYNCREP_PANIC.store(true, SeqCst);
+            ProcKill(0, 0); // must contain the panic, not unwind
+            assert!(MyProc().is_none());
+            assert_eq!(GetPGProcByNumber(procno).pid.load(SeqCst), 0);
+        })
+        .join()
+        .unwrap();
+    });
+    assert!(!SYNCREP_PANIC.load(SeqCst), "injection was consumed");
+    assert_eq!(freelist_len(FreeListId::Regular), free_before);
+}
+
+#[test]
+fn deferred_leader_return_survives_member_cleanup_panic() {
+    // GL-CONNSLOT-1 regression, the round-10 signature shape: a leader dies
+    // FIRST with a lock-group member still attached (its Regular PGPROC is
+    // deferred to the last member out), and the member's own release path
+    // then hits a cleanup panic. Before the fix the member's exit unwound
+    // past LeaveLockGroup AND its own freelist push: the member's slot AND
+    // the dead leader's Regular slot were both silently leaked — N parallel
+    // error episodes exhausted max_connections permanently.
+    use std::sync::mpsc::channel;
+    setup();
+    let _guard = freelist_guard();
+    let regular_before = freelist_len(FreeListId::Regular);
+    let bgworker_before = freelist_len(FreeListId::Bgworker);
+
+    let (leader_no_tx, leader_no_rx) = channel::<ProcNumber>();
+    let (leader_die_tx, leader_die_rx) = channel::<()>();
+    let leader = std::thread::spawn(move || {
+        thread_globals(302);
+        InitProcess(BackendType::Backend).unwrap();
+        BecomeLockGroupLeader().unwrap();
+        leader_no_tx.send(MyProc().unwrap()).unwrap();
+        leader_die_rx.recv().unwrap(); // member has joined
+        ProcKill(0, 0); // dies with the member attached: deferred return
+    });
+    let leader_no = leader_no_rx.recv().unwrap();
+
+    let (joined_tx, joined_rx) = channel::<()>();
+    let (member_go_tx, member_go_rx) = channel::<()>();
+    let member = std::thread::spawn(move || {
+        thread_globals(303);
+        InitProcess(BackendType::BgWorker).unwrap();
+        assert!(BecomeLockGroupMember(leader_no, 302).unwrap());
+        joined_tx.send(()).unwrap();
+        member_go_rx.recv().unwrap(); // leader is dead now
+        LOCKRELEASE_PANIC.store(true, SeqCst);
+        KillRetainedProc(); // must contain the panic and still run the
+                            // group leave + both freelist returns
+        assert!(MyProc().is_none());
+    });
+
+    joined_rx.recv().unwrap();
+    leader_die_tx.send(()).unwrap();
+    leader.join().unwrap();
+    // Leader died first with a member attached: its slot is NOT yet back.
+    assert_eq!(freelist_len(FreeListId::Regular), regular_before - 1);
+
+    member_go_tx.send(()).unwrap();
+    member.join().unwrap();
+    assert!(!LOCKRELEASE_PANIC.load(SeqCst), "injection was consumed");
+    // The member's contained exit returned BOTH slots: its own bgworker
+    // slot and the dead leader's deferred Regular slot.
+    assert_eq!(freelist_len(FreeListId::Regular), regular_before);
+    assert_eq!(freelist_len(FreeListId::Bgworker), bgworker_before);
 }
 
 #[test]

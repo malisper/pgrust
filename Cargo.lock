@@ -8647,6 +8647,7 @@ dependencies = [
  "elog",
  "guc_tables",
  "init_small",
+ "ipc",
  "ipc_seams",
  "latch_seams",
  "lmgr_proc_seams",
